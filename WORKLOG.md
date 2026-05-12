@@ -954,3 +954,34 @@
 
 - README 首页要先解释今天的产品心智,不能只保留旧时代的 listen/connect 介绍。
 - 对 code agent 来说,最重要的不是命令多,而是 `rdog control` 的响应协议、target-name 寻址、PTY 和截图这些可编排能力。
+
+## [2026-05-12 11:54:07] [Session ID: codex-app-2026-05-12-rustdog-repush] 任务名称: 重新发布 rustdog 到 raiscui/rustdog
+
+### 任务内容
+
+- 按用户新的本地 `git init` 状态,重新发布仓库到 `raiscui/rustdog`。
+- 发布前检查 `.gitignore` 和已跟踪文件边界,避免把私有、运行态、构建产物和下载缓存推到 GitHub。
+
+### 完成过程
+
+- 确认当前分支是 `main`,初始提交已存在但 remote 为空。
+- 检查 `.gitignore` 与全局 ignore:
+  - `.envrc.private` 被 `/Users/cuiluming/.gitignore_global` 拦住。
+  - `.omx/`、`target/`、`archive/`、`openspec/`、`rdog_downloads/` 被项目 `.gitignore` 拦住。
+- 确认 tracked 文件中没有 `secret`、`token`、`credential`、`private`、`.pem`、`.key` 等命名风险文件;唯一 `.envrc` 是公开注释示例,只 source `.envrc.private`。
+- 使用 Lore protocol amend 初始提交,最终本地 baseline commit 是 `9b2c0455f0caf6d50fb172c6d96f4a5ad9615de6`。
+- 使用 `env -u GITHUB_TOKEN gh repo create raiscui/rustdog --public --description "Rustdog remote control utility" --source=. --remote=origin --push` 创建 public GitHub 仓库并推送 `main`。
+
+### 验证
+
+- `git diff --check`: 通过。
+- `cargo fmt --all --check`: 通过。
+- `cargo check --quiet`: 通过。
+- `git check-ignore -v .envrc.private .omx/state.json .codex/tmp target/debug/foo rdog_downloads/foo archive/foo openspec/foo`: 对应路径均被 ignore 命中。
+- `gh repo view raiscui/rustdog --json nameWithOwner,visibility,isPrivate,defaultBranchRef,url,pushedAt`: 返回 public,defaultBranch 为 `main`。
+- `git ls-remote origin HEAD refs/heads/main`: 远端 HEAD 和 `refs/heads/main` 都是 `9b2c0455f0caf6d50fb172c6d96f4a5ad9615de6`。
+
+### 总结感悟
+
+- 这次是 fresh init 后发布,不能沿用上午旧的 `master` / tag / remote 结论。
+- `GITHUB_TOKEN` 和 keyring 中 `raiscui` 权限来源不同;创建仓库时继续使用 `env -u GITHUB_TOKEN` 更稳。

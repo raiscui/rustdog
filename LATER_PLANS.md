@@ -154,3 +154,27 @@
 - 创建或迁移 GitHub 仓库 `raiscui/rustdog`。
 - 迁移 GitHub release、wiki、badge、installer 依赖的 release asset 发布面。
 - 如果仍需要保留旧 `raiscui/rustcat` 或 `robiot/rustcat` 的来源说明,应在 README 中明确写成 upstream/legacy,不要混入新主路径。
+
+## [2026-05-12 11:54:07] [Session ID: codex-app-2026-05-12-rustdog-repush] 主题: rdog GitHub 远端创建项已落地,但 release 发布面仍未迁移
+
+### 背景
+
+- 旧记录里有一项“创建或迁移 GitHub 仓库 `raiscui/rustdog`”。
+- 本轮已经按 fresh init 状态重新创建 public 仓库并推送 `main`。
+
+### 当前状态
+
+- 已完成:
+  - 创建 `https://github.com/raiscui/rustdog`
+  - 设置 `origin = git@github.com:raiscui/rustdog.git`
+  - 推送 `main`
+  - 验证远端 HEAD 与本地 HEAD 一致
+- 未在本轮处理:
+  - GitHub release 迁移
+  - wiki 迁移
+  - badge / installer / 外部 release asset 依赖面迁移
+
+### 后续事项
+
+- 如果要正式对外发布,下一轮应检查 README badge、安装文档、release workflow 和旧仓库跳转说明。
+- 不要把本轮 fresh init push 误记成完整 release 迁移。
