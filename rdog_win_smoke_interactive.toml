@@ -1,0 +1,26 @@
+# Windows hidden-daemon 交互 shell 烟测专用配置
+#
+# 说明:
+# 1. 这份文件专门用于验证 hidden-daemon 在 interactive 路径下
+#    是否会拉起隐藏的 Windows shell 子进程。
+# 2. 端口单独改到 5556, 避免和 control 烟测互相影响。
+
+[daemon]
+retry_seconds = 3
+
+[hidden]
+log_file = "rdog_hidden_smoke_interactive.log"
+
+[outbound]
+enabled = false
+host = "127.0.0.1"
+port = 4444
+shell = "powershell.exe"
+mode = "interactive"
+
+[inbound]
+enabled = true
+host = "127.0.0.1"
+port = 5556
+shell = "powershell.exe"
+mode = "interactive"

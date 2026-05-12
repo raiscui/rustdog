@@ -1,0 +1,26 @@
+# Windows hidden-daemon 烟测专用配置
+#
+# 说明:
+# 1. 这份文件只用于当前现场烟测,避免污染默认 `rdog_win.toml`。
+# 2. inbound 改成 `control`, 方便直接验证控制链路。
+# 3. 日志单独写入 `rdog_hidden_smoke.log`, 便于和其他运行记录隔离。
+
+[daemon]
+retry_seconds = 3
+
+[hidden]
+log_file = "rdog_hidden_smoke.log"
+
+[outbound]
+enabled = false
+host = "127.0.0.1"
+port = 4444
+shell = "powershell.exe"
+mode = "interactive"
+
+[inbound]
+enabled = true
+host = "127.0.0.1"
+port = 5555
+shell = "powershell.exe"
+mode = "control"

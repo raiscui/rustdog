@@ -1,0 +1,83 @@
+# rdog Linux daemon 配置模版
+#
+# 说明:
+# 1. 这个文件适用于 Linux 平台。
+# 2. `rdog daemon` 在 Linux 上默认会优先读取 `rdog_linux.toml`。
+# 3. 如果你显式传入 `--config`,则以显式路径为准。
+# 4. 环境变量 `RDOG_...` 的优先级高于这里的配置。
+# 5. 为了避免默认把 shell 暴露到外网,这里把 inbound 绑定到 127.0.0.1。
+
+[daemon]
+# outbound 或 inbound 失败后的重试间隔,单位是秒。
+retry_seconds = 5
+
+[outbound]
+# 主动反连模式。
+# 需要时改成 true,然后填写目标主机和端口。
+enabled = false
+
+# 远端控制端地址。
+host = "127.0.0.1"
+
+# 远端控制端端口。
+port = 4444
+
+# Linux 推荐:
+# - "/bin/bash"
+# - "/bin/sh"
+shell = "/bin/bash"
+
+# endpoint 模式:
+# - "interactive": 默认 shell 会话
+# - "control": 显式 `@key` / `@paste` / `@script` 控制协议接收端
+mode = "interactive"
+
+[inbound]
+# 被动监听模式。
+# 这里默认开启,但只监听本机回环地址,方便本地验证。
+enabled = true
+
+# 建议默认先绑到本机,确认没问题后再改成 0.0.0.0。
+host = "127.0.0.1"
+
+# 本地监听端口。
+port = 5555
+
+# Linux 推荐:
+# - "/bin/bash"
+# - "/bin/sh"
+shell = "/bin/bash"
+
+# inbound 默认仍然是普通 shell。
+# 如果你要让 `rdog control` 或 `connect --mode control` 来控制本机,改成 "control"。
+mode = "interactive"
+
+# 环境变量覆盖示例:
+# RDOG_DAEMON__RETRY_SECONDS=2
+# RDOG_OUTBOUND__ENABLED=true
+# RDOG_OUTBOUND__HOST=192.168.1.10
+# RDOG_OUTBOUND__PORT=4444
+# RDOG_OUTBOUND__MODE=control
+# RDOG_INBOUND__HOST=0.0.0.0
+# RDOG_INBOUND__MODE=control
+
+[zenoh]
+# Canonical router/serial control-plane profile (v1).
+enabled = false
+mode = "router"
+namespace = "default"
+daemon_name = "mini-a.lab"
+listen_endpoints = [
+    # TCP endpoint for control/client join.
+    "tcp/0.0.0.0:7447",
+    # Serial endpoint for ESP32/MCU access.
+    "serial//dev/ttyACM1#baudrate=112500",
+]
+request_timeout_ms = 3000
+startup_guard_window_ms = 1000
+
+[zenoh.key_input_events]
+# 当 daemon 成功执行 `@key` 时,同时向这个 KeyExpr 发布键盘事件。
+# 只有 `[zenoh].enabled = true` 时这一段才会生效。
+enabled = true
+keyexpr = "rdog/default/daemon/mini-a.lab/member/mini-a.lab/keyinput"

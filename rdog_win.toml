@@ -1,0 +1,95 @@
+# rdog Windows daemon 配置模版
+#
+# 说明:
+# 1. 这个文件适用于 Windows 平台。
+# 2. `rdog daemon` 在 Windows 上默认会优先读取 `rdog_win.toml`。
+# 3. 如果你显式传入 `--config`,则以显式路径为准。
+# 4. 环境变量 `RDOG_...` 的优先级高于这里的配置。
+# 5. 当前 Windows 模版默认开启全接口 control lane。
+#    启动前请确认你信任网络路径,并按需收紧 host 或关闭 inbound。
+
+[daemon]
+# outbound 或 inbound 失败后的重试间隔,单位是秒。
+retry_seconds = 5
+
+[hidden]
+# `hidden-daemon` 模式下默认写入的日志文件。
+# 这个模式是额外新增能力,不会改变普通 `rdog daemon` 的行为。
+log_file = "rdog_hidden.log"
+
+[outbound]
+# 主动反连模式。
+# 需要时改成 true,然后填写目标主机和端口。
+enabled = false
+
+# 远端控制端地址。
+host = "127.0.0.1"
+
+# 远端控制端端口。
+port = 4444
+
+# Windows 推荐:
+# - "powershell.exe"
+# - "cmd.exe"
+shell = "powershell.exe"
+
+# endpoint 模式:
+# - "interactive": 默认 shell 会话
+# - "control": 显式 `@key` / `@paste` / `@script` 控制协议接收端
+mode = "interactive"
+
+[inbound]
+# 被动监听模式。
+# 这里默认开启,用于长期接收显式 control 请求。
+enabled = false
+
+# 默认监听所有网卡。
+# 如果你只想本机调试,再改回 127.0.0.1。
+host = "0.0.0.0"
+
+# 本地监听端口。
+port = 5555
+
+# Windows 推荐:
+# - "powershell.exe"
+# - "cmd.exe"
+shell = "powershell.exe"
+
+# inbound 默认就是 control lane。
+# 如果你想把它改回普通 bind shell,再切成 "interactive"。
+mode = "control"
+
+# 环境变量覆盖示例:
+# RDOG_DAEMON__RETRY_SECONDS=2
+# RDOG_OUTBOUND__ENABLED=true
+# RDOG_OUTBOUND__HOST=192.168.1.10
+# RDOG_OUTBOUND__PORT=4444
+# RDOG_OUTBOUND__MODE=control
+# RDOG_INBOUND__HOST=0.0.0.0
+# RDOG_INBOUND__MODE=control
+
+[zenoh]
+enabled = true
+mode = "router"
+namespace = "lab"
+daemon_name = "dongfeng-unity.lab"
+
+# v1 router profile: host-reachable TCP endpoint + serial endpoint.
+# 如果你要让外部主机稳定接入这台 Windows daemon,
+# 优先把 TCP endpoint 改成“具体网卡 IP + 高位端口”,例如:
+#   "tcp/192.168.50.57:17447"
+# 外部 control 再配合:
+#   --entry-point tcp/192.168.50.57:17447
+listen_endpoints = [
+    # TCP endpoint for control/client join.
+    "udp/0.0.0.0:7447",
+    # Serial endpoint for ESP32/MCU access.
+    "serial/COM3#baudrate=115200",
+]
+request_timeout_ms = 3000
+startup_guard_window_ms = 1000
+
+[zenoh.key_input_events]
+# 当 daemon 成功执行 `@key` 时,同时向这个 KeyExpr 发布键盘事件。
+enabled = true
+keyexpr = "rdog/lab/daemon/dongfeng-unity.lab/member/dongfeng-unity.lab/keyinput"
