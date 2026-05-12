@@ -18,3 +18,4 @@ archive
 openspec
 rdog_downloads
 *.log
+.history

@@ -313,3 +313,23 @@
 ### 状态
 
 **远端发布完成** - `origin/main` 与本地 HEAD `9b2c0455f0caf6d50fb172c6d96f4a5ad9615de6` 一致,准备提交收尾记录。
+
+## [2026-05-12 12:40:37] [Session ID: codex-app-2026-05-12-git-commit] [继续执行]: 提交 README 清理和 history ignore
+
+### 当前目标
+
+- 用户要求 `git 提交`。
+- 当前 staged 内容只有 `.gitignore` 和 `README.md`。
+- `.history/` 是本地历史备份目录,已通过 `.gitignore` 忽略,不应进入提交。
+
+### 待办
+
+- [x] 检查当前工作区和 staged diff。
+- [x] 确认 `.history/` 已被 ignore 且没有纳入 staged 内容。
+- [x] 运行提交前轻量验证。
+- [x] 创建符合 Lore protocol 的本地提交。
+- [x] 确认提交后工作区状态。
+
+### 状态
+
+**本地提交完成** - 最终提交为 `3dc2df6`,当前分支比 `origin/main` ahead 1,没有未提交改动。

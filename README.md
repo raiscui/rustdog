@@ -2,12 +2,7 @@
       <h1>rustdog - remote control plane, PTY, and reverse shell</h1>
 </div>
 
-<p align="center">
-  <img alt="GitHub All Releases" src="https://img.shields.io/github/downloads/raiscui/rustdog/total?label=GitHub%20Downloads" />
-  <a href="https://aur.archlinux.org/packages/rustdog"><img alt="AUR version" src="https://img.shields.io/aur/version/rustdog" /></a>
-  <img alt="GitHub Issues" src="https://img.shields.io/github/issues/raiscui/rustdog.svg" />
-  <img alt="GitHub Contributors" src="https://img.shields.io/github/contributors/raiscui/rustdog" /></a>
-</p>
+
 
 ## What is Rustdog
 
@@ -23,7 +18,6 @@ It still supports the original port listener and reverse shell workflows, but th
 - GUI-oriented actions such as `@key`, `@paste`, and `@screenshot`
 - structured responses that are easy for a code agent to parse
 
-![image](https://user-images.githubusercontent.com/68228472/184684103-87bf3af8-0607-4789-b3a2-09ce67efce55.jpg)
 
 ## Rename and compatibility
 
