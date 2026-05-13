@@ -266,8 +266,9 @@ __rdog_session_open__:sess-42
 ```text
 @response "pong"
 @response {"id":42,"value":"READY"}
-@savefile {"id":7,"filename":"screenshot-...jpg","mime":"image/jpeg","encoding":"base64","data":"..."}
-@response {"id":7,"value":0}
+@savefile {"id":7,"filename":"screenshot-...-virtual-desktop.jpg","mime":"image/jpeg","encoding":"base64","data":"..."}
+@savefile {"id":7,"filename":"screenshot-...-manifest.json","mime":"application/json","encoding":"base64","data":"..."}
+@response {"id":7,"value":{"kind":"screenshot-bundle","layout":"composite","coordinate_space":"os-logical","image":"screenshot-...-virtual-desktop.jpg","manifest":"screenshot-...-manifest.json","display_count":2}}
 ```
 
 ### 6.3 当前不要假设的事情

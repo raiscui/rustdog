@@ -3478,6 +3478,7 @@ dependencies = [
  "rustyline",
  "sck-rs",
  "serde",
+ "serde_json",
  "sha1",
  "signal-hook",
  "termios",

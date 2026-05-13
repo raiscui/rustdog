@@ -503,8 +503,9 @@ rdog control mac.lab
 @response 0
 @response "READY"
 @response {"id":42,"value":"READY"}
-@savefile {"id":7,"filename":"shot.jpg","mime":"image/jpeg","encoding":"base64","data":"..."}
-@response {"id":7,"value":0}
+@savefile {"id":7,"filename":"screenshot-123-virtual-desktop.jpg","mime":"image/jpeg","encoding":"base64","data":"..."}
+@savefile {"id":7,"filename":"screenshot-123-manifest.json","mime":"application/json","encoding":"base64","data":"..."}
+@response {"id":7,"value":{"kind":"screenshot-bundle","layout":"composite","coordinate_space":"os-logical","image":"screenshot-123-virtual-desktop.jpg","manifest":"screenshot-123-manifest.json","display_count":2}}
 ```
 
 如果控制动作本身失败,也会走同一套协议回传:
@@ -524,10 +525,14 @@ rdog control mac.lab
 - `@key` / `@paste` 当前底层走的是 `enigo`
 - `@savefile` 当前已经是正式控制指令,不是 transport 私有返回技巧
 - `@screenshot` 当前默认行为是:
-  - 主显示器截图
+  - 所有 active displays 合成为一张 virtual desktop 截图
+  - 同时返回 manifest JSON
+  - `coordinate_space="os-logical"`
   - `jpeg`
   - `quality=75`
-  - 结果先通过 `@savefile` 回文件,再以最终 `@response` 收口
+  - 结果先通过两个 `@savefile` 回 JPEG + manifest,再以最终 `@response` 的 `screenshot-bundle` 收口
+- 如果只需要主显示器兼容路径,显式使用:
+  - `@screenshot#7:{target:"display",display:"primary",layout:"single",format:"jpeg",quality:75}`
 - 旧字符串写法 `@key:"..."` 现在默认等价于:
   - `mode="press_release"`
   - `hold_ms=200`

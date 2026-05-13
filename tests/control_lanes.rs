@@ -437,8 +437,12 @@ fn daemon_control_lane_should_execute_screenshot_and_save_file_via_rdog_control(
         "control output did not contain savefile notice: {combined}"
     );
     assert!(
-        combined.contains(r#"@response {"id":7,"value":0}"#),
-        "control output did not contain final response payload: {combined}"
+        combined.matches("saved file:").count() >= 2,
+        "control output did not contain two savefile notices: {combined}"
+    );
+    assert!(
+        combined.contains("screenshot-bundle") && combined.contains("os-logical"),
+        "control output did not contain screenshot bundle summary: {combined}"
     );
 
     let download_dir = workdir.join("rdog_downloads");
@@ -459,6 +463,26 @@ fn daemon_control_lane_should_execute_screenshot_and_save_file_via_rdog_control(
     assert!(
         metadata.len() > 0,
         "saved screenshot file should not be empty"
+    );
+    let manifest = entries
+        .iter()
+        .map(|entry| entry.path())
+        .find(|path| path.extension().and_then(|ext| ext.to_str()) == Some("json"))
+        .expect("should save a json screenshot manifest");
+    let manifest_text = fs::read_to_string(&manifest).expect("manifest should be readable");
+    let manifest_json: serde_json::Value =
+        serde_json::from_str(&manifest_text).expect("manifest should be json");
+    assert_eq!(manifest_json["schema"], "rdog.screenshot.v1");
+    assert_eq!(manifest_json["layout"], "composite");
+    assert_eq!(manifest_json["coordinate_space"], "os-logical");
+    assert_eq!(
+        manifest_json["display_count"].as_u64(),
+        Some(
+            manifest_json["displays"]
+                .as_array()
+                .expect("displays should be an array")
+                .len() as u64
+        )
     );
 
     daemon

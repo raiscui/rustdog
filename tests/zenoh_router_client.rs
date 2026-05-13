@@ -1605,8 +1605,15 @@ fn control_should_execute_screenshot_and_save_file_in_zenoh_profile() {
         "zenoh screenshot output did not contain savefile notice: {combined}"
     );
     assert!(
-        combined.contains(r#"@response {"id":7,"value":0}"#),
-        "zenoh screenshot output did not contain final response payload: {combined}"
+        combined.matches("saved file:").count() >= 2,
+        "zenoh screenshot output did not contain two savefile notices: {combined}"
+    );
+    assert!(
+        combined.contains("screenshot-bundle")
+            && combined.contains("coordinate_space")
+            && combined.contains("os-logical")
+            && combined.contains("display_count"),
+        "zenoh screenshot output did not contain bundle summary: {combined}"
     );
 
     let download_dir = workdir.join("rdog_downloads");
@@ -1627,6 +1634,35 @@ fn control_should_execute_screenshot_and_save_file_in_zenoh_profile() {
     assert!(
         metadata.len() > 0,
         "saved screenshot file should not be empty"
+    );
+    let manifest = entries
+        .iter()
+        .map(|entry| entry.path())
+        .find(|path| path.extension().and_then(|ext| ext.to_str()) == Some("json"))
+        .expect("should save a json screenshot manifest");
+    let manifest_text = fs::read_to_string(&manifest).expect("manifest should be readable");
+    let manifest_json: serde_json::Value =
+        serde_json::from_str(&manifest_text).expect("manifest should be json");
+    assert_eq!(manifest_json["schema"], "rdog.screenshot.v1");
+    assert_eq!(manifest_json["layout"], "composite");
+    assert_eq!(manifest_json["coordinate_space"], "os-logical");
+    assert!(
+        manifest_json["display_count"].as_u64().unwrap_or(0) >= 1,
+        "manifest should report at least one display"
+    );
+    assert_eq!(
+        manifest_json["display_count"].as_u64(),
+        Some(
+            manifest_json["displays"]
+                .as_array()
+                .expect("displays should be an array")
+                .len() as u64
+        )
+    );
+    assert!(
+        manifest_json["image_size"]["width"].as_u64().unwrap_or(0) > 0
+            && manifest_json["image_size"]["height"].as_u64().unwrap_or(0) > 0,
+        "manifest image_size should be non-zero"
     );
 
     let _ = fs::remove_dir_all(workdir);

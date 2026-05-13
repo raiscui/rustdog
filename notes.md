@@ -410,3 +410,169 @@
 - `EXPERIENCE.md`: 追加更名兼容和二进制权限主体经验。
 - `AGENTS.md`: 追加 `archive/manifests/ARCHIVE_MANIFEST__2026-05-11_rdog_rename_continuation.md` 索引。
 - `ERRORFIX.md`: 追加本次未加引号 heredoc 错误记录。
+## [2026-05-12 17:28:58] [Session ID: codex-native-unknown] 笔记: rdog-control skill 资料依据
+
+## 来源
+
+### 来源1: 当前 CLI help
+
+- 路径: `./target/debug/rdog --help`
+- 路径: `./target/debug/rdog control --help`
+- 路径: `./target/debug/rdog daemon --help`
+- 要点:
+  - 当前主二进制是 `rdog`。
+  - `rdog control [HOST_OR_TARGET]... [-- COMMAND...]` 支持 `--url`、`--transport`、`--namespace`、`--target-name`、`--entry-point`、`--pty`、`--pty-close`、`--pty-detach`、`--pty-attach`。
+  - 单个非端口位置参数会推断为 Zenoh target-name,所以 `rdog control mac.lab` 是现行主路径。
+  - `rdog daemon` 支持 `--transport zenoh`、`--namespace`、`--name` 和 `--config`。
+
+### 来源2: 仓库规格文档
+
+- 路径: `specs/code-agent-rdog-control-usage.md`
+- 路径: `specs/control-line-protocol.md`
+- 路径: `specs/pty-control-plan.md`
+- 路径: `specs/zenoh-sdk-integration-playbook.md`
+- 路径: `specs/zenoh-screenshot-control-plan.md`
+- 路径: `README.md`
+- 路径: `cmd.md`
+- 要点:
+  - `rdog control` 是 stdio 到远端 control lane 的桥,不是 SSH 的同义词。
+  - code agent 应优先 `@ping`,再按需求选择 `@cmd#id`、裸 shell、`@key`、`@paste`、`@screenshot` 或 `--pty`。
+  - `@response` 是请求结果,不是 `rdog control` 退出信号。
+  - 文件型结果使用 `@savefile`。接收端应保存文件,不要把 base64 直接展示给用户。
+  - PTY 完成必须看 `@pty-exit` 或 `@pty-closed`; `@pty-detached` / `@pty-attached` 只是所有权变化。
+  - 硬件和单片机控制通常通过桥接主机间接完成,比如 bridge host 上的 serial/JTAG/SDK/vendor CLI。
+
+## 综合发现
+
+### skill 结构
+
+- 主 `SKILL.md` 只放触发条件、最小决策流和安全边界。
+- 详细命令放 `references/control-workflow.md`。
+- 协议和响应解析放 `references/protocol.md`。
+- Zenoh、硬件桥接和单片机边界放 `references/zenoh-hardware.md`。
+
+### 验证结论
+
+- `quick_validate.py` 输出 `Skill is valid!`。
+- 当前二进制 help 中确认存在 skill 引用的关键 flag。
+- skill 内容扫描未发现 `TODO`、旧 `rcat` 主路径、`zenoh-peer` 或 `target/debug/rcat`。
+## [2026-05-13 14:06:58] [Session ID: codex-native-unknown] 笔记: `@screenshot` 只有桌面没有窗口
+
+## 来源
+
+### 来源1: `src/screenshot.rs`
+
+- `execute_screenshot_request()` 直接调用 `capture_primary_display_image()`。
+- macOS 路径先执行 `capture_with_sck_rs()`,失败后执行 `capture_with_xcap()`。
+- `capture_with_sck_rs()` 只调用 `sck_rs::Monitor::primary().capture_image()`,没有传入窗口排除参数。
+- `capture_with_xcap()` 只找 primary monitor 并调用 `monitor.capture_image()`。
+- 结论: 当前仓库实现没有主动过滤窗口,也没有只截桌面的业务开关。
+
+### 来源2: `sck-rs` 本地依赖源码
+
+- `Monitor::capture_image()` 调用 `capture_monitor_sync(..., &[])`。
+- `sck-rs` 注释说明空的 excluded window list 表示 capture everything。
+- 结论: 如果 SCK 主路径成功,从代码意图看应该包含屏幕上的窗口。
+
+### 来源3: `xcap` 本地依赖源码
+
+- macOS monitor capture 最终走 `CGWindowListCreateImage(cg_rect, CGWindowListOption::OptionAll, 0, ...)`。
+- 这个路径只要拿到 `CGImage` 就会组装 `RgbaImage`,没有额外判断窗口是否真的进入了图像。
+- `xcap` 的 window listing 路径有 Screen Recording preflight,但 monitor capture 路径这里没有显式 preflight。
+- 结论: 如果系统隐私权限导致窗口内容被裁掉,当前 fallback 有机会把“只有桌面背景”的图当成成功截图。
+
+## 综合发现
+
+- 已验证现象:
+  - `@ping` 和 `@screenshot#7` 协议层成功。
+  - `@savefile` 落盘 JPEG 成功。
+  - 用户观察到内容只有桌面,没有可见窗口。
+- 主假设:
+  - macOS Screen Recording 权限没有授给实际执行截图的进程身份,或者 `sck-rs` 主路径失败后,`xcap` fallback 返回了被系统隐私裁剪后的桌面图。
+- 最强备选解释:
+  - daemon 运行在不同 GUI session / Space / 用户上下文中,实际能看到的就是空桌面。
+  - 但本轮 daemon 是从当前用户 PTY 临时启动,所以这个备选解释弱于权限/fallback 假阳性。
+- 需要修复时的方向:
+  - macOS 上先做权限 preflight 或窗口可见性 probe。
+  - 如果无法枚举窗口或权限不足,返回 `PermissionDenied`,不要继续保存桌面-only 图并返回成功。
+
+## [2026-05-13 17:45:06] [Session ID: codex-native-unknown] 笔记: 多显示器截图与鼠标坐标方案事实
+
+## 来源
+
+### 来源1: 当前协议和截图实现
+
+- `src/control_protocol.rs:54-60`: `ScreenshotRequest` 当前只有 `quality`。
+- `src/control_protocol.rs:686-710`: 当前对象 payload 只允许 `target="display"`、`format="jpeg"`、`display="primary"`。
+- `src/control_protocol.rs:1461-1463`: 当前测试明确拒绝 `display="secondary"`。
+- `src/screenshot.rs:13-18`: 截图入口只调用 primary capture。
+- `src/screenshot.rs:32-56`: 当前一个 screenshot request 只产出一个 JPEG `@savefile` 和一个最终 `@response`。
+- `src/screenshot.rs:77-118`: macOS 和非 macOS 当前都以 primary monitor 为主路径。
+
+### 来源2: 当前 `@savefile` 能力
+
+- `src/control_frames.rs:31-40`: `SaveFileFrame` 字段可以承载任意 filename/mime/base64 data,但没有通用 metadata map。
+- `src/control_frames.rs:540-555`: `SaveFileFrame` 直接序列化为 `@savefile {...}`。
+- `src/shell.rs:604-610`: control client 以循环方式接收 result frames,一个请求返回多个 `@savefile` 在传输模型上可行。
+
+### 来源3: 显示器枚举能力
+
+- `sck-rs::Monitor::all()` 已能提供多显示器的 id、x/y、logical size、scale factor 和 primary 信息。
+- `xcap::Monitor::all()` 已能提供 id、name、x/y、width/height、scale factor、primary 和 capture_image。
+
+## 综合发现
+
+- 方案应选择“完整虚拟桌面大图 + manifest”作为默认主路径。
+- manifest 应成为截图坐标和未来鼠标坐标之间的单一真相源。
+- 默认 composite 建议使用 `os-logical` 分辨率,让 `image_x + virtual_bounds.x = os_x` 成立,降低后续点击/拖拽换算复杂度。
+- 每屏单独文件可以作为 future debug 模式,不应成为默认 code-agent 视觉入口。
+
+## [2026-05-13 19:57:11] [Session ID: omx-1778661154642-agn8qc] 验证记录: 多显示器 screenshot bundle 动态证据
+
+### 已验证
+- `cargo test --package rustdog --bin rdog`: 140 passed。
+- `cargo test --tests --no-run`: integration tests 全部预编译通过,无 warning。
+- `git diff --check`: 在上一轮批处理通过。
+- `beautiful-mermaid-rs --ascii`: `specs/rdog-multi-display-screenshot-coordinate-plan.md` 两个 Mermaid block 通过。
+- 手写真实 TCP control smoke:
+  - stdout 出现两个 `saved file:`。
+  - 保存 `screenshot-...-virtual-desktop.jpg`。
+  - 保存 `screenshot-...-manifest.json`。
+  - final response 为 `kind:"screenshot-bundle"`。
+  - manifest `display_count = 2`。
+  - manifest `image_size = {"width":3390,"height":1080}`。
+- `cargo test --package rustdog --test zenoh_router_client -- control_should_execute_screenshot_and_save_file_in_zenoh_profile --exact --ignored --nocapture`: passed。
+- `cargo test --package rustdog --test control_lanes -- daemon_control_lane_should_execute_screenshot_and_save_file_via_rdog_control --exact --ignored --nocapture`: passed。
+- `cargo test --package rustdog --test control_websocket -- control_cli_should_execute_screenshot_and_save_file_over_websocket --exact --ignored --nocapture`: passed。
+
+### 结论
+- 默认 `@screenshot#id` 已在真实双显示器环境返回 composite JPEG + manifest JSON。
+- TCP、WebSocket、Zenoh control 路径均能保存两个 `@savefile` 并收到 `screenshot-bundle` final response。
+
+## [2026-05-13 20:13:46] [Session ID: omx-1778661154642-agn8qc] 笔记: 多显示器 screenshot bundle post-deslop 验证
+
+## 来源
+
+### 来源1: post-deslop 回归命令
+
+- 命令: cargo fmt
+- 结果: 退出码 0。
+- 命令: cargo test --package rustdog --bin rdog -- screenshot::tests --nocapture
+- 结果: 11 passed, 0 failed。
+- 命令: cargo test --package rustdog --bin rdog
+- 结果: 142 passed, 0 failed。
+- 命令: cargo test --tests --no-run
+- 结果: integration tests 全部编译为可执行测试目标,未出现 warning/error。
+- 命令: git diff --check
+- 结果: 退出码 0,无输出。
+- 命令: cargo test --package rustdog --test zenoh_router_client -- control_should_execute_screenshot_and_save_file_in_zenoh_profile --exact --ignored --nocapture
+- 结果: 1 passed, 0 failed。
+- 命令: python3 /Users/cuiluming/.codex/skills/.system/skill-creator/scripts/quick_validate.py /Users/cuiluming/.codex/skills/rdog-control
+- 结果: Skill is valid!
+
+## 综合发现
+
+- Architect 子智能体结论为 APPROVE,架构状态 WATCH。
+- WATCH 点是内部 API 构造非法 ScreenshotRequest 时可能先 capture 再校验。
+- 本轮已把 primary/composite request 校验前置到 capture closure 之前,并新增两个测试证明非法 request 不会触发 capture。
+- 多显示器默认 screenshot bundle、manifest 坐标契约、primary 兼容入口和 Zenoh ignored smoke 仍然通过验证。

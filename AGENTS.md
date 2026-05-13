@@ -56,6 +56,16 @@
   - 用途: 说明 `task_plan.md` 超过 1000 行后的归档位置,以及本轮 `rcat/rustcat` -> `rdog/rustdog` 更名、legacy 兼容和权限主体经验沉淀范围
   - 何时阅读: 需要追溯 rdog 更名任务的长计划、验证证据、legacy 兼容决策,或确认为何当前默认 `task_plan.md` 变短时
 
+- `archive/manifests/ARCHIVE_MANIFEST__2026-05-12_rdog_control_skill_worklog.md`
+  - 主题: 2026-05-12 创建 `rdog-control` 全局 skill 后的 `WORKLOG.md` 续档说明
+  - 用途: 说明旧 `WORKLOG.md` 超过 1000 行后的归档位置,以及本轮 skill 创建、验证和硬件/单片机表述边界沉淀范围
+  - 何时阅读: 需要追溯 `rdog-control` skill 为什么创建、旧 WORKLOG 为什么被续档,或查找 2026-05-12 前默认工作记录时
+
+- `/Users/cuiluming/.codex/skills/rdog-control/SKILL.md`
+  - 主题: code agent 使用 `rdog daemon` / `rdog control` 控制局域网主机、硬件桥接机和单片机场景的全局 skill
+  - 用途: 提供 target-name / `--entry-point` / line-control / PTY / screenshot / savefile / Zenoh session channel 的可复用操作指南
+  - 何时阅读: 需要让 Codex 或其他 code agent 使用 `rdog control <target-name>` 控制主机、桌面、硬件桥接机或单片机场景之前
+
 - `specs/zenoh-control-plane-plan.md`
   - 主题: `rustdog` 的 canonical Zenoh router/serial control-plane 规划
   - 用途: 固定 daemon 内嵌 router、control client、native `transport_serial`、autodiscovery 默认接入 + `--entry-point` fallback、identity/keyexpr、CLI/config、runtime 边界与验证矩阵
@@ -88,8 +98,13 @@
 
 - `specs/zenoh-screenshot-control-plan.md`
   - 主题: `@screenshot` 远程截图能力的控制面规划
-  - 用途: 固定“截图请求继续走显式 control plane,默认直接 `@response` 返回 jpeg 75 base64,macOS 用 `sck-rs` 主路径 + `xcap` fallback,其他平台走 `xcap`”这一轮方案
+  - 用途: 固定“截图请求继续走显式 control plane,默认 all-display composite JPEG + manifest JSON 通过 `@savefile` 返回,再以 `@response ...screenshot-bundle...` 收口; macOS 用 `sck-rs` 主路径 + `xcap` fallback,其他平台走 `xcap`”这一轮方案
   - 何时阅读: 准备实现或评审 `@screenshot`、截图结果响应格式、截图后端选择或 screenshot control 测试方案前
+
+- `specs/rdog-multi-display-screenshot-coordinate-plan.md`
+  - 主题: 多显示器 `@screenshot` bundle 和截图坐标/OS 鼠标坐标契约
+  - 用途: 固定 `display:"all"`、`layout:"composite"`、`coordinate_space:"os-logical"`、virtual desktop JPEG、manifest JSON、`display:"primary"` 兼容入口、gap/rotation 和 Screen Recording 权限边界
+  - 何时阅读: 准备实现或评审多显示器截图、manifest schema、后续 `@click` / `@drag` 坐标换算、或排查 screenshot 坐标偏移前
 
 - `specs/bidirectional-control-plane-plan.md`
   - 主题: 控制面从单向 request/reply 升级为真正双向 control peer 的规划

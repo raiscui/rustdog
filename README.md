@@ -223,7 +223,7 @@ The usual shape is:
 | Ping | `@ping` | `@response "pong"` | Health check |
 | One-shot command | `@cmd#1:"pwd"` | `@response {"id":1,"value":"..."}` | Scripted automation |
 | Bare shell line | `pwd` | `@response "..."` | Human-friendly one-shot shell command |
-| Screenshot | `@screenshot#7` | `@savefile ...` then `@response ...` | Remote visual evidence |
+| Screenshot | `@screenshot#7` | image `@savefile` + manifest `@savefile` + `@response ...screenshot-bundle...` | Remote visual evidence |
 | Save file | `@savefile:{...}` | local file in `./rdog_downloads/` | Transfer generated artifacts |
 | Key input | `@key:"F11"` | `@response 0` or permission error | GUI shortcut / desktop control |
 | Paste text | `@paste:"hello"` | `@response 0` or permission error | Text injection into focused UI |
@@ -241,6 +241,10 @@ Important behavior:
 - Request-id errors are wrapped as `@response {"id":42,"code":64,"error":"..."}`.
 - Bare shell lines and `@cmd` are one-shot command execution. Do not rely on `cd`, shell variables, or cwd changes persisting across requests.
 - If you need shell state, use `rdog control TARGET --pty -- /bin/bash` or another PTY session.
+- Bare `@screenshot` defaults to all active displays: `display:"all", layout:"composite", coordinate_space:"os-logical"`.
+- `@screenshot:{display:"primary",layout:"single"}` is the explicit compatibility path for a single primary-display JPEG.
+- Default screenshot results are a bundle: one virtual-desktop JPEG `@savefile`, one manifest JSON `@savefile`, then a final `@response` whose value has `kind:"screenshot-bundle"`.
+- The manifest is the coordinate source of truth. For the default logical composite, `os_x = image_x + virtual_bounds.x` and `os_y = image_y + virtual_bounds.y`.
 - `@screenshot` saves file-style results through `@savefile`; the CLI stores them under `./rdog_downloads/` instead of dumping base64 to the terminal.
 - In a real TTY, `rdog control` renders simple `@response` values for humans.
 - In pipe/redirect mode, `rdog control` keeps raw protocol lines for programs.
@@ -270,6 +274,10 @@ rdog control mac.lab <<'RDOG'
 @screenshot#3
 RDOG
 ```
+
+After a screenshot smoke, parse both saved files.
+The JPEG is the visual evidence.
+The manifest JSON tells a code agent how screenshot pixels map to OS mouse coordinates.
 
 For a full agent-facing guide, see [`specs/code-agent-rdog-control-usage.md`](./specs/code-agent-rdog-control-usage.md).
 
@@ -477,6 +485,8 @@ Important boundaries:
 - On macOS, the actual `rdog` binary may need Accessibility permission for input simulation and Screen Recording permission for screenshots.
 - On Windows, `@key` / `@paste` may be blocked by UIPI when the target window runs at a higher integrity level than the daemon.
 - `@screenshot` depends on platform screen-capture permissions.
+  On macOS, Screen Recording permission failures are first-class errors.
+  Rustdog must not treat a desktop-only fallback image as a successful window-capable screenshot.
 - Review `0.0.0.0` bind endpoints before exposing them on untrusted networks.
 
 ## More documentation
@@ -487,6 +497,7 @@ Important boundaries:
 - [`specs/code-agent-rdog-control-usage.md`](./specs/code-agent-rdog-control-usage.md): code-agent remote coordination guide
 - [`specs/zenoh-control-plane-plan.md`](./specs/zenoh-control-plane-plan.md): Zenoh router/client control-plane plan
 - [`specs/zenoh-screenshot-control-plan.md`](./specs/zenoh-screenshot-control-plan.md): screenshot control plan
+- [`specs/rdog-multi-display-screenshot-coordinate-plan.md`](./specs/rdog-multi-display-screenshot-coordinate-plan.md): multi-display screenshot bundle and coordinate manifest contract
 
 ## Disclaimer
 

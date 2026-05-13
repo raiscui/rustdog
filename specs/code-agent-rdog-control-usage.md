@@ -105,7 +105,7 @@ flowchart LR
 | 显式脚本 | `@script:"git status --short"` | `@response ...` | 远端执行命令文本 |
 | 按键 | `@key#7:{key:"F11",hold_ms:200,mode:"press_release"}` | `@response {"id":7,"value":0}` | 操作远端 GUI 焦点窗口 |
 | 粘贴 | `@paste:"hello"` | `@response 0` 或错误对象 | 向远端 GUI 输入文本 |
-| 截图 | `@screenshot#7` | `@savefile ...` + `@response ...` | 采集远端屏幕证据 |
+| 截图 | `@screenshot#7` | image `@savefile` + manifest `@savefile` + `@response ...screenshot-bundle...` | 采集远端屏幕证据与坐标 manifest |
 | PTY / TUI | `rdog control mac.lab --pty -- codex` | `@pty-*` frame 流 | 跑 `codex`、shell、vim、REPL |
 | PTY detach | `--pty-detach SESSION_ID` | `@pty-detached ...` | 保留远端进程,解绑当前控制端 |
 | PTY attach | `--pty-attach SESSION_ID` | `@pty-attached ...` 后继续输出 | 重新接管远端 PTY |
@@ -128,6 +128,35 @@ agent 应按下面的规则解析输出:
 - `@response {"id":...,"value":...}`: 带 request id 的成功值
 - `@response {"code":...,"error":"..."}`: 协议或执行错误
 - `@savefile {...}`: 文件型结果,不应把 base64 原样展示给用户
+- 同一个 request id 可能返回多个 `@savefile`。
+  默认 `@screenshot#id` 至少返回一个 virtual-desktop JPEG 和一个 manifest JSON。
+
+默认截图请求:
+
+```text
+@screenshot#7
+```
+
+等价于:
+
+```text
+@screenshot#7:{target:"display",display:"all",layout:"composite",coordinate_space:"os-logical",format:"jpeg",quality:75}
+```
+
+显式主屏兼容入口:
+
+```text
+@screenshot#8:{target:"display",display:"primary",layout:"single",format:"jpeg",quality:75}
+```
+
+默认 screenshot bundle 的 final response 会包含:
+
+- `kind:"screenshot-bundle"`
+- `layout:"composite"`
+- `coordinate_space:"os-logical"`
+- `image`
+- `manifest`
+- `display_count`
 
 ### 2. 需要真实 TTY 时才用 PTY
 
@@ -264,6 +293,8 @@ rdog control linux-build.lab --entry-point tcp/10.8.0.20:17447
 - macOS 需要屏幕录制权限
 - Linux / Windows 也可能受桌面环境或权限限制
 - 权限缺失应视为一等错误,不要把它当成网络失败
+- macOS desktop-only 假成功不能接受。
+  如果 backend 无法证明窗口内容可被捕获,应该返回可诊断错误,不要把只有桌面的图片当成功截图。
 
 ## 和 SSH 的差异
 
@@ -286,7 +317,9 @@ rdog control linux-build.lab --entry-point tcp/10.8.0.20:17447
 2. 不需要 TTY 时,用 `@cmd#id` 或 bare shell line。
 3. 需要关联结果时,用 request id。
 4. 需要 GUI 副作用时,用 `@key` / `@paste`,并先确认权限。
-5. 需要视觉证据时,用 `@screenshot#id`,并解析 `@savefile`。
+5. 需要视觉证据时,用 `@screenshot#id`,并解析所有同 id 的 `@savefile`。
+   默认截图要同时读取 JPEG 和 manifest。
+   后续点击/拖拽坐标必须从 manifest 的 `virtual_bounds` 和 `display.image_rect` 换算,不要只凭图片猜。
 6. 需要 TUI 或长期交互时,用 `--pty -- COMMAND`。
 7. 需要保留远端进程时,用 `--pty-detach`。
 8. 重新接管时,用 `--pty-attach`。

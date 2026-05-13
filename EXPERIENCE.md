@@ -169,3 +169,19 @@
 - 重命名后的测试契约要能识别权限边界。
   - 如果返回 `PermissionDenied` 或项目约定的 code 77,应验证错误说明和恢复路径。
   - 只有真实输入成功时,才继续等待 keyinput event 或 GUI 副作用。
+
+## [2026-05-12 17:35:27] rdog-control skill 与硬件/单片机表述边界
+
+- 给 code agent 做 `rdog control` 使用 skill 时,不要只提供命令速查。
+  - 需要同时写清楚 target-name 寻址、line-control 请求、`@response` / `@savefile` / `@pty-*` 解析、权限错误和安全边界。
+
+- `rdog control mac.lab` 这类短命令是当前主路径。
+  - `--entry-point` 是 autodiscovery 不可用时的 fallback,不要把 fallback 写成唯一入口。
+
+- 面向硬件和单片机场景时,默认表述应是:
+  - Codex 通过 `rdog control` 操作 bridge host。
+  - bridge host 再通过串口、JTAG、SDK、烧录器或厂商工具控制设备。
+  - 除非固件或设备侧 app 明确实现了兼容控制协议,否则不要暗示 `rdog` 能直接在 MCU 内执行 shell。
+
+- 这条经验已经沉淀成全局 skill:
+  - `/Users/cuiluming/.codex/skills/rdog-control/SKILL.md`

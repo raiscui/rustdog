@@ -1318,6 +1318,79 @@ mod tests {
     }
 
     #[test]
+    fn receive_control_result_frames_should_save_multiple_savefiles_before_final_response() {
+        let (client, mut server) = connected_pair();
+        let save_dir = temp_directory("savefile-bundle");
+        let image_frame = SaveFileFrame {
+            request_id: Some(7),
+            filename: "screenshot-123-virtual-desktop.jpg".to_owned(),
+            mime: "image/jpeg".to_owned(),
+            encoding: "base64".to_owned(),
+            data: "QUJD".to_owned(),
+            quality: Some(75),
+            width: Some(100),
+            height: Some(60),
+        };
+        let manifest_frame = SaveFileFrame {
+            request_id: Some(7),
+            filename: "screenshot-123-manifest.json".to_owned(),
+            mime: "application/json".to_owned(),
+            encoding: "base64".to_owned(),
+            data: "eyJzY2hlbWEiOiJyZG9nLnNjcmVlbnNob3QudjEifQ==".to_owned(),
+            quality: None,
+            width: None,
+            height: None,
+        };
+
+        let worker = thread::spawn(move || {
+            let mut transport = ControlTransport::from_tcp_stream(client)
+                .expect("transport should wrap tcp stream");
+            let mut output = Vec::new();
+            receive_control_result_frames(
+                &mut transport,
+                &mut output,
+                &save_dir,
+                ControlResponseDisplay::Protocol,
+            )
+            .expect("client should consume screenshot bundle frames");
+            (
+                String::from_utf8(output).expect("output should be utf-8"),
+                save_dir,
+            )
+        });
+
+        write_response_line(&mut server, &image_frame.to_wire_message())
+            .expect("image savefile should send");
+        write_response_line(&mut server, &manifest_frame.to_wire_message())
+            .expect("manifest savefile should send");
+        write_response_line(
+            &mut server,
+            r#"@response {"id":7,"value":{"kind":"screenshot-bundle","layout":"composite","coordinate_space":"os-logical","image":"screenshot-123-virtual-desktop.jpg","manifest":"screenshot-123-manifest.json","display_count":2}}"#,
+        )
+        .expect("bundle response should send");
+        server
+            .shutdown(Shutdown::Both)
+            .expect("server side should close cleanly");
+
+        let (output, saved_dir) = worker.join().expect("worker should not panic");
+
+        assert_eq!(output.matches("saved file:").count(), 2);
+        assert!(output.contains("screenshot-bundle"));
+        assert_eq!(
+            fs::read(saved_dir.join("screenshot-123-virtual-desktop.jpg"))
+                .expect("image file should exist"),
+            b"ABC"
+        );
+        assert_eq!(
+            fs::read_to_string(saved_dir.join("screenshot-123-manifest.json"))
+                .expect("manifest file should exist"),
+            r#"{"schema":"rdog.screenshot.v1"}"#
+        );
+
+        let _ = fs::remove_dir_all(saved_dir);
+    }
+
+    #[test]
     fn control_receiver_should_escape_double_at_to_literal_shell_command() {
         let (mut client, server) = connected_pair();
         let executor = FakeExecutor::default();

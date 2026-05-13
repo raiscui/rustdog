@@ -178,3 +178,55 @@
 
 - 如果要正式对外发布,下一轮应检查 README badge、安装文档、release workflow 和旧仓库跳转说明。
 - 不要把本轮 fresh init push 误记成完整 release 迁移。
+
+## [2026-05-13 14:06:58] [Session ID: codex-native-unknown] 主题: macOS `@screenshot` 需要避免 desktop-only 假成功
+
+### 背景
+
+- 用户观察到 `@screenshot` 生成的 JPEG 只有桌面,没有可见窗口。
+- 当前实现中 `sck-rs` 主路径失败后会 fallback 到 `xcap`。
+- `xcap` monitor capture 路径可能拿到被 macOS 隐私权限裁剪后的桌面-only 图,但仍作为成功图片返回。
+
+### 后续事项
+
+- 在 macOS 截图前补 Screen Recording 权限 preflight 或窗口可见性 probe。
+- 当权限不足或无法确认窗口内容可捕获时,应返回 `PermissionDenied`,不要继续保存 desktop-only 图。
+- 可以考虑让 `@screenshot` response metadata 标注实际 backend,方便后续区分 `sck-rs` 主路径和 `xcap` fallback。
+
+## [2026-05-13 18:26:13] [Session ID: omx-1778661154642-agn8qc] 后续计划: 将 ralplan 方案转为可提交 specs 文档
+
+### 背景
+- 当前多显示器截图坐标方案产物位于 `.omx/plans/`,该目录被 `.gitignore` 忽略。
+
+### 建议后续动作
+- 如果这份方案需要作为仓库长期规格,将核心内容整理到 `specs/rdog-multi-display-screenshot-coordinate-plan.md` 或合并进 `specs/zenoh-screenshot-control-plan.md`。
+- 同步更新 `AGENTS.md` 长期知识索引,说明何时阅读该 specs 文件。
+
+### 当前状态
+- 本轮不执行迁移,因为用户当前请求是 `$ralplan` 指定 `.omx/plans/...` 产物,不是提交长期 specs。
+
+## [2026-05-13 20:13:46] [Session ID: omx-1778661154642-agn8qc] 后续计划: 基于 screenshot manifest 实现鼠标点击和拖拽
+
+### 背景
+- 多显示器  已默认返回 virtual desktop JPEG + manifest JSON。
+- manifest 已定义 、 和 ,可以把截图像素坐标稳定换算成 OS logical 鼠标坐标。
+
+### 后续事项
+- 实现  /  时,直接复用 manifest 的  坐标语义。
+- 不要新增第二套屏幕坐标解释,也不要让 agent 只凭大图猜显示器偏移。
+- 如需要单屏调试模式,可以后续追加  或 debug-only 输出,但不应改变默认 composite 契约。
+
+## [2026-05-13 20:14:51] [Session ID: omx-1778661154642-agn8qc] 更正记录: 基于 screenshot manifest 实现鼠标点击和拖拽
+
+### 说明
+- 上一条同主题 LATER_PLANS 记录因未加引号 heredoc 丢失了反引号内字段。
+- 本条为准。
+
+### 背景
+- 多显示器 `@screenshot` 已默认返回 virtual desktop JPEG + manifest JSON。
+- manifest 已定义 `virtual_bounds`、`display.image_rect` 和 `display.os_rect`,可以把截图像素坐标稳定换算成 OS logical 鼠标坐标。
+
+### 后续事项
+- 实现 `@click` / `@drag` 时,直接复用 manifest 的 `os-logical` 坐标语义。
+- 不要新增第二套屏幕坐标解释,也不要让 agent 只凭大图猜显示器偏移。
+- 如需要单屏调试模式,可以后续追加 `layout:"per-display"` 或 debug-only 输出,但不应改变默认 composite 契约。

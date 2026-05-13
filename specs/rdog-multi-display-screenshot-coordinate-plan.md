@@ -1,0 +1,156 @@
+# `rdog @screenshot` 多显示器截图与坐标契约
+
+## 1. 当前实现结论
+
+`@screenshot` 的默认目标是用户所有 active displays。
+默认返回一张完整虚拟桌面 JPEG,再返回一个 manifest JSON。
+manifest 是截图坐标和后续鼠标坐标之间的单一真相源。
+
+裸请求:
+
+```text
+@screenshot#7
+```
+
+等价于:
+
+```text
+@screenshot#7:{target:"display",display:"all",layout:"composite",coordinate_space:"os-logical",format:"jpeg",quality:75}
+```
+
+显式主屏兼容入口:
+
+```text
+@screenshot#8:{target:"display",display:"primary",layout:"single",format:"jpeg",quality:75}
+```
+
+## 2. 返回帧顺序
+
+默认 composite 请求返回三帧:
+
+```text
+@savefile {"id":7,"filename":"screenshot-...-virtual-desktop.jpg","mime":"image/jpeg","encoding":"base64",...}
+@savefile {"id":7,"filename":"screenshot-...-manifest.json","mime":"application/json","encoding":"base64",...}
+@response {"id":7,"value":{"kind":"screenshot-bundle","layout":"composite","coordinate_space":"os-logical","image":"screenshot-...-virtual-desktop.jpg","manifest":"screenshot-...-manifest.json","display_count":2}}
+```
+
+显式 `display:"primary",layout:"single"` 仍是旧兼容形态:
+
+- 一个 JPEG `@savefile`
+- 一个最终 `@response 0` 或 `@response {"id":...,"value":0}`
+
+## 3. Manifest 坐标不变量
+
+manifest schema 固定为 `rdog.screenshot.v1`。
+字段命名统一使用 `snake_case`。
+
+关键字段:
+
+- `layout = "composite"`
+- `coordinate_space = "os-logical"`
+- `image_coordinate_space = "virtual-logical-pixels"`
+- `virtual_bounds`
+- `image_size`
+- `display_count`
+- `gaps`
+- `displays[].os_rect`
+- `displays[].image_rect`
+- `displays[].native_capture_size`
+- `displays[].scale_factor`
+- `displays[].resize_applied`
+- `displays[].rotation`
+
+默认 logical composite 下,换算公式固定为:
+
+```text
+os_x = image_x + virtual_bounds.x
+os_y = image_y + virtual_bounds.y
+image_x = os_x - virtual_bounds.x
+image_y = os_y - virtual_bounds.y
+```
+
+必须满足:
+
+- `virtual_bounds` 是所有 display `os_rect` 的 union。
+- `image_rect.x = os_rect.x - virtual_bounds.x`。
+- `image_rect.y = os_rect.y - virtual_bounds.y`。
+- `image_size.width = virtual_bounds.width`。
+- `image_size.height = virtual_bounds.height`。
+- `display_count == displays.len()`。
+
+## 4. Gap 和 rotation
+
+gap 区域不属于任何显示器。
+manifest 必须提供 `gaps` 字段。
+命中所有 `display.image_rect` 之外的点,不能直接转成鼠标点击。
+
+第一版不支持旋转显示器。
+任一 display `rotation != 0` 时,daemon 应返回 unsupported error,不要生成看似可点击的截图。
+
+## 5. macOS 权限契约
+
+macOS 截图需要实际运行 `rdog` 的进程拥有 Screen Recording 权限。
+权限不足时返回 `PermissionDenied`,控制面映射为 `code = 77`。
+
+实现上优先执行 Screen Recording preflight。
+如果 preflight 不通过,不能继续 fallback 到可能产生 desktop-only 假成功的截图后端。
+
+## 6. 处理流程
+
+```mermaid
+flowchart LR
+    A[Control line @screenshot] --> B[Parse ScreenshotRequest]
+    B --> C{display selector}
+    C -->|primary| D[Capture primary display]
+    D --> E[Emit one JPEG @savefile]
+    E --> F[Emit compatibility @response 0]
+    C -->|all| G[Enumerate all displays]
+    G --> H[Capture each display with metadata]
+    H --> I[Build virtual bounds]
+    I --> J[Resize native captures to logical rects]
+    J --> K[Composite virtual desktop JPEG]
+    K --> L[Build manifest JSON]
+    L --> M[Emit image @savefile]
+    M --> N[Emit manifest @savefile]
+    N --> O[Emit @response screenshot-bundle]
+```
+
+## 7. 时序
+
+```mermaid
+sequenceDiagram
+    participant Agent as Code agent
+    participant Control as rdog control
+    participant Daemon as rdog daemon
+    participant Backend as Screenshot backend
+    Agent->>Control: @screenshot#7
+    Control->>Daemon: line-control request
+    Daemon->>Backend: enumerate displays
+    Backend-->>Daemon: display metadata
+    Daemon->>Backend: capture each display
+    Backend-->>Daemon: image buffers
+    Daemon->>Daemon: compose image and manifest
+    Daemon-->>Control: @savefile virtual-desktop.jpg
+    Daemon-->>Control: @savefile manifest.json
+    Daemon-->>Control: @response screenshot-bundle
+    Control-->>Agent: saved file paths and final protocol response
+```
+
+## 8. 验证入口
+
+核心 focused tests:
+
+```bash
+cargo test --package rustdog --bin rdog -- control_protocol::tests::parse_should_support_screenshot_display_layout_and_coordinate_space --exact
+cargo test --package rustdog --bin rdog -- screenshot::tests
+cargo test --package rustdog --bin rdog -- shell::tests::receive_control_result_frames_should_save_multiple_savefiles_before_final_response --exact
+```
+
+完整 bin 单测:
+
+```bash
+cargo test --package rustdog --bin rdog
+```
+
+真实 Zenoh / TCP / WebSocket screenshot smoke 是 ignored 测试。
+它们需要本机真实屏幕和截图权限。

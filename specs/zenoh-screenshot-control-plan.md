@@ -24,6 +24,12 @@
 - macOS 备用后端: `xcap`
 - Windows / Linux 后端: `xcap`
 
+> 2026-05-13 更新:
+> 当前实现已从 primary-only 单图升级为默认 all-display composite bundle。
+> 裸 `@screenshot#id` 等价于 `display:"all",layout:"composite",coordinate_space:"os-logical"`。
+> 返回顺序为 virtual-desktop JPEG `@savefile`、manifest JSON `@savefile`、最终 `@response ...screenshot-bundle...`。
+> 详细坐标契约见 `specs/rdog-multi-display-screenshot-coordinate-plan.md`。
+
 ## 2. 结论先行
 
 ### 2.1 推荐方案
@@ -161,14 +167,16 @@
 @screenshot
 @screenshot#7
 @screenshot:{target:"display"}
-@screenshot#7:{target:"display",display:"primary",format:"jpeg",quality:75}
-@screenshot#9:{target:"window",window_id:12345,format:"jpeg",quality:75}
+@screenshot#7:{target:"display",display:"all",layout:"composite",coordinate_space:"os-logical",format:"jpeg",quality:75}
+@screenshot#8:{target:"display",display:"primary",layout:"single",format:"jpeg",quality:75}
 ```
 
 ### 5.2 v1 默认值
 
 - `target = "display"`
-- `display = "primary"`
+- `display = "all"`
+- `layout = "composite"`
+- `coordinate_space = "os-logical"`
 - `format = "jpeg"`
 - `quality = 75`
 
@@ -177,11 +185,14 @@
 建议 v1 只开放下面这些字段:
 
 - `target`
-  - `"display"` 或 `"window"`
+  - 当前只接受 `"display"`
 - `display`
-  - `"primary"` 或显示器 id / 名称
-- `window_id`
-  - 当 `target = "window"` 时使用
+  - `"all"` 或 `"primary"`
+- `layout`
+  - `"composite"` 用于 `display = "all"`
+  - `"single"` 用于 `display = "primary"`
+- `coordinate_space`
+  - 当前只接受 `"os-logical"`
 - `format`
   - 当前只接受 `"jpeg"`
 - `quality`
@@ -192,13 +203,15 @@
 这轮规划新增 daemon -> client 返回指令:
 
 ```text
-@savefile {"id":7,"filename":"screenshot-20260501-143700.jpg","mime":"image/jpeg","encoding":"base64","quality":75,"width":1728,"height":1117,"data":"..."}
+@savefile {"id":7,"filename":"screenshot-20260501-143700-virtual-desktop.jpg","mime":"image/jpeg","encoding":"base64","quality":75,"width":3456,"height":1117,"data":"..."}
+@savefile {"id":7,"filename":"screenshot-20260501-143700-manifest.json","mime":"application/json","encoding":"base64","data":"..."}
 ```
 
 无 request id 时:
 
 ```text
-@savefile {"filename":"screenshot-20260501-143700.jpg","mime":"image/jpeg","encoding":"base64","quality":75,"width":1728,"height":1117,"data":"..."}
+@savefile {"filename":"screenshot-20260501-143700-virtual-desktop.jpg","mime":"image/jpeg","encoding":"base64","quality":75,"width":3456,"height":1117,"data":"..."}
+@savefile {"filename":"screenshot-20260501-143700-manifest.json","mime":"application/json","encoding":"base64","data":"..."}
 ```
 
 语义固定为:
@@ -227,25 +240,25 @@ saved file: ./rdog_downloads/screenshot-20260501-143700.jpg
 
 ### 5.5 成功状态响应
 
-`@savefile` 发完之后,daemon 仍然返回一条不含 JPEG 数据的 `@response`。
+`@savefile` 发完之后,daemon 仍然返回一条不含 JPEG / manifest 数据的 `@response`。
 
 建议形态如下:
 
 ```text
-@response {"id":7,"value":{"kind":"savefile","filename":"screenshot-20260501-143700.jpg","mime":"image/jpeg","quality":75,"width":1728,"height":1117}}
+@response {"id":7,"value":{"kind":"screenshot-bundle","layout":"composite","coordinate_space":"os-logical","image":"screenshot-20260501-143700-virtual-desktop.jpg","manifest":"screenshot-20260501-143700-manifest.json","display_count":2}}
 ```
 
 无 request id 时:
 
 ```text
-@response {"kind":"savefile","filename":"screenshot-20260501-143700.jpg","mime":"image/jpeg","quality":75,"width":1728,"height":1117}
+@response {"kind":"screenshot-bundle","layout":"composite","coordinate_space":"os-logical","image":"screenshot-20260501-143700-virtual-desktop.jpg","manifest":"screenshot-20260501-143700-manifest.json","display_count":2}
 ```
 
 这里的作用不是携带文件内容。
 而是保留现有请求完成语义:
 
 - 这次请求成功了
-- 返回的是一个需要保存的文件结果
+- 返回的是一组需要保存的文件结果
 - 终端仍能看到精简元信息
 
 ### 5.6 失败响应
@@ -459,11 +472,15 @@ trait ScreenshotBackend {
 
 #### `src/control_protocol.rs`
 
-- `@screenshot` 无 payload 时应落默认值
+- `@screenshot` 无 payload 时应落默认 all/composite/os-logical/jpeg/75
 - `@screenshot#7` 应保留 request id
+- `@screenshot:{display:"primary"}` 应落 primary/single 兼容路径
 - 非法 `quality`
 - 非法 `target`
-- `window` 模式缺少 `window_id`
+- 非法 `display`
+- 非法 `layout`
+- 非法 `coordinate_space`
+- 非法 `display/layout` 组合
 - 非法 `format`
 
 #### `src/control_core.rs`
@@ -473,36 +490,41 @@ trait ScreenshotBackend {
 - 权限错误能返回 `code = 77`
 - 平台不支持能返回 `code = 78`
 
-#### `src/control_actions.rs`
+#### `src/screenshot.rs`
 
-- 成功截图后,会走 JPEG 75 编码
-- 编码失败时错误能被上抛
-- backend fallback 顺序正确
+- 默认 all-display 截图会返回 JPEG `@savefile` + manifest JSON `@savefile` + `screenshot-bundle` response
+- manifest `display_count == displays.len()`
+- `virtual_bounds`、`image_rect` 和 `os_rect` 的换算不变量成立
+- 负坐标、不同 y 偏移、gap、不同 scale factor 都有纯单测覆盖
+- 非 0 rotation 返回 unsupported error
+- 权限错误以 `PermissionDenied` 冒泡
 
 ### 8.2 集成测试
 
 #### TCP control lane
 
 - `daemon inbound.mode=control` 下发送 `@screenshot#7`
-- 先收到 `@savefile {"id":7,...}`
-- 再收到不含 JPEG 数据的 `@response {"id":7,...}`
+- 先保存 virtual-desktop JPEG
+- 再保存 manifest JSON
+- 再收到不含 JPEG/manifest 数据的 `@response {"id":7,"value":{"kind":"screenshot-bundle",...}}`
 - `mime = image/jpeg`
 - `quality = 75`
-- `data` 非空且可 base64 解码
+- manifest 是合法 JSON
 
 #### Zenoh router/client
 
 - `rdog control --transport zenoh --target-name ...`
 - 发送 `@screenshot#7`
-- 收到 `@savefile`
-- 收到对象型 `@response`
+- 收到两个 `@savefile`
+- 收到 `screenshot-bundle` 对象型 `@response`
 - 不引入新的 request topic
 
 #### WebSocket control
 
 - 文本消息发送 `@screenshot#7`
-- 文本消息先收到 `@savefile ...`
-- 文本消息再收到 `@response ...`
+- 文本消息先收到 image `@savefile ...`
+- 文本消息再收到 manifest `@savefile ...`
+- 文本消息最后收到 `@response ...screenshot-bundle...`
 
 ### 8.3 平台实测
 

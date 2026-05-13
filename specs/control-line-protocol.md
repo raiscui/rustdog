@@ -367,7 +367,8 @@ rdog control TARGET --pty-attach SESSION_ID
 
 有两个例外:
 
-- 文件型结果可以先返回 `@savefile ...`,再返回最终 `@response ...`
+- 文件型结果可以先返回一个或多个 `@savefile ...`,再返回最终 `@response ...`
+  例如默认 `@screenshot#id` 会先返回 virtual-desktop JPEG,再返回 manifest JSON,最后返回 `@response ...screenshot-bundle...`
 - `@pty` 会切入 PTY frame 流,返回 `@pty-ready` / `@pty-output` / `@pty-exit` / `@pty-closed` / `@pty-detached` / `@pty-attached`
 
 ### 无 request id 的响应

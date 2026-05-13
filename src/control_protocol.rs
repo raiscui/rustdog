@@ -51,21 +51,51 @@ pub enum KeyMode {
     Release,
 }
 
-/// `@screenshot` 的最小请求形态。
+/// `@screenshot` 的结构化请求。
 ///
-/// v1 先只支持主显示器截图。
-/// 参数先保持尽量少,确保 producer 能稳定接上。
+/// 默认走完整虚拟桌面截图,这样截图证据和后续鼠标坐标能共享同一套
+/// `os-logical` 坐标语义。显式 `display:"primary"` 保留为兼容入口。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScreenshotRequest {
+    pub target: ScreenshotTarget,
+    pub display: ScreenshotDisplaySelector,
+    pub layout: ScreenshotLayout,
+    pub coordinate_space: ScreenshotCoordinateSpace,
     pub quality: u8,
 }
 
 impl Default for ScreenshotRequest {
     fn default() -> Self {
         Self {
+            target: ScreenshotTarget::Display,
+            display: ScreenshotDisplaySelector::All,
+            layout: ScreenshotLayout::Composite,
+            coordinate_space: ScreenshotCoordinateSpace::OsLogical,
             quality: DEFAULT_SCREENSHOT_QUALITY,
         }
     }
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum ScreenshotTarget {
+    Display,
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum ScreenshotDisplaySelector {
+    All,
+    Primary,
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum ScreenshotLayout {
+    Composite,
+    Single,
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum ScreenshotCoordinateSpace {
+    OsLogical,
 }
 
 /// 远程 PTY 会话打开请求。
@@ -666,6 +696,10 @@ fn parse_screenshot_payload(input: &str) -> io::Result<ScreenshotRequest> {
         return Ok(ScreenshotRequest::default());
     }
 
+    let mut target = None::<ScreenshotTarget>;
+    let mut display = None::<ScreenshotDisplaySelector>;
+    let mut layout = None::<ScreenshotLayout>;
+    let mut coordinate_space = None::<ScreenshotCoordinateSpace>;
     let mut quality = None::<u8>;
 
     for field in split_object_fields(inner)? {
@@ -684,13 +718,13 @@ fn parse_screenshot_payload(input: &str) -> io::Result<ScreenshotRequest> {
                 quality = Some(parse_screenshot_quality(raw_value)?);
             }
             "target" => {
-                let target = parse_quoted_payload(raw_value)?;
-                if !target.eq_ignore_ascii_case("display") {
+                if target.is_some() {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidData,
-                        format!("@screenshot 当前只支持 target=\"display\": {target}"),
+                        "@screenshot 对象 payload 的 `target` 字段重复",
                     ));
                 }
+                target = Some(parse_screenshot_target(raw_value)?);
             }
             "format" => {
                 let format = parse_quoted_payload(raw_value)?;
@@ -702,13 +736,31 @@ fn parse_screenshot_payload(input: &str) -> io::Result<ScreenshotRequest> {
                 }
             }
             "display" => {
-                let display = parse_quoted_payload(raw_value)?;
-                if !display.eq_ignore_ascii_case("primary") {
+                if display.is_some() {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidData,
-                        format!("@screenshot 当前只支持 display=\"primary\": {display}"),
+                        "@screenshot 对象 payload 的 `display` 字段重复",
                     ));
                 }
+                display = Some(parse_screenshot_display(raw_value)?);
+            }
+            "layout" => {
+                if layout.is_some() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "@screenshot 对象 payload 的 `layout` 字段重复",
+                    ));
+                }
+                layout = Some(parse_screenshot_layout(raw_value)?);
+            }
+            "coordinate_space" => {
+                if coordinate_space.is_some() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "@screenshot 对象 payload 的 `coordinate_space` 字段重复",
+                    ));
+                }
+                coordinate_space = Some(parse_screenshot_coordinate_space(raw_value)?);
             }
             _ => {
                 return Err(io::Error::new(
@@ -719,9 +771,95 @@ fn parse_screenshot_payload(input: &str) -> io::Result<ScreenshotRequest> {
         }
     }
 
+    let target = target.unwrap_or(ScreenshotTarget::Display);
+    let display = display.unwrap_or(ScreenshotDisplaySelector::All);
+    let layout = layout.unwrap_or(match display {
+        ScreenshotDisplaySelector::All => ScreenshotLayout::Composite,
+        ScreenshotDisplaySelector::Primary => ScreenshotLayout::Single,
+    });
+    let coordinate_space = coordinate_space.unwrap_or(ScreenshotCoordinateSpace::OsLogical);
+
+    validate_screenshot_layout(display, layout)?;
+
     Ok(ScreenshotRequest {
+        target,
+        display,
+        layout,
+        coordinate_space,
         quality: quality.unwrap_or(DEFAULT_SCREENSHOT_QUALITY),
     })
+}
+
+fn parse_screenshot_target(input: &str) -> io::Result<ScreenshotTarget> {
+    let target = parse_quoted_payload(input)?;
+    if target.eq_ignore_ascii_case("display") {
+        return Ok(ScreenshotTarget::Display);
+    }
+
+    Err(io::Error::new(
+        io::ErrorKind::InvalidData,
+        format!("@screenshot 当前只支持 target=\"display\": {target}"),
+    ))
+}
+
+fn parse_screenshot_display(input: &str) -> io::Result<ScreenshotDisplaySelector> {
+    let display = parse_quoted_payload(input)?;
+    if display.eq_ignore_ascii_case("all") {
+        return Ok(ScreenshotDisplaySelector::All);
+    }
+    if display.eq_ignore_ascii_case("primary") {
+        return Ok(ScreenshotDisplaySelector::Primary);
+    }
+
+    Err(io::Error::new(
+        io::ErrorKind::InvalidData,
+        format!("@screenshot 当前只支持 display=\"all\" 或 display=\"primary\": {display}"),
+    ))
+}
+
+fn parse_screenshot_layout(input: &str) -> io::Result<ScreenshotLayout> {
+    let layout = parse_quoted_payload(input)?;
+    if layout.eq_ignore_ascii_case("composite") {
+        return Ok(ScreenshotLayout::Composite);
+    }
+    if layout.eq_ignore_ascii_case("single") {
+        return Ok(ScreenshotLayout::Single);
+    }
+
+    Err(io::Error::new(
+        io::ErrorKind::InvalidData,
+        format!("@screenshot 当前只支持 layout=\"composite\" 或 layout=\"single\": {layout}"),
+    ))
+}
+
+fn parse_screenshot_coordinate_space(input: &str) -> io::Result<ScreenshotCoordinateSpace> {
+    let coordinate_space = parse_quoted_payload(input)?;
+    if coordinate_space.eq_ignore_ascii_case("os-logical") {
+        return Ok(ScreenshotCoordinateSpace::OsLogical);
+    }
+
+    Err(io::Error::new(
+        io::ErrorKind::InvalidData,
+        format!("@screenshot 当前只支持 coordinate_space=\"os-logical\": {coordinate_space}"),
+    ))
+}
+
+fn validate_screenshot_layout(
+    display: ScreenshotDisplaySelector,
+    layout: ScreenshotLayout,
+) -> io::Result<()> {
+    match (display, layout) {
+        (ScreenshotDisplaySelector::All, ScreenshotLayout::Composite)
+        | (ScreenshotDisplaySelector::Primary, ScreenshotLayout::Single) => Ok(()),
+        (ScreenshotDisplaySelector::All, ScreenshotLayout::Single) => Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "@screenshot display=\"all\" 必须使用 layout=\"composite\"",
+        )),
+        (ScreenshotDisplaySelector::Primary, ScreenshotLayout::Composite) => Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "@screenshot display=\"primary\" 必须使用 layout=\"single\"",
+        )),
+    }
 }
 
 fn parse_screenshot_quality(input: &str) -> io::Result<u8> {
@@ -732,7 +870,7 @@ fn parse_screenshot_quality(input: &str) -> io::Result<u8> {
         )
     })?;
 
-    if quality == 0 {
+    if !(1..=100).contains(&quality) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "@screenshot 的 `quality` 必须在 1..=100 之间",
@@ -1199,7 +1337,44 @@ mod tests {
             .unwrap(),
             ControlParseResult::Control(ControlRequest {
                 request_id: None,
-                command: ControlCommand::Screenshot(ScreenshotRequest { quality: 80 }),
+                command: ControlCommand::Screenshot(ScreenshotRequest {
+                    display: ScreenshotDisplaySelector::Primary,
+                    layout: ScreenshotLayout::Single,
+                    quality: 80,
+                    ..ScreenshotRequest::default()
+                }),
+            })
+        );
+    }
+
+    #[test]
+    fn parse_should_support_screenshot_display_layout_and_coordinate_space() {
+        assert_eq!(
+            parse_control_line(
+                r#"@screenshot#7:{target:"display",display:"all",layout:"composite",coordinate_space:"os-logical",format:"jpeg",quality:80}"#
+            )
+            .unwrap(),
+            ControlParseResult::Control(ControlRequest {
+                request_id: Some(7),
+                command: ControlCommand::Screenshot(ScreenshotRequest {
+                    target: ScreenshotTarget::Display,
+                    display: ScreenshotDisplaySelector::All,
+                    layout: ScreenshotLayout::Composite,
+                    coordinate_space: ScreenshotCoordinateSpace::OsLogical,
+                    quality: 80,
+                }),
+            })
+        );
+
+        assert_eq!(
+            parse_control_line(r#"@screenshot:{display:"primary"}"#).unwrap(),
+            ControlParseResult::Control(ControlRequest {
+                request_id: None,
+                command: ControlCommand::Screenshot(ScreenshotRequest {
+                    display: ScreenshotDisplaySelector::Primary,
+                    layout: ScreenshotLayout::Single,
+                    ..ScreenshotRequest::default()
+                }),
             })
         );
     }
@@ -1459,7 +1634,17 @@ mod tests {
         );
         assert!(parse_control_line(r#"@pty:{cmd:"codex",argv:["other","--a"]}"#).is_err());
         assert!(parse_control_line(r#"@screenshot:{quality:0}"#).is_err());
+        assert!(parse_control_line(r#"@screenshot:{quality:101}"#).is_err());
         assert!(parse_control_line(r#"@screenshot:{format:"png"}"#).is_err());
         assert!(parse_control_line(r#"@screenshot:{display:"secondary"}"#).is_err());
+        assert!(parse_control_line(r#"@screenshot:{layout:"separate"}"#).is_err());
+        assert!(parse_control_line(r#"@screenshot:{coordinate_space:"native"}"#).is_err());
+        assert!(parse_control_line(r#"@screenshot:{display:"all",layout:"single"}"#).is_err());
+        assert!(
+            parse_control_line(r#"@screenshot:{display:"primary",layout:"composite"}"#).is_err()
+        );
+        assert!(parse_control_line(r#"@screenshot:{display:"all",display:"primary"}"#).is_err());
+        assert!(parse_control_line(r#"@screenshot:{layout:"composite",layout:"single"}"#).is_err());
+        assert!(parse_control_line(r#"@screenshot:{quality:75,quality:80}"#).is_err());
     }
 }

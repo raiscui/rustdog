@@ -242,3 +242,142 @@
 - `tail -120 task_plan.md` 确认错误写入形态和后续更正记录均可见。
 - 新续档后的 `task_plan.md` 使用单引号 heredoc 创建,反引号内容保持完整。
 - `git diff --check` 在错误修复前已通过;补写后将再次运行确认没有空白格式问题。
+## [2026-05-12 17:28:58] [Session ID: codex-native-unknown] 错误修复: skill 初始化脚本直接执行被拒绝
+
+### 问题
+
+- 直接执行 `/Users/cuiluming/.codex/skills/.system/skill-creator/scripts/init_skill.py` 时,zsh 返回 `permission denied`。
+
+### 原因
+
+- 该脚本当前没有可执行权限,但内容仍可通过 Python 解释器运行。
+
+### 修复
+
+- 不修改脚本权限。
+- 改用 `python3 /Users/cuiluming/.codex/skills/.system/skill-creator/scripts/init_skill.py ...` 执行。
+
+### 验证
+
+- `python3 .../init_skill.py rdog-control --path ~/.codex/skills --resources references ...` 成功创建 skill 目录。
+- 后续 `quick_validate.py` 输出 `Skill is valid!`。
+
+### 经验
+
+- 遇到 skill creator 脚本权限问题时,优先用 `python3` 调用脚本本身,不要为了单次初始化改工具目录权限。
+
+## [2026-05-13 18:24:16] [Session ID: omx-1778661154642-agn8qc] 错误修复: Markdown 追加时未加引号 heredoc 触发命令替换
+
+### 问题
+- 向 `task_plan.md` 追加包含反引号的 Markdown 时, 使用了未加引号 heredoc。
+- shell 将反引号内的 `$ralplan ...`、`.omx`、`git diff --check` 当作命令或命令替换内容处理。
+
+### 原因
+- 没有遵守项目规则: "向上下文文件追加 Markdown 时,若正文包含反引号,必须使用 `cat <<'EOF'`,禁止使用未加引号 heredoc"。
+
+### 修复
+- 立即追加一条修正记录, 用安全 heredoc 补齐原本要表达的计划内容。
+- 后续所有包含反引号的上下文文件追加, 改用 `printf` 写标题 + `cat <<'EOF'` 写正文的组合。
+
+### 验证
+- 已查看 `task_plan.md` 尾部, 能看到修正记录补齐了缺失的命令字面量。
+- 后续还会运行 `git diff --check` 验证空白和补丁格式。
+
+## [2026-05-13 19:00:18] [Session ID: omx-1778661154642-agn8qc] 错误修复: Ralph state phase 不支持 intake
+
+### 问题
+- 执行 `omx state write` 初始化 Ralph 状态时使用了 `current_phase:"intake"`。
+- 工具返回错误: `ralph.current_phase must be one of: starting, executing, verifying, fixing, blocked_on_user, complete, failed, cancelled`。
+
+### 原因
+- Ralph 状态 schema 没有 `intake` phase。虽然流程语义上正在做 intake,但状态机字段必须使用枚举允许值。
+
+### 修复
+- 改用 `current_phase:"starting"` 表达 Ralph 启动/上下文摄取阶段。
+- 后续进入实现时再更新为 `executing`,验证时更新为 `verifying`。
+
+### 验证
+- 下一条状态写入会重新执行并读取结果。
+
+## [2026-05-13 19:36:03] [Session ID: omx-1778661154642-agn8qc] 错误修复: focused cargo test 需要使用 bin target
+
+### 问题
+- 执行 `cargo test --package rustdog --lib -- control_protocol::tests::parse_should_support_screenshot_display_layout_and_coordinate_space --exact` 失败。
+- 输出: `error: no library targets found in package rustdog`。
+
+### 原因
+- 当前 `Cargo.toml` 只定义了 `[[bin]] name = "rdog"`,没有 lib target。
+
+### 修复
+- focused unit test 改用 `cargo test --package rustdog --bin rdog -- <test-path> --exact`。
+
+## [2026-05-13 20:13:46] [Session ID: omx-1778661154642-agn8qc] 错误修复: screenshot 权限假成功和非法 request 先 capture
+
+### 问题
+- 用户现场曾观察到  保存的图片只有桌面,没有可见窗口。
+- 这类现象在 macOS 上可能来自 Screen Recording 权限不足,但旧路径可能把被隐私裁剪后的 desktop-only 图片当成成功。
+- Architect 审查还指出一个内部 API 风险: 如果绕过 parser 手工构造非法 ScreenshotRequest,旧实现可能先执行 capture,再在 build 阶段返回参数错误。
+
+### 原因
+- 截图后端成功返回图片不等于 macOS 已允许捕获窗口内容。
+- 参数校验放在 outcome build 函数里,对正常 wire protocol 足够,但对内部 API 的副作用边界不够早。
+
+### 修复
+- macOS  /  前置  权限检查。
+- 权限不足直接返回 ,不再继续保存 desktop-only 假成功图片。
+- primary/composite request 校验前置到 capture closure 调用之前。
+- 新增测试证明非法 primary/composite request 不会触发 capture。
+
+### 验证
+- cargo test --package rustdog --bin rdog -- screenshot::tests --nocapture: 11 passed。
+- cargo test --package rustdog --bin rdog: 142 passed。
+- cargo test --tests --no-run: 通过。
+- cargo test --package rustdog --test zenoh_router_client -- control_should_execute_screenshot_and_save_file_in_zenoh_profile --exact --ignored --nocapture: 1 passed。
+- git diff --check: 通过。
+
+## [2026-05-13 20:14:51] [Session ID: omx-1778661154642-agn8qc] 更正记录: screenshot 权限假成功和非法 request 先 capture
+
+### 说明
+- 上一条同主题 ERRORFIX 记录因未加引号 heredoc 触发 command substitution,反引号内标识符被 shell 当作命令执行。
+- 本条为准,上一条保留为错误追踪证据。
+
+### 问题
+- 用户现场曾观察到 `@screenshot` 保存的图片只有桌面,没有可见窗口。
+- 这类现象在 macOS 上可能来自 Screen Recording 权限不足,但旧路径可能把被隐私裁剪后的 desktop-only 图片当成成功。
+- Architect 审查还指出一个内部 API 风险: 如果绕过 parser 手工构造非法 `ScreenshotRequest`,旧实现可能先执行 capture,再在 build 阶段返回参数错误。
+
+### 原因
+- 截图后端成功返回图片不等于 macOS 已允许捕获窗口内容。
+- 参数校验放在 outcome build 函数里,对正常 wire protocol 足够,但对内部 API 的副作用边界不够早。
+
+### 修复
+- macOS `capture_primary_display_image` / `capture_all_display_images` 前置 `CGPreflightScreenCaptureAccess` 权限检查。
+- 权限不足直接返回 `PermissionDenied`,不再继续保存 desktop-only 假成功图片。
+- primary/composite request 校验前置到 capture closure 调用之前。
+- 新增测试证明非法 primary/composite request 不会触发 capture。
+
+### 验证
+- `cargo test --package rustdog --bin rdog -- screenshot::tests --nocapture`: 11 passed。
+- `cargo test --package rustdog --bin rdog`: 142 passed。
+- `cargo test --tests --no-run`: 通过。
+- `cargo test --package rustdog --test zenoh_router_client -- control_should_execute_screenshot_and_save_file_in_zenoh_profile --exact --ignored --nocapture`: 1 passed。
+- `git diff --check`: 通过。
+
+## [2026-05-13 20:14:51] [Session ID: omx-1778661154642-agn8qc] 错误修复: 收尾日志再次误用未加引号 heredoc
+
+### 问题
+- 收尾时向 `WORKLOG.md`、`ERRORFIX.md`、`LATER_PLANS.md` 追加包含反引号的 Markdown,再次使用了未加引号 heredoc。
+- shell 执行了反引号内的 `.omx/plans/...`、`@screenshot`、`display:"primary"`、`@click`、`@drag` 等内容。
+- 终端出现 `permission denied`、`command not found`、ImageMagick `display` 帮助输出等噪声。
+
+### 原因
+- 已经知道规则,但在批量追加多个文件时仍然使用了 `cat <<EOF`。
+- 这属于同类错误复发,不能只口头说明。
+
+### 修复
+- 不编辑 append-only 文件中间的错误记录。
+- 立即在每个受影响文件末尾追加更正记录,明确“本条为准”。
+- 本次 ERRORFIX 也使用 `cat <<'EOF'` 单引号 heredoc 写入。
+
+### 验证
+- 后续将再次运行 `git diff --check`,并查看尾部记录确认反引号内容保留完整。

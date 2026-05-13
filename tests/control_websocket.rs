@@ -455,8 +455,12 @@ fn control_cli_should_execute_screenshot_and_save_file_over_websocket() {
         "websocket control output did not contain savefile notice: {combined}"
     );
     assert!(
-        combined.contains(r#"@response {"id":7,"value":0}"#),
-        "websocket control output did not contain final response payload: {combined}"
+        combined.matches("saved file:").count() >= 2,
+        "websocket control output did not contain two savefile notices: {combined}"
+    );
+    assert!(
+        combined.contains("screenshot-bundle") && combined.contains("os-logical"),
+        "websocket control output did not contain screenshot bundle summary: {combined}"
     );
 
     let download_dir = workdir.join("rdog_downloads");
@@ -477,6 +481,26 @@ fn control_cli_should_execute_screenshot_and_save_file_over_websocket() {
     assert!(
         metadata.len() > 0,
         "saved screenshot file should not be empty"
+    );
+    let manifest = entries
+        .iter()
+        .map(|entry| entry.path())
+        .find(|path| path.extension().and_then(|ext| ext.to_str()) == Some("json"))
+        .expect("should save a json screenshot manifest");
+    let manifest_text = fs::read_to_string(&manifest).expect("manifest should be readable");
+    let manifest_json: serde_json::Value =
+        serde_json::from_str(&manifest_text).expect("manifest should be json");
+    assert_eq!(manifest_json["schema"], "rdog.screenshot.v1");
+    assert_eq!(manifest_json["layout"], "composite");
+    assert_eq!(manifest_json["coordinate_space"], "os-logical");
+    assert_eq!(
+        manifest_json["display_count"].as_u64(),
+        Some(
+            manifest_json["displays"]
+                .as_array()
+                .expect("displays should be an array")
+                .len() as u64
+        )
     );
 
     assert_child_still_running(
