@@ -576,3 +576,39 @@
 - WATCH 点是内部 API 构造非法 ScreenshotRequest 时可能先 capture 再校验。
 - 本轮已把 primary/composite request 校验前置到 capture closure 之前,并新增两个测试证明非法 request 不会触发 capture。
 - 多显示器默认 screenshot bundle、manifest 坐标契约、primary 兼容入口和 Zenoh ignored smoke 仍然通过验证。
+
+## [2026-05-13 22:50:12] [Session ID: codex-app-2026-05-13-mouse-control-plan] 笔记: mouse control 执行计划生成
+
+## 来源
+
+### 来源1: 源规格
+
+- 文件: `specs/rdog-mouse-control-coordinate-plan.md`
+- 要点:
+  - 鼠标控制必须复用 `@screenshot` manifest 的 `os-logical` 坐标语义。
+  - 默认命令面覆盖 `@mouse-move`、`@mouse-button`、`@click`、`@drag`、`@wheel`。
+  - image pixel 与 OS logical 的换算公式是 `os_x = image_x + virtual_bounds.x` 和 `os_y = image_y + virtual_bounds.y`。
+
+### 来源2: 当前源码入口
+
+- 文件: `src/control_protocol.rs`
+- 要点:
+  - 当前 `ControlCommand` 还没有鼠标变体。
+  - parser dispatch 已经按 command kind 集中分发。
+  - `@key` 对象 payload 已有字段去重、默认值和未知字段拒绝模式,鼠标 parser 应沿用。
+
+### 来源3: 当前执行层
+
+- 文件: `src/control_actions.rs`
+- 要点:
+  - `SystemControlActionExecutor` 已经负责 `@key` / `@paste` / shell action。
+  - key 路径已经把 plan builder 和 enigo performer 拆开,鼠标动作适合复用这一思路。
+  - 权限文案当前还偏向 `@key` / `@paste`,后续要扩展成通用输入模拟权限说明。
+
+## 综合发现
+
+- 已生成 `.omx/plans/rdog-mouse-control-implementation-plan.md`。
+- 计划推荐 Option A: 显式 `ControlCommand` 变体 + 纯鼠标计划层 + enigo performer + 平台能力保护。
+- Option B 只做 `@click` / `@wheel` 被拒绝,因为不满足用户明确要求的 move 和 button press/release。
+- `@drag` 是最高风险组合命令,实现时必须覆盖 press 后失败时尝试 release 的动态测试。
+- 当前计划文件本身没有 Mermaid 块;源规格中的两个 Mermaid 块已用 `beautiful-mermaid-rs --ascii` 验证通过。

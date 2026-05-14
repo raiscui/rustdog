@@ -401,3 +401,45 @@ Buttons:
 - 后续 `@click` / `@drag` 不能重新发明坐标体系,必须复用 manifest 的 `os-logical` 语义。
 - `@savefile` 是截图 bundle 的稳定承载层,final `@response` 只负责说明 bundle 已完整结束。
 - macOS 权限问题必须前置检测并显式失败,不要把 desktop-only 图当成可用视觉证据。
+
+## [2026-05-13 22:00:49] [Session ID: codex-app-2026-05-13-mouse-control-plan] 任务名称: mouse control 坐标方案
+
+### 任务内容
+- 按用户要求,在完成多显示器 screenshot local commit 后,给出 click + mouse move + button press/release + wheel 方案。
+- 坐标契约必须复用 screenshot manifest 的 `os-logical`,不新增第二套坐标解释。
+
+### 完成过程
+- 已确认 local commit: `bba1048 Make screenshots a coordinate-bearing desktop bundle`。
+- 查阅当前 `@key` / `@paste` 输入执行路径和 enigo 0.6.1 mouse API。
+- 创建 `specs/rdog-mouse-control-coordinate-plan.md`。
+- 在 `AGENTS.md` 添加该方案的长期知识索引。
+
+### 验证
+- `beautiful-mermaid-rs --ascii` 校验方案文档两个 Mermaid 图: 通过。
+- `git diff --check`: 通过。
+
+### 总结感悟
+- 对外协议只暴露 `os-logical`。平台 backend 坐标适配属于实现层,不能污染协议层。
+- Windows / Linux 多显示器 absolute 坐标需要真实 smoke。若 backend 不可靠,应返回 Unsupported,不能把鼠标移动到错误屏幕位置。
+
+## [2026-05-13 22:50:12] [Session ID: codex-app-2026-05-13-mouse-control-plan] 任务名称: 生成 mouse control OMX 执行计划
+
+### 任务内容
+- 按用户 `$plan specs/rdog-mouse-control-coordinate-plan.md 生成方案` 的请求,生成可执行计划。
+- 本轮只做方案落盘,不实现鼠标控制代码。
+
+### 完成过程
+- 读取 `$plan` skill 规则,按 direct planning mode 执行。
+- 读取 `specs/rdog-mouse-control-coordinate-plan.md`、`src/control_protocol.rs`、`src/control_actions.rs`、`src/control_core.rs`、`src/shell.rs` 和本地 `enigo 0.6.1` crate source。
+- 生成 `.omx/plans/rdog-mouse-control-implementation-plan.md`。
+- 计划中固定推荐 Option A: 显式鼠标命令变体、纯 plan builder、enigo performer、平台能力保护和真实 smoke。
+
+### 验证
+- `beautiful-mermaid-rs --ascii < /tmp/rdog-mouse-spec-mermaid-1.mmd`: 通过。
+- `beautiful-mermaid-rs --ascii < /tmp/rdog-mouse-spec-mermaid-2.mmd`: 通过。
+- `git diff --check`: 通过。
+- `rg -n '```mermaid' .omx/plans/rdog-mouse-control-implementation-plan.md specs/rdog-mouse-control-coordinate-plan.md`: 确认新计划无 Mermaid 块,源规格有两个 Mermaid 块。
+
+### 总结感悟
+- 计划层必须把 `os-logical` 坐标契约作为硬边界,否则后续实现很容易在 backend 里引入第二套坐标解释。
+- `@mouse-button mode:"press"` 是真实状态能力,不能为了省心偷偷 release;只有 `@drag` 这类组合动作内部失败恢复才应该尝试 release。

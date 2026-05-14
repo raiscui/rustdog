@@ -920,3 +920,73 @@
 
 ### 状态
 **阶段4完成** - Ralph 运行态已完成,等待用户查看 diff 或进行 git 提交。
+
+## [2026-05-13 21:56:34] [Session ID: codex-app-2026-05-13-mouse-control-plan] 状态更新: mouse control 方案落盘
+
+### 当前目标
+- 用户已要求: 先 review diff 后做 local commit,再给出 click + mouse move + button press/release + wheel 方案。
+- 本地 commit 已完成: `bba1048 Make screenshots a coordinate-bearing desktop bundle`。
+- 现在进入方案阶段,重点是复用 screenshot manifest 的 `os-logical` 坐标语义,不新增第二套坐标解释。
+
+### 即将执行
+- 创建 `specs/rdog-mouse-control-coordinate-plan.md`。
+- 方案覆盖 `@mouse-move`、`@mouse-button`、`@click`、`@drag`、`@wheel`。
+- 补 `AGENTS.md` 长期知识索引。
+- 用 `beautiful-mermaid-rs --ascii` 验证 Mermaid 图。
+- 运行 `git diff --check`。
+
+### 状态
+**当前在新阶段** - mouse control 方案设计与文档验证。
+
+## [2026-05-13 22:41:01] [Session ID: codex-app-2026-05-13-mouse-control-plan] 状态更新: 生成 OMX 执行计划
+
+### 当前目标
+- 用户显式调用 `$plan specs/rdog-mouse-control-coordinate-plan.md 生成方案`。
+- 本轮只生成 `.omx/plans/` 下的执行计划,不进入代码实现。
+- 计划必须以 `specs/rdog-mouse-control-coordinate-plan.md` 为源规格,并坚持复用 screenshot manifest 的 `os-logical` 坐标语义。
+
+### 即将执行
+- 读取源规格和相关代码位置,确认计划引用的文件路径与协议入口真实存在。
+- 生成 `.omx/plans/rdog-mouse-control-implementation-plan.md`。
+- 验证 Mermaid 语法和 `git diff --check`。
+- 更新 `WORKLOG.md` 与本计划状态。
+
+### 状态
+**当前在 `$plan` 直接模式** - 方案落盘和验证中。
+
+## [2026-05-13 22:47:18] [Session ID: codex-app-2026-05-13-mouse-control-plan] 错误记录: Mermaid 搜索命令引用错误
+
+### 现象
+- 执行 `rg -n "```mermaid" ...` 时,zsh 报 `unmatched "`。
+- 原因是搜索串包含反引号,双引号不能安全保护这类内容。
+
+### 处理
+- 改用单引号搜索串重跑。
+- 后续涉及反引号的 shell 命令和 Markdown 追加,继续使用单引号或 quoted heredoc。
+
+### 状态
+**验证继续** - 该错误未修改文件,但已记录并纠正命令写法。
+
+## [2026-05-13 22:50:12] [Session ID: codex-app-2026-05-13-mouse-control-plan] 完成记录: mouse control OMX 执行计划已生成
+
+### 已完成
+- 已生成 `.omx/plans/rdog-mouse-control-implementation-plan.md`。
+- 已读取并引用源规格、协议 parser、执行层、错误码映射、client 多帧接收和 enigo mouse API。
+- 已把计划证据记录到 `notes.md`。
+- 已把交付记录追加到 `WORKLOG.md`。
+
+### 验证证据
+- `beautiful-mermaid-rs --ascii < /tmp/rdog-mouse-spec-mermaid-1.mmd`: 通过。
+- `beautiful-mermaid-rs --ascii < /tmp/rdog-mouse-spec-mermaid-2.mmd`: 通过。
+- `git diff --check`: 通过。
+- 新计划文件没有 Mermaid 块,无需单独 Mermaid 校验。
+
+### 状态
+**本轮 `$plan` 已完成** - 没有进入实现;后续实现入口应使用 `.omx/plans/rdog-mouse-control-implementation-plan.md`。
+
+## [2026-05-14 10:34:15] [Session ID: 019e1b72-d659-7a60-91b4-66cea3fc6ce0] 索引: mouse_ralplan 支线上下文
+
+### 索引
+- 因默认 `task_plan.md` 接近 1000 行,本轮 `$ralplan .omx/plans/rdog-mouse-control-implementation-plan.md 按 Option A 继续` 启用支线上下文集。
+- 后缀: `__mouse_ralplan`。
+- 主计划记录只保留本索引,后续状态写入 `task_plan__mouse_ralplan.md`。

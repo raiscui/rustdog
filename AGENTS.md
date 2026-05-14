@@ -106,6 +106,11 @@
   - 用途: 固定 `display:"all"`、`layout:"composite"`、`coordinate_space:"os-logical"`、virtual desktop JPEG、manifest JSON、`display:"primary"` 兼容入口、gap/rotation 和 Screen Recording 权限边界
   - 何时阅读: 准备实现或评审多显示器截图、manifest schema、后续 `@click` / `@drag` 坐标换算、或排查 screenshot 坐标偏移前
 
+- `specs/rdog-mouse-control-coordinate-plan.md`
+  - 主题: `@mouse-move` / `@mouse-button` / `@click` / `@drag` / `@wheel` 鼠标控制方案
+  - 用途: 固定鼠标控制必须复用 screenshot manifest 的 `os-logical` 坐标语义,以及 press/release、click、drag、wheel 的协议字段、错误边界和验证矩阵
+  - 何时阅读: 准备实现或评审鼠标移动、点击、拖拽、滚轮、button press/release,或排查多显示器鼠标坐标偏移前
+
 - `specs/bidirectional-control-plane-plan.md`
   - 主题: 控制面从单向 request/reply 升级为真正双向 control peer 的规划
   - 用途: 固定“daemon 和 control 双方都能主动发送 `@key` / `@script` / `@savefile` 等显式控制指令,Zenoh 不再停留在单向 query/reply”这一轮新的架构方向
