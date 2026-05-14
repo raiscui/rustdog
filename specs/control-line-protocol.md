@@ -60,6 +60,13 @@ line-control 会把每一行输入分成 3 类:
 @key#7:"right-option"
 @key#7:{key:"right-option",hold_ms:200,mode:"press_release"}
 @paste:"hello"
+@mouse-move#10:{x:1200,y:540,coordinate_space:"os-logical"}
+@mouse-move#11:{dx:10,dy:-5,coordinate_space:"relative"}
+@mouse-button#12:{button:"left",mode:"press"}
+@mouse-button#13:{button:"left",mode:"release"}
+@click#14:{x:1200,y:540,button:"left",count:1}
+@drag#15:{from:{x:900,y:420},to:{x:1200,y:540},button:"left"}
+@wheel#16:{x:1200,y:540,delta_y:-3}
 @script:"printf READY"
 @script#42:"printf READY"
 @cmd:"printf READY"
@@ -250,6 +257,37 @@ mode = "press_release"
 用于文本注入。
 成功时通常没有 stdout,因此成功响应通常是数值 `0`。
 
+### 鼠标控制
+
+鼠标控制复用截图 manifest 的 `coordinate_space:"os-logical"`。
+默认 `@screenshot#id` 返回的 manifest 是坐标真相源。
+
+常用命令:
+
+```text
+@mouse-move#10:{x:1200,y:540,coordinate_space:"os-logical"}
+@mouse-move#11:{dx:10,dy:-5,coordinate_space:"relative"}
+@mouse-button#12:{button:"left",mode:"press"}
+@mouse-button#13:{button:"left",mode:"release"}
+@click#14:{x:1200,y:540,button:"left",count:1,hold_ms:80}
+@drag#15:{from:{x:900,y:420},to:{x:1200,y:540},button:"left",duration_ms:450,steps:24}
+@wheel#16:{x:1200,y:540,delta_y:-3}
+```
+
+行为边界:
+
+- `@click`、`@drag` 和带 `x/y` 的 `@wheel` 只接受 `coordinate_space:"os-logical"`。
+- `@mouse-move` 可以使用 `coordinate_space:"relative"` 和 `dx/dy` 做安全的相对移动。
+- `@mouse-button mode:"press"` 不会自动松开。
+  需要恢复时发送对应的 `mode:"release"`。
+- 组合动作如果在按下按钮后失败,daemon 会尽量释放按钮,并把恢复结果写入错误文本。
+
+成功响应是结构化 mouse value:
+
+```text
+@response {"id":10,"value":{"kind":"mouse","action":"move","backend":"enigo","status":"ok","coordinate_space":"os-logical","x":1200,"y":540}}
+```
+
 ### `@script`
 
 表示显式远端代码执行。
@@ -383,6 +421,9 @@ rdog control TARGET --pty-attach SESSION_ID
 
 - `@key`
 - `@paste`
+
+鼠标控制成功时不是 `0`,而是结构化 mouse value。
+这样 code agent 可以直接确认执行动作、坐标语义和 backend。
 
 #### 成功且只有字符串输出
 

@@ -106,6 +106,11 @@ flowchart LR
 | 按键 | `@key#7:{key:"F11",hold_ms:200,mode:"press_release"}` | `@response {"id":7,"value":0}` | 操作远端 GUI 焦点窗口 |
 | 粘贴 | `@paste:"hello"` | `@response 0` 或错误对象 | 向远端 GUI 输入文本 |
 | 截图 | `@screenshot#7` | image `@savefile` + manifest `@savefile` + `@response ...screenshot-bundle...` | 采集远端屏幕证据与坐标 manifest |
+| 鼠标移动 | `@mouse-move#10:{x:1200,y:540,coordinate_space:"os-logical"}` | structured mouse `@response` | 按 manifest 坐标移动远端指针 |
+| 鼠标按钮 | `@mouse-button#11:{button:"left",mode:"press"}` | structured mouse `@response` | 原始 press / release / click |
+| 点击 | `@click#12:{x:1200,y:540}` | structured mouse `@response` | 根据截图坐标点击远端桌面 |
+| 拖拽 | `@drag#13:{from:{x:900,y:420},to:{x:1200,y:540}}` | structured mouse `@response` | 按 os-logical 坐标拖拽 |
+| 滚轮 | `@wheel#14:{x:1200,y:540,delta_y:-3}` | structured mouse `@response` | 移到目标点后滚动 |
 | PTY / TUI | `rdog control mac.lab --pty -- codex` | `@pty-*` frame 流 | 跑 `codex`、shell、vim、REPL |
 | PTY detach | `--pty-detach SESSION_ID` | `@pty-detached ...` | 保留远端进程,解绑当前控制端 |
 | PTY attach | `--pty-attach SESSION_ID` | `@pty-attached ...` 后继续输出 | 重新接管远端 PTY |
@@ -157,6 +162,15 @@ agent 应按下面的规则解析输出:
 - `image`
 - `manifest`
 - `display_count`
+
+鼠标命令直接复用这个 manifest 的坐标语义:
+
+- `@click`、`@drag`、带 `x/y` 的 `@wheel` 使用 `coordinate_space:"os-logical"`。
+- 对默认 composite screenshot,图片点位换算为 `os_x = image_x + virtual_bounds.x`, `os_y = image_y + virtual_bounds.y`。
+- 如果点位落在 display gap 或 manifest 范围外,agent 应该先拒绝,不要把猜出来的坐标发送给 daemon。
+- `@mouse-move#id:{dx:0,dy:0,coordinate_space:"relative"}` 是安全 smoke,不会改变有效指针位置。
+- `@mouse-button mode:"press"` 是原始按下,不会自动 release。
+  发生中断时先发送 `@mouse-button:{button:"left",mode:"release"}` 做恢复。
 
 ### 2. 需要真实 TTY 时才用 PTY
 
@@ -282,7 +296,7 @@ rdog control linux-build.lab --entry-point tcp/10.8.0.20:17447
 `@script`、`@cmd` 和裸 shell 行都是远程代码执行。
 只应该在可信主机、可信网络和可信 daemon 上启用。
 
-`@key` / `@paste` 受系统输入权限约束:
+`@key` / `@paste` / 鼠标命令受系统输入权限约束:
 
 - macOS 需要给实际运行 daemon 的进程授予辅助功能权限
 - Windows 可能受 UIPI 影响,低权限 daemon 不能控制高权限窗口
@@ -303,7 +317,7 @@ rdog control linux-build.lab --entry-point tcp/10.8.0.20:17447
 | 目标寻址 | host / port / user | `namespace + daemon_name` |
 | 自动发现 | 通常没有 | Zenoh autodiscovery + `--entry-point` fallback |
 | 响应协议 | 终端字节流 | `@response`, `@savefile`, `@pty-*` |
-| GUI 操作 | 需要额外工具 | `@key`, `@paste`, `@screenshot` 是同一 control plane |
+| GUI 操作 | 需要额外工具 | `@key`, `@paste`, `@screenshot`, `@click`, `@drag`, `@wheel` 是同一 control plane |
 | TUI | 原生 SSH PTY | 显式 `@pty` / session channel |
 | 多主机 agent 协调 | 需要自己维护连接与解析 | 统一 target-name 和 line-control 语义 |
 | 裸命令状态 | shell session 可保持状态 | 裸 shell 是 one-shot,状态保持请用 PTY |
@@ -316,7 +330,7 @@ rdog control linux-build.lab --entry-point tcp/10.8.0.20:17447
 1. 先 `@ping`。
 2. 不需要 TTY 时,用 `@cmd#id` 或 bare shell line。
 3. 需要关联结果时,用 request id。
-4. 需要 GUI 副作用时,用 `@key` / `@paste`,并先确认权限。
+4. 需要 GUI 副作用时,用 `@key` / `@paste` / 鼠标命令,并先确认权限。
 5. 需要视觉证据时,用 `@screenshot#id`,并解析所有同 id 的 `@savefile`。
    默认截图要同时读取 JPEG 和 manifest。
    后续点击/拖拽坐标必须从 manifest 的 `virtual_bounds` 和 `display.image_rect` 换算,不要只凭图片猜。
@@ -335,6 +349,7 @@ rdog control mac.lab <<'RDOG'
 @ping
 @cmd#1:"printf READY"
 printf PLAIN_OK
+@mouse-move#2:{dx:0,dy:0,coordinate_space:"relative"}
 RDOG
 ```
 
@@ -344,6 +359,7 @@ RDOG
 @response "pong"
 @response {"id":1,"value":"READY"}
 @response "PLAIN_OK"
+@response {"id":2,"value":{"kind":"mouse","action":"move",...}}
 ```
 
 PTY smoke:
@@ -364,4 +380,4 @@ PTY_OK
 - 不支持不经 `@pty` 的传统 interactive shell over Zenoh。
 - 不把截图请求拆成第二套独立 control topic。
 - 不让同一个 `daemon_name` 在同一 namespace 下多实例并存。
-- 不把 `@key` / `@paste` 设计成绕过系统权限的后门。
+- 不把 `@key` / `@paste` / 鼠标命令设计成绕过系统权限的后门。

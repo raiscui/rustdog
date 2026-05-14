@@ -67,12 +67,18 @@ pub fn execute_explicit_control_request<E: ControlActionExecutor>(
         }
         command => match executor.execute(command, shell) {
             Ok(result) => {
-                ControlExecutionOutcome::from_response_line(render_control_response_payload(
-                    request.request_id,
-                    result.exit_code,
-                    &result.stdout,
-                    &result.stderr,
-                ))
+                let response = match result.response_value_json {
+                    Some(value_json) => {
+                        render_structured_success_response(request.request_id, &value_json)
+                    }
+                    None => render_control_response_payload(
+                        request.request_id,
+                        result.exit_code,
+                        &result.stdout,
+                        &result.stderr,
+                    ),
+                };
+                ControlExecutionOutcome::from_response_line(response)
             }
             Err(err) => ControlExecutionOutcome::from_response_line(
                 render_control_action_error_response(request.request_id, &err),
@@ -161,6 +167,11 @@ pub fn render_control_response_payload(
         &format!("{{\"exit_code\":{exit_code},\"stdout\":\"{stdout}\",\"stderr\":\"{stderr}\"}}"),
     );
     render_response_value(&value)
+}
+
+pub fn render_structured_success_response(request_id: Option<u64>, value_json: &str) -> String {
+    let wrapped = wrap_response_value(request_id, value_json);
+    render_response_value(&wrapped)
 }
 
 /// line-control 协议错误统一走 code/error 对象响应。
@@ -265,6 +276,7 @@ mod tests {
                 exit_code: 0,
                 stdout: b"EXEC_OK".to_vec(),
                 stderr: Vec::new(),
+                response_value_json: None,
             })
         }
     }
@@ -413,6 +425,49 @@ mod tests {
 
         assert!(response.contains(r#""code":77"#));
         assert!(response.contains("blocked by UIPI"));
+    }
+
+    #[test]
+    fn explicit_request_should_render_structured_success_without_double_escaping() {
+        #[derive(Clone)]
+        struct StructuredExecutor;
+
+        impl ControlActionExecutor for StructuredExecutor {
+            fn execute(
+                &self,
+                _command: &ControlCommand,
+                _shell: &str,
+            ) -> io::Result<ActionExecutionResult> {
+                Ok(ActionExecutionResult {
+                    exit_code: 0,
+                    stdout: Vec::new(),
+                    stderr: Vec::new(),
+                    response_value_json: Some(
+                        r#"{"kind":"mouse","action":"move","coordinate_space":"os-logical","x":1,"y":2}"#
+                            .to_owned(),
+                    ),
+                })
+            }
+        }
+
+        let response = execute_explicit_control_request(
+            &ControlRequest {
+                request_id: Some(10),
+                command: ControlCommand::Key(KeyRequest {
+                    key: "F11".to_owned(),
+                    hold_ms: 200,
+                    mode: KeyMode::PressRelease,
+                }),
+            },
+            "/bin/sh",
+            &StructuredExecutor,
+        )
+        .into_single_response_line();
+
+        assert_eq!(
+            response,
+            r#"@response {"id":10,"value":{"kind":"mouse","action":"move","coordinate_space":"os-logical","x":1,"y":2}}"#
+        );
     }
 
     #[test]

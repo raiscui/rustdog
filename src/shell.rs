@@ -1034,12 +1034,31 @@ mod tests {
                     request.session_id, request.cols, request.rows
                 )
                 .into_bytes(),
+                ControlCommand::MouseMove(request) => format!(
+                    "MOUSE_MOVE:{}:{}\n",
+                    request.x.unwrap_or(0),
+                    request.y.unwrap_or(0)
+                )
+                .into_bytes(),
+                ControlCommand::MouseButton(request) => {
+                    format!("MOUSE_BUTTON:{}\n", request.button.as_protocol_str()).into_bytes()
+                }
+                ControlCommand::Click(request) => {
+                    format!("CLICK:{}:{}\n", request.x, request.y).into_bytes()
+                }
+                ControlCommand::Drag(request) => {
+                    format!("DRAG:{}:{}\n", request.from.x, request.to.x).into_bytes()
+                }
+                ControlCommand::Wheel(request) => {
+                    format!("WHEEL:{}:{}\n", request.delta_x, request.delta_y).into_bytes()
+                }
             };
 
             Ok(ActionExecutionResult {
                 exit_code: 0,
                 stdout,
                 stderr: Vec::new(),
+                response_value_json: None,
             })
         }
     }

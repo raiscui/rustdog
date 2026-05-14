@@ -717,6 +717,60 @@ fn control_should_route_key_request_in_zenoh_profile() {
 }
 
 #[test]
+#[ignore = "requires real input simulation backend permissions on the daemon host"]
+fn control_should_execute_safe_mouse_move_in_zenoh_profile() {
+    let daemon_name = unique_name("mouse");
+    let listen_port = next_port();
+    let (mut daemon, config_path, entrypoint) = start_zenoh_daemon(&daemon_name, listen_port);
+    let daemon_stdout = daemon.stdout.take().expect("daemon stdout should exist");
+    let (buffer, _collector) = spawn_output_collector(daemon_stdout);
+    wait_until_output_contains(
+        &mut daemon,
+        &buffer,
+        "zenoh router daemon ready",
+        Duration::from_secs(8),
+    )
+    .expect("daemon should report ready");
+
+    let (status, stdout, stderr) = run_control(
+        &[
+            "--transport",
+            "zenoh",
+            "--target-name",
+            &daemon_name,
+            "--entry-point",
+            &entrypoint,
+        ],
+        r#"@mouse-move#10:{dx:0,dy:0,coordinate_space:"relative"}"#,
+    );
+
+    stop_child(&mut daemon);
+    let _ = fs::remove_file(&config_path);
+
+    assert!(
+        status.success(),
+        "safe mouse move should return a protocol response\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    let combined = format!("{stdout}\n{stderr}");
+    if combined.contains(r#""code":77"#) {
+        assert!(
+            combined.contains("permission to simulate input")
+                || combined.contains("辅助功能权限")
+                || combined.contains("blocked by UIPI"),
+            "permission-denied mouse move should explain missing input permission\n{combined}"
+        );
+        return;
+    }
+
+    assert!(combined.contains(r#""id":10"#));
+    assert!(combined.contains(r#""kind":"mouse""#));
+    assert!(combined.contains(r#""action":"move""#));
+    assert!(combined.contains(r#""coordinate_space":"relative""#));
+    assert!(combined.contains(r#""dx":0"#));
+    assert!(combined.contains(r#""dy":0"#));
+}
+
+#[test]
 fn control_should_publish_key_event_after_successful_key_request() {
     let daemon_name = unique_name("keyevent");
     let listen_port = next_port();

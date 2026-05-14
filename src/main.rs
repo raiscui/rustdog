@@ -12,6 +12,7 @@ mod control_client_input;
 mod control_core;
 mod control_display;
 mod control_frames;
+mod control_mouse;
 mod control_protocol;
 mod control_transport;
 mod daemon;

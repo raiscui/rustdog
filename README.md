@@ -15,7 +15,7 @@ It still supports the original port listener and reverse shell workflows, but th
 - `rdog control` for explicit line-control commands over TCP, WebSocket, or Zenoh
 - Zenoh target-name discovery for LAN and reachable remote networks
 - real remote PTY sessions for TUI programs such as `codex`, `vim`, shells, and REPLs
-- GUI-oriented actions such as `@key`, `@paste`, and `@screenshot`
+- GUI-oriented actions such as `@key`, `@paste`, `@screenshot`, `@click`, `@drag`, and `@wheel`
 - structured responses that are easy for a code agent to parse
 
 
@@ -227,6 +227,9 @@ The usual shape is:
 | Save file | `@savefile:{...}` | local file in `./rdog_downloads/` | Transfer generated artifacts |
 | Key input | `@key:"F11"` | `@response 0` or permission error | GUI shortcut / desktop control |
 | Paste text | `@paste:"hello"` | `@response 0` or permission error | Text injection into focused UI |
+| Mouse move | `@mouse-move#8:{x:1200,y:540,coordinate_space:"os-logical"}` | structured mouse `@response` or permission error | Move the remote pointer using screenshot manifest coordinates |
+| Mouse button | `@mouse-button#9:{button:"left",mode:"press"}` | structured mouse `@response` or permission error | Press, release, or click a mouse button |
+| Click / drag / wheel | `@click#10:{x:1200,y:540}` | structured mouse `@response` or permission error | Desktop interaction after parsing screenshot coordinates |
 | PTY | `@pty:"codex"` | `@pty-ready`, `@pty-output`, `@pty-exit` | TUI / shell / REPL |
 | PTY detach | `@pty-detach:{session_id:"..."}` | `@pty-detached ...` | Keep remote PTY running |
 | PTY attach | `@pty-attach:{session_id:"..."}` | `@pty-attached ...` | Reclaim remote PTY |
@@ -245,6 +248,10 @@ Important behavior:
 - `@screenshot:{display:"primary",layout:"single"}` is the explicit compatibility path for a single primary-display JPEG.
 - Default screenshot results are a bundle: one virtual-desktop JPEG `@savefile`, one manifest JSON `@savefile`, then a final `@response` whose value has `kind:"screenshot-bundle"`.
 - The manifest is the coordinate source of truth. For the default logical composite, `os_x = image_x + virtual_bounds.x` and `os_y = image_y + virtual_bounds.y`.
+- Absolute mouse commands use that same `coordinate_space:"os-logical"` contract.
+  Do not invent a second screen coordinate model for `@click`, `@drag`, or positioned `@wheel`.
+- `@mouse-button mode:"press"` intentionally leaves the button pressed.
+  Send a matching `@mouse-button:{button:"left",mode:"release"}` when recovering from interrupted raw press flows.
 - `@screenshot` saves file-style results through `@savefile`; the CLI stores them under `./rdog_downloads/` instead of dumping base64 to the terminal.
 - In a real TTY, `rdog control` renders simple `@response` values for humans.
 - In pipe/redirect mode, `rdog control` keeps raw protocol lines for programs.
@@ -259,10 +266,11 @@ For code agents, prefer this decision tree:
 
 1. Need a quick deterministic command? Use `@cmd#id:"..."` or a bare shell line.
 2. Need response correlation? Use request ids such as `@cmd#7:"..."`.
-3. Need GUI or desktop side effects? Use `@key`, `@paste`, and `@screenshot`.
-4. Need real terminal behavior or persistent shell state? Use `--pty`.
-5. Need multiple hosts? Address them by stable daemon names such as `mac.lab`, `win11.lab`, or `linux-build.lab`.
-6. Need direct SDK integration? Use the Zenoh session channel model documented in [`specs/zenoh-sdk-integration-playbook.md`](./specs/zenoh-sdk-integration-playbook.md).
+3. Need visual evidence or coordinates? Use `@screenshot#id` and parse the JPEG plus manifest.
+4. Need GUI or desktop side effects? Use `@key`, `@paste`, `@click`, `@drag`, `@wheel`, and `@screenshot`.
+5. Need real terminal behavior or persistent shell state? Use `--pty`.
+6. Need multiple hosts? Address them by stable daemon names such as `mac.lab`, `win11.lab`, or `linux-build.lab`.
+7. Need direct SDK integration? Use the Zenoh session channel model documented in [`specs/zenoh-sdk-integration-playbook.md`](./specs/zenoh-sdk-integration-playbook.md).
 
 Minimal scriptable smoke:
 
@@ -272,6 +280,7 @@ rdog control mac.lab <<'RDOG'
 @cmd#1:"pwd"
 @cmd#2:"git status --short"
 @screenshot#3
+@mouse-move#4:{dx:0,dy:0,coordinate_space:"relative"}
 RDOG
 ```
 
@@ -455,6 +464,11 @@ Supported over the current Zenoh profile:
 - `@paste`
 - `@savefile`
 - `@screenshot`
+- `@mouse-move`
+- `@mouse-button`
+- `@click`
+- `@drag`
+- `@wheel`
 - `@pty` / `@pty-close` / `@pty-detach` / `@pty-attach`
 - explicit protocol errors
 - session close / reopen
@@ -481,9 +495,9 @@ Only run `daemon` or `hidden-daemon` in environments where you trust the network
 Important boundaries:
 
 - `mode = "control"` enables explicit remote command execution.
-- `@key` and `@paste` depend on OS permissions and target-window privilege boundaries.
+- `@key`, `@paste`, and mouse commands depend on OS permissions and target-window privilege boundaries.
 - On macOS, the actual `rdog` binary may need Accessibility permission for input simulation and Screen Recording permission for screenshots.
-- On Windows, `@key` / `@paste` may be blocked by UIPI when the target window runs at a higher integrity level than the daemon.
+- On Windows, `@key` / `@paste` / mouse commands may be blocked by UIPI when the target window runs at a higher integrity level than the daemon.
 - `@screenshot` depends on platform screen-capture permissions.
   On macOS, Screen Recording permission failures are first-class errors.
   Rustdog must not treat a desktop-only fallback image as a successful window-capable screenshot.
@@ -498,6 +512,7 @@ Important boundaries:
 - [`specs/zenoh-control-plane-plan.md`](./specs/zenoh-control-plane-plan.md): Zenoh router/client control-plane plan
 - [`specs/zenoh-screenshot-control-plan.md`](./specs/zenoh-screenshot-control-plan.md): screenshot control plan
 - [`specs/rdog-multi-display-screenshot-coordinate-plan.md`](./specs/rdog-multi-display-screenshot-coordinate-plan.md): multi-display screenshot bundle and coordinate manifest contract
+- [`specs/rdog-mouse-control-coordinate-plan.md`](./specs/rdog-mouse-control-coordinate-plan.md): mouse control commands and screenshot-coordinate reuse contract
 
 ## Disclaimer
 

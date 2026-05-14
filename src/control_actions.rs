@@ -1,5 +1,9 @@
 use crate::{
     control_frames::{default_savefile_directory, SaveFileFrame},
+    control_mouse::{
+        build_click_plan, build_drag_plan, build_mouse_button_plan, build_mouse_move_plan,
+        build_wheel_plan, perform_mouse_plan, MouseExecutionPlan,
+    },
     control_protocol::{ControlCommand, KeyMode, KeyRequest},
 };
 use enigo::{Direction, Enigo, Key, Keyboard, Settings};
@@ -21,6 +25,7 @@ pub struct ActionExecutionResult {
     pub exit_code: i32,
     pub stdout: Vec<u8>,
     pub stderr: Vec<u8>,
+    pub response_value_json: Option<String>,
 }
 
 pub trait ControlActionExecutor {
@@ -91,12 +96,20 @@ impl ControlActionExecutor for SystemControlActionExecutor {
                 exit_code: 0,
                 stdout: b"pong".to_vec(),
                 stderr: Vec::new(),
+                response_value_json: None,
             }),
             ControlCommand::Script(script_text) => execute_script(shell, script_text),
             ControlCommand::Screenshot(_) => Err(io::Error::new(
                 io::ErrorKind::Unsupported,
                 "@screenshot 由 control_core 直接走 screenshot producer,不应进入默认 executor 分支",
             )),
+            ControlCommand::MouseMove(request) => execute_mouse_plan(build_mouse_move_plan(request)?),
+            ControlCommand::MouseButton(request) => {
+                execute_mouse_plan(build_mouse_button_plan(request)?)
+            }
+            ControlCommand::Click(request) => execute_mouse_plan(build_click_plan(request)?),
+            ControlCommand::Drag(request) => execute_mouse_plan(build_drag_plan(request)?),
+            ControlCommand::Wheel(request) => execute_mouse_plan(build_wheel_plan(request)?),
             ControlCommand::PtyOpen(_)
             | ControlCommand::PtyClose(_)
             | ControlCommand::PtyDetach(_)
@@ -196,6 +209,7 @@ where
         exit_code: 0,
         stdout: Vec::new(),
         stderr: Vec::new(),
+        response_value_json: None,
     })
 }
 
@@ -207,6 +221,19 @@ fn execute_paste(text: &str) -> io::Result<ActionExecutionResult> {
         exit_code: 0,
         stdout: Vec::new(),
         stderr: Vec::new(),
+        response_value_json: None,
+    })
+}
+
+fn execute_mouse_plan(plan: MouseExecutionPlan) -> io::Result<ActionExecutionResult> {
+    let mut enigo = Enigo::new(&Settings::default()).map_err(to_io_error)?;
+    let report = perform_mouse_plan(&mut enigo, &plan).map_err(to_io_error)?;
+
+    Ok(ActionExecutionResult {
+        exit_code: 0,
+        stdout: Vec::new(),
+        stderr: Vec::new(),
+        response_value_json: Some(report.to_value_json()),
     })
 }
 
@@ -225,6 +252,7 @@ fn execute_save_file(
         exit_code: 0,
         stdout,
         stderr: Vec::new(),
+        response_value_json: None,
     })
 }
 
@@ -420,7 +448,7 @@ fn to_io_error(err: impl std::fmt::Display) -> io::Error {
         return io::Error::new(
             io::ErrorKind::PermissionDenied,
             format!(
-                "{message}. macOS 需要为实际执行 `@key` / `@paste` 的进程授予辅助功能权限,并在授权后重启该进程。"
+                "{message}. macOS 需要为实际执行 `@key` / `@paste` / `@mouse-move` / `@mouse-button` / `@click` / `@drag` / `@wheel` 的进程授予辅助功能权限,并在授权后重启该进程。"
             ),
         );
     }
@@ -447,6 +475,7 @@ fn from_process_output(output: Output) -> ActionExecutionResult {
         exit_code: output.status.code().unwrap_or(-1),
         stdout: output.stdout,
         stderr: output.stderr,
+        response_value_json: None,
     }
 }
 
@@ -477,6 +506,7 @@ mod tests {
                 exit_code: 0,
                 stdout: b"FAKE_OK".to_vec(),
                 stderr: Vec::new(),
+                response_value_json: None,
             })
         }
     }

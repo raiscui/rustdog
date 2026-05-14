@@ -1,6 +1,11 @@
 use std::io;
 
 use crate::control_frames::SaveFileFrame;
+use crate::control_mouse::{
+    parse_click_payload, parse_drag_payload, parse_mouse_button_payload, parse_mouse_move_payload,
+    parse_wheel_payload, ClickRequest, DragRequest, MouseButtonRequest, MouseMoveRequest,
+    WheelRequest,
+};
 
 /// 行级控制协议的解析结果。
 ///
@@ -26,6 +31,11 @@ pub enum ControlCommand {
     PtyDetach(PtyDetachRequest),
     PtyAttach(PtyAttachRequest),
     Screenshot(ScreenshotRequest),
+    MouseMove(MouseMoveRequest),
+    MouseButton(MouseButtonRequest),
+    Click(ClickRequest),
+    Drag(DragRequest),
+    Wheel(WheelRequest),
     SaveFile(SaveFileFrame),
 }
 
@@ -201,6 +211,11 @@ pub fn parse_control_line(line: &str) -> io::Result<ControlParseResult> {
         "pty-detach" => ControlCommand::PtyDetach(parse_pty_detach_payload(payload)?),
         "pty-attach" => ControlCommand::PtyAttach(parse_pty_attach_payload(payload)?),
         "screenshot" => ControlCommand::Screenshot(parse_screenshot_payload(payload)?),
+        "mouse-move" => ControlCommand::MouseMove(parse_mouse_move_payload(payload)?),
+        "mouse-button" => ControlCommand::MouseButton(parse_mouse_button_payload(payload)?),
+        "click" => ControlCommand::Click(parse_click_payload(payload)?),
+        "drag" => ControlCommand::Drag(parse_drag_payload(payload)?),
+        "wheel" => ControlCommand::Wheel(parse_wheel_payload(payload)?),
         "savefile" => ControlCommand::SaveFile(SaveFileFrame::parse_object_payload(payload)?),
         _ => {
             return Err(io::Error::new(
@@ -616,7 +631,7 @@ fn parse_pty_attach_payload(input: &str) -> io::Result<PtyAttachRequest> {
     })
 }
 
-fn object_inner<'a>(input: &'a str, kind: &str) -> io::Result<&'a str> {
+pub(crate) fn object_inner<'a>(input: &'a str, kind: &str) -> io::Result<&'a str> {
     let trimmed = input.trim();
     trimmed
         .strip_prefix('{')
@@ -985,7 +1000,7 @@ fn parse_key_object_payload(input: &str) -> io::Result<KeyRequest> {
     })
 }
 
-fn split_object_fields(input: &str) -> io::Result<Vec<&str>> {
+pub(crate) fn split_object_fields(input: &str) -> io::Result<Vec<&str>> {
     let mut fields = Vec::new();
     let mut start = 0usize;
     let mut in_string = false;
@@ -1059,7 +1074,7 @@ fn split_object_fields(input: &str) -> io::Result<Vec<&str>> {
     Ok(fields)
 }
 
-fn split_object_field(field: &str) -> io::Result<(&str, &str)> {
+pub(crate) fn split_object_field(field: &str) -> io::Result<(&str, &str)> {
     let mut in_string = false;
     let mut escaped = false;
     let mut square_depth = 0usize;
@@ -1110,7 +1125,7 @@ fn split_object_field(field: &str) -> io::Result<(&str, &str)> {
     ))
 }
 
-fn normalize_object_field_name(field_name: &str) -> io::Result<String> {
+pub(crate) fn normalize_object_field_name(field_name: &str) -> io::Result<String> {
     let trimmed = field_name.trim();
     if trimmed.is_empty() {
         return Err(io::Error::new(
@@ -1197,7 +1212,7 @@ fn require_non_empty_payload<T>(
     Ok(constructor(payload))
 }
 
-fn parse_quoted_payload(input: &str) -> io::Result<String> {
+pub(crate) fn parse_quoted_payload(input: &str) -> io::Result<String> {
     let bytes = input.as_bytes();
     if bytes.len() < 2 || bytes.first() != Some(&b'"') {
         return Err(io::Error::new(
@@ -1253,6 +1268,10 @@ fn parse_quoted_payload(input: &str) -> io::Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::control_mouse::{
+        MouseButtonMode, MouseButtonName, MouseCoordinateSpace, MousePoint,
+        DEFAULT_MOUSE_CLICK_HOLD_MS, DEFAULT_MOUSE_CLICK_INTERVAL_MS,
+    };
 
     #[test]
     fn parse_should_route_plain_shell_lines_to_literal() {
@@ -1376,6 +1395,109 @@ mod tests {
                     ..ScreenshotRequest::default()
                 }),
             })
+        );
+    }
+
+    #[test]
+    fn parse_should_support_mouse_requests() {
+        assert_eq!(
+            parse_control_line(r#"@mouse-move#1:{x:1,y:2,coordinate_space:"os-logical"}"#).unwrap(),
+            ControlParseResult::Control(ControlRequest {
+                request_id: Some(1),
+                command: ControlCommand::MouseMove(MouseMoveRequest {
+                    x: Some(1),
+                    y: Some(2),
+                    dx: None,
+                    dy: None,
+                    coordinate_space: MouseCoordinateSpace::OsLogical,
+                }),
+            })
+        );
+        assert_eq!(
+            parse_control_line(r#"@mouse-move#2:{dx:1,dy:-2,coordinate_space:"relative"}"#)
+                .unwrap(),
+            ControlParseResult::Control(ControlRequest {
+                request_id: Some(2),
+                command: ControlCommand::MouseMove(MouseMoveRequest {
+                    x: None,
+                    y: None,
+                    dx: Some(1),
+                    dy: Some(-2),
+                    coordinate_space: MouseCoordinateSpace::Relative,
+                }),
+            })
+        );
+        assert_eq!(
+            parse_control_line(r#"@mouse-button#3:{button:"left",mode:"press"}"#).unwrap(),
+            ControlParseResult::Control(ControlRequest {
+                request_id: Some(3),
+                command: ControlCommand::MouseButton(MouseButtonRequest {
+                    button: MouseButtonName::Left,
+                    mode: MouseButtonMode::Press,
+                    hold_ms: DEFAULT_MOUSE_CLICK_HOLD_MS,
+                }),
+            })
+        );
+        assert_eq!(
+            parse_control_line(r#"@click#4:{x:1,y:2}"#).unwrap(),
+            ControlParseResult::Control(ControlRequest {
+                request_id: Some(4),
+                command: ControlCommand::Click(ClickRequest {
+                    x: 1,
+                    y: 2,
+                    button: MouseButtonName::Left,
+                    count: 1,
+                    hold_ms: DEFAULT_MOUSE_CLICK_HOLD_MS,
+                    interval_ms: DEFAULT_MOUSE_CLICK_INTERVAL_MS,
+                    coordinate_space: MouseCoordinateSpace::OsLogical,
+                }),
+            })
+        );
+        assert_eq!(
+            parse_control_line(r#"@drag#5:{from:{x:1,y:2},to:{x:3,y:4}}"#).unwrap(),
+            ControlParseResult::Control(ControlRequest {
+                request_id: Some(5),
+                command: ControlCommand::Drag(DragRequest {
+                    from: MousePoint { x: 1, y: 2 },
+                    to: MousePoint { x: 3, y: 4 },
+                    button: MouseButtonName::Left,
+                    duration_ms: crate::control_mouse::DEFAULT_MOUSE_DRAG_DURATION_MS,
+                    steps: crate::control_mouse::DEFAULT_MOUSE_DRAG_STEPS,
+                    coordinate_space: MouseCoordinateSpace::OsLogical,
+                }),
+            })
+        );
+        assert_eq!(
+            parse_control_line(r#"@wheel#6:{delta_y:-3}"#).unwrap(),
+            ControlParseResult::Control(ControlRequest {
+                request_id: Some(6),
+                command: ControlCommand::Wheel(WheelRequest {
+                    x: None,
+                    y: None,
+                    delta_x: 0,
+                    delta_y: -3,
+                    coordinate_space: MouseCoordinateSpace::OsLogical,
+                }),
+            })
+        );
+    }
+
+    #[test]
+    fn parse_should_reject_invalid_mouse_payloads() {
+        assert!(parse_control_line(r#"@mouse-move:{x:1,y:2,dx:1,dy:2}"#).is_err());
+        assert!(parse_control_line(r#"@mouse-move:{dx:1,coordinate_space:"relative"}"#).is_err());
+        assert!(parse_control_line(r#"@mouse-button:{button:"side",mode:"press"}"#).is_err());
+        assert!(parse_control_line(r#"@mouse-button:{button:"left",mode:"hold"}"#).is_err());
+        assert!(parse_control_line(r#"@click:{x:1,y:2,count:0}"#).is_err());
+        assert!(parse_control_line(r#"@click:{x:1,y:2,coordinate_space:"native"}"#).is_err());
+        assert!(parse_control_line(r#"@drag:{from:{x:1,y:2},to:{x:3,y:4},steps:0}"#).is_err());
+        assert!(parse_control_line(r#"@drag:{from:{x:1},to:{x:3,y:4}}"#).is_err());
+        assert!(parse_control_line(r#"@wheel:{delta_y:0}"#).is_err());
+        assert!(parse_control_line(r#"@wheel:{x:1,delta_y:-3}"#).is_err());
+        assert!(parse_control_line(r#"@wheel:{delta_y:-3,unknown:1}"#).is_err());
+        assert!(
+            parse_control_line(r#"@wheel:{x:1,y:2,delta_y:-3,coordinate_space:"relative"}"#)
+                .is_err()
         );
     }
 
