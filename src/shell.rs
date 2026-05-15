@@ -1052,6 +1052,14 @@ mod tests {
                 ControlCommand::Wheel(request) => {
                     format!("WHEEL:{}:{}\n", request.delta_x, request.delta_y).into_bytes()
                 }
+                ControlCommand::AxTree(request) => {
+                    format!("AX_TREE:{}:{}\n", request.depth, request.max_elements).into_bytes()
+                }
+                ControlCommand::AxPress(request) => format!(
+                    "AX_PRESS:{}\n",
+                    request.target.id.as_deref().unwrap_or("semantic")
+                )
+                .into_bytes(),
             };
 
             Ok(ActionExecutionResult {

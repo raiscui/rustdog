@@ -1,5 +1,9 @@
 use std::io;
 
+use crate::control_ax::{
+    parse_ax_press_payload, parse_ax_tree_payload, AxPressRequest, AxTreeRequest, DEFAULT_AX_DEPTH,
+    DEFAULT_AX_INCLUDE_VALUES, DEFAULT_AX_MAX_ELEMENTS,
+};
 use crate::control_frames::SaveFileFrame;
 use crate::control_mouse::{
     parse_click_payload, parse_drag_payload, parse_mouse_button_payload, parse_mouse_move_payload,
@@ -36,6 +40,8 @@ pub enum ControlCommand {
     Click(ClickRequest),
     Drag(DragRequest),
     Wheel(WheelRequest),
+    AxTree(AxTreeRequest),
+    AxPress(AxPressRequest),
     SaveFile(SaveFileFrame),
 }
 
@@ -72,6 +78,11 @@ pub struct ScreenshotRequest {
     pub layout: ScreenshotLayout,
     pub coordinate_space: ScreenshotCoordinateSpace,
     pub quality: u8,
+    pub include_ax: bool,
+    pub ax_required: bool,
+    pub ax_depth: u8,
+    pub ax_max_elements: u16,
+    pub ax_include_values: bool,
 }
 
 impl Default for ScreenshotRequest {
@@ -82,6 +93,11 @@ impl Default for ScreenshotRequest {
             layout: ScreenshotLayout::Composite,
             coordinate_space: ScreenshotCoordinateSpace::OsLogical,
             quality: DEFAULT_SCREENSHOT_QUALITY,
+            include_ax: false,
+            ax_required: false,
+            ax_depth: DEFAULT_AX_DEPTH,
+            ax_max_elements: DEFAULT_AX_MAX_ELEMENTS,
+            ax_include_values: DEFAULT_AX_INCLUDE_VALUES,
         }
     }
 }
@@ -216,6 +232,8 @@ pub fn parse_control_line(line: &str) -> io::Result<ControlParseResult> {
         "click" => ControlCommand::Click(parse_click_payload(payload)?),
         "drag" => ControlCommand::Drag(parse_drag_payload(payload)?),
         "wheel" => ControlCommand::Wheel(parse_wheel_payload(payload)?),
+        "ax-tree" => ControlCommand::AxTree(parse_ax_tree_payload(payload)?),
+        "ax-press" => ControlCommand::AxPress(parse_ax_press_payload(payload)?),
         "savefile" => ControlCommand::SaveFile(SaveFileFrame::parse_object_payload(payload)?),
         _ => {
             return Err(io::Error::new(
@@ -716,6 +734,11 @@ fn parse_screenshot_payload(input: &str) -> io::Result<ScreenshotRequest> {
     let mut layout = None::<ScreenshotLayout>;
     let mut coordinate_space = None::<ScreenshotCoordinateSpace>;
     let mut quality = None::<u8>;
+    let mut include_ax = None::<bool>;
+    let mut ax_required = None::<bool>;
+    let mut ax_depth = None::<u8>;
+    let mut ax_max_elements = None::<u16>;
+    let mut ax_include_values = None::<bool>;
 
     for field in split_object_fields(inner)? {
         let (field_name, raw_value) = split_object_field(field)?;
@@ -777,6 +800,55 @@ fn parse_screenshot_payload(input: &str) -> io::Result<ScreenshotRequest> {
                 }
                 coordinate_space = Some(parse_screenshot_coordinate_space(raw_value)?);
             }
+            "include_ax" => {
+                if include_ax.is_some() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "@screenshot 对象 payload 的 `include_ax` 字段重复",
+                    ));
+                }
+                include_ax = Some(parse_bool_field("@screenshot", "include_ax", raw_value)?);
+            }
+            "ax_required" => {
+                if ax_required.is_some() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "@screenshot 对象 payload 的 `ax_required` 字段重复",
+                    ));
+                }
+                ax_required = Some(parse_bool_field("@screenshot", "ax_required", raw_value)?);
+            }
+            "ax_depth" => {
+                if ax_depth.is_some() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "@screenshot 对象 payload 的 `ax_depth` 字段重复",
+                    ));
+                }
+                ax_depth = Some(parse_screenshot_ax_depth(raw_value)?);
+            }
+            "ax_max_elements" => {
+                if ax_max_elements.is_some() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "@screenshot 对象 payload 的 `ax_max_elements` 字段重复",
+                    ));
+                }
+                ax_max_elements = Some(parse_screenshot_ax_max_elements(raw_value)?);
+            }
+            "ax_include_values" => {
+                if ax_include_values.is_some() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "@screenshot 对象 payload 的 `ax_include_values` 字段重复",
+                    ));
+                }
+                ax_include_values = Some(parse_bool_field(
+                    "@screenshot",
+                    "ax_include_values",
+                    raw_value,
+                )?);
+            }
             _ => {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
@@ -802,6 +874,11 @@ fn parse_screenshot_payload(input: &str) -> io::Result<ScreenshotRequest> {
         layout,
         coordinate_space,
         quality: quality.unwrap_or(DEFAULT_SCREENSHOT_QUALITY),
+        include_ax: include_ax.unwrap_or(false),
+        ax_required: ax_required.unwrap_or(false),
+        ax_depth: ax_depth.unwrap_or(DEFAULT_AX_DEPTH),
+        ax_max_elements: ax_max_elements.unwrap_or(DEFAULT_AX_MAX_ELEMENTS),
+        ax_include_values: ax_include_values.unwrap_or(DEFAULT_AX_INCLUDE_VALUES),
     })
 }
 
@@ -893,6 +970,53 @@ fn parse_screenshot_quality(input: &str) -> io::Result<u8> {
     }
 
     Ok(quality)
+}
+
+fn parse_screenshot_ax_depth(input: &str) -> io::Result<u8> {
+    let depth = input.parse::<u8>().map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("@screenshot 的 `ax_depth` 必须是无符号整数: {input}"),
+        )
+    })?;
+
+    if depth == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "@screenshot 的 `ax_depth` 必须大于 0",
+        ));
+    }
+
+    Ok(depth)
+}
+
+fn parse_screenshot_ax_max_elements(input: &str) -> io::Result<u16> {
+    let max_elements = input.parse::<u16>().map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("@screenshot 的 `ax_max_elements` 必须是无符号整数: {input}"),
+        )
+    })?;
+
+    if max_elements == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "@screenshot 的 `ax_max_elements` 必须大于 0",
+        ));
+    }
+
+    Ok(max_elements)
+}
+
+fn parse_bool_field(kind: &str, field_name: &str, input: &str) -> io::Result<bool> {
+    match input.trim().to_ascii_lowercase().as_str() {
+        "true" => Ok(true),
+        "false" => Ok(false),
+        _ => Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("{kind} 的 `{field_name}` 必须是 true 或 false: {input}"),
+        )),
+    }
 }
 
 fn parse_key_payload(input: &str) -> io::Result<KeyRequest> {
@@ -1213,8 +1337,7 @@ fn require_non_empty_payload<T>(
 }
 
 pub(crate) fn parse_quoted_payload(input: &str) -> io::Result<String> {
-    let bytes = input.as_bytes();
-    if bytes.len() < 2 || bytes.first() != Some(&b'"') {
+    if !input.starts_with('"') {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             format!("控制指令 payload 必须使用双引号包裹: {input}"),
@@ -1224,18 +1347,18 @@ pub(crate) fn parse_quoted_payload(input: &str) -> io::Result<String> {
     let mut escaped = false;
     let mut result = String::new();
 
-    for (index, byte) in bytes.iter().copied().enumerate().skip(1) {
+    for (index, ch) in input.char_indices().skip(1) {
         if escaped {
-            match byte {
-                b'"' => result.push('"'),
-                b'\\' => result.push('\\'),
-                b'n' => result.push('\n'),
-                b'r' => result.push('\r'),
-                b't' => result.push('\t'),
+            match ch {
+                '"' => result.push('"'),
+                '\\' => result.push('\\'),
+                'n' => result.push('\n'),
+                'r' => result.push('\r'),
+                't' => result.push('\t'),
                 other => {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidData,
-                        format!("不支持的转义序列: \\{}", other as char),
+                        format!("不支持的转义序列: \\{other}"),
                     ))
                 }
             }
@@ -1243,9 +1366,9 @@ pub(crate) fn parse_quoted_payload(input: &str) -> io::Result<String> {
             continue;
         }
 
-        match byte {
-            b'\\' => escaped = true,
-            b'"' => {
+        match ch {
+            '\\' => escaped = true,
+            '"' => {
                 if input[index + 1..].trim().is_empty() {
                     return Ok(result);
                 }
@@ -1255,7 +1378,7 @@ pub(crate) fn parse_quoted_payload(input: &str) -> io::Result<String> {
                     format!("控制指令 payload 后存在多余内容: {input}"),
                 ));
             }
-            other => result.push(other as char),
+            other => result.push(other),
         }
     }
 
@@ -1268,9 +1391,12 @@ pub(crate) fn parse_quoted_payload(input: &str) -> io::Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::control_mouse::{
-        MouseButtonMode, MouseButtonName, MouseCoordinateSpace, MousePoint,
-        DEFAULT_MOUSE_CLICK_HOLD_MS, DEFAULT_MOUSE_CLICK_INTERVAL_MS,
+    use crate::{
+        control_ax::{AxTarget, AxTreeScope},
+        control_mouse::{
+            MouseButtonMode, MouseButtonName, MouseCoordinateSpace, MousePoint,
+            DEFAULT_MOUSE_CLICK_HOLD_MS, DEFAULT_MOUSE_CLICK_INTERVAL_MS,
+        },
     };
 
     #[test]
@@ -1381,6 +1507,7 @@ mod tests {
                     layout: ScreenshotLayout::Composite,
                     coordinate_space: ScreenshotCoordinateSpace::OsLogical,
                     quality: 80,
+                    ..ScreenshotRequest::default()
                 }),
             })
         );
@@ -1477,6 +1604,86 @@ mod tests {
                     delta_x: 0,
                     delta_y: -3,
                     coordinate_space: MouseCoordinateSpace::OsLogical,
+                }),
+            })
+        );
+    }
+
+    #[test]
+    fn parse_should_support_screenshot_ax_fields() {
+        assert_eq!(
+            parse_control_line(r#"@screenshot:{include_ax:true,ax_required:true}"#).unwrap(),
+            ControlParseResult::Control(ControlRequest {
+                request_id: None,
+                command: ControlCommand::Screenshot(ScreenshotRequest {
+                    include_ax: true,
+                    ax_required: true,
+                    ..ScreenshotRequest::default()
+                }),
+            })
+        );
+
+        assert_eq!(
+            parse_control_line(
+                r#"@screenshot:{ax_depth:4,ax_max_elements:1000,ax_include_values:false}"#
+            )
+            .unwrap(),
+            ControlParseResult::Control(ControlRequest {
+                request_id: None,
+                command: ControlCommand::Screenshot(ScreenshotRequest {
+                    ax_depth: 4,
+                    ax_max_elements: 1000,
+                    ax_include_values: false,
+                    ..ScreenshotRequest::default()
+                }),
+            })
+        );
+    }
+
+    #[test]
+    fn parse_should_support_ax_tree_and_ax_press() {
+        assert_eq!(
+            parse_control_line(r#"@ax-tree#1:{scope:"windows",depth:4,max_elements:1000}"#)
+                .unwrap(),
+            ControlParseResult::Control(ControlRequest {
+                request_id: Some(1),
+                command: ControlCommand::AxTree(AxTreeRequest {
+                    scope: AxTreeScope::Windows,
+                    depth: 4,
+                    max_elements: 1000,
+                    include_values: DEFAULT_AX_INCLUDE_VALUES,
+                }),
+            })
+        );
+
+        assert_eq!(
+            parse_control_line(r#"@ax-press#2:{target:{id:"pid:1/window:0/path:0"}}"#).unwrap(),
+            ControlParseResult::Control(ControlRequest {
+                request_id: Some(2),
+                command: ControlCommand::AxPress(AxPressRequest {
+                    target: AxTarget {
+                        id: Some("pid:1/window:0/path:0".to_owned()),
+                        ..AxTarget::default()
+                    },
+                }),
+            })
+        );
+
+        assert_eq!(
+            parse_control_line(
+                r#"@ax-press#3:{target:{process:"System Information",window_title:"关于本机",role:"AXButton",description:"关闭按钮"}}"#
+            )
+            .unwrap(),
+            ControlParseResult::Control(ControlRequest {
+                request_id: Some(3),
+                command: ControlCommand::AxPress(AxPressRequest {
+                    target: AxTarget {
+                        process: Some("System Information".to_owned()),
+                        window_title: Some("关于本机".to_owned()),
+                        role: Some("AXButton".to_owned()),
+                        description: Some("关闭按钮".to_owned()),
+                        ..AxTarget::default()
+                    },
                 }),
             })
         );
@@ -1768,5 +1975,12 @@ mod tests {
         assert!(parse_control_line(r#"@screenshot:{display:"all",display:"primary"}"#).is_err());
         assert!(parse_control_line(r#"@screenshot:{layout:"composite",layout:"single"}"#).is_err());
         assert!(parse_control_line(r#"@screenshot:{quality:75,quality:80}"#).is_err());
+        assert!(parse_control_line(r#"@screenshot:{include_ax:true,include_ax:false}"#).is_err());
+        assert!(parse_control_line(r#"@screenshot:{include_ax:"true"}"#).is_err());
+        assert!(parse_control_line(r#"@screenshot:{ax_depth:0}"#).is_err());
+        assert!(parse_control_line(r#"@screenshot:{ax_max_elements:0}"#).is_err());
+        assert!(parse_control_line(r#"@ax-tree:{depth:0}"#).is_err());
+        assert!(parse_control_line(r#"@ax-tree:{max_elements:0}"#).is_err());
+        assert!(parse_control_line(r#"@ax-press:{target:{}}"#).is_err());
     }
 }

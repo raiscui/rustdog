@@ -1,4 +1,5 @@
 use crate::{
+    control_ax::{capture_default_ax_snapshot, perform_default_ax_press},
     control_frames::{default_savefile_directory, SaveFileFrame},
     control_mouse::{
         build_click_plan, build_drag_plan, build_mouse_button_plan, build_mouse_move_plan,
@@ -110,6 +111,8 @@ impl ControlActionExecutor for SystemControlActionExecutor {
             ControlCommand::Click(request) => execute_mouse_plan(build_click_plan(request)?),
             ControlCommand::Drag(request) => execute_mouse_plan(build_drag_plan(request)?),
             ControlCommand::Wheel(request) => execute_mouse_plan(build_wheel_plan(request)?),
+            ControlCommand::AxTree(request) => execute_ax_tree(request),
+            ControlCommand::AxPress(request) => execute_ax_press(request),
             ControlCommand::PtyOpen(_)
             | ControlCommand::PtyClose(_)
             | ControlCommand::PtyDetach(_)
@@ -234,6 +237,30 @@ fn execute_mouse_plan(plan: MouseExecutionPlan) -> io::Result<ActionExecutionRes
         stdout: Vec::new(),
         stderr: Vec::new(),
         response_value_json: Some(report.to_value_json()),
+    })
+}
+
+fn execute_ax_tree(
+    request: &crate::control_ax::AxTreeRequest,
+) -> io::Result<ActionExecutionResult> {
+    let snapshot = capture_default_ax_snapshot(request)?;
+    Ok(ActionExecutionResult {
+        exit_code: 0,
+        stdout: Vec::new(),
+        stderr: Vec::new(),
+        response_value_json: Some(snapshot.to_tree_value_json()?),
+    })
+}
+
+fn execute_ax_press(
+    request: &crate::control_ax::AxPressRequest,
+) -> io::Result<ActionExecutionResult> {
+    let report = perform_default_ax_press(request)?;
+    Ok(ActionExecutionResult {
+        exit_code: 0,
+        stdout: Vec::new(),
+        stderr: Vec::new(),
+        response_value_json: Some(report.to_value_json()?),
     })
 }
 

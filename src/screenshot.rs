@@ -11,6 +11,7 @@ use std::{
 };
 
 use crate::{
+    control_ax::{capture_default_ax_snapshot, current_ax_platform, AxSnapshot, AxTreeRequest},
     control_frames::{ControlExecutionOutcome, ControlFrame, SaveFileFrame},
     control_protocol::{
         ScreenshotCoordinateSpace, ScreenshotDisplaySelector, ScreenshotLayout, ScreenshotRequest,
@@ -26,11 +27,12 @@ pub fn execute_screenshot_request(
     request: &ScreenshotRequest,
 ) -> io::Result<ControlExecutionOutcome> {
     match request.display {
-        ScreenshotDisplaySelector::All => {
-            execute_composite_screenshot_request_with_capture(request_id, request, || {
-                capture_all_display_images()
-            })
-        }
+        ScreenshotDisplaySelector::All => execute_composite_screenshot_request_with_capture_and_ax(
+            request_id,
+            request,
+            || capture_all_display_images(),
+            |ax_request| capture_default_ax_snapshot(ax_request),
+        ),
         ScreenshotDisplaySelector::Primary => {
             execute_primary_screenshot_request_with_capture(request_id, request, || {
                 capture_primary_display_image()
@@ -52,6 +54,7 @@ where
     build_primary_screenshot_outcome(request_id, request, image)
 }
 
+#[cfg(test)]
 fn execute_composite_screenshot_request_with_capture<F>(
     request_id: Option<u64>,
     request: &ScreenshotRequest,
@@ -60,10 +63,35 @@ fn execute_composite_screenshot_request_with_capture<F>(
 where
     F: FnOnce() -> io::Result<Vec<CapturedDisplay>>,
 {
+    execute_composite_screenshot_request_with_capture_and_ax(
+        request_id,
+        request,
+        capture,
+        |ax_request| capture_default_ax_snapshot(ax_request),
+    )
+}
+
+fn execute_composite_screenshot_request_with_capture_and_ax<F, A>(
+    request_id: Option<u64>,
+    request: &ScreenshotRequest,
+    capture: F,
+    capture_ax: A,
+) -> io::Result<ControlExecutionOutcome>
+where
+    F: FnOnce() -> io::Result<Vec<CapturedDisplay>>,
+    A: FnOnce(&AxTreeRequest) -> io::Result<AxSnapshot>,
+{
     validate_composite_request(request)?;
     let displays = capture()?;
     let screenshot_id = current_unix_epoch_millis().to_string();
-    build_composite_screenshot_outcome_with_id(request_id, request, displays, &screenshot_id)
+    let accessibility = build_accessibility_manifest(request, capture_ax)?;
+    build_composite_screenshot_outcome_with_id_and_ax(
+        request_id,
+        request,
+        displays,
+        &screenshot_id,
+        accessibility,
+    )
 }
 
 fn build_primary_screenshot_outcome(
@@ -96,15 +124,32 @@ fn build_primary_screenshot_outcome(
     })
 }
 
+#[cfg(test)]
 fn build_composite_screenshot_outcome_with_id(
     request_id: Option<u64>,
     request: &ScreenshotRequest,
     displays: Vec<CapturedDisplay>,
     screenshot_id: &str,
 ) -> io::Result<ControlExecutionOutcome> {
+    build_composite_screenshot_outcome_with_id_and_ax(
+        request_id,
+        request,
+        displays,
+        screenshot_id,
+        None,
+    )
+}
+
+fn build_composite_screenshot_outcome_with_id_and_ax(
+    request_id: Option<u64>,
+    request: &ScreenshotRequest,
+    displays: Vec<CapturedDisplay>,
+    screenshot_id: &str,
+    accessibility: Option<AxSnapshot>,
+) -> io::Result<ControlExecutionOutcome> {
     validate_composite_request(request)?;
 
-    let bundle = build_screenshot_bundle(displays, screenshot_id)?;
+    let bundle = build_screenshot_bundle_with_ax(displays, screenshot_id, accessibility)?;
     let image_filename = format!("screenshot-{screenshot_id}-virtual-desktop.jpg");
     let manifest_filename = format!("screenshot-{screenshot_id}-manifest.json");
     let jpeg_bytes = encode_jpeg(&bundle.composite, request.quality)?;
@@ -145,6 +190,36 @@ fn build_composite_screenshot_outcome_with_id(
             ControlFrame::ResponseLine(response),
         ],
     })
+}
+
+fn build_accessibility_manifest<A>(
+    request: &ScreenshotRequest,
+    capture_ax: A,
+) -> io::Result<Option<AxSnapshot>>
+where
+    A: FnOnce(&AxTreeRequest) -> io::Result<AxSnapshot>,
+{
+    if !request.include_ax {
+        return Ok(None);
+    }
+
+    let ax_request = AxTreeRequest {
+        depth: request.ax_depth,
+        max_elements: request.ax_max_elements,
+        include_values: request.ax_include_values,
+        ..AxTreeRequest::default()
+    };
+
+    match capture_ax(&ax_request) {
+        Ok(snapshot) => Ok(Some(snapshot)),
+        Err(err) if err.kind() == io::ErrorKind::PermissionDenied && !request.ax_required => {
+            Ok(Some(AxSnapshot::permission_denied(current_ax_platform())))
+        }
+        Err(err) if err.kind() == io::ErrorKind::Unsupported && !request.ax_required => {
+            Ok(Some(AxSnapshot::unsupported()))
+        }
+        Err(err) => Err(err),
+    }
 }
 
 fn validate_primary_request(request: &ScreenshotRequest) -> io::Result<()> {
@@ -277,6 +352,8 @@ struct ScreenshotManifest {
     transforms: ScreenshotTransforms,
     gaps: Vec<LogicalRect>,
     displays: Vec<DisplayManifest>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    accessibility: Option<AxSnapshot>,
 }
 
 #[derive(Serialize)]
@@ -309,9 +386,18 @@ struct ScreenshotBundleResponse<'a> {
     display_count: usize,
 }
 
+#[cfg(test)]
 fn build_screenshot_bundle(
     displays: Vec<CapturedDisplay>,
     screenshot_id: &str,
+) -> io::Result<ScreenshotBundle> {
+    build_screenshot_bundle_with_ax(displays, screenshot_id, None)
+}
+
+fn build_screenshot_bundle_with_ax(
+    displays: Vec<CapturedDisplay>,
+    screenshot_id: &str,
+    accessibility: Option<AxSnapshot>,
 ) -> io::Result<ScreenshotBundle> {
     if displays.is_empty() {
         return Err(io::Error::new(
@@ -383,6 +469,7 @@ fn build_screenshot_bundle(
         },
         gaps,
         displays: display_manifests,
+        accessibility,
     };
 
     let display_count = manifest.display_count;

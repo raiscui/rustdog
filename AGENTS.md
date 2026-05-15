@@ -111,6 +111,11 @@
   - 用途: 固定鼠标控制必须复用 screenshot manifest 的 `os-logical` 坐标语义,以及 press/release、click、drag、wheel 的协议字段、错误边界和验证矩阵
   - 何时阅读: 准备实现或评审鼠标移动、点击、拖拽、滚轮、button press/release,或排查多显示器鼠标坐标偏移前
 
+- `specs/rdog-ax-screenshot-manifest-control-plan.md`
+  - 主题: `@screenshot` manifest 集成 macOS AX 窗口/UI 元素结构,以及 `@ax-tree` / `@ax-press` AX control 方案
+  - 用途: 固定 `include_ax`、`ax_required`、`rdog.ax.v1` manifest schema、Accessibility 权限降级语义、AXPress target locator 和错误映射
+  - 何时阅读: 准备实现或评审 AX screenshot manifest、`@ax-tree`、`@ax-press`、Accessibility 权限提示,或排查 AX 元素坐标/定位歧义前
+
 - `specs/bidirectional-control-plane-plan.md`
   - 主题: 控制面从单向 request/reply 升级为真正双向 control peer 的规划
   - 用途: 固定“daemon 和 control 双方都能主动发送 `@key` / `@script` / `@savefile` 等显式控制指令,Zenoh 不再停留在单向 query/reply”这一轮新的架构方向

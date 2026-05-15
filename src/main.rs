@@ -8,6 +8,7 @@ use crate::listener::{listen, Mode, Opts};
 
 mod config;
 mod control_actions;
+mod control_ax;
 mod control_client_input;
 mod control_core;
 mod control_display;

@@ -471,6 +471,66 @@ mod tests {
     }
 
     #[test]
+    fn explicit_request_should_route_ax_commands_to_executor() {
+        #[derive(Clone)]
+        struct StructuredAxExecutor;
+
+        impl ControlActionExecutor for StructuredAxExecutor {
+            fn execute(
+                &self,
+                command: &ControlCommand,
+                _shell: &str,
+            ) -> io::Result<ActionExecutionResult> {
+                match command {
+                    ControlCommand::AxTree(_) => Ok(ActionExecutionResult {
+                        exit_code: 0,
+                        stdout: Vec::new(),
+                        stderr: Vec::new(),
+                        response_value_json: Some(
+                            r#"{"kind":"ax-tree","schema":"rdog.ax.v1","capture_status":"complete"}"#
+                                .to_owned(),
+                        ),
+                    }),
+                    ControlCommand::AxPress(_) => Ok(ActionExecutionResult {
+                        exit_code: 0,
+                        stdout: Vec::new(),
+                        stderr: Vec::new(),
+                        response_value_json: Some(
+                            r#"{"kind":"ax","action":"press","performed":true}"#.to_owned(),
+                        ),
+                    }),
+                    _ => Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "unexpected command",
+                    )),
+                }
+            }
+        }
+
+        let tree_response = parse_and_execute_control_line(
+            r#"@ax-tree#9:{scope:"windows"}"#,
+            "/bin/sh",
+            &StructuredAxExecutor,
+        )
+        .into_single_response_line();
+        let press_response = parse_and_execute_control_line(
+            r#"@ax-press#10:{target:{id:"pid:1/window:0/path:0"}}"#,
+            "/bin/sh",
+            &StructuredAxExecutor,
+        )
+        .into_single_response_line();
+
+        assert_eq!(
+            tree_response,
+            r#"@response {"id":9,"value":{"kind":"ax-tree","schema":"rdog.ax.v1","capture_status":"complete"}}"#
+        );
+        assert_eq!(
+            press_response,
+            r#"@response {"id":10,"value":{"kind":"ax","action":"press","performed":true}}"#
+        );
+    }
+
+    #[test]
     fn explicit_request_should_return_outcome_with_single_response_frame() {
         let outcome = execute_explicit_control_request(
             &ControlRequest {

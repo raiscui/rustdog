@@ -67,6 +67,9 @@ line-control 会把每一行输入分成 3 类:
 @click#14:{x:1200,y:540,button:"left",count:1}
 @drag#15:{from:{x:900,y:420},to:{x:1200,y:540},button:"left"}
 @wheel#16:{x:1200,y:540,delta_y:-3}
+@screenshot#17:{include_ax:true,ax_required:false}
+@ax-tree#18:{scope:"windows",depth:4,max_elements:1000}
+@ax-press#19:{target:{id:"pid:123/window:0/path:3.2"}}
 @script:"printf READY"
 @script#42:"printf READY"
 @cmd:"printf READY"
@@ -122,6 +125,14 @@ printf 'PLAIN_OK'
 - `cmd`
 - `pty`
 - `pty-close`
+- `screenshot`
+- `mouse-move`
+- `mouse-button`
+- `click`
+- `drag`
+- `wheel`
+- `ax-tree`
+- `ax-press`
 
 ### request id 规则
 
@@ -288,6 +299,62 @@ mode = "press_release"
 @response {"id":10,"value":{"kind":"mouse","action":"move","backend":"enigo","status":"ok","coordinate_space":"os-logical","x":1200,"y":540}}
 ```
 
+### AX 结构读取与 AXPress
+
+AX 能力是 macOS UI 结构层。
+它和鼠标点击不是一回事。
+鼠标命令控制指针坐标,AX 命令控制可访问性元素。
+
+截图可以可选携带 AX snapshot:
+
+```text
+@screenshot#17:{include_ax:true,ax_required:false,ax_depth:4,ax_max_elements:1000,ax_include_values:true}
+@screenshot#18:{include_ax:true,ax_required:true}
+```
+
+字段语义:
+
+- `include_ax`: 默认 `false`。为 `false` 时不调用 AX provider。
+- `ax_required`: 默认 `false`。为 `false` 时,AX 权限不足不会让截图失败,manifest 会写入 `accessibility.capture_status:"permission_denied"`。
+- `ax_required:true`: AX 权限不足时整个请求返回 code 77。
+- `ax_depth`: 默认 `4`,必须大于 0。
+- `ax_max_elements`: 默认 `1000`,必须大于 0。
+- `ax_include_values`: 默认 `true`,但 secure text 仍必须 redacted。
+
+manifest 中的 `accessibility` 字段使用 `rdog.ax.v1` schema。
+AX rect 坐标继续使用 screenshot manifest 的 `coordinate_space:"os-logical"`。
+
+独立读取 AX tree:
+
+```text
+@ax-tree#30:{scope:"windows",depth:4,max_elements:1000,include_values:true}
+```
+
+Phase 1 返回 structured `@response`,不走 `@savefile`:
+
+```text
+@response {"id":30,"value":{"kind":"ax-tree","schema":"rdog.ax.v1","platform":"macos","capture_status":"complete",...}}
+```
+
+执行 AXPress:
+
+```text
+@ax-press#31:{target:{id:"pid:123/window:0/path:3.2"}}
+@ax-press#32:{target:{process:"System Information",window_title:"关于本机",role:"AXButton",description:"关闭按钮"}}
+```
+
+成功响应:
+
+```text
+@response {"id":31,"value":{"kind":"ax","action":"press","backend":"macos-accessibility","target_id":"pid:123/window:0/path:3.2","performed":true,"status":"ok"}}
+```
+
+错误边界:
+
+- ambiguous 或 stale target 返回 code 64。
+- Accessibility 权限不足返回 code 77。
+- 非 macOS 或 backend 不支持返回 code 78。
+
 ### `@script`
 
 表示显式远端代码执行。
@@ -424,6 +491,7 @@ rdog control TARGET --pty-attach SESSION_ID
 
 鼠标控制成功时不是 `0`,而是结构化 mouse value。
 这样 code agent 可以直接确认执行动作、坐标语义和 backend。
+AX control 成功时也不是 `0`,而是结构化 AX value。
 
 #### 成功且只有字符串输出
 

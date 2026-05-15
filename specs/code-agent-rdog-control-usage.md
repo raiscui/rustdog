@@ -106,6 +106,9 @@ flowchart LR
 | 按键 | `@key#7:{key:"F11",hold_ms:200,mode:"press_release"}` | `@response {"id":7,"value":0}` | 操作远端 GUI 焦点窗口 |
 | 粘贴 | `@paste:"hello"` | `@response 0` 或错误对象 | 向远端 GUI 输入文本 |
 | 截图 | `@screenshot#7` | image `@savefile` + manifest `@savefile` + `@response ...screenshot-bundle...` | 采集远端屏幕证据与坐标 manifest |
+| 截图 + AX | `@screenshot#8:{include_ax:true,ax_required:false}` | screenshot bundle,manifest 可含 `accessibility` | 同时采集远端屏幕和 macOS UI 结构 |
+| AX tree | `@ax-tree#9:{scope:"windows",depth:4,max_elements:1000}` | structured AX `@response` | 不截图,只读取当前 macOS UI 结构 |
+| AXPress | `@ax-press#10:{target:{id:"pid:123/window:0/path:3.2"}}` | structured AX `@response` | 对按钮/菜单项等 AX 元素执行 `AXPress` |
 | 鼠标移动 | `@mouse-move#10:{x:1200,y:540,coordinate_space:"os-logical"}` | structured mouse `@response` | 按 manifest 坐标移动远端指针 |
 | 鼠标按钮 | `@mouse-button#11:{button:"left",mode:"press"}` | structured mouse `@response` | 原始 press / release / click |
 | 点击 | `@click#12:{x:1200,y:540}` | structured mouse `@response` | 根据截图坐标点击远端桌面 |
@@ -162,6 +165,43 @@ agent 应按下面的规则解析输出:
 - `image`
 - `manifest`
 - `display_count`
+
+如果目标是 macOS GUI 自动化,可以显式请求 AX metadata:
+
+```text
+@screenshot#9:{include_ax:true,ax_required:false,ax_depth:4,ax_max_elements:1000}
+```
+
+AX metadata 会写入 manifest 的 `accessibility` 字段,使用 `rdog.ax.v1` schema。
+它包含窗口,标题,rect,元素 role/name/description/actions 等结构信息。
+AX rect 继续使用 `coordinate_space:"os-logical"`。
+
+权限语义:
+
+- `include_ax:false`: 默认行为,不读取 AX。
+- `include_ax:true,ax_required:false`: Accessibility 权限不足时截图仍成功,manifest 标记 `capture_status:"permission_denied"`。
+- `include_ax:true,ax_required:true`: Accessibility 权限不足时请求失败,返回 code 77。
+
+`@ax-tree` 可独立读取当前 AX tree:
+
+```text
+@ax-tree#10:{scope:"windows",depth:4,max_elements:1000,include_values:true}
+```
+
+`@ax-press` 可以使用 manifest/tree 中的短期 id:
+
+```text
+@ax-press#11:{target:{id:"pid:123/window:0/path:3.2"}}
+```
+
+也可以使用语义 locator,但必须避免匹配到多个元素:
+
+```text
+@ax-press#12:{target:{process:"System Information",window_title:"关于本机",role:"AXButton",description:"关闭按钮"}}
+```
+
+建议优先使用刚刚从 manifest 或 `@ax-tree` 读到的 `id`。
+如果元素已经消失或 locator 歧义,daemon 会返回 code 64。
 
 鼠标命令直接复用这个 manifest 的坐标语义:
 
@@ -300,6 +340,12 @@ rdog control linux-build.lab --entry-point tcp/10.8.0.20:17447
 
 - macOS 需要给实际运行 daemon 的进程授予辅助功能权限
 - Windows 可能受 UIPI 影响,低权限 daemon 不能控制高权限窗口
+
+`@ax-tree` / `@ax-press` 也受 macOS Accessibility 权限约束:
+
+- 权限主体是实际执行 AX 的 `rdog` 进程,通常是 daemon。
+- `@screenshot include_ax` 同时受 Screen Recording 和 Accessibility 两类权限影响。
+- `ax_required:false` 只表示 AX 失败可降级,不表示 Screen Recording 可以降级。
 - GUI 焦点窗口不对时,按键可能进入错误目标
 
 `@screenshot` 受屏幕录制权限约束:

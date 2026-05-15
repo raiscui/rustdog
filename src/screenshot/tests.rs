@@ -1,4 +1,7 @@
 use super::*;
+use crate::control_ax::{
+    AxElement, AxRect, AxSnapshot, AxWindow, DEFAULT_AX_DEPTH, DEFAULT_AX_MAX_ELEMENTS,
+};
 use serde_json::Value;
 
 #[test]
@@ -211,6 +214,185 @@ fn build_screenshot_outcome_should_emit_composite_image_manifest_and_bundle_resp
 }
 
 #[test]
+fn build_screenshot_bundle_should_embed_ax_snapshot_when_provided() {
+    let displays = vec![fake_display(
+        "one",
+        LogicalRect {
+            x: 0,
+            y: 0,
+            width: 10,
+            height: 10,
+        },
+        Size {
+            width: 10,
+            height: 10,
+        },
+        Rgba([0, 255, 0, 255]),
+    )];
+    let bundle = build_screenshot_bundle_with_ax(displays, "fixed", Some(fake_ax_snapshot()))
+        .expect("bundle should build");
+    let manifest = manifest_value(&bundle);
+
+    assert_eq!(manifest["accessibility"]["schema"], "rdog.ax.v1");
+    assert_eq!(manifest["accessibility"]["capture_status"], "complete");
+    assert_eq!(manifest["accessibility"]["coordinate_space"], "os-logical");
+    assert_eq!(manifest["accessibility"]["window_count"], 1);
+    assert_eq!(
+        manifest["accessibility"]["windows"][0]["process_name"],
+        "System Information"
+    );
+    assert_eq!(
+        manifest["accessibility"]["windows"][0]["elements"][0]["actions"][0],
+        "AXPress"
+    );
+}
+
+#[test]
+fn execute_composite_screenshot_request_should_not_call_ax_when_include_false() {
+    let request = ScreenshotRequest::default();
+    let mut ax_called = false;
+    let displays = vec![fake_display(
+        "one",
+        LogicalRect {
+            x: 0,
+            y: 0,
+            width: 1,
+            height: 1,
+        },
+        Size {
+            width: 1,
+            height: 1,
+        },
+        Rgba([0, 0, 0, 255]),
+    )];
+
+    let outcome = execute_composite_screenshot_request_with_capture_and_ax(
+        Some(1),
+        &request,
+        || Ok(displays),
+        |_| {
+            ax_called = true;
+            Ok(fake_ax_snapshot())
+        },
+    )
+    .expect("screenshot should succeed");
+
+    assert_eq!(outcome.outbound_frames.len(), 3);
+    assert!(!ax_called, "include_ax=false must not call AX provider");
+    let manifest = manifest_from_outcome(&outcome);
+    assert!(manifest.get("accessibility").is_none());
+}
+
+#[test]
+fn execute_composite_screenshot_request_should_embed_ax_when_requested() {
+    let request = ScreenshotRequest {
+        include_ax: true,
+        ..ScreenshotRequest::default()
+    };
+    let displays = vec![fake_display(
+        "one",
+        LogicalRect {
+            x: 0,
+            y: 0,
+            width: 1,
+            height: 1,
+        },
+        Size {
+            width: 1,
+            height: 1,
+        },
+        Rgba([0, 0, 0, 255]),
+    )];
+
+    let outcome = execute_composite_screenshot_request_with_capture_and_ax(
+        Some(1),
+        &request,
+        || Ok(displays),
+        |ax_request| {
+            assert_eq!(ax_request.depth, DEFAULT_AX_DEPTH);
+            assert_eq!(ax_request.max_elements, DEFAULT_AX_MAX_ELEMENTS);
+            assert!(ax_request.include_values);
+            Ok(fake_ax_snapshot())
+        },
+    )
+    .expect("screenshot should succeed");
+
+    let manifest = manifest_from_outcome(&outcome);
+    assert_eq!(manifest["accessibility"]["capture_status"], "complete");
+}
+
+#[test]
+fn execute_composite_screenshot_request_should_degrade_ax_permission_denied_when_optional() {
+    let request = ScreenshotRequest {
+        include_ax: true,
+        ax_required: false,
+        ..ScreenshotRequest::default()
+    };
+    let displays = vec![fake_display(
+        "one",
+        LogicalRect {
+            x: 0,
+            y: 0,
+            width: 1,
+            height: 1,
+        },
+        Size {
+            width: 1,
+            height: 1,
+        },
+        Rgba([0, 0, 0, 255]),
+    )];
+
+    let outcome = execute_composite_screenshot_request_with_capture_and_ax(
+        Some(1),
+        &request,
+        || Ok(displays),
+        |_| Err(io::Error::new(io::ErrorKind::PermissionDenied, "AX denied")),
+    )
+    .expect("optional AX denial should keep screenshot bundle");
+
+    let manifest = manifest_from_outcome(&outcome);
+    assert_eq!(
+        manifest["accessibility"]["capture_status"],
+        "permission_denied"
+    );
+    assert_eq!(manifest["accessibility"]["permission_status"], "denied");
+}
+
+#[test]
+fn execute_composite_screenshot_request_should_fail_ax_permission_denied_when_required() {
+    let request = ScreenshotRequest {
+        include_ax: true,
+        ax_required: true,
+        ..ScreenshotRequest::default()
+    };
+    let displays = vec![fake_display(
+        "one",
+        LogicalRect {
+            x: 0,
+            y: 0,
+            width: 1,
+            height: 1,
+        },
+        Size {
+            width: 1,
+            height: 1,
+        },
+        Rgba([0, 0, 0, 255]),
+    )];
+
+    let err = execute_composite_screenshot_request_with_capture_and_ax(
+        Some(1),
+        &request,
+        || Ok(displays),
+        |_| Err(io::Error::new(io::ErrorKind::PermissionDenied, "AX denied")),
+    )
+    .expect_err("required AX denial should fail screenshot");
+
+    assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
+}
+
+#[test]
 fn build_screenshot_outcome_should_emit_primary_single_image_for_primary_request() {
     let image = RgbaImage::from_pixel(2, 1, Rgba([255, 0, 0, 255]));
     let request = ScreenshotRequest {
@@ -394,6 +576,59 @@ fn real_capture_smoke_should_capture_or_report_permission_denied() {
 
 fn manifest_value(bundle: &ScreenshotBundle) -> Value {
     serde_json::from_slice(&bundle.manifest_json).expect("manifest should parse")
+}
+
+fn manifest_from_outcome(outcome: &ControlExecutionOutcome) -> Value {
+    match &outcome.outbound_frames[1] {
+        ControlFrame::SaveFile(frame) => {
+            let decoded = BASE64_STANDARD
+                .decode(&frame.data)
+                .expect("manifest should be base64 json");
+            serde_json::from_slice(&decoded).expect("manifest should parse")
+        }
+        other => panic!("expected second frame to be SaveFile, got {other:?}"),
+    }
+}
+
+fn fake_ax_snapshot() -> AxSnapshot {
+    AxSnapshot::complete(
+        "macos",
+        vec![AxWindow {
+            id: "pid:123/window:0".to_owned(),
+            pid: 123,
+            process_name: "System Information".to_owned(),
+            title: Some("关于本机".to_owned()),
+            role: "AXWindow".to_owned(),
+            subrole: None,
+            rect: Some(AxRect {
+                x: 10,
+                y: 20,
+                width: 320,
+                height: 240,
+            }),
+            focused: Some(true),
+            elements: vec![AxElement {
+                id: "pid:123/window:0/path:0".to_owned(),
+                role: "AXButton".to_owned(),
+                subrole: Some("AXCloseButton".to_owned()),
+                name: Some("关闭".to_owned()),
+                value: None,
+                value_redacted: false,
+                description: Some("关闭按钮".to_owned()),
+                rect: Some(AxRect {
+                    x: 16,
+                    y: 26,
+                    width: 12,
+                    height: 12,
+                }),
+                enabled: Some(true),
+                actions: vec!["AXPress".to_owned()],
+                ax_path: vec![0],
+                children: Vec::new(),
+            }],
+        }],
+        false,
+    )
 }
 
 fn fake_display(

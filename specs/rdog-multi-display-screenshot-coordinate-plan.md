@@ -18,6 +18,16 @@ manifest 是截图坐标和后续鼠标坐标之间的单一真相源。
 @screenshot#7:{target:"display",display:"all",layout:"composite",coordinate_space:"os-logical",format:"jpeg",quality:75}
 ```
 
+macOS 可选 AX metadata 入口:
+
+```text
+@screenshot#9:{include_ax:true,ax_required:false,ax_depth:4,ax_max_elements:1000}
+```
+
+这不会改变 screenshot 的坐标真相源。
+manifest 中的 `accessibility` 字段仍使用 `coordinate_space:"os-logical"`。
+详细 AX schema 和控制命令见 `specs/rdog-ax-screenshot-manifest-control-plan.md`。
+
 显式主屏兼容入口:
 
 ```text
@@ -59,6 +69,7 @@ manifest schema 固定为 `rdog.screenshot.v1`。
 - `displays[].scale_factor`
 - `displays[].resize_applied`
 - `displays[].rotation`
+- `accessibility` 可选字段,仅在 `include_ax:true` 时出现
 
 默认 logical composite 下,换算公式固定为:
 
@@ -94,6 +105,10 @@ macOS 截图需要实际运行 `rdog` 的进程拥有 Screen Recording 权限。
 
 实现上优先执行 Screen Recording preflight。
 如果 preflight 不通过,不能继续 fallback 到可能产生 desktop-only 假成功的截图后端。
+
+`include_ax:true` 还需要 Accessibility 权限。
+当 `ax_required:false` 时,Accessibility 权限不足只让 `accessibility.capture_status` 变成 `permission_denied`,截图 bundle 仍返回。
+当 `ax_required:true` 时,Accessibility 权限不足返回 `PermissionDenied`,控制面映射为 `code = 77`。
 
 ## 6. 处理流程
 
