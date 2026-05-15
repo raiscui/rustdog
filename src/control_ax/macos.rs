@@ -22,10 +22,12 @@ type AXError = i32;
 const UTF8: u32 = 0x0800_0100;
 const CF_NUMBER_SINT32: i32 = 3;
 const AX_SUCCESS: AXError = 0;
+const AX_ERROR_FAILURE: AXError = -25200;
 const AX_ERROR_INVALID_UI_ELEMENT: AXError = -25202;
 const AX_ERROR_CANNOT_COMPLETE: AXError = -25204;
 const AX_ERROR_ATTRIBUTE_UNSUPPORTED: AXError = -25205;
 const AX_ERROR_ACTION_UNSUPPORTED: AXError = -25206;
+const AX_ERROR_NOT_IMPLEMENTED: AXError = -25208;
 const AX_ERROR_API_DISABLED: AXError = -25211;
 const AX_ERROR_NO_VALUE: AXError = -25212;
 const AX_VALUE_CG_POINT: u32 = 1;
@@ -522,10 +524,7 @@ fn copy_attribute(element: AXUIElementRef, attr: &str) -> io::Result<Option<CfOw
         let error = unsafe { AXUIElementCopyAttributeValue(element, attr_ref, &mut value) };
         match error {
             AX_SUCCESS => Ok(CfOwned::new(value)),
-            AX_ERROR_ATTRIBUTE_UNSUPPORTED
-            | AX_ERROR_NO_VALUE
-            | AX_ERROR_CANNOT_COMPLETE
-            | AX_ERROR_INVALID_UI_ELEMENT => Ok(None),
+            code if snapshot_optional_ax_error(code) => Ok(None),
             AX_ERROR_API_DISABLED => Err(io::Error::new(
                 io::ErrorKind::PermissionDenied,
                 "macOS Accessibility API 当前不可用或未授权",
@@ -535,6 +534,18 @@ fn copy_attribute(element: AXUIElementRef, attr: &str) -> io::Result<Option<CfOw
             ))),
         }
     })
+}
+
+fn snapshot_optional_ax_error(error: AXError) -> bool {
+    matches!(
+        error,
+        AX_ERROR_FAILURE
+            | AX_ERROR_NOT_IMPLEMENTED
+            | AX_ERROR_ATTRIBUTE_UNSUPPORTED
+            | AX_ERROR_NO_VALUE
+            | AX_ERROR_CANNOT_COMPLETE
+            | AX_ERROR_INVALID_UI_ELEMENT
+    )
 }
 
 fn copy_string_attr(element: AXUIElementRef, attr: &str) -> io::Result<Option<String>> {
@@ -556,10 +567,12 @@ fn copy_action_names(element: AXUIElementRef) -> io::Result<Vec<String>> {
     let error = unsafe { AXUIElementCopyActionNames(element, &mut actions) };
     match error {
         AX_SUCCESS => {}
-        AX_ERROR_ACTION_UNSUPPORTED
-        | AX_ERROR_NO_VALUE
-        | AX_ERROR_CANNOT_COMPLETE
-        | AX_ERROR_INVALID_UI_ELEMENT => return Ok(Vec::new()),
+        // 有些真实 macOS UI 元素能读取 role/title/rect,但对其它查询只返回
+        // kAXErrorFailure / not implemented。snapshot 的职责是尽量描述当前桌面,
+        // 不能因为一个元素不愿意列 actions 就让整棵 AX tree 失败。
+        code if snapshot_optional_ax_error(code) || code == AX_ERROR_ACTION_UNSUPPORTED => {
+            return Ok(Vec::new())
+        }
         AX_ERROR_API_DISABLED => {
             return Err(io::Error::new(
                 io::ErrorKind::PermissionDenied,
@@ -782,5 +795,17 @@ mod tests {
         assert!(parse_target_id("pid:123/window:2/path:3.").is_err());
         assert!(parse_target_id("pid:123/window:2/path:3/extra").is_err());
         assert!(parse_target_id("pid:123/window:2/path:bad").is_err());
+    }
+
+    #[test]
+    fn snapshot_should_treat_partial_ax_failures_as_missing_optional_fields() {
+        assert!(snapshot_optional_ax_error(AX_ERROR_FAILURE));
+        assert!(snapshot_optional_ax_error(AX_ERROR_NOT_IMPLEMENTED));
+        assert!(snapshot_optional_ax_error(AX_ERROR_ATTRIBUTE_UNSUPPORTED));
+        assert!(snapshot_optional_ax_error(AX_ERROR_NO_VALUE));
+        assert!(snapshot_optional_ax_error(AX_ERROR_CANNOT_COMPLETE));
+        assert!(snapshot_optional_ax_error(AX_ERROR_INVALID_UI_ELEMENT));
+        assert!(!snapshot_optional_ax_error(AX_ERROR_API_DISABLED));
+        assert!(!snapshot_optional_ax_error(AX_SUCCESS));
     }
 }

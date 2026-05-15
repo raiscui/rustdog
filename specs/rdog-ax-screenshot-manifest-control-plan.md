@@ -343,6 +343,7 @@ cargo test --package rustdog --bin rdog -- control_protocol::tests::parse_should
 cargo test --package rustdog --bin rdog -- control_ax::tests --nocapture
 cargo test --package rustdog --bin rdog -- screenshot::tests --nocapture
 cargo test --package rustdog --bin rdog -- control_core::tests --nocapture
+cargo test --package rustdog --test control_ax_e2e --no-run
 cargo test --tests --no-run
 git diff --check
 ```
@@ -350,17 +351,18 @@ git diff --check
 macOS ignored smoke:
 
 ```bash
-cargo test --package rustdog --test control_lanes -- daemon_control_lane_should_return_screenshot_manifest_with_ax_snapshot --exact --ignored --nocapture
-cargo test --package rustdog --test control_lanes -- daemon_control_lane_should_perform_ax_press_on_about_window_close_button --exact --ignored --nocapture
+RDOG_LIVE_AX_E2E=1 cargo test --package rustdog --test control_ax_e2e -- daemon_control_lane_should_read_real_terminal_window_and_press_real_button --exact --ignored --nocapture
+RDOG_LIVE_AX_E2E=1 RDOG_LIVE_AX_E2E_VIA_TERMINAL=1 RDOG_LIVE_AX_E2E_BINARY=/Users/cuiluming/.cargo/bin/rdog cargo test --package rustdog --test control_ax_e2e -- daemon_control_lane_should_read_real_terminal_window_and_press_real_button --exact --ignored --nocapture
 ```
 
 真实 smoke 流程:
 
-1. 用现有 rdog 鼠标 E2E 打开 "关于本机" / "About This Mac".
-2. 运行 `@screenshot#90:{include_ax:true,ax_required:true,ax_depth:4,ax_max_elements:1000}`.
-3. 断言 manifest 包含 `System Information`,窗口标题,`MacBook Air`,`15.7.5`,以及 close button 的 `AXPress` action.
-4. 对 close button id 执行 `@ax-press`.
-5. 再次截图,确认 "关于本机" 窗口已经关闭.
+1. 测试在随机本地端口启动临时 `rdog daemon`;当 `RDOG_LIVE_AX_E2E_VIA_TERMINAL=1` 时,由 Terminal.app 启动 daemon,复用 Terminal 宿主的 Accessibility 授权路径.
+2. 通过真实 `rdog control` 发送 `@ax-tree`.
+3. 断言 `capture_status:"complete"`,`permission_status:"granted"`,且 tree 中包含测试 daemon 对应的 Terminal 窗口和带 `AXPress` action 的 close button.
+4. 对 tree 中返回的 close button id 执行 `@ax-press`.
+5. 再次 `@ax-tree`,断言 Terminal 弹出运行进程确认 sheet,且 sheet 中包含 `取消` / `终止` 按钮.
+6. 对 `取消` 按钮执行 `@ax-press`,恢复测试窗口状态并关闭临时 daemon.
 
 ## 9. ADR
 

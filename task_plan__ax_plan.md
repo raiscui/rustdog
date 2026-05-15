@@ -373,3 +373,310 @@
 
 ### 状态
 **文档校验完成** - 进入 stage 和本地 commit.
+
+## [2026-05-15 11:45:37] [Session ID: 019e1b72-d659-7a60-91b4-66cea3fc6ce0] [行动]: Phase 2.1 live AX E2E
+
+### 当前目标
+- 给已授权的 `rdog` 跑一个 live AX E2E.
+- 必须证明 `@ax-tree` 能读到真实窗口,不是只到权限边界.
+- 必须证明 `@ax-press` 能对真实按钮执行 `AXPress`,并产生可观察状态变化.
+- 复用 `rdog control` line-control 真实路径,避免只测内部函数.
+
+### 待办
+- [ ] 读取现有 daemon/control 测试形态,确定最小可复用测试 harness.
+- [ ] 找一个稳定的 macOS UI 目标和按钮动作,设计可证伪验收.
+- [ ] 实现或补充 live AX E2E,默认 gated/ignored,避免无权限机器误失败.
+- [ ] 在当前已授权机器运行 live E2E,采集 `@ax-tree` 与 `@ax-press` 动态证据.
+- [ ] 运行提交前验证,review diff,做 local commit.
+
+### 状态
+**Phase 2.1 开始** - 先做只读调查和测试目标选择.
+
+## [2026-05-15 11:49:20] [Session ID: 019e1b72-d659-7a60-91b4-66cea3fc6ce0] [验证红灯]: target/debug/rdog 仍返回 Accessibility code 77
+
+### 现象
+- 已启动真实 `target/debug/rdog daemon`,并通过 `target/debug/rdog control 127.0.0.1 PORT` 发送 `@ax-tree`.
+- control 进程退出码为 0,stdout 返回 `@response {"id":1,"code":77,...}`.
+- 这说明 line-control 到 AX backend 仍然贯通,但当前执行 AX 的 `target/debug/rdog` 进程没有 Accessibility 授权.
+
+### 当前主假设
+- 用户授权的可能是系统安装的 `rdog` 或终端宿主,不是当前仓库 freshly built 的 `target/debug/rdog`.
+
+### 备选解释
+- Accessibility 授权已给到某个进程,但 daemon/control 启动方式或二进制签名变化导致 TCC 仍按新主体处理.
+- 授权没有覆盖由 Codex shell 启动的进程链路.
+
+### 下一步
+- 检查 `which rdog` 与 `target/debug/rdog` 差异.
+- 改用系统安装的 `rdog` 跑同一 live 探针.
+
+## [2026-05-15 11:52:40] [Session ID: 019e1b72-d659-7a60-91b4-66cea3fc6ce0] [验证红灯]: installed rdog 是旧版本
+
+### 现象
+- 使用 `/Users/cuiluming/.cargo/bin/rdog` 跑同一 live 探针.
+- `@ax-tree` 返回 `@response {"code":64,"error":"不支持的控制指令类型: ax-tree"}`.
+
+### 结论
+- 系统安装的 `rdog` 不是当前 Phase 1 代码,还没有 `@ax-tree` / `@ax-press`.
+- `target/debug/rdog` 有新代码但缺 Accessibility 授权;installed rdog 可能是用户授权过的主体但代码过旧.
+
+### 下一步
+- 执行 `cargo install --path .`,让 `/Users/cuiluming/.cargo/bin/rdog` 更新到当前 AX 代码.
+- 用更新后的 installed rdog 重新跑同一 live AX E2E.
+
+## [2026-05-15 11:58:10] [Session ID: 019e1b72-d659-7a60-91b4-66cea3fc6ce0] [验证红灯]: 更新后的 installed rdog 仍返回 code 77
+
+### 现象
+- 已执行 `cargo install --path .`,更新 `/Users/cuiluming/.cargo/bin/rdog` 到当前 Phase 1 AX 代码.
+- 重新跑 osascript dialog live 探针.
+- `@ax-tree` 返回 `@response {"id":1,"code":77,...}`.
+
+### 当前结论
+- 新代码已经在 installed `rdog` 上可用,但当前执行 AX 的 daemon 进程仍未被 macOS Accessibility 信任.
+- 不能把这轮说成 Phase 2.1 通过;只能说真实路径到达权限边界.
+
+### 当前主假设
+- `cargo install` 替换了二进制,导致 TCC 授权身份不再匹配,或者用户先前授权的是 Screen Recording/Terminal 宿主,不是 Accessibility 下的新 `rdog` CLI 主体.
+
+### 备选解释
+- Codex App/outside-tmux 启动链路和用户手动授权链路不是同一 TCC 客户端.
+- macOS 需要重新打开授权面板后重启 daemon/control 进程才能让 `AXIsProcessTrusted()` 变成 true.
+
+### 下一步
+- 把 Phase 2.1 live AX E2E 固化成 gated integration test,让有授权机器可以一条命令跑出证据.
+- 继续寻找可自动判定权限主体和跳过/失败口径的最小实现.
+
+
+## [2026-05-15 11:55:42] [Session ID: 019e1b72-d659-7a60-91b4-66cea3fc6ce0] [行动]: 固化 Phase 2.1 live AX E2E
+
+### 当前目标
+- 把真实桌面 AX 验证做成可重复 integration test,默认 `ignored` 且需要显式环境变量开启.
+- live 验收必须同时证明 `@ax-tree` 读取真实 osascript dialog/window/button,以及 `@ax-press` 对该真实按钮产生可观察状态变化.
+- 如果当前机器仍返回 code 77,记录为权限主体阻断,不能宣称 Phase 2.1 通过.
+
+### 待办
+- [ ] 读取现有 integration test harness 与 AX response schema.
+- [ ] 新增 gated macOS live AX E2E 测试.
+- [ ] 补 `.envrc` 与 AX spec 的运行说明.
+- [ ] 运行编译/格式/静态验证.
+- [ ] 尝试运行 live E2E 并按真实结果记录结论.
+- [ ] review diff 后按 Lore protocol 做 local commit.
+
+### 状态
+**目前在实现测试前调查** - 先确认当前 harness 和 JSON response 结构,避免写出脱离现有协议的测试.
+
+
+## [2026-05-15 12:04:33] [Session ID: 019e1b72-d659-7a60-91b4-66cea3fc6ce0] [状态]: live AX E2E 测试文件已新增
+
+### 已完成
+- [x] 读取现有 integration test harness 与 AX response schema.
+- [x] 新增 `tests/control_ax_e2e.rs`,默认 ignored,并要求 `RDOG_LIVE_AX_E2E=1` 才执行真实桌面动作.
+- [x] 补 `.envrc` 中 live AX E2E 环境变量说明.
+- [x] 更新 `specs/rdog-ax-screenshot-manifest-control-plan.md` 的 macOS ignored smoke 命令和真实 smoke 流程.
+
+### 待办
+- [ ] 运行格式化和编译验证.
+- [ ] 尝试运行 live E2E,如 code 77 则记录权限主体阻断,如通过则记录真实成功证据.
+- [ ] review diff 后做 local commit.
+
+### 状态
+**目前在验证阶段** - 先让新增测试通过编译,再尝试真实桌面执行.
+
+
+## [2026-05-15 12:10:46] [Session ID: 019e1b72-d659-7a60-91b4-66cea3fc6ce0] [验证红灯]: installed rdog live E2E 到达 code 77
+
+### 现象
+- `tests/control_ax_e2e.rs` 单独编译通过.
+- `RDOG_LIVE_AX_E2E=1 RDOG_LIVE_AX_E2E_BINARY=/Users/cuiluming/.cargo/bin/rdog cargo test ... --ignored --nocapture` 真正执行了 live 探针.
+- `@ax-tree` 返回 code 77,错误明确是 macOS Accessibility 权限不足.
+- `rdog control mac.lab` 未发现长驻 Zenoh daemon,无法复用可能已授权的长期 target.
+
+### 当前假设
+- 当前从 Codex shell 启动的 `/Users/cuiluming/.cargo/bin/rdog` 不是 macOS TCC 已授权主体.
+- 可能需要由已授权的 GUI 终端宿主启动 daemon,或者需要重新授权更新后的 rdog 二进制.
+
+### 下一步
+- 尝试从 macOS Terminal 启动 daemon 并复用当前 control 测 `@ax-tree`/`@ax-press`.
+- 如果仍失败,按权限主体阻断收口,并提交 gated E2E harness.
+
+
+## [2026-05-15 12:11:10] [Session ID: 019e1b72-d659-7a60-91b4-66cea3fc6ce0] [行动]: Terminal 宿主权限路径复测
+
+### 目的
+- 用 `/System/Applications/Utilities/Terminal.app` 启动临时 `rdog daemon`,再由当前会话连接该端口发送 `@ax-tree`.
+- 如果该路径返回 granted,说明授权更可能归于 GUI 终端宿主;如果仍返回 code 77,说明当前 rdog 二进制身份或启动链路仍未被 AX 信任.
+
+### 安全边界
+- 使用随机本地端口和本地 loopback,只做临时 daemon.
+- 测试结束后按监听端口杀掉该临时 daemon.
+- 不执行破坏性 shell 命令,只测试 AX tree/press.
+
+### 状态
+**准备执行最小可证伪实验** - 这一步只为定位权限主体,不修改代码.
+
+
+## [2026-05-15 12:12:04] [Session ID: 019e1b72-d659-7a60-91b4-66cea3fc6ce0] [验证红灯]: Terminal 宿主通过权限但 AX actions 读取失败
+
+### 现象
+- 使用 Terminal.app 启动临时 `rdog daemon`,再由当前会话连接该端口发送 `@ax-tree`.
+- 返回从 code 77 变成 code 70: `读取 AX actions 失败: AXError -25200`.
+- 这说明至少有一条启动路径已经越过 Accessibility trust 检查,但 AX snapshot builder 对单个元素读取 actions 的错误处理过于致命.
+
+### 当前主假设
+- `AXUIElementCopyActionNames` 对某些系统/临时 AX element 会返回不可完成或 failure 类错误,这不应该让整棵树失败;应把该元素 actions 降级为空数组.
+
+### 备选解释
+- 目标元素失效或系统 dialog 生命周期变化导致 attributes/actions 读取竞态,同样应作为单元素降级处理,不能破坏 `@ax-tree` 整体可用性.
+
+### 下一步
+- 阅读 `src/control_ax/macos.rs` 的 element 构建和 actions 读取逻辑.
+- 做最小健壮性修复: actions 读取失败时返回空 actions,保留元素其它字段,权限错误仍由 `ensure_trusted()` 统一处理.
+- 补单元测试锁住 actions failure 非致命语义,再重跑 live E2E.
+
+
+## [2026-05-15 12:13:37] [Session ID: 019e1b72-d659-7a60-91b4-66cea3fc6ce0] [遇到错误]: actions 降级补丁漏写 match `|`
+
+### 现象
+- `cargo fmt` 和 `cargo test --package rustdog --bin rdog -- control_ax::tests --nocapture` 均失败.
+- 编译错误: `expected one of =>, @, if, or |, found AX_ERROR_ACTION_UNSUPPORTED`.
+
+### 原因
+- 在 `copy_action_names` match arm 中新增 `AX_ERROR_FAILURE` 后漏写后续 pattern 的 `|`.
+
+### 处理
+- 修正 match pattern,然后重新运行格式化和 focused tests.
+
+
+## [2026-05-15 12:16:08] [Session ID: 019e1b72-d659-7a60-91b4-66cea3fc6ce0] [验证红灯]: AXSubrole attribute 也会返回 kAXErrorFailure
+
+### 现象
+- 更新 installed rdog 后,从 Terminal.app 启动临时 daemon 并发送 `@ax-tree`.
+- 返回 code 70: `读取 AX attribute `AXSubrole` 失败: AXError -25200`.
+- 这说明前一条“只有 actions 需要降级”的假设过窄.
+
+### 修正后的主假设
+- 在 AX snapshot 阶段,`kAXErrorFailure` 和 `kAXErrorNotImplemented` 对单个 attribute/action 应按“不支持/暂不可读”降级为 None/空列表.
+- `AXIsProcessTrusted()` 和 `kAXErrorAPIDisabled` 仍然是权限硬错误.
+
+### 下一步
+- 调整 `copy_attribute` 的错误分类,保持 press action 错误不降级.
+- 补纯函数/单元测试锁住 snapshot optional error 分类.
+- 重新安装并跑 Terminal live tree+press.
+
+
+## [2026-05-15 12:29:51] [Session ID: 019e1b72-d659-7a60-91b4-66cea3fc6ce0] [状态]: live 证据与测试目标收紧
+
+### 已验证事实
+- Terminal.app 启动的 `rdog daemon` 已经能让 `@ax-tree` 返回 `capture_status:"complete"` 和 `permission_status:"granted"`.
+- `@ax-tree` 读到了真实 Terminal 窗口,窗口数和元素数均非零.
+- 对真实 Terminal close button 执行 `@ax-press` 返回 `performed:true,status:"ok"`.
+- 随后再次 `@ax-tree` 读到了 Terminal 的运行进程确认 sheet,包含“你想要终止这个窗口中正在运行的进程吗?”,“取消”,“终止”等真实 UI 元素.
+
+### 设计调整
+- live E2E 不再使用短生命周期 osascript dialog 作为目标,因为该 dialog 容易超时或不进入当前窗口枚举.
+- live E2E 改为 Terminal 宿主启动 daemon,再点击该测试窗口自己的 close button,以确认 sheet 作为 `AXPress` 的可观察结果.
+- 为避免误点用户现有 Terminal 窗口,测试要求 `RDOG_LIVE_AX_E2E_VIA_TERMINAL=1`.
+
+### 下一步
+- 修整 `tests/control_ax_e2e.rs` 编译问题和未使用代码.
+- 运行 live ignored test 获取正式通过证据.
+
+
+## [2026-05-15 12:35:37] [Session ID: 019e1b72-d659-7a60-91b4-66cea3fc6ce0] [行动]: 继续 Phase 2.1 live AX E2E 收口
+
+### 当前目标
+- 修复 `tests/control_ax_e2e.rs` 的 control 子进程 stdout/stderr pipe 阻塞问题.
+- 重新运行 live AX E2E,用真实 Terminal 窗口证明 `@ax-tree` 读取窗口和 `@ax-press` 点击按钮.
+- 更新 `.envrc` 与 AX spec 的 Terminal 宿主运行说明.
+- 验证通过后 review diff 并做 local commit,不提交 mouse E2E 支线文件.
+
+### 现象 -> 假设 -> 验证计划
+- 现象: 上一轮 live 测试 stdout 中已经出现完整 AX tree,但 `rdog control command timed out`.
+- 当前主假设: 测试 harness 在等待子进程退出前没有并发 drain stdout/stderr,大 AX JSON 填满 pipe 导致 control 子进程无法退出.
+- 备选解释: `rdog control` 本身在收到单行命令后没有退出或等待 session 关闭.
+- 验证计划: 先改 harness 并发读取 stdout/stderr;若仍 timeout,再缩小请求或检查 control 退出语义.
+
+### 待办
+- [ ] 修复 live E2E harness pipe drain.
+- [ ] 更新 `.envrc` 与 `specs/rdog-ax-screenshot-manifest-control-plan.md`.
+- [ ] 跑格式化,focused tests,live ignored E2E,全测试编译和 diff check.
+- [ ] review diff,只 stage AX Phase 2.1 文件.
+- [ ] 按 Lore protocol 做 local commit.
+
+### 状态
+**目前在测试 harness 修复阶段** - 先解决 timeout 的可证伪问题,再判断 AX live 能力是否真正通过.
+
+
+## [2026-05-15 12:42:57] [Session ID: 019e1b72-d659-7a60-91b4-66cea3fc6ce0] [状态]: Phase 2.1 live AX E2E 验证通过
+
+### 已完成
+- [x] 修复 live E2E harness pipe drain.
+- [x] 更新 `.envrc` 与 `specs/rdog-ax-screenshot-manifest-control-plan.md`.
+- [x] 跑格式化,focused tests,live ignored E2E,全测试编译和 diff check.
+
+### 验证证据
+- `cargo fmt -- --check`: 通过.
+- `cargo test --package rustdog --bin rdog -- control_ax:: --nocapture`: 7 passed.
+- `cargo test --package rustdog --test control_ax_e2e --no-run`: 通过.
+- `RDOG_LIVE_AX_E2E=1 RDOG_LIVE_AX_E2E_VIA_TERMINAL=1 RDOG_LIVE_AX_E2E_BINARY=/Users/cuiluming/.cargo/bin/rdog cargo test --package rustdog --test control_ax_e2e -- daemon_control_lane_should_read_real_terminal_window_and_press_real_button --exact --ignored --nocapture`: 1 passed.
+- live 输出包含 `live AX E2E observed Terminal confirmation sheet: cancel_id=pid:556/window:0/path:7.3, terminate_id=pid:556/window:0/path:7.4`.
+- `cargo test --tests --no-run`: 通过.
+- `git diff --check`: 通过.
+
+### 待办
+- [ ] review diff,只 stage AX Phase 2.1 文件.
+- [ ] 按 Lore protocol 做 local commit.
+
+### 状态
+**目前在提交阶段** - live 证据已满足 Phase 2.1,接下来只提交 AX 相关文件,不纳入 mouse 支线文件.
+
+
+## [2026-05-15 12:45:55] [Session ID: 019e1b72-d659-7a60-91b4-66cea3fc6ce0] [遇到错误]: 首次 commit message 缺少 OMX co-author trailer
+
+### 现象
+- `git commit` 被 PreToolUse hook 阻止.
+- hook 提示: `git commit is blocked until the inline commit message satisfies the Lore format and includes the required OmX co-author trailer`.
+
+### 处理
+- 读取最近提交,确认项目当前使用 `Co-authored-by: OmX <omx@oh-my-codex.dev>`.
+- 下一次提交消息保留 Lore trailers,并追加 required co-author trailer.
+
+### 状态
+**仍在提交阶段** - staged 内容不变,只修正 commit message 规范.
+
+
+## [2026-05-15 12:47:31] [Session ID: 019e1b72-d659-7a60-91b4-66cea3fc6ce0] [行动]: Stop hook 后继续 Ralph 收尾
+
+### 现象
+- Stop hook 提示 OMX Ralph 仍 active.
+- 当前 session state 文件是 `.omx/state/sessions/019e1b72-d659-7a60-91b4-66cea3fc6ce0/ralph-state.json`.
+- 文件内容显示 `active:true`,`current_phase:"starting"`.
+
+### 当前目标
+- 重新采集 fresh verification evidence,避免只依赖提交前旧输出.
+- 按 OMX cancel skill 的 Ralph post-condition 清理 session 级 active state.
+- 保持已经创建的 AX Phase 2.1 commit 不变;如本次只追加收尾记录,会单独处理工作区状态.
+
+### 待办
+- [ ] 重新运行 live AX E2E 或足够的 focused verification.
+- [ ] 清理 Ralph active state,确认 `active:false` 或已从 active 列表消失.
+- [ ] 根据是否产生新的 tracked diff 决定 amend/新 commit/留作工作记录.
+
+### 状态
+**Stop hook 收尾中** - 先补 fresh 验证,再清理 Ralph runtime.
+
+
+## [2026-05-15 12:50:11] [Session ID: 019e1b72-d659-7a60-91b4-66cea3fc6ce0] [状态]: Stop hook 后 Ralph 收尾完成
+
+### fresh 验证证据
+- `RDOG_LIVE_AX_E2E=1 RDOG_LIVE_AX_E2E_VIA_TERMINAL=1 RDOG_LIVE_AX_E2E_BINARY=/Users/cuiluming/.cargo/bin/rdog cargo test --package rustdog --test control_ax_e2e -- daemon_control_lane_should_read_real_terminal_window_and_press_real_button --exact --ignored --nocapture`: 1 passed,输出包含 `live AX E2E observed Terminal confirmation sheet: cancel_id=pid:556/window:0/path:7.3, terminate_id=pid:556/window:0/path:7.4`.
+- `cargo test --package rustdog --bin rdog -- control_ax:: --nocapture`: 7 passed.
+- `git diff --check`: 通过.
+
+### Ralph runtime post-condition
+- `omx cancel`: 输出 `Cancelled: ralph`.
+- `omx state list-active --json`: `{"active_modes":[]}`.
+- `.omx/state/sessions/019e1b72-d659-7a60-91b4-66cea3fc6ce0/ralph-state.json`: `active:false`,`current_phase:"cancelled"`,`completed_at` 已设置.
+
+### 状态
+**全部完成** - Phase 2.1 live AX E2E 已验证,本地 commit 已创建,Ralph active state 已清理.

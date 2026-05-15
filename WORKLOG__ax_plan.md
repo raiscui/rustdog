@@ -107,3 +107,32 @@
 ### 总结感悟
 - Phase 1 已覆盖 opt-in AX manifest,`@ax-tree`,`@ax-press` 和权限降级/硬失败语义.
 - Phase 2 仍存在,主要是 live granted E2E,大 AX tree `@savefile`,`@ax-get`,`@ax-set-value`,`@ax-focus`,`@ax-menu`,非 macOS 后端和更稳定的 snapshot id/versioning.
+
+## [2026-05-15 12:42:57] [Session ID: 019e1b72-d659-7a60-91b4-66cea3fc6ce0] 任务名称: AX Phase 2.1 live E2E
+
+### 任务内容
+- 给已授权的 `rdog` 跑 live AX E2E.
+- 证明 `@ax-tree` 可以读取真实 macOS 桌面窗口.
+- 证明 `@ax-press` 可以点击真实 AX 按钮,并产生可观察 UI 状态变化.
+
+### 完成过程
+- 新增 `tests/control_ax_e2e.rs`,默认 ignored,并要求 `RDOG_LIVE_AX_E2E=1` 才执行真实桌面动作.
+- 测试支持 `RDOG_LIVE_AX_E2E_VIA_TERMINAL=1`,通过 Terminal.app 启动临时 daemon,复用已经授权的 Terminal 宿主路径.
+- live 目标改为测试 daemon 所在的 Terminal 窗口 close button,避免误点用户其它窗口.
+- `@ax-press` close button 后,再次 `@ax-tree` 读取 Terminal 运行进程确认 sheet,再按 `取消` 恢复状态.
+- 修复 `src/control_ax/macos.rs` 中 snapshot optional AX error 分类: 对 `kAXErrorFailure` / `kAXErrorNotImplemented` 等单元素读取失败降级为字段缺失或空 actions,权限错误仍硬失败.
+- 修复 E2E harness 的 stdout/stderr pipe drain,避免大 AX tree JSON 填满 pipe 后误判 control 超时.
+- 更新 `.envrc` 和 `specs/rdog-ax-screenshot-manifest-control-plan.md` 中的 live smoke 命令和流程说明.
+
+### 验证
+- `cargo fmt -- --check`: 通过.
+- `cargo test --package rustdog --bin rdog -- control_ax:: --nocapture`: 7 passed.
+- `cargo test --package rustdog --test control_ax_e2e --no-run`: 通过.
+- `RDOG_LIVE_AX_E2E=1 RDOG_LIVE_AX_E2E_VIA_TERMINAL=1 RDOG_LIVE_AX_E2E_BINARY=/Users/cuiluming/.cargo/bin/rdog cargo test --package rustdog --test control_ax_e2e -- daemon_control_lane_should_read_real_terminal_window_and_press_real_button --exact --ignored --nocapture`: 1 passed,输出包含 `live AX E2E observed Terminal confirmation sheet: cancel_id=pid:556/window:0/path:7.3, terminate_id=pid:556/window:0/path:7.4`.
+- `cargo test --tests --no-run`: 通过.
+- `git diff --check`: 通过.
+
+### 总结感悟
+- Phase 2.1 的关键不是协议返回 ok,而是用 live UI 状态变化证明 `@ax-tree` 和 `@ax-press` 真的对桌面可用.
+- macOS Accessibility 授权主体可能落在 Terminal.app 这种宿主应用上,因此 live E2E 需要显式记录启动链路.
+- AX snapshot 读取真实桌面时会遇到单元素 attribute/action 的非致命失败,这些不应破坏整棵 tree;但真正的 AXPress action failure 不能降级.
