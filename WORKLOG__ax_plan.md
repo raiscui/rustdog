@@ -168,3 +168,27 @@
 - 面向智能体的 AX 能力需要先把信息量变小,否则 `include_ax:true` 很容易把 token 预算打爆.
 - `@ax-find` / `@ax-get` 比直接 full tree 更适合作为默认思路: 先找候选,再看一个局部节点.
 - `@screenshot` 用 `ax_mode`,AX-only 命令用 `mode`,这条命名边界能减少后续协议歧义.
+
+## [2026-05-15 22:30:01] [Session ID: 019e1b72-d659-7a60-91b4-66cea3fc6ce0] 任务名称: AX find/get live ignored E2E
+
+### 任务内容
+- 给 `@ax-find` / `@ax-get` 补真实 macOS 桌面 live ignored E2E.
+- 复用 Terminal.app 授权宿主路径,通过真实 `rdog daemon` + `rdog control` 验证新命令.
+
+### 完成过程
+- 在 `tests/control_ax_e2e.rs` 提取 `start_live_ax_daemon` helper,让已有 `@ax-tree/@ax-press` live 测试和新增 find/get live 测试共用启动逻辑.
+- 新增 `daemon_control_lane_should_find_and_get_real_terminal_button`,用 `@ax-find` 定位测试 Terminal 窗口的 pressable `AXCloseButton`,再用 `@ax-get` 钻取同一个元素.
+- 更新 `specs/rdog-ax-screenshot-manifest-control-plan.md` 的 macOS ignored smoke 命令和真实 smoke 流程.
+- 首次 live 运行发现 installed `/Users/cuiluming/.cargo/bin/rdog` 还是旧版本,不支持 `@ax-find`;执行 `cargo install --path .` 后重跑通过.
+
+### 验证
+- `cargo fmt -- --check`: 通过.
+- `cargo test --package rustdog --test control_ax_e2e --no-run`: 通过.
+- `RDOG_LIVE_AX_E2E=1 RDOG_LIVE_AX_E2E_VIA_TERMINAL=1 RDOG_LIVE_AX_E2E_BINARY=/Users/cuiluming/.cargo/bin/rdog cargo test --package rustdog --test control_ax_e2e -- daemon_control_lane_should_find_and_get_real_terminal_button --exact --ignored --nocapture`: 1 passed,输出包含 `live AX find/get observed Terminal close button: target_id=pid:556/window:0/path:2`.
+- `cargo test --package rustdog --bin rdog -- control_ax:: --nocapture`: 11 passed.
+- `cargo test --package rustdog --bin rdog -- control_protocol::tests --nocapture`: 13 passed.
+- `git diff --check`: 通过.
+
+### 总结感悟
+- live E2E 依赖安装版二进制时,必须确认 installed rdog 已更新到当前源码,否则会把旧协议误判成新测试失败.
+- `@ax-find` + `@ax-get` 的真实价值是减少上下文压力: 先拿小列表,再读一个元素,不需要一上来拉完整 tree.

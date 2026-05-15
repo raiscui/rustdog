@@ -20,3 +20,27 @@
 - `RDOG_LIVE_AX_E2E=1 RDOG_LIVE_AX_E2E_VIA_TERMINAL=1 RDOG_LIVE_AX_E2E_BINARY=/Users/cuiluming/.cargo/bin/rdog cargo test --package rustdog --test control_ax_e2e -- daemon_control_lane_should_read_real_terminal_window_and_press_real_button --exact --ignored --nocapture`: 1 passed.
 - `cargo test --tests --no-run`: 通过.
 - `git diff --check`: 通过.
+
+## [2026-05-15 22:27:36] [Session ID: 019e1b72-d659-7a60-91b4-66cea3fc6ce0] 问题: live AX find/get E2E 使用旧 installed rdog
+
+### 现象
+- 新增 live ignored E2E 首次运行失败.
+- 命令: `RDOG_LIVE_AX_E2E=1 RDOG_LIVE_AX_E2E_VIA_TERMINAL=1 RDOG_LIVE_AX_E2E_BINARY=/Users/cuiluming/.cargo/bin/rdog cargo test --package rustdog --test control_ax_e2e -- daemon_control_lane_should_find_and_get_real_terminal_button --exact --ignored --nocapture`.
+- 返回: `@ax-find returned protocol error code Some(64): 不支持的控制指令类型: ax-find`.
+
+### 原因
+- live 测试显式使用 `/Users/cuiluming/.cargo/bin/rdog`.
+- 该 installed binary 还没有包含上一轮 `@ax-find` / `@ax-get` 新命令,所以真实 daemon 路径返回 code 64.
+
+### 修复
+- 执行 `cargo install --path .`,把 installed rdog 更新到当前源码.
+- 更新后重新运行同一 live ignored E2E.
+
+### 验证
+- 待重新运行后补充.
+
+### 复验结果
+- `cargo install --path .`: 通过,已替换 `/Users/cuiluming/.cargo/bin/rdog`.
+- 重新运行同一 live ignored E2E: 1 passed.
+- 关键输出: `live AX find/get observed Terminal close button: target_id=pid:556/window:0/path:2`.
+- 结论: 首次失败由 installed rdog 版本旧导致,不是 `@ax-find` / `@ax-get` live E2E 设计失败.

@@ -69,6 +69,62 @@ impl Drop for TerminalDaemon {
     }
 }
 
+#[derive(Debug)]
+struct LiveAxDaemon {
+    port: u16,
+    binary: PathBuf,
+    _workdir: PathBuf,
+    _direct_daemon: Option<ChildGuard>,
+    terminal_daemon: Option<TerminalDaemon>,
+}
+
+impl LiveAxDaemon {
+    fn uses_terminal_host(&self) -> bool {
+        self.terminal_daemon.is_some()
+    }
+
+    fn stop_terminal(&self) {
+        if let Some(terminal_daemon) = self.terminal_daemon.as_ref() {
+            terminal_daemon.stop();
+        }
+    }
+}
+
+fn start_live_ax_daemon(name: &str) -> LiveAxDaemon {
+    let port = next_free_port();
+    let binary = rdog_binary_path();
+    let workdir = temp_workdir(name);
+    let mut direct_daemon = None::<ChildGuard>;
+    let terminal_daemon = if terminal_host_enabled() {
+        Some(start_terminal_daemon(&binary, &workdir, port))
+    } else {
+        direct_daemon = Some(start_direct_daemon(&binary, &workdir, port));
+        None
+    };
+
+    let port_ready = wait_until_port_is_busy(
+        direct_daemon.as_mut().map(ChildGuard::child_mut),
+        port,
+        Duration::from_secs(8),
+    );
+    assert!(
+        port_ready,
+        "daemon control lane never started listening on port {port}\n{}",
+        terminal_daemon
+            .as_ref()
+            .map(TerminalDaemon::startup_log)
+            .unwrap_or_else(|| "direct daemon stderr is intentionally suppressed".to_owned())
+    );
+
+    LiveAxDaemon {
+        port,
+        binary,
+        _workdir: workdir,
+        _direct_daemon: direct_daemon,
+        terminal_daemon,
+    }
+}
+
 fn next_free_port() -> u16 {
     let listener = TcpListener::bind(("127.0.0.1", 0)).expect("ephemeral listener should bind");
     let port = listener
@@ -514,6 +570,86 @@ fn assert_ax_press_report(report: &Value, expected_target_id: &str) {
     assert_eq!(report["status"].as_str(), Some("ok"));
 }
 
+fn value_contains_action(value: &Value, expected_action: &str) -> bool {
+    value
+        .get("actions")
+        .and_then(Value::as_array)
+        .is_some_and(|actions| {
+            actions
+                .iter()
+                .any(|action| action.as_str() == Some(expected_action))
+        })
+}
+
+fn assert_ax_find_close_button_match(find: &Value, title_needle: &str) -> String {
+    assert_eq!(find["kind"].as_str(), Some("ax-find"));
+    assert_eq!(find["schema"].as_str(), Some("rdog.ax.v1"));
+    assert_eq!(find["platform"].as_str(), Some("macos"));
+    assert_eq!(find["capture_status"].as_str(), Some("complete"));
+    assert_eq!(find["permission_status"].as_str(), Some("granted"));
+    assert_eq!(find["coordinate_space"].as_str(), Some("os-logical"));
+    assert!(
+        find["match_count"].as_u64().unwrap_or(0) > 0,
+        "@ax-find should match the Terminal close button: {}",
+        json_excerpt(find, 4000)
+    );
+
+    let matches = find["matches"]
+        .as_array()
+        .unwrap_or_else(|| panic!("@ax-find should return matches array: {find}"));
+    let close_button = matches
+        .iter()
+        .find(|item| {
+            item["role"].as_str() == Some("AXButton")
+                && item["subrole"].as_str() == Some("AXCloseButton")
+                && item["window_title"]
+                    .as_str()
+                    .is_some_and(|title| title.contains(title_needle))
+                && value_contains_action(item, "AXPress")
+        })
+        .unwrap_or_else(|| {
+            panic!(
+                "@ax-find should return a pressable Terminal close button: {}",
+                json_excerpt(find, 4000)
+            )
+        });
+
+    close_button["id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("@ax-find match should contain id: {close_button}"))
+        .to_owned()
+}
+
+fn assert_ax_get_close_button(get: &Value, expected_target_id: &str, title_needle: &str) {
+    assert_eq!(get["kind"].as_str(), Some("ax-get"));
+    assert_eq!(get["schema"].as_str(), Some("rdog.ax.v1"));
+    assert_eq!(get["platform"].as_str(), Some("macos"));
+    assert_eq!(get["capture_status"].as_str(), Some("complete"));
+    assert_eq!(get["permission_status"].as_str(), Some("granted"));
+    assert_eq!(get["coordinate_space"].as_str(), Some("os-logical"));
+    assert_eq!(get["target_id"].as_str(), Some(expected_target_id));
+    assert_eq!(get["target_type"].as_str(), Some("element"));
+    assert!(
+        get["window_title"]
+            .as_str()
+            .is_some_and(|title| title.contains(title_needle)),
+        "@ax-get should preserve the Terminal window title: {}",
+        json_excerpt(get, 4000)
+    );
+
+    let element = get
+        .get("element")
+        .unwrap_or_else(|| panic!("@ax-get should return an element body: {get}"));
+    assert_eq!(element["id"].as_str(), Some(expected_target_id));
+    assert_eq!(element["role"].as_str(), Some("AXButton"));
+    assert_eq!(element["subrole"].as_str(), Some("AXCloseButton"));
+    assert!(
+        value_contains_action(element, "AXPress"),
+        "@ax-get element should expose AXPress: {}",
+        json_excerpt(get, 4000)
+    );
+}
+
 #[test]
 #[ignore = "requires a visible macOS desktop and Accessibility permission for the actual daemon host"]
 fn daemon_control_lane_should_read_real_terminal_window_and_press_real_button() {
@@ -524,42 +660,20 @@ fn daemon_control_lane_should_read_real_terminal_window_and_press_real_button() 
         return;
     }
 
-    let port = next_free_port();
-    let binary = rdog_binary_path();
-    let workdir = temp_workdir("terminal-close-button");
-    let mut direct_daemon = None::<ChildGuard>;
-    let terminal_daemon = if terminal_host_enabled() {
-        Some(start_terminal_daemon(&binary, &workdir, port))
-    } else {
-        direct_daemon = Some(start_direct_daemon(&binary, &workdir, port));
-        None
-    };
-
-    let port_ready = wait_until_port_is_busy(
-        direct_daemon.as_mut().map(ChildGuard::child_mut),
-        port,
-        Duration::from_secs(8),
-    );
-    assert!(
-        port_ready,
-        "daemon control lane never started listening on port {port}\n{}",
-        terminal_daemon
-            .as_ref()
-            .map(TerminalDaemon::startup_log)
-            .unwrap_or_else(|| "direct daemon stderr is intentionally suppressed".to_owned())
-    );
+    let daemon = start_live_ax_daemon("terminal-close-button");
+    let port = daemon.port;
+    let binary = daemon.binary.as_path();
 
     let tree_response = run_control_command(
-        &binary,
+        binary,
         port,
         "@ax-tree#100:{scope:\"windows\",depth:6,max_elements:8000,include_values:true}\n",
         Duration::from_secs(30),
     );
-    let tree = successful_response_value(tree_response, "@ax-tree", &binary);
+    let tree = successful_response_value(tree_response, "@ax-tree", binary);
     assert_ax_tree_is_complete(&tree);
 
-    let terminal_daemon = terminal_daemon.as_ref();
-    let close_button_id = if terminal_daemon.is_some() {
+    let close_button_id = if daemon.uses_terminal_host() {
         let window = find_terminal_window(&tree, port).unwrap_or_else(|| {
             panic!(
                 "@ax-tree should include the Terminal daemon window for port {port}: {}",
@@ -590,25 +704,25 @@ fn daemon_control_lane_should_read_real_terminal_window_and_press_real_button() 
     };
 
     let press_response = run_control_command(
-        &binary,
+        binary,
         port,
         &format!("@ax-press#101:{{target:{{id:\"{close_button_id}\"}}}}\n"),
         Duration::from_secs(15),
     );
-    let press_report = successful_response_value(press_response, "@ax-press", &binary);
+    let press_report = successful_response_value(press_response, "@ax-press", binary);
     assert_ax_press_report(&press_report, &close_button_id);
 
-    if terminal_daemon.is_some() {
+    if daemon.uses_terminal_host() {
         let sheet_tree = (0..10)
             .find_map(|_| {
                 thread::sleep(Duration::from_millis(250));
                 let response = run_control_command(
-                    &binary,
+                    binary,
                     port,
                     "@ax-tree#102:{scope:\"windows\",depth:7,max_elements:8000,include_values:true}\n",
                     Duration::from_secs(30),
                 );
-                let tree = successful_response_value(response, "@ax-tree", &binary);
+                let tree = successful_response_value(response, "@ax-tree", binary);
                 find_terminal_termination_sheet(&tree, port)
             })
             .unwrap_or_else(|| {
@@ -620,15 +734,61 @@ fn daemon_control_lane_should_read_real_terminal_window_and_press_real_button() 
         );
 
         let cancel_response = run_control_command(
-            &binary,
+            binary,
             port,
             &format!("@ax-press#103:{{target:{{id:\"{}\"}}}}\n", sheet_tree.0),
             Duration::from_secs(15),
         );
-        let cancel_report = successful_response_value(cancel_response, "@ax-press cancel", &binary);
+        let cancel_report = successful_response_value(cancel_response, "@ax-press cancel", binary);
         assert_ax_press_report(&cancel_report, &sheet_tree.0);
-        terminal_daemon
-            .expect("terminal daemon should still exist")
-            .stop();
+        daemon.stop_terminal();
     }
+}
+
+#[test]
+#[ignore = "requires a visible macOS desktop and Accessibility permission for the actual daemon host"]
+fn daemon_control_lane_should_find_and_get_real_terminal_button() {
+    if !live_ax_e2e_enabled() {
+        eprintln!(
+            "skipping live AX find/get E2E; set {LIVE_AX_E2E_ENV}=1 to run against the real macOS desktop"
+        );
+        return;
+    }
+
+    if !terminal_host_enabled() {
+        eprintln!(
+            "skipping live AX find/get E2E; set {LIVE_AX_E2E_VIA_TERMINAL_ENV}=1 to expose the test daemon's Terminal window"
+        );
+        return;
+    }
+
+    let daemon = start_live_ax_daemon("terminal-find-get");
+    let port = daemon.port;
+    let binary = daemon.binary.as_path();
+    let title_needle = format!("rdog-ax-e2e-{port}.command");
+
+    let find_response = run_control_command(
+        binary,
+        port,
+        &format!(
+            "@ax-find#200:{{window_title_contains:\"{title_needle}\",role:\"AXButton\",subrole:\"AXCloseButton\",action:\"AXPress\",depth:6,max_elements:8000,include_values:false,limit:5}}\n"
+        ),
+        Duration::from_secs(30),
+    );
+    let find = successful_response_value(find_response, "@ax-find", binary);
+    let close_button_id = assert_ax_find_close_button_match(&find, &title_needle);
+
+    let get_response = run_control_command(
+        binary,
+        port,
+        &format!(
+            "@ax-get#201:{{target:{{id:\"{close_button_id}\"}},depth:2,max_elements:8000,include_values:false}}\n"
+        ),
+        Duration::from_secs(30),
+    );
+    let get = successful_response_value(get_response, "@ax-get", binary);
+    assert_ax_get_close_button(&get, &close_button_id, &title_needle);
+    eprintln!("live AX find/get observed Terminal close button: target_id={close_button_id}");
+
+    daemon.stop_terminal();
 }

@@ -421,6 +421,7 @@ macOS ignored smoke:
 ```bash
 RDOG_LIVE_AX_E2E=1 cargo test --package rustdog --test control_ax_e2e -- daemon_control_lane_should_read_real_terminal_window_and_press_real_button --exact --ignored --nocapture
 RDOG_LIVE_AX_E2E=1 RDOG_LIVE_AX_E2E_VIA_TERMINAL=1 RDOG_LIVE_AX_E2E_BINARY=/Users/cuiluming/.cargo/bin/rdog cargo test --package rustdog --test control_ax_e2e -- daemon_control_lane_should_read_real_terminal_window_and_press_real_button --exact --ignored --nocapture
+RDOG_LIVE_AX_E2E=1 RDOG_LIVE_AX_E2E_VIA_TERMINAL=1 RDOG_LIVE_AX_E2E_BINARY=/Users/cuiluming/.cargo/bin/rdog cargo test --package rustdog --test control_ax_e2e -- daemon_control_lane_should_find_and_get_real_terminal_button --exact --ignored --nocapture
 ```
 
 真实 smoke 流程:
@@ -431,6 +432,7 @@ RDOG_LIVE_AX_E2E=1 RDOG_LIVE_AX_E2E_VIA_TERMINAL=1 RDOG_LIVE_AX_E2E_BINARY=/User
 4. 对 tree 中返回的 close button id 执行 `@ax-press`.
 5. 再次 `@ax-tree`,断言 Terminal 弹出运行进程确认 sheet,且 sheet 中包含 `取消` / `终止` 按钮.
 6. 对 `取消` 按钮执行 `@ax-press`,恢复测试窗口状态并关闭临时 daemon.
+7. `daemon_control_lane_should_find_and_get_real_terminal_button` 使用 `@ax-find` 找到同一个真实 Terminal close button,再用 `@ax-get` 钻取该元素,不触发关闭动作.
 
 ## 9. ADR
 

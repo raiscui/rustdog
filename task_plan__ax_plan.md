@@ -761,3 +761,49 @@
 ### 提交前复核
 - staged 文件只包含 AX 相关实现,规格和 `task_plan__ax_plan.md` / `WORKLOG__ax_plan.md`.
 - 未跟踪的 mouse E2E 支线文件保持未 stage.
+
+## [2026-05-15 22:22:35] [Session ID: 019e1b72-d659-7a60-91b4-66cea3fc6ce0] [行动]: 补 live ignored AX find/get E2E
+
+### 当前目标
+- 在现有 `tests/control_ax_e2e.rs` 里补一个 ignored live 测试.
+- 证明 `@ax-find` 能在真实 macOS Terminal 窗口里找到 pressable AXButton.
+- 证明 `@ax-get` 能按 `@ax-find` 返回的 id 钻取同一个真实元素.
+
+### 约束
+- 默认 ignored 且需要 `RDOG_LIVE_AX_E2E=1`,避免普通测试触碰桌面.
+- 继续支持 `RDOG_LIVE_AX_E2E_VIA_TERMINAL=1`,复用已验证的 Terminal 授权宿主路径.
+- 本测试不执行 `@ax-press`,避免重复触发关闭确认 sheet;只验证 find/get 读路径.
+- 不 stage 现有 mouse E2E 支线文件.
+
+### 待办
+- [ ] 提取或复用 live daemon setup helper.
+- [ ] 新增 `@ax-find` + `@ax-get` ignored live test.
+- [ ] 跑 focused 编译/单测/live 测试和 diff check.
+- [ ] review diff 后 local commit.
+
+### 状态
+**实现前调查完成** - 下一步编辑 `tests/control_ax_e2e.rs`.
+
+## [2026-05-15 22:30:01] [Session ID: 019e1b72-d659-7a60-91b4-66cea3fc6ce0] [完成]: AX find/get live ignored E2E
+
+### 完成状态
+- [x] 提取或复用 live daemon setup helper.
+- [x] 新增 `@ax-find` + `@ax-get` ignored live test.
+- [x] 跑 focused 编译/单测/live 测试和 diff check.
+- [ ] review diff 后 local commit.
+
+### 动态证据
+- 首次 live 运行失败: installed `/Users/cuiluming/.cargo/bin/rdog` 不支持 `@ax-find`,返回 code 64.
+- `cargo install --path .`: 通过,installed rdog 已更新.
+- 重新运行 live ignored E2E: 1 passed.
+- 关键输出: `live AX find/get observed Terminal close button: target_id=pid:556/window:0/path:2`.
+
+### 验证命令
+- `cargo fmt -- --check`: 通过.
+- `cargo test --package rustdog --test control_ax_e2e --no-run`: 通过.
+- `cargo test --package rustdog --bin rdog -- control_ax:: --nocapture`: 11 passed.
+- `cargo test --package rustdog --bin rdog -- control_protocol::tests --nocapture`: 13 passed.
+- `git diff --check`: 通过.
+
+### 状态
+**准备提交** - 下一步 review diff,stage AX E2E 相关文件并创建 local commit.
