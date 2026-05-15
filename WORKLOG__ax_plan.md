@@ -136,3 +136,35 @@
 - Phase 2.1 的关键不是协议返回 ok,而是用 live UI 状态变化证明 `@ax-tree` 和 `@ax-press` 真的对桌面可用.
 - macOS Accessibility 授权主体可能落在 Terminal.app 这种宿主应用上,因此 live E2E 需要显式记录启动链路.
 - AX snapshot 读取真实桌面时会遇到单元素 attribute/action 的非致命失败,这些不应破坏整棵 tree;但真正的 AXPress action failure 不能降级.
+
+## [2026-05-15 18:45:57] [Session ID: 019e1b72-d659-7a60-91b4-66cea3fc6ce0] 任务名称: AX 轻量模式与按需查询
+
+### 任务内容
+- 给 `@screenshot include_ax` 增加 `ax_mode:"windows"`, `ax_mode:"interactive"`, `ax_mode:"full"` 三档默认.
+- 新增 `@ax-find` / `@ax-get`,让智能体先拿紧凑匹配列表,再按 target id 或 semantic locator 钻取局部结构.
+- 更新 repo AX 规格和全局 `rdog-control` skill,写清楚低 token 的常见命令取舍.
+
+### 完成过程
+- 在 `src/control_ax.rs` 增加 `AxMode` preset,并让 `@ax-tree` 支持 `mode`.
+- 新增 `src/control_ax/query.rs`,集中实现 `@ax-find` / `@ax-get` parser,response builder 和匹配逻辑,避免继续膨胀主 AX 模块.
+- 在 `src/control_protocol.rs`, `src/control_actions.rs`, `src/control_core.rs`, `src/shell.rs` 接通新命令分发和测试 fake executor.
+- 在 `src/screenshot/tests.rs` 补 `ax_mode` 对 screenshot AX request 的默认值验证.
+- 收紧协议命名: `@screenshot` 只接受 `ax_mode`,AX-only 命令使用 `mode`,避免未来 screenshot 自身模式字段冲突.
+- 更新 `specs/rdog-ax-screenshot-manifest-control-plan.md` 和 `/Users/cuiluming/.codex/skills/rdog-control/` 下的主 skill/protocol/workflow 参考.
+
+### 验证
+- `cargo fmt -- --check`: 通过.
+- `cargo test --package rustdog --bin rdog -- control_ax:: --nocapture`: 11 passed.
+- `cargo test --package rustdog --bin rdog -- control_protocol::tests --nocapture`: 13 passed.
+- `cargo test --package rustdog --bin rdog -- screenshot::tests --nocapture`: 17 passed.
+- `cargo test --package rustdog --bin rdog -- control_actions::tests --nocapture`: 14 passed.
+- `cargo test --package rustdog --bin rdog -- control_core::tests --nocapture`: 10 passed.
+- `cargo test --package rustdog --bin rdog -- shell::tests --nocapture`: 9 passed.
+- `cargo test --tests --no-run`: 通过.
+- `cargo build --package rustdog --bin rdog`: 通过.
+- `git diff --check`: 通过.
+
+### 总结感悟
+- 面向智能体的 AX 能力需要先把信息量变小,否则 `include_ax:true` 很容易把 token 预算打爆.
+- `@ax-find` / `@ax-get` 比直接 full tree 更适合作为默认思路: 先找候选,再看一个局部节点.
+- `@screenshot` 用 `ax_mode`,AX-only 命令用 `mode`,这条命名边界能减少后续协议歧义.

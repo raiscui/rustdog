@@ -491,6 +491,24 @@ mod tests {
                                 .to_owned(),
                         ),
                     }),
+                    ControlCommand::AxFind(_) => Ok(ActionExecutionResult {
+                        exit_code: 0,
+                        stdout: Vec::new(),
+                        stderr: Vec::new(),
+                        response_value_json: Some(
+                            r#"{"kind":"ax-find","schema":"rdog.ax.v1","match_count":1}"#
+                                .to_owned(),
+                        ),
+                    }),
+                    ControlCommand::AxGet(_) => Ok(ActionExecutionResult {
+                        exit_code: 0,
+                        stdout: Vec::new(),
+                        stderr: Vec::new(),
+                        response_value_json: Some(
+                            r#"{"kind":"ax-get","schema":"rdog.ax.v1","target_type":"element"}"#
+                                .to_owned(),
+                        ),
+                    }),
                     ControlCommand::AxPress(_) => Ok(ActionExecutionResult {
                         exit_code: 0,
                         stdout: Vec::new(),

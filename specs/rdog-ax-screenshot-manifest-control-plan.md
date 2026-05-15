@@ -6,14 +6,16 @@ Phase 1 采用可选 AX snapshot 方案:
 
 - `@screenshot:{include_ax:true,ax_required:false}` 在 manifest 中附带 macOS AX 窗口和 UI 元素结构.
 - `@screenshot:{include_ax:true,ax_required:true}` 把 AX 作为硬依赖,权限不足时返回 code 77.
+- `ax_mode:"windows" | "interactive" | "full"` 提供窗口摘要,交互元素摘要和完整树三档默认值,避免智能体默认读取超大 manifest.
 - `@ax-tree` 独立读取当前 AX tree 的 structured summary.
+- `@ax-find` 在当前 AX tree 中返回紧凑 match list.
+- `@ax-get` 按 target id 或 semantic target 钻取单个窗口/元素局部树.
 - `@ax-press` 对 manifest/tree 中定位到的元素执行 `AXPress`.
 
 Phase 1 不做:
 
 - `@ax-set-value`
 - `@ax-focus`
-- `@ax-get`
 - `@ax-menu`
 - 默认开启 `include_ax`
 - 非 macOS AX 实现
@@ -51,6 +53,7 @@ Phase 1 不做:
 ```text
 include_ax: bool = false
 ax_required: bool = false
+ax_mode: "windows" | "interactive" | "full" = "full"
 ax_depth: u8 = 4
 ax_max_elements: u16 = 1000
 ax_include_values: bool = true
@@ -61,15 +64,23 @@ ax_include_values: bool = true
 - `include_ax:false`: 不调用 AX provider,保持现有截图行为.
 - `include_ax:true,ax_required:false`: best-effort 附带 AX. 如果 AX 权限失败,截图仍成功,manifest 写入失败状态.
 - `include_ax:true,ax_required:true`: AX 是 hard requirement. 如果 AX 权限失败,整个 `@screenshot` 返回 code 77.
+- `ax_mode:"windows"`: 窗口/浅层摘要,等价默认 `ax_depth:1,ax_max_elements:80,ax_include_values:false`.
+- `ax_mode:"interactive"`: 面向按钮,菜单项,文本输入等交互控件的轻量摘要,等价默认 `ax_depth:2,ax_max_elements:200,ax_include_values:false`.
+- `ax_mode:"full"`: 完整树倾向,保留原 Phase 1 默认 `ax_depth:4,ax_max_elements:1000,ax_include_values:true`.
 - `ax_depth`: 限制每个窗口下递归读取元素的深度.
 - `ax_max_elements`: 限制单次 snapshot 的最大元素数量.
 - `ax_include_values`: 是否读取普通文本值. 安全文本字段仍必须 redacted.
+- 显式 `ax_depth` / `ax_max_elements` / `ax_include_values` 会覆盖 `ax_mode` 默认值.
 
 示例:
 
 ```text
-@screenshot#90:{include_ax:true,ax_required:false,ax_depth:4,ax_max_elements:1000}
-@screenshot#91:{include_ax:true,ax_required:true,ax_include_values:false}
+@screenshot#90:{include_ax:true,ax_required:false,ax_mode:"windows"}
+@screenshot#91:{include_ax:true,ax_required:false,ax_mode:"interactive"}
+@screenshot#92:{include_ax:true,ax_required:false,ax_depth:2,ax_max_elements:200,ax_include_values:false}
+@screenshot#93:{include_ax:true,ax_required:false,ax_depth:1,ax_max_elements:80,ax_include_values:false}
+@screenshot#94:{include_ax:true,ax_required:false,ax_mode:"full"}
+@screenshot#95:{include_ax:true,ax_required:true,ax_include_values:false}
 ```
 
 ### 4.2 manifest `accessibility` 字段
@@ -159,6 +170,7 @@ Phase 1 返回 structured `@response` summary,不走 `@savefile`.
 
 ```text
 @ax-tree#30:{scope:"windows",depth:4,max_elements:1000,include_values:true}
+@ax-tree#31:{mode:"interactive"}
 ```
 
 返回:
@@ -173,7 +185,57 @@ Phase 1 返回 structured `@response` summary,不走 `@savefile`.
 - 当前平台不支持: code 78.
 - 参数无效: code 64.
 
-### 4.4 `@ax-press`
+### 4.4 `@ax-find`
+
+`@ax-find` 用于让智能体先拿紧凑 match list,不要直接读取完整 AX tree.
+
+```text
+@ax-find#40:{role:"AXButton",name_contains:"取消",limit:20}
+@ax-find#41:{action:"AXPress",mode:"interactive",limit:30}
+@ax-find#42:{process:"Terminal",window_title_contains:"rdog",role:"AXButton",limit:10}
+```
+
+返回:
+
+```json
+@response {"id":40,"value":{"kind":"ax-find","schema":"rdog.ax.v1","match_count":1,"returned_count":1,"matches":[{"id":"pid:1234/window:0/path:7.3","role":"AXButton","name":"取消","actions":["AXPress"]}]}}
+```
+
+查询字段:
+
+- `process` / `process_contains`
+- `window_title` / `window_title_contains`
+- `role`
+- `subrole`
+- `name` / `name_contains`
+- `description` / `description_contains`
+- `value` / `value_contains`
+- `action`
+- `mode`, `depth`, `max_elements`, `include_values`, `limit`
+
+### 4.5 `@ax-get`
+
+`@ax-get` 用于在拿到窗口/元素 id 后钻取局部结构.
+
+```text
+@ax-get#50:{target:{id:"pid:1234/window:0"},mode:"windows"}
+@ax-get#51:{target:{id:"pid:1234/window:0/path:7"},depth:2,include_values:false}
+```
+
+返回:
+
+```json
+@response {"id":51,"value":{"kind":"ax-get","schema":"rdog.ax.v1","target_type":"element","target_id":"pid:1234/window:0/path:7","element":{}}}
+```
+
+语义:
+
+- `target.id` 可以是 window id 或 element id.
+- semantic target 复用 `@ax-press` 的 locator 字段.
+- `depth` 表示返回目标节点以下的局部深度;实现会自动捕获足够深度以找到该 target path.
+- stale 或 ambiguous target 返回 code 64.
+
+### 4.6 `@ax-press`
 
 按短期 id 定位:
 
@@ -218,8 +280,8 @@ flowchart LR
     I -->|permission denied and ax_required true| L[Return code 77]
     J --> G
     K --> G
-    B -->|@ax-tree or @ax-press| M[SystemControlActionExecutor]
-    M --> N[AxBackend tree or press]
+    B -->|@ax-tree ax-find ax-get ax-press| M[SystemControlActionExecutor]
+    M --> N[AxBackend tree find get or press]
     N --> O[Structured @response]
 ```
 
@@ -264,6 +326,8 @@ sequenceDiagram
   - `ax_max_elements`
   - `ax_include_values`
 - 新增 `ControlCommand::AxTree`.
+- 新增 `ControlCommand::AxFind`.
+- 新增 `ControlCommand::AxGet`.
 - 新增 `ControlCommand::AxPress`.
 - 为新字段和新命令补 parser tests.
 
@@ -276,6 +340,8 @@ sequenceDiagram
 - `AxElement`
 - `AxTarget`
 - `AxTreeRequest`
+- `AxFindRequest`
+- `AxGetRequest`
 - `AxPressRequest`
 - `AxActionReport`
 - `AxBackend` trait
@@ -312,7 +378,7 @@ sequenceDiagram
 
 ### 6.5 Action dispatch
 
-- 在 `SystemControlActionExecutor` 中分发 `@ax-tree` 和 `@ax-press`.
+- 在 `SystemControlActionExecutor` 中分发 `@ax-tree`,`@ax-find`,`@ax-get` 和 `@ax-press`.
 - 成功时使用现有 structured JSON response.
 - 错误继续复用 `control_core` 的 code mapping:
   - 64: InvalidInput.
@@ -330,9 +396,11 @@ sequenceDiagram
 7. AX elements 包含 role/name/value-or-redaction/description/rect/enabled/actions.
 8. secure fields 不暴露 value.
 9. `@ax-tree` 返回 structured `@response`.
-10. `@ax-press` 能 press manifest/tree target id.
-11. ambiguous 或 stale locator 返回 code 64.
-12. 非 macOS AX commands 返回 code 78.
+10. `@ax-find` 返回紧凑 match list,支持 role/name/action 等常用筛选.
+11. `@ax-get` 能按 window/element id 返回局部树.
+12. `@ax-press` 能 press manifest/tree/find/get target id.
+13. ambiguous 或 stale locator 返回 code 64.
+14. 非 macOS AX commands 返回 code 78.
 
 ## 8. 验证命令
 
@@ -390,6 +458,6 @@ RDOG_LIVE_AX_E2E=1 RDOG_LIVE_AX_E2E_VIA_TERMINAL=1 RDOG_LIVE_AX_E2E_BINARY=/User
 
 ## 10. 后续阶段
 
-- Phase 2: `@ax-get`, `@ax-focus`.
+- Phase 2: `@ax-focus`,更多 AX action 白名单.
 - Phase 3: 谨慎加入 `@ax-set-value`.
 - Later: 当 `@ax-tree` payload 变大时,通过 `@savefile` 返回完整 tree.

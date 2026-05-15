@@ -7,9 +7,51 @@ use serde_json::json;
 use std::io;
 
 pub const AX_SCHEMA: &str = "rdog.ax.v1";
+pub const AX_WINDOWS_DEPTH: u8 = 1;
+pub const AX_WINDOWS_MAX_ELEMENTS: u16 = 80;
+pub const AX_WINDOWS_INCLUDE_VALUES: bool = false;
+pub const AX_INTERACTIVE_DEPTH: u8 = 2;
+pub const AX_INTERACTIVE_MAX_ELEMENTS: u16 = 200;
+pub const AX_INTERACTIVE_INCLUDE_VALUES: bool = false;
 pub const DEFAULT_AX_DEPTH: u8 = 4;
 pub const DEFAULT_AX_MAX_ELEMENTS: u16 = 1000;
 pub const DEFAULT_AX_INCLUDE_VALUES: bool = true;
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum AxMode {
+    Windows,
+    Interactive,
+    Full,
+}
+
+impl AxMode {
+    pub fn preset(self) -> AxModePreset {
+        match self {
+            Self::Windows => AxModePreset {
+                depth: AX_WINDOWS_DEPTH,
+                max_elements: AX_WINDOWS_MAX_ELEMENTS,
+                include_values: AX_WINDOWS_INCLUDE_VALUES,
+            },
+            Self::Interactive => AxModePreset {
+                depth: AX_INTERACTIVE_DEPTH,
+                max_elements: AX_INTERACTIVE_MAX_ELEMENTS,
+                include_values: AX_INTERACTIVE_INCLUDE_VALUES,
+            },
+            Self::Full => AxModePreset {
+                depth: DEFAULT_AX_DEPTH,
+                max_elements: DEFAULT_AX_MAX_ELEMENTS,
+                include_values: DEFAULT_AX_INCLUDE_VALUES,
+            },
+        }
+    }
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub struct AxModePreset {
+    pub depth: u8,
+    pub max_elements: u16,
+    pub include_values: bool,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AxTreeRequest {
@@ -287,6 +329,13 @@ impl AxActionReport {
     }
 }
 
+mod query;
+
+pub use query::{
+    build_ax_find_response_json, build_ax_get_response_json, parse_ax_find_payload,
+    parse_ax_get_payload, AxFindRequest, AxGetRequest,
+};
+
 pub trait AxBackend {
     fn snapshot(&self, request: &AxTreeRequest) -> io::Result<AxSnapshot>;
     fn press(&self, request: &AxPressRequest) -> io::Result<AxActionReport>;
@@ -331,6 +380,7 @@ pub fn parse_ax_tree_payload(input: &str) -> io::Result<AxTreeRequest> {
     }
 
     let mut scope = None::<AxTreeScope>;
+    let mut mode = None::<AxMode>;
     let mut depth = None::<u8>;
     let mut max_elements = None::<u16>;
     let mut include_values = None::<bool>;
@@ -346,6 +396,12 @@ pub fn parse_ax_tree_payload(input: &str) -> io::Result<AxTreeRequest> {
                 "scope",
                 "@ax-tree",
                 parse_ax_tree_scope(raw_value)?,
+            )?,
+            "mode" => assign_once(
+                &mut mode,
+                "mode",
+                "@ax-tree",
+                parse_ax_mode_payload("@ax-tree", raw_value)?,
             )?,
             "depth" => assign_once(&mut depth, "depth", "@ax-tree", parse_ax_depth(raw_value)?)?,
             "max_elements" => assign_once(
@@ -368,11 +424,12 @@ pub fn parse_ax_tree_payload(input: &str) -> io::Result<AxTreeRequest> {
         }
     }
 
+    let preset = mode.unwrap_or(AxMode::Full).preset();
     Ok(AxTreeRequest {
         scope: scope.unwrap_or(AxTreeScope::Windows),
-        depth: depth.unwrap_or(DEFAULT_AX_DEPTH),
-        max_elements: max_elements.unwrap_or(DEFAULT_AX_MAX_ELEMENTS),
-        include_values: include_values.unwrap_or(DEFAULT_AX_INCLUDE_VALUES),
+        depth: depth.unwrap_or(preset.depth),
+        max_elements: max_elements.unwrap_or(preset.max_elements),
+        include_values: include_values.unwrap_or(preset.include_values),
     })
 }
 
@@ -533,6 +590,18 @@ fn parse_ax_tree_scope(input: &str) -> io::Result<AxTreeScope> {
         "windows" => Ok(AxTreeScope::Windows),
         _ => Err(invalid_data(format!(
             "@ax-tree 当前只支持 scope=\"windows\": {scope}"
+        ))),
+    }
+}
+
+pub(crate) fn parse_ax_mode_payload(kind: &str, input: &str) -> io::Result<AxMode> {
+    let mode = parse_quoted_payload(input)?;
+    match mode.to_ascii_lowercase().as_str() {
+        "windows" | "summary" => Ok(AxMode::Windows),
+        "interactive" | "controls" => Ok(AxMode::Interactive),
+        "full" => Ok(AxMode::Full),
+        _ => Err(invalid_data(format!(
+            "{kind} 当前只支持 mode/ax_mode=\"windows\" | \"interactive\" | \"full\": {mode}"
         ))),
     }
 }
@@ -780,7 +849,7 @@ mod tests {
     fn parse_ax_tree_payload_should_validate_limits() {
         assert_eq!(
             parse_ax_tree_payload(
-                r#"{scope:"windows",depth:4,max_elements:1000,include_values:false}"#
+                r#"{scope:"windows",mode:"interactive",depth:4,max_elements:1000,include_values:false}"#
             )
             .unwrap(),
             AxTreeRequest {
@@ -792,6 +861,15 @@ mod tests {
         );
         assert!(parse_ax_tree_payload(r#"{depth:0}"#).is_err());
         assert!(parse_ax_tree_payload(r#"{max_elements:0}"#).is_err());
+        assert_eq!(
+            parse_ax_tree_payload(r#"{mode:"windows"}"#).unwrap(),
+            AxTreeRequest {
+                scope: AxTreeScope::Windows,
+                depth: AX_WINDOWS_DEPTH,
+                max_elements: AX_WINDOWS_MAX_ELEMENTS,
+                include_values: AX_WINDOWS_INCLUDE_VALUES,
+            }
+        );
     }
 
     #[test]

@@ -680,3 +680,84 @@
 
 ### 状态
 **全部完成** - Phase 2.1 live AX E2E 已验证,本地 commit 已创建,Ralph active state 已清理.
+
+
+## [2026-05-15 18:23:11] [Session ID: 019e1b72-d659-7a60-91b4-66cea3fc6ce0] [行动]: AX 轻量模式与按需查询能力
+
+### 当前目标
+- 给 `@screenshot include_ax` 增加几种面向智能体 token 控制的轻量模式.
+- 续加 `@ax-find` / `@ax-get`,让智能体先摘要查找,再按 target id 钻取局部树.
+- 更新全局 `rdog-control` skill,写清楚常见命令取舍,尤其 `ax_depth:1/2`, `ax_max_elements:80/200`, `ax_include_values:false` 的友好默认.
+
+### 约束
+- 复用现有 `rdog.ax.v1` snapshot/window/element schema,不另起一套 UI 树结构.
+- `os-logical` 坐标契约保持不变.
+- 轻量模式必须是显式 opt-in 或可预测 defaults,不能让裸 `@screenshot` 行为变重.
+- `@ax-find` / `@ax-get` 需要继续沿用当前 target id/locator 语义,避免 `@AXPress:"b"` 这种局部变量式协议.
+
+### 待办
+- [ ] 阅读现有 AX parser/provider/screenshot 接入点.
+- [ ] 设计 `ax_mode` 和 `@ax-find` / `@ax-get` payload/response 的最小 schema.
+- [ ] 实现协议解析,AX 查询/裁剪逻辑和 screenshot mode defaults.
+- [ ] 更新 specs 与 `rdog-control` skill.
+- [ ] 跑格式化,focused tests,集成编译和 diff check.
+- [ ] review diff 后做 local commit.
+
+### 状态
+**准备实现** - 先读代码确定当前单一真相源,再改协议和测试.
+
+## [2026-05-15 18:38:08] [Session ID: 019e1b72-d659-7a60-91b4-66cea3fc6ce0] [状态]: 接续 AX 轻量模式验证收口
+
+### 当前目标
+- 接续已经落地但未提交的 AX 轻量模式,`@ax-find`,`@ax-get` 改动.
+- 先复核 diff 与协议边界,确认没有混入 mouse E2E 支线文件.
+- 再运行 fresh 验证矩阵,失败则修复,通过后做 local commit.
+
+### 已收集验证
+- `cargo test --package rustdog --bin rdog -- screenshot::tests --nocapture`: 17 passed.
+- `cargo test --package rustdog --bin rdog -- control_ax:: --nocapture`: 11 passed.
+- `cargo test --package rustdog --bin rdog -- control_protocol::tests --nocapture`: 13 passed.
+- `cargo test --package rustdog --bin rdog -- control_core::tests --nocapture`: 10 passed.
+
+### 下一步
+- [x] 复核 `git diff --stat` 与关键协议实现.
+- [ ] 补跑提交前完整验证.
+- [ ] stage 仅 AX 相关文件并创建 Lore local commit.
+
+### 状态
+**目前在验证阶段** - 已收紧 `@screenshot` 只接受 `ax_mode`,下一步运行 fresh 验证矩阵.
+
+## [2026-05-15 18:45:00] [Session ID: 019e1b72-d659-7a60-91b4-66cea3fc6ce0] [文档一致性]: AX 轻量模式参考补齐
+
+### 已处理
+- `@screenshot` 只接受 `ax_mode`,不再接受容易歧义的 `mode` 别名.
+- `specs/rdog-ax-screenshot-manifest-control-plan.md` 去掉旧的 "`@ax-get` 仍是 Phase 2" 表述.
+- `/Users/cuiluming/.codex/skills/rdog-control/references/protocol.md` 补充 `ax_mode:"windows"`, `ax_mode:"interactive"`, `@ax-find`, `@ax-get`, `@ax-press` 命令取舍.
+- `/Users/cuiluming/.codex/skills/rdog-control/references/control-workflow.md` 补充 token-friendly AX workflow.
+
+### 当前验证
+- `cargo fmt -- --check`: 已通过一次.
+- focused tests 第一轮已通过.
+- `cargo test --tests --no-run`: 已通过.
+- `git diff --check`: 已通过一次.
+
+### 下一步
+- [x] 对最新文档改动再跑 fresh 验证.
+- [x] review diff 并提交.
+
+### 状态
+**准备创建 local commit** - staged 范围已复核,只包含 AX 轻量模式和按需查询相关文件.
+
+### Fresh 验证
+- `cargo fmt -- --check`: 通过.
+- `cargo test --package rustdog --bin rdog -- control_ax:: --nocapture`: 11 passed.
+- `cargo test --package rustdog --bin rdog -- control_protocol::tests --nocapture`: 13 passed.
+- `cargo test --package rustdog --bin rdog -- screenshot::tests --nocapture`: 17 passed.
+- `cargo test --tests --no-run`: 通过.
+- `cargo build --package rustdog --bin rdog`: 通过.
+- `git diff --check`: 通过.
+- `git diff --cached --check`: 通过.
+
+### 提交前复核
+- staged 文件只包含 AX 相关实现,规格和 `task_plan__ax_plan.md` / `WORKLOG__ax_plan.md`.
+- 未跟踪的 mouse E2E 支线文件保持未 stage.

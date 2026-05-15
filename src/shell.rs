@@ -1055,6 +1055,14 @@ mod tests {
                 ControlCommand::AxTree(request) => {
                     format!("AX_TREE:{}:{}\n", request.depth, request.max_elements).into_bytes()
                 }
+                ControlCommand::AxFind(request) => {
+                    format!("AX_FIND:{}\n", request.limit).into_bytes()
+                }
+                ControlCommand::AxGet(request) => format!(
+                    "AX_GET:{}\n",
+                    request.target.id.as_deref().unwrap_or("semantic")
+                )
+                .into_bytes(),
                 ControlCommand::AxPress(request) => format!(
                     "AX_PRESS:{}\n",
                     request.target.id.as_deref().unwrap_or("semantic")

@@ -322,6 +322,51 @@ fn execute_composite_screenshot_request_should_embed_ax_when_requested() {
 }
 
 #[test]
+fn execute_composite_screenshot_request_should_apply_ax_mode_defaults() {
+    let request = ScreenshotRequest {
+        include_ax: true,
+        ax_mode: crate::control_ax::AxMode::Interactive,
+        ax_depth: crate::control_ax::AX_INTERACTIVE_DEPTH,
+        ax_max_elements: crate::control_ax::AX_INTERACTIVE_MAX_ELEMENTS,
+        ax_include_values: crate::control_ax::AX_INTERACTIVE_INCLUDE_VALUES,
+        ..ScreenshotRequest::default()
+    };
+    let displays = vec![fake_display(
+        "one",
+        LogicalRect {
+            x: 0,
+            y: 0,
+            width: 1,
+            height: 1,
+        },
+        Size {
+            width: 1,
+            height: 1,
+        },
+        Rgba([0, 0, 0, 255]),
+    )];
+
+    let outcome = execute_composite_screenshot_request_with_capture_and_ax(
+        Some(1),
+        &request,
+        || Ok(displays),
+        |ax_request| {
+            assert_eq!(ax_request.depth, crate::control_ax::AX_INTERACTIVE_DEPTH);
+            assert_eq!(
+                ax_request.max_elements,
+                crate::control_ax::AX_INTERACTIVE_MAX_ELEMENTS
+            );
+            assert!(!ax_request.include_values);
+            Ok(fake_ax_snapshot())
+        },
+    )
+    .expect("screenshot should succeed");
+
+    let manifest = manifest_from_outcome(&outcome);
+    assert_eq!(manifest["accessibility"]["capture_status"], "complete");
+}
+
+#[test]
 fn execute_composite_screenshot_request_should_degrade_ax_permission_denied_when_optional() {
     let request = ScreenshotRequest {
         include_ax: true,

@@ -1,5 +1,8 @@
 use crate::{
-    control_ax::{capture_default_ax_snapshot, perform_default_ax_press},
+    control_ax::{
+        build_ax_find_response_json, build_ax_get_response_json, capture_default_ax_snapshot,
+        perform_default_ax_press,
+    },
     control_frames::{default_savefile_directory, SaveFileFrame},
     control_mouse::{
         build_click_plan, build_drag_plan, build_mouse_button_plan, build_mouse_move_plan,
@@ -112,6 +115,8 @@ impl ControlActionExecutor for SystemControlActionExecutor {
             ControlCommand::Drag(request) => execute_mouse_plan(build_drag_plan(request)?),
             ControlCommand::Wheel(request) => execute_mouse_plan(build_wheel_plan(request)?),
             ControlCommand::AxTree(request) => execute_ax_tree(request),
+            ControlCommand::AxFind(request) => execute_ax_find(request),
+            ControlCommand::AxGet(request) => execute_ax_get(request),
             ControlCommand::AxPress(request) => execute_ax_press(request),
             ControlCommand::PtyOpen(_)
             | ControlCommand::PtyClose(_)
@@ -249,6 +254,28 @@ fn execute_ax_tree(
         stdout: Vec::new(),
         stderr: Vec::new(),
         response_value_json: Some(snapshot.to_tree_value_json()?),
+    })
+}
+
+fn execute_ax_find(
+    request: &crate::control_ax::AxFindRequest,
+) -> io::Result<ActionExecutionResult> {
+    let snapshot = capture_default_ax_snapshot(&request.tree)?;
+    Ok(ActionExecutionResult {
+        exit_code: 0,
+        stdout: Vec::new(),
+        stderr: Vec::new(),
+        response_value_json: Some(build_ax_find_response_json(&snapshot, request)?),
+    })
+}
+
+fn execute_ax_get(request: &crate::control_ax::AxGetRequest) -> io::Result<ActionExecutionResult> {
+    let snapshot = capture_default_ax_snapshot(&request.tree_request())?;
+    Ok(ActionExecutionResult {
+        exit_code: 0,
+        stdout: Vec::new(),
+        stderr: Vec::new(),
+        response_value_json: Some(build_ax_get_response_json(&snapshot, request)?),
     })
 }
 

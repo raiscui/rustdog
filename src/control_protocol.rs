@@ -1,8 +1,9 @@
 use std::io;
 
 use crate::control_ax::{
-    parse_ax_press_payload, parse_ax_tree_payload, AxPressRequest, AxTreeRequest, DEFAULT_AX_DEPTH,
-    DEFAULT_AX_INCLUDE_VALUES, DEFAULT_AX_MAX_ELEMENTS,
+    parse_ax_find_payload, parse_ax_get_payload, parse_ax_mode_payload, parse_ax_press_payload,
+    parse_ax_tree_payload, AxFindRequest, AxGetRequest, AxMode, AxPressRequest, AxTreeRequest,
+    DEFAULT_AX_DEPTH, DEFAULT_AX_INCLUDE_VALUES, DEFAULT_AX_MAX_ELEMENTS,
 };
 use crate::control_frames::SaveFileFrame;
 use crate::control_mouse::{
@@ -41,6 +42,8 @@ pub enum ControlCommand {
     Drag(DragRequest),
     Wheel(WheelRequest),
     AxTree(AxTreeRequest),
+    AxFind(AxFindRequest),
+    AxGet(AxGetRequest),
     AxPress(AxPressRequest),
     SaveFile(SaveFileFrame),
 }
@@ -80,6 +83,7 @@ pub struct ScreenshotRequest {
     pub quality: u8,
     pub include_ax: bool,
     pub ax_required: bool,
+    pub ax_mode: AxMode,
     pub ax_depth: u8,
     pub ax_max_elements: u16,
     pub ax_include_values: bool,
@@ -95,6 +99,7 @@ impl Default for ScreenshotRequest {
             quality: DEFAULT_SCREENSHOT_QUALITY,
             include_ax: false,
             ax_required: false,
+            ax_mode: AxMode::Full,
             ax_depth: DEFAULT_AX_DEPTH,
             ax_max_elements: DEFAULT_AX_MAX_ELEMENTS,
             ax_include_values: DEFAULT_AX_INCLUDE_VALUES,
@@ -233,6 +238,8 @@ pub fn parse_control_line(line: &str) -> io::Result<ControlParseResult> {
         "drag" => ControlCommand::Drag(parse_drag_payload(payload)?),
         "wheel" => ControlCommand::Wheel(parse_wheel_payload(payload)?),
         "ax-tree" => ControlCommand::AxTree(parse_ax_tree_payload(payload)?),
+        "ax-find" => ControlCommand::AxFind(parse_ax_find_payload(payload)?),
+        "ax-get" => ControlCommand::AxGet(parse_ax_get_payload(payload)?),
         "ax-press" => ControlCommand::AxPress(parse_ax_press_payload(payload)?),
         "savefile" => ControlCommand::SaveFile(SaveFileFrame::parse_object_payload(payload)?),
         _ => {
@@ -736,6 +743,7 @@ fn parse_screenshot_payload(input: &str) -> io::Result<ScreenshotRequest> {
     let mut quality = None::<u8>;
     let mut include_ax = None::<bool>;
     let mut ax_required = None::<bool>;
+    let mut ax_mode = None::<AxMode>;
     let mut ax_depth = None::<u8>;
     let mut ax_max_elements = None::<u16>;
     let mut ax_include_values = None::<bool>;
@@ -818,6 +826,15 @@ fn parse_screenshot_payload(input: &str) -> io::Result<ScreenshotRequest> {
                 }
                 ax_required = Some(parse_bool_field("@screenshot", "ax_required", raw_value)?);
             }
+            "ax_mode" => {
+                if ax_mode.is_some() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "@screenshot 对象 payload 的 `ax_mode` 字段重复",
+                    ));
+                }
+                ax_mode = Some(parse_ax_mode_payload("@screenshot", raw_value)?);
+            }
             "ax_depth" => {
                 if ax_depth.is_some() {
                     return Err(io::Error::new(
@@ -867,6 +884,8 @@ fn parse_screenshot_payload(input: &str) -> io::Result<ScreenshotRequest> {
     let coordinate_space = coordinate_space.unwrap_or(ScreenshotCoordinateSpace::OsLogical);
 
     validate_screenshot_layout(display, layout)?;
+    let ax_mode = ax_mode.unwrap_or(AxMode::Full);
+    let ax_preset = ax_mode.preset();
 
     Ok(ScreenshotRequest {
         target,
@@ -876,9 +895,10 @@ fn parse_screenshot_payload(input: &str) -> io::Result<ScreenshotRequest> {
         quality: quality.unwrap_or(DEFAULT_SCREENSHOT_QUALITY),
         include_ax: include_ax.unwrap_or(false),
         ax_required: ax_required.unwrap_or(false),
-        ax_depth: ax_depth.unwrap_or(DEFAULT_AX_DEPTH),
-        ax_max_elements: ax_max_elements.unwrap_or(DEFAULT_AX_MAX_ELEMENTS),
-        ax_include_values: ax_include_values.unwrap_or(DEFAULT_AX_INCLUDE_VALUES),
+        ax_mode,
+        ax_depth: ax_depth.unwrap_or(ax_preset.depth),
+        ax_max_elements: ax_max_elements.unwrap_or(ax_preset.max_elements),
+        ax_include_values: ax_include_values.unwrap_or(ax_preset.include_values),
     })
 }
 
@@ -1392,7 +1412,7 @@ pub(crate) fn parse_quoted_payload(input: &str) -> io::Result<String> {
 mod tests {
     use super::*;
     use crate::{
-        control_ax::{AxTarget, AxTreeScope},
+        control_ax::{AxMode, AxTarget, AxTreeScope},
         control_mouse::{
             MouseButtonMode, MouseButtonName, MouseCoordinateSpace, MousePoint,
             DEFAULT_MOUSE_CLICK_HOLD_MS, DEFAULT_MOUSE_CLICK_INTERVAL_MS,
@@ -1638,6 +1658,21 @@ mod tests {
                 }),
             })
         );
+
+        assert_eq!(
+            parse_control_line(r#"@screenshot:{include_ax:true,ax_mode:"windows"}"#).unwrap(),
+            ControlParseResult::Control(ControlRequest {
+                request_id: None,
+                command: ControlCommand::Screenshot(ScreenshotRequest {
+                    include_ax: true,
+                    ax_mode: AxMode::Windows,
+                    ax_depth: crate::control_ax::AX_WINDOWS_DEPTH,
+                    ax_max_elements: crate::control_ax::AX_WINDOWS_MAX_ELEMENTS,
+                    ax_include_values: crate::control_ax::AX_WINDOWS_INCLUDE_VALUES,
+                    ..ScreenshotRequest::default()
+                }),
+            })
+        );
     }
 
     #[test]
@@ -1655,6 +1690,36 @@ mod tests {
                 }),
             })
         );
+
+        assert_eq!(
+            parse_control_line(r#"@ax-tree#4:{mode:"interactive"}"#).unwrap(),
+            ControlParseResult::Control(ControlRequest {
+                request_id: Some(4),
+                command: ControlCommand::AxTree(AxTreeRequest {
+                    scope: AxTreeScope::Windows,
+                    depth: crate::control_ax::AX_INTERACTIVE_DEPTH,
+                    max_elements: crate::control_ax::AX_INTERACTIVE_MAX_ELEMENTS,
+                    include_values: crate::control_ax::AX_INTERACTIVE_INCLUDE_VALUES,
+                }),
+            })
+        );
+
+        assert!(matches!(
+            parse_control_line(r#"@ax-find#5:{role:"AXButton",name_contains:"取消"}"#).unwrap(),
+            ControlParseResult::Control(ControlRequest {
+                request_id: Some(5),
+                command: ControlCommand::AxFind(_),
+            })
+        ));
+
+        assert!(matches!(
+            parse_control_line(r#"@ax-get#6:{target:{id:"pid:1/window:0/path:0"},depth:2}"#)
+                .unwrap(),
+            ControlParseResult::Control(ControlRequest {
+                request_id: Some(6),
+                command: ControlCommand::AxGet(_),
+            })
+        ));
 
         assert_eq!(
             parse_control_line(r#"@ax-press#2:{target:{id:"pid:1/window:0/path:0"}}"#).unwrap(),
@@ -1979,8 +2044,13 @@ mod tests {
         assert!(parse_control_line(r#"@screenshot:{include_ax:"true"}"#).is_err());
         assert!(parse_control_line(r#"@screenshot:{ax_depth:0}"#).is_err());
         assert!(parse_control_line(r#"@screenshot:{ax_max_elements:0}"#).is_err());
+        assert!(parse_control_line(r#"@screenshot:{ax_mode:"small"}"#).is_err());
+        assert!(parse_control_line(r#"@screenshot:{mode:"windows"}"#).is_err());
         assert!(parse_control_line(r#"@ax-tree:{depth:0}"#).is_err());
         assert!(parse_control_line(r#"@ax-tree:{max_elements:0}"#).is_err());
+        assert!(parse_control_line(r#"@ax-find:{limit:0,role:"AXButton"}"#).is_err());
+        assert!(parse_control_line(r#"@ax-find:{}"#).is_err());
+        assert!(parse_control_line(r#"@ax-get:{target:{}}"#).is_err());
         assert!(parse_control_line(r#"@ax-press:{target:{}}"#).is_err());
     }
 }
