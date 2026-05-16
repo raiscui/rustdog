@@ -186,6 +186,21 @@ fn render_control_action_error_response(request_id: Option<u64>, err: &io::Error
         io::ErrorKind::Unsupported => 78,
         _ => 70,
     };
+
+    if let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&err.to_string()) {
+        if let serde_json::Value::Object(object) = &mut value {
+            object
+                .entry("code".to_owned())
+                .or_insert(serde_json::Value::from(code));
+            if let Some(request_id) = request_id {
+                object.insert("id".to_owned(), serde_json::Value::from(request_id));
+            }
+            if let Ok(rendered) = serde_json::to_string(&value) {
+                return render_response_value(&rendered);
+            }
+        }
+    }
+
     render_response_error_object(request_id, code, &err.to_string())
 }
 
@@ -425,6 +440,37 @@ mod tests {
 
         assert!(response.contains(r#""code":77"#));
         assert!(response.contains("blocked by UIPI"));
+    }
+
+    #[test]
+    fn explicit_request_should_forward_structured_invalid_input_json() {
+        #[derive(Clone)]
+        struct StructuredInvalidInputExecutor;
+
+        impl ControlActionExecutor for StructuredInvalidInputExecutor {
+            fn execute(
+                &self,
+                _command: &ControlCommand,
+                _shell: &str,
+            ) -> io::Result<ActionExecutionResult> {
+                Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    r#"{"kind":"window-ambiguous","code":64,"error":"matched multiple windows","match_count":2}"#,
+                ))
+            }
+        }
+
+        let response = parse_and_execute_control_line(
+            r#"@window-close:{app:"Terminal",title_contains:"rdog"}"#,
+            "/bin/sh",
+            &StructuredInvalidInputExecutor,
+        )
+        .into_single_response_line();
+
+        assert_eq!(
+            response,
+            r#"@response {"code":64,"error":"matched multiple windows","kind":"window-ambiguous","match_count":2}"#
+        );
     }
 
     #[test]

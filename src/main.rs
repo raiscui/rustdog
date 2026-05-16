@@ -16,6 +16,7 @@ mod control_frames;
 mod control_mouse;
 mod control_protocol;
 mod control_transport;
+mod control_window;
 mod daemon;
 mod hidden_mode;
 mod input;

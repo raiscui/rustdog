@@ -9,6 +9,9 @@ use crate::{
         build_wheel_plan, perform_mouse_plan, MouseExecutionPlan,
     },
     control_protocol::{ControlCommand, KeyMode, KeyRequest},
+    control_window::{
+        execute_default_window_activate, execute_default_window_close, execute_default_window_find,
+    },
 };
 use enigo::{Direction, Enigo, Key, Keyboard, Settings};
 use std::{
@@ -118,6 +121,9 @@ impl ControlActionExecutor for SystemControlActionExecutor {
             ControlCommand::AxFind(request) => execute_ax_find(request),
             ControlCommand::AxGet(request) => execute_ax_get(request),
             ControlCommand::AxPress(request) => execute_ax_press(request),
+            ControlCommand::WindowFind(request) => execute_window_find(request),
+            ControlCommand::WindowActivate(request) => execute_window_activate(request),
+            ControlCommand::WindowClose(request) => execute_window_close(request),
             ControlCommand::PtyOpen(_)
             | ControlCommand::PtyClose(_)
             | ControlCommand::PtyDetach(_)
@@ -288,6 +294,42 @@ fn execute_ax_press(
         stdout: Vec::new(),
         stderr: Vec::new(),
         response_value_json: Some(report.to_value_json()?),
+    })
+}
+
+fn execute_window_find(
+    request: &crate::control_window::WindowFindRequest,
+) -> io::Result<ActionExecutionResult> {
+    let response = execute_default_window_find(request)?;
+    Ok(ActionExecutionResult {
+        exit_code: 0,
+        stdout: Vec::new(),
+        stderr: Vec::new(),
+        response_value_json: Some(response.to_value_json()?),
+    })
+}
+
+fn execute_window_activate(
+    request: &crate::control_window::WindowActivateRequest,
+) -> io::Result<ActionExecutionResult> {
+    let response = execute_default_window_activate(request)?;
+    Ok(ActionExecutionResult {
+        exit_code: 0,
+        stdout: Vec::new(),
+        stderr: Vec::new(),
+        response_value_json: Some(response.to_value_json()?),
+    })
+}
+
+fn execute_window_close(
+    request: &crate::control_window::WindowCloseRequest,
+) -> io::Result<ActionExecutionResult> {
+    let response = execute_default_window_close(request)?;
+    Ok(ActionExecutionResult {
+        exit_code: 0,
+        stdout: Vec::new(),
+        stderr: Vec::new(),
+        response_value_json: Some(response.to_value_json()?),
     })
 }
 

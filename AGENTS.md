@@ -116,6 +116,11 @@
   - 用途: 固定 `include_ax`、`ax_required`、`rdog.ax.v1` manifest schema、Accessibility 权限降级语义、AXPress target locator 和错误映射
   - 何时阅读: 准备实现或评审 AX screenshot manifest、`@ax-tree`、`@ax-press`、Accessibility 权限提示,或排查 AX 元素坐标/定位歧义前
 
+- `specs/rdog-window-control-plan.md`
+  - 主题: `@window-find` / `@window-activate` / `@window-close` 的窗口状态与窗口生命周期控制方案
+  - 用途: 固定截图不可见窗口的 agent 工作流、window state schema、graceful/terminate/kill 关闭边界、以及 hidden/minimized/occluded/cross-space 的诚实状态语义
+  - 何时阅读: 准备实现或评审窗口发现、窗口激活、窗口关闭、被遮挡窗口交互,或更新 `rdog-control` skill 的窗口控制指引前
+
 - `specs/bidirectional-control-plane-plan.md`
   - 主题: 控制面从单向 request/reply 升级为真正双向 control peer 的规划
   - 用途: 固定“daemon 和 control 双方都能主动发送 `@key` / `@script` / `@savefile` 等显式控制指令,Zenoh 不再停留在单向 query/reply”这一轮新的架构方向

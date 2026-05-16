@@ -11,6 +11,10 @@ use crate::control_mouse::{
     parse_wheel_payload, ClickRequest, DragRequest, MouseButtonRequest, MouseMoveRequest,
     WheelRequest,
 };
+use crate::control_window::{
+    parse_window_activate_payload, parse_window_close_payload, parse_window_find_payload,
+    WindowActivateRequest, WindowCloseRequest, WindowFindRequest,
+};
 
 /// 行级控制协议的解析结果。
 ///
@@ -45,6 +49,9 @@ pub enum ControlCommand {
     AxFind(AxFindRequest),
     AxGet(AxGetRequest),
     AxPress(AxPressRequest),
+    WindowFind(WindowFindRequest),
+    WindowActivate(WindowActivateRequest),
+    WindowClose(WindowCloseRequest),
     SaveFile(SaveFileFrame),
 }
 
@@ -241,6 +248,11 @@ pub fn parse_control_line(line: &str) -> io::Result<ControlParseResult> {
         "ax-find" => ControlCommand::AxFind(parse_ax_find_payload(payload)?),
         "ax-get" => ControlCommand::AxGet(parse_ax_get_payload(payload)?),
         "ax-press" => ControlCommand::AxPress(parse_ax_press_payload(payload)?),
+        "window-find" => ControlCommand::WindowFind(parse_window_find_payload(payload)?),
+        "window-activate" => {
+            ControlCommand::WindowActivate(parse_window_activate_payload(payload)?)
+        }
+        "window-close" => ControlCommand::WindowClose(parse_window_close_payload(payload)?),
         "savefile" => ControlCommand::SaveFile(SaveFileFrame::parse_object_payload(payload)?),
         _ => {
             return Err(io::Error::new(
@@ -1417,6 +1429,9 @@ mod tests {
             MouseButtonMode, MouseButtonName, MouseCoordinateSpace, MousePoint,
             DEFAULT_MOUSE_CLICK_HOLD_MS, DEFAULT_MOUSE_CLICK_INTERVAL_MS,
         },
+        control_window::{
+            WindowCloseStrategy, WindowCommandTarget, WindowQuery, WindowSelectPolicy,
+        },
     };
 
     #[test]
@@ -1749,6 +1764,68 @@ mod tests {
                         description: Some("关闭按钮".to_owned()),
                         ..AxTarget::default()
                     },
+                }),
+            })
+        );
+    }
+
+    #[test]
+    fn parse_should_support_window_commands() {
+        assert_eq!(
+            parse_control_line(
+                r#"@window-find#201:{app:"Terminal",title_contains:"rdog",limit:5}"#
+            )
+            .unwrap(),
+            ControlParseResult::Control(ControlRequest {
+                request_id: Some(201),
+                command: ControlCommand::WindowFind(WindowFindRequest {
+                    query: WindowQuery {
+                        app: Some("Terminal".to_owned()),
+                        title_contains: Some("rdog".to_owned()),
+                        ..WindowQuery::default()
+                    },
+                    limit: 5,
+                    include_state: true,
+                    include_recipes: true,
+                }),
+            })
+        );
+
+        assert_eq!(
+            parse_control_line(
+                r#"@window-activate:{window_id:"pid:1/window:0",recipe:"to_interact",allow_ambiguous:false,select:"frontmost"}"#
+            )
+            .unwrap(),
+            ControlParseResult::Control(ControlRequest {
+                request_id: None,
+                command: ControlCommand::WindowActivate(WindowActivateRequest {
+                    target: WindowCommandTarget {
+                        window_id: Some("pid:1/window:0".to_owned()),
+                        query: WindowQuery::default(),
+                    },
+                    recipe: Some("to_interact".to_owned()),
+                    steps: Vec::new(),
+                    allow_ambiguous: false,
+                    select: Some(WindowSelectPolicy::Frontmost),
+                }),
+            })
+        );
+
+        assert_eq!(
+            parse_control_line(
+                r#"@window-close:{window_id:"pid:1/window:0",strategy:"terminate"}"#
+            )
+            .unwrap(),
+            ControlParseResult::Control(ControlRequest {
+                request_id: None,
+                command: ControlCommand::WindowClose(WindowCloseRequest {
+                    target: WindowCommandTarget {
+                        window_id: Some("pid:1/window:0".to_owned()),
+                        query: WindowQuery::default(),
+                    },
+                    strategy: WindowCloseStrategy::Terminate,
+                    allow_ambiguous: false,
+                    select: None,
                 }),
             })
         );
