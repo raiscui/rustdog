@@ -989,7 +989,12 @@ fn match_visible_window(
             };
 
             match (has_title, has_rect) {
-                (true, true) => title_matches && rect_matches,
+                // --------------------------------------------------
+                // 对 macOS 来说, AX 的 title 和 CGWindow 的 name 并不总是同一份真相.
+                // 有些窗口会给出精确 rect, 但标题会退化成短名或局部名, 反之亦然.
+                // 所以只要同 pid 下有 title 或 rect 的真实命中, 就认为当前 Space 可见.
+                // --------------------------------------------------
+                (true, true) => title_matches || rect_matches,
                 (true, false) => title_matches,
                 (false, true) => rect_matches,
                 (false, false) => false,
@@ -1371,6 +1376,33 @@ mod tests {
             }),
         )
         .is_none());
+    }
+
+    #[test]
+    fn visible_window_match_should_accept_exact_rect_when_cg_title_differs() {
+        let visible = vec![VisibleWindowInfo {
+            pid: 7,
+            title: Some("T".to_owned()),
+            rect: Some(AxRect {
+                x: 304,
+                y: 180,
+                width: 920,
+                height: 464,
+            }),
+        }];
+
+        assert!(match_visible_window(
+            &visible,
+            7,
+            Some("rdog-window-e2e-states-49955-63775"),
+            Some(AxRect {
+                x: 304,
+                y: 180,
+                width: 920,
+                height: 464,
+            }),
+        )
+        .is_some());
     }
 
     #[test]
