@@ -1068,6 +1068,28 @@ mod tests {
                     request.target.id.as_deref().unwrap_or("semantic")
                 )
                 .into_bytes(),
+                ControlCommand::WindowFind(request) => {
+                    format!("WINDOW_FIND:{}\n", request.limit).into_bytes()
+                }
+                ControlCommand::WindowActivate(request) => format!(
+                    "WINDOW_ACTIVATE:{}\n",
+                    request
+                        .target
+                        .window_id
+                        .as_deref()
+                        .unwrap_or("query-target")
+                )
+                .into_bytes(),
+                ControlCommand::WindowClose(request) => format!(
+                    "WINDOW_CLOSE:{}:{}\n",
+                    request.strategy.as_str(),
+                    request
+                        .target
+                        .window_id
+                        .as_deref()
+                        .unwrap_or("query-target")
+                )
+                .into_bytes(),
             };
 
             Ok(ActionExecutionResult {

@@ -338,3 +338,18 @@
 
 ### 状态
 **window live E2E 稳定化已完成** - 下一步只提交本轮 window 相关文件,不纳入其他脏改动.
+
+## [2026-05-16 23:36:37] [Session ID: 019e1b72-d659-7a60-91b4-66cea3fc6ce0] [Follow-up]: 拆出 shell test executor 的窗口命令补齐
+
+### 现象
+- 当前工作树里 `src/shell.rs` 仍有未提交改动,内容是测试 fake executor 对 `ControlCommand::WindowFind/WindowActivate/WindowClose` 的 match arms.
+- 这不属于 mouse E2E,应当和 mouse 文件分开提交.
+
+### 结论
+- 该改动是 window-control 测试面补齐,用于让 shell control receiver 测试能覆盖新窗口命令并保持 fake executor match 完整.
+
+### 验证
+- `cargo test --package rustdog --bin rdog -- shell::tests --nocapture` -> 9 passed.
+
+### 状态
+**准备单独 local commit** - 只提交 `src/shell.rs` 和本条 window 支线记录.

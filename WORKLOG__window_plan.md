@@ -95,3 +95,16 @@
 - macOS 的 AX title 与 CGWindow name 不是同一个真相源,不能拿两者做强 AND 匹配.
 - live E2E 里 `window_id` 必须被当成短期 follow-up locator,状态变更后应先重新 find 再操作.
 - 测试打开真实 GUI 窗口时,清理逻辑本身就是验收的一部分,否则“测试通过”也会破坏用户桌面状态.
+
+## [2026-05-16 23:36:37] [Session ID: 019e1b72-d659-7a60-91b4-66cea3fc6ce0] 任务名称: shell fake executor 补齐窗口命令分支
+
+### 任务内容
+- 将 `src/shell.rs` 中测试 fake executor 对 `@window-find` / `@window-activate` / `@window-close` 的响应补齐.
+- 该改动从 mouse E2E 脏工作树中拆出,作为 window-control follow-up 单独提交.
+
+### 完成过程
+- 复核 diff 确认它只影响 `shell::tests` 的 fake executor,不是 mouse 控制逻辑.
+- 运行 focused shell tests 验证 control receiver 测试面仍通过.
+
+### 总结感悟
+- 新增 `ControlCommand` 变体后,测试 fake executor 也要同步补齐,否则后续 shell/control receiver 回归测试容易被新协议分支遗漏.
