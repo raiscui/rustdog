@@ -1,6 +1,6 @@
 use crate::control_protocol::{
     normalize_object_field_name, object_inner, parse_quoted_payload, split_object_field,
-    split_object_fields,
+    split_object_fields, KeyDelivery, KeyMode, KeyRequest,
 };
 use serde::Serialize;
 use serde_json::json;
@@ -122,6 +122,39 @@ pub struct AxSetValueRequest {
     pub mode: AxValueSetMode,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AxFocusRequest {
+    pub target: Option<AxTarget>,
+    pub window_id: Option<String>,
+    pub activate: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AxScrollRequest {
+    pub target: AxTarget,
+    pub direction: AxScrollDirection,
+    pub pages: u16,
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum AxScrollDirection {
+    Up,
+    Down,
+    Left,
+    Right,
+}
+
+impl AxScrollDirection {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Up => "up",
+            Self::Down => "down",
+            Self::Left => "left",
+            Self::Right => "right",
+        }
+    }
+}
+
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum AxValueSetMode {
     Replace,
@@ -149,6 +182,8 @@ pub struct TypeTextRequest {
 pub enum TypeTextMode {
     Auto,
     AxValue,
+    TargetedKeyboard,
+    Clipboard,
 }
 
 impl TypeTextMode {
@@ -156,6 +191,8 @@ impl TypeTextMode {
         match self {
             Self::Auto => "auto",
             Self::AxValue => "ax-value",
+            Self::TargetedKeyboard => "targeted-keyboard",
+            Self::Clipboard => "clipboard",
         }
     }
 }
@@ -516,6 +553,155 @@ impl TypeTextReport {
         serde_json::to_string(self)
             .map_err(|err| io::Error::other(format!("type-text response 序列化失败: {err}")))
     }
+
+    pub fn targeted_keyboard_success(
+        backend: impl Into<String>,
+        target_id: Option<String>,
+    ) -> Self {
+        Self {
+            kind: "type-text",
+            backend: backend.into(),
+            target_id,
+            mode: "targeted-keyboard",
+            delivered_via: "targeted-keyboard",
+            performed: true,
+            status: "ok",
+            used_clipboard: false,
+        }
+    }
+
+    pub fn clipboard_success(backend: impl Into<String>, target_id: Option<String>) -> Self {
+        Self {
+            kind: "type-text",
+            backend: backend.into(),
+            target_id,
+            mode: "clipboard",
+            delivered_via: "clipboard",
+            performed: true,
+            status: "ok",
+            used_clipboard: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct KeyDeliveryReport {
+    pub kind: &'static str,
+    pub backend: String,
+    pub key: String,
+    pub mode: &'static str,
+    pub delivery: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_pid: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub window_id: Option<String>,
+    pub performed: bool,
+    pub status: &'static str,
+}
+
+impl KeyDeliveryReport {
+    pub fn success(
+        backend: impl Into<String>,
+        request: &KeyRequest,
+        target_pid: Option<i32>,
+        window_id: Option<String>,
+    ) -> Self {
+        Self {
+            kind: "key",
+            backend: backend.into(),
+            key: request.key.clone(),
+            mode: key_mode_as_str(request.mode),
+            delivery: request.delivery.as_str(),
+            target_pid,
+            window_id,
+            performed: true,
+            status: "ok",
+        }
+    }
+
+    pub fn to_value_json(&self) -> io::Result<String> {
+        serde_json::to_string(self)
+            .map_err(|err| io::Error::other(format!("key response 序列化失败: {err}")))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct AxFocusReport {
+    pub kind: &'static str,
+    pub backend: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub window_id: Option<String>,
+    pub activated: bool,
+    pub performed: bool,
+    pub status: &'static str,
+}
+
+impl AxFocusReport {
+    pub fn success(
+        backend: impl Into<String>,
+        target_id: Option<String>,
+        window_id: Option<String>,
+        activated: bool,
+    ) -> Self {
+        Self {
+            kind: "ax-focus",
+            backend: backend.into(),
+            target_id,
+            window_id,
+            activated,
+            performed: true,
+            status: "ok",
+        }
+    }
+
+    pub fn to_value_json(&self) -> io::Result<String> {
+        serde_json::to_string(self)
+            .map_err(|err| io::Error::other(format!("AX focus response 序列化失败: {err}")))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct AxScrollReport {
+    pub kind: &'static str,
+    pub backend: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_id: Option<String>,
+    pub direction: &'static str,
+    pub pages: u16,
+    pub line_steps: i32,
+    pub delivered_via: &'static str,
+    pub performed: bool,
+    pub status: &'static str,
+}
+
+impl AxScrollReport {
+    pub fn success(
+        backend: impl Into<String>,
+        target_id: Option<String>,
+        direction: AxScrollDirection,
+        pages: u16,
+        line_steps: i32,
+        delivered_via: &'static str,
+    ) -> Self {
+        Self {
+            kind: "ax-scroll",
+            backend: backend.into(),
+            target_id,
+            direction: direction.as_str(),
+            pages,
+            line_steps,
+            delivered_via,
+            performed: true,
+            status: "ok",
+        }
+    }
+
+    pub fn to_value_json(&self) -> io::Result<String> {
+        serde_json::to_string(self)
+            .map_err(|err| io::Error::other(format!("AX scroll response 序列化失败: {err}")))
+    }
 }
 
 mod query;
@@ -529,6 +715,9 @@ pub trait AxBackend {
     fn snapshot(&self, request: &AxTreeRequest) -> io::Result<AxSnapshot>;
     fn perform_action(&self, request: &AxActionRequest) -> io::Result<AxPerformedActionReport>;
     fn set_value(&self, request: &AxSetValueRequest) -> io::Result<AxSetValueReport>;
+    fn focus(&self, request: &AxFocusRequest) -> io::Result<AxFocusReport>;
+    fn scroll(&self, request: &AxScrollRequest) -> io::Result<AxScrollReport>;
+    fn type_text(&self, request: &TypeTextRequest) -> io::Result<TypeTextReport>;
 }
 
 #[derive(Debug, Copy, Clone, Default)]
@@ -545,6 +734,18 @@ impl AxBackend for SystemAxBackend {
 
     fn set_value(&self, request: &AxSetValueRequest) -> io::Result<AxSetValueReport> {
         platform_set_value(request)
+    }
+
+    fn focus(&self, request: &AxFocusRequest) -> io::Result<AxFocusReport> {
+        platform_focus(request)
+    }
+
+    fn scroll(&self, request: &AxScrollRequest) -> io::Result<AxScrollReport> {
+        platform_scroll(request)
+    }
+
+    fn type_text(&self, request: &TypeTextRequest) -> io::Result<TypeTextReport> {
+        platform_type_text(request)
     }
 }
 
@@ -568,21 +769,25 @@ pub fn perform_default_ax_set_value(request: &AxSetValueRequest) -> io::Result<A
     SystemAxBackend.set_value(request)
 }
 
+pub fn perform_default_key_delivery(request: &KeyRequest) -> io::Result<Option<KeyDeliveryReport>> {
+    match request.delivery {
+        KeyDelivery::Global => Ok(None),
+        KeyDelivery::PidTargeted | KeyDelivery::WindowTargeted => {
+            platform_key_delivery(request).map(Some)
+        }
+    }
+}
+
+pub fn perform_default_ax_focus(request: &AxFocusRequest) -> io::Result<AxFocusReport> {
+    SystemAxBackend.focus(request)
+}
+
+pub fn perform_default_ax_scroll(request: &AxScrollRequest) -> io::Result<AxScrollReport> {
+    SystemAxBackend.scroll(request)
+}
+
 pub fn perform_default_type_text(request: &TypeTextRequest) -> io::Result<TypeTextReport> {
-    let set_request = AxSetValueRequest {
-        target: request.target.clone(),
-        value: request.text.clone(),
-        mode: match request.mode {
-            TypeTextMode::Auto | TypeTextMode::AxValue => AxValueSetMode::Replace,
-        },
-    };
-    let report =
-        perform_default_ax_set_value(&set_request).map_err(remap_type_text_ax_value_error)?;
-    Ok(TypeTextReport::ax_value_success(
-        report.backend,
-        report.target_id,
-        request.mode,
-    ))
+    SystemAxBackend.type_text(request)
 }
 
 pub fn current_ax_platform() -> &'static str {
@@ -776,6 +981,111 @@ pub fn parse_ax_set_value_payload(input: &str) -> io::Result<AxSetValueRequest> 
     })
 }
 
+pub fn parse_ax_focus_payload(input: &str) -> io::Result<AxFocusRequest> {
+    let inner = object_inner(input, "@ax-focus")?;
+    if inner.is_empty() {
+        return Err(invalid_data("@ax-focus 对象 payload 不能为空"));
+    }
+
+    let mut target = None::<AxTarget>;
+    let mut window_id = None::<String>;
+    let mut activate = None::<bool>;
+    for field in split_object_fields(inner)? {
+        let (field_name, raw_value) = split_object_field(field)?;
+        let field_name = normalize_object_field_name(field_name)?;
+        let raw_value = raw_value.trim();
+
+        match field_name.as_str() {
+            "target" => assign_once(
+                &mut target,
+                "target",
+                "@ax-focus",
+                parse_ax_target(raw_value)?,
+            )?,
+            "window_id" => assign_once(
+                &mut window_id,
+                "window_id",
+                "@ax-focus",
+                parse_non_empty_string("@ax-focus.window_id", raw_value)?,
+            )?,
+            "activate" => assign_once(
+                &mut activate,
+                "activate",
+                "@ax-focus",
+                parse_bool_literal("@ax-focus", "activate", raw_value)?,
+            )?,
+            _ => {
+                return Err(invalid_data(format!(
+                    "@ax-focus 对象 payload 包含未知字段: {field_name}"
+                )))
+            }
+        }
+    }
+
+    if target.is_none() && window_id.is_none() {
+        return Err(invalid_data("@ax-focus 至少需要 `target` 或 `window_id`"));
+    }
+    if target.is_some() && window_id.is_some() {
+        return Err(invalid_data(
+            "@ax-focus 不能同时携带 `target` 和 `window_id`",
+        ));
+    }
+
+    Ok(AxFocusRequest {
+        target,
+        window_id,
+        activate: activate.unwrap_or(false),
+    })
+}
+
+pub fn parse_ax_scroll_payload(input: &str) -> io::Result<AxScrollRequest> {
+    let inner = object_inner(input, "@ax-scroll")?;
+    if inner.is_empty() {
+        return Err(invalid_data("@ax-scroll 对象 payload 不能为空"));
+    }
+
+    let mut target = None::<AxTarget>;
+    let mut direction = None::<AxScrollDirection>;
+    let mut pages = None::<u16>;
+    for field in split_object_fields(inner)? {
+        let (field_name, raw_value) = split_object_field(field)?;
+        let field_name = normalize_object_field_name(field_name)?;
+        let raw_value = raw_value.trim();
+
+        match field_name.as_str() {
+            "target" => assign_once(
+                &mut target,
+                "target",
+                "@ax-scroll",
+                parse_ax_target(raw_value)?,
+            )?,
+            "direction" => assign_once(
+                &mut direction,
+                "direction",
+                "@ax-scroll",
+                parse_ax_scroll_direction(raw_value)?,
+            )?,
+            "pages" => assign_once(
+                &mut pages,
+                "pages",
+                "@ax-scroll",
+                parse_ax_scroll_pages(raw_value)?,
+            )?,
+            _ => {
+                return Err(invalid_data(format!(
+                    "@ax-scroll 对象 payload 包含未知字段: {field_name}"
+                )))
+            }
+        }
+    }
+
+    Ok(AxScrollRequest {
+        target: required_field(target, "@ax-scroll", "target")?,
+        direction: required_field(direction, "@ax-scroll", "direction")?,
+        pages: pages.unwrap_or(1),
+    })
+}
+
 pub fn parse_type_text_payload(input: &str) -> io::Result<TypeTextRequest> {
     let inner = object_inner(input, "@type-text")?;
     if inner.is_empty() {
@@ -824,17 +1134,19 @@ pub fn parse_type_text_payload(input: &str) -> io::Result<TypeTextRequest> {
         }
     }
 
-    if matches!(allow_clipboard, Some(true)) {
+    let mode = mode.unwrap_or(TypeTextMode::Auto);
+    let allow_clipboard = allow_clipboard.unwrap_or(false);
+    if matches!(mode, TypeTextMode::Clipboard) && !allow_clipboard {
         return Err(invalid_data(
-            "@type-text 当前尚未实现 allow_clipboard:true,请先显式使用 AXValue 路径",
+            "@type-text mode:\"clipboard\" 需要显式 `allow_clipboard:true`",
         ));
     }
 
     Ok(TypeTextRequest {
         target: required_field(target, "@type-text", "target")?,
         text: required_field(text, "@type-text", "text")?,
-        mode: mode.unwrap_or(TypeTextMode::Auto),
-        allow_clipboard: allow_clipboard.unwrap_or(false),
+        mode,
+        allow_clipboard,
     })
 }
 
@@ -978,10 +1290,35 @@ fn parse_type_text_mode(input: &str) -> io::Result<TypeTextMode> {
     match value.to_ascii_lowercase().as_str() {
         "auto" => Ok(TypeTextMode::Auto),
         "ax-value" | "ax_value" => Ok(TypeTextMode::AxValue),
+        "targeted-keyboard" | "targeted_keyboard" => Ok(TypeTextMode::TargetedKeyboard),
+        "clipboard" => Ok(TypeTextMode::Clipboard),
         _ => Err(invalid_data(format!(
-            "@type-text 当前只支持 mode=\"auto\" | \"ax-value\": {value}"
+            "@type-text 当前只支持 mode=\"auto\" | \"ax-value\" | \"targeted-keyboard\" | \"clipboard\": {value}"
         ))),
     }
+}
+
+fn parse_ax_scroll_direction(input: &str) -> io::Result<AxScrollDirection> {
+    let value = parse_quoted_payload(input)?;
+    match value.to_ascii_lowercase().as_str() {
+        "up" => Ok(AxScrollDirection::Up),
+        "down" => Ok(AxScrollDirection::Down),
+        "left" => Ok(AxScrollDirection::Left),
+        "right" => Ok(AxScrollDirection::Right),
+        _ => Err(invalid_data(format!(
+            "@ax-scroll 的 `direction` 只支持 \"up\" | \"down\" | \"left\" | \"right\": {value}"
+        ))),
+    }
+}
+
+fn parse_ax_scroll_pages(input: &str) -> io::Result<u16> {
+    let pages = input
+        .parse::<u16>()
+        .map_err(|_| invalid_data(format!("@ax-scroll 的 `pages` 必须是正整数: {input}")))?;
+    if pages == 0 {
+        return Err(invalid_data("@ax-scroll 的 `pages` 必须大于 0"));
+    }
+    Ok(pages)
 }
 
 fn remap_type_text_ax_value_error(err: io::Error) -> io::Error {
@@ -1000,6 +1337,33 @@ fn remap_type_text_ax_value_error(err: io::Error) -> io::Error {
             format!("type-text AXValue 路径失败: {message}"),
         ),
         _ => io::Error::other(format!("type-text AXValue 路径失败: {message}")),
+    }
+}
+
+fn remap_type_text_targeted_keyboard_error(err: io::Error) -> io::Error {
+    let message = err.to_string();
+    match err.kind() {
+        io::ErrorKind::Unsupported => io::Error::new(
+            io::ErrorKind::Unsupported,
+            "type-text 当前只支持 macOS targeted keyboard 路径",
+        ),
+        io::ErrorKind::InvalidInput => io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("type-text targeted keyboard 路径失败: {message}"),
+        ),
+        io::ErrorKind::PermissionDenied => io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!("type-text targeted keyboard 路径失败: {message}"),
+        ),
+        _ => io::Error::other(format!("type-text targeted keyboard 路径失败: {message}")),
+    }
+}
+
+fn key_mode_as_str(mode: KeyMode) -> &'static str {
+    match mode {
+        KeyMode::PressRelease => "press_release",
+        KeyMode::Press => "press",
+        KeyMode::Release => "release",
     }
 }
 
@@ -1142,6 +1506,63 @@ fn platform_set_value(_request: &AxSetValueRequest) -> io::Result<AxSetValueRepo
     Err(io::Error::new(
         io::ErrorKind::Unsupported,
         "AX set value 当前只支持 macOS",
+    ))
+}
+
+#[cfg(target_os = "macos")]
+fn platform_key_delivery(request: &KeyRequest) -> io::Result<KeyDeliveryReport> {
+    macos::deliver_key(request)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn platform_key_delivery(request: &KeyRequest) -> io::Result<KeyDeliveryReport> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        format!("key delivery {:?} 当前只支持 macOS", request.delivery),
+    ))
+}
+
+#[cfg(target_os = "macos")]
+fn platform_focus(request: &AxFocusRequest) -> io::Result<AxFocusReport> {
+    macos::focus(request)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn platform_focus(_request: &AxFocusRequest) -> io::Result<AxFocusReport> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "AX focus 当前只支持 macOS",
+    ))
+}
+
+#[cfg(target_os = "macos")]
+fn platform_scroll(request: &AxScrollRequest) -> io::Result<AxScrollReport> {
+    macos::scroll(request)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn platform_scroll(_request: &AxScrollRequest) -> io::Result<AxScrollReport> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "AX scroll 当前只支持 macOS",
+    ))
+}
+
+#[cfg(target_os = "macos")]
+fn platform_type_text(request: &TypeTextRequest) -> io::Result<TypeTextReport> {
+    macos::type_text(request)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn platform_type_text(request: &TypeTextRequest) -> io::Result<TypeTextReport> {
+    let detail = match request.mode {
+        TypeTextMode::Auto | TypeTextMode::AxValue => "macOS AXValue 路径",
+        TypeTextMode::TargetedKeyboard => "macOS targeted keyboard 路径",
+        TypeTextMode::Clipboard => "macOS clipboard 路径",
+    };
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        format!("type-text 当前只支持 {detail}"),
     ))
 }
 
@@ -1409,20 +1830,96 @@ mod tests {
                 allow_clipboard: false,
             }
         );
-        assert!(parse_type_text_payload(
-            r#"{target:{id:"pid:1/window:0/path:0"},text:"hello",mode:"targeted-keyboard"}"#
-        )
-        .is_err());
+        assert_eq!(
+            parse_type_text_payload(
+                r#"{target:{id:"pid:1/window:0/path:0"},text:"hello",mode:"targeted-keyboard"}"#
+            )
+            .unwrap(),
+            TypeTextRequest {
+                target: AxTarget {
+                    id: Some("pid:1/window:0/path:0".to_owned()),
+                    ..AxTarget::default()
+                },
+                text: "hello".to_owned(),
+                mode: TypeTextMode::TargetedKeyboard,
+                allow_clipboard: false,
+            }
+        );
         let error = parse_type_text_payload(
-            r#"{target:{id:"pid:1/window:0/path:0"},text:"hello",allow_clipboard:true}"#,
+            r#"{target:{id:"pid:1/window:0/path:0"},text:"hello",mode:"clipboard"}"#,
         )
         .unwrap_err();
         assert!(
             error
                 .to_string()
-                .contains("@type-text 当前尚未实现 allow_clipboard:true"),
+                .contains("mode:\"clipboard\" 需要显式 `allow_clipboard:true`"),
             "unexpected error: {error}"
         );
+        assert_eq!(
+            parse_type_text_payload(
+                r#"{target:{id:"pid:1/window:0/path:0"},text:"hello",mode:"clipboard",allow_clipboard:true}"#
+            )
+            .unwrap(),
+            TypeTextRequest {
+                target: AxTarget {
+                    id: Some("pid:1/window:0/path:0".to_owned()),
+                    ..AxTarget::default()
+                },
+                text: "hello".to_owned(),
+                mode: TypeTextMode::Clipboard,
+                allow_clipboard: true,
+            }
+        );
+    }
+
+    #[test]
+    fn parse_ax_focus_payload_should_accept_target_or_window_id() {
+        assert_eq!(
+            parse_ax_focus_payload(r#"{window_id:"pid:1/window:0",activate:true}"#).unwrap(),
+            AxFocusRequest {
+                target: None,
+                window_id: Some("pid:1/window:0".to_owned()),
+                activate: true,
+            }
+        );
+        assert_eq!(
+            parse_ax_focus_payload(r#"{target:{id:"pid:1/window:0/path:0"}}"#).unwrap(),
+            AxFocusRequest {
+                target: Some(AxTarget {
+                    id: Some("pid:1/window:0/path:0".to_owned()),
+                    ..AxTarget::default()
+                }),
+                window_id: None,
+                activate: false,
+            }
+        );
+        assert!(parse_ax_focus_payload(r#"{}"#).is_err());
+        assert!(parse_ax_focus_payload(
+            r#"{window_id:"pid:1/window:0",target:{id:"pid:1/window:0/path:0"}}"#
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn parse_ax_scroll_payload_should_accept_direction_and_pages() {
+        assert_eq!(
+            parse_ax_scroll_payload(
+                r#"{target:{id:"pid:1/window:0/path:0"},direction:"down",pages:2}"#
+            )
+            .unwrap(),
+            AxScrollRequest {
+                target: AxTarget {
+                    id: Some("pid:1/window:0/path:0".to_owned()),
+                    ..AxTarget::default()
+                },
+                direction: AxScrollDirection::Down,
+                pages: 2,
+            }
+        );
+        assert!(parse_ax_scroll_payload(
+            r#"{target:{id:"pid:1/window:0/path:0"},direction:"spin"}"#
+        )
+        .is_err());
     }
 
     #[test]

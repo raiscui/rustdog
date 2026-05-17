@@ -1,9 +1,10 @@
 use std::io;
 
 use crate::control_ax::{
-    parse_ax_action_payload, parse_ax_find_payload, parse_ax_get_payload, parse_ax_mode_payload,
-    parse_ax_press_payload, parse_ax_set_value_payload, parse_ax_tree_payload,
-    parse_type_text_payload, AxActionRequest, AxFindRequest, AxGetRequest, AxMode, AxPressRequest,
+    parse_ax_action_payload, parse_ax_find_payload, parse_ax_focus_payload, parse_ax_get_payload,
+    parse_ax_mode_payload, parse_ax_press_payload, parse_ax_scroll_payload,
+    parse_ax_set_value_payload, parse_ax_tree_payload, parse_type_text_payload, AxActionRequest,
+    AxFindRequest, AxFocusRequest, AxGetRequest, AxMode, AxPressRequest, AxScrollRequest,
     AxSetValueRequest, AxTreeRequest, TypeTextRequest, DEFAULT_AX_DEPTH, DEFAULT_AX_INCLUDE_VALUES,
     DEFAULT_AX_MAX_ELEMENTS,
 };
@@ -50,6 +51,8 @@ pub enum ControlCommand {
     AxTree(AxTreeRequest),
     AxFind(AxFindRequest),
     AxGet(AxGetRequest),
+    AxFocus(AxFocusRequest),
+    AxScroll(AxScrollRequest),
     AxAction(AxActionRequest),
     AxPress(AxPressRequest),
     AxSetValue(AxSetValueRequest),
@@ -73,6 +76,24 @@ pub struct KeyRequest {
     pub key: String,
     pub hold_ms: u64,
     pub mode: KeyMode,
+    pub delivery: KeyDelivery,
+    pub pid: Option<i32>,
+    pub window_id: Option<String>,
+    pub response_mode: KeyResponseMode,
+}
+
+impl KeyRequest {
+    pub fn legacy(key: impl Into<String>, hold_ms: u64, mode: KeyMode) -> Self {
+        Self {
+            key: key.into(),
+            hold_ms,
+            mode,
+            delivery: KeyDelivery::Global,
+            pid: None,
+            window_id: None,
+            response_mode: KeyResponseMode::Legacy,
+        }
+    }
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -80,6 +101,29 @@ pub enum KeyMode {
     PressRelease,
     Press,
     Release,
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum KeyDelivery {
+    Global,
+    PidTargeted,
+    WindowTargeted,
+}
+
+impl KeyDelivery {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Global => "global",
+            Self::PidTargeted => "pid-targeted",
+            Self::WindowTargeted => "window-targeted",
+        }
+    }
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum KeyResponseMode {
+    Legacy,
+    Structured,
 }
 
 /// `@screenshot` 的结构化请求。
@@ -252,6 +296,8 @@ pub fn parse_control_line(line: &str) -> io::Result<ControlParseResult> {
         "ax-tree" => ControlCommand::AxTree(parse_ax_tree_payload(payload)?),
         "ax-find" => ControlCommand::AxFind(parse_ax_find_payload(payload)?),
         "ax-get" => ControlCommand::AxGet(parse_ax_get_payload(payload)?),
+        "ax-focus" => ControlCommand::AxFocus(parse_ax_focus_payload(payload)?),
+        "ax-scroll" => ControlCommand::AxScroll(parse_ax_scroll_payload(payload)?),
         "ax-action" => ControlCommand::AxAction(parse_ax_action_payload(payload)?),
         "ax-press" => ControlCommand::AxPress(parse_ax_press_payload(payload)?),
         "ax-set-value" => ControlCommand::AxSetValue(parse_ax_set_value_payload(payload)?),
@@ -1059,6 +1105,26 @@ fn parse_bool_field(kind: &str, field_name: &str, input: &str) -> io::Result<boo
     }
 }
 
+fn parse_i32_field(kind: &str, field_name: &str, input: &str) -> io::Result<i32> {
+    input.trim().parse::<i32>().map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("{kind} 的 `{field_name}` 必须是整数: {input}"),
+        )
+    })
+}
+
+fn parse_non_empty_string(kind: &str, input: &str) -> io::Result<String> {
+    let value = parse_quoted_payload(input)?;
+    if value.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("{kind} 不能为空字符串"),
+        ));
+    }
+    Ok(value)
+}
+
 fn parse_key_payload(input: &str) -> io::Result<KeyRequest> {
     let trimmed = input.trim();
 
@@ -1078,10 +1144,8 @@ fn parse_key_payload(input: &str) -> io::Result<KeyRequest> {
 }
 
 fn default_key_request(key: String) -> io::Result<KeyRequest> {
-    require_non_empty_payload("key", key, |key| KeyRequest {
-        key,
-        hold_ms: DEFAULT_KEY_HOLD_MS,
-        mode: KeyMode::PressRelease,
+    require_non_empty_payload("key", key, |key| {
+        KeyRequest::legacy(key, DEFAULT_KEY_HOLD_MS, KeyMode::PressRelease)
     })
 }
 
@@ -1100,6 +1164,10 @@ fn parse_key_object_payload(input: &str) -> io::Result<KeyRequest> {
     let mut key = None::<String>;
     let mut hold_ms = None::<u64>;
     let mut mode = None::<KeyMode>;
+    let mut delivery = None::<KeyDelivery>;
+    let mut pid = None::<i32>;
+    let mut window_id = None::<String>;
+    let mut delivery_seen = false;
 
     if inner.is_empty() {
         return Err(io::Error::new(
@@ -1141,6 +1209,34 @@ fn parse_key_object_payload(input: &str) -> io::Result<KeyRequest> {
                 }
                 mode = Some(parse_key_mode(raw_value)?);
             }
+            "delivery" => {
+                if delivery.is_some() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "@key 对象 payload 的 `delivery` 字段重复",
+                    ));
+                }
+                delivery_seen = true;
+                delivery = Some(parse_key_delivery(raw_value)?);
+            }
+            "pid" => {
+                if pid.is_some() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "@key 对象 payload 的 `pid` 字段重复",
+                    ));
+                }
+                pid = Some(parse_i32_field("@key", "pid", raw_value)?);
+            }
+            "window_id" => {
+                if window_id.is_some() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "@key 对象 payload 的 `window_id` 字段重复",
+                    ));
+                }
+                window_id = Some(parse_non_empty_string("@key.window_id", raw_value)?);
+            }
             _ => {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
@@ -1157,11 +1253,85 @@ fn parse_key_object_payload(input: &str) -> io::Result<KeyRequest> {
         )
     })?;
 
+    let delivery = delivery.unwrap_or(KeyDelivery::Global);
+    validate_key_delivery(delivery, pid, window_id.as_deref())?;
+    let response_mode = if delivery_seen || pid.is_some() || window_id.is_some() {
+        KeyResponseMode::Structured
+    } else {
+        KeyResponseMode::Legacy
+    };
+
     default_key_request(key).map(|defaulted| KeyRequest {
         key: defaulted.key,
         hold_ms: hold_ms.unwrap_or(DEFAULT_KEY_HOLD_MS),
         mode: mode.unwrap_or(KeyMode::PressRelease),
+        delivery,
+        pid,
+        window_id,
+        response_mode,
     })
+}
+
+fn parse_key_delivery(input: &str) -> io::Result<KeyDelivery> {
+    let value = parse_quoted_payload(input)?;
+    match value.to_ascii_lowercase().as_str() {
+        "global" => Ok(KeyDelivery::Global),
+        "pid-targeted" | "pid_targeted" => Ok(KeyDelivery::PidTargeted),
+        "window-targeted" | "window_targeted" => Ok(KeyDelivery::WindowTargeted),
+        _ => Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "@key 的 `delivery` 只支持 \"global\" | \"pid-targeted\" | \"window-targeted\": {value}"
+            ),
+        )),
+    }
+}
+
+fn validate_key_delivery(
+    delivery: KeyDelivery,
+    pid: Option<i32>,
+    window_id: Option<&str>,
+) -> io::Result<()> {
+    match delivery {
+        KeyDelivery::Global => {
+            if pid.is_some() || window_id.is_some() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "@key delivery:\"global\" 不能同时携带 `pid` 或 `window_id`",
+                ));
+            }
+        }
+        KeyDelivery::PidTargeted => {
+            if pid.is_none() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "@key delivery:\"pid-targeted\" 缺少必填字段 `pid`",
+                ));
+            }
+            if window_id.is_some() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "@key delivery:\"pid-targeted\" 不能同时携带 `window_id`",
+                ));
+            }
+        }
+        KeyDelivery::WindowTargeted => {
+            if window_id.is_none() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "@key delivery:\"window-targeted\" 缺少必填字段 `window_id`",
+                ));
+            }
+            if pid.is_some() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "@key delivery:\"window-targeted\" 不能同时携带 `pid`",
+                ));
+            }
+        }
+    }
+
+    Ok(())
 }
 
 pub(crate) fn split_object_fields(input: &str) -> io::Result<Vec<&str>> {
@@ -1467,11 +1637,11 @@ mod tests {
             parse_control_line(r#"@key:"F11""#).unwrap(),
             ControlParseResult::Control(ControlRequest {
                 request_id: None,
-                command: ControlCommand::Key(KeyRequest {
-                    key: "F11".to_owned(),
-                    hold_ms: DEFAULT_KEY_HOLD_MS,
-                    mode: KeyMode::PressRelease,
-                }),
+                command: ControlCommand::Key(KeyRequest::legacy(
+                    "F11",
+                    DEFAULT_KEY_HOLD_MS,
+                    KeyMode::PressRelease,
+                )),
             })
         );
         assert_eq!(
@@ -2069,11 +2239,11 @@ mod tests {
             parse_control_line(r#"@key#7:"F11""#).unwrap(),
             ControlParseResult::Control(ControlRequest {
                 request_id: Some(7),
-                command: ControlCommand::Key(KeyRequest {
-                    key: "F11".to_owned(),
-                    hold_ms: DEFAULT_KEY_HOLD_MS,
-                    mode: KeyMode::PressRelease,
-                }),
+                command: ControlCommand::Key(KeyRequest::legacy(
+                    "F11",
+                    DEFAULT_KEY_HOLD_MS,
+                    KeyMode::PressRelease,
+                )),
             })
         );
         assert_eq!(
@@ -2130,11 +2300,11 @@ mod tests {
                 .unwrap(),
             ControlParseResult::Control(ControlRequest {
                 request_id: Some(7),
-                command: ControlCommand::Key(KeyRequest {
-                    key: "right-option".to_owned(),
-                    hold_ms: 200,
-                    mode: KeyMode::PressRelease,
-                }),
+                command: ControlCommand::Key(KeyRequest::legacy(
+                    "right-option",
+                    200,
+                    KeyMode::PressRelease,
+                )),
             })
         );
 
@@ -2142,10 +2312,45 @@ mod tests {
             parse_control_line(r#"@key:{key:"right-option"}"#).unwrap(),
             ControlParseResult::Control(ControlRequest {
                 request_id: None,
+                command: ControlCommand::Key(KeyRequest::legacy(
+                    "right-option",
+                    DEFAULT_KEY_HOLD_MS,
+                    KeyMode::PressRelease,
+                )),
+            })
+        );
+
+        assert_eq!(
+            parse_control_line(r#"@key#8:{key:"Return",delivery:"pid-targeted",pid:556}"#).unwrap(),
+            ControlParseResult::Control(ControlRequest {
+                request_id: Some(8),
                 command: ControlCommand::Key(KeyRequest {
-                    key: "right-option".to_owned(),
+                    key: "Return".to_owned(),
                     hold_ms: DEFAULT_KEY_HOLD_MS,
                     mode: KeyMode::PressRelease,
+                    delivery: KeyDelivery::PidTargeted,
+                    pid: Some(556),
+                    window_id: None,
+                    response_mode: KeyResponseMode::Structured,
+                }),
+            })
+        );
+
+        assert_eq!(
+            parse_control_line(
+                r#"@key:{key:"Cmd+W",delivery:"window-targeted",window_id:"pid:556/window:0"}"#
+            )
+            .unwrap(),
+            ControlParseResult::Control(ControlRequest {
+                request_id: None,
+                command: ControlCommand::Key(KeyRequest {
+                    key: "Cmd+W".to_owned(),
+                    hold_ms: DEFAULT_KEY_HOLD_MS,
+                    mode: KeyMode::PressRelease,
+                    delivery: KeyDelivery::WindowTargeted,
+                    pid: None,
+                    window_id: Some("pid:556/window:0".to_owned()),
+                    response_mode: KeyResponseMode::Structured,
                 }),
             })
         );

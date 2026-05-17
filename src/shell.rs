@@ -1063,6 +1063,17 @@ mod tests {
                     request.target.id.as_deref().unwrap_or("semantic")
                 )
                 .into_bytes(),
+                ControlCommand::AxFocus(request) => format!(
+                    "AX_FOCUS:{}\n",
+                    request.window_id.as_deref().unwrap_or("target")
+                )
+                .into_bytes(),
+                ControlCommand::AxScroll(request) => format!(
+                    "AX_SCROLL:{}:{}\n",
+                    request.direction.as_str(),
+                    request.pages
+                )
+                .into_bytes(),
                 ControlCommand::AxAction(request) => format!(
                     "AX_ACTION:{}:{}\n",
                     request.action.protocol_str(),
@@ -1262,11 +1273,11 @@ mod tests {
                 .lock()
                 .expect("commands lock should work")
                 .as_slice(),
-            &[ControlCommand::Key(KeyRequest {
-                key: "F11".to_owned(),
-                hold_ms: 200,
-                mode: KeyMode::PressRelease,
-            })]
+            &[ControlCommand::Key(KeyRequest::legacy(
+                "F11",
+                200,
+                KeyMode::PressRelease,
+            ))]
         );
     }
 

@@ -119,8 +119,8 @@ rustdog 首先被LLM agent 智能体使用，其次被人类使用。要以agent
   - 何时阅读: 准备实现或评审 AX screenshot manifest、`@ax-tree`、`@ax-press`、Accessibility 权限提示,或排查 AX 元素坐标/定位歧义前
 
 - `specs/rdog-non-mouse-semantic-control-plan.md`
-  - 主题: `@ax-action` / `@ax-set-value` / `@type-text` 的非鼠标语义控制协议
-  - 用途: 固定第一批“非鼠标优先”协议能力,明确 `@ax-press` 兼容映射、AXValue 写入边界和 `@type-text` 当前只走 AXValue 分支的事实
+  - 主题: `@ax-action` / `@ax-set-value` / `@type-text` / `@key delivery` / `@ax-focus` / `@ax-scroll` 的非鼠标语义控制协议
+  - 用途: 固定“非鼠标优先”协议能力,明确 `@ax-press` 兼容映射、AXValue 写入边界、`targeted-keyboard` / clipboard opt-in、`@key` 定向投递,以及 `@ax-focus activate:true` 复用 `@window-activate` 的边界
   - 何时阅读: 准备实现或评审非鼠标 GUI 控制、更新 `rdog-control` skill,或判断某个交互是否该先走 AX/value 而不是鼠标前
 
 - `specs/rdog-window-control-plan.md`

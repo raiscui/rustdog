@@ -335,11 +335,7 @@ mod tests {
         let response = execute_explicit_control_request(
             &ControlRequest {
                 request_id: Some(42),
-                command: ControlCommand::Key(KeyRequest {
-                    key: "F11".to_owned(),
-                    hold_ms: 200,
-                    mode: KeyMode::PressRelease,
-                }),
+                command: ControlCommand::Key(KeyRequest::legacy("F11", 200, KeyMode::PressRelease)),
             },
             "/bin/sh",
             &executor,
@@ -352,11 +348,11 @@ mod tests {
                 .lock()
                 .expect("commands lock should work")
                 .as_slice(),
-            &[ControlCommand::Key(KeyRequest {
-                key: "F11".to_owned(),
-                hold_ms: 200,
-                mode: KeyMode::PressRelease,
-            })]
+            &[ControlCommand::Key(KeyRequest::legacy(
+                "F11",
+                200,
+                KeyMode::PressRelease,
+            ))]
         );
     }
 
@@ -387,11 +383,11 @@ mod tests {
                 .lock()
                 .expect("commands lock should work")
                 .as_slice(),
-            &[ControlCommand::Key(KeyRequest {
-                key: "F11".to_owned(),
-                hold_ms: 200,
-                mode: KeyMode::PressRelease,
-            })]
+            &[ControlCommand::Key(KeyRequest::legacy(
+                "F11",
+                200,
+                KeyMode::PressRelease,
+            ))]
         );
     }
 
@@ -499,11 +495,7 @@ mod tests {
         let response = execute_explicit_control_request(
             &ControlRequest {
                 request_id: Some(10),
-                command: ControlCommand::Key(KeyRequest {
-                    key: "F11".to_owned(),
-                    hold_ms: 200,
-                    mode: KeyMode::PressRelease,
-                }),
+                command: ControlCommand::Key(KeyRequest::legacy("F11", 200, KeyMode::PressRelease)),
             },
             "/bin/sh",
             &StructuredExecutor,

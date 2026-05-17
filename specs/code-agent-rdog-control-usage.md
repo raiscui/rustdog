@@ -103,7 +103,7 @@ flowchart LR
 | one-shot shell | `printf READY` | `@response "READY"` | 跑简单命令,不保留 cwd |
 | 带 id shell | `@cmd#42:"printf READY"` | `@response {"id":42,"value":"READY"}` | 并行或批处理时关联结果 |
 | 显式脚本 | `@script:"git status --short"` | `@response ...` | 远端执行命令文本 |
-| 按键 | `@key#7:{key:"F11",hold_ms:200,mode:"press_release"}` | `@response {"id":7,"value":0}` | 操作远端 GUI 焦点窗口 |
+| 按键 | `@key#7:{key:"F11",hold_ms:200,mode:"press_release"}` | `@response {"id":7,"value":0}` 或 structured key report | 操作远端 GUI 焦点窗口 |
 | 粘贴 | `@paste:"hello"` | `@response 0` 或错误对象 | 向远端 GUI 输入文本 |
 | 截图 | `@screenshot#7` | image `@savefile` + manifest `@savefile` + `@response ...screenshot-bundle...` | 采集远端屏幕证据与坐标 manifest |
 | 截图 + AX | `@screenshot#8:{include_ax:true,ax_required:false}` | screenshot bundle,manifest 可含 `accessibility` | 同时采集远端屏幕和 macOS UI 结构 |
@@ -111,7 +111,9 @@ flowchart LR
 | AX action | `@ax-action#10:{target:{id:"pid:123/window:0/path:3.2"},action:"AXPress"}` | structured AX `@response` | 对按钮/菜单项执行 allowlisted AX semantic action |
 | AXPress | `@ax-press#10:{target:{id:"pid:123/window:0/path:3.2"}}` | structured AX `@response` | 对按钮/菜单项等 AX 元素执行 `AXPress` |
 | AX set value | `@ax-set-value#11:{target:{id:"pid:123/window:0/path:8.2"},value:"hello",mode:"replace"}` | structured AX `@response` | 向 settable 文本字段直接写 `AXValue` |
-| type-text | `@type-text#12:{target:{id:"pid:123/window:0/path:8.2"},text:"hello",mode:"ax-value"}` | structured AX `@response` | 用语义文本输入入口写入文本,当前只走 AXValue 路径 |
+| AX focus | `@ax-focus#12:{window_id:"pid:123/window:0",activate:true}` | structured AX `@response` | 在不默认动鼠标的前提下聚焦元素或窗口 |
+| AX scroll | `@ax-scroll#13:{target:{id:"pid:123/window:0/path:8.2"},direction:"down",pages:2}` | structured AX `@response` | 用 AX locator + targeted scroll event 滚动 |
+| type-text | `@type-text#14:{target:{id:"pid:123/window:0/path:8.2"},text:"hello",mode:"ax-value"}` | structured AX `@response` | 用语义文本输入入口写入文本,支持 AXValue / targeted keyboard / clipboard |
 | 鼠标移动 | `@mouse-move#10:{x:1200,y:540,coordinate_space:"os-logical"}` | structured mouse `@response` | 按 manifest 坐标移动远端指针 |
 | 鼠标按钮 | `@mouse-button#11:{button:"left",mode:"press"}` | structured mouse `@response` | 原始 press / release / click |
 | 点击 | `@click#12:{x:1200,y:540}` | structured mouse `@response` | 根据截图坐标点击远端桌面 |
@@ -228,12 +230,26 @@ AX rect 继续使用 `coordinate_space:"os-logical"`。
 @type-text#15:{target:{id:"pid:123/window:0/path:8.2"},text:"hello",mode:"ax-value"}
 ```
 
+如果需要非鼠标键盘投递,可以显式用:
+
+```text
+@key#16:{key:"Return",delivery:"pid-targeted",pid:556}
+@key#17:{key:"Cmd+W",delivery:"window-targeted",window_id:"pid:556/window:0"}
+@type-text#18:{target:{id:"pid:556/window:0/path:8.2"},text:"hello",mode:"targeted-keyboard"}
+@type-text#19:{target:{id:"pid:556/window:0/path:8.2"},text:"hello",mode:"clipboard",allow_clipboard:true}
+@ax-focus#20:{window_id:"pid:556/window:0",activate:true}
+@ax-scroll#21:{target:{id:"pid:556/window:0/path:10.1"},direction:"down",pages:2}
+```
+
 当前阶段:
 
-- `@type-text` 只支持 `mode:"ax-value"` 和 `mode:"auto"`。
-- `mode:"auto"` 当前仍只走 AXValue 分支。
-- 不会自动 fallback 到 keyboard 或 clipboard。
-- `allow_clipboard` 虽然已经是协议字段,但当前保持 `false` 才是安全默认。
+- `@key` 支持 `delivery:"global" | "pid-targeted" | "window-targeted"`。
+- 旧字符串 payload 和旧 object payload 继续兼容。
+- 只要 object payload 显式带 `delivery` / `pid` / `window_id`,成功响应就会切到 structured key report。
+- `@type-text mode:"auto"` 会按 `ax-value -> targeted-keyboard -> clipboard(opt-in)` 梯子尝试。
+- `mode:"clipboard"` 必须显式 `allow_clipboard:true`。
+- `@ax-focus activate:true` 是唯一允许它主动调用 `@window-activate` 的情况。
+- `@ax-scroll` 当前在 macOS 第一版真实返回 `delivered_via:"pid-scroll-event"` 和 `line_steps`,不要把它当成隐式全局 wheel。
 
 鼠标命令直接复用这个 manifest 的坐标语义:
 

@@ -1,7 +1,8 @@
 use crate::{
     control_ax::{
         build_ax_find_response_json, build_ax_get_response_json, capture_default_ax_snapshot,
-        perform_default_ax_action, perform_default_ax_press, perform_default_ax_set_value,
+        perform_default_ax_action, perform_default_ax_focus, perform_default_ax_press,
+        perform_default_ax_scroll, perform_default_ax_set_value, perform_default_key_delivery,
         perform_default_type_text,
     },
     control_frames::{default_savefile_directory, SaveFileFrame},
@@ -9,7 +10,7 @@ use crate::{
         build_click_plan, build_drag_plan, build_mouse_button_plan, build_mouse_move_plan,
         build_wheel_plan, perform_mouse_plan, MouseExecutionPlan,
     },
-    control_protocol::{ControlCommand, KeyMode, KeyRequest},
+    control_protocol::{ControlCommand, KeyMode, KeyRequest, KeyResponseMode},
     control_window::{
         execute_default_window_activate, execute_default_window_close, execute_default_window_find,
     },
@@ -121,6 +122,8 @@ impl ControlActionExecutor for SystemControlActionExecutor {
             ControlCommand::AxTree(request) => execute_ax_tree(request),
             ControlCommand::AxFind(request) => execute_ax_find(request),
             ControlCommand::AxGet(request) => execute_ax_get(request),
+            ControlCommand::AxFocus(request) => execute_ax_focus(request),
+            ControlCommand::AxScroll(request) => execute_ax_scroll(request),
             ControlCommand::AxAction(request) => execute_ax_action(request),
             ControlCommand::AxPress(request) => execute_ax_press(request),
             ControlCommand::AxSetValue(request) => execute_ax_set_value(request),
@@ -189,7 +192,19 @@ fn execute_key(
     request: &KeyRequest,
     key_input_event_sink: Option<&dyn KeyInputEventSink>,
 ) -> io::Result<ActionExecutionResult> {
-    execute_key_with_dependencies(
+    if let Some(report) = perform_default_key_delivery(request)? {
+        if let Some(key_input_event_sink) = key_input_event_sink {
+            key_input_event_sink.publish_key_event(request)?;
+        }
+        return Ok(ActionExecutionResult {
+            exit_code: 0,
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+            response_value_json: Some(report.to_value_json()?),
+        });
+    }
+
+    let mut result = execute_key_with_dependencies(
         request,
         |request| {
             let key_plan = build_key_execution_plan(request)?;
@@ -197,7 +212,19 @@ fn execute_key(
             perform_key_plan(&mut enigo, &key_plan).map_err(to_io_error)
         },
         key_input_event_sink,
-    )
+    )?;
+
+    if matches!(request.response_mode, KeyResponseMode::Structured) {
+        let report = crate::control_ax::KeyDeliveryReport::success(
+            "global-input-simulation",
+            request,
+            None,
+            None,
+        );
+        result.response_value_json = Some(report.to_value_json()?);
+    }
+
+    Ok(result)
 }
 
 fn execute_key_with_dependencies<F>(
@@ -317,6 +344,58 @@ fn execute_ax_set_value(
     request: &crate::control_ax::AxSetValueRequest,
 ) -> io::Result<ActionExecutionResult> {
     let report = perform_default_ax_set_value(request)?;
+    Ok(ActionExecutionResult {
+        exit_code: 0,
+        stdout: Vec::new(),
+        stderr: Vec::new(),
+        response_value_json: Some(report.to_value_json()?),
+    })
+}
+
+fn execute_ax_focus(
+    request: &crate::control_ax::AxFocusRequest,
+) -> io::Result<ActionExecutionResult> {
+    if request.activate {
+        let window_id = match &request.window_id {
+            Some(window_id) => Some(window_id.clone()),
+            None => request
+                .target
+                .as_ref()
+                .and_then(|target| target.id.as_ref())
+                .and_then(|target_id| target_id.split("/path:").next().map(str::to_owned)),
+        };
+        let Some(window_id) = window_id else {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "@ax-focus activate:true 目前需要 `window_id` 或可回推出 window_id 的 target.id",
+            ));
+        };
+        let activation_request = crate::control_window::WindowActivateRequest {
+            target: crate::control_window::WindowCommandTarget {
+                window_id: Some(window_id),
+                query: crate::control_window::WindowQuery::default(),
+            },
+            recipe: Some("to_interact".to_owned()),
+            steps: Vec::new(),
+            allow_ambiguous: false,
+            select: None,
+        };
+        execute_default_window_activate(&activation_request)?;
+    }
+
+    let report = perform_default_ax_focus(request)?;
+    Ok(ActionExecutionResult {
+        exit_code: 0,
+        stdout: Vec::new(),
+        stderr: Vec::new(),
+        response_value_json: Some(report.to_value_json()?),
+    })
+}
+
+fn execute_ax_scroll(
+    request: &crate::control_ax::AxScrollRequest,
+) -> io::Result<ActionExecutionResult> {
+    let report = perform_default_ax_scroll(request)?;
     Ok(ActionExecutionResult {
         exit_code: 0,
         stdout: Vec::new(),
@@ -675,11 +754,7 @@ mod tests {
         let executor = FakeExecutor::default();
         let output = executor
             .execute(
-                &ControlCommand::Key(KeyRequest {
-                    key: "F11".to_owned(),
-                    hold_ms: 200,
-                    mode: KeyMode::PressRelease,
-                }),
+                &ControlCommand::Key(KeyRequest::legacy("F11", 200, KeyMode::PressRelease)),
                 "/bin/sh",
             )
             .unwrap();
@@ -692,11 +767,11 @@ mod tests {
                 .lock()
                 .expect("fake executor lock should work")
                 .as_slice(),
-            &[ControlCommand::Key(KeyRequest {
-                key: "F11".to_owned(),
-                hold_ms: 200,
-                mode: KeyMode::PressRelease,
-            })]
+            &[ControlCommand::Key(KeyRequest::legacy(
+                "F11",
+                200,
+                KeyMode::PressRelease,
+            ))]
         );
     }
 
@@ -741,11 +816,7 @@ mod tests {
     #[test]
     fn execute_key_should_publish_event_after_successful_key_plan() {
         let sink = RecordingKeyInputEventSink::default();
-        let request = KeyRequest {
-            key: "F11".to_owned(),
-            hold_ms: 200,
-            mode: KeyMode::PressRelease,
-        };
+        let request = KeyRequest::legacy("F11", 200, KeyMode::PressRelease);
         let performed = Arc::new(AtomicBool::new(false));
         let performed_for_closure = Arc::clone(&performed);
 
@@ -776,11 +847,7 @@ mod tests {
     fn execute_key_should_not_publish_event_when_key_plan_fails() {
         let sink = RecordingKeyInputEventSink::default();
         let err = execute_key_with_dependencies(
-            &KeyRequest {
-                key: "F11".to_owned(),
-                hold_ms: 200,
-                mode: KeyMode::PressRelease,
-            },
+            &KeyRequest::legacy("F11", 200, KeyMode::PressRelease),
             |_| Err(io::Error::other("key input failed")),
             Some(&sink),
         )
@@ -797,11 +864,7 @@ mod tests {
     #[test]
     fn execute_key_should_fail_when_event_publish_fails() {
         let err = execute_key_with_dependencies(
-            &KeyRequest {
-                key: "F11".to_owned(),
-                hold_ms: 200,
-                mode: KeyMode::PressRelease,
-            },
+            &KeyRequest::legacy("F11", 200, KeyMode::PressRelease),
             |_| Ok(()),
             Some(&AlwaysFailingKeyInputEventSink),
         )
@@ -875,11 +938,11 @@ mod tests {
 
     #[test]
     fn build_key_execution_plan_should_default_to_press_release_with_hold() {
-        let plan = build_key_execution_plan(&KeyRequest {
-            key: "right-control+c".to_owned(),
-            hold_ms: 200,
-            mode: KeyMode::PressRelease,
-        })
+        let plan = build_key_execution_plan(&KeyRequest::legacy(
+            "right-control+c",
+            200,
+            KeyMode::PressRelease,
+        ))
         .unwrap();
 
         assert_eq!(
@@ -896,12 +959,9 @@ mod tests {
 
     #[test]
     fn build_key_execution_plan_should_support_press_only() {
-        let plan = build_key_execution_plan(&KeyRequest {
-            key: "right-control+c".to_owned(),
-            hold_ms: 200,
-            mode: KeyMode::Press,
-        })
-        .unwrap();
+        let plan =
+            build_key_execution_plan(&KeyRequest::legacy("right-control+c", 200, KeyMode::Press))
+                .unwrap();
 
         assert_eq!(
             plan,
@@ -914,11 +974,11 @@ mod tests {
 
     #[test]
     fn build_key_execution_plan_should_support_release_only() {
-        let plan = build_key_execution_plan(&KeyRequest {
-            key: "right-control+c".to_owned(),
-            hold_ms: 200,
-            mode: KeyMode::Release,
-        })
+        let plan = build_key_execution_plan(&KeyRequest::legacy(
+            "right-control+c",
+            200,
+            KeyMode::Release,
+        ))
         .unwrap();
 
         assert_eq!(

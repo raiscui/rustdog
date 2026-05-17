@@ -133,3 +133,106 @@
 
 ### 当前状态
 **准备本地提交** - 下一步把这轮 review fix 单独做成 local commit,然后再开 Phase 2。
+
+## [2026-05-17 11:06:25] [Session ID: 019e1b72-d659-7a60-91b4-66cea3fc6ce0] [计划]: 进入 Phase 2 非鼠标投递能力
+
+### 目标
+- 实现 `@key delivery`
+- 实现 `@ax-focus`
+- 实现 `@ax-scroll`
+- 实现 `@type-text` 的 `targeted-keyboard` / `clipboard`
+
+### 约束
+- 保持 Phase 1 真相面不回退
+- 不运行 live 鼠标测试
+- `@window-activate` 仍是唯一允许显式改变桌面可见状态的入口
+- targeted input 必须诚实报告实际 delivery,不能伪装成比真实更强的能力
+
+### 分解策略
+- [ ] Phase 2A: 扩展协议结构,为 `@key` / `@ax-focus` / `@ax-scroll` / `@type-text` 增加字段与 parser
+- [ ] Phase 2B: 落地 macOS targeted keyboard / AX focus / AX scroll / clipboard backend
+- [ ] Phase 2C: 串起 executor / fake executor / focused tests
+- [ ] Phase 2D: 同步 specs / skill / usage 文档
+
+### 当前状态
+**正在 Phase 2A** - 先扩请求结构和返回模型,再把 macOS 后端挂上去。
+
+## [2026-05-17 11:14:33] [Session ID: 019e1b72-d659-7a60-91b4-66cea3fc6ce0] [状态]: 锁定 Phase 2 第一轮实现切面
+
+### 已确认事实
+- `@key` 当前只有 `key/hold_ms/mode`,成功时仍走老的简单 `EXEC_OK` / `@response 0` 风格。
+- `TypeTextReport` 已经有 `delivered_via` 和 `used_clipboard`,适合继续承载 targeted-keyboard / clipboard 的真实投递结果。
+- `@window-activate` 已经是唯一显式窗口恢复入口,并且 `window_id` 语义已经稳定,适合给 `@key delivery:"window-targeted"` 和 `@ax-focus` 复用。
+- `src/shell.rs` / `src/control_core.rs` / `src/control_protocol.rs` 都有围绕旧 `KeyRequest` 的断言,改协议时必须同步修。
+
+### 当前主假设
+- 第一轮 Phase 2 可以先只支持 `pid` / `window_id` 定向,不必把 `app` / `bundle_id` 一次性铺开。
+- `@key` 需要保留旧字符串 payload 的老返回形态,对象 payload 只有在显式带 `delivery` / `pid` / `window_id` 时才返回结构化成功报告。
+- `@type-text` 的 `targeted-keyboard` 与 `clipboard` 更适合复用同一条 `type-text` response schema,由 `delivered_via` 区分真实路径。
+
+### 下一步
+- [ ] 先扩 `src/control_protocol.rs` / `src/control_ax.rs` 的请求结构与 parser。
+- [ ] 再落地 macOS backend,优先做不改变桌面状态的路径。
+- [ ] 最后同步 executor / fake executor / focused tests / docs。
+
+### 当前状态
+**继续 Phase 2A** - 先把协议结构做成可测形态,再进入后端实现。
+
+## [2026-05-17 12:08:33] [Session ID: 019e1b72-d659-7a60-91b4-66cea3fc6ce0] [完成]: Phase 2 非鼠标投递能力第一轮已落地
+
+### 阶段更新
+- [x] Phase 2A: 扩展协议结构,为 `@key` / `@ax-focus` / `@ax-scroll` / `@type-text` 增加字段与 parser
+- [x] Phase 2B: 落地 macOS targeted keyboard / AX focus / AX scroll / clipboard backend
+- [x] Phase 2C: 串起 executor / fake executor / focused tests
+- [x] Phase 2D: 同步 specs / skill / usage 文档
+
+### 已完成结果
+- `@key` 新增 `delivery:"global" | "pid-targeted" | "window-targeted"`。
+- `@ax-focus` 已支持 `target` / `window_id` 二选一,且 `activate:true` 时显式复用 `@window-activate`。
+- `@ax-scroll` 已支持 `direction/pages`,macOS 第一版真实回报 `delivered_via:"pid-scroll-event"`。
+- `@type-text` 已支持:
+  - `mode:"ax-value"`
+  - `mode:"targeted-keyboard"`
+  - `mode:"clipboard",allow_clipboard:true`
+  - `mode:"auto"` 梯子
+- 文档 / spec / skill / AGENTS 长期索引已同步。
+
+### 验证结果
+- `cargo fmt`
+- `cargo test --package rustdog --bin rdog -- control_ax::tests --nocapture`
+- `cargo test --package rustdog --bin rdog -- control_protocol::tests --nocapture`
+- `cargo test --package rustdog --bin rdog -- control_core::tests --nocapture`
+- `cargo test --package rustdog --bin rdog -- control_actions::tests --nocapture`
+- `cargo test --package rustdog --bin rdog --no-run`
+- `cargo build --package rustdog --bin rdog`
+- `git diff --check`
+- 以上全部通过
+
+### 当前状态
+**本轮 Phase 2 已完成** - 下一步可以 review diff,确认是否拆成本地 commit,以及是否继续做 live ignored E2E。
+
+## [2026-05-17 13:06:00] [Session ID: 019e1b72-d659-7a60-91b4-66cea3fc6ce0] [续写]: Phase 2 提交前收口
+
+### 目标
+- 只 review 本轮 Phase 2 非鼠标语义控制相关 diff。
+- 避开 worktree 中其他实验线和未完成支线文件。
+- 在 review 无阻塞问题后,做 local commit,不 push。
+
+### 待办
+- [x] 审阅 `src/control_protocol.rs` / `src/control_ax.rs` / `src/control_ax/macos.rs` / `src/control_actions.rs` / `src/control_core.rs` / `src/shell.rs` / `src/zenoh_control.rs`
+- [x] 审阅同步过的 `specs/rdog-non-mouse-semantic-control-plan.md` / `specs/code-agent-rdog-control-usage.md` / `AGENTS.md`
+- [x] 复看 focused verification 证据是否仍成立
+- [x] 只暂存本轮 Phase 2 相关文件并做 local commit
+
+### 当前状态
+**正在 review diff** - 先确认有没有需要在提交前修的小问题,再收口提交。
+
+## [2026-05-17 13:13:00] [Session ID: 019e1b72-d659-7a60-91b4-66cea3fc6ce0] [完成]: Phase 2 第一轮已本地提交
+
+### 结果
+- 已完成 local commit: `3725ce9`
+- 提交只包含本轮非鼠标语义控制相关文件。
+- 当前 worktree 剩余改动属于其他支线,未纳入本次提交。
+
+### 当前状态
+**本轮目标完成** - 下一步若继续推进,最自然的是进入 live ignored E2E 或补 `@key global structured success` 的更细单测。

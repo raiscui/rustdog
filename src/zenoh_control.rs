@@ -2076,11 +2076,7 @@ mod tests {
         let payload = render_key_input_event_payload(
             "lab",
             "mini-a.lab",
-            &KeyRequest {
-                key: "F11".to_owned(),
-                hold_ms: 200,
-                mode: KeyMode::PressRelease,
-            },
+            &KeyRequest::legacy("F11", 200, KeyMode::PressRelease),
         );
 
         assert!(payload.contains(r#""event":"key_input""#));

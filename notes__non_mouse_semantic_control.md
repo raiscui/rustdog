@@ -131,3 +131,65 @@
 ### 结论
 - 这轮修复把 Phase 1 从“主链可用”推进到“append / type-text / redaction 三个敏感点也说真话”。
 - 现在再开 Phase 2,不用继续背着 Phase 1 的协议真实性债。
+
+## [2026-05-17 11:14:33] [Session ID: 019e1b72-d659-7a60-91b4-66cea3fc6ce0] 笔记: Phase 2 第一轮实施边界
+
+### 静态证据
+- `src/control_protocol.rs`
+  - `KeyRequest` 仍只有 `key/hold_ms/mode`。
+  - `parse_key_object_payload()` 还不认识 `delivery/pid/window_id`。
+- `src/control_actions.rs`
+  - `execute_key_with_dependencies()` 成功后没有结构化 report,所以现在无法诚实回报“实际投递到了哪里”。
+- `src/control_ax.rs`
+  - `TypeTextReport` 已经有 `delivered_via/used_clipboard`,说明 type-text 新模式不需要另起 response schema。
+  - `TypeTextMode` 目前只有 `auto/ax-value`。
+- `src/control_window.rs` + `src/control_window/macos.rs`
+  - 已经稳定提供 `window_id = pid:<pid>/window:<index>` 解析与 direct lookup,可以给 Phase 2 复用。
+
+### 实施策略
+- `@key`
+  - 兼容旧字符串 payload。
+  - 只对显式 object + targeted 字段返回结构化 `kind:"key"` 报告。
+- `@ax-focus`
+  - 默认 `activate:false`。
+  - 只在请求显式写 `activate:true` 时复用现有 `@window-activate` recipe。
+- `@ax-scroll`
+  - 第一轮只做 AX action / AX value 层可解释的滚动,不偷偷回退到全局 wheel。
+- `@type-text`
+  - `auto` 先按 `ax-value -> targeted-keyboard -> clipboard(opt-in)` 梯子尝试。
+  - clipboard 必须是显式允许,并且 response 必须说明是否真的用了剪贴板。
+
+### 主要风险
+- `src/control_ax/macos.rs` 已经很大,Phase 2 实现时要尽量抽出小 helper,否则文件会继续膨胀。
+- `@key` 返回形态一旦改坏,会连带影响 shell / control_core / lane tests,需要分清“旧路径兼容”和“新路径结构化成功”两类断言。
+
+## [2026-05-17 13:10:00] [Session ID: 019e1b72-d659-7a60-91b4-66cea3fc6ce0] 笔记: Phase 2 提交前复核结论
+
+### 现象
+- 当前 worktree 里混有多个别的支线文件,不能直接整体提交。
+- 本轮 Phase 2 相关文件重新复跑后:
+  - `control_ax::tests` 13 passed
+  - `control_protocol::tests` 14 passed
+  - `control_actions::tests` 14 passed
+  - `control_core::tests` 11 passed
+  - `cargo build --package rustdog --bin rdog` 通过
+  - 针对本轮文件集合执行 `git diff --check` 通过
+
+### 复核结论
+- 当前没有发现需要在提交前继续返工的阻塞问题。
+- `@key delivery`、`@ax-focus`、`@ax-scroll`、`@type-text targeted-keyboard/clipboard` 这几条线已经满足“协议说真话”的最小提交条件。
+- 这次提交应只包含:
+  - `src/control_protocol.rs`
+  - `src/control_ax.rs`
+  - `src/control_ax/macos.rs`
+  - `src/control_actions.rs`
+  - `src/control_core.rs`
+  - `src/shell.rs`
+  - `src/zenoh_control.rs`
+  - `specs/rdog-non-mouse-semantic-control-plan.md`
+  - `specs/code-agent-rdog-control-usage.md`
+  - `AGENTS.md`
+  - 本支线 context 文件
+
+### 剩余风险
+- `src/control_ax/macos.rs` 继续膨胀的问题没有在这次提交里处理,后续如果继续做 live E2E 或再扩能力,最好优先拆 helper。

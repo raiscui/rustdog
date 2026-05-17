@@ -1,9 +1,13 @@
 use super::*;
+use crate::control_protocol::{KeyResponseMode, DEFAULT_KEY_HOLD_MS};
 use std::{
     collections::BTreeMap,
     ffi::CString,
+    io::{self, Write},
     os::raw::{c_char, c_int, c_void},
-    ptr,
+    process::{Command, Stdio},
+    ptr, thread,
+    time::Duration,
 };
 
 type Boolean = u8;
@@ -18,6 +22,10 @@ type CFBooleanRef = CFTypeRef;
 type AXUIElementRef = CFTypeRef;
 type AXValueRef = CFTypeRef;
 type AXError = i32;
+type CGEventSourceRef = CFTypeRef;
+type CGEventRef = CFTypeRef;
+type CGKeyCode = u16;
+type UniChar = u16;
 
 const UTF8: u32 = 0x0800_0100;
 const CF_NUMBER_SINT32: i32 = 3;
@@ -34,6 +42,30 @@ const AX_VALUE_CG_POINT: u32 = 1;
 const AX_VALUE_CG_SIZE: u32 = 2;
 const CG_WINDOW_ON_SCREEN_ONLY: u32 = 1 << 0;
 const CG_WINDOW_EXCLUDE_DESKTOP: u32 = 1 << 4;
+const CG_EVENT_SOURCE_STATE_COMBINED_SESSION: i32 = 0;
+const CG_SCROLL_EVENT_UNIT_LINE: u32 = 1;
+const KEYCODE_BACKSPACE: u16 = 0x33;
+const KEYCODE_TAB: u16 = 0x30;
+const KEYCODE_RETURN: u16 = 0x24;
+const KEYCODE_ESCAPE: u16 = 0x35;
+const KEYCODE_SPACE: u16 = 0x31;
+const KEYCODE_FORWARD_DELETE: u16 = 0x75;
+const KEYCODE_HOME: u16 = 0x73;
+const KEYCODE_END: u16 = 0x77;
+const KEYCODE_PAGE_UP: u16 = 0x74;
+const KEYCODE_PAGE_DOWN: u16 = 0x79;
+const KEYCODE_LEFT_ARROW: u16 = 0x7B;
+const KEYCODE_RIGHT_ARROW: u16 = 0x7C;
+const KEYCODE_DOWN_ARROW: u16 = 0x7D;
+const KEYCODE_UP_ARROW: u16 = 0x7E;
+const KEYCODE_LEFT_COMMAND: u16 = 0x37;
+const KEYCODE_RIGHT_COMMAND: u16 = 0x36;
+const KEYCODE_LEFT_SHIFT: u16 = 0x38;
+const KEYCODE_RIGHT_SHIFT: u16 = 0x3C;
+const KEYCODE_LEFT_OPTION: u16 = 0x3A;
+const KEYCODE_RIGHT_OPTION: u16 = 0x3D;
+const KEYCODE_LEFT_CONTROL: u16 = 0x3B;
+const KEYCODE_RIGHT_CONTROL: u16 = 0x3E;
 
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
@@ -58,6 +90,7 @@ struct CGRect {
 
 #[link(name = "ApplicationServices", kind = "framework")]
 extern "C" {
+    static kCFBooleanTrue: CFBooleanRef;
     static kCGWindowBounds: CFStringRef;
     static kCGWindowLayer: CFStringRef;
     static kCGWindowName: CFStringRef;
@@ -107,6 +140,25 @@ extern "C" {
         encoding: u32,
     ) -> Boolean;
     fn CFStringGetTypeID() -> CFTypeID;
+    fn CGEventSourceCreate(state_id: i32) -> CGEventSourceRef;
+    fn CGEventCreateKeyboardEvent(
+        source: CGEventSourceRef,
+        virtual_key: CGKeyCode,
+        key_down: bool,
+    ) -> CGEventRef;
+    fn CGEventKeyboardSetUnicodeString(
+        event: CGEventRef,
+        string_length: usize,
+        unicode_string: *const UniChar,
+    );
+    fn CGEventCreateScrollWheelEvent(
+        source: CGEventSourceRef,
+        units: u32,
+        wheel_count: u32,
+        wheel1: i32,
+        ...
+    ) -> CGEventRef;
+    fn CGEventPostToPid(pid: c_int, event: CGEventRef);
     fn CGRectMakeWithDictionaryRepresentation(dict: CFDictionaryRef, rect: *mut CGRect) -> bool;
     fn CGWindowListCopyWindowInfo(option: u32, relative_to_window: u32) -> CFArrayRef;
 }
@@ -240,6 +292,189 @@ pub(super) fn set_value(request: &AxSetValueRequest) -> io::Result<AxSetValueRep
         request.mode,
         value_redacted,
         value_redacted,
+    ))
+}
+
+pub(super) fn deliver_key(request: &KeyRequest) -> io::Result<KeyDeliveryReport> {
+    ensure_trusted()?;
+
+    let (target_pid, window_id) = match request.delivery {
+        KeyDelivery::Global => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "global @key 不应走 macOS targeted delivery 后端",
+            ))
+        }
+        KeyDelivery::PidTargeted => (
+            request
+                .pid
+                .ok_or_else(|| invalid_input("@key pid-targeted 缺少 pid"))?,
+            None,
+        ),
+        KeyDelivery::WindowTargeted => {
+            let window_id = request
+                .window_id
+                .clone()
+                .ok_or_else(|| invalid_input("@key window-targeted 缺少 window_id"))?;
+            let window_ref = retain_target_element(&window_id)?;
+            focus_window_element(window_ref.as_ptr())?;
+            let parsed = parse_target_id(&window_id)?;
+            (parsed.pid, Some(window_id))
+        }
+    };
+
+    post_key_request_to_pid(target_pid, request)?;
+    Ok(KeyDeliveryReport::success(
+        "macos-cg-event-post-to-pid",
+        request,
+        Some(target_pid),
+        window_id,
+    ))
+}
+
+pub(super) fn focus(request: &AxFocusRequest) -> io::Result<AxFocusReport> {
+    ensure_trusted()?;
+
+    if let Some(window_id) = &request.window_id {
+        let window_ref = retain_target_element(window_id)?;
+        focus_window_element(window_ref.as_ptr())?;
+        return Ok(AxFocusReport::success(
+            "macos-accessibility",
+            None,
+            Some(window_id.clone()),
+            request.activate,
+        ));
+    }
+
+    let target = request
+        .target
+        .as_ref()
+        .ok_or_else(|| invalid_input("@ax-focus 缺少 target"))?;
+    let target_id = resolve_live_target_id(target)?;
+    let target_ref = retain_target_element(&target_id)?;
+    let parsed = parse_target_id(&target_id)?;
+    if parsed.path.is_empty() {
+        focus_window_element(target_ref.as_ptr())?;
+        return Ok(AxFocusReport::success(
+            "macos-accessibility",
+            None,
+            Some(target_id),
+            request.activate,
+        ));
+    }
+
+    focus_element(target_ref.as_ptr())?;
+    Ok(AxFocusReport::success(
+        "macos-accessibility",
+        Some(target_id),
+        None,
+        request.activate,
+    ))
+}
+
+pub(super) fn scroll(request: &AxScrollRequest) -> io::Result<AxScrollReport> {
+    ensure_trusted()?;
+
+    let target_id = resolve_live_target_id(&request.target)?;
+    prepare_text_target(&target_id)?;
+    let parsed = parse_target_id(&target_id)?;
+    let line_steps = scroll_line_steps(request.direction, request.pages);
+    post_scroll_to_pid(parsed.pid, request.direction, line_steps)?;
+
+    Ok(AxScrollReport::success(
+        "macos-cg-event-post-to-pid",
+        Some(target_id),
+        request.direction,
+        request.pages,
+        line_steps,
+        "pid-scroll-event",
+    ))
+}
+
+pub(super) fn type_text(request: &TypeTextRequest) -> io::Result<TypeTextReport> {
+    ensure_trusted()?;
+
+    match request.mode {
+        TypeTextMode::AxValue => type_text_via_ax_value(request),
+        TypeTextMode::TargetedKeyboard => type_text_via_targeted_keyboard(request),
+        TypeTextMode::Clipboard => type_text_via_clipboard(request),
+        TypeTextMode::Auto => match type_text_via_ax_value(request) {
+            Ok(report) => Ok(report),
+            Err(ax_err)
+                if matches!(
+                    ax_err.kind(),
+                    io::ErrorKind::InvalidInput | io::ErrorKind::Unsupported
+                ) =>
+            {
+                match type_text_via_targeted_keyboard(request) {
+                    Ok(report) => Ok(report),
+                    Err(keyboard_err)
+                        if request.allow_clipboard
+                            && matches!(
+                                keyboard_err.kind(),
+                                io::ErrorKind::InvalidInput | io::ErrorKind::Unsupported
+                            ) =>
+                    {
+                        type_text_via_clipboard(request)
+                    }
+                    Err(keyboard_err) => Err(remap_type_text_targeted_keyboard_error(keyboard_err)),
+                }
+            }
+            Err(ax_err) => Err(remap_type_text_ax_value_error(ax_err)),
+        },
+    }
+}
+
+fn type_text_via_ax_value(request: &TypeTextRequest) -> io::Result<TypeTextReport> {
+    let set_request = AxSetValueRequest {
+        target: request.target.clone(),
+        value: request.text.clone(),
+        mode: AxValueSetMode::Replace,
+    };
+    let report = set_value(&set_request).map_err(remap_type_text_ax_value_error)?;
+    Ok(TypeTextReport::ax_value_success(
+        report.backend,
+        report.target_id,
+        request.mode,
+    ))
+}
+
+fn type_text_via_targeted_keyboard(request: &TypeTextRequest) -> io::Result<TypeTextReport> {
+    let target_id = resolve_live_target_id(&request.target)?;
+    prepare_text_target(&target_id)?;
+    let parsed = parse_target_id(&target_id)?;
+    post_unicode_text_to_pid(parsed.pid, &request.text)?;
+    Ok(TypeTextReport::targeted_keyboard_success(
+        "macos-cg-event-post-to-pid",
+        Some(target_id),
+    ))
+}
+
+fn type_text_via_clipboard(request: &TypeTextRequest) -> io::Result<TypeTextReport> {
+    if !request.allow_clipboard {
+        return Err(invalid_input(
+            "type-text clipboard 路径需要显式 `allow_clipboard:true`",
+        ));
+    }
+
+    let target_id = resolve_live_target_id(&request.target)?;
+    prepare_text_target(&target_id)?;
+    let parsed = parse_target_id(&target_id)?;
+    with_temporary_clipboard_text(&request.text, || {
+        let paste_request = KeyRequest {
+            key: "cmd+v".to_owned(),
+            hold_ms: DEFAULT_KEY_HOLD_MS,
+            mode: KeyMode::PressRelease,
+            delivery: KeyDelivery::PidTargeted,
+            pid: Some(parsed.pid),
+            window_id: None,
+            response_mode: KeyResponseMode::Structured,
+        };
+        post_key_request_to_pid(parsed.pid, &paste_request)
+    })?;
+    Ok(TypeTextReport::clipboard_success(
+        "macos-clipboard+cg-event-post-to-pid",
+        Some(target_id),
     ))
 }
 
@@ -552,6 +787,348 @@ fn set_ax_value_string(element: AXUIElementRef, value: &str) -> io::Result<()> {
             map_ax_set_value_error(AXUIElementSetAttributeValue(element, attribute, cf_value))
         })
     })
+}
+
+fn prepare_text_target(target_id: &str) -> io::Result<()> {
+    let target_ref = retain_target_element(target_id)?;
+    let parsed = parse_target_id(target_id)?;
+    if parsed.path.is_empty() {
+        focus_window_element(target_ref.as_ptr())
+    } else {
+        focus_element(target_ref.as_ptr())
+    }
+}
+
+fn focus_element(element: AXUIElementRef) -> io::Result<()> {
+    set_bool_attribute(element, "AXFocused", true).map_err(|err| {
+        if err.kind() == io::ErrorKind::InvalidInput {
+            invalid_input(format!("目标 AX 元素无法获得焦点: {err}"))
+        } else {
+            err
+        }
+    })
+}
+
+fn focus_window_element(window_ref: AXUIElementRef) -> io::Result<()> {
+    let mut focused = false;
+    match set_bool_attribute(window_ref, "AXMain", true) {
+        Ok(()) => focused = true,
+        Err(err) if err.kind() == io::ErrorKind::InvalidInput => {}
+        Err(err) => return Err(err),
+    }
+    match set_bool_attribute(window_ref, "AXFocused", true) {
+        Ok(()) => focused = true,
+        Err(err) if err.kind() == io::ErrorKind::InvalidInput => {}
+        Err(err) => return Err(err),
+    }
+
+    if focused {
+        Ok(())
+    } else {
+        Err(invalid_input(
+            "目标窗口不支持 AXMain/AXFocused,无法在不激活桌面的前提下聚焦",
+        ))
+    }
+}
+
+fn set_bool_attribute(element: AXUIElementRef, attr: &str, value: bool) -> io::Result<()> {
+    with_cf_string(attr, |attribute| unsafe {
+        let bool_ref = if value { kCFBooleanTrue } else { ptr::null() };
+        map_ax_bool_set_error(
+            attr,
+            AXUIElementSetAttributeValue(element, attribute, bool_ref),
+        )
+    })
+}
+
+fn post_key_request_to_pid(pid: i32, request: &KeyRequest) -> io::Result<()> {
+    let chord = parse_mac_key_chord(&request.key, request.delivery)?;
+    match request.mode {
+        KeyMode::PressRelease => {
+            for modifier in &chord.modifiers {
+                post_key_event_to_pid(pid, *modifier, true, None)?;
+            }
+            post_main_key_event_to_pid(pid, &chord.main, true)?;
+            if request.hold_ms > 0 {
+                thread::sleep(Duration::from_millis(request.hold_ms));
+            }
+            post_main_key_event_to_pid(pid, &chord.main, false)?;
+            for modifier in chord.modifiers.iter().rev() {
+                post_key_event_to_pid(pid, *modifier, false, None)?;
+            }
+        }
+        KeyMode::Press => {
+            for modifier in &chord.modifiers {
+                post_key_event_to_pid(pid, *modifier, true, None)?;
+            }
+            post_main_key_event_to_pid(pid, &chord.main, true)?;
+        }
+        KeyMode::Release => {
+            post_main_key_event_to_pid(pid, &chord.main, false)?;
+            for modifier in chord.modifiers.iter().rev() {
+                post_key_event_to_pid(pid, *modifier, false, None)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn post_unicode_text_to_pid(pid: i32, text: &str) -> io::Result<()> {
+    if text.is_empty() {
+        return Ok(());
+    }
+    let unicode = text.encode_utf16().collect::<Vec<_>>();
+    post_key_event_to_pid(pid, 0, true, Some(&unicode))?;
+    post_key_event_to_pid(pid, 0, false, Some(&unicode))?;
+    Ok(())
+}
+
+fn post_scroll_to_pid(pid: i32, direction: AxScrollDirection, line_steps: i32) -> io::Result<()> {
+    let source = create_event_source()?;
+    let (wheel1, wheel2) = match direction {
+        AxScrollDirection::Up => (line_steps.abs(), 0),
+        AxScrollDirection::Down => (-line_steps.abs(), 0),
+        AxScrollDirection::Left => (0, -line_steps.abs()),
+        AxScrollDirection::Right => (0, line_steps.abs()),
+    };
+    let event = unsafe {
+        CfOwned::new(CGEventCreateScrollWheelEvent(
+            source.as_ptr(),
+            CG_SCROLL_EVENT_UNIT_LINE,
+            2,
+            wheel1,
+            wheel2,
+        ))
+    }
+    .ok_or_else(|| io::Error::other("创建 macOS scroll CGEvent 失败"))?;
+    unsafe {
+        CGEventPostToPid(pid, event.as_ptr());
+    }
+    Ok(())
+}
+
+fn with_temporary_clipboard_text(
+    text: &str,
+    run: impl FnOnce() -> io::Result<()>,
+) -> io::Result<()> {
+    let previous = Command::new("pbpaste")
+        .output()
+        .map_err(|err| io::Error::other(format!("读取系统剪贴板失败: {err}")))?;
+    write_clipboard_text(text)?;
+    let run_result = run();
+    let restore_result = write_clipboard_bytes(&previous.stdout);
+    run_result?;
+    restore_result?;
+    Ok(())
+}
+
+fn write_clipboard_text(text: &str) -> io::Result<()> {
+    write_clipboard_bytes(text.as_bytes())
+}
+
+fn write_clipboard_bytes(bytes: &[u8]) -> io::Result<()> {
+    let mut child = Command::new("pbcopy")
+        .stdin(Stdio::piped())
+        .spawn()
+        .map_err(|err| io::Error::other(format!("写入系统剪贴板失败: {err}")))?;
+    if let Some(stdin) = child.stdin.as_mut() {
+        stdin
+            .write_all(bytes)
+            .map_err(|err| io::Error::other(format!("写入系统剪贴板失败: {err}")))?;
+    }
+    let status = child
+        .wait()
+        .map_err(|err| io::Error::other(format!("等待 pbcopy 结束失败: {err}")))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(io::Error::other(format!("pbcopy 退出失败: {status}")))
+    }
+}
+
+fn scroll_line_steps(_direction: AxScrollDirection, pages: u16) -> i32 {
+    i32::from(pages) * 10
+}
+
+#[derive(Debug, Clone)]
+struct MacKeyChord {
+    modifiers: Vec<CGKeyCode>,
+    main: MacKeyMain,
+}
+
+#[derive(Debug, Clone)]
+enum MacKeyMain {
+    KeyCode(CGKeyCode),
+    Unicode(Vec<UniChar>),
+}
+
+fn parse_mac_key_chord(key: &str, delivery: KeyDelivery) -> io::Result<MacKeyChord> {
+    let mut tokens = key
+        .split('+')
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+        .collect::<Vec<_>>();
+    let Some(main) = tokens.pop() else {
+        return Err(invalid_input("@key payload 不能为空"));
+    };
+
+    let mut modifiers = Vec::new();
+    for token in tokens {
+        modifiers.push(mac_modifier_keycode(token)?);
+    }
+
+    let main = mac_main_key(main, !modifiers.is_empty(), delivery)?;
+    Ok(MacKeyChord { modifiers, main })
+}
+
+fn mac_modifier_keycode(token: &str) -> io::Result<CGKeyCode> {
+    match token.to_ascii_lowercase().as_str() {
+        "ctrl" | "control" => Ok(KEYCODE_LEFT_CONTROL),
+        "left-ctrl" | "left-control" | "lctrl" | "lcontrol" => Ok(KEYCODE_LEFT_CONTROL),
+        "right-ctrl" | "right-control" | "rctrl" | "rcontrol" => Ok(KEYCODE_RIGHT_CONTROL),
+        "shift" | "left-shift" | "lshift" => Ok(KEYCODE_LEFT_SHIFT),
+        "right-shift" | "rshift" => Ok(KEYCODE_RIGHT_SHIFT),
+        "cmd" | "command" | "meta" | "super" => Ok(KEYCODE_LEFT_COMMAND),
+        "left-cmd" | "left-command" | "left-meta" | "left-super" => Ok(KEYCODE_LEFT_COMMAND),
+        "right-cmd" | "right-command" | "right-meta" | "right-super" => Ok(KEYCODE_RIGHT_COMMAND),
+        "alt" | "option" | "left-alt" | "left-option" => Ok(KEYCODE_LEFT_OPTION),
+        "right-alt" | "right-option" => Ok(KEYCODE_RIGHT_OPTION),
+        _ => Err(invalid_input(format!(
+            "macOS targeted @key 不支持的修饰键: {token}"
+        ))),
+    }
+}
+
+fn mac_main_key(token: &str, has_modifiers: bool, delivery: KeyDelivery) -> io::Result<MacKeyMain> {
+    if let Some(keycode) = mac_named_keycode(token) {
+        return Ok(MacKeyMain::KeyCode(keycode));
+    }
+    if token.chars().count() == 1 {
+        let ch = token.chars().next().expect("single char should exist");
+        if let Some(keycode) = mac_ascii_keycode(ch) {
+            return Ok(MacKeyMain::KeyCode(keycode));
+        }
+        if !has_modifiers {
+            return Ok(MacKeyMain::Unicode(ch.encode_utf16(&mut [0; 2]).to_vec()));
+        }
+    }
+    Err(invalid_input(format!(
+        "macOS {:?} 当前只支持 ASCII 字母/数字/空格、常见 named keys 和常见修饰键组合: {token}",
+        delivery
+    )))
+}
+
+fn mac_named_keycode(token: &str) -> Option<CGKeyCode> {
+    match token.to_ascii_lowercase().as_str() {
+        "f1" => Some(0x7A),
+        "f2" => Some(0x78),
+        "f3" => Some(0x63),
+        "f4" => Some(0x76),
+        "f5" => Some(0x60),
+        "f6" => Some(0x61),
+        "f7" => Some(0x62),
+        "f8" => Some(0x64),
+        "f9" => Some(0x65),
+        "f10" => Some(0x6D),
+        "f11" => Some(0x67),
+        "f12" => Some(0x6F),
+        "enter" | "return" => Some(KEYCODE_RETURN),
+        "tab" => Some(KEYCODE_TAB),
+        "space" => Some(KEYCODE_SPACE),
+        "esc" | "escape" => Some(KEYCODE_ESCAPE),
+        "backspace" => Some(KEYCODE_BACKSPACE),
+        "delete" => Some(KEYCODE_FORWARD_DELETE),
+        "home" => Some(KEYCODE_HOME),
+        "end" => Some(KEYCODE_END),
+        "pageup" => Some(KEYCODE_PAGE_UP),
+        "pagedown" => Some(KEYCODE_PAGE_DOWN),
+        "up" => Some(KEYCODE_UP_ARROW),
+        "down" => Some(KEYCODE_DOWN_ARROW),
+        "left" => Some(KEYCODE_LEFT_ARROW),
+        "right" => Some(KEYCODE_RIGHT_ARROW),
+        _ => None,
+    }
+}
+
+fn mac_ascii_keycode(ch: char) -> Option<CGKeyCode> {
+    match ch.to_ascii_lowercase() {
+        'a' => Some(0x00),
+        'b' => Some(0x0B),
+        'c' => Some(0x08),
+        'd' => Some(0x02),
+        'e' => Some(0x0E),
+        'f' => Some(0x03),
+        'g' => Some(0x05),
+        'h' => Some(0x04),
+        'i' => Some(0x22),
+        'j' => Some(0x26),
+        'k' => Some(0x28),
+        'l' => Some(0x25),
+        'm' => Some(0x2E),
+        'n' => Some(0x2D),
+        'o' => Some(0x1F),
+        'p' => Some(0x23),
+        'q' => Some(0x0C),
+        'r' => Some(0x0F),
+        's' => Some(0x01),
+        't' => Some(0x11),
+        'u' => Some(0x20),
+        'v' => Some(0x09),
+        'w' => Some(0x0D),
+        'x' => Some(0x07),
+        'y' => Some(0x10),
+        'z' => Some(0x06),
+        '0' => Some(0x1D),
+        '1' => Some(0x12),
+        '2' => Some(0x13),
+        '3' => Some(0x14),
+        '4' => Some(0x15),
+        '5' => Some(0x17),
+        '6' => Some(0x16),
+        '7' => Some(0x1A),
+        '8' => Some(0x1C),
+        '9' => Some(0x19),
+        ' ' => Some(KEYCODE_SPACE),
+        _ => None,
+    }
+}
+
+fn post_main_key_event_to_pid(pid: i32, main: &MacKeyMain, key_down: bool) -> io::Result<()> {
+    match main {
+        MacKeyMain::KeyCode(keycode) => post_key_event_to_pid(pid, *keycode, key_down, None),
+        MacKeyMain::Unicode(text) => post_key_event_to_pid(pid, 0, key_down, Some(text)),
+    }
+}
+
+fn post_key_event_to_pid(
+    pid: i32,
+    keycode: CGKeyCode,
+    key_down: bool,
+    unicode: Option<&[UniChar]>,
+) -> io::Result<()> {
+    let source = create_event_source()?;
+    let event = unsafe {
+        CfOwned::new(CGEventCreateKeyboardEvent(
+            source.as_ptr(),
+            keycode,
+            key_down,
+        ))
+    }
+    .ok_or_else(|| io::Error::other("创建 macOS keyboard CGEvent 失败"))?;
+    if let Some(unicode) = unicode {
+        unsafe {
+            CGEventKeyboardSetUnicodeString(event.as_ptr(), unicode.len(), unicode.as_ptr());
+        }
+    }
+    unsafe {
+        CGEventPostToPid(pid, event.as_ptr());
+    }
+    Ok(())
+}
+
+fn create_event_source() -> io::Result<CfOwned> {
+    unsafe { CfOwned::new(CGEventSourceCreate(CG_EVENT_SOURCE_STATE_COMBINED_SESSION)) }
+        .ok_or_else(|| io::Error::other("创建 macOS CGEventSource 失败"))
 }
 
 #[derive(Debug)]
@@ -891,6 +1468,23 @@ unsafe fn map_ax_set_value_error(error: AXError) -> io::Result<()> {
         }
         code => Err(io::Error::other(format!(
             "写入 AXValue 失败: AXError {code}"
+        ))),
+    }
+}
+
+unsafe fn map_ax_bool_set_error(attr: &str, error: AXError) -> io::Result<()> {
+    match error {
+        AX_SUCCESS => Ok(()),
+        AX_ERROR_API_DISABLED => Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "macOS Accessibility API 当前不可用或未授权",
+        )),
+        AX_ERROR_ATTRIBUTE_UNSUPPORTED | AX_ERROR_NOT_IMPLEMENTED | AX_ERROR_NO_VALUE => {
+            Err(invalid_input(format!("目标 AX 元素不支持 `{attr}`")))
+        }
+        AX_ERROR_INVALID_UI_ELEMENT => Err(invalid_input("AX target 元素已失效")),
+        code => Err(io::Error::other(format!(
+            "设置 `{attr}` 失败: AXError {code}"
         ))),
     }
 }

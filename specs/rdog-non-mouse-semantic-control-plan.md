@@ -11,11 +11,14 @@
 
 而不是默认退化成真实鼠标操作。
 
-这份规格聚焦第一批落地能力:
+这份规格当前已覆盖两批能力:
 
 - `@ax-action`
 - `@ax-set-value`
 - `@type-text`
+- `@key delivery`
+- `@ax-focus`
+- `@ax-scroll`
 
 ## 设计原则
 
@@ -92,14 +95,97 @@
 
 当前阶段语义:
 
-- 第一版只支持 `mode:"ax-value"` 和 `mode:"auto"`。
-- `mode:"auto"` 当前仍只走 AXValue 分支。
-- `allow_clipboard` 已有协议字段,但默认必须是 `false`,当前不会自动用剪贴板。
+- 支持 `mode:"ax-value"`、`mode:"targeted-keyboard"`、`mode:"clipboard"` 和 `mode:"auto"`。
+- `mode:"auto"` 按下面的梯子尝试:
+  1. AXValue replace
+  2. targeted keyboard
+  3. clipboard,但只有 `allow_clipboard:true` 时才允许
+- `mode:"clipboard"` 必须显式 `allow_clipboard:true`。
+- response 里的 `delivered_via` 必须说真话:
+  - `ax-value`
+  - `targeted-keyboard`
+  - `clipboard`
 
 返回:
 
 ```json
 {"kind":"type-text","backend":"macos-accessibility","target_id":"pid:123/window:0/path:8.2","mode":"ax-value","delivered_via":"ax-value","performed":true,"status":"ok","used_clipboard":false}
+```
+
+targeted keyboard / clipboard 示例:
+
+```text
+@type-text#32:{target:{id:"pid:123/window:0/path:8.2"},text:"hello",mode:"targeted-keyboard"}
+@type-text#33:{target:{id:"pid:123/window:0/path:8.2"},text:"hello",mode:"clipboard",allow_clipboard:true}
+```
+
+### `@key delivery`
+
+示例:
+
+```text
+@key#40:{key:"Return",delivery:"pid-targeted",pid:556}
+@key#41:{key:"Cmd+W",delivery:"window-targeted",window_id:"pid:556/window:0"}
+@key#42:{key:"F11",delivery:"global"}
+```
+
+语义:
+
+- 旧字符串 payload 和旧 object payload 继续兼容,仍可走 legacy 成功响应。
+- 只要 object payload 显式带 `delivery` / `pid` / `window_id`,成功响应就切到结构化 `kind:"key"` report。
+- `delivery:"pid-targeted"` 需要 `pid`。
+- `delivery:"window-targeted"` 需要 `window_id`。
+- `delivery:"global"` 不能再带 `pid` / `window_id`。
+- macOS 当前真实后端:
+  - `global`: 仍走本地输入模拟
+  - `pid-targeted` / `window-targeted`: 走 `CGEventPostToPid`
+
+返回:
+
+```json
+{"kind":"key","backend":"macos-cg-event-post-to-pid","key":"Cmd+W","mode":"press_release","delivery":"window-targeted","target_pid":556,"window_id":"pid:556/window:0","performed":true,"status":"ok"}
+```
+
+### `@ax-focus`
+
+示例:
+
+```text
+@ax-focus#50:{target:{id:"pid:123/window:0/path:8.2"}}
+@ax-focus#51:{window_id:"pid:123/window:0",activate:true}
+```
+
+语义:
+
+- `target` 和 `window_id` 二选一。
+- 默认 `activate:false`。
+- 只有显式 `activate:true` 时,执行层才允许先复用 `@window-activate` 做窗口恢复。
+- `activate:true` 仍不代表隐式 mouse fallback。
+
+返回:
+
+```json
+{"kind":"ax-focus","backend":"macos-accessibility","target_id":"pid:123/window:0/path:8.2","activated":false,"performed":true,"status":"ok"}
+```
+
+### `@ax-scroll`
+
+示例:
+
+```text
+@ax-scroll#60:{target:{id:"pid:123/window:0/path:10.1"},direction:"down",pages:2}
+```
+
+语义:
+
+- 当前命令名仍叫 `@ax-scroll`,但 macOS 第一版真实投递是“基于 AX locator 解析出 pid,再发 targeted scroll event”。
+- 不会偷偷退化成全局 wheel。
+- response 必须回报 `delivered_via:"pid-scroll-event"` 和真实 `line_steps`,避免把“页”的抽象伪装成系统真的 page-scroll API。
+
+返回:
+
+```json
+{"kind":"ax-scroll","backend":"macos-cg-event-post-to-pid","target_id":"pid:123/window:0/path:10.1","direction":"down","pages":2,"line_steps":20,"delivered_via":"pid-scroll-event","performed":true,"status":"ok"}
 ```
 
 ## Agent 决策流
@@ -122,11 +208,8 @@ flowchart TD
 
 ## 非目标范围
 
-当前这版还没有落地:
+当前仍然没有落地:
 
-- `@key delivery:"pid-targeted" | "window-targeted" | "global"`
-- `@ax-focus`
-- `@ax-scroll`
-- 剪贴板 fallback
-
-这些仍属于下一阶段扩展。
+- 非 macOS 的 targeted keyboard / AX focus / AX scroll / clipboard 后端
+- `app` / `bundle_id` 级别的 `@key` / `@type-text` 定向投递
+- 更强的 page-level AX scroll action fallback
