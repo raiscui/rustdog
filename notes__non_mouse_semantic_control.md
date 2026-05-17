@@ -291,3 +291,24 @@
 - `@ax-focus activate:true` 已能把隐藏的真实 TextEdit 窗口恢复到可交互状态。
 - `@type-text mode:"targeted-keyboard"` 已能在不动鼠标的前提下,把文本输入到真实 TextEdit 编辑区。
 - `@key delivery:"global"` 的 structured success 现在也有独立 unit seam 锁住了。
+
+## [2026-05-17 15:30:18] [Session ID: codex-20260517-clipboard-restore] 笔记: clipboard 文本投递的恢复策略
+
+### 现象
+- `@type-text mode:"clipboard"` 需要临时写入系统剪贴板,再通过 `Cmd+V` 投递文本。
+- 旧实现会在投递结束后无条件恢复旧剪贴板内容。
+
+### 风险判断
+- 如果人类或其他进程在 rdog 投递期间写入了新的剪贴板内容,无条件恢复会把这份新内容覆盖掉。
+- 这不符合“非鼠标语义控制尽量不干扰人类现场”的目标。
+
+### 本轮结论
+- clipboard 路径应该使用 `restore-if-unchanged` 策略。
+- 只有当前剪贴板仍等于 rdog 临时写入的文本时,才恢复旧剪贴板。
+- 如果当前剪贴板已经变化,应跳过恢复,并在 response 中返回:
+  - `clipboard_restored:false`
+  - `clipboard_restore_skipped_reason:"clipboard-changed"`
+
+### 验证边界
+- 本轮用 focused unit test 锁住恢复决策和 response 字段。
+- 未跑 live clipboard E2E,原因是用户正在交互,真实剪贴板测试会有额外干扰风险。

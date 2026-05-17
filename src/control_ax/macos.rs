@@ -458,7 +458,7 @@ fn type_text_via_clipboard(request: &TypeTextRequest) -> io::Result<TypeTextRepo
     let target_id = resolve_live_target_id(&request.target)?;
     prepare_text_target(&target_id)?;
     let parsed = parse_target_id(&target_id)?;
-    with_temporary_clipboard_text(&request.text, || {
+    let restore = with_temporary_clipboard_text(&request.text, || {
         let paste_request = KeyRequest {
             key: "cmd+v".to_owned(),
             hold_ms: DEFAULT_KEY_HOLD_MS,
@@ -473,6 +473,7 @@ fn type_text_via_clipboard(request: &TypeTextRequest) -> io::Result<TypeTextRepo
     Ok(TypeTextReport::clipboard_success(
         "macos-clipboard+cg-event-post-to-pid",
         Some(target_id),
+        restore,
     ))
 }
 
@@ -973,16 +974,51 @@ fn post_unicode_text_to_pid(pid: i32, text: &str) -> io::Result<()> {
 fn with_temporary_clipboard_text(
     text: &str,
     run: impl FnOnce() -> io::Result<()>,
-) -> io::Result<()> {
-    let previous = Command::new("pbpaste")
+) -> io::Result<ClipboardRestoreStatus> {
+    let previous = read_clipboard_bytes()?;
+    write_clipboard_text(text)?;
+
+    // 这里只临时借用剪贴板完成 Cmd+V。
+    // 如果人类在这期间写入了新内容,恢复旧值反而会污染用户现场。
+    let run_result = run();
+    let restore_result = restore_clipboard_if_unchanged(text.as_bytes(), &previous);
+
+    run_result?;
+    restore_result
+}
+
+fn restore_clipboard_if_unchanged(
+    temporary: &[u8],
+    previous: &[u8],
+) -> io::Result<ClipboardRestoreStatus> {
+    let current = read_clipboard_bytes()?;
+    let decision = clipboard_restore_decision(&current, temporary);
+    if decision.restored {
+        write_clipboard_bytes(previous)?;
+    }
+    Ok(decision)
+}
+
+fn clipboard_restore_decision(current: &[u8], temporary: &[u8]) -> ClipboardRestoreStatus {
+    if current == temporary {
+        ClipboardRestoreStatus::restored()
+    } else {
+        ClipboardRestoreStatus::skipped("clipboard-changed")
+    }
+}
+
+fn read_clipboard_bytes() -> io::Result<Vec<u8>> {
+    let output = Command::new("pbpaste")
         .output()
         .map_err(|err| io::Error::other(format!("读取系统剪贴板失败: {err}")))?;
-    write_clipboard_text(text)?;
-    let run_result = run();
-    let restore_result = write_clipboard_bytes(&previous.stdout);
-    run_result?;
-    restore_result?;
-    Ok(())
+    if output.status.success() {
+        Ok(output.stdout)
+    } else {
+        Err(io::Error::other(format!(
+            "pbpaste 退出失败: {}",
+            output.status
+        )))
+    }
 }
 
 fn write_clipboard_text(text: &str) -> io::Result<()> {
@@ -1617,6 +1653,18 @@ mod tests {
                 .to_string()
                 .contains("目标 AX 元素当前 AXValue 不可读,无法执行 append"),
             "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn clipboard_restore_decision_should_restore_only_when_temporary_value_survived() {
+        assert_eq!(
+            clipboard_restore_decision(b"temporary", b"temporary"),
+            ClipboardRestoreStatus::restored()
+        );
+        assert_eq!(
+            clipboard_restore_decision(b"human-new-value", b"temporary"),
+            ClipboardRestoreStatus::skipped("clipboard-changed")
         );
     }
 

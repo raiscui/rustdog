@@ -262,3 +262,35 @@
 ### 总结感悟
 - GUI semantic control 不能只看“API 调用成功”。必须回读真实 UI 状态。
 - AX 字段并不总是稳定同构。TextEdit 滚动后可能不再返回 `AXScrollBar.value`,但 indicator 位置仍是可靠的可观察状态。
+
+## [2026-05-17 15:30:18] [Session ID: codex-20260517-clipboard-restore] 任务名称: Phase 2.3 clipboard 文本投递恢复语义收口
+
+### 任务内容
+- 收紧 `@type-text mode:"clipboard"` 的剪贴板恢复行为。
+- 在 response 中暴露 clipboard 恢复策略和恢复结果。
+- 同步更新 repo specs、agent usage 文档和全局 `rdog-control` skill。
+
+### 完成过程
+- 将 macOS clipboard 路径从“投递后无条件恢复旧剪贴板”改为 `restore-if-unchanged`。
+- 新增 `ClipboardRestoreStatus`,让 `TypeTextReport` 能表达:
+  - `clipboard_restore_policy:"restore-if-unchanged"`
+  - `clipboard_restored:true|false`
+  - `clipboard_restore_skipped_reason`
+- 补充 focused tests:
+  - response schema 暴露恢复状态
+  - clipboard 恢复决策只在临时值仍存在时恢复
+- 修正规格文档里的 clipboard code fence 嵌套问题。
+
+### 验证
+- `cargo fmt`
+- `cargo fmt -- --check`
+- `cargo test --package rustdog --bin rdog -- control_ax::tests::type_text_clipboard_report_should_expose_restore_status control_ax::macos::tests::clipboard_restore_decision_should_restore_only_when_temporary_value_survived --nocapture`
+- `cargo test --package rustdog --bin rdog -- control_ax:: --nocapture`
+- `cargo test --package rustdog --test control_ax_e2e --no-run`
+- `cargo test --package rustdog --bin rdog -- control_core::tests::explicit_request_should_route_ax_commands_to_executor --exact --nocapture`
+- `git diff --check -- src/control_ax.rs src/control_ax/macos.rs specs/rdog-non-mouse-semantic-control-plan.md specs/code-agent-rdog-control-usage.md task_plan__non_mouse_semantic_control.md`
+- 以上全部通过
+
+### 总结感悟
+- clipboard fallback 不是“无副作用输入”。它必须把人类剪贴板当成共享资源。
+- 对 agent 来说,仅有 `used_clipboard:true` 不够,还需要知道恢复策略和恢复结果,否则无法判断现场是否被污染。

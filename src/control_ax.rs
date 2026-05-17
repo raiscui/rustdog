@@ -197,6 +197,28 @@ impl TypeTextMode {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ClipboardRestoreStatus {
+    pub restored: bool,
+    pub skipped_reason: Option<&'static str>,
+}
+
+impl ClipboardRestoreStatus {
+    pub fn restored() -> Self {
+        Self {
+            restored: true,
+            skipped_reason: None,
+        }
+    }
+
+    pub fn skipped(reason: &'static str) -> Self {
+        Self {
+            restored: false,
+            skipped_reason: Some(reason),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct AxTarget {
     pub id: Option<String>,
@@ -529,6 +551,12 @@ pub struct TypeTextReport {
     pub performed: bool,
     pub status: &'static str,
     pub used_clipboard: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub clipboard_restore_policy: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub clipboard_restored: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub clipboard_restore_skipped_reason: Option<&'static str>,
 }
 
 impl TypeTextReport {
@@ -546,6 +574,9 @@ impl TypeTextReport {
             performed: true,
             status: "ok",
             used_clipboard: false,
+            clipboard_restore_policy: None,
+            clipboard_restored: None,
+            clipboard_restore_skipped_reason: None,
         }
     }
 
@@ -567,10 +598,17 @@ impl TypeTextReport {
             performed: true,
             status: "ok",
             used_clipboard: false,
+            clipboard_restore_policy: None,
+            clipboard_restored: None,
+            clipboard_restore_skipped_reason: None,
         }
     }
 
-    pub fn clipboard_success(backend: impl Into<String>, target_id: Option<String>) -> Self {
+    pub fn clipboard_success(
+        backend: impl Into<String>,
+        target_id: Option<String>,
+        restore: ClipboardRestoreStatus,
+    ) -> Self {
         Self {
             kind: "type-text",
             backend: backend.into(),
@@ -580,6 +618,9 @@ impl TypeTextReport {
             performed: true,
             status: "ok",
             used_clipboard: true,
+            clipboard_restore_policy: Some("restore-if-unchanged"),
+            clipboard_restored: Some(restore.restored),
+            clipboard_restore_skipped_reason: restore.skipped_reason,
         }
     }
 }
@@ -1869,6 +1910,39 @@ mod tests {
                 mode: TypeTextMode::Clipboard,
                 allow_clipboard: true,
             }
+        );
+    }
+
+    #[test]
+    fn type_text_clipboard_report_should_expose_restore_status() {
+        let restored = TypeTextReport::clipboard_success(
+            "macos-clipboard+cg-event-post-to-pid",
+            Some("pid:1/window:0/path:0".to_owned()),
+            ClipboardRestoreStatus::restored(),
+        );
+        let restored_json = serde_json::to_value(restored).unwrap();
+        assert_eq!(restored_json["kind"], "type-text");
+        assert_eq!(restored_json["mode"], "clipboard");
+        assert_eq!(restored_json["used_clipboard"], true);
+        assert_eq!(
+            restored_json["clipboard_restore_policy"],
+            "restore-if-unchanged"
+        );
+        assert_eq!(restored_json["clipboard_restored"], true);
+        assert!(restored_json
+            .get("clipboard_restore_skipped_reason")
+            .is_none());
+
+        let skipped = TypeTextReport::clipboard_success(
+            "macos-clipboard+cg-event-post-to-pid",
+            Some("pid:1/window:0/path:0".to_owned()),
+            ClipboardRestoreStatus::skipped("clipboard-changed"),
+        );
+        let skipped_json = serde_json::to_value(skipped).unwrap();
+        assert_eq!(skipped_json["clipboard_restored"], false);
+        assert_eq!(
+            skipped_json["clipboard_restore_skipped_reason"],
+            "clipboard-changed"
         );
     }
 

@@ -253,6 +253,8 @@ AX rect 继续使用 `coordinate_space:"os-logical"`。
 - `mode:"targeted-keyboard"` 仍可能受输入法和焦点状态影响。
   它是文本输入路径,不是热键路径。
 - `mode:"clipboard"` 必须显式 `allow_clipboard:true`。
+  它会临时写入远端系统剪贴板,然后按 `restore-if-unchanged` 策略恢复旧值。
+  如果人类或其他进程在此期间改了剪贴板,rdog 会跳过恢复,并在 response 里返回 `clipboard_restored:false` 与 `clipboard_restore_skipped_reason:"clipboard-changed"`。
 - `@ax-focus activate:true` 是唯一允许它主动调用 `@window-activate` 的情况。
 - `@ax-scroll` 当前在 macOS 主路径真实返回 `delivered_via:"ax-scrollbar-value"`。
   它通过写入 AXScrollBar 的 AXValue 滚动,不要把它当成隐式全局 wheel。

@@ -371,6 +371,41 @@
 ### 当前状态
 **Phase 2.2 已完成** - targeted key 与 AX scroll live ignored E2E 均已有真实桌面动态证据。
 
+## [2026-05-17 15:20:29] [Session ID: codex-20260517-clipboard-restore] [续写]: Phase 2.3 clipboard 文本投递的非干扰恢复语义
+
+### 目标
+- 收紧 `@type-text mode:"clipboard"` 的剪贴板恢复契约。
+- 避免在 rdog 临时写入剪贴板期间覆盖人类新写入的剪贴板内容。
+- 在 response 中明确告诉 agent 剪贴板是否恢复、恢复策略是什么。
+
+### 待办
+- [x] 检查当前 clipboard 实现和 `TypeTextReport` schema。
+- [x] 将剪贴板恢复改为 `restore-if-unchanged`。
+- [x] 补 focused 单元测试锁定恢复决策和 response 字段。
+- [x] 更新 specs / agent usage / global skill 的 clipboard 口径。
+- [x] 运行格式化、目标测试和 diff 检查。
+
+### 约束
+- 本轮不运行鼠标类 live 测试。
+- 本轮默认不运行真实 clipboard live E2E,避免在人类正在交互时抢剪贴板。
+- 如需验证,先用 focused unit test 证明恢复决策,再决定是否以后补 ignored live E2E。
+
+### 遇到错误
+- `git diff` 不能同时检查 repo 内文件和 `/Users/cuiluming/.codex/skills/rdog-control/SKILL.md` 这种仓库外路径。已改为 repo diff 和外部 skill 内容检查分开处理。
+- 一次 `cargo test` 误传了不存在的 control_core test 名称,结果是 `0 tests`。已用真实名称 `control_core::tests::explicit_request_should_route_ax_commands_to_executor` 重跑并通过。
+
+### 动态证据
+- `cargo fmt`
+- `cargo fmt -- --check`
+- `cargo test --package rustdog --bin rdog -- control_ax::tests::type_text_clipboard_report_should_expose_restore_status control_ax::macos::tests::clipboard_restore_decision_should_restore_only_when_temporary_value_survived --nocapture`
+- `cargo test --package rustdog --bin rdog -- control_ax:: --nocapture`
+- `cargo test --package rustdog --test control_ax_e2e --no-run`
+- `cargo test --package rustdog --bin rdog -- control_core::tests::explicit_request_should_route_ax_commands_to_executor --exact --nocapture`
+- `git diff --check -- src/control_ax.rs src/control_ax/macos.rs specs/rdog-non-mouse-semantic-control-plan.md specs/code-agent-rdog-control-usage.md task_plan__non_mouse_semantic_control.md`
+
+### 当前状态
+**Phase 2.3 已完成** - repo 内实现、规格和 focused 验证已闭环; 未运行 live clipboard E2E,避免干扰人类剪贴板。
+
 ## [2026-05-17 14:32:00] [Session ID: 019e1b72-d659-7a60-91b4-66cea3fc6ce0] [转向]: 输入法无关文本投递策略调研
 
 ### 目标

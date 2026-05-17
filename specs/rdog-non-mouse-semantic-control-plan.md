@@ -102,6 +102,11 @@
   2. targeted keyboard
   3. clipboard,但只有 `allow_clipboard:true` 时才允许
 - `mode:"clipboard"` 必须显式 `allow_clipboard:true`。
+- clipboard 路径只会在目标写入期间临时借用系统剪贴板,并且只在剪贴板仍保持 rdog 写入内容时恢复旧值。
+- response 里应额外暴露:
+  - `clipboard_restore_policy:"restore-if-unchanged"`
+  - `clipboard_restored:true|false`
+  - `clipboard_restore_skipped_reason`
 - `mode:"targeted-keyboard"` 仍可能受焦点、输入法、app 自己的键盘处理逻辑影响。
   它是“定向文本输入”路径,不是功能热键路径。
 - response 里的 `delivered_via` 必须说真话:
@@ -120,6 +125,12 @@ targeted keyboard / clipboard 示例:
 ```text
 @type-text#32:{target:{id:"pid:123/window:0/path:8.2"},text:"hello",mode:"targeted-keyboard"}
 @type-text#33:{target:{id:"pid:123/window:0/path:8.2"},text:"hello",mode:"clipboard",allow_clipboard:true}
+```
+
+clipboard response 示例:
+
+```json
+{"kind":"type-text","backend":"macos-clipboard+cg-event-post-to-pid","target_id":"pid:123/window:0/path:8.2","mode":"clipboard","delivered_via":"clipboard","performed":true,"status":"ok","used_clipboard":true,"clipboard_restore_policy":"restore-if-unchanged","clipboard_restored":true}
 ```
 
 ### `@key delivery`
