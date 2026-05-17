@@ -93,3 +93,43 @@
 
 ### 当前状态
 **本轮执行完成** - 下一步做 local commit,并把 Phase 2 留作后续独立实现线。
+
+## [2026-05-17 10:59:54] [Session ID: 019e1b72-d659-7a60-91b4-66cea3fc6ce0] [状态]: 根据 review 进入 Phase 1 补真修复
+
+### 现象
+- `1d580eb` 的主方向正确,但 review 暴露出 3 个真实性缺口:
+  - `@ax-set-value mode:"append"` 在读不到旧值时会静默退化成 replace。
+  - `@type-text` 在不支持路径上会回报 `AX set value 当前只支持 macOS`,协议名不真实。
+  - `old_value_redacted/new_value_redacted` 当前是硬编码 `false`,不是实测结论。
+
+### 当前假设
+- 这 3 个点都在 Phase 1 边界内,应该立即修复,不该带入 Phase 2。
+- 修复后需要 focused tests 重新证明:
+  - append 不再静默覆盖
+  - type-text 的错误口径独立
+  - redaction report 不再伪造固定 false
+
+### 下一步
+- [ ] 修正 `src/control_ax/macos.rs` 的 append 语义与 redaction report。
+- [ ] 修正 `src/control_ax.rs` 的 type-text 错误映射与 report 结构。
+- [ ] 同步 specs 文案并补 focused tests / build 验证。
+
+### 当前状态
+**正在补真修复** - 先改执行语义和 report,再跑 focused verification。
+
+## [2026-05-17 10:59:54] [Session ID: 019e1b72-d659-7a60-91b4-66cea3fc6ce0] [完成]: review 补真修复已验证通过
+
+### 已完成
+- [x] 修正 `src/control_ax/macos.rs` 的 append 语义与 redaction report。
+- [x] 修正 `src/control_ax.rs` 的 type-text 错误映射与 report 结构。
+- [x] 同步 specs 文案并补 focused tests / build 验证。
+
+### 验证结果
+- `cargo test --package rustdog --bin rdog -- control_ax::tests --nocapture` -> 11 passed
+- `cargo test --package rustdog --bin rdog -- control_protocol::tests --nocapture` -> 14 passed
+- `cargo test --package rustdog --bin rdog -- control_core::tests --nocapture` -> 11 passed
+- `cargo build --package rustdog --bin rdog` -> 通过
+- `git diff --check` -> 通过
+
+### 当前状态
+**准备本地提交** - 下一步把这轮 review fix 单独做成 local commit,然后再开 Phase 2。

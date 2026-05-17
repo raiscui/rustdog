@@ -229,17 +229,17 @@ pub(super) fn set_value(request: &AxSetValueRequest) -> io::Result<AxSetValueRep
     let element = retain_target_element(&target_id)?;
     ensure_ax_value_settable(element.as_ptr())?;
 
-    let old_value = copy_string_attr(element.as_ptr(), "AXValue")?.unwrap_or_default();
-    let final_value = match request.mode {
-        AxValueSetMode::Replace => request.value.clone(),
-        AxValueSetMode::Append => format!("{old_value}{}", request.value),
-    };
+    let value_redacted = target_value_is_redacted(element.as_ptr())?;
+    let current_value = copy_string_attr(element.as_ptr(), "AXValue")?;
+    let final_value = build_final_ax_value(current_value, &request.value, request.mode)?;
 
     set_ax_value_string(element.as_ptr(), &final_value)?;
     Ok(AxSetValueReport::success(
         "macos-accessibility",
         Some(target_id),
         request.mode,
+        value_redacted,
+        value_redacted,
     ))
 }
 
@@ -523,6 +523,27 @@ fn ensure_ax_value_settable(element: AXUIElementRef) -> io::Result<()> {
             ))),
         }
     })
+}
+
+fn target_value_is_redacted(element: AXUIElementRef) -> io::Result<bool> {
+    let role = copy_string_attr(element, "AXRole")?.unwrap_or_else(|| "AXUnknown".to_owned());
+    let subrole = copy_string_attr(element, "AXSubrole")?;
+    Ok(looks_like_secure_element(&role, subrole.as_deref()))
+}
+
+fn build_final_ax_value(
+    current_value: Option<String>,
+    request_value: &str,
+    mode: AxValueSetMode,
+) -> io::Result<String> {
+    match mode {
+        AxValueSetMode::Replace => Ok(request_value.to_owned()),
+        AxValueSetMode::Append => {
+            let current_value = current_value
+                .ok_or_else(|| invalid_input("目标 AX 元素当前 AXValue 不可读,无法执行 append"))?;
+            Ok(format!("{current_value}{request_value}"))
+        }
+    }
 }
 
 fn set_ax_value_string(element: AXUIElementRef, value: &str) -> io::Result<()> {
@@ -901,6 +922,26 @@ mod tests {
         assert!(
             !message.contains("@ax-press target"),
             "unexpected error: {message}"
+        );
+    }
+
+    #[test]
+    fn build_final_ax_value_should_reject_append_when_current_value_is_unreadable() {
+        assert_eq!(
+            build_final_ax_value(Some("hello".to_owned()), " world", AxValueSetMode::Append)
+                .unwrap(),
+            "hello world"
+        );
+        assert_eq!(
+            build_final_ax_value(None, "fresh", AxValueSetMode::Replace).unwrap(),
+            "fresh"
+        );
+        let error = build_final_ax_value(None, " world", AxValueSetMode::Append).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("目标 AX 元素当前 AXValue 不可读,无法执行 append"),
+            "unexpected error: {error}"
         );
     }
 

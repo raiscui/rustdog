@@ -76,3 +76,58 @@
   - `@ax-focus`
   - `@ax-scroll`
   - `@type-text targeted-keyboard / clipboard`
+
+## [2026-05-17 10:59:54] [Session ID: 019e1b72-d659-7a60-91b4-66cea3fc6ce0] 笔记: Phase 1 review 后补真修复策略
+
+### 现象
+- review 证明 `1d580eb` 仍有 3 个不够“说真话”的点:
+  - append 可能静默覆盖
+  - `@type-text` 会复用 `AX set value` 的 unsupported 错误口径
+  - redaction report 固定写 `false`
+
+### 修复策略
+- append:
+  - 只有在当前 `AXValue` 可读且可转成字符串时才允许 append
+  - 否则返回结构化 invalid input,拒绝偷偷 replace
+- type-text:
+  - 保持当前只走 AXValue 路径
+  - 但在 Unsupported / PermissionDenied / 其它错误上保留 `@type-text` 自己的协议名
+- redaction:
+  - 用目标元素的 `AXRole` / `AXSubrole` 推导是否是 secure element
+  - secure 时把 old/new redacted 标成 `true`
+  - 非 secure 才标 `false`
+
+### 需要同步的文档口径
+- `append` 不再写成“先读取再拼接”这么轻描淡写。
+- 要明确“当前值不可读时 append 失败”。
+- `old_value_redacted/new_value_redacted` 不再暗示固定有值,而是表达真实 redaction 状态。
+
+## [2026-05-17 10:59:54] [Session ID: 019e1b72-d659-7a60-91b4-66cea3fc6ce0] 笔记: review 修复后的结论
+
+### 已修复事实
+- `src/control_ax/macos.rs`
+  - `append` 现在走 `build_final_ax_value()`。
+  - 当前 `AXValue` 不可读时,明确报错 `无法执行 append`,不再静默 replace。
+  - `target_value_is_redacted()` 会读取目标元素的 `AXRole` / `AXSubrole`,再复用 `looks_like_secure_element()` 推导 redaction。
+- `src/control_ax.rs`
+  - `AxSetValueReport::success()` 不再硬编码 redaction 为 `false`,而是接收真实值。
+  - `perform_default_type_text()` 经过 `remap_type_text_ax_value_error()` 包一层协议名映射。
+  - 非 macOS unsupported 文案从 `AX set value` 纠正为 `type-text` 自己的路径描述。
+- `specs/rdog-non-mouse-semantic-control-plan.md`
+  - append 语义补成“当前值不可读即失败”。
+
+### 动态证据
+- `cargo test --package rustdog --bin rdog -- control_ax::tests --nocapture`
+  - 11 passed
+- `cargo test --package rustdog --bin rdog -- control_protocol::tests --nocapture`
+  - 14 passed
+- `cargo test --package rustdog --bin rdog -- control_core::tests --nocapture`
+  - 11 passed
+- `cargo build --package rustdog --bin rdog`
+  - 通过
+- `git diff --check`
+  - 通过
+
+### 结论
+- 这轮修复把 Phase 1 从“主链可用”推进到“append / type-text / redaction 三个敏感点也说真话”。
+- 现在再开 Phase 2,不用继续背着 Phase 1 的协议真实性债。

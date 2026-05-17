@@ -459,6 +459,8 @@ impl AxSetValueReport {
         backend: impl Into<String>,
         target_id: Option<String>,
         mode: AxValueSetMode,
+        old_value_redacted: bool,
+        new_value_redacted: bool,
     ) -> Self {
         Self {
             kind: "ax-set-value",
@@ -468,8 +470,8 @@ impl AxSetValueReport {
             performed: true,
             status: "ok",
             settable: true,
-            old_value_redacted: false,
-            new_value_redacted: false,
+            old_value_redacted,
+            new_value_redacted,
         }
     }
 
@@ -574,7 +576,8 @@ pub fn perform_default_type_text(request: &TypeTextRequest) -> io::Result<TypeTe
             TypeTextMode::Auto | TypeTextMode::AxValue => AxValueSetMode::Replace,
         },
     };
-    let report = perform_default_ax_set_value(&set_request)?;
+    let report =
+        perform_default_ax_set_value(&set_request).map_err(remap_type_text_ax_value_error)?;
     Ok(TypeTextReport::ax_value_success(
         report.backend,
         report.target_id,
@@ -981,6 +984,25 @@ fn parse_type_text_mode(input: &str) -> io::Result<TypeTextMode> {
     }
 }
 
+fn remap_type_text_ax_value_error(err: io::Error) -> io::Error {
+    let message = err.to_string();
+    match err.kind() {
+        io::ErrorKind::Unsupported => io::Error::new(
+            io::ErrorKind::Unsupported,
+            "type-text 当前只支持 macOS AXValue 路径",
+        ),
+        io::ErrorKind::InvalidInput => io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("type-text AXValue 路径失败: {message}"),
+        ),
+        io::ErrorKind::PermissionDenied => io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!("type-text AXValue 路径失败: {message}"),
+        ),
+        _ => io::Error::other(format!("type-text AXValue 路径失败: {message}")),
+    }
+}
+
 fn parse_ax_tree_scope(input: &str) -> io::Result<AxTreeScope> {
     let scope = parse_quoted_payload(input)?;
     match scope.to_ascii_lowercase().as_str() {
@@ -1349,6 +1371,30 @@ mod tests {
     }
 
     #[test]
+    fn ax_set_value_report_should_keep_real_redaction_state() {
+        assert_eq!(
+            AxSetValueReport::success(
+                "macos-accessibility",
+                Some("pid:1/window:0/path:0".to_owned()),
+                AxValueSetMode::Append,
+                true,
+                true,
+            ),
+            AxSetValueReport {
+                kind: "ax-set-value",
+                backend: "macos-accessibility".to_owned(),
+                target_id: Some("pid:1/window:0/path:0".to_owned()),
+                mode: "append",
+                performed: true,
+                status: "ok",
+                settable: true,
+                old_value_redacted: true,
+                new_value_redacted: true,
+            }
+        );
+    }
+
+    #[test]
     fn parse_type_text_payload_should_default_to_auto_without_clipboard() {
         assert_eq!(
             parse_type_text_payload(r#"{target:{id:"pid:1/window:0/path:0"},text:"hello"}"#)
@@ -1376,6 +1422,31 @@ mod tests {
                 .to_string()
                 .contains("@type-text 当前尚未实现 allow_clipboard:true"),
             "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn remap_type_text_ax_value_error_should_use_type_text_protocol_name() {
+        let unsupported = remap_type_text_ax_value_error(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "AX set value 当前只支持 macOS",
+        ));
+        assert_eq!(unsupported.kind(), io::ErrorKind::Unsupported);
+        assert!(
+            unsupported
+                .to_string()
+                .contains("type-text 当前只支持 macOS AXValue 路径"),
+            "unexpected error: {unsupported}"
+        );
+
+        let invalid = remap_type_text_ax_value_error(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "目标 AX 元素不支持 AXValue",
+        ));
+        assert_eq!(invalid.kind(), io::ErrorKind::InvalidInput);
+        assert!(
+            invalid.to_string().contains("type-text AXValue 路径失败"),
+            "unexpected error: {invalid}"
         );
     }
 }

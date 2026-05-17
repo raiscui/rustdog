@@ -45,3 +45,32 @@
 ### 提交记录
 - local commit: `6497ab6`
 - 提交标题: `Make non-mouse control truthful for agents`
+
+## [2026-05-17 10:59:54] [Session ID: 019e1b72-d659-7a60-91b4-66cea3fc6ce0] 任务名称: 非鼠标语义控制 Phase 1 review fix
+
+### 任务内容
+- 根据对 `1d580eb` 的 code review,修复 append 语义、type-text 错误口径和 redaction report 真实性问题。
+
+### 完成过程
+- 在 `src/control_ax/macos.rs` 中把 append 行为改成:
+  - 仅在当前 `AXValue` 可读时才允许 append
+  - 当前值不可读时直接失败
+- 在 `src/control_ax/macos.rs` 中新增 target redaction 推导,让 report 使用真实 secure 状态。
+- 在 `src/control_ax.rs` 中新增 `remap_type_text_ax_value_error()`,让 `@type-text` 不再冒用 `AX set value` 协议名。
+- 同步修正 `specs/rdog-non-mouse-semantic-control-plan.md` 的 append 文案。
+- 补充 focused tests,锁住:
+  - append 不可读时报错
+  - type-text 错误口径独立
+  - redaction report 不再固定 false
+
+### 验证
+- `cargo test --package rustdog --bin rdog -- control_ax::tests --nocapture`
+- `cargo test --package rustdog --bin rdog -- control_protocol::tests --nocapture`
+- `cargo test --package rustdog --bin rdog -- control_core::tests --nocapture`
+- `cargo build --package rustdog --bin rdog`
+- `git diff --check`
+- 全部通过
+
+### 总结感悟
+- append 这类“看起来只是字符串处理”的能力,只要偷做一次 silent fallback,就会直接破坏 agent 对协议的信任。
+- report 字段一旦对外暴露,宁可少报,也不能伪造固定值。

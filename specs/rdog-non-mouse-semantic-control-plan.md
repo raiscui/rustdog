@@ -72,12 +72,13 @@
 
 - 写入前必须检查 `AXUIElementIsAttributeSettable(AXValue)`。
 - 不可写时返回错误,不自动 fallback 到键盘或剪贴板。
-- `mode:"append"` 会先读取当前字符串值,再拼接。
+- `mode:"append"` 只有在当前 `AXValue` 可读时才允许执行。
+- 如果当前值不可读,请求必须失败,不能静默退化成 replace。
 
 返回:
 
 ```json
-{"kind":"ax-set-value","backend":"macos-accessibility","target_id":"pid:123/window:0/path:8.2","mode":"append","performed":true,"status":"ok","settable":true,"old_value_redacted":false,"new_value_redacted":false}
+{"kind":"ax-set-value","backend":"macos-accessibility","target_id":"pid:123/window:0/path:8.2","mode":"append","performed":true,"status":"ok","settable":true,"old_value_redacted":true,"new_value_redacted":true}
 ```
 
 ### `@type-text`
