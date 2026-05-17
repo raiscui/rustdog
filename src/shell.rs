@@ -982,7 +982,7 @@ fn parse_json_string(bytes: &[u8], index: &mut usize) -> io::Result<String> {
 mod tests {
     use super::*;
     use crate::control_frames::SaveFileFrame;
-    use crate::control_protocol::{KeyMode, KeyRequest};
+    use crate::control_protocol::{KeyMode, KeyRequest, PasteRequestKind};
     use crate::{control_actions::ActionExecutionResult, control_protocol::ControlCommand};
     use std::{
         fs,
@@ -1011,7 +1011,12 @@ mod tests {
 
             let stdout = match command {
                 ControlCommand::Key(request) => format!("KEY:{}\n", request.key).into_bytes(),
-                ControlCommand::Paste(payload) => format!("PASTE:{payload}\n").into_bytes(),
+                ControlCommand::Paste(request) => match &request.kind {
+                    PasteRequestKind::GlobalHotkey => b"PASTE:global-hotkey\n".to_vec(),
+                    PasteRequestKind::LegacyTextInjection(payload) => {
+                        format!("PASTE:{payload}\n").into_bytes()
+                    }
+                },
                 ControlCommand::Script(payload) => format!("SCRIPT:{payload}\n").into_bytes(),
                 ControlCommand::Ping => b"PONG\n".to_vec(),
                 ControlCommand::Screenshot(request) => {

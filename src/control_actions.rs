@@ -10,7 +10,10 @@ use crate::{
         build_click_plan, build_drag_plan, build_mouse_button_plan, build_mouse_move_plan,
         build_wheel_plan, perform_mouse_plan, MouseExecutionPlan,
     },
-    control_protocol::{ControlCommand, KeyMode, KeyRequest, KeyResponseMode},
+    control_protocol::{
+        ControlCommand, KeyMode, KeyRequest, KeyResponseMode, PasteRequest, PasteRequestKind,
+        DEFAULT_KEY_HOLD_MS,
+    },
     control_window::{
         execute_default_window_activate, execute_default_window_close, execute_default_window_find,
     },
@@ -100,7 +103,7 @@ impl ControlActionExecutor for SystemControlActionExecutor {
             ControlCommand::Key(request) => {
                 execute_key(request, self.key_input_event_sink.as_deref())
             }
-            ControlCommand::Paste(text) => execute_paste(text),
+            ControlCommand::Paste(request) => execute_paste(request),
             ControlCommand::Ping => Ok(ActionExecutionResult {
                 exit_code: 0,
                 stdout: b"pong".to_vec(),
@@ -260,16 +263,111 @@ where
     })
 }
 
-fn execute_paste(text: &str) -> io::Result<ActionExecutionResult> {
-    let mut enigo = Enigo::new(&Settings::default()).map_err(to_io_error)?;
-    enigo.text(text).map_err(to_io_error)?;
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+struct PasteReport {
+    kind: &'static str,
+    delivery: &'static str,
+    delivered_via: &'static str,
+    used_hotkey: bool,
+    used_keyboard: bool,
+    requires_focus: bool,
+    performed: bool,
+    status: &'static str,
+}
 
-    Ok(ActionExecutionResult {
-        exit_code: 0,
-        stdout: Vec::new(),
-        stderr: Vec::new(),
-        response_value_json: None,
-    })
+impl PasteReport {
+    fn hotkey_success(delivered_via: &'static str) -> Self {
+        Self {
+            kind: "paste",
+            delivery: "global-hotkey",
+            delivered_via,
+            used_hotkey: true,
+            used_keyboard: true,
+            requires_focus: true,
+            performed: true,
+            status: "ok",
+        }
+    }
+
+    fn to_value_json(&self) -> io::Result<String> {
+        serde_json::to_string(self)
+            .map_err(|err| io::Error::other(format!("paste response 序列化失败: {err}")))
+    }
+}
+
+fn execute_paste(request: &PasteRequest) -> io::Result<ActionExecutionResult> {
+    execute_paste_with_dependencies(request, perform_paste_hotkey, perform_legacy_paste_text)
+}
+
+fn execute_paste_with_dependencies<FH, FT>(
+    request: &PasteRequest,
+    perform_hotkey: FH,
+    perform_text: FT,
+) -> io::Result<ActionExecutionResult>
+where
+    FH: FnOnce(&KeyRequest) -> io::Result<()>,
+    FT: FnOnce(&str) -> io::Result<()>,
+{
+    match &request.kind {
+        PasteRequestKind::GlobalHotkey => {
+            let key_request = KeyRequest::legacy(
+                platform_paste_shortcut(),
+                DEFAULT_KEY_HOLD_MS,
+                KeyMode::PressRelease,
+            );
+            perform_hotkey(&key_request)?;
+
+            Ok(ActionExecutionResult {
+                exit_code: 0,
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+                response_value_json: Some(
+                    PasteReport::hotkey_success(platform_paste_delivered_via()).to_value_json()?,
+                ),
+            })
+        }
+        PasteRequestKind::LegacyTextInjection(text) => {
+            perform_text(text)?;
+
+            Ok(ActionExecutionResult {
+                exit_code: 0,
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+                response_value_json: None,
+            })
+        }
+    }
+}
+
+fn perform_paste_hotkey(key_request: &KeyRequest) -> io::Result<()> {
+    let key_plan = build_key_execution_plan(key_request)?;
+    let mut enigo = Enigo::new(&Settings::default()).map_err(to_io_error)?;
+    perform_key_plan(&mut enigo, &key_plan).map_err(to_io_error)
+}
+
+fn perform_legacy_paste_text(text: &str) -> io::Result<()> {
+    let mut enigo = Enigo::new(&Settings::default()).map_err(to_io_error)?;
+    enigo.text(text).map_err(to_io_error)
+}
+
+#[cfg(target_os = "macos")]
+fn platform_paste_shortcut() -> &'static str {
+    "cmd+v"
+}
+
+#[cfg(not(target_os = "macos"))]
+fn platform_paste_shortcut() -> &'static str {
+    "ctrl+v"
+}
+
+#[cfg(target_os = "macos")]
+fn platform_paste_delivered_via() -> &'static str {
+    "cmd-v"
+}
+
+#[cfg(not(target_os = "macos"))]
+fn platform_paste_delivered_via() -> &'static str {
+    "ctrl-v"
 }
 
 fn execute_mouse_plan(plan: MouseExecutionPlan) -> io::Result<ActionExecutionResult> {
@@ -896,6 +994,82 @@ mod tests {
         assert_eq!(response_value["status"].as_str(), Some("ok"));
         assert!(response_value.get("target_pid").is_none());
         assert!(response_value.get("window_id").is_none());
+    }
+
+    #[test]
+    fn execute_paste_hotkey_should_use_platform_shortcut_and_structured_report() {
+        let hotkey_performed = Arc::new(AtomicBool::new(false));
+        let text_injected = Arc::new(AtomicBool::new(false));
+        let hotkey_performed_for_closure = Arc::clone(&hotkey_performed);
+        let text_injected_for_closure = Arc::clone(&text_injected);
+
+        let result = execute_paste_with_dependencies(
+            &PasteRequest::hotkey(),
+            move |request| {
+                hotkey_performed_for_closure.store(true, Ordering::Relaxed);
+                assert_eq!(request.key, platform_paste_shortcut());
+                assert_eq!(request.hold_ms, DEFAULT_KEY_HOLD_MS);
+                assert_eq!(request.mode, KeyMode::PressRelease);
+                Ok(())
+            },
+            move |_| {
+                text_injected_for_closure.store(true, Ordering::Relaxed);
+                Ok(())
+            },
+        )
+        .expect("paste hotkey should execute through hotkey branch");
+
+        assert!(hotkey_performed.load(Ordering::Relaxed));
+        assert!(!text_injected.load(Ordering::Relaxed));
+        assert_eq!(result.exit_code, 0);
+        assert!(result.stdout.is_empty());
+        assert!(result.stderr.is_empty());
+
+        let response_json = result
+            .response_value_json
+            .expect("hotkey paste should produce structured response");
+        let response_value: serde_json::Value =
+            serde_json::from_str(&response_json).expect("paste response should parse");
+        assert_eq!(response_value["kind"].as_str(), Some("paste"));
+        assert_eq!(response_value["delivery"].as_str(), Some("global-hotkey"));
+        assert_eq!(
+            response_value["delivered_via"].as_str(),
+            Some(platform_paste_delivered_via())
+        );
+        assert_eq!(response_value["used_hotkey"].as_bool(), Some(true));
+        assert_eq!(response_value["used_keyboard"].as_bool(), Some(true));
+        assert_eq!(response_value["requires_focus"].as_bool(), Some(true));
+        assert_eq!(response_value["performed"].as_bool(), Some(true));
+        assert_eq!(response_value["status"].as_str(), Some("ok"));
+    }
+
+    #[test]
+    fn execute_paste_legacy_text_should_keep_text_injection_compatibility() {
+        let hotkey_performed = Arc::new(AtomicBool::new(false));
+        let text_injected = Arc::new(AtomicBool::new(false));
+        let hotkey_performed_for_closure = Arc::clone(&hotkey_performed);
+        let text_injected_for_closure = Arc::clone(&text_injected);
+
+        let result = execute_paste_with_dependencies(
+            &PasteRequest::legacy_text("hello"),
+            move |_| {
+                hotkey_performed_for_closure.store(true, Ordering::Relaxed);
+                Ok(())
+            },
+            move |text| {
+                text_injected_for_closure.store(true, Ordering::Relaxed);
+                assert_eq!(text, "hello");
+                Ok(())
+            },
+        )
+        .expect("legacy paste should execute through text injection branch");
+
+        assert!(!hotkey_performed.load(Ordering::Relaxed));
+        assert!(text_injected.load(Ordering::Relaxed));
+        assert_eq!(result.exit_code, 0);
+        assert!(result.stdout.is_empty());
+        assert!(result.stderr.is_empty());
+        assert!(result.response_value_json.is_none());
     }
 
     #[test]

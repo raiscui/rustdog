@@ -406,6 +406,27 @@
 ### 当前状态
 **Phase 2.3 已完成** - repo 内实现、规格和 focused 验证已闭环; 未运行 live clipboard E2E,避免干扰人类剪贴板。
 
+## [2026-05-17 15:36:00] [Session ID: codex-20260517-clipboard-live-e2e] [续写]: Phase 2.4 live clipboard E2E
+
+### 目标
+- 补一条真实 macOS live ignored E2E。
+- 证明 `@type-text mode:"clipboard",allow_clipboard:true` 能向真实 TextEdit 投递文本。
+- 证明 rdog 在成功路径下能把系统剪贴板恢复回原值。
+
+### 待办
+- [ ] 为 clipboard live E2E 增加剪贴板守护器和 helper。
+- [ ] 新增 ignored live 测试,复用 TextEdit fixture。
+- [ ] 跑 focused tests + live ignored E2E,并读回真实剪贴板做断言。
+- [ ] 更新工作记录与错误记录。
+
+### 约束
+- 不做任何鼠标 live 操作。
+- 测试开始前后必须读取并恢复真实系统剪贴板。
+- 只在当前用户明确要求下进行 live 剪贴板验证。
+
+### 当前状态
+**正在 Phase 2.4** - 先补测试,再直接跑 live ignored E2E。
+
 ## [2026-05-17 14:32:00] [Session ID: 019e1b72-d659-7a60-91b4-66cea3fc6ce0] [转向]: 输入法无关文本投递策略调研
 
 ### 目标
@@ -420,3 +441,73 @@
 
 ### 当前状态
 **正在调研** - 先看外部仓库真实代码和它们的输入策略,再回到 rdog 设计选择。
+
+## [2026-05-17 20:57:28] [Session ID: 019e1b72-d659-7a60-91b4-66cea3fc6ce0] [续写]: `@paste` 热键与 AXValue 拆分执行
+
+### 目标
+- 按已批准计划实现 `@paste` 语义拆分。
+- 裸 `@paste` 走当前远端焦点的粘贴热键。
+- 普通文本写入继续优先走 `@ax-set-value` / `@type-text mode:"ax-value"`.
+
+### 约束
+- 不把 `@paste` 偷换成 `cmd+v` 之外的 text injection。
+- 不在当前用户交互现场跑鼠标 live 测试。
+- 先补 parser / executor / docs / unit seam,再决定是否需要 live ignored E2E。
+
+### 当前状态
+**正在执行** - 先读取真实代码路径并改造协议边界,再做 focused 验证。
+
+## [2026-05-17 21:20:04] [Session ID: 019e1b72-d659-7a60-91b4-66cea3fc6ce0] [验证]: `@paste` 热键与 AXValue 拆分收口
+
+### 目标
+- 复核本轮 diff 是否符合计划中的 Option A。
+- 顺序运行 parser / executor / shell / AX compile focused tests。
+- 跑 `git diff --check`,并验证外部 `rdog-control` skill 内容没有误导 agent。
+- 完成 Ralph completion audit 后关闭 Ralph active state。
+
+### 待办
+- [x] 审查 repo 内 `@paste` 相关 diff 和文档口径。
+- [x] 顺序运行 focused tests,避免 Cargo lock 互相等待。
+- [x] 检查外部 skill 的 `@paste` 文档说明。
+- [x] 更新 WORKLOG / ERRORFIX,写明验证证据和本轮修复。
+- [x] 写入 Ralph completion state。
+
+### 约束
+- 本轮不运行鼠标类 live 测试。
+- 本轮也不运行会抢焦点或污染剪贴板的 live paste E2E。
+- 只处理 `@paste` 语义拆分收口,不碰其他支线脏改。
+
+### 遇到的错误
+- `specs/control-line-protocol.md` 里 "无 request id 的成功且无输出" 还把 `@paste` 写成 `@response 0`,和当前实现不一致。已改成只保留 legacy `@paste:"text"` 的 `0` 口径,并补充裸 `@paste` 的 structured report 说明。
+
+### 当前状态
+**已收口** - completion audit 已完成, Ralph state 也已清空。
+
+## [2026-05-17 23:37:56] [Session ID: 019e1b72-d659-7a60-91b4-66cea3fc6ce0] [续写]: 按建议执行 1-4
+
+### 目标
+- 做完上一轮建议里的 1-4 项。
+- 1. 先把当前 `@paste` / clipboard 相关改动整理成一个本地 commit。
+- 2. 分拣 worktree 里的其他支线脏改,不把无关改动混进本次提交。
+- 3. 运行真实 macOS live ignored clipboard E2E,补齐 `@type-text mode:"clipboard"` 的动态证据。
+- 4. 清理或迁移仍在计划里的旧研究记录,让当前支线上下文更干净。
+
+### 待办
+- [x] 跑 live ignored clipboard E2E.
+- [ ] review 当前 `@paste` 相关 diff,确认提交边界.
+- [ ] 分拣并 stage 这轮相关文件,做 local commit.
+- [ ] 清理旧的 research 计划痕迹,把已完成内容迁入工作记录或 LATER_PLANS.
+
+### 约束
+- 不改动无关支线的实现内容.
+- 不跑鼠标类 live 测试.
+- clipboard live E2E 必须在测试前后尽量恢复真实系统剪贴板.
+
+### 当前状态
+**正在执行 1-4** - live clipboard E2E 已通过,下一步 review diff 并分拣 commit。
+
+### 遇到的错误
+- live clipboard E2E 第一次运行时,`@type-text mode:"clipboard"` 的 `rdog control` 调用在 15 秒窗口内超时,但 daemon 日志没有协议错误,更像是等待窗口不够。
+- 将该调用放宽到 45 秒后仍然超时,说明问题不是单纯 timeout 数值太小。下一步先增强测试失败 label,让超时输出具体卡住的 line-control 命令。
+- 增强 label 后确认卡住的是前置 editor 查找里的重型 `@ax-get depth:6,max_elements:2000`,不是 clipboard 投递本身。已把 editor 查找改成 compact `@ax-find` match,避免把整棵窗口树塞进 control pipe。
+- compact `@ax-find` 仍会超时,最终改成轻量 `@ax-get depth:2,max_elements:300`。随后 live E2E 暴露出真正问题: `cmd+v` 只输入了 `v`,原因是 targeted CGEvent 没有设置 modifier flags。已补 `CGEventSetFlags`,live E2E 通过。

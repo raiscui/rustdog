@@ -103,6 +103,8 @@
   3. clipboard,但只有 `allow_clipboard:true` 时才允许
 - `mode:"clipboard"` 必须显式 `allow_clipboard:true`。
 - clipboard 路径只会在目标写入期间临时借用系统剪贴板,并且只在剪贴板仍保持 rdog 写入内容时恢复旧值。
+- clipboard 路径不是无热键方案。
+  当前 macOS 实现仍通过剪贴板 + 定向 paste key 完成,所以只作为显式 fallback。
 - response 里应额外暴露:
   - `clipboard_restore_policy:"restore-if-unchanged"`
   - `clipboard_restored:true|false`
@@ -131,6 +133,34 @@ clipboard response 示例:
 
 ```json
 {"kind":"type-text","backend":"macos-clipboard+cg-event-post-to-pid","target_id":"pid:123/window:0/path:8.2","mode":"clipboard","delivered_via":"clipboard","performed":true,"status":"ok","used_clipboard":true,"clipboard_restore_policy":"restore-if-unchanged","clipboard_restored":true}
+```
+
+### `@paste`
+
+示例:
+
+```text
+@paste
+@paste#34
+```
+
+当前阶段语义:
+
+- 裸 `@paste` 不带 payload,不带 target。
+- 它表示“对当前远端前台焦点执行系统粘贴”。
+- macOS 使用 `Cmd+V`;Windows / Linux 使用 `Ctrl+V`。
+- response 必须暴露:
+  - `delivery:"global-hotkey"`
+  - `delivered_via:"cmd-v"` 或 `delivered_via:"ctrl-v"`
+  - `used_hotkey:true`
+  - `requires_focus:true`
+- 它不是稳定普通文本输入接口。
+- 旧 `@paste:"text"` 只作为 legacy text injection 兼容层保留,新 agent 应优先使用 `@type-text mode:"ax-value"` 或 `@ax-set-value`。
+
+返回:
+
+```json
+{"kind":"paste","delivery":"global-hotkey","delivered_via":"cmd-v","used_hotkey":true,"used_keyboard":true,"requires_focus":true,"performed":true,"status":"ok"}
 ```
 
 ### `@key delivery`

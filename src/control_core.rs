@@ -267,6 +267,7 @@ mod tests {
         control_actions::ActionExecutionResult,
         control_protocol::{
             parse_control_line, ControlCommand, ControlParseResult, KeyMode, KeyRequest,
+            PasteRequest,
         },
     };
     use std::sync::{Arc, Mutex};
@@ -392,7 +393,7 @@ mod tests {
     }
 
     #[test]
-    fn control_line_should_route_paste_requests_to_executor() {
+    fn control_line_should_route_legacy_paste_requests_to_executor() {
         let executor = FakeExecutor::default();
         let recorded = Arc::clone(&executor.commands);
 
@@ -405,7 +406,25 @@ mod tests {
                 .lock()
                 .expect("commands lock should work")
                 .as_slice(),
-            &[ControlCommand::Paste("hello".to_owned())]
+            &[ControlCommand::Paste(PasteRequest::legacy_text("hello"))]
+        );
+    }
+
+    #[test]
+    fn control_line_should_route_bare_paste_hotkey_requests_to_executor() {
+        let executor = FakeExecutor::default();
+        let recorded = Arc::clone(&executor.commands);
+
+        let response = parse_and_execute_control_line(r#"@paste#12"#, "/bin/sh", &executor)
+            .into_single_response_line();
+
+        assert_eq!(response, r#"@response {"id":12,"value":"EXEC_OK"}"#);
+        assert_eq!(
+            recorded
+                .lock()
+                .expect("commands lock should work")
+                .as_slice(),
+            &[ControlCommand::Paste(PasteRequest::hotkey())]
         );
     }
 

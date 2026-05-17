@@ -56,3 +56,47 @@
 
 ### 备注
 - 本轮没有跑 live clipboard E2E,因为用户正在交互,不希望剪贴板测试扰动现场。
+
+## [2026-05-17 21:20:04] [Session ID: 019e1b72-d659-7a60-91b4-66cea3fc6ce0] 错误修复: `@paste` 的协议文档还把裸命令写成 `@response 0`
+
+### 问题
+- `specs/control-line-protocol.md` 的“无 request id 的成功且无输出”段落里,还把 `@paste` 放进了 `@response 0` 的适用场景。
+- 这和当前实现不一致,因为裸 `@paste` 现在返回的是 structured paste report,里面要明确告诉 agent 它走的是 hotkey,以及实际使用的是 `cmd-v` 还是 `ctrl-v`。
+
+### 原因
+- 文档是在 `@paste` 语义拆分前写的,更新主线协议时没有把响应语义那一节一起同步。
+
+### 修复
+- 将该段的适用场景改成 legacy `@key` 和 legacy `@paste:"text"`。
+- 补充说明裸 `@paste` 成功时会返回 structured paste value,而不是 `0`。
+
+### 验证
+- `git diff --check`
+- `rg -n '@paste.*@response 0|@paste.*稳定|@paste.*普通文本|@paste.*deterministic|Bare \`@paste\`|legacy \`@paste|structured paste|global-hotkey' specs /Users/cuiluming/.codex/skills/rdog-control/SKILL.md`
+- `python3 /Users/cuiluming/.codex/skills/.system/skill-creator/scripts/quick_validate.py /Users/cuiluming/.codex/skills/rdog-control`
+
+### 备注
+- 这个问题不是代码回归,但它会直接误导 agent,所以必须写进错误记录。
+
+## [2026-05-18 00:05:23] [Session ID: 019e1b72-d659-7a60-91b4-66cea3fc6ce0] 错误修复: clipboard live E2E 只落下单个 `v`
+
+### 问题
+- `@type-text mode:"clipboard"` 的真实 live ignored E2E 结果不是完整字符串,而是只在 TextEdit 里留下了一个 `v`。
+
+### 原因
+- macOS targeted delivery 的 `cmd+v` 事件只发了 modifier down/up,但主键事件没有携带 modifier flags。
+- 结果目标 App 把它当成了普通字母 `v`,而不是系统粘贴快捷键。
+
+### 修复
+- 在 `src/control_ax/macos.rs` 里补入 `CGEventSetFlags` 和 modifier flag mask。
+- `post_key_request_to_pid` 改成在 main key event 和 modifier 序列里显式设置 active modifier flags。
+- 同时把 clipboard live E2E 的 editor 查找改成轻量 `@ax-get depth:2,max_elements:300`,避免重型 AX 树扫描拖慢测试。
+
+### 验证
+- live ignored clipboard E2E 重新运行后,TextEdit 真正收到了完整文本,并且 `clipboard_restored=true`。
+- 辅助 unit test 继续通过:
+  - `control_ax::tests::type_text_clipboard_report_should_expose_restore_status`
+  - `control_ax::macos::tests::clipboard_restore_decision_should_restore_only_when_temporary_value_survived`
+
+### 备注
+- 这个 bug 只会在真实桌面上暴露,所以一定要留 live evidence,不能只看协议和 unit test。

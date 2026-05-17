@@ -36,7 +36,7 @@ pub enum ControlParseResult {
 pub enum ControlCommand {
     Ping,
     Key(KeyRequest),
-    Paste(String),
+    Paste(PasteRequest),
     Script(String),
     PtyOpen(PtyOpenRequest),
     PtyClose(PtyCloseRequest),
@@ -65,6 +65,36 @@ pub enum ControlCommand {
 
 pub const DEFAULT_KEY_HOLD_MS: u64 = 200;
 pub const DEFAULT_SCREENSHOT_QUALITY: u8 = 75;
+
+/// `@paste` 的结构化请求。
+///
+/// 当前语义分两条线:
+/// - 裸 `@paste` / `@paste#id`: 当前远端前台焦点的热键粘贴
+/// - `@paste:"text"`: legacy 文本注入兼容层,不建议作为普通文本输入路径
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PasteRequest {
+    pub kind: PasteRequestKind,
+}
+
+impl PasteRequest {
+    pub fn hotkey() -> Self {
+        Self {
+            kind: PasteRequestKind::GlobalHotkey,
+        }
+    }
+
+    pub fn legacy_text(text: impl Into<String>) -> Self {
+        Self {
+            kind: PasteRequestKind::LegacyTextInjection(text.into()),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PasteRequestKind {
+    GlobalHotkey,
+    LegacyTextInjection(String),
+}
 
 /// `@key` 的结构化请求。
 ///
@@ -261,6 +291,13 @@ pub fn parse_control_line(line: &str) -> io::Result<ControlParseResult> {
         }));
     }
 
+    if kind.eq_ignore_ascii_case("paste") && !has_payload {
+        return Ok(ControlParseResult::Control(ControlRequest {
+            request_id,
+            command: ControlCommand::Paste(PasteRequest::hotkey()),
+        }));
+    }
+
     let Some((_, payload)) = command.split_once(':') else {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -273,7 +310,9 @@ pub fn parse_control_line(line: &str) -> io::Result<ControlParseResult> {
         "key" => ControlCommand::Key(parse_key_payload(payload)?),
         "paste" => {
             let payload = parse_quoted_payload(payload)?;
-            require_non_empty_payload("paste", payload, ControlCommand::Paste)?
+            require_non_empty_payload("paste", payload, |payload| {
+                ControlCommand::Paste(PasteRequest::legacy_text(payload))
+            })?
         }
         "script" => {
             let payload = parse_quoted_payload(payload)?;
@@ -1648,7 +1687,21 @@ mod tests {
             parse_control_line(r#"@paste:"hello""#).unwrap(),
             ControlParseResult::Control(ControlRequest {
                 request_id: None,
-                command: ControlCommand::Paste("hello".to_owned()),
+                command: ControlCommand::Paste(PasteRequest::legacy_text("hello")),
+            })
+        );
+        assert_eq!(
+            parse_control_line("@paste").unwrap(),
+            ControlParseResult::Control(ControlRequest {
+                request_id: None,
+                command: ControlCommand::Paste(PasteRequest::hotkey()),
+            })
+        );
+        assert_eq!(
+            parse_control_line(r#"@paste#12"#).unwrap(),
+            ControlParseResult::Control(ControlRequest {
+                request_id: Some(12),
+                command: ControlCommand::Paste(PasteRequest::hotkey()),
             })
         );
         assert_eq!(

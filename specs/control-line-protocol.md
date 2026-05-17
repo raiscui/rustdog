@@ -59,6 +59,8 @@ line-control 会把每一行输入分成 3 类:
 @key:"right-option"
 @key#7:"right-option"
 @key#7:{key:"right-option",hold_ms:200,mode:"press_release"}
+@paste
+@paste#8
 @paste:"hello"
 @mouse-move#10:{x:1200,y:540,coordinate_space:"os-logical"}
 @mouse-move#11:{dx:10,dy:-5,coordinate_space:"relative"}
@@ -265,8 +267,42 @@ mode = "press_release"
 
 ### `@paste`
 
-用于文本注入。
-成功时通常没有 stdout,因此成功响应通常是数值 `0`。
+用于当前远端前台焦点的系统粘贴。
+
+```text
+@paste
+@paste#8
+```
+
+语义:
+
+- 不带 payload。
+- 不需要 target。
+- 依赖远端当前焦点。
+- macOS 发送 `Cmd+V`。
+- Windows / Linux 发送 `Ctrl+V`。
+- 这是热键粘贴,不是无热键文本写入。
+
+成功响应会说真话:
+
+```json
+{"kind":"paste","delivery":"global-hotkey","delivered_via":"cmd-v","used_hotkey":true,"used_keyboard":true,"requires_focus":true,"performed":true,"status":"ok"}
+```
+
+兼容入口:
+
+```text
+@paste:"hello"
+```
+
+这是 legacy text injection,保留给旧客户端。
+新 agent 不应把它当作稳定普通文本输入接口。
+普通文本输入优先使用:
+
+```text
+@type-text#30:{target:{id:"pid:123/window:0/path:8.2"},text:"hello",mode:"ax-value"}
+@ax-set-value#31:{target:{id:"pid:123/window:0/path:8.2"},value:"hello",mode:"replace"}
+```
 
 ### 鼠标控制
 
@@ -486,12 +522,14 @@ rdog control TARGET --pty-attach SESSION_ID
 
 适用场景:
 
-- `@key`
-- `@paste`
+- legacy `@key` 成功且没有结构化 report
+- legacy `@paste:"text"`
 
 鼠标控制成功时不是 `0`,而是结构化 mouse value。
 这样 code agent 可以直接确认执行动作、坐标语义和 backend。
 AX control 成功时也不是 `0`,而是结构化 AX value。
+裸 `@paste` 成功时也不是 `0`,而是结构化 paste value。
+这样 agent 可以看到它使用了热键、依赖焦点,并知道实际投递路径是 `cmd-v` 还是 `ctrl-v`。
 
 #### 成功且只有字符串输出
 

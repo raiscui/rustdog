@@ -104,7 +104,7 @@ flowchart LR
 | 带 id shell | `@cmd#42:"printf READY"` | `@response {"id":42,"value":"READY"}` | 并行或批处理时关联结果 |
 | 显式脚本 | `@script:"git status --short"` | `@response ...` | 远端执行命令文本 |
 | 按键 | `@key#7:{key:"F11",hold_ms:200,mode:"press_release"}` | `@response {"id":7,"value":0}` 或 structured key report | 用于快捷键、功能键、导航键和 app 功能触发,不是普通文本输入 |
-| 粘贴 | `@paste:"hello"` | `@response 0` 或错误对象 | 向远端 GUI 输入文本 |
+| 粘贴 | `@paste` | structured paste report | 对远端当前焦点执行系统粘贴,需要焦点正确 |
 | 截图 | `@screenshot#7` | image `@savefile` + manifest `@savefile` + `@response ...screenshot-bundle...` | 采集远端屏幕证据与坐标 manifest |
 | 截图 + AX | `@screenshot#8:{include_ax:true,ax_required:false}` | screenshot bundle,manifest 可含 `accessibility` | 同时采集远端屏幕和 macOS UI 结构 |
 | AX tree | `@ax-tree#9:{scope:"windows",depth:4,max_elements:1000}` | structured AX `@response` | 不截图,只读取当前 macOS UI 结构 |
@@ -255,6 +255,9 @@ AX rect 继续使用 `coordinate_space:"os-logical"`。
 - `mode:"clipboard"` 必须显式 `allow_clipboard:true`。
   它会临时写入远端系统剪贴板,然后按 `restore-if-unchanged` 策略恢复旧值。
   如果人类或其他进程在此期间改了剪贴板,rdog 会跳过恢复,并在 response 里返回 `clipboard_restored:false` 与 `clipboard_restore_skipped_reason:"clipboard-changed"`。
+- `@paste` 不带参数时是当前焦点的系统粘贴热键。
+  它不需要 target,但依赖焦点,返回里会标出 `used_hotkey:true` 和 `requires_focus:true`。
+  旧 `@paste:"text"` 只保留为 legacy text injection,新 agent 不应把它作为稳定普通文本输入路径。
 - `@ax-focus activate:true` 是唯一允许它主动调用 `@window-activate` 的情况。
 - `@ax-scroll` 当前在 macOS 主路径真实返回 `delivered_via:"ax-scrollbar-value"`。
   它通过写入 AXScrollBar 的 AXValue 滚动,不要把它当成隐式全局 wheel。
@@ -433,6 +436,7 @@ rdog control linux-build.lab --entry-point tcp/10.8.0.20:17447
 2. 不需要 TTY 时,用 `@cmd#id` 或 bare shell line。
 3. 需要关联结果时,用 request id。
 4. 需要 GUI 副作用时,用 `@key` / `@paste` / 鼠标命令,并先确认权限。
+   其中 `@paste` 是当前焦点粘贴,不是稳定文本输入。
 5. 需要视觉证据时,用 `@screenshot#id`,并解析所有同 id 的 `@savefile`。
    默认截图要同时读取 JPEG 和 manifest。
    后续点击/拖拽坐标必须从 manifest 的 `virtual_bounds` 和 `display.image_rect` 换算,不要只凭图片猜。

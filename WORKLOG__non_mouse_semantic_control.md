@@ -294,3 +294,46 @@
 ### 总结感悟
 - clipboard fallback 不是“无副作用输入”。它必须把人类剪贴板当成共享资源。
 - 对 agent 来说,仅有 `used_clipboard:true` 不够,还需要知道恢复策略和恢复结果,否则无法判断现场是否被污染。
+
+## [2026-05-17 21:20:04] [Session ID: 019e1b72-d659-7a60-91b4-66cea3fc6ce0] 任务名称: `@paste` 热键与 AXValue 拆分收口
+
+### 任务内容
+- 将裸 `@paste` 改成当前远端前台焦点的系统粘贴热键。
+- 保留 `@paste:"text"` 作为 legacy text injection 兼容层。
+- 把 `@paste` 的推荐文本输入职责继续留给 `@ax-set-value` / `@type-text mode:"ax-value"`。
+- 同步更新协议文档、agent usage 文档和 `rdog-control` skill。
+
+### 完成过程
+- 在 `src/control_protocol.rs` 中把 `ControlCommand::Paste(String)` 重构成结构化 `PasteRequest`。
+- 在 `src/control_actions.rs` 中把裸 `@paste` 执行改为平台 paste hotkey,并返回 structured paste report。
+- 在 `src/control_core.rs` / `src/shell.rs` 中更新测试适配,锁定裸 `@paste#id` 和 legacy `@paste:"text"` 的路由。
+- 在 `specs/control-line-protocol.md`、`specs/rdog-non-mouse-semantic-control-plan.md`、`specs/code-agent-rdog-control-usage.md` 和 `/Users/cuiluming/.codex/skills/rdog-control/SKILL.md` 中同步口径。
+- 顺序跑完 focused tests、`cargo fmt -- --check`、`cargo test --package rustdog --test control_ax_e2e --no-run`、`git diff --check` 和外部 skill 校验。
+
+### 总结感悟
+- `paste` 这个词天然会让人联想到“当前剪贴板粘贴”,所以裸命令要诚实地表现成热键语义,不要再偷塞文本注入。
+- 只要协议层把 `paste` 和 `ax-value` 分开,agent 的决策就会更稳,也更容易解释。
+
+## [2026-05-18 00:05:23] [Session ID: 019e1b72-d659-7a60-91b4-66cea3fc6ce0] 任务名称: `@paste` clipboard live E2E 与命令键 flags 修复
+
+### 任务内容
+- 跑通 `@type-text mode:"clipboard",allow_clipboard:true` 的真实 macOS live ignored E2E。
+- 修正 macOS targeted key 事件里 `cmd+v` 只落下字母 `v` 的问题。
+- 清理 clipboard live E2E 的测试夹具，让它不再依赖重型 AX 树查询。
+
+### 完成过程
+- 先把 live clipboard E2E 的等待窗口扩到 45 秒,再定位到真正的失败点。
+- 发现失败不是 clipboard 恢复,而是 `cmd+v` 在 targeted delivery 下没有携带 modifier flags。
+- 在 `src/control_ax/macos.rs` 里补了 `CGEventSetFlags`、modifier flag mask 和按键序列的 active modifier flags。
+- 将 clipboard live E2E 的 editor 定位从重型 `@ax-get depth:6,max_elements:2000` 收回到轻量 `@ax-get depth:2,max_elements:300`,保留更小的窗口树边界。
+- 重新运行 live ignored E2E,验证真实 TextEdit 窗口写入了完整文本,并且系统剪贴板恢复回测试前内容。
+
+### 验证
+- `RDOG_LIVE_AX_E2E=1 RDOG_LIVE_AX_E2E_VIA_TERMINAL=1 RDOG_LIVE_AX_E2E_BINARY=/Users/cuiluming/local_doc/l_dev/my/rust/rustdog/target/debug/rdog cargo test --package rustdog --test control_ax_e2e -- daemon_control_lane_should_type_text_via_clipboard_and_restore_clipboard --exact --ignored --nocapture`
+- `cargo test --package rustdog --bin rdog -- control_ax::tests::type_text_clipboard_report_should_expose_restore_status control_ax::macos::tests::clipboard_restore_decision_should_restore_only_when_temporary_value_survived --nocapture`
+- `cargo fmt -- --check`
+- `git diff --check`
+
+### 总结感悟
+- clipboard 这条路不能只看协议声明,还得看实际键盘事件有没有把 modifiers 带进去。
+- live E2E 卡住时,先缩小测试夹具的 AX 查询面,常常比加大超时更快找到真问题。

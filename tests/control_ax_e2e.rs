@@ -163,6 +163,59 @@ impl Drop for TextEditDocumentFixture {
 }
 
 #[derive(Debug)]
+struct ClipboardGuard {
+    original: Vec<u8>,
+}
+
+impl ClipboardGuard {
+    fn capture() -> Self {
+        Self {
+            original: read_system_clipboard_bytes(),
+        }
+    }
+
+    fn assert_current_is_original(&self) {
+        let current = read_system_clipboard_bytes();
+        assert!(
+            current == self.original,
+            "system clipboard should be restored to pre-test bytes (before_len={}, after_len={})",
+            self.original.len(),
+            current.len()
+        );
+    }
+}
+
+impl Drop for ClipboardGuard {
+    fn drop(&mut self) {
+        let _ = try_write_system_clipboard_bytes(&self.original);
+    }
+}
+
+fn read_system_clipboard_bytes() -> Vec<u8> {
+    let output = Command::new("pbpaste")
+        .output()
+        .expect("pbpaste should be available for macOS live clipboard E2E");
+    assert!(
+        output.status.success(),
+        "pbpaste should succeed while reading test clipboard state\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    output.stdout
+}
+
+fn try_write_system_clipboard_bytes(bytes: &[u8]) -> std::io::Result<()> {
+    let mut child = Command::new("pbcopy").stdin(Stdio::piped()).spawn()?;
+    if let Some(stdin) = child.stdin.as_mut() {
+        stdin.write_all(bytes)?;
+    }
+    let status = child.wait()?;
+    status
+        .success()
+        .then_some(())
+        .ok_or_else(|| std::io::Error::other(format!("pbcopy exited with {status}")))
+}
+
+#[derive(Debug)]
 struct LiveAxDaemon {
     port: u16,
     binary: PathBuf,
@@ -440,7 +493,8 @@ fn run_control_command(binary: &Path, port: u16, line: &str, timeout: Duration) 
         .expect("control stdin should accept command");
     drop(child.stdin.take());
 
-    let output = wait_with_output_timeout(child, timeout, "rdog control command");
+    let label = format!("rdog control command `{}`", line.trim());
+    let output = wait_with_output_timeout(child, timeout, &label);
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
@@ -796,6 +850,26 @@ fn assert_type_text_targeted_keyboard_report(report: &Value, expected_target_id:
     assert_eq!(report["used_clipboard"].as_bool(), Some(false));
 }
 
+fn assert_type_text_clipboard_report(report: &Value, expected_target_id: &str) {
+    assert_eq!(report["kind"].as_str(), Some("type-text"));
+    assert_eq!(
+        report["backend"].as_str(),
+        Some("macos-clipboard+cg-event-post-to-pid")
+    );
+    assert_eq!(report["target_id"].as_str(), Some(expected_target_id));
+    assert_eq!(report["mode"].as_str(), Some("clipboard"));
+    assert_eq!(report["delivered_via"].as_str(), Some("clipboard"));
+    assert_eq!(report["performed"].as_bool(), Some(true));
+    assert_eq!(report["status"].as_str(), Some("ok"));
+    assert_eq!(report["used_clipboard"].as_bool(), Some(true));
+    assert_eq!(
+        report["clipboard_restore_policy"].as_str(),
+        Some("restore-if-unchanged")
+    );
+    assert_eq!(report["clipboard_restored"].as_bool(), Some(true));
+    assert!(report.get("clipboard_restore_skipped_reason").is_none());
+}
+
 fn assert_key_delivery_report(
     report: &Value,
     expected_delivery: &str,
@@ -881,9 +955,9 @@ fn wait_for_textedit_editor_match(
             binary,
             port,
             &format!(
-                "@ax-get#300:{{target:{{id:\"{window_id}\"}},depth:6,max_elements:2000,include_values:false}}\n"
+                "@ax-get#300:{{target:{{id:\"{window_id}\"}},depth:2,max_elements:300,include_values:false}}\n"
             ),
-            Duration::from_secs(30),
+            Duration::from_secs(15),
         );
         let get = successful_response_value(response, label, binary);
         last_get = Some(get.clone());
@@ -1417,6 +1491,67 @@ fn daemon_control_lane_should_deliver_pid_and_window_targeted_hotkeys_to_real_te
     eprintln!(
         "live targeted-hotkey E2E observed TextEdit target: window_id={}, target_id={}, pid={}",
         window_id, editor_target_id, target_pid
+    );
+
+    daemon.stop_terminal();
+}
+
+#[test]
+#[ignore = "requires a visible macOS desktop, Accessibility permission, and temporary clipboard use"]
+fn daemon_control_lane_should_type_text_via_clipboard_and_restore_clipboard() {
+    if !live_ax_e2e_enabled() {
+        eprintln!(
+            "skipping live clipboard E2E; set {LIVE_AX_E2E_ENV}=1 to run against the real macOS desktop"
+        );
+        return;
+    }
+
+    let clipboard = ClipboardGuard::capture();
+    let daemon = start_live_ax_daemon("textedit-clipboard");
+    let binary = daemon.binary.as_path();
+    let port = daemon.port;
+    let fixture = TextEditDocumentFixture::create("clipboard");
+
+    let window_id = wait_for_textedit_window_id(
+        binary,
+        port,
+        &fixture.title_needle,
+        "@window-find clipboard",
+    );
+    let (editor_target_id, restored_window_id, target_pid) =
+        wait_for_textedit_editor_match(binary, port, &window_id, "@ax-get clipboard editor");
+    assert_eq!(restored_window_id, window_id);
+
+    let expected_text = format!("RDOG CLIPBOARD LIVE E2E {port}");
+    let type_response = run_control_command(
+        binary,
+        port,
+        &format!(
+            "@type-text#350:{{target:{{id:\"{editor_target_id}\"}},text:\"{expected_text}\",mode:\"clipboard\",allow_clipboard:true}}\n"
+        ),
+        Duration::from_secs(45),
+    );
+    let type_report = successful_response_value(type_response, "@type-text clipboard", binary);
+    assert_type_text_clipboard_report(&type_report, &editor_target_id);
+
+    let get = wait_for_textedit_value_exact(binary, port, &editor_target_id, &expected_text);
+    assert_eq!(get["kind"].as_str(), Some("ax-get"));
+    assert_eq!(get["target_id"].as_str(), Some(editor_target_id.as_str()));
+    assert_eq!(get["window_id"].as_str(), Some(restored_window_id.as_str()));
+    assert_eq!(get["pid"].as_i64(), Some(i64::from(target_pid)));
+    assert_eq!(
+        get["element"]["value"].as_str(),
+        Some(expected_text.as_str())
+    );
+
+    clipboard.assert_current_is_original();
+
+    eprintln!(
+        "live clipboard E2E observed TextEdit paste and clipboard restore: window_id={}, target_id={}, pid={}, clipboard_restored={}",
+        window_id,
+        editor_target_id,
+        target_pid,
+        type_report["clipboard_restored"].as_bool().unwrap_or(false)
     );
 
     daemon.stop_terminal();

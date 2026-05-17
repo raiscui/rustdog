@@ -25,6 +25,7 @@ type AXValueRef = CFTypeRef;
 type AXError = i32;
 type CGEventSourceRef = CFTypeRef;
 type CGEventRef = CFTypeRef;
+type CGEventFlags = u64;
 type CGKeyCode = u16;
 type UniChar = u16;
 
@@ -43,6 +44,10 @@ const AX_ERROR_API_DISABLED: AXError = -25211;
 const AX_ERROR_NO_VALUE: AXError = -25212;
 const AX_VALUE_CG_POINT: u32 = 1;
 const AX_VALUE_CG_SIZE: u32 = 2;
+const CG_EVENT_FLAG_MASK_SHIFT: CGEventFlags = 1 << 17;
+const CG_EVENT_FLAG_MASK_CONTROL: CGEventFlags = 1 << 18;
+const CG_EVENT_FLAG_MASK_ALTERNATE: CGEventFlags = 1 << 19;
+const CG_EVENT_FLAG_MASK_COMMAND: CGEventFlags = 1 << 20;
 const CG_WINDOW_ON_SCREEN_ONLY: u32 = 1 << 0;
 const CG_WINDOW_EXCLUDE_DESKTOP: u32 = 1 << 4;
 const CG_EVENT_SOURCE_STATE_COMBINED_SESSION: i32 = 0;
@@ -153,6 +158,7 @@ extern "C" {
         virtual_key: CGKeyCode,
         key_down: bool,
     ) -> CGEventRef;
+    fn CGEventSetFlags(event: CGEventRef, flags: CGEventFlags);
     fn CGEventKeyboardSetUnicodeString(
         event: CGEventRef,
         string_length: usize,
@@ -458,7 +464,7 @@ fn type_text_via_clipboard(request: &TypeTextRequest) -> io::Result<TypeTextRepo
     let target_id = resolve_live_target_id(&request.target)?;
     prepare_text_target(&target_id)?;
     let parsed = parse_target_id(&target_id)?;
-    let restore = with_temporary_clipboard_text(&request.text, || {
+    let restore = with_temporary_clipboard_text(&target_id, &request.text, || {
         let paste_request = KeyRequest {
             key: "cmd+v".to_owned(),
             hold_ms: DEFAULT_KEY_HOLD_MS,
@@ -931,30 +937,35 @@ fn set_bool_attribute(element: AXUIElementRef, attr: &str, value: bool) -> io::R
 
 fn post_key_request_to_pid(pid: i32, request: &KeyRequest) -> io::Result<()> {
     let chord = parse_mac_key_chord(&request.key, request.delivery)?;
+    let active_modifier_flags = modifier_flags(&chord.modifiers);
     match request.mode {
         KeyMode::PressRelease => {
-            for modifier in &chord.modifiers {
-                post_key_event_to_pid(pid, *modifier, true, None)?;
+            for (index, modifier) in chord.modifiers.iter().enumerate() {
+                let active_flags = modifier_flags(&chord.modifiers[..=index]);
+                post_key_event_to_pid(pid, *modifier, true, None, active_flags)?;
             }
-            post_main_key_event_to_pid(pid, &chord.main, true)?;
+            post_main_key_event_to_pid(pid, &chord.main, true, active_modifier_flags)?;
             if request.hold_ms > 0 {
                 thread::sleep(Duration::from_millis(request.hold_ms));
             }
-            post_main_key_event_to_pid(pid, &chord.main, false)?;
-            for modifier in chord.modifiers.iter().rev() {
-                post_key_event_to_pid(pid, *modifier, false, None)?;
+            post_main_key_event_to_pid(pid, &chord.main, false, active_modifier_flags)?;
+            for index in (0..chord.modifiers.len()).rev() {
+                let remaining_flags = modifier_flags(&chord.modifiers[..index]);
+                post_key_event_to_pid(pid, chord.modifiers[index], false, None, remaining_flags)?;
             }
         }
         KeyMode::Press => {
-            for modifier in &chord.modifiers {
-                post_key_event_to_pid(pid, *modifier, true, None)?;
+            for (index, modifier) in chord.modifiers.iter().enumerate() {
+                let active_flags = modifier_flags(&chord.modifiers[..=index]);
+                post_key_event_to_pid(pid, *modifier, true, None, active_flags)?;
             }
-            post_main_key_event_to_pid(pid, &chord.main, true)?;
+            post_main_key_event_to_pid(pid, &chord.main, true, active_modifier_flags)?;
         }
         KeyMode::Release => {
-            post_main_key_event_to_pid(pid, &chord.main, false)?;
-            for modifier in chord.modifiers.iter().rev() {
-                post_key_event_to_pid(pid, *modifier, false, None)?;
+            post_main_key_event_to_pid(pid, &chord.main, false, active_modifier_flags)?;
+            for index in (0..chord.modifiers.len()).rev() {
+                let remaining_flags = modifier_flags(&chord.modifiers[..index]);
+                post_key_event_to_pid(pid, chord.modifiers[index], false, None, remaining_flags)?;
             }
         }
     }
@@ -966,12 +977,13 @@ fn post_unicode_text_to_pid(pid: i32, text: &str) -> io::Result<()> {
         return Ok(());
     }
     let unicode = text.encode_utf16().collect::<Vec<_>>();
-    post_key_event_to_pid(pid, 0, true, Some(&unicode))?;
-    post_key_event_to_pid(pid, 0, false, Some(&unicode))?;
+    post_key_event_to_pid(pid, 0, true, Some(&unicode), 0)?;
+    post_key_event_to_pid(pid, 0, false, Some(&unicode), 0)?;
     Ok(())
 }
 
 fn with_temporary_clipboard_text(
+    _target_id: &str,
     text: &str,
     run: impl FnOnce() -> io::Result<()>,
 ) -> io::Result<ClipboardRestoreStatus> {
@@ -1188,10 +1200,15 @@ fn mac_ascii_keycode(ch: char) -> Option<CGKeyCode> {
     }
 }
 
-fn post_main_key_event_to_pid(pid: i32, main: &MacKeyMain, key_down: bool) -> io::Result<()> {
+fn post_main_key_event_to_pid(
+    pid: i32,
+    main: &MacKeyMain,
+    key_down: bool,
+    flags: CGEventFlags,
+) -> io::Result<()> {
     match main {
-        MacKeyMain::KeyCode(keycode) => post_key_event_to_pid(pid, *keycode, key_down, None),
-        MacKeyMain::Unicode(text) => post_key_event_to_pid(pid, 0, key_down, Some(text)),
+        MacKeyMain::KeyCode(keycode) => post_key_event_to_pid(pid, *keycode, key_down, None, flags),
+        MacKeyMain::Unicode(text) => post_key_event_to_pid(pid, 0, key_down, Some(text), flags),
     }
 }
 
@@ -1200,6 +1217,7 @@ fn post_key_event_to_pid(
     keycode: CGKeyCode,
     key_down: bool,
     unicode: Option<&[UniChar]>,
+    flags: CGEventFlags,
 ) -> io::Result<()> {
     let source = create_event_source()?;
     let event = unsafe {
@@ -1215,10 +1233,28 @@ fn post_key_event_to_pid(
             CGEventKeyboardSetUnicodeString(event.as_ptr(), unicode.len(), unicode.as_ptr());
         }
     }
+    if flags != 0 {
+        unsafe {
+            CGEventSetFlags(event.as_ptr(), flags);
+        }
+    }
     unsafe {
         CGEventPostToPid(pid, event.as_ptr());
     }
     Ok(())
+}
+
+fn modifier_flags(modifiers: &[CGKeyCode]) -> CGEventFlags {
+    modifiers.iter().fold(0, |flags, modifier| {
+        flags
+            | match *modifier {
+                KEYCODE_LEFT_COMMAND | KEYCODE_RIGHT_COMMAND => CG_EVENT_FLAG_MASK_COMMAND,
+                KEYCODE_LEFT_SHIFT | KEYCODE_RIGHT_SHIFT => CG_EVENT_FLAG_MASK_SHIFT,
+                KEYCODE_LEFT_CONTROL | KEYCODE_RIGHT_CONTROL => CG_EVENT_FLAG_MASK_CONTROL,
+                KEYCODE_LEFT_OPTION | KEYCODE_RIGHT_OPTION => CG_EVENT_FLAG_MASK_ALTERNATE,
+                _ => 0,
+            }
+    })
 }
 
 fn create_event_source() -> io::Result<CfOwned> {
