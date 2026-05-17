@@ -337,3 +337,26 @@
 ### 总结感悟
 - clipboard 这条路不能只看协议声明,还得看实际键盘事件有没有把 modifiers 带进去。
 - live E2E 卡住时,先缩小测试夹具的 AX 查询面,常常比加大超时更快找到真问题。
+
+## [2026-05-18 00:13:46] [Session ID: codex-20260518-1234-completion] 任务名称: 按建议执行 1-4 收口
+
+### 任务内容
+- 将 `@paste` / clipboard 改动整理成本地提交。
+- 分拣当前 worktree,避免把其他支线脏改混入本轮提交。
+- 补齐真实 macOS live ignored clipboard E2E 证据。
+- 将旧的非鼠标控制调研产物从临时上下文迁入 repo-local 提交面。
+
+### 完成过程
+- 完成代码提交 `71de57c Keep paste honest and prove clipboard fallback on real macOS UI`.
+- 重新确认 staged 范围,只提交非鼠标控制调研的 5 个文件。
+- 补充 Lore Commit Protocol 和 `Co-authored-by: OmX <omx@oh-my-codex.dev>` trailer 后,完成调研提交 `99961e3 Preserve non-mouse control research for future protocol work`.
+- 检查剩余 worktree,确认仍然存在的脏改属于 `task_plan.md`、`task_plan__ax_plan.md`、`.ralph/` 和 mouse E2E 支线,本轮未触碰这些内容。
+
+### 验证
+- `git diff --cached --check`: 第二个提交前通过。
+- `git diff --check`: 第二个提交后通过,不含本轮新增 whitespace 问题。
+- live clipboard E2E 证据已经记录在上一条工作日志中。
+
+### 总结感悟
+- 对这种多支线 worktree,先分清 staged 范围再 commit 比直接“全加”更重要。
+- 旧 research 产物不应该停留在临时文件里,只要后续会影响协议和 skill,就要迁入 repo-local 长期知识面。

@@ -511,3 +511,14 @@
 - 将该调用放宽到 45 秒后仍然超时,说明问题不是单纯 timeout 数值太小。下一步先增强测试失败 label,让超时输出具体卡住的 line-control 命令。
 - 增强 label 后确认卡住的是前置 editor 查找里的重型 `@ax-get depth:6,max_elements:2000`,不是 clipboard 投递本身。已把 editor 查找改成 compact `@ax-find` match,避免把整棵窗口树塞进 control pipe。
 - compact `@ax-find` 仍会超时,最终改成轻量 `@ax-get depth:2,max_elements:300`。随后 live E2E 暴露出真正问题: `cmd+v` 只输入了 `v`,原因是 targeted CGEvent 没有设置 modifier flags。已补 `CGEventSetFlags`,live E2E 通过。
+
+## [2026-05-18 00:13:46] [Session ID: codex-20260518-1234-completion] [完成]: 按建议执行 1-4 收口
+
+### 已完成
+- [x] 1. 已把 `@paste` / clipboard 相关代码、测试和文档整理成本地 commit `71de57c`.
+- [x] 2. 已分拣 worktree,没有把 mouse E2E、AX plan 或 `.ralph/` 运行态内容混进本轮提交.
+- [x] 3. 已运行真实 macOS live ignored clipboard E2E,验证 TextEdit 写入和剪贴板恢复.
+- [x] 4. 已把旧的非鼠标控制调研产物迁入可提交的 repo-local 文件,并提交为 `99961e3`.
+
+### 当前状态
+**1-4 已全部完成** - 剩余 worktree 脏改属于其他支线或运行态文件,本轮没有继续处理。
