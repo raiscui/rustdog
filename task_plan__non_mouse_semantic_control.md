@@ -236,3 +236,46 @@
 
 ### 当前状态
 **本轮目标完成** - 下一步若继续推进,最自然的是进入 live ignored E2E 或补 `@key global structured success` 的更细单测。
+
+## [2026-05-17 13:18:00] [Session ID: 019e1b72-d659-7a60-91b4-66cea3fc6ce0] [续写]: Phase 2.1 live E2E + `@key` 结构化单测
+
+### 目标
+- 新增一个不依赖鼠标的 macOS live ignored E2E。
+- 证明已授权 rdog 能在真实桌面上完成非鼠标语义控制链路。
+- 同时补一条 `@key delivery:\"global\"` + `response_mode == Structured` 的 focused unit test。
+
+### 待办
+- [x] 阅读现有 `tests/control_ax_e2e.rs` / 相关 live helper,选定可稳定复用的目标 app 和断言。
+- [x] 设计 live ignored E2E: 不碰鼠标,优先覆盖 `@ax-focus` + `@type-text targeted-keyboard` 或 `@ax-scroll` / `@key pid-targeted`。
+- [x] 补 `execute_key` / `control_core` 层 focused unit test,锁住 global structured success response。
+- [x] 跑新增 focused test + live ignored E2E,记录动态证据。
+
+### 约束
+- 不做任何鼠标移动、点击、拖拽、滚轮 live 操作。
+- live E2E 必须以真实窗口行为为成功判据,不能只看返回码。
+- 只改本轮非鼠标语义控制相关文件。
+
+### 当前状态
+**正在进入 Phase 2.1** - 先找现有 live ignored 测试夹具和最稳的真实窗口交互路径。
+
+## [2026-05-17 14:07:00] [Session ID: 019e1b72-d659-7a60-91b4-66cea3fc6ce0] [完成]: Phase 2.1 live E2E 与 unit seam 已完成
+
+### 结果
+- 已新增 `@key delivery:"global"` structured success 的 focused unit seam test。
+- 已新增并跑通不碰鼠标的 macOS live ignored E2E。
+- 已用真实 TextEdit 窗口证明:
+  - `@ax-focus activate:true`
+  - `@type-text mode:"targeted-keyboard"`
+
+### 动态证据
+- unit:
+  - `control_actions::tests::structured_global_key_success_response_should_report_structured_global_success`
+- live:
+  - `daemon_control_lane_should_focus_hidden_textedit_and_type_without_mouse`
+  - 真实观测:
+    - `window_id=pid:551/window:0`
+    - `target_id=pid:551/window:0/path:0.0`
+    - `pid=551`
+
+### 当前状态
+**本轮目标完成** - 下一步可以 review 这轮新增 diff 并做 local commit。

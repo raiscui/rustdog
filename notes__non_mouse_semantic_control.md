@@ -193,3 +193,50 @@
 
 ### 剩余风险
 - `src/control_ax/macos.rs` 继续膨胀的问题没有在这次提交里处理,后续如果继续做 live E2E 或再扩能力,最好优先拆 helper。
+
+## [2026-05-17 14:05:00] [Session ID: 019e1b72-d659-7a60-91b4-66cea3fc6ce0] 笔记: Phase 2.1 live ignored E2E 调试结论
+
+### 现象
+- 新增的 TextEdit live ignored E2E 首轮失败,不是一上来就通过。
+- 第一轮失败现象:
+  - 重型 `@ax-find` 请求会导致 `rdog control` 在收到结果前连接关闭。
+  - 随后 daemon 端口也消失,说明这条请求会把 daemon 拖死。
+- 第二轮失败现象:
+  - 改成轻量 `@ax-find` 后 daemon 不再崩,但 `match_count = 0`。
+- 第三轮失败现象:
+  - 改成 `@window-find -> @ax-get(window_id)` 两段式后,live 链路已经能走到 `@type-text targeted-keyboard`。
+  - 最后暴露的只是不正确的测试断言:
+    - 实际 backend 是 `macos-cg-event-post-to-pid`
+    - 不是 `macos-accessibility`
+
+### 假设演进
+- 假设1: TextEdit 场景只是等待条件不稳。
+  - 被手工复现推翻:
+    - 同样的重型 `@ax-find` 会直接让 daemon 退出。
+- 假设2: 只是 AX 查找深度不够。
+  - 也不完整。
+  - 因为 `@ax-find` 的空结果并不等于窗口不存在,只是“窗口定位和编辑区定位混在一条全局元素查询里”不稳。
+- 最终成立的假设:
+  - 对真实 GUI 文本编辑场景,应该把“找窗口”和“找元素”拆开:
+    1. `@window-find` 先锁定真实 `window_id`
+    2. `@ax-get(window_id)` 再在单窗口树里找 `AXTextArea` / `AXTextField`
+  - 这样既避开重型全局 AX 查询,也更符合当前协议分层。
+
+### 动态证据
+- focused unit seam:
+  - `cargo test --package rustdog --bin rdog -- control_actions::tests::structured_global_key_success_response_should_report_structured_global_success --exact`
+  - 1 passed
+- integration compile:
+  - `cargo test --package rustdog --test control_ax_e2e --no-run`
+  - 通过
+- live ignored E2E:
+  - `RDOG_LIVE_AX_E2E=1 RDOG_LIVE_AX_E2E_VIA_TERMINAL=1 RDOG_LIVE_AX_E2E_BINARY=/Users/cuiluming/local_doc/l_dev/my/rust/rustdog/target/debug/rdog cargo test --package rustdog --test control_ax_e2e -- daemon_control_lane_should_focus_hidden_textedit_and_type_without_mouse --exact --ignored --nocapture`
+  - 最终通过,并观察到:
+    - `window_id=pid:551/window:0`
+    - `target_id=pid:551/window:0/path:0.0`
+    - `pid=551`
+
+### 结论
+- `@ax-focus activate:true` 已能把隐藏的真实 TextEdit 窗口恢复到可交互状态。
+- `@type-text mode:"targeted-keyboard"` 已能在不动鼠标的前提下,把文本输入到真实 TextEdit 编辑区。
+- `@key delivery:"global"` 的 structured success 现在也有独立 unit seam 锁住了。

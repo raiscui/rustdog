@@ -152,3 +152,43 @@
 ### 总结感悟
 - 一旦 worktree 同时跑多条线,提交前显式收窄文件集合很关键,否则很容易把未验证实验线一起带进历史。
 - 对 agent-facing 协议来说,真实 response schema 比“看起来更方便的 fallback”更重要。
+
+## [2026-05-17 14:06:00] [Session ID: 019e1b72-d659-7a60-91b4-66cea3fc6ce0] 任务名称: 非鼠标语义控制 Phase 2.1 live E2E 与 `@key` 单测收口
+
+### 任务内容
+- 给 `@key delivery:"global"` 的 structured success 增加独立 unit seam test。
+- 为已授权的 rdog 增加一个不碰鼠标的 macOS live ignored E2E。
+- 用真实桌面证明:
+  - `@ax-focus activate:true`
+  - `@type-text mode:"targeted-keyboard"`
+
+### 完成过程
+- 在 `src/control_actions.rs` 中抽出 `structured_global_key_success_response()`:
+  - 让 `execute_key()` 的 global structured success 走可单测的纯函数缝
+  - 新增 focused unit test 锁住:
+    - `kind:"key"`
+    - `backend:"global-input-simulation"`
+    - `delivery:"global"`
+- 在 `tests/control_ax_e2e.rs` 中新增 live ignored E2E:
+  - 使用临时 TextEdit 文档作为真实目标
+  - 先用 `@window-find` 锁定真实 `window_id`
+  - 把 TextEdit app 隐藏
+  - 再用 `@ax-focus activate:true` 恢复窗口
+  - 用 `@ax-get(window_id)` 在单窗口树里定位编辑区 target
+  - 最后用 `@type-text mode:"targeted-keyboard"` 输入文本,并用 `@ax-get(target_id)` 回读 AXValue
+- 调试过程中还修正了 live fixture:
+  - 避开会拖死 daemon 的重型全局 `@ax-find`
+  - 改用 `@window-find -> @ax-get(window_id)` 两段式
+  - 修正 TextEdit 隐藏用的 AppleScript
+  - 修正 targeted-keyboard report 的真实 backend 断言
+
+### 验证
+- `cargo test --package rustdog --bin rdog -- control_actions::tests::structured_global_key_success_response_should_report_structured_global_success --exact`
+- `cargo test --package rustdog --test control_ax_e2e --no-run`
+- `RDOG_LIVE_AX_E2E=1 RDOG_LIVE_AX_E2E_VIA_TERMINAL=1 RDOG_LIVE_AX_E2E_BINARY=/Users/cuiluming/local_doc/l_dev/my/rust/rustdog/target/debug/rdog cargo test --package rustdog --test control_ax_e2e -- daemon_control_lane_should_focus_hidden_textedit_and_type_without_mouse --exact --ignored --nocapture`
+- `git diff --check -- src/control_actions.rs tests/control_ax_e2e.rs task_plan__non_mouse_semantic_control.md notes__non_mouse_semantic_control.md WORKLOG__non_mouse_semantic_control.md`
+- 以上全部通过
+
+### 总结感悟
+- 对真实 GUI 文本输入场景,把“找窗口”和“找元素”拆成两段,比一条全局 AX 查询稳得多。
+- live E2E 的价值不只是“最后绿了”,更在于它把协议名、backend 名、桌面状态恢复路径都压成了真实证据。

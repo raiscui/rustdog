@@ -214,17 +214,19 @@ fn execute_key(
         key_input_event_sink,
     )?;
 
-    if matches!(request.response_mode, KeyResponseMode::Structured) {
-        let report = crate::control_ax::KeyDeliveryReport::success(
-            "global-input-simulation",
-            request,
-            None,
-            None,
-        );
-        result.response_value_json = Some(report.to_value_json()?);
-    }
+    result.response_value_json = structured_global_key_success_response(request)?;
 
     Ok(result)
+}
+
+fn structured_global_key_success_response(request: &KeyRequest) -> io::Result<Option<String>> {
+    if !matches!(request.response_mode, KeyResponseMode::Structured) {
+        return Ok(None);
+    }
+
+    crate::control_ax::KeyDeliveryReport::success("global-input-simulation", request, None, None)
+        .to_value_json()
+        .map(Some)
 }
 
 fn execute_key_with_dependencies<F>(
@@ -871,6 +873,29 @@ mod tests {
         .expect_err("publish failure should bubble up");
 
         assert!(err.to_string().contains("keyboard event publish failed"));
+    }
+
+    #[test]
+    fn structured_global_key_success_response_should_report_structured_global_success() {
+        let mut request = KeyRequest::legacy("F11", 200, KeyMode::PressRelease);
+        request.response_mode = KeyResponseMode::Structured;
+        let response_json = structured_global_key_success_response(&request)
+            .expect("structured global response should serialize")
+            .expect("structured mode should produce a response");
+        let response_value: serde_json::Value =
+            serde_json::from_str(&response_json).expect("response json should parse");
+
+        assert_eq!(response_value["kind"].as_str(), Some("key"));
+        assert_eq!(
+            response_value["backend"].as_str(),
+            Some("global-input-simulation")
+        );
+        assert_eq!(response_value["delivery"].as_str(), Some("global"));
+        assert_eq!(response_value["key"].as_str(), Some("F11"));
+        assert_eq!(response_value["performed"].as_bool(), Some(true));
+        assert_eq!(response_value["status"].as_str(), Some("ok"));
+        assert!(response_value.get("target_pid").is_none());
+        assert!(response_value.get("window_id").is_none());
     }
 
     #[test]

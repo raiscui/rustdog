@@ -70,6 +70,76 @@ impl Drop for TerminalDaemon {
 }
 
 #[derive(Debug)]
+struct TextEditDocumentFixture {
+    file_path: PathBuf,
+    title_needle: String,
+}
+
+impl TextEditDocumentFixture {
+    fn create(name: &str) -> Self {
+        let file_path = std::env::temp_dir().join(format!(
+            "rdog-ax-textedit-{name}-{}-{}.txt",
+            std::process::id(),
+            next_free_port()
+        ));
+        fs::write(&file_path, b"").expect("TextEdit fixture file should write");
+
+        let status = Command::new("open")
+            .arg("-a")
+            .arg("TextEdit")
+            .arg(&file_path)
+            .status()
+            .expect("open -a TextEdit should run");
+        assert!(status.success(), "open -a TextEdit should succeed");
+        run_applescript("tell application \"TextEdit\" to activate");
+
+        let title_needle = file_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .expect("TextEdit fixture file name should be UTF-8")
+            .to_owned();
+
+        Self {
+            file_path,
+            title_needle,
+        }
+    }
+
+    fn hide_app(&self) {
+        run_applescript(
+            "tell application \"System Events\"\n\
+             tell process \"TextEdit\"\n\
+               set visible to false\n\
+             end tell\n\
+             end tell",
+        );
+    }
+
+    fn close_without_saving(&self) {
+        let title = apple_script_string(&self.title_needle);
+        let script = format!(
+            "tell application \"TextEdit\"\n\
+             repeat with d in documents\n\
+               try\n\
+                 if (name of d) contains \"{title}\" then\n\
+                   close d saving no\n\
+                 end if\n\
+               end try\n\
+             end repeat\n\
+             end tell"
+        );
+        let _ = try_run_applescript(&script);
+    }
+}
+
+impl Drop for TextEditDocumentFixture {
+    fn drop(&mut self) {
+        self.close_without_saving();
+        let _ = fs::remove_file(&self.file_path);
+    }
+}
+
+#[derive(Debug)]
 struct LiveAxDaemon {
     port: u16,
     binary: PathBuf,
@@ -232,6 +302,36 @@ fn terminal_host_enabled() -> bool {
         std::env::var(LIVE_AX_E2E_VIA_TERMINAL_ENV).ok().as_deref(),
         Some("1" | "true" | "yes")
     )
+}
+
+fn run_applescript(script: &str) -> String {
+    let output = Command::new("osascript")
+        .arg("-e")
+        .arg(script)
+        .output()
+        .unwrap_or_else(|err| panic!("osascript should run: {err}"));
+    assert!(
+        output.status.success(),
+        "osascript should succeed\nscript:\n{script}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout).trim().to_owned()
+}
+
+fn try_run_applescript(script: &str) -> Option<String> {
+    let output = Command::new("osascript")
+        .arg("-e")
+        .arg(script)
+        .output()
+        .ok()?;
+    output
+        .status
+        .success()
+        .then(|| String::from_utf8_lossy(&output.stdout).trim().to_owned())
+}
+
+fn apple_script_string(input: &str) -> String {
+    input.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
 fn shell_quote(value: &Path) -> String {
@@ -650,6 +750,160 @@ fn assert_ax_get_close_button(get: &Value, expected_target_id: &str, title_needl
     );
 }
 
+fn assert_ax_focus_report(report: &Value, expected_window_id: &str, activated: bool) {
+    assert_eq!(report["kind"].as_str(), Some("ax-focus"));
+    assert_eq!(report["backend"].as_str(), Some("macos-accessibility"));
+    assert_eq!(report["window_id"].as_str(), Some(expected_window_id));
+    assert_eq!(report["activated"].as_bool(), Some(activated));
+    assert_eq!(report["performed"].as_bool(), Some(true));
+    assert_eq!(report["status"].as_str(), Some("ok"));
+}
+
+fn assert_type_text_targeted_keyboard_report(report: &Value, expected_target_id: &str) {
+    assert_eq!(report["kind"].as_str(), Some("type-text"));
+    assert_eq!(
+        report["backend"].as_str(),
+        Some("macos-cg-event-post-to-pid")
+    );
+    assert_eq!(report["target_id"].as_str(), Some(expected_target_id));
+    assert_eq!(report["mode"].as_str(), Some("targeted-keyboard"));
+    assert_eq!(report["delivered_via"].as_str(), Some("targeted-keyboard"));
+    assert_eq!(report["performed"].as_bool(), Some(true));
+    assert_eq!(report["status"].as_str(), Some("ok"));
+    assert_eq!(report["used_clipboard"].as_bool(), Some(false));
+}
+
+fn wait_for_textedit_window_id(
+    binary: &Path,
+    port: u16,
+    title_needle: &str,
+    label: &str,
+) -> String {
+    let mut last_find = None::<Value>;
+    for _ in 0..20 {
+        let response = run_control_command(
+            binary,
+            port,
+            &format!(
+                "@window-find#302:{{app:\"TextEdit\",title_contains:\"{title_needle}\",limit:5,include_state:true,include_recipes:false}}\n"
+            ),
+            Duration::from_secs(30),
+        );
+        let find = successful_response_value(response, label, binary);
+        last_find = Some(find.clone());
+        if let Some(first) = find["matches"]
+            .as_array()
+            .and_then(|matches| matches.first())
+        {
+            return first["window_id"]
+                .as_str()
+                .unwrap_or_else(|| panic!("window-find match should contain window_id: {first}"))
+                .to_owned();
+        }
+        thread::sleep(Duration::from_millis(250));
+    }
+
+    panic!(
+        "Timed out waiting for TextEdit window_id: {title_needle}\nlast @window-find response:\n{}",
+        last_find
+            .as_ref()
+            .map(|value| json_excerpt(value, 4000))
+            .unwrap_or_else(|| "<no @window-find response captured>".to_owned())
+    );
+}
+
+fn wait_for_textedit_editor_match(
+    binary: &Path,
+    port: u16,
+    window_id: &str,
+    label: &str,
+) -> (String, String, i32) {
+    let mut last_get = None::<Value>;
+    for _ in 0..20 {
+        let response = run_control_command(
+            binary,
+            port,
+            &format!(
+                "@ax-get#300:{{target:{{id:\"{window_id}\"}},depth:6,max_elements:2000,include_values:false}}\n"
+            ),
+            Duration::from_secs(30),
+        );
+        let get = successful_response_value(response, label, binary);
+        last_get = Some(get.clone());
+        if let Some(window) = get.get("window") {
+            if let Some(editor) = descendants(window).into_iter().find(|element| {
+                matches!(
+                    element["role"].as_str(),
+                    Some("AXTextArea") | Some("AXTextField")
+                )
+            }) {
+                let target_id = editor["id"]
+                    .as_str()
+                    .unwrap_or_else(|| panic!("TextEdit editor node should contain id: {editor}"))
+                    .to_owned();
+                let restored_window_id = get["window_id"]
+                    .as_str()
+                    .unwrap_or_else(|| panic!("ax-get should contain window_id: {get}"))
+                    .to_owned();
+                let pid = get["pid"]
+                    .as_i64()
+                    .unwrap_or_else(|| panic!("ax-get should contain pid: {get}"))
+                    as i32;
+                return (target_id, restored_window_id, pid);
+            }
+        }
+        thread::sleep(Duration::from_millis(250));
+    }
+
+    panic!(
+        "Timed out waiting for TextEdit editor target in window: {window_id}\nlast @ax-get response:\n{}",
+        last_get
+            .as_ref()
+            .map(|value| json_excerpt(value, 4000))
+            .unwrap_or_else(|| "<no @ax-get response captured>".to_owned())
+    );
+}
+
+fn wait_for_textedit_value(
+    binary: &Path,
+    port: u16,
+    target_id: &str,
+    expected_text: &str,
+) -> Value {
+    for _ in 0..20 {
+        let response = run_control_command(
+            binary,
+            port,
+            &format!(
+                "@ax-get#301:{{target:{{id:\"{target_id}\"}},depth:2,max_elements:400,include_values:true}}\n"
+            ),
+            Duration::from_secs(30),
+        );
+        let get = successful_response_value(response, "@ax-get text value", binary);
+        let value_text = get["element"]["value"].as_str().unwrap_or_default();
+        if value_text.contains(expected_text) {
+            return get;
+        }
+        thread::sleep(Duration::from_millis(250));
+    }
+
+    panic!("Timed out waiting for TextEdit value to contain expected text: {expected_text}");
+}
+
+fn assert_textedit_is_frontmost() {
+    let frontmost = run_applescript(
+        "tell application \"System Events\"\n\
+         tell process \"TextEdit\"\n\
+           return frontmost as string\n\
+         end tell\n\
+         end tell",
+    );
+    assert_eq!(
+        frontmost, "true",
+        "TextEdit should become frontmost after @ax-focus"
+    );
+}
+
 #[test]
 #[ignore = "requires a visible macOS desktop and Accessibility permission for the actual daemon host"]
 fn daemon_control_lane_should_read_real_terminal_window_and_press_real_button() {
@@ -789,6 +1043,75 @@ fn daemon_control_lane_should_find_and_get_real_terminal_button() {
     let get = successful_response_value(get_response, "@ax-get", binary);
     assert_ax_get_close_button(&get, &close_button_id, &title_needle);
     eprintln!("live AX find/get observed Terminal close button: target_id={close_button_id}");
+
+    daemon.stop_terminal();
+}
+
+#[test]
+#[ignore = "requires a visible macOS desktop and Accessibility permission for the actual daemon host"]
+fn daemon_control_lane_should_focus_hidden_textedit_and_type_without_mouse() {
+    if !live_ax_e2e_enabled() {
+        eprintln!(
+            "skipping live AX focus/type E2E; set {LIVE_AX_E2E_ENV}=1 to run against the real macOS desktop"
+        );
+        return;
+    }
+
+    let daemon = start_live_ax_daemon("textedit-focus-type");
+    let binary = daemon.binary.as_path();
+    let port = daemon.port;
+    let fixture = TextEditDocumentFixture::create("focus-type");
+
+    let initial_window_id =
+        wait_for_textedit_window_id(binary, port, &fixture.title_needle, "@window-find initial");
+    fixture.hide_app();
+
+    let focus_response = run_control_command(
+        binary,
+        port,
+        &format!("@ax-focus#310:{{window_id:\"{initial_window_id}\",activate:true}}\n"),
+        Duration::from_secs(15),
+    );
+    let focus_report = successful_response_value(focus_response, "@ax-focus", binary);
+    assert_ax_focus_report(&focus_report, &initial_window_id, true);
+    assert_textedit_is_frontmost();
+
+    let (editor_target_id, restored_window_id, target_pid) =
+        wait_for_textedit_editor_match(binary, port, &initial_window_id, "@ax-get restored editor");
+    assert_eq!(
+        restored_window_id, initial_window_id,
+        "TextEdit window_id should stay stable across hide/focus recovery"
+    );
+
+    let type_response = run_control_command(
+        binary,
+        port,
+        &format!(
+            "@type-text#311:{{target:{{id:\"{editor_target_id}\"}},text:\"AX TARGETED TEXT\",mode:\"targeted-keyboard\"}}\n"
+        ),
+        Duration::from_secs(15),
+    );
+    let type_report =
+        successful_response_value(type_response, "@type-text targeted-keyboard", binary);
+    assert_type_text_targeted_keyboard_report(&type_report, &editor_target_id);
+
+    let get = wait_for_textedit_value(binary, port, &editor_target_id, "AX TARGETED TEXT");
+    assert_eq!(get["kind"].as_str(), Some("ax-get"));
+    assert_eq!(get["target_id"].as_str(), Some(editor_target_id.as_str()));
+    assert_eq!(get["window_id"].as_str(), Some(restored_window_id.as_str()));
+    assert_eq!(get["pid"].as_i64(), Some(i64::from(target_pid)));
+    assert!(
+        get["element"]["value"]
+            .as_str()
+            .is_some_and(|value| value.contains("AX TARGETED TEXT")),
+        "TextEdit AX value should contain typed text: {}",
+        json_excerpt(&get, 4000)
+    );
+
+    eprintln!(
+        "live AX focus/type E2E observed TextEdit target: window_id={}, target_id={}, pid={}",
+        restored_window_id, editor_target_id, target_pid
+    );
 
     daemon.stop_terminal();
 }
