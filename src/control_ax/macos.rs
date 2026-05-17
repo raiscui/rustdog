@@ -65,6 +65,11 @@ extern "C" {
     static kCGWindowOwnerPID: CFStringRef;
 
     fn AXIsProcessTrusted() -> Boolean;
+    fn AXUIElementIsAttributeSettable(
+        element: AXUIElementRef,
+        attribute: CFStringRef,
+        settable: *mut Boolean,
+    ) -> AXError;
     fn AXUIElementCreateApplication(pid: c_int) -> AXUIElementRef;
     fn AXUIElementCopyAttributeValue(
         element: AXUIElementRef,
@@ -73,6 +78,11 @@ extern "C" {
     ) -> AXError;
     fn AXUIElementCopyActionNames(element: AXUIElementRef, names: *mut CFArrayRef) -> AXError;
     fn AXUIElementPerformAction(element: AXUIElementRef, action: CFStringRef) -> AXError;
+    fn AXUIElementSetAttributeValue(
+        element: AXUIElementRef,
+        attribute: CFStringRef,
+        value: CFTypeRef,
+    ) -> AXError;
     fn AXValueGetTypeID() -> CFTypeID;
     fn AXValueGetValue(value: AXValueRef, value_type: u32, value_ptr: *mut c_void) -> Boolean;
     fn CFArrayGetCount(array: CFArrayRef) -> CFIndex;
@@ -200,27 +210,36 @@ pub(super) fn snapshot(request: &AxTreeRequest) -> io::Result<AxSnapshot> {
     Ok(AxSnapshot::complete("macos", windows, state.truncated))
 }
 
-pub(super) fn press(request: &AxPressRequest) -> io::Result<AxActionReport> {
+pub(super) fn perform_action(request: &AxActionRequest) -> io::Result<AxPerformedActionReport> {
     ensure_trusted()?;
 
-    let target_id = match &request.target.id {
-        Some(id) => id.clone(),
-        None => {
-            let lookup_request = AxTreeRequest {
-                depth: 8,
-                max_elements: 5000,
-                include_values: false,
-                ..AxTreeRequest::default()
-            };
-            let snapshot = snapshot(&lookup_request)?;
-            resolve_target_id_in_snapshot(&snapshot, &request.target)?
-        }
-    };
-
-    press_target_id(&target_id)?;
-    Ok(AxActionReport::press(
+    let target_id = resolve_live_target_id(&request.target)?;
+    perform_action_on_target_id(&target_id, request.action)?;
+    Ok(AxPerformedActionReport::success(
         "macos-accessibility",
         Some(target_id),
+        request.action,
+    ))
+}
+
+pub(super) fn set_value(request: &AxSetValueRequest) -> io::Result<AxSetValueReport> {
+    ensure_trusted()?;
+
+    let target_id = resolve_live_target_id(&request.target)?;
+    let element = retain_target_element(&target_id)?;
+    ensure_ax_value_settable(element.as_ptr())?;
+
+    let old_value = copy_string_attr(element.as_ptr(), "AXValue")?.unwrap_or_default();
+    let final_value = match request.mode {
+        AxValueSetMode::Replace => request.value.clone(),
+        AxValueSetMode::Append => format!("{old_value}{}", request.value),
+    };
+
+    set_ax_value_string(element.as_ptr(), &final_value)?;
+    Ok(AxSetValueReport::success(
+        "macos-accessibility",
+        Some(target_id),
+        request.mode,
     ))
 }
 
@@ -415,16 +434,32 @@ fn build_element(
     })
 }
 
-fn press_target_id(target_id: &str) -> io::Result<()> {
+fn resolve_live_target_id(target: &AxTarget) -> io::Result<String> {
+    match &target.id {
+        Some(id) => Ok(id.clone()),
+        None => {
+            let lookup_request = AxTreeRequest {
+                depth: 8,
+                max_elements: 5000,
+                include_values: false,
+                ..AxTreeRequest::default()
+            };
+            let snapshot = snapshot(&lookup_request)?;
+            resolve_target_id_in_snapshot(&snapshot, target)
+        }
+    }
+}
+
+fn retain_target_element(target_id: &str) -> io::Result<CfOwned> {
     let parsed = parse_target_id(target_id)?;
     let app = unsafe { CfOwned::new(AXUIElementCreateApplication(parsed.pid)) }
-        .ok_or_else(|| invalid_input("@ax-press 无法创建目标应用 AX element"))?;
+        .ok_or_else(|| invalid_input("AX target 无法创建目标应用 AX element"))?;
     let windows = copy_attribute(app.as_ptr(), "AXWindows")?
-        .ok_or_else(|| invalid_input("@ax-press 目标应用没有 AXWindows"))?;
+        .ok_or_else(|| invalid_input("AX target 应用没有 AXWindows"))?;
     let count = unsafe { CFArrayGetCount(windows.as_ptr()) };
     if parsed.window_index >= count as usize {
         return Err(invalid_input(format!(
-            "@ax-press 目标 window index 已失效: {}",
+            "AX target window index 已失效: {}",
             parsed.window_index
         )));
     }
@@ -432,24 +467,69 @@ fn press_target_id(target_id: &str) -> io::Result<()> {
     let window_ref =
         unsafe { CFArrayGetValueAtIndex(windows.as_ptr(), parsed.window_index as CFIndex) };
     let mut current = unsafe { CfOwned::retain(window_ref) }
-        .ok_or_else(|| invalid_input("@ax-press 目标 window 已失效"))?;
+        .ok_or_else(|| invalid_input("AX target window 已失效"))?;
 
     for step in parsed.path {
         let children = copy_attribute(current.as_ptr(), "AXChildren")?
-            .ok_or_else(|| invalid_input("@ax-press 目标路径已失效"))?;
+            .ok_or_else(|| invalid_input("AX target 路径已失效"))?;
         let count = unsafe { CFArrayGetCount(children.as_ptr()) };
         if step >= count as usize {
-            return Err(invalid_input(format!(
-                "@ax-press 目标路径 step 已失效: {step}"
-            )));
+            return Err(invalid_input(format!("AX target 路径 step 已失效: {step}")));
         }
         let child = unsafe { CFArrayGetValueAtIndex(children.as_ptr(), step as CFIndex) };
         current = unsafe { CfOwned::retain(child) }
-            .ok_or_else(|| invalid_input("@ax-press 目标元素已失效"))?;
+            .ok_or_else(|| invalid_input("AX target 元素已失效"))?;
     }
 
-    with_cf_string("AXPress", |action| unsafe {
-        map_ax_action_error(AXUIElementPerformAction(current.as_ptr(), action))
+    Ok(current)
+}
+
+fn perform_action_on_target_id(target_id: &str, action: AxActionName) -> io::Result<()> {
+    let current = retain_target_element(target_id)?;
+    let available_actions = copy_action_names(current.as_ptr())?;
+    let action_name = action.protocol_str();
+    if !available_actions.iter().any(|item| item == action_name) {
+        return Err(invalid_input(format!(
+            "目标 AX 元素不支持动作 {action_name}"
+        )));
+    }
+    with_cf_string(action_name, |action_ref| unsafe {
+        map_ax_action_error(
+            AXUIElementPerformAction(current.as_ptr(), action_ref),
+            action_name,
+        )
+    })
+}
+
+fn ensure_ax_value_settable(element: AXUIElementRef) -> io::Result<()> {
+    with_cf_string("AXValue", |attribute| {
+        let mut settable = 0;
+        let error = unsafe { AXUIElementIsAttributeSettable(element, attribute, &mut settable) };
+        match error {
+            AX_SUCCESS => {
+                if settable != 0 {
+                    Ok(())
+                } else {
+                    Err(invalid_input("目标 AX 元素的 AXValue 不可写"))
+                }
+            }
+            AX_ERROR_ATTRIBUTE_UNSUPPORTED => Err(invalid_input("目标 AX 元素不支持 AXValue")),
+            AX_ERROR_API_DISABLED => Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "macOS Accessibility API 当前不可用或未授权",
+            )),
+            code => Err(io::Error::other(format!(
+                "检查 AXValue 是否可写失败: AXError {code}"
+            ))),
+        }
+    })
+}
+
+fn set_ax_value_string(element: AXUIElementRef, value: &str) -> io::Result<()> {
+    with_cf_string("AXValue", |attribute| {
+        with_cf_string(value, |cf_value| unsafe {
+            map_ax_set_value_error(AXUIElementSetAttributeValue(element, attribute, cf_value))
+        })
     })
 }
 
@@ -463,36 +543,34 @@ struct ParsedTargetId {
 fn parse_target_id(target_id: &str) -> io::Result<ParsedTargetId> {
     let parts = target_id.split('/').collect::<Vec<_>>();
     if !(2..=3).contains(&parts.len()) {
-        return Err(invalid_input(format!(
-            "@ax-press target id 格式非法: {target_id}"
-        )));
+        return Err(invalid_input(format!("AX target id 格式非法: {target_id}")));
     }
 
     let pid = parts[0]
         .strip_prefix("pid:")
-        .ok_or_else(|| invalid_input(format!("@ax-press target id 缺少 pid: {target_id}")))?
+        .ok_or_else(|| invalid_input(format!("AX target id 缺少 pid: {target_id}")))?
         .parse::<i32>()
-        .map_err(|_| invalid_input(format!("@ax-press target id pid 非法: {target_id}")))?;
+        .map_err(|_| invalid_input(format!("AX target id pid 非法: {target_id}")))?;
     let window_index = parts[1]
         .strip_prefix("window:")
-        .ok_or_else(|| invalid_input(format!("@ax-press target id 缺少 window: {target_id}")))?
+        .ok_or_else(|| invalid_input(format!("AX target id 缺少 window: {target_id}")))?
         .parse::<usize>()
-        .map_err(|_| invalid_input(format!("@ax-press target id window 非法: {target_id}")))?;
+        .map_err(|_| invalid_input(format!("AX target id window 非法: {target_id}")))?;
 
     let path = match parts.get(2) {
         Some(path) => {
-            let path = path.strip_prefix("path:").ok_or_else(|| {
-                invalid_input(format!("@ax-press target id path 非法: {target_id}"))
-            })?;
+            let path = path
+                .strip_prefix("path:")
+                .ok_or_else(|| invalid_input(format!("AX target id path 非法: {target_id}")))?;
             if path.is_empty() || path.split('.').any(str::is_empty) {
                 return Err(invalid_input(format!(
-                    "@ax-press target id path step 非法: {target_id}"
+                    "AX target id path step 非法: {target_id}"
                 )));
             }
             path.split('.')
                 .map(|item| {
                     item.parse::<usize>().map_err(|_| {
-                        invalid_input(format!("@ax-press target id path step 非法: {target_id}"))
+                        invalid_input(format!("AX target id path step 非法: {target_id}"))
                     })
                 })
                 .collect::<io::Result<Vec<_>>>()?
@@ -760,19 +838,38 @@ fn with_cf_string<T>(value: &str, f: impl FnOnce(CFStringRef) -> T) -> T {
     f(cf_string.as_ptr())
 }
 
-unsafe fn map_ax_action_error(error: AXError) -> io::Result<()> {
+unsafe fn map_ax_action_error(error: AXError, action_name: &str) -> io::Result<()> {
     match error {
         AX_SUCCESS => Ok(()),
         AX_ERROR_API_DISABLED => Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
             "macOS Accessibility API 当前不可用或未授权",
         )),
-        AX_ERROR_ACTION_UNSUPPORTED => Err(invalid_input("目标 AX 元素不支持 AXPress")),
+        AX_ERROR_ACTION_UNSUPPORTED => Err(invalid_input(format!(
+            "目标 AX 元素不支持动作 {action_name}"
+        ))),
         AX_ERROR_INVALID_UI_ELEMENT | AX_ERROR_NO_VALUE => {
-            Err(invalid_input("@ax-press 目标元素已失效"))
+            Err(invalid_input("AX target 元素已失效"))
         }
         code => Err(io::Error::other(format!(
-            "执行 AXPress 失败: AXError {code}"
+            "执行动作 {action_name} 失败: AXError {code}"
+        ))),
+    }
+}
+
+unsafe fn map_ax_set_value_error(error: AXError) -> io::Result<()> {
+    match error {
+        AX_SUCCESS => Ok(()),
+        AX_ERROR_API_DISABLED => Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "macOS Accessibility API 当前不可用或未授权",
+        )),
+        AX_ERROR_ATTRIBUTE_UNSUPPORTED => Err(invalid_input("目标 AX 元素不支持 AXValue")),
+        AX_ERROR_INVALID_UI_ELEMENT | AX_ERROR_NO_VALUE => {
+            Err(invalid_input("AX target 元素已失效"))
+        }
+        code => Err(io::Error::other(format!(
+            "写入 AXValue 失败: AXError {code}"
         ))),
     }
 }
@@ -795,6 +892,16 @@ mod tests {
         assert!(parse_target_id("pid:123/window:2/path:3.").is_err());
         assert!(parse_target_id("pid:123/window:2/path:3/extra").is_err());
         assert!(parse_target_id("pid:123/window:2/path:bad").is_err());
+        let error = parse_target_id("bad-target-id").unwrap_err();
+        let message = error.to_string();
+        assert!(
+            message.contains("AX target id"),
+            "unexpected error: {message}"
+        );
+        assert!(
+            !message.contains("@ax-press target"),
+            "unexpected error: {message}"
+        );
     }
 
     #[test]

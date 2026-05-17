@@ -555,12 +555,39 @@ mod tests {
                                 .to_owned(),
                         ),
                     }),
+                    ControlCommand::AxAction(_) => Ok(ActionExecutionResult {
+                        exit_code: 0,
+                        stdout: Vec::new(),
+                        stderr: Vec::new(),
+                        response_value_json: Some(
+                            r#"{"kind":"ax-action","action":"AXShowMenu","performed":true}"#
+                                .to_owned(),
+                        ),
+                    }),
                     ControlCommand::AxPress(_) => Ok(ActionExecutionResult {
                         exit_code: 0,
                         stdout: Vec::new(),
                         stderr: Vec::new(),
                         response_value_json: Some(
                             r#"{"kind":"ax","action":"press","performed":true}"#.to_owned(),
+                        ),
+                    }),
+                    ControlCommand::AxSetValue(_) => Ok(ActionExecutionResult {
+                        exit_code: 0,
+                        stdout: Vec::new(),
+                        stderr: Vec::new(),
+                        response_value_json: Some(
+                            r#"{"kind":"ax-set-value","mode":"append","performed":true}"#
+                                .to_owned(),
+                        ),
+                    }),
+                    ControlCommand::TypeText(_) => Ok(ActionExecutionResult {
+                        exit_code: 0,
+                        stdout: Vec::new(),
+                        stderr: Vec::new(),
+                        response_value_json: Some(
+                            r#"{"kind":"type-text","delivered_via":"ax-value","performed":true}"#
+                                .to_owned(),
                         ),
                     }),
                     _ => Err(io::Error::new(
@@ -583,6 +610,24 @@ mod tests {
             &StructuredAxExecutor,
         )
         .into_single_response_line();
+        let action_response = parse_and_execute_control_line(
+            r#"@ax-action#11:{target:{id:"pid:1/window:0/path:0"},action:"AXShowMenu"}"#,
+            "/bin/sh",
+            &StructuredAxExecutor,
+        )
+        .into_single_response_line();
+        let set_value_response = parse_and_execute_control_line(
+            r#"@ax-set-value#12:{target:{id:"pid:1/window:0/path:0"},value:"hello",mode:"append"}"#,
+            "/bin/sh",
+            &StructuredAxExecutor,
+        )
+        .into_single_response_line();
+        let type_text_response = parse_and_execute_control_line(
+            r#"@type-text#13:{target:{id:"pid:1/window:0/path:0"},text:"hello",mode:"ax-value"}"#,
+            "/bin/sh",
+            &StructuredAxExecutor,
+        )
+        .into_single_response_line();
 
         assert_eq!(
             tree_response,
@@ -591,6 +636,18 @@ mod tests {
         assert_eq!(
             press_response,
             r#"@response {"id":10,"value":{"kind":"ax","action":"press","performed":true}}"#
+        );
+        assert_eq!(
+            action_response,
+            r#"@response {"id":11,"value":{"kind":"ax-action","action":"AXShowMenu","performed":true}}"#
+        );
+        assert_eq!(
+            set_value_response,
+            r#"@response {"id":12,"value":{"kind":"ax-set-value","mode":"append","performed":true}}"#
+        );
+        assert_eq!(
+            type_text_response,
+            r#"@response {"id":13,"value":{"kind":"type-text","delivered_via":"ax-value","performed":true}}"#
         );
     }
 

@@ -1,5 +1,7 @@
 # rustdog 仓库知识索引
 
+rustdog 首先被LLM agent 智能体使用，其次被人类使用。要以agent使用（AI原生）为根本。
+
 这个文件只负责给仓库里的长期知识载体建索引。
 更具体的执行规范,以外层注入的 AGENTS 指令和会话中的高优先级消息为准。
 
@@ -115,6 +117,11 @@
   - 主题: `@screenshot` manifest 集成 macOS AX 窗口/UI 元素结构,以及 `@ax-tree` / `@ax-press` AX control 方案
   - 用途: 固定 `include_ax`、`ax_required`、`rdog.ax.v1` manifest schema、Accessibility 权限降级语义、AXPress target locator 和错误映射
   - 何时阅读: 准备实现或评审 AX screenshot manifest、`@ax-tree`、`@ax-press`、Accessibility 权限提示,或排查 AX 元素坐标/定位歧义前
+
+- `specs/rdog-non-mouse-semantic-control-plan.md`
+  - 主题: `@ax-action` / `@ax-set-value` / `@type-text` 的非鼠标语义控制协议
+  - 用途: 固定第一批“非鼠标优先”协议能力,明确 `@ax-press` 兼容映射、AXValue 写入边界和 `@type-text` 当前只走 AXValue 分支的事实
+  - 何时阅读: 准备实现或评审非鼠标 GUI 控制、更新 `rdog-control` skill,或判断某个交互是否该先走 AX/value 而不是鼠标前
 
 - `specs/rdog-window-control-plan.md`
   - 主题: `@window-find` / `@window-activate` / `@window-close` 的窗口状态与窗口生命周期控制方案

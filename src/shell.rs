@@ -1063,8 +1063,26 @@ mod tests {
                     request.target.id.as_deref().unwrap_or("semantic")
                 )
                 .into_bytes(),
+                ControlCommand::AxAction(request) => format!(
+                    "AX_ACTION:{}:{}\n",
+                    request.action.protocol_str(),
+                    request.target.id.as_deref().unwrap_or("semantic")
+                )
+                .into_bytes(),
                 ControlCommand::AxPress(request) => format!(
                     "AX_PRESS:{}\n",
+                    request.target.id.as_deref().unwrap_or("semantic")
+                )
+                .into_bytes(),
+                ControlCommand::AxSetValue(request) => format!(
+                    "AX_SET_VALUE:{}:{}\n",
+                    request.mode.as_str(),
+                    request.target.id.as_deref().unwrap_or("semantic")
+                )
+                .into_bytes(),
+                ControlCommand::TypeText(request) => format!(
+                    "TYPE_TEXT:{}:{}\n",
+                    request.mode.as_str(),
                     request.target.id.as_deref().unwrap_or("semantic")
                 )
                 .into_bytes(),

@@ -1,9 +1,11 @@
 use std::io;
 
 use crate::control_ax::{
-    parse_ax_find_payload, parse_ax_get_payload, parse_ax_mode_payload, parse_ax_press_payload,
-    parse_ax_tree_payload, AxFindRequest, AxGetRequest, AxMode, AxPressRequest, AxTreeRequest,
-    DEFAULT_AX_DEPTH, DEFAULT_AX_INCLUDE_VALUES, DEFAULT_AX_MAX_ELEMENTS,
+    parse_ax_action_payload, parse_ax_find_payload, parse_ax_get_payload, parse_ax_mode_payload,
+    parse_ax_press_payload, parse_ax_set_value_payload, parse_ax_tree_payload,
+    parse_type_text_payload, AxActionRequest, AxFindRequest, AxGetRequest, AxMode, AxPressRequest,
+    AxSetValueRequest, AxTreeRequest, TypeTextRequest, DEFAULT_AX_DEPTH, DEFAULT_AX_INCLUDE_VALUES,
+    DEFAULT_AX_MAX_ELEMENTS,
 };
 use crate::control_frames::SaveFileFrame;
 use crate::control_mouse::{
@@ -48,7 +50,10 @@ pub enum ControlCommand {
     AxTree(AxTreeRequest),
     AxFind(AxFindRequest),
     AxGet(AxGetRequest),
+    AxAction(AxActionRequest),
     AxPress(AxPressRequest),
+    AxSetValue(AxSetValueRequest),
+    TypeText(TypeTextRequest),
     WindowFind(WindowFindRequest),
     WindowActivate(WindowActivateRequest),
     WindowClose(WindowCloseRequest),
@@ -247,7 +252,10 @@ pub fn parse_control_line(line: &str) -> io::Result<ControlParseResult> {
         "ax-tree" => ControlCommand::AxTree(parse_ax_tree_payload(payload)?),
         "ax-find" => ControlCommand::AxFind(parse_ax_find_payload(payload)?),
         "ax-get" => ControlCommand::AxGet(parse_ax_get_payload(payload)?),
+        "ax-action" => ControlCommand::AxAction(parse_ax_action_payload(payload)?),
         "ax-press" => ControlCommand::AxPress(parse_ax_press_payload(payload)?),
+        "ax-set-value" => ControlCommand::AxSetValue(parse_ax_set_value_payload(payload)?),
+        "type-text" => ControlCommand::TypeText(parse_type_text_payload(payload)?),
         "window-find" => ControlCommand::WindowFind(parse_window_find_payload(payload)?),
         "window-activate" => {
             ControlCommand::WindowActivate(parse_window_activate_payload(payload)?)
@@ -1424,7 +1432,10 @@ pub(crate) fn parse_quoted_payload(input: &str) -> io::Result<String> {
 mod tests {
     use super::*;
     use crate::{
-        control_ax::{AxMode, AxTarget, AxTreeScope},
+        control_ax::{
+            AxActionName, AxActionRequest, AxMode, AxSetValueRequest, AxTarget, AxTreeScope,
+            AxValueSetMode, TypeTextMode, TypeTextRequest,
+        },
         control_mouse::{
             MouseButtonMode, MouseButtonName, MouseCoordinateSpace, MousePoint,
             DEFAULT_MOUSE_CLICK_HOLD_MS, DEFAULT_MOUSE_CLICK_INTERVAL_MS,
@@ -1691,7 +1702,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_should_support_ax_tree_and_ax_press() {
+    fn parse_should_support_ax_tree_and_ax_commands() {
         assert_eq!(
             parse_control_line(r#"@ax-tree#1:{scope:"windows",depth:4,max_elements:1000}"#)
                 .unwrap(),
@@ -1737,6 +1748,23 @@ mod tests {
         ));
 
         assert_eq!(
+            parse_control_line(
+                r#"@ax-action#7:{target:{id:"pid:1/window:0/path:0"},action:"AXShowMenu"}"#
+            )
+            .unwrap(),
+            ControlParseResult::Control(ControlRequest {
+                request_id: Some(7),
+                command: ControlCommand::AxAction(AxActionRequest {
+                    target: AxTarget {
+                        id: Some("pid:1/window:0/path:0".to_owned()),
+                        ..AxTarget::default()
+                    },
+                    action: AxActionName::ShowMenu,
+                }),
+            })
+        );
+
+        assert_eq!(
             parse_control_line(r#"@ax-press#2:{target:{id:"pid:1/window:0/path:0"}}"#).unwrap(),
             ControlParseResult::Control(ControlRequest {
                 request_id: Some(2),
@@ -1764,6 +1792,43 @@ mod tests {
                         description: Some("关闭按钮".to_owned()),
                         ..AxTarget::default()
                     },
+                }),
+            })
+        );
+
+        assert_eq!(
+            parse_control_line(
+                r#"@ax-set-value#8:{target:{id:"pid:1/window:0/path:0"},value:"hello",mode:"append"}"#
+            )
+            .unwrap(),
+            ControlParseResult::Control(ControlRequest {
+                request_id: Some(8),
+                command: ControlCommand::AxSetValue(AxSetValueRequest {
+                    target: AxTarget {
+                        id: Some("pid:1/window:0/path:0".to_owned()),
+                        ..AxTarget::default()
+                    },
+                    value: "hello".to_owned(),
+                    mode: AxValueSetMode::Append,
+                }),
+            })
+        );
+
+        assert_eq!(
+            parse_control_line(
+                r#"@type-text#9:{target:{id:"pid:1/window:0/path:0"},text:"hello",mode:"ax-value",allow_clipboard:false}"#
+            )
+            .unwrap(),
+            ControlParseResult::Control(ControlRequest {
+                request_id: Some(9),
+                command: ControlCommand::TypeText(TypeTextRequest {
+                    target: AxTarget {
+                        id: Some("pid:1/window:0/path:0".to_owned()),
+                        ..AxTarget::default()
+                    },
+                    text: "hello".to_owned(),
+                    mode: TypeTextMode::AxValue,
+                    allow_clipboard: false,
                 }),
             })
         );

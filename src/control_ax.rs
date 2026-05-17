@@ -82,6 +82,84 @@ pub struct AxPressRequest {
     pub target: AxTarget,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AxActionRequest {
+    pub target: AxTarget,
+    pub action: AxActionName,
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum AxActionName {
+    Press,
+    Open,
+    Confirm,
+    Cancel,
+    ShowMenu,
+    ScrollToVisible,
+}
+
+impl AxActionName {
+    pub fn protocol_str(self) -> &'static str {
+        match self {
+            Self::Press => "AXPress",
+            Self::Open => "AXOpen",
+            Self::Confirm => "AXConfirm",
+            Self::Cancel => "AXCancel",
+            Self::ShowMenu => "AXShowMenu",
+            Self::ScrollToVisible => "AXScrollToVisible",
+        }
+    }
+
+    pub fn report_str(self) -> &'static str {
+        self.protocol_str()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AxSetValueRequest {
+    pub target: AxTarget,
+    pub value: String,
+    pub mode: AxValueSetMode,
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum AxValueSetMode {
+    Replace,
+    Append,
+}
+
+impl AxValueSetMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Replace => "replace",
+            Self::Append => "append",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TypeTextRequest {
+    pub target: AxTarget,
+    pub text: String,
+    pub mode: TypeTextMode,
+    pub allow_clipboard: bool,
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum TypeTextMode {
+    Auto,
+    AxValue,
+}
+
+impl TypeTextMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::AxValue => "ax-value",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct AxTarget {
     pub id: Option<String>,
@@ -106,7 +184,7 @@ impl AxTarget {
             && self.name.is_none()
             && self.description.is_none()
         {
-            return Err(invalid_data("@ax-press target 不能为空"));
+            return Err(invalid_data("AX target 不能为空"));
         }
 
         if self.role.is_none()
@@ -115,7 +193,7 @@ impl AxTarget {
             && self.description.is_none()
         {
             return Err(invalid_data(
-                "@ax-press semantic target 必须至少包含 role/subrole/name/description 之一",
+                "AX semantic target 必须至少包含 role/subrole/name/description 之一",
             ));
         }
 
@@ -303,7 +381,7 @@ impl AxElement {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct AxActionReport {
     pub kind: &'static str,
-    pub action: &'static str,
+    pub action: String,
     pub backend: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub target_id: Option<String>,
@@ -315,7 +393,7 @@ impl AxActionReport {
     pub fn press(backend: impl Into<String>, target_id: Option<String>) -> Self {
         Self {
             kind: "ax",
-            action: "press",
+            action: "press".to_owned(),
             backend: backend.into(),
             target_id,
             performed: true,
@@ -329,6 +407,115 @@ impl AxActionReport {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct AxPerformedActionReport {
+    pub kind: &'static str,
+    pub action: String,
+    pub backend: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_id: Option<String>,
+    pub performed: bool,
+    pub status: &'static str,
+}
+
+impl AxPerformedActionReport {
+    pub fn success(
+        backend: impl Into<String>,
+        target_id: Option<String>,
+        action: AxActionName,
+    ) -> Self {
+        Self {
+            kind: "ax-action",
+            action: action.report_str().to_owned(),
+            backend: backend.into(),
+            target_id,
+            performed: true,
+            status: "ok",
+        }
+    }
+
+    pub fn to_value_json(&self) -> io::Result<String> {
+        serde_json::to_string(self)
+            .map_err(|err| io::Error::other(format!("AX action response 序列化失败: {err}")))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct AxSetValueReport {
+    pub kind: &'static str,
+    pub backend: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_id: Option<String>,
+    pub mode: &'static str,
+    pub performed: bool,
+    pub status: &'static str,
+    pub settable: bool,
+    pub old_value_redacted: bool,
+    pub new_value_redacted: bool,
+}
+
+impl AxSetValueReport {
+    pub fn success(
+        backend: impl Into<String>,
+        target_id: Option<String>,
+        mode: AxValueSetMode,
+    ) -> Self {
+        Self {
+            kind: "ax-set-value",
+            backend: backend.into(),
+            target_id,
+            mode: mode.as_str(),
+            performed: true,
+            status: "ok",
+            settable: true,
+            old_value_redacted: false,
+            new_value_redacted: false,
+        }
+    }
+
+    pub fn to_value_json(&self) -> io::Result<String> {
+        serde_json::to_string(self)
+            .map_err(|err| io::Error::other(format!("AX set value response 序列化失败: {err}")))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct TypeTextReport {
+    pub kind: &'static str,
+    pub backend: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_id: Option<String>,
+    pub mode: &'static str,
+    pub delivered_via: &'static str,
+    pub performed: bool,
+    pub status: &'static str,
+    pub used_clipboard: bool,
+}
+
+impl TypeTextReport {
+    pub fn ax_value_success(
+        backend: impl Into<String>,
+        target_id: Option<String>,
+        mode: TypeTextMode,
+    ) -> Self {
+        Self {
+            kind: "type-text",
+            backend: backend.into(),
+            target_id,
+            mode: mode.as_str(),
+            delivered_via: "ax-value",
+            performed: true,
+            status: "ok",
+            used_clipboard: false,
+        }
+    }
+
+    pub fn to_value_json(&self) -> io::Result<String> {
+        serde_json::to_string(self)
+            .map_err(|err| io::Error::other(format!("type-text response 序列化失败: {err}")))
+    }
+}
+
 mod query;
 
 pub use query::{
@@ -338,7 +525,8 @@ pub use query::{
 
 pub trait AxBackend {
     fn snapshot(&self, request: &AxTreeRequest) -> io::Result<AxSnapshot>;
-    fn press(&self, request: &AxPressRequest) -> io::Result<AxActionReport>;
+    fn perform_action(&self, request: &AxActionRequest) -> io::Result<AxPerformedActionReport>;
+    fn set_value(&self, request: &AxSetValueRequest) -> io::Result<AxSetValueReport>;
 }
 
 #[derive(Debug, Copy, Clone, Default)]
@@ -349,8 +537,12 @@ impl AxBackend for SystemAxBackend {
         platform_snapshot(request)
     }
 
-    fn press(&self, request: &AxPressRequest) -> io::Result<AxActionReport> {
-        platform_press(request)
+    fn perform_action(&self, request: &AxActionRequest) -> io::Result<AxPerformedActionReport> {
+        platform_perform_action(request)
+    }
+
+    fn set_value(&self, request: &AxSetValueRequest) -> io::Result<AxSetValueReport> {
+        platform_set_value(request)
     }
 }
 
@@ -359,7 +551,35 @@ pub fn capture_default_ax_snapshot(request: &AxTreeRequest) -> io::Result<AxSnap
 }
 
 pub fn perform_default_ax_press(request: &AxPressRequest) -> io::Result<AxActionReport> {
-    SystemAxBackend.press(request)
+    let report = SystemAxBackend.perform_action(&AxActionRequest {
+        target: request.target.clone(),
+        action: AxActionName::Press,
+    })?;
+    Ok(AxActionReport::press(report.backend, report.target_id))
+}
+
+pub fn perform_default_ax_action(request: &AxActionRequest) -> io::Result<AxPerformedActionReport> {
+    SystemAxBackend.perform_action(request)
+}
+
+pub fn perform_default_ax_set_value(request: &AxSetValueRequest) -> io::Result<AxSetValueReport> {
+    SystemAxBackend.set_value(request)
+}
+
+pub fn perform_default_type_text(request: &TypeTextRequest) -> io::Result<TypeTextReport> {
+    let set_request = AxSetValueRequest {
+        target: request.target.clone(),
+        value: request.text.clone(),
+        mode: match request.mode {
+            TypeTextMode::Auto | TypeTextMode::AxValue => AxValueSetMode::Replace,
+        },
+    };
+    let report = perform_default_ax_set_value(&set_request)?;
+    Ok(TypeTextReport::ax_value_success(
+        report.backend,
+        report.target_id,
+        request.mode,
+    ))
 }
 
 pub fn current_ax_platform() -> &'static str {
@@ -465,6 +685,156 @@ pub fn parse_ax_press_payload(input: &str) -> io::Result<AxPressRequest> {
     })
 }
 
+pub fn parse_ax_action_payload(input: &str) -> io::Result<AxActionRequest> {
+    let inner = object_inner(input, "@ax-action")?;
+    if inner.is_empty() {
+        return Err(invalid_data("@ax-action 对象 payload 不能为空"));
+    }
+
+    let mut target = None::<AxTarget>;
+    let mut action = None::<AxActionName>;
+    for field in split_object_fields(inner)? {
+        let (field_name, raw_value) = split_object_field(field)?;
+        let field_name = normalize_object_field_name(field_name)?;
+        let raw_value = raw_value.trim();
+
+        match field_name.as_str() {
+            "target" => assign_once(
+                &mut target,
+                "target",
+                "@ax-action",
+                parse_ax_target(raw_value)?,
+            )?,
+            "action" => assign_once(
+                &mut action,
+                "action",
+                "@ax-action",
+                parse_ax_action_name(raw_value)?,
+            )?,
+            _ => {
+                return Err(invalid_data(format!(
+                    "@ax-action 对象 payload 包含未知字段: {field_name}"
+                )))
+            }
+        }
+    }
+
+    Ok(AxActionRequest {
+        target: required_field(target, "@ax-action", "target")?,
+        action: required_field(action, "@ax-action", "action")?,
+    })
+}
+
+pub fn parse_ax_set_value_payload(input: &str) -> io::Result<AxSetValueRequest> {
+    let inner = object_inner(input, "@ax-set-value")?;
+    if inner.is_empty() {
+        return Err(invalid_data("@ax-set-value 对象 payload 不能为空"));
+    }
+
+    let mut target = None::<AxTarget>;
+    let mut value = None::<String>;
+    let mut mode = None::<AxValueSetMode>;
+    for field in split_object_fields(inner)? {
+        let (field_name, raw_value) = split_object_field(field)?;
+        let field_name = normalize_object_field_name(field_name)?;
+        let raw_value = raw_value.trim();
+
+        match field_name.as_str() {
+            "target" => assign_once(
+                &mut target,
+                "target",
+                "@ax-set-value",
+                parse_ax_target(raw_value)?,
+            )?,
+            "value" => assign_once(
+                &mut value,
+                "value",
+                "@ax-set-value",
+                parse_quoted_payload(raw_value)?,
+            )?,
+            "mode" => assign_once(
+                &mut mode,
+                "mode",
+                "@ax-set-value",
+                parse_ax_value_mode(raw_value)?,
+            )?,
+            _ => {
+                return Err(invalid_data(format!(
+                    "@ax-set-value 对象 payload 包含未知字段: {field_name}"
+                )))
+            }
+        }
+    }
+
+    Ok(AxSetValueRequest {
+        target: required_field(target, "@ax-set-value", "target")?,
+        value: required_field(value, "@ax-set-value", "value")?,
+        mode: mode.unwrap_or(AxValueSetMode::Replace),
+    })
+}
+
+pub fn parse_type_text_payload(input: &str) -> io::Result<TypeTextRequest> {
+    let inner = object_inner(input, "@type-text")?;
+    if inner.is_empty() {
+        return Err(invalid_data("@type-text 对象 payload 不能为空"));
+    }
+
+    let mut target = None::<AxTarget>;
+    let mut text = None::<String>;
+    let mut mode = None::<TypeTextMode>;
+    let mut allow_clipboard = None::<bool>;
+    for field in split_object_fields(inner)? {
+        let (field_name, raw_value) = split_object_field(field)?;
+        let field_name = normalize_object_field_name(field_name)?;
+        let raw_value = raw_value.trim();
+
+        match field_name.as_str() {
+            "target" => assign_once(
+                &mut target,
+                "target",
+                "@type-text",
+                parse_ax_target(raw_value)?,
+            )?,
+            "text" => assign_once(
+                &mut text,
+                "text",
+                "@type-text",
+                parse_quoted_payload(raw_value)?,
+            )?,
+            "mode" => assign_once(
+                &mut mode,
+                "mode",
+                "@type-text",
+                parse_type_text_mode(raw_value)?,
+            )?,
+            "allow_clipboard" => assign_once(
+                &mut allow_clipboard,
+                "allow_clipboard",
+                "@type-text",
+                parse_bool_literal("@type-text", "allow_clipboard", raw_value)?,
+            )?,
+            _ => {
+                return Err(invalid_data(format!(
+                    "@type-text 对象 payload 包含未知字段: {field_name}"
+                )))
+            }
+        }
+    }
+
+    if matches!(allow_clipboard, Some(true)) {
+        return Err(invalid_data(
+            "@type-text 当前尚未实现 allow_clipboard:true,请先显式使用 AXValue 路径",
+        ));
+    }
+
+    Ok(TypeTextRequest {
+        target: required_field(target, "@type-text", "target")?,
+        text: required_field(text, "@type-text", "text")?,
+        mode: mode.unwrap_or(TypeTextMode::Auto),
+        allow_clipboard: allow_clipboard.unwrap_or(false),
+    })
+}
+
 pub fn resolve_target_id_in_snapshot(
     snapshot: &AxSnapshot,
     target: &AxTarget,
@@ -473,9 +843,7 @@ pub fn resolve_target_id_in_snapshot(
         if snapshot.contains_element_id(id) {
             return Ok(id.clone());
         }
-        return Err(invalid_input(format!(
-            "@ax-press target id 已失效或不存在: {id}"
-        )));
+        return Err(invalid_input(format!("AX target id 已失效或不存在: {id}")));
     }
 
     target.validate().map_err(to_invalid_input)?;
@@ -487,14 +855,14 @@ pub fn resolve_target_id_in_snapshot(
         }
         collect_matching_element_ids(target, &window.elements, &mut matches);
         if matches.len() > 1 {
-            return Err(invalid_input("@ax-press semantic target 匹配到多个元素"));
+            return Err(invalid_input("AX semantic target 匹配到多个元素"));
         }
     }
 
     match matches.as_slice() {
         [id] => Ok(id.clone()),
-        [] => Err(invalid_input("@ax-press semantic target 未匹配到元素")),
-        _ => Err(invalid_input("@ax-press semantic target 匹配到多个元素")),
+        [] => Err(invalid_input("AX semantic target 未匹配到元素")),
+        _ => Err(invalid_input("AX semantic target 匹配到多个元素")),
     }
 }
 
@@ -512,9 +880,9 @@ fn collect_matching_element_ids(
 }
 
 fn parse_ax_target(input: &str) -> io::Result<AxTarget> {
-    let inner = object_inner(input, "@ax-press target")?;
+    let inner = object_inner(input, "AX target")?;
     if inner.is_empty() {
-        return Err(invalid_data("@ax-press target 不能为空"));
+        return Err(invalid_data("AX target 不能为空"));
     }
 
     let mut target = AxTarget::default();
@@ -533,48 +901,38 @@ fn parse_ax_target(input: &str) -> io::Result<AxTarget> {
 
         match field_name.as_str() {
             "id" => {
-                reject_duplicate(&mut id_seen, "@ax-press target", "id")?;
-                target.id = Some(parse_non_empty_string("@ax-press target.id", raw_value)?);
+                reject_duplicate(&mut id_seen, "AX target", "id")?;
+                target.id = Some(parse_non_empty_string("AX target.id", raw_value)?);
             }
             "process" | "process_name" => {
-                reject_duplicate(&mut process_seen, "@ax-press target", "process")?;
-                target.process = Some(parse_non_empty_string(
-                    "@ax-press target.process",
-                    raw_value,
-                )?);
+                reject_duplicate(&mut process_seen, "AX target", "process")?;
+                target.process = Some(parse_non_empty_string("AX target.process", raw_value)?);
             }
             "window_title" | "title" => {
-                reject_duplicate(&mut window_title_seen, "@ax-press target", "window_title")?;
-                target.window_title = Some(parse_non_empty_string(
-                    "@ax-press target.window_title",
-                    raw_value,
-                )?);
+                reject_duplicate(&mut window_title_seen, "AX target", "window_title")?;
+                target.window_title =
+                    Some(parse_non_empty_string("AX target.window_title", raw_value)?);
             }
             "role" => {
-                reject_duplicate(&mut role_seen, "@ax-press target", "role")?;
-                target.role = Some(parse_non_empty_string("@ax-press target.role", raw_value)?);
+                reject_duplicate(&mut role_seen, "AX target", "role")?;
+                target.role = Some(parse_non_empty_string("AX target.role", raw_value)?);
             }
             "subrole" => {
-                reject_duplicate(&mut subrole_seen, "@ax-press target", "subrole")?;
-                target.subrole = Some(parse_non_empty_string(
-                    "@ax-press target.subrole",
-                    raw_value,
-                )?);
+                reject_duplicate(&mut subrole_seen, "AX target", "subrole")?;
+                target.subrole = Some(parse_non_empty_string("AX target.subrole", raw_value)?);
             }
             "name" => {
-                reject_duplicate(&mut name_seen, "@ax-press target", "name")?;
-                target.name = Some(parse_non_empty_string("@ax-press target.name", raw_value)?);
+                reject_duplicate(&mut name_seen, "AX target", "name")?;
+                target.name = Some(parse_non_empty_string("AX target.name", raw_value)?);
             }
             "description" => {
-                reject_duplicate(&mut description_seen, "@ax-press target", "description")?;
-                target.description = Some(parse_non_empty_string(
-                    "@ax-press target.description",
-                    raw_value,
-                )?);
+                reject_duplicate(&mut description_seen, "AX target", "description")?;
+                target.description =
+                    Some(parse_non_empty_string("AX target.description", raw_value)?);
             }
             _ => {
                 return Err(invalid_data(format!(
-                    "@ax-press target 包含未知字段: {field_name}"
+                    "AX target 包含未知字段: {field_name}"
                 )))
             }
         }
@@ -582,6 +940,45 @@ fn parse_ax_target(input: &str) -> io::Result<AxTarget> {
 
     target.validate()?;
     Ok(target)
+}
+
+fn parse_ax_action_name(input: &str) -> io::Result<AxActionName> {
+    let value = parse_quoted_payload(input)?;
+    match value.to_ascii_lowercase().as_str() {
+        "axpress" | "press" => Ok(AxActionName::Press),
+        "axopen" | "open" => Ok(AxActionName::Open),
+        "axconfirm" | "confirm" => Ok(AxActionName::Confirm),
+        "axcancel" | "cancel" => Ok(AxActionName::Cancel),
+        "axshowmenu" | "showmenu" | "show_menu" => Ok(AxActionName::ShowMenu),
+        "axscrolltovisible" | "scrolltovisible" | "scroll_to_visible" => {
+            Ok(AxActionName::ScrollToVisible)
+        }
+        _ => Err(invalid_data(format!(
+            "@ax-action 当前只支持安全 action allowlist: {value}"
+        ))),
+    }
+}
+
+fn parse_ax_value_mode(input: &str) -> io::Result<AxValueSetMode> {
+    let value = parse_quoted_payload(input)?;
+    match value.to_ascii_lowercase().as_str() {
+        "replace" => Ok(AxValueSetMode::Replace),
+        "append" => Ok(AxValueSetMode::Append),
+        _ => Err(invalid_data(format!(
+            "@ax-set-value 当前只支持 mode=\"replace\" | \"append\": {value}"
+        ))),
+    }
+}
+
+fn parse_type_text_mode(input: &str) -> io::Result<TypeTextMode> {
+    let value = parse_quoted_payload(input)?;
+    match value.to_ascii_lowercase().as_str() {
+        "auto" => Ok(TypeTextMode::Auto),
+        "ax-value" | "ax_value" => Ok(TypeTextMode::AxValue),
+        _ => Err(invalid_data(format!(
+            "@type-text 当前只支持 mode=\"auto\" | \"ax-value\": {value}"
+        ))),
+    }
 }
 
 fn parse_ax_tree_scope(input: &str) -> io::Result<AxTreeScope> {
@@ -701,15 +1098,28 @@ fn platform_snapshot(_request: &AxTreeRequest) -> io::Result<AxSnapshot> {
 }
 
 #[cfg(target_os = "macos")]
-fn platform_press(request: &AxPressRequest) -> io::Result<AxActionReport> {
-    macos::press(request)
+fn platform_perform_action(request: &AxActionRequest) -> io::Result<AxPerformedActionReport> {
+    macos::perform_action(request)
 }
 
 #[cfg(not(target_os = "macos"))]
-fn platform_press(_request: &AxPressRequest) -> io::Result<AxActionReport> {
+fn platform_perform_action(_request: &AxActionRequest) -> io::Result<AxPerformedActionReport> {
     Err(io::Error::new(
         io::ErrorKind::Unsupported,
-        "AXPress 当前只支持 macOS",
+        "AX action 当前只支持 macOS",
+    ))
+}
+
+#[cfg(target_os = "macos")]
+fn platform_set_value(request: &AxSetValueRequest) -> io::Result<AxSetValueReport> {
+    macos::set_value(request)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn platform_set_value(_request: &AxSetValueRequest) -> io::Result<AxSetValueReport> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "AX set value 当前只支持 macOS",
     ))
 }
 
@@ -885,5 +1295,87 @@ mod tests {
         );
         assert!(parse_ax_press_payload(r#"{target:{}}"#).is_err());
         assert!(parse_ax_press_payload(r#"{target:{process:"App"}}"#).is_err());
+    }
+
+    #[test]
+    fn parse_ax_action_payload_should_support_allowlisted_actions() {
+        assert_eq!(
+            parse_ax_action_payload(r#"{target:{id:"pid:1/window:0/path:0"},action:"AXShowMenu"}"#)
+                .unwrap(),
+            AxActionRequest {
+                target: AxTarget {
+                    id: Some("pid:1/window:0/path:0".to_owned()),
+                    ..AxTarget::default()
+                },
+                action: AxActionName::ShowMenu,
+            }
+        );
+        assert!(parse_ax_action_payload(
+            r#"{target:{id:"pid:1/window:0/path:0"},action:"AXRaise"}"#
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn parse_ax_action_payload_should_report_generic_ax_target_errors() {
+        let error = parse_ax_action_payload(
+            r#"{target:{id:"pid:1/window:0/path:0",id:"pid:1/window:0/path:1"},action:"AXPress"}"#,
+        )
+        .unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("AX target"), "unexpected error: {message}");
+        assert!(
+            !message.contains("@ax-press target"),
+            "unexpected error: {message}"
+        );
+    }
+
+    #[test]
+    fn parse_ax_set_value_payload_should_allow_empty_value_and_append_mode() {
+        assert_eq!(
+            parse_ax_set_value_payload(
+                r#"{target:{id:"pid:1/window:0/path:0"},value:"",mode:"append"}"#
+            )
+            .unwrap(),
+            AxSetValueRequest {
+                target: AxTarget {
+                    id: Some("pid:1/window:0/path:0".to_owned()),
+                    ..AxTarget::default()
+                },
+                value: String::new(),
+                mode: AxValueSetMode::Append,
+            }
+        );
+    }
+
+    #[test]
+    fn parse_type_text_payload_should_default_to_auto_without_clipboard() {
+        assert_eq!(
+            parse_type_text_payload(r#"{target:{id:"pid:1/window:0/path:0"},text:"hello"}"#)
+                .unwrap(),
+            TypeTextRequest {
+                target: AxTarget {
+                    id: Some("pid:1/window:0/path:0".to_owned()),
+                    ..AxTarget::default()
+                },
+                text: "hello".to_owned(),
+                mode: TypeTextMode::Auto,
+                allow_clipboard: false,
+            }
+        );
+        assert!(parse_type_text_payload(
+            r#"{target:{id:"pid:1/window:0/path:0"},text:"hello",mode:"targeted-keyboard"}"#
+        )
+        .is_err());
+        let error = parse_type_text_payload(
+            r#"{target:{id:"pid:1/window:0/path:0"},text:"hello",allow_clipboard:true}"#,
+        )
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("@type-text 当前尚未实现 allow_clipboard:true"),
+            "unexpected error: {error}"
+        );
     }
 }

@@ -108,7 +108,10 @@ flowchart LR
 | 截图 | `@screenshot#7` | image `@savefile` + manifest `@savefile` + `@response ...screenshot-bundle...` | 采集远端屏幕证据与坐标 manifest |
 | 截图 + AX | `@screenshot#8:{include_ax:true,ax_required:false}` | screenshot bundle,manifest 可含 `accessibility` | 同时采集远端屏幕和 macOS UI 结构 |
 | AX tree | `@ax-tree#9:{scope:"windows",depth:4,max_elements:1000}` | structured AX `@response` | 不截图,只读取当前 macOS UI 结构 |
+| AX action | `@ax-action#10:{target:{id:"pid:123/window:0/path:3.2"},action:"AXPress"}` | structured AX `@response` | 对按钮/菜单项执行 allowlisted AX semantic action |
 | AXPress | `@ax-press#10:{target:{id:"pid:123/window:0/path:3.2"}}` | structured AX `@response` | 对按钮/菜单项等 AX 元素执行 `AXPress` |
+| AX set value | `@ax-set-value#11:{target:{id:"pid:123/window:0/path:8.2"},value:"hello",mode:"replace"}` | structured AX `@response` | 向 settable 文本字段直接写 `AXValue` |
+| type-text | `@type-text#12:{target:{id:"pid:123/window:0/path:8.2"},text:"hello",mode:"ax-value"}` | structured AX `@response` | 用语义文本输入入口写入文本,当前只走 AXValue 路径 |
 | 鼠标移动 | `@mouse-move#10:{x:1200,y:540,coordinate_space:"os-logical"}` | structured mouse `@response` | 按 manifest 坐标移动远端指针 |
 | 鼠标按钮 | `@mouse-button#11:{button:"left",mode:"press"}` | structured mouse `@response` | 原始 press / release / click |
 | 点击 | `@click#12:{x:1200,y:540}` | structured mouse `@response` | 根据截图坐标点击远端桌面 |
@@ -202,6 +205,35 @@ AX rect 继续使用 `coordinate_space:"os-logical"`。
 
 建议优先使用刚刚从 manifest 或 `@ax-tree` 读到的 `id`。
 如果元素已经消失或 locator 歧义,daemon 会返回 code 64。
+
+如果目标元素支持的并不只是 `AXPress`,可以显式走 `@ax-action`:
+
+```text
+@ax-action#13:{target:{id:"pid:123/window:0/path:3.2"},action:"AXShowMenu"}
+```
+
+当前只允许安全 allowlist:
+
+- `AXPress`
+- `AXOpen`
+- `AXConfirm`
+- `AXCancel`
+- `AXShowMenu`
+- `AXScrollToVisible`
+
+文本字段如果是 settable `AXValue`,优先用:
+
+```text
+@ax-set-value#14:{target:{id:"pid:123/window:0/path:8.2"},value:"hello",mode:"replace"}
+@type-text#15:{target:{id:"pid:123/window:0/path:8.2"},text:"hello",mode:"ax-value"}
+```
+
+当前阶段:
+
+- `@type-text` 只支持 `mode:"ax-value"` 和 `mode:"auto"`。
+- `mode:"auto"` 当前仍只走 AXValue 分支。
+- 不会自动 fallback 到 keyboard 或 clipboard。
+- `allow_clipboard` 虽然已经是协议字段,但当前保持 `false` 才是安全默认。
 
 鼠标命令直接复用这个 manifest 的坐标语义:
 

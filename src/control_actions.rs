@@ -1,7 +1,8 @@
 use crate::{
     control_ax::{
         build_ax_find_response_json, build_ax_get_response_json, capture_default_ax_snapshot,
-        perform_default_ax_press,
+        perform_default_ax_action, perform_default_ax_press, perform_default_ax_set_value,
+        perform_default_type_text,
     },
     control_frames::{default_savefile_directory, SaveFileFrame},
     control_mouse::{
@@ -120,7 +121,10 @@ impl ControlActionExecutor for SystemControlActionExecutor {
             ControlCommand::AxTree(request) => execute_ax_tree(request),
             ControlCommand::AxFind(request) => execute_ax_find(request),
             ControlCommand::AxGet(request) => execute_ax_get(request),
+            ControlCommand::AxAction(request) => execute_ax_action(request),
             ControlCommand::AxPress(request) => execute_ax_press(request),
+            ControlCommand::AxSetValue(request) => execute_ax_set_value(request),
+            ControlCommand::TypeText(request) => execute_type_text(request),
             ControlCommand::WindowFind(request) => execute_window_find(request),
             ControlCommand::WindowActivate(request) => execute_window_activate(request),
             ControlCommand::WindowClose(request) => execute_window_close(request),
@@ -289,6 +293,42 @@ fn execute_ax_press(
     request: &crate::control_ax::AxPressRequest,
 ) -> io::Result<ActionExecutionResult> {
     let report = perform_default_ax_press(request)?;
+    Ok(ActionExecutionResult {
+        exit_code: 0,
+        stdout: Vec::new(),
+        stderr: Vec::new(),
+        response_value_json: Some(report.to_value_json()?),
+    })
+}
+
+fn execute_ax_action(
+    request: &crate::control_ax::AxActionRequest,
+) -> io::Result<ActionExecutionResult> {
+    let report = perform_default_ax_action(request)?;
+    Ok(ActionExecutionResult {
+        exit_code: 0,
+        stdout: Vec::new(),
+        stderr: Vec::new(),
+        response_value_json: Some(report.to_value_json()?),
+    })
+}
+
+fn execute_ax_set_value(
+    request: &crate::control_ax::AxSetValueRequest,
+) -> io::Result<ActionExecutionResult> {
+    let report = perform_default_ax_set_value(request)?;
+    Ok(ActionExecutionResult {
+        exit_code: 0,
+        stdout: Vec::new(),
+        stderr: Vec::new(),
+        response_value_json: Some(report.to_value_json()?),
+    })
+}
+
+fn execute_type_text(
+    request: &crate::control_ax::TypeTextRequest,
+) -> io::Result<ActionExecutionResult> {
+    let report = perform_default_type_text(request)?;
     Ok(ActionExecutionResult {
         exit_code: 0,
         stdout: Vec::new(),
