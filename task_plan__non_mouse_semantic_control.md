@@ -218,6 +218,76 @@
 - 避开 worktree 中其他实验线和未完成支线文件。
 - 在 review 无阻塞问题后,做 local commit,不 push。
 
+## [2026-05-17 13:56:17] [Session ID: 019e1b72-d659-7a60-91b4-66cea3fc6ce0] [状态]: 根据用户建议校正 `@key` / `@type-text` 语义边界
+
+### 现象
+- 当前协议实现已经同时提供 `@key` 和 `@type-text`,但 live ignored E2E 里仍有一条测试把 `@key:"1"` / `@key:"2"` 当作普通文本输入来验证。
+- 这会把“快捷键/功能键触发”与“普通文本输入”混成一类,与用户刚明确给出的使用边界不一致。
+
+### 已确认决策
+- `@key` 保留并继续强化,但主语义明确为:
+  - 快捷键
+  - 功能键
+  - 导航键
+  - 特定 app 焦点下的功能触发
+- 普通文本输入应走 `@type-text`,再按能力细分:
+  - `mode:"ax-value"`
+  - `mode:"targeted-keyboard"`
+  - `mode:"clipboard"`
+- live E2E 不再用 `@key` 证明字符文本写入,而要改成证明“热键确实触发了真实 app 状态变化”。
+
+### 下一步
+- [x] 更新 `specs/rdog-non-mouse-semantic-control-plan.md` 和 `specs/code-agent-rdog-control-usage.md`,把这层边界写成正式规格。
+- [x] 更新全局 `rdog-control` skill,让 code agent 明确知道什么时候该用 `@key`,什么时候该用 `@type-text`。
+- [x] 改写 `tests/control_ax_e2e.rs` 的 targeted-key live ignored E2E,移除输入法切换依赖,改成热键场景验证。
+
+### 当前状态
+**已完成语义边界收口** - 当前已完成规格、skill 和测试口径调整,下一步只差在不打扰用户桌面操作的时段补 live ignored E2E 动态证据。
+
+## [2026-05-17 14:56:54] [Session ID: 019e1b72-d659-7a60-91b4-66cea3fc6ce0] [状态]: `@ax-scroll` live E2E 挂起后的轻量观测修正
+
+### 现象
+- 新版 hotkey live E2E 已通过,动态证明 `pid-targeted` 和 `window-targeted` 的 `Backspace` 可以改变真实 TextEdit 文本状态。
+- `@ax-scroll` live E2E 曾运行超过 60 秒未收口。
+- 现场日志显示 daemon 和 test 进程都还活着,并且存在一条已建立 control 连接。
+
+### 当前假设
+- 主假设: scroll 测试的观测路径太重,反复 `@ax-get(window_id,depth:8,include_values:true)` 会拉取长文本 TextEdit 的大值,导致 control 调用变慢或挂起。
+- 备选解释: `@ax-scroll` 后端投递本身没有改变 TextEdit 滚动状态,但测试没有及时暴露失败。
+- 推翻主假设的证据: 改成只读 `AXScrollBar` 元素后仍然挂起或仍然读不到数值变化。
+
+### 已执行修正
+- 将初始窗口树读取改为 `include_values:false`。
+- 新增 scroll bar target id 查找。
+- 后续轮询只 `@ax-get` scroll bar 元素本身,不再反复读取完整窗口树。
+
+### 当前状态
+**正在验证 scroll 轻量观测修正** - 先跑 compile / no-run,再跑 live ignored scroll E2E。
+
+## [2026-05-17 15:11:59] [Session ID: 019e1b72-d659-7a60-91b4-66cea3fc6ce0] [完成]: Phase 2.2 `@key` targeted 与 `@ax-scroll` live E2E 收口
+
+### 阶段更新
+- [x] 复用 TextEdit fixture,新增 targeted key live E2E。
+- [x] 为长文本 + 小窗口场景新增 scrollable TextEdit fixture。
+- [x] 新增 `@ax-scroll` live ignored E2E,用真实 AX scroll bar/value 变化做成功判据。
+- [x] 跑 focused compile + 两条 live ignored E2E,记录动态证据。
+
+### 动态证据
+- `daemon_control_lane_should_deliver_pid_and_window_targeted_hotkeys_to_real_textedit`
+  - 通过
+  - 真实观测: `window_id=pid:551/window:0`, `target_id=pid:551/window:0/path:0.0`, `pid=551`
+- `daemon_control_lane_should_scroll_real_textedit_without_mouse`
+  - 通过
+  - 真实观测: `before=109`, `after=211`
+
+### 关键修正
+- `@key` live E2E 从字符输入测试改为 hotkey / non-text-key 行为验证。
+- `@ax-scroll` 后端从不生效的 `pid-scroll-event` 改为 `AXScrollBar AXValue` 语义路径。
+- scroll E2E 的成功判据从只看 `AXScrollBar.value` 改为优先看 `AXValueIndicator.rect.y`,因为真实 TextEdit 在滚动后可能不再返回 scroll bar value 字段。
+
+### 当前状态
+**Phase 2.2 验证完成** - 下一步可以 review 当前 diff,做 targeted local commit。
+
 ### 待办
 - [x] 审阅 `src/control_protocol.rs` / `src/control_ax.rs` / `src/control_ax/macos.rs` / `src/control_actions.rs` / `src/control_core.rs` / `src/shell.rs` / `src/zenoh_control.rs`
 - [x] 审阅同步过的 `specs/rdog-non-mouse-semantic-control-plan.md` / `specs/code-agent-rdog-control-usage.md` / `AGENTS.md`
@@ -279,3 +349,39 @@
 
 ### 当前状态
 **本轮目标完成** - 下一步可以 review 这轮新增 diff 并做 local commit。
+
+## [2026-05-17 14:14:00] [Session ID: 019e1b72-d659-7a60-91b4-66cea3fc6ce0] [续写]: Phase 2.2 live ignored E2E for `@key` targeted + `@ax-scroll`
+
+### 目标
+- 为 `@key pid-targeted` / `@key window-targeted` 增加真实桌面 live ignored E2E。
+- 为 `@ax-scroll` 增加真实桌面 live ignored E2E。
+- 继续保持“不碰鼠标”的验证边界。
+
+### 待办
+- [x] 复用 TextEdit fixture,新增 targeted key live E2E。
+- [x] 为长文本 + 小窗口场景新增 scrollable TextEdit fixture。
+- [x] 新增 `@ax-scroll` live ignored E2E,用真实 AX scroll bar/value 变化做成功判据。
+- [x] 跑 focused compile + 两条 live ignored E2E,记录动态证据。
+
+### 约束
+- 不做任何鼠标 live 操作。
+- `@key` / `@ax-scroll` 必须以真实桌面内容或真实 AX 状态变化为判据。
+- 优先复用现有 TextEdit / `@window-find -> @ax-get(window_id)` 路径,避免重型全局 AX 查询。
+
+### 当前状态
+**Phase 2.2 已完成** - targeted key 与 AX scroll live ignored E2E 均已有真实桌面动态证据。
+
+## [2026-05-17 14:32:00] [Session ID: 019e1b72-d659-7a60-91b4-66cea3fc6ce0] [转向]: 输入法无关文本投递策略调研
+
+### 目标
+- 参考 `open-codex-computer-use` 与 `hermes-agent` 的 computer-use 实现,确认它们如何处理文本输入、输入法状态和剪贴板污染。
+- 找出一条适合 rdog 的“尽量不受输入法影响,又尽量不污染用户剪贴板”的文本投递策略。
+- 用这份结论指导后续 `@key` / `@type-text` live E2E 与协议演进。
+
+### 待办
+- [ ] 阅读两个外部仓库中与文本输入、键盘投递、剪贴板相关的真实实现。
+- [ ] 对比几类策略: 键盘事件、Unicode keyboard event、AXValue、剪贴板、脚本化粘贴。
+- [ ] 给出适合 rdog 的优先级建议和风险边界。
+
+### 当前状态
+**正在调研** - 先看外部仓库真实代码和它们的输入策略,再回到 rdog 设计选择。

@@ -218,6 +218,57 @@
   - 因为 `@ax-find` 的空结果并不等于窗口不存在,只是“窗口定位和编辑区定位混在一条全局元素查询里”不稳。
 - 最终成立的假设:
   - 对真实 GUI 文本编辑场景,应该把“找窗口”和“找元素”拆开:
+
+## [2026-05-17 13:56:17] [Session ID: 019e1b72-d659-7a60-91b4-66cea3fc6ce0] 笔记: 用户补充后的 `@key` / `@type-text` 职责分界
+
+### 用户给出的新边界
+- `@key` 是有意义的。
+- 它最初就是给快捷键准备的。
+- 主要用途是:
+  - 呼叫 app
+  - 在特定 app 焦点下激活特定功能
+  - 发送 `F12` 这类不受输入法影响的按键
+- 如果是普通输入,可能会激活输入法状态,这时 `@key` 不适合,需要改用更适合的文本输入路径。
+
+### 调整后的结论
+- `@key` 不是“文本输入 API”,而是“按键/热键/功能触发 API”。
+- `@type-text` 才是普通文本输入 API。
+- `@type-text` 内部再分:
+  - `ax-value`: 最语义化,最不受输入法影响
+  - `targeted-keyboard`: 仍可能受输入法/焦点影响,但比全局键盘更定向
+  - `clipboard`: 最后 fallback,而且必须显式 opt-in
+
+### 对测试策略的影响
+- `@key` 的 live E2E 不该再验证 `"1"`、`"2"` 这种字符是否进入文本框。
+- 更合适的验证方式是:
+  - 用 `Cmd+A`、`Cmd+W`、`Return`、`Tab`、方向键等不依赖输入法状态的键
+  - 断言真实 app 状态变化
+  - 例如窗口关闭、窗口新建、内容被选择后删除、焦点跳转、滚动状态变化
+- `@type-text targeted-keyboard` 可以继续保留真实文本输入 E2E,但它的结果解释要明确标成“文本输入路径”,不能再拿它去代表 `@key`。
+
+## [2026-05-17 15:11:59] [Session ID: 019e1b72-d659-7a60-91b4-66cea3fc6ce0] 笔记: `@ax-scroll` live E2E 修正结论
+
+### 现象
+- 第一版 scroll live E2E 曾挂起超过 60 秒。
+- 轻量化观测后,挂起消失,但 `pid-scroll-event` 后端没有改变 TextEdit 的滚动条 value。
+- 改成 AXScrollBar page button 的 AXPress 后,仍然没有让 value 变化。
+- 改成写入 AXScrollBar 的 AXValue 后,TextEdit 的滚动条 indicator 真实移动。
+
+### 被推翻的假设
+- 假设1: 只要给目标 pid 发 targeted scroll event 就能让 TextEdit 滚动。
+  - 动态证据推翻: `@ax-scroll` 返回 success,但 scroll bar value 仍为 0。
+- 假设2: 对 AXScrollBar 的 page button 执行 AXPress 就能滚动。
+  - 动态证据推翻: AXPress 后 `AXValueIndicator` 没有移动。
+- 假设3: 只看 `AXScrollBar.value` 就足够判断滚动。
+  - 动态证据修正: 写入 AXValue 后,TextEdit 有时不再返回 scroll bar value,但 `AXValueIndicator.rect.y` 明确从 109 变到 211。
+
+### 已验证结论
+- macOS TextEdit 的这条 scroll live E2E 应使用 `AXScrollBar AXValue` 作为后端路径。
+- live 成功判据应优先看真实滚动条 indicator 位置变化,而不是只看 value 字段。
+- 当前动态证据:
+  - `daemon_control_lane_should_scroll_real_textedit_without_mouse`
+  - `before=109`
+  - `after=211`
     1. `@window-find` 先锁定真实 `window_id`
     2. `@ax-get(window_id)` 再在单窗口树里找 `AXTextArea` / `AXTextField`
   - 这样既避开重型全局 AX 查询,也更符合当前协议分层。

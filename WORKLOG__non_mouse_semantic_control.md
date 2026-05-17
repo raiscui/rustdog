@@ -192,3 +192,73 @@
 ### 总结感悟
 - 对真实 GUI 文本输入场景,把“找窗口”和“找元素”拆成两段,比一条全局 AX 查询稳得多。
 - live E2E 的价值不只是“最后绿了”,更在于它把协议名、backend 名、桌面状态恢复路径都压成了真实证据。
+
+## [2026-05-17 14:30:14] [Session ID: 019e1b72-d659-7a60-91b4-66cea3fc6ce0] 任务名称: 校正 `@key` 与普通文本输入的职责边界
+
+### 任务内容
+- 根据用户新增约束,把 `@key` 和 `@type-text` 的使用场景正式拆开。
+- 修正 live ignored E2E,不再把 `@key` 当作普通字符输入能力来证明。
+- 同步更新 specs、agent usage 文档和全局 `rdog-control` skill。
+
+### 完成过程
+- 在 `specs/rdog-non-mouse-semantic-control-plan.md` 中明确:
+  - `@key` 主要用于快捷键、功能键、导航键和 app 功能触发
+  - 普通文本输入优先走 `@ax-set-value` / `@type-text`
+  - `targeted-keyboard` 仍是文本输入路径,依然可能受输入法和焦点影响
+- 在 `specs/code-agent-rdog-control-usage.md` 中同步 agent-facing 用法:
+  - `@key` 不再被描述成通用文本输入
+  - `@type-text` 被明确标成普通文本输入入口
+- 在 `/Users/cuiluming/.codex/skills/rdog-control/SKILL.md` 中补上面向 code agent 的经验口径:
+  - 不要把 `@key:"1"` / `@key:"a"` 当成稳定文本输入
+  - 普通文本输入优先用 `@type-text`
+- 在 `tests/control_ax_e2e.rs` 中:
+  - 删除输入法切换 guard 和相关 helper
+  - 把 live targeted-key 测试改成热键场景
+  - 改为用 `Cmd+A` + `Backspace` 验证“真实 app 状态变化”,而不是验证字符是否输入
+  - 新增 `wait_for_textedit_value_exact()` 方便断言文本被整段清空
+
+### 验证
+- `cargo fmt`
+- `cargo test --package rustdog --test control_ax_e2e --no-run`
+- `git diff --check -- specs/rdog-non-mouse-semantic-control-plan.md specs/code-agent-rdog-control-usage.md tests/control_ax_e2e.rs task_plan__non_mouse_semantic_control.md notes__non_mouse_semantic_control.md`
+- 以上全部通过
+
+### 总结感悟
+- `@key` 有意义,但它的意义不是“代替所有文本输入”,而是“把按键当成功能触发”。
+- 一旦协议层同时拥有 `@key` 和 `@type-text`,live E2E 也必须跟着分工,否则测试会反过来污染产品语义。
+
+## [2026-05-17 15:11:59] [Session ID: 019e1b72-d659-7a60-91b4-66cea3fc6ce0] 任务名称: Phase 2.2 targeted key 与 AX scroll live E2E 收口
+
+### 任务内容
+- 为 `@key pid-targeted` / `@key window-targeted` 补 live ignored E2E。
+- 为 `@ax-scroll` 补 live ignored E2E。
+- 修正 `@ax-scroll` 后端,让 response 和真实桌面行为一致。
+
+### 完成过程
+- 将 targeted key live E2E 改成:
+  - 先用 `@type-text mode:"targeted-keyboard"` 输入 `"AB"`
+  - 再用 `@key delivery:"pid-targeted",key:"Backspace"` 删除成 `"A"`
+  - 再用 `@key delivery:"window-targeted",key:"Backspace"` 删除成空字符串
+- 为 scroll live E2E 建立长文本小窗口 TextEdit fixture。
+- 发现 `pid-scroll-event` 返回 success 但不改变 TextEdit 滚动状态。
+- 改为 `AXScrollBar AXValue` 语义路径:
+  - 在目标窗口内找同方向 `AXScrollBar`
+  - 检查 `AXValue` settable
+  - 按 direction/pages 写入新的 0..1 比例值
+  - response 改为 `delivered_via:"ax-scrollbar-value"`
+- 修正 scroll E2E 判据:
+  - 优先使用 `AXValueIndicator.rect.y` 作为真实滚动位置
+  - fallback 才看 `AXScrollBar.value`
+
+### 验证
+- `cargo fmt`
+- `cargo test --package rustdog --test control_ax_e2e --no-run`
+- `cargo test --package rustdog --bin rdog -- control_ax::tests --nocapture`
+- `RDOG_LIVE_AX_E2E=1 RDOG_LIVE_AX_E2E_VIA_TERMINAL=1 RDOG_LIVE_AX_E2E_BINARY=/Users/cuiluming/local_doc/l_dev/my/rust/rustdog/target/debug/rdog cargo test --package rustdog --test control_ax_e2e -- daemon_control_lane_should_deliver_pid_and_window_targeted_hotkeys_to_real_textedit --exact --ignored --nocapture`
+- `RDOG_LIVE_AX_E2E=1 RDOG_LIVE_AX_E2E_VIA_TERMINAL=1 RDOG_LIVE_AX_E2E_BINARY=/Users/cuiluming/local_doc/l_dev/my/rust/rustdog/target/debug/rdog cargo test --package rustdog --test control_ax_e2e -- daemon_control_lane_should_scroll_real_textedit_without_mouse --exact --ignored --nocapture`
+- targeted key live: 1 passed
+- scroll live: 1 passed, `before=109`, `after=211`
+
+### 总结感悟
+- GUI semantic control 不能只看“API 调用成功”。必须回读真实 UI 状态。
+- AX 字段并不总是稳定同构。TextEdit 滚动后可能不再返回 `AXScrollBar.value`,但 indicator 位置仍是可靠的可观察状态。

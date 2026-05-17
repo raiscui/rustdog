@@ -14,6 +14,7 @@ type Boolean = u8;
 type CFIndex = isize;
 type CFTypeID = usize;
 type CFTypeRef = *const c_void;
+type CFAllocatorRef = CFTypeRef;
 type CFStringRef = CFTypeRef;
 type CFArrayRef = CFTypeRef;
 type CFDictionaryRef = CFTypeRef;
@@ -29,6 +30,8 @@ type UniChar = u16;
 
 const UTF8: u32 = 0x0800_0100;
 const CF_NUMBER_SINT32: i32 = 3;
+const CF_NUMBER_DOUBLE: i32 = 13;
+const AX_SCROLL_PAGE_FRACTION: f64 = 0.25;
 const AX_SUCCESS: AXError = 0;
 const AX_ERROR_FAILURE: AXError = -25200;
 const AX_ERROR_INVALID_UI_ELEMENT: AXError = -25202;
@@ -43,7 +46,6 @@ const AX_VALUE_CG_SIZE: u32 = 2;
 const CG_WINDOW_ON_SCREEN_ONLY: u32 = 1 << 0;
 const CG_WINDOW_EXCLUDE_DESKTOP: u32 = 1 << 4;
 const CG_EVENT_SOURCE_STATE_COMBINED_SESSION: i32 = 0;
-const CG_SCROLL_EVENT_UNIT_LINE: u32 = 1;
 const KEYCODE_BACKSPACE: u16 = 0x33;
 const KEYCODE_TAB: u16 = 0x30;
 const KEYCODE_RETURN: u16 = 0x24;
@@ -126,6 +128,11 @@ extern "C" {
     fn CFGetTypeID(value: CFTypeRef) -> CFTypeID;
     fn CFNumberGetTypeID() -> CFTypeID;
     fn CFNumberGetValue(number: CFNumberRef, number_type: i32, value_ptr: *mut c_void) -> Boolean;
+    fn CFNumberCreate(
+        allocator: CFAllocatorRef,
+        number_type: i32,
+        value_ptr: *const c_void,
+    ) -> CFNumberRef;
     fn CFRelease(value: CFTypeRef);
     fn CFRetain(value: CFTypeRef) -> CFTypeRef;
     fn CFStringCreateWithCString(
@@ -151,13 +158,6 @@ extern "C" {
         string_length: usize,
         unicode_string: *const UniChar,
     );
-    fn CGEventCreateScrollWheelEvent(
-        source: CGEventSourceRef,
-        units: u32,
-        wheel_count: u32,
-        wheel1: i32,
-        ...
-    ) -> CGEventRef;
     fn CGEventPostToPid(pid: c_int, event: CGEventRef);
     fn CGRectMakeWithDictionaryRepresentation(dict: CFDictionaryRef, rect: *mut CGRect) -> bool;
     fn CGWindowListCopyWindowInfo(option: u32, relative_to_window: u32) -> CFArrayRef;
@@ -377,17 +377,15 @@ pub(super) fn scroll(request: &AxScrollRequest) -> io::Result<AxScrollReport> {
 
     let target_id = resolve_live_target_id(&request.target)?;
     prepare_text_target(&target_id)?;
-    let parsed = parse_target_id(&target_id)?;
-    let line_steps = scroll_line_steps(request.direction, request.pages);
-    post_scroll_to_pid(parsed.pid, request.direction, line_steps)?;
+    set_scrollbar_value_for_target(&target_id, request.direction, request.pages)?;
 
     Ok(AxScrollReport::success(
-        "macos-cg-event-post-to-pid",
+        "macos-accessibility",
         Some(target_id),
         request.direction,
         request.pages,
-        line_steps,
-        "pid-scroll-event",
+        0,
+        "ax-scrollbar-value",
     ))
 }
 
@@ -831,6 +829,95 @@ fn focus_window_element(window_ref: AXUIElementRef) -> io::Result<()> {
     }
 }
 
+fn set_scrollbar_value_for_target(
+    target_id: &str,
+    direction: AxScrollDirection,
+    pages: u16,
+) -> io::Result<()> {
+    let parsed = parse_target_id(target_id)?;
+    let window_id = format!("pid:{}/window:{}", parsed.pid, parsed.window_index);
+    let window = retain_target_element(&window_id)?;
+    let scrollbar = find_scrollbar_element(window.as_ptr(), direction)?.ok_or_else(|| {
+        invalid_input(format!("目标窗口没有可用于 {:?} 的 AXScrollBar", direction,))
+    })?;
+
+    ensure_ax_value_settable(scrollbar.as_ptr())?;
+    let current_value = copy_number_attr(scrollbar.as_ptr(), "AXValue")?
+        .ok_or_else(|| invalid_input("目标 AXScrollBar 当前 AXValue 不可读"))?;
+    let next_value = next_scrollbar_value(current_value, direction, pages);
+    set_ax_number_value(scrollbar.as_ptr(), next_value)
+}
+
+fn find_scrollbar_element(
+    element: AXUIElementRef,
+    direction: AxScrollDirection,
+) -> io::Result<Option<CfOwned>> {
+    let role = copy_string_attr(element, "AXRole")?.unwrap_or_default();
+    if role == "AXScrollBar" && scrollbar_matches_direction(element, direction)? {
+        return unsafe { CfOwned::retain(element) }
+            .map(Some)
+            .ok_or_else(|| invalid_input("AXScrollBar 已失效,无法执行非鼠标滚动"));
+    }
+
+    let Some(children) = copy_attribute(element, "AXChildren")? else {
+        return Ok(None);
+    };
+    let count = unsafe { CFArrayGetCount(children.as_ptr()) };
+    for index in 0..count {
+        let child = unsafe { CFArrayGetValueAtIndex(children.as_ptr(), index) };
+        if child.is_null() {
+            continue;
+        }
+        if let Some(scrollbar) = find_scrollbar_element(child, direction)? {
+            return Ok(Some(scrollbar));
+        }
+    }
+    Ok(None)
+}
+
+fn scrollbar_matches_direction(
+    element: AXUIElementRef,
+    direction: AxScrollDirection,
+) -> io::Result<bool> {
+    let Some(rect) = copy_ax_rect(element)? else {
+        return Ok(true);
+    };
+    Ok(match direction {
+        AxScrollDirection::Up | AxScrollDirection::Down => rect.height >= rect.width,
+        AxScrollDirection::Left | AxScrollDirection::Right => rect.width > rect.height,
+    })
+}
+
+fn next_scrollbar_value(current_value: f64, direction: AxScrollDirection, pages: u16) -> f64 {
+    // macOS AXScrollBar 的 AXValue 通常是 0..1 的比例值。
+    // `pages` 是协议抽象,这里用温和的比例步进映射,避免一次滚到尽头。
+    let delta = f64::from(pages) * AX_SCROLL_PAGE_FRACTION;
+    match direction {
+        AxScrollDirection::Up | AxScrollDirection::Left => (current_value - delta).max(0.0),
+        AxScrollDirection::Down | AxScrollDirection::Right => (current_value + delta).min(1.0),
+    }
+}
+
+fn set_ax_number_value(element: AXUIElementRef, value: f64) -> io::Result<()> {
+    with_cf_string("AXValue", |attribute| {
+        let number_ref = unsafe {
+            CfOwned::new(CFNumberCreate(
+                ptr::null(),
+                CF_NUMBER_DOUBLE,
+                (&value as *const f64).cast(),
+            ))
+        }
+        .ok_or_else(|| io::Error::other("创建 AXScrollBar 数值失败"))?;
+        unsafe {
+            map_ax_set_value_error(AXUIElementSetAttributeValue(
+                element,
+                attribute,
+                number_ref.as_ptr(),
+            ))
+        }
+    })
+}
+
 fn set_bool_attribute(element: AXUIElementRef, attr: &str, value: bool) -> io::Result<()> {
     with_cf_string(attr, |attribute| unsafe {
         let bool_ref = if value { kCFBooleanTrue } else { ptr::null() };
@@ -883,30 +970,6 @@ fn post_unicode_text_to_pid(pid: i32, text: &str) -> io::Result<()> {
     Ok(())
 }
 
-fn post_scroll_to_pid(pid: i32, direction: AxScrollDirection, line_steps: i32) -> io::Result<()> {
-    let source = create_event_source()?;
-    let (wheel1, wheel2) = match direction {
-        AxScrollDirection::Up => (line_steps.abs(), 0),
-        AxScrollDirection::Down => (-line_steps.abs(), 0),
-        AxScrollDirection::Left => (0, -line_steps.abs()),
-        AxScrollDirection::Right => (0, line_steps.abs()),
-    };
-    let event = unsafe {
-        CfOwned::new(CGEventCreateScrollWheelEvent(
-            source.as_ptr(),
-            CG_SCROLL_EVENT_UNIT_LINE,
-            2,
-            wheel1,
-            wheel2,
-        ))
-    }
-    .ok_or_else(|| io::Error::other("创建 macOS scroll CGEvent 失败"))?;
-    unsafe {
-        CGEventPostToPid(pid, event.as_ptr());
-    }
-    Ok(())
-}
-
 fn with_temporary_clipboard_text(
     text: &str,
     run: impl FnOnce() -> io::Result<()>,
@@ -944,10 +1007,6 @@ fn write_clipboard_bytes(bytes: &[u8]) -> io::Result<()> {
     } else {
         Err(io::Error::other(format!("pbcopy 退出失败: {status}")))
     }
-}
-
-fn scroll_line_steps(_direction: AxScrollDirection, pages: u16) -> i32 {
-    i32::from(pages) * 10
 }
 
 #[derive(Debug, Clone)]
@@ -1238,6 +1297,13 @@ fn copy_bool_attr(element: AXUIElementRef, attr: &str) -> io::Result<Option<bool
     Ok(cf_to_bool(value.as_ptr()))
 }
 
+fn copy_number_attr(element: AXUIElementRef, attr: &str) -> io::Result<Option<f64>> {
+    let Some(value) = copy_attribute(element, attr)? else {
+        return Ok(None);
+    };
+    Ok(cf_to_f64(value.as_ptr()))
+}
+
 fn copy_action_names(element: AXUIElementRef) -> io::Result<Vec<String>> {
     let mut actions = ptr::null();
     let error = unsafe { AXUIElementCopyActionNames(element, &mut actions) };
@@ -1359,6 +1425,21 @@ fn cf_to_i32(value: CFTypeRef) -> Option<i32> {
             value as CFNumberRef,
             CF_NUMBER_SINT32,
             (&mut number as *mut i32).cast(),
+        )
+    };
+    (ok != 0).then_some(number)
+}
+
+fn cf_to_f64(value: CFTypeRef) -> Option<f64> {
+    if value.is_null() || unsafe { CFGetTypeID(value) } != unsafe { CFNumberGetTypeID() } {
+        return None;
+    }
+    let mut number = 0.0f64;
+    let ok = unsafe {
+        CFNumberGetValue(
+            value as CFNumberRef,
+            CF_NUMBER_DOUBLE,
+            (&mut number as *mut f64).cast(),
         )
     };
     (ok != 0).then_some(number)

@@ -96,11 +96,14 @@
 当前阶段语义:
 
 - 支持 `mode:"ax-value"`、`mode:"targeted-keyboard"`、`mode:"clipboard"` 和 `mode:"auto"`。
+- `@type-text` 的职责是普通文本输入,不是快捷键触发。
 - `mode:"auto"` 按下面的梯子尝试:
   1. AXValue replace
   2. targeted keyboard
   3. clipboard,但只有 `allow_clipboard:true` 时才允许
 - `mode:"clipboard"` 必须显式 `allow_clipboard:true`。
+- `mode:"targeted-keyboard"` 仍可能受焦点、输入法、app 自己的键盘处理逻辑影响。
+  它是“定向文本输入”路径,不是功能热键路径。
 - response 里的 `delivered_via` 必须说真话:
   - `ax-value`
   - `targeted-keyboard`
@@ -131,6 +134,13 @@ targeted keyboard / clipboard 示例:
 
 语义:
 
+- `@key` 的主职责是:
+  - 快捷键
+  - 功能键
+  - 导航键
+  - 在特定 app / window 焦点下触发功能
+- `@key` 不应被当作通用普通文本输入接口。
+  如果目标是稳定写入文本,优先使用 `@ax-set-value` 或 `@type-text`。
 - 旧字符串 payload 和旧 object payload 继续兼容,仍可走 legacy 成功响应。
 - 只要 object payload 显式带 `delivery` / `pid` / `window_id`,成功响应就切到结构化 `kind:"key"` report。
 - `delivery:"pid-targeted"` 需要 `pid`。
@@ -178,14 +188,15 @@ targeted keyboard / clipboard 示例:
 
 语义:
 
-- 当前命令名仍叫 `@ax-scroll`,但 macOS 第一版真实投递是“基于 AX locator 解析出 pid,再发 targeted scroll event”。
+- 当前命令名仍叫 `@ax-scroll`,macOS 主路径会在目标窗口内查找同方向的 `AXScrollBar`,再写入它的 `AXValue`。
 - 不会偷偷退化成全局 wheel。
-- response 必须回报 `delivered_via:"pid-scroll-event"` 和真实 `line_steps`,避免把“页”的抽象伪装成系统真的 page-scroll API。
+- response 必须回报 `delivered_via:"ax-scrollbar-value"`。
+  `line_steps` 在这条语义路径上为 `0`,避免把 AXValue 比例写入伪装成系统 line wheel。
 
 返回:
 
 ```json
-{"kind":"ax-scroll","backend":"macos-cg-event-post-to-pid","target_id":"pid:123/window:0/path:10.1","direction":"down","pages":2,"line_steps":20,"delivered_via":"pid-scroll-event","performed":true,"status":"ok"}
+{"kind":"ax-scroll","backend":"macos-accessibility","target_id":"pid:123/window:0/path:10.1","direction":"down","pages":2,"line_steps":0,"delivered_via":"ax-scrollbar-value","performed":true,"status":"ok"}
 ```
 
 ## Agent 决策流
@@ -201,6 +212,7 @@ flowchart TD
     FindAgain --> Choose
     Choose -->|按钮/菜单| Action[@ax-action 或 @ax-press]
     Choose -->|文本输入| Value[@ax-set-value 或 @type-text]
+    Choose -->|快捷键/功能触发| Key[@key]
     Choose -->|无法语义化| Fallback{允许干扰?}
     Fallback -->|否| Limited[返回 limited]
     Fallback -->|是| Mouse[@click/@drag/@wheel]

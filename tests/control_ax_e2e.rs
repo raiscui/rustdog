@@ -77,12 +77,16 @@ struct TextEditDocumentFixture {
 
 impl TextEditDocumentFixture {
     fn create(name: &str) -> Self {
+        Self::create_with_contents(name, "")
+    }
+
+    fn create_with_contents(name: &str, contents: &str) -> Self {
         let file_path = std::env::temp_dir().join(format!(
             "rdog-ax-textedit-{name}-{}-{}.txt",
             std::process::id(),
             next_free_port()
         ));
-        fs::write(&file_path, b"").expect("TextEdit fixture file should write");
+        fs::write(&file_path, contents).expect("TextEdit fixture file should write");
 
         let status = Command::new("open")
             .arg("-a")
@@ -103,6 +107,25 @@ impl TextEditDocumentFixture {
             file_path,
             title_needle,
         }
+    }
+
+    fn set_bounds(&self, x: i64, y: i64, width: i64, height: i64) {
+        let right = x + width;
+        let bottom = y + height;
+        let title = apple_script_string(&self.title_needle);
+        run_applescript(&format!(
+            "tell application \"TextEdit\"\n\
+             activate\n\
+             repeat with w in windows\n\
+               try\n\
+                 if (name of w) contains \"{title}\" then\n\
+                   set bounds of w to {{{x}, {y}, {right}, {bottom}}}\n\
+                   exit repeat\n\
+                 end if\n\
+               end try\n\
+             end repeat\n\
+             end tell"
+        ));
     }
 
     fn hide_app(&self) {
@@ -773,6 +796,40 @@ fn assert_type_text_targeted_keyboard_report(report: &Value, expected_target_id:
     assert_eq!(report["used_clipboard"].as_bool(), Some(false));
 }
 
+fn assert_key_delivery_report(
+    report: &Value,
+    expected_delivery: &str,
+    expected_key: &str,
+    expected_pid: i32,
+    expected_window_id: Option<&str>,
+) {
+    assert_eq!(report["kind"].as_str(), Some("key"));
+    assert_eq!(
+        report["backend"].as_str(),
+        Some("macos-cg-event-post-to-pid")
+    );
+    assert_eq!(report["delivery"].as_str(), Some(expected_delivery));
+    assert_eq!(report["key"].as_str(), Some(expected_key));
+    assert_eq!(report["performed"].as_bool(), Some(true));
+    assert_eq!(report["status"].as_str(), Some("ok"));
+    assert_eq!(report["target_pid"].as_i64(), Some(i64::from(expected_pid)));
+    match expected_window_id {
+        Some(window_id) => assert_eq!(report["window_id"].as_str(), Some(window_id)),
+        None => assert!(report.get("window_id").is_none()),
+    }
+}
+
+fn assert_ax_scroll_report(report: &Value, expected_target_id: &str, expected_pages: u16) {
+    assert_eq!(report["kind"].as_str(), Some("ax-scroll"));
+    assert_eq!(report["backend"].as_str(), Some("macos-accessibility"));
+    assert_eq!(report["target_id"].as_str(), Some(expected_target_id));
+    assert_eq!(report["direction"].as_str(), Some("down"));
+    assert_eq!(report["pages"].as_u64(), Some(u64::from(expected_pages)));
+    assert_eq!(report["delivered_via"].as_str(), Some("ax-scrollbar-value"));
+    assert_eq!(report["performed"].as_bool(), Some(true));
+    assert_eq!(report["status"].as_str(), Some("ok"));
+}
+
 fn wait_for_textedit_window_id(
     binary: &Path,
     port: u16,
@@ -870,6 +927,7 @@ fn wait_for_textedit_value(
     target_id: &str,
     expected_text: &str,
 ) -> Value {
+    let mut last_get = None::<Value>;
     for _ in 0..20 {
         let response = run_control_command(
             binary,
@@ -880,6 +938,7 @@ fn wait_for_textedit_value(
             Duration::from_secs(30),
         );
         let get = successful_response_value(response, "@ax-get text value", binary);
+        last_get = Some(get.clone());
         let value_text = get["element"]["value"].as_str().unwrap_or_default();
         if value_text.contains(expected_text) {
             return get;
@@ -887,7 +946,143 @@ fn wait_for_textedit_value(
         thread::sleep(Duration::from_millis(250));
     }
 
-    panic!("Timed out waiting for TextEdit value to contain expected text: {expected_text}");
+    panic!(
+        "Timed out waiting for TextEdit value to contain expected text: {expected_text}\nlast @ax-get response:\n{}",
+        last_get
+            .as_ref()
+            .map(|value| json_excerpt(value, 4000))
+            .unwrap_or_else(|| "<no @ax-get response captured>".to_owned())
+    );
+}
+
+fn wait_for_textedit_value_exact(
+    binary: &Path,
+    port: u16,
+    target_id: &str,
+    expected_text: &str,
+) -> Value {
+    let mut last_get = None::<Value>;
+    for _ in 0..20 {
+        let response = run_control_command(
+            binary,
+            port,
+            &format!(
+                "@ax-get#304:{{target:{{id:\"{target_id}\"}},depth:2,max_elements:400,include_values:true}}\n"
+            ),
+            Duration::from_secs(30),
+        );
+        let get = successful_response_value(response, "@ax-get exact text value", binary);
+        last_get = Some(get.clone());
+        let value_text = get["element"]["value"].as_str().unwrap_or_default();
+        if value_text == expected_text {
+            return get;
+        }
+        thread::sleep(Duration::from_millis(250));
+    }
+
+    panic!(
+        "Timed out waiting for TextEdit value to equal expected text: {expected_text}\nlast @ax-get response:\n{}",
+        last_get
+            .as_ref()
+            .map(|value| json_excerpt(value, 4000))
+            .unwrap_or_else(|| "<no @ax-get response captured>".to_owned())
+    );
+}
+
+fn read_textedit_window_tree(binary: &Path, port: u16, window_id: &str, label: &str) -> Value {
+    let response = run_control_command(
+        binary,
+        port,
+        &format!(
+            "@ax-get#320:{{target:{{id:\"{window_id}\"}},depth:8,max_elements:3000,include_values:false}}\n"
+        ),
+        Duration::from_secs(30),
+    );
+    successful_response_value(response, label, binary)
+}
+
+fn find_first_textedit_editor_target(window_tree: &Value) -> Option<String> {
+    let window = window_tree.get("window")?;
+    descendants(window).into_iter().find_map(|element| {
+        matches!(
+            element["role"].as_str(),
+            Some("AXTextArea") | Some("AXTextField")
+        )
+        .then(|| element["id"].as_str().map(ToOwned::to_owned))
+        .flatten()
+    })
+}
+
+fn find_first_scrollbar_target_id(window_tree: &Value) -> Option<String> {
+    let window = window_tree.get("window")?;
+    descendants(window).into_iter().find_map(|element| {
+        (element["role"].as_str() == Some("AXScrollBar"))
+            .then(|| element["id"].as_str().map(ToOwned::to_owned))
+            .flatten()
+    })
+}
+
+fn read_ax_element(binary: &Path, port: u16, target_id: &str, label: &str) -> Value {
+    let response = run_control_command(
+        binary,
+        port,
+        &format!(
+            "@ax-get#321:{{target:{{id:\"{target_id}\"}},depth:1,max_elements:32,include_values:true}}\n"
+        ),
+        Duration::from_secs(15),
+    );
+    successful_response_value(response, label, binary)
+}
+
+fn read_scrollbar_state(binary: &Path, port: u16, scrollbar_target_id: &str) -> Value {
+    read_ax_element(binary, port, scrollbar_target_id, "@ax-get scrollbar value")
+}
+
+fn extract_scrollbar_position(element_get: &Value) -> Option<f64> {
+    element_get["element"]["children"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find_map(|child| {
+            if child["role"].as_str() != Some("AXValueIndicator") {
+                return None;
+            }
+            child["rect"]["y"].as_f64()
+        })
+        .or_else(|| extract_numeric_value(element_get))
+}
+
+fn extract_numeric_value(element_get: &Value) -> Option<f64> {
+    element_get["element"]["value"]
+        .as_str()
+        .and_then(|raw| raw.parse::<f64>().ok())
+}
+
+fn wait_for_scrollbar_value_change(
+    binary: &Path,
+    port: u16,
+    scrollbar_target_id: &str,
+    old_value: f64,
+) -> Value {
+    let mut last_tree = None::<Value>;
+    for _ in 0..20 {
+        let tree = read_scrollbar_state(binary, port, scrollbar_target_id);
+        last_tree = Some(tree.clone());
+        if let Some(new_value) = extract_scrollbar_position(&tree) {
+            if (new_value - old_value).abs() > 0.0001 {
+                return tree;
+            }
+        }
+        thread::sleep(Duration::from_millis(250));
+    }
+
+    panic!(
+        "Timed out waiting for AX scroll bar position/value to change from {old_value}\nlast @ax-get response:\n{}",
+        last_tree
+            .as_ref()
+            .map(|value| json_excerpt(value, 4000))
+            .unwrap_or_else(|| "<no @ax-get response captured>".to_owned())
+    );
 }
 
 fn assert_textedit_is_frontmost() {
@@ -1111,6 +1306,194 @@ fn daemon_control_lane_should_focus_hidden_textedit_and_type_without_mouse() {
     eprintln!(
         "live AX focus/type E2E observed TextEdit target: window_id={}, target_id={}, pid={}",
         restored_window_id, editor_target_id, target_pid
+    );
+
+    daemon.stop_terminal();
+}
+
+#[test]
+#[ignore = "requires a visible macOS desktop and Accessibility permission for the actual daemon host"]
+fn daemon_control_lane_should_deliver_pid_and_window_targeted_hotkeys_to_real_textedit() {
+    if !live_ax_e2e_enabled() {
+        eprintln!(
+            "skipping live targeted-hotkey E2E; set {LIVE_AX_E2E_ENV}=1 to run against the real macOS desktop"
+        );
+        return;
+    }
+
+    let daemon = start_live_ax_daemon("textedit-targeted-key");
+    let binary = daemon.binary.as_path();
+    let port = daemon.port;
+    let fixture = TextEditDocumentFixture::create("targeted-key");
+
+    let window_id =
+        wait_for_textedit_window_id(binary, port, &fixture.title_needle, "@window-find key");
+    let (editor_target_id, restored_window_id, target_pid) =
+        wait_for_textedit_editor_match(binary, port, &window_id, "@ax-get key editor");
+    assert_eq!(restored_window_id, window_id);
+
+    let focus_response = run_control_command(
+        binary,
+        port,
+        &format!("@ax-focus#329:{{target:{{id:\"{editor_target_id}\"}}}}\n"),
+        Duration::from_secs(15),
+    );
+    let focus_report = successful_response_value(focus_response, "@ax-focus key target", binary);
+    assert_eq!(focus_report["kind"].as_str(), Some("ax-focus"));
+    assert_eq!(
+        focus_report["target_id"].as_str(),
+        Some(editor_target_id.as_str())
+    );
+    assert_eq!(focus_report["performed"].as_bool(), Some(true));
+
+    let seed_text_response = run_control_command(
+        binary,
+        port,
+        &format!(
+            "@type-text#328:{{target:{{id:\"{editor_target_id}\"}},text:\"AB\",mode:\"targeted-keyboard\"}}\n"
+        ),
+        Duration::from_secs(15),
+    );
+    let seed_text_report =
+        successful_response_value(seed_text_response, "@type-text hotkey seed", binary);
+    assert_type_text_targeted_keyboard_report(&seed_text_report, &editor_target_id);
+
+    let seeded_get = wait_for_textedit_value_exact(binary, port, &editor_target_id, "AB");
+    assert!(
+        seeded_get["element"]["value"].as_str() == Some("AB"),
+        "TextEdit should contain hotkey seed text before backspace delivery: {}",
+        json_excerpt(&seeded_get, 4000)
+    );
+
+    let pid_key_response = run_control_command(
+        binary,
+        port,
+        &format!("@key#330:{{key:\"Backspace\",delivery:\"pid-targeted\",pid:{target_pid}}}\n"),
+        Duration::from_secs(15),
+    );
+    let pid_key_report = successful_response_value(pid_key_response, "@key pid-targeted", binary);
+    assert_key_delivery_report(
+        &pid_key_report,
+        "pid-targeted",
+        "Backspace",
+        target_pid,
+        None,
+    );
+
+    let first_get = wait_for_textedit_value_exact(binary, port, &editor_target_id, "A");
+    assert!(
+        first_get["element"]["value"].as_str() == Some("A"),
+        "TextEdit should reflect pid-targeted backspace delivery: {}",
+        json_excerpt(&first_get, 4000)
+    );
+
+    let window_key_response = run_control_command(
+        binary,
+        port,
+        &format!(
+            "@key#331:{{key:\"Backspace\",delivery:\"window-targeted\",window_id:\"{window_id}\"}}\n"
+        ),
+        Duration::from_secs(15),
+    );
+    let window_key_report =
+        successful_response_value(window_key_response, "@key window-targeted", binary);
+    assert_key_delivery_report(
+        &window_key_report,
+        "window-targeted",
+        "Backspace",
+        target_pid,
+        Some(&window_id),
+    );
+
+    let second_get = wait_for_textedit_value_exact(binary, port, &editor_target_id, "");
+    assert!(
+        second_get["element"]["value"]
+            .as_str()
+            .is_some_and(str::is_empty),
+        "TextEdit value should become empty after pid/window targeted backspace delivery: {}",
+        json_excerpt(&second_get, 4000)
+    );
+
+    eprintln!(
+        "live targeted-hotkey E2E observed TextEdit target: window_id={}, target_id={}, pid={}",
+        window_id, editor_target_id, target_pid
+    );
+
+    daemon.stop_terminal();
+}
+
+#[test]
+#[ignore = "requires a visible macOS desktop and Accessibility permission for the actual daemon host"]
+fn daemon_control_lane_should_scroll_real_textedit_without_mouse() {
+    if !live_ax_e2e_enabled() {
+        eprintln!(
+            "skipping live AX scroll E2E; set {LIVE_AX_E2E_ENV}=1 to run against the real macOS desktop"
+        );
+        return;
+    }
+
+    let long_text = (0..400)
+        .map(|index| format!("scroll line {index:03}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let daemon = start_live_ax_daemon("textedit-scroll");
+    let binary = daemon.binary.as_path();
+    let port = daemon.port;
+    let fixture = TextEditDocumentFixture::create_with_contents("scroll", &long_text);
+    fixture.set_bounds(80, 80, 480, 260);
+
+    let window_id =
+        wait_for_textedit_window_id(binary, port, &fixture.title_needle, "@window-find scroll");
+    let window_tree = read_textedit_window_tree(binary, port, &window_id, "@ax-get scroll initial");
+    let editor_target_id = find_first_textedit_editor_target(&window_tree).unwrap_or_else(|| {
+        panic!(
+            "scroll E2E should find a TextEdit editor target in window tree: {}",
+            json_excerpt(&window_tree, 4000)
+        )
+    });
+    let scrollbar_target_id = find_first_scrollbar_target_id(&window_tree).unwrap_or_else(|| {
+        panic!(
+            "scroll E2E should find an AXScrollBar target before scrolling: {}",
+            json_excerpt(&window_tree, 4000)
+        )
+    });
+    let initial_scrollbar_get = read_scrollbar_state(binary, port, &scrollbar_target_id);
+    let initial_scrollbar =
+        extract_scrollbar_position(&initial_scrollbar_get).unwrap_or_else(|| {
+            panic!(
+                "scroll E2E should read AXScrollBar position/value before scrolling: {}",
+                json_excerpt(&initial_scrollbar_get, 4000)
+            )
+        });
+
+    let scroll_response = run_control_command(
+        binary,
+        port,
+        &format!(
+            "@ax-scroll#340:{{target:{{id:\"{editor_target_id}\"}},direction:\"down\",pages:2}}\n"
+        ),
+        Duration::from_secs(15),
+    );
+    let scroll_report = successful_response_value(scroll_response, "@ax-scroll", binary);
+    assert_ax_scroll_report(&scroll_report, &editor_target_id, 2);
+
+    let scrolled_tree =
+        wait_for_scrollbar_value_change(binary, port, &scrollbar_target_id, initial_scrollbar);
+    let scrolled_value = extract_scrollbar_position(&scrolled_tree).unwrap_or_else(|| {
+        panic!(
+            "scroll E2E should still expose AXScrollBar position/value after scrolling: {}",
+            json_excerpt(&scrolled_tree, 4000)
+        )
+    });
+    assert!(
+        scrolled_value > initial_scrollbar,
+        "AX scroll should increase TextEdit scroll bar value: before={initial_scrollbar}, after={scrolled_value}\n{}",
+        json_excerpt(&scrolled_tree, 4000)
+    );
+
+    eprintln!(
+        "live AX scroll E2E observed TextEdit scroll bar change: window_id={}, target_id={}, before={}, after={}",
+        window_id, editor_target_id, initial_scrollbar, scrolled_value
     );
 
     daemon.stop_terminal();
