@@ -1,0 +1,24 @@
+{
+  "reason": "missing default ralph.yml and no explicit prompt; selected v1 rule default",
+  "resource_root": "/Users/cuiluming/.ralph/resources",
+  "resource_root_source": "HOME/.ralph",
+  "sync": {
+    "created": 0,
+    "preserved": 6,
+    "metadata_only": 0
+  },
+  "selected_resources": [
+    "workflow:feature-minimal",
+    "prompt:bootstrap-default-task"
+  ],
+  "merge_order": [
+    "workflow:feature-minimal",
+    "resolved_prompt_source",
+    "cli_overrides"
+  ],
+  "prompt_source": {
+    "kind": "prompt_template",
+    "resource_id": "prompt:bootstrap-default-task"
+  },
+  "startup_only": true
+}

@@ -807,3 +807,174 @@
 
 ### 状态
 **准备提交** - 下一步 review diff,stage AX E2E 相关文件并创建 local commit.
+
+## [2026-05-15 22:59:40] [Session ID: 019e1b72-d659-7a60-91b4-66cea3fc6ce0] [Deep Interview]: 被遮挡窗口控制需求澄清
+
+### 当前目标
+- 通过 deep-interview 澄清 `rdog control` 对截图不可见/被遮挡窗口的控制语义.
+- 先问清楚“不可见窗口”的范围和第一版动作边界,不直接实现.
+- 已创建上下文快照 `.omx/context/rdog-occluded-window-control-20260515T145940Z.md`.
+
+### 当前代码事实
+- 已有 `@ax-tree`, `@ax-find`, `@ax-get`, `@ax-press`.
+- 当前 AX 规格强调 screenshot 是视觉 observation,AX 是 UI structure/action layer.
+- 当前 macOS 后端是否保证覆盖完全遮挡/最小化/其他 Space 窗口,还没有明确产品契约.
+
+### 状态
+**Round 1 准备提问** - 先锁定第一版“截图看不到”的范围.
+
+## [2026-05-16 11:20:37] [Session ID: 019e1b72-d659-7a60-91b4-66cea3fc6ce0] [Deep Interview]: Round 1 回答与 Round 2 提问准备
+
+### 用户已确认
+- 关闭窗口这条线采用更通用的目标: 按进程/标题找到任意 AX window,能关闭就关闭,不以截图可见性分类为准.
+- 关闭窗口不一定要看截图,也不一定只靠 AXPress,可以根据语义考虑更直接的 close/terminate/kill 类手段.
+- 交互点击和按键这条线需要支持被遮挡,最小化,隐藏 app,跨 Space,全屏 Space,其他桌面的窗口.
+- 对交互窗口的处理语义是: 被遮挡则前置,最小化和隐藏则恢复/显示,跨 Space 或全屏 Space 则需要进入可交互上下文.
+
+### 当前拆分
+- close lane: 按进程/标题/窗口定位后关闭,不依赖截图可见性.
+- interactive lane: 对需要点击/按键/AX 操作的窗口,先让它变成可交互窗口,再执行动作.
+
+### 下一轮问题
+- Round 2 需要确认 interactive lane 的默认行为: 自动改变桌面状态,显式 activate 后再操作,还是两者都支持但默认显式.
+
+### 状态
+**Round 2 准备提问** - 先锁定默认副作用边界,再决定协议字段和命令拆分.
+
+## [2026-05-16 11:42:46] [Session ID: 019e1b72-d659-7a60-91b4-66cea3fc6ce0] [Deep Interview]: Round 2 回答与 Round 3 提问准备
+
+### 用户已确认
+- interactive lane 采用 Option C: 两者都支持,但默认要求显式 activate;只有命令里写 `activate:true` 时,才自动改变桌面状态.
+- 用户更希望这些被表达成 rdog 的能力和 agent skill 里的经验方法,而不是 rdog 在所有情况下自动替 agent 做策略决策.
+- 第一目标是让 agent 能知晓窗口当前状态,例如被遮挡,最小化,隐藏 app,跨 Space,全屏 Space,其他桌面.
+- 第二目标是让 agent 能了解如何处理这些状态,例如何时 activate/unhide/unminimize/前置/切换 Space,何时改用 close/terminate/kill.
+
+### 当前产品边界
+- rdog 应提供可观察状态和可组合动作,并让命令返回足够清楚的可执行建议.
+- skill 应写清楚经验方法: 先 inspect/find/get,判断窗口状态,再选择 activate 或直接执行 AX/window 动作.
+- 自动改变桌面状态必须是显式 opt-in,不能成为普通 `@click` / `@key` 的静默默认行为.
+
+### 下一轮问题
+- Round 3 需要确认 rdog 输出给 agent 的窗口状态字段和建议字段应该长什么样,这样 agent 才能“知晓情况并自行决策”.
+
+### 状态
+**Round 3 准备提问** - 先锁定 agent 可读的状态模型,再进入命令能力清单.
+
+## [2026-05-16 11:45:42] [Session ID: 019e1b72-d659-7a60-91b4-66cea3fc6ce0] [Deep Interview]: Round 3 回答与 Round 4 提问准备
+
+### 用户已确认
+- rdog 输出应采用 Option C: 返回事实字段 + 明确 recipe.
+- recipe 只告诉 agent 如何把目标变成可交互或如何关闭,默认不自动执行.
+- agent 可以按 recipe 自行决定是否执行 activate/unhide/unminimize/raise/switch-space/close/terminate/kill.
+
+### 当前输出契约倾向
+- `state` 放事实: 是否最小化,app 是否隐藏,是否当前 Space,是否全屏 Space,是否可 raise,是否可 close.
+- `recipes` 放可执行步骤: 例如 `to_interact`, `to_close_gracefully`, `to_force_close`.
+- recipe 需要能被 skill 解释,也最好能被后续命令直接消费,避免只成为自然语言提示.
+
+### 下一轮问题
+- Round 4 需要确认关闭语义和交互语义是否应走同一套 `@window-*` 能力,以及 kill/terminate/AXClose 这类动作的安全等级.
+
+### 状态
+**Round 4 准备提问** - 先锁定命令能力清单和破坏性动作边界.
+
+## [2026-05-16 12:32:01] [Session ID: 019e1b72-d659-7a60-91b4-66cea3fc6ce0] [Deep Interview]: Round 4 回答与 Round 5 提问准备
+
+### 用户已确认
+- `@window-close` 采用分级关闭策略.
+- 默认只做温和关闭,例如 AXClose / Cmd-W / close window 类动作.
+- 只有显式 `strategy:"terminate"` 或 `strategy:"kill"` 时,才允许结束进程.
+
+### 当前安全边界
+- “关闭窗口”默认不能静默升级成“杀进程”.
+- terminate/kill 属于显式高风险策略,必须由 agent 在命令参数中写清楚.
+- recipe 可以列出升级路径,但执行命令仍要显式 strategy.
+
+### 下一轮问题
+- Round 5 需要确认 activation recipe 的实际执行粒度: 是一个 `@window-activate` 自动完成全部步骤,还是拆成 `unhide` / `unminimize` / `raise` / `switch-space` 等单步能力.
+
+### 状态
+**Round 5 准备提问** - 先锁定激活/恢复命令的组合边界.
+
+## [2026-05-16 12:36:18] [Session ID: 019e1b72-d659-7a60-91b4-66cea3fc6ce0] [Deep Interview]: Round 5 回答与 Round 6 提问准备
+
+### 用户已确认
+- activation recipe 采用 Option C: 高层入口和单步命令都支持.
+- 默认推荐 agent 用 `@window-activate` 执行完整 recipe.
+- 调试或细粒度控制时,agent 可以使用单步命令,例如 unhide app,unminimize window,raise window,switch Space.
+
+### 当前命令边界
+- `@window-activate` 是常用高层入口,负责把窗口恢复到可交互状态,失败时返回具体失败步骤.
+- 单步命令用于权限诊断,平台行为差异,或 agent 需要局部处理时.
+- 这仍然不改变普通 `@click` / `@key` 默认语义;自动激活必须显式 opt-in 或先执行 activate 命令.
+
+### 下一轮问题
+- Round 6 需要确认多个匹配窗口时的歧义处理,避免按标题或进程名误操作同名窗口.
+
+### 状态
+**Round 6 准备提问** - 先锁定目标定位歧义策略.
+
+## [2026-05-16 13:08:21] [Session ID: 019e1b72-d659-7a60-91b4-66cea3fc6ce0] [Deep Interview]: Round 6 回答与 Round 7 提问准备
+
+### 用户已确认
+- 目标定位采用 Option C.
+- `@window-find` 可以宽松返回候选和 recipe.
+- `@window-close` / `@window-activate` 这类执行命令默认必须使用稳定 `window_id`.
+- 如果执行命令不用稳定 id,必须显式写 `allow_ambiguous:true` 和 `select` 策略,才允许从多个候选里选择.
+
+### 当前安全边界
+- 查询宽松,执行严格.
+- 多个同名窗口时,默认返回 `ambiguous` 和候选列表,不直接操作.
+- agent 的推荐流程是: find -> inspect candidates -> choose stable window_id -> activate/close/interact.
+
+### 下一轮问题
+- Round 7 需要确认第一版是否只做 macOS AX/window backend,其他平台先返回 unsupported/limited,还是从一开始设计跨平台抽象.
+
+### 状态
+**Round 7 准备提问** - 先锁定第一版平台范围和验收方式.
+
+## [2026-05-16 13:09:35] [Session ID: 019e1b72-d659-7a60-91b4-66cea3fc6ce0] [Deep Interview]: Round 7 回答与 Round 8 提问准备
+
+### 用户已确认
+- 第一版采用跨平台协议先行.
+- 先定义统一 `@window-*` 协议和 schema.
+- macOS 做完整实现.
+- Windows/Linux 先保留 stub,明确返回 `unsupported` 或 `limited`.
+
+### 当前平台边界
+- 协议和 skill 不能写成 macOS 私有概念,但 macOS 可以是首个完整 backend.
+- 非 macOS 不能假装可用;要在响应中明确平台能力缺口.
+- 后续 Windows/Linux 可以按同一协议补 backend,无需再改 agent-facing 命令面.
+
+### 下一轮问题
+- Round 8 需要确认第一版验收标准: 协议/schema/spec/skill 到位即可,还是必须带 macOS live E2E.
+
+### 状态
+**Round 8 准备提问** - 先锁定 Phase 1 完成标准.
+
+## [2026-05-16 14:15:16] [Session ID: 019e1b72-d659-7a60-91b4-66cea3fc6ce0] [Deep Interview]: Round 8 回答与访谈收口
+
+### 用户已确认
+- Phase 1 采用“可真实使用”标准.
+- 除协议骨架和 macOS `@window-find` / `@window-activate` / `@window-close` 最小实现外,还必须有 macOS live ignored E2E.
+- live E2E 要证明能 find 被遮挡,最小化,隐藏窗口,并能 activate 后再交互或 close.
+
+### 已生成收口文件
+- 访谈摘要: `.omx/interviews/rdog-occluded-window-control-20260516T061516Z.md`.
+- 执行规格: `.omx/specs/deep-interview-rdog-occluded-window-control.md`.
+
+### 当前状态
+**Deep Interview 已收口** - 最终歧义度 14%,低于 20% 阈值;下一步建议执行 `$ralplan .omx/specs/deep-interview-rdog-occluded-window-control.md`.
+
+## [2026-05-16 14:34:45] [Session ID: 019e1b72-d659-7a60-91b4-66cea3fc6ce0] [索引]: 启用 window plan 支线上下文
+
+### 原因
+- 当前 `task_plan__ax_plan.md` 已接近 1000 行.
+- `@window-*` ralplan 是 AX 主线派生出的新规划支线,继续写在 AX 支线里容易触发续档并污染历史.
+
+### 新支线上下文
+- 后续本轮 `$ralplan .omx/specs/deep-interview-rdog-occluded-window-control.md` 记录写入 `task_plan__window_plan.md`.
+- 只在确有实质内容时按需创建其他同后缀文件.
+
+### 状态
+**已转入 `__window_plan` 支线** - AX 支线只保留索引.

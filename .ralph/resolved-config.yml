@@ -1,0 +1,149 @@
+event_loop:
+  prompt: |-
+    No ralph.yml or PROMPT.md was found in this workspace.
+
+    Act as Ralph's startup bootstrap coordinator:
+    1. Inspect the current workspace.
+    2. Summarize what can be safely inferred.
+    3. If there is no concrete task to execute, ask the user for the next task.
+    4. Emit LOOP_COMPLETE only after producing a useful startup summary or clear next-step request.
+  ralph_prompt: null
+  prompt_file: ''
+  completion_promise: LOOP_COMPLETE
+  max_iterations: 100
+  max_runtime_seconds: 14400
+  max_cost_usd: null
+  max_consecutive_failures: 5
+  starting_hat: null
+  starting_event: null
+  complete_publishes: null
+cli:
+  backend: claude
+  command: null
+  prompt_mode: arg
+  default_mode: interactive
+  idle_timeout_secs: 30
+  args: []
+  prompt_flag: null
+core:
+  scratchpad: .agent/scratchpad.md
+  specs_dir: ./specs/
+  guardrails:
+  - Fresh context each iteration - scratchpad is memory
+  - Don't assume 'not implemented' - search first
+  - Backpressure is law - tests/typecheck/lint must pass
+  all_hat_prompt:
+    mode: compiled
+hats:
+  builder:
+    name: Builder
+    description: Implements code changes. One task, one commit.
+    triggers:
+    - build.task
+    publishes:
+    - build.done
+    - build.blocked
+    instructions: ''
+    backend: null
+    job_timeout_secs: null
+    default_publishes: build.done
+    max_activations: null
+    instances: 1
+    capabilities: []
+    workspace:
+      strategy: shared
+      hooks:
+        on_acquire: null
+        on_release: null
+  reviewer:
+    name: Reviewer
+    description: Reviews implementation for quality. Does NOT modify code.
+    triggers:
+    - review.request
+    publishes:
+    - review.approved
+    - review.changes_requested
+    instructions: ''
+    backend: null
+    job_timeout_secs: null
+    default_publishes: review.approved
+    max_activations: null
+    instances: 1
+    capabilities: []
+    workspace:
+      strategy: shared
+      hooks:
+        on_acquire: null
+        on_release: null
+events: {}
+parallel:
+  enabled: true
+  autoscale:
+    max_running_jobs: 4
+    dynamic_idle_ttl_secs: 30
+  topic_contracts: {}
+  gate:
+    default_timeout_secs: 60
+  workspace:
+    worktree_base_dir: .ralph/worktrees
+    worktree_backend: worktree
+  permissions:
+    worktree: allow
+    hooks: allow
+agent: null
+agent_priority: []
+prompt_file: null
+completion_promise: null
+max_iterations: null
+max_runtime: null
+max_cost: null
+verbose: false
+archive_prompts: false
+enable_metrics: false
+max_tokens: null
+retry_delay: null
+adapters:
+  claude:
+    timeout: 3600
+    output_stale_timeout_secs: 1800
+    context_window_tokens: null
+    enabled: true
+    tool_permissions: null
+  gemini:
+    timeout: 3600
+    output_stale_timeout_secs: 1800
+    context_window_tokens: null
+    enabled: true
+    tool_permissions: null
+  kiro:
+    timeout: 3600
+    output_stale_timeout_secs: 1800
+    context_window_tokens: null
+    enabled: true
+    tool_permissions: null
+  codex:
+    timeout: 3600
+    output_stale_timeout_secs: 1800
+    context_window_tokens: null
+    enabled: true
+    tool_permissions: null
+  amp:
+    timeout: 3600
+    output_stale_timeout_secs: 1800
+    context_window_tokens: null
+    enabled: true
+    tool_permissions: null
+_suppress_warnings: false
+tui:
+  prefix_key: ctrl-a
+  max_buffer_lines: 10000
+memories:
+  enabled: true
+  inject: auto
+  budget: 0
+  filter:
+    types: []
+    tags: []
+    recent: 0
+tasks:
+  enabled: true

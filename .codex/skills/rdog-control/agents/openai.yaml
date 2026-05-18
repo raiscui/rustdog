@@ -1,0 +1,4 @@
+interface:
+  display_name: "Rdog Control"
+  short_description: "Control LAN hosts and devices with rdog"
+  default_prompt: "Use $rdog-control to control a LAN host, device, or microcontroller with rdog control and follow the repo's line-control, PTY, and Zenoh target-name rules."

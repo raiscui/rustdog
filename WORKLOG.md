@@ -443,3 +443,50 @@ Buttons:
 ### 总结感悟
 - 计划层必须把 `os-logical` 坐标契约作为硬边界,否则后续实现很容易在 backend 里引入第二套坐标解释。
 - `@mouse-button mode:"press"` 是真实状态能力,不能为了省心偷偷 release;只有 `@drag` 这类组合动作内部失败恢复才应该尝试 release。
+
+## [2026-05-18 10:48:30] [Session ID: 019e38be-b9d9-76f0-aabc-fad94a2bcf12] 任务名称: 将 rdog-control skill 迁入项目目录
+
+### 任务内容
+- 把全局 `/Users/cuiluming/.codex/skills/rdog-control` 复制到仓库内 `.codex/skills/rdog-control`。
+- 将 `AGENTS.md` 的长期索引改成项目内相对路径,让 skill 成为仓库长期维护资产。
+- 排除 `.vscode` 这类本机编辑器噪音,只保留实质 skill 内容。
+
+### 完成过程
+- 先读取 `EPIPHANY_LOG.md`、`WORKLOG.md`、`LATER_PLANS.md`、`task_plan.md`,确认当前工作上下文。
+- 读取全局 `rdog-control` skill 本体和 references,确认可直接沿用的内容。
+- 用 `rsync -a --exclude='.vscode'` 复制 skill 到仓库内。
+- 在 `AGENTS.md` 中新增项目内 skill 索引,并移除旧的用户级绝对路径索引。
+- 追加 `task_plan.md`、`notes.md`、`WORKLOG.md` 的本轮记录。
+
+### 验证
+- `python3 ~/.codex/skills/.system/skill-creator/scripts/quick_validate.py .codex/skills/rdog-control`: `Skill is valid!`
+- `diff -ru --exclude='.vscode' /Users/cuiluming/.codex/skills/rdog-control .codex/skills/rdog-control`: 无差异。
+- `git diff --check`: 通过。
+
+### 总结感悟
+- 项目内 skill 最好和 AGENTS 索引一起落地,不然只是复制文件,不是建立长期入口。
+- 全局 skill 以后仍可作为来源,但仓库内的 `.codex/skills/rdog-control` 应该成为主维护面。
+
+## [2026-05-18 10:57:20] [Session ID: 019e38be-b9d9-76f0-aabc-fad94a2bcf12] 任务名称: 将全局 rdog-control 改为项目内连接目录
+
+### 任务内容
+- 将 `/Users/cuiluming/.codex/skills/rdog-control` 从普通目录改成指向项目内 `.codex/skills/rdog-control` 的符号链接。
+- 让全局 skill 入口和项目内 skill 入口共享同一份内容,避免后续双副本漂移。
+
+### 完成过程
+- 确认全局路径原本是普通目录。
+- 确认项目内 `.codex/skills/rdog-control` 已存在且结构有效。
+- 将旧全局目录移到 `/tmp/rdog-control-global-backup-20260518-104751`。
+- 创建符号链接:
+  - `/Users/cuiluming/.codex/skills/rdog-control -> /Users/cuiluming/local_doc/l_dev/my/rust/rustdog/.codex/skills/rdog-control`
+
+### 验证
+- `ls -ld /Users/cuiluming/.codex/skills/rdog-control`: 显示为符号链接。
+- `readlink /Users/cuiluming/.codex/skills/rdog-control`: 指向项目内 skill 目录。
+- `python3 ~/.codex/skills/.system/skill-creator/scripts/quick_validate.py /Users/cuiluming/.codex/skills/rdog-control`: `Skill is valid!`
+- `python3 ~/.codex/skills/.system/skill-creator/scripts/quick_validate.py .codex/skills/rdog-control`: `Skill is valid!`
+- `git diff --check`: 通过。
+
+### 总结感悟
+- 现在项目内 `.codex/skills/rdog-control` 是单一维护面。
+- 全局 skill 入口只负责让 Codex skill discovery 继续发现它。

@@ -612,3 +612,56 @@
 - Option B 只做 `@click` / `@wheel` 被拒绝,因为不满足用户明确要求的 move 和 button press/release。
 - `@drag` 是最高风险组合命令,实现时必须覆盖 press 后失败时尝试 release 的动态测试。
 - 当前计划文件本身没有 Mermaid 块;源规格中的两个 Mermaid 块已用 `beautiful-mermaid-rs --ascii` 验证通过。
+
+## [2026-05-18 10:47:20] [Session ID: 019e38be-b9d9-76f0-aabc-fad94a2bcf12] 笔记: rdog-control skill 项目内迁移
+
+## 来源
+
+### 来源1: 全局 skill 目录
+
+- 路径: `/Users/cuiluming/.codex/skills/rdog-control`
+- 要点:
+  - 全局目录包含 `SKILL.md`、`references/`、`agents/openai.yaml` 和 `.vscode/`。
+  - 本轮只把 skill 实质内容复制进仓库,不复制 `.vscode` 这类本机编辑器配置。
+
+### 来源2: 项目长期索引
+
+- 路径: `AGENTS.md`
+- 要点:
+  - 原索引里存在用户级绝对路径 `/Users/cuiluming/.codex/skills/rdog-control/SKILL.md`。
+  - 本轮改为项目内相对路径 `.codex/skills/rdog-control/SKILL.md`,避免后续项目维护和全局 skill 维护分裂。
+
+## 综合发现
+
+### 迁移结论
+
+- 项目内维护落点确定为 `.codex/skills/rdog-control`。
+- 这个位置和仓库现有知识索引中 `.codex/skills/...` 的表达一致。
+- 迁移后通过 `quick_validate.py` 验证 skill 结构有效。
+- 通过 `diff -ru --exclude='.vscode'` 证明项目内 copy 和全局来源在实质内容上没有差异。
+
+## [2026-05-18 10:57:20] [Session ID: 019e38be-b9d9-76f0-aabc-fad94a2bcf12] 笔记: 全局 skill 目录改为连接目录
+
+## 来源
+
+### 来源1: 文件系统替换结果
+
+- 路径: `/Users/cuiluming/.codex/skills/rdog-control`
+- 要点:
+  - 该路径已从普通目录替换为符号链接。
+  - 链接目标是仓库内 `.codex/skills/rdog-control`。
+  - 这让全局入口和项目内入口共享同一份 skill 内容。
+
+### 来源2: 验证命令
+
+- 命令: `ls -ld /Users/cuiluming/.codex/skills/rdog-control && readlink ... && realpath ...`
+- 命令: `python3 ~/.codex/skills/.system/skill-creator/scripts/quick_validate.py /Users/cuiluming/.codex/skills/rdog-control`
+- 命令: `python3 ~/.codex/skills/.system/skill-creator/scripts/quick_validate.py .codex/skills/rdog-control`
+
+## 综合发现
+
+### 结论
+
+- 全局 skill 现在只是项目内 skill 的连接入口。
+- 后续维护只需要改仓库内 `.codex/skills/rdog-control`。
+- 旧全局目录已保留到 `/tmp/rdog-control-global-backup-20260518-104751` 作为回退点。

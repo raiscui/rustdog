@@ -1,0 +1,39 @@
+{
+  "generated_at": "2026-05-16T16:10:58.844653+00:00",
+  "instances": [
+    {
+      "instance_id": "builder#1",
+      "hat_id": "builder",
+      "state": "idle",
+      "is_dynamic": false
+    },
+    {
+      "instance_id": "ralph#1",
+      "hat_id": "ralph",
+      "state": "failed",
+      "is_dynamic": false,
+      "last_input": {
+        "ts": "2026-05-16T16:10:37.715812+00:00",
+        "topic": "human.message",
+        "preview": "balance\\\",\\\"type\\\":\\\"insufficient_balance\\\"}}\",\"session_id\":\"1352e756-8d1d-4d33-b314-4ac432374304\",\"total_cost_usd\":0,\"usage\":{\"input_tokens\":0,\"cache_creation_..."
+      }
+    },
+    {
+      "instance_id": "ralph#2",
+      "hat_id": "ralph",
+      "state": "failed",
+      "is_dynamic": false,
+      "last_input": {
+        "ts": "2026-05-16T16:10:39.315803+00:00",
+        "topic": "human.message",
+        "preview": "utput_tokens\":0,\"server_tool_use\":{\"web_search_requests\":0,\"web_fetch_requests\":0},\"service_tier\":\"standard\",\"cache_creation\":{\"ephemeral_1h_input_tokens\":0,\"ep..."
+      }
+    },
+    {
+      "instance_id": "reviewer#1",
+      "hat_id": "reviewer",
+      "state": "idle",
+      "is_dynamic": false
+    }
+  ]
+}

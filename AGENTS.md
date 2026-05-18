@@ -28,6 +28,11 @@ rustdog 首先被LLM agent 智能体使用，其次被人类使用。要以agent
   - 用途: 帮助后续改协议时避免把 `@exit`、显式协议请求和裸 shell 行再次混淆
   - 何时阅读: 做协议演进、回顾历史判断口径、沉淀经验时
 
+- `.codex/skills/rdog-control/SKILL.md`
+  - 主题: 项目内 `rdog control` 复用 skill,覆盖 Zenoh target-name、line-control、PTY、AX、鼠标和硬件桥接
+  - 用途: 给 Codex 和其他 code agent 的项目内稳定入口,让 `rdog control` 的使用约定和协议文档一起版本化
+  - 何时阅读: 需要改 `rdog control` 相关协议、示例、README、PTY 或 GUI 控制行为前
+
 - `.codex/skills/self-learning.zenoh-duplicate-name-local-guard/SKILL.md`
   - 主题: Zenoh 同机重复 `daemon_name` / `service_name` 只靠 liveliness 检查会漏掉启动竞争窗口
   - 用途: 固定“本地 PID/lock guard + 网络 liveliness 双层约束”的修复模式
@@ -62,11 +67,6 @@ rustdog 首先被LLM agent 智能体使用，其次被人类使用。要以agent
   - 主题: 2026-05-12 创建 `rdog-control` 全局 skill 后的 `WORKLOG.md` 续档说明
   - 用途: 说明旧 `WORKLOG.md` 超过 1000 行后的归档位置,以及本轮 skill 创建、验证和硬件/单片机表述边界沉淀范围
   - 何时阅读: 需要追溯 `rdog-control` skill 为什么创建、旧 WORKLOG 为什么被续档,或查找 2026-05-12 前默认工作记录时
-
-- `/Users/cuiluming/.codex/skills/rdog-control/SKILL.md`
-  - 主题: code agent 使用 `rdog daemon` / `rdog control` 控制局域网主机、硬件桥接机和单片机场景的全局 skill
-  - 用途: 提供 target-name / `--entry-point` / line-control / PTY / screenshot / savefile / Zenoh session channel 的可复用操作指南
-  - 何时阅读: 需要让 Codex 或其他 code agent 使用 `rdog control <target-name>` 控制主机、桌面、硬件桥接机或单片机场景之前
 
 - `specs/zenoh-control-plane-plan.md`
   - 主题: `rustdog` 的 canonical Zenoh router/serial control-plane 规划
