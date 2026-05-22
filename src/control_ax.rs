@@ -1021,6 +1021,10 @@ pub fn capture_default_ax_snapshot(request: &AxTreeRequest) -> io::Result<AxSnap
 }
 
 pub fn resolve_current_ax_target_rect(target: &AxTarget) -> io::Result<AxResolvedTargetRect> {
+    if let Some(target_id) = direct_ax_target_id(target)? {
+        return platform_resolve_current_target_rect(&target_id);
+    }
+
     let request = AxTreeRequest {
         depth: 8,
         max_elements: 5000,
@@ -1057,6 +1061,22 @@ pub fn resolve_current_ax_target_rect(target: &AxTarget) -> io::Result<AxResolve
         io::ErrorKind::InvalidInput,
         format!("AX target id 已失效或不存在: {target_id}"),
     ))
+}
+
+fn direct_ax_target_id(target: &AxTarget) -> io::Result<Option<String>> {
+    target.validate()?;
+
+    if let Some(id) = target.id.as_deref() {
+        return Ok(Some(id.to_owned()));
+    }
+
+    if let (Some(observation_id), Some(ref_id)) =
+        (target.observation_id.as_deref(), target.ref_id.as_deref())
+    {
+        return resolve_observation_ref(observation_id, ref_id).map(|entry| Some(entry.backend_id));
+    }
+
+    Ok(None)
 }
 
 pub fn perform_default_ax_press(request: &AxPressRequest) -> io::Result<AxActionReport> {
@@ -1838,6 +1858,19 @@ fn platform_snapshot(request: &AxTreeRequest) -> io::Result<AxSnapshot> {
     macos::snapshot(request)
 }
 
+#[cfg(target_os = "macos")]
+fn platform_resolve_current_target_rect(target_id: &str) -> io::Result<AxResolvedTargetRect> {
+    macos::resolve_current_target_rect(target_id)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn platform_resolve_current_target_rect(_target_id: &str) -> io::Result<AxResolvedTargetRect> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "AX target rect 当前只支持 macOS",
+    ))
+}
+
 #[cfg(not(target_os = "macos"))]
 fn platform_snapshot(_request: &AxTreeRequest) -> io::Result<AxSnapshot> {
     Err(io::Error::new(
@@ -2052,6 +2085,49 @@ mod tests {
                 .kind(),
             io::ErrorKind::InvalidInput
         );
+    }
+
+    #[test]
+    fn direct_ax_target_id_should_resolve_ids_and_observation_refs_without_snapshot() {
+        let direct = direct_ax_target_id(&AxTarget {
+            id: Some("pid:1/window:0/path:2".to_owned()),
+            ..AxTarget::default()
+        })
+        .expect("direct id should validate");
+        assert_eq!(direct.as_deref(), Some("pid:1/window:0/path:2"));
+
+        let header = record_observation_with_selectors(
+            "ax",
+            "@observe ax",
+            ObservationRoot {
+                schema: AX_SCHEMA.to_owned(),
+                platform: "macos".to_owned(),
+                coordinate_space: "os-logical".to_owned(),
+            },
+            vec![ObservationRefEntry {
+                ref_id: "@e1".to_owned(),
+                backend_id: "pid:7/window:0/path:3".to_owned(),
+                kind: "ax-element".to_owned(),
+            }],
+            Vec::new(),
+        )
+        .expect("observation should record");
+
+        let from_ref = direct_ax_target_id(&AxTarget {
+            ref_id: Some("@e1".to_owned()),
+            observation_id: Some(header.observation_id),
+            ..AxTarget::default()
+        })
+        .expect("observation ref should resolve to backend id");
+        assert_eq!(from_ref.as_deref(), Some("pid:7/window:0/path:3"));
+
+        let semantic = direct_ax_target_id(&AxTarget {
+            role: Some("AXButton".to_owned()),
+            name: Some("OK".to_owned()),
+            ..AxTarget::default()
+        })
+        .expect("semantic target should defer to snapshot resolver");
+        assert!(semantic.is_none());
     }
 
     #[test]

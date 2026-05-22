@@ -38,3 +38,35 @@
 - `@selector-refind` 的 `fresh_target` 不是动作成功,必须先执行 `verify_hint`,再显式发送 side-effect 命令。
 - mouse 是 fallback lane。ref fallback 成功要看 `target_resolution.source:"observation_ref"`; raw coordinate 成功要看 `target_resolution.source:"coordinate_fallback"`。
 - live smoke 的证据链应固定为 `@capabilities -> @observe -> ref target mouse fallback -> fresh verify`。
+
+## [2026-05-22 14:37:24] [Session ID: DECD1A1F-DE7A-4689-8762-F23D9FCF9708] 笔记: ref mouse live smoke 修复证据
+
+## 来源
+
+### 来源1: macOS live lane `mac.observe.lab`
+
+- 命令:
+  - `@capabilities#100`
+  - `@observe#101:{mode:"ax",include_ax:true,include_refs:true,include_selectors:true,ax_required:false,ax_mode:"interactive",limit:80}`
+  - `@mouse-move#102:{target:{ref:"@e18",observation_id:"obs-1779431694917-1"}}`
+  - `@observe#103:{mode:"ax",include_ax:true,include_refs:true,include_selectors:true,ax_required:false,ax_mode:"interactive",limit:10}`
+- 证据文件: `/tmp/rdog-observe-smoke-final-summary.json`
+- 要点:
+  - `screenshot`、`accessibility`、`window_control`、`mouse_input`、`zenoh_session_channel` 均为 `available`。
+  - `@observe` 返回 `kind:"observe"`、`schema:"rdog.observe.v1"`、`observation_id:"obs-1779431694917-1"`。
+  - 选中的 ref 是 `@e18`,名称为 `tab bar`,section 为 `accessibility`。
+  - `@mouse-move` 返回 `status:"ok"`,并带有 `target_resolution.source:"observation_ref"`。
+  - fresh verify observation 返回 `observation_id:"obs-1779431695476-2"`。
+
+## 综合发现
+
+### 现象
+
+- ref mouse 在修复前会表现为 `Zenoh session bridge subscriber 在收到结果前关闭`。
+- 同一 target 的 raw `@mouse-move {x,y,coordinate_space:"os-logical"}` 能成功。
+- 同一 observation ref 的 `@ax-get` 能在同一个 `rdog control` 进程里成功。
+
+### 结论
+
+- 已验证结论: 修复后,AX observation ref mouse target 可以在 3 秒 Zenoh session timeout 内完成 current rect 解析和 mouse move。
+- 修复点: AX ref current rect 不再为了一个 backend id 重建完整 AX snapshot,而是直接按 target id retain 当前 AX element/window 并读取 rect。

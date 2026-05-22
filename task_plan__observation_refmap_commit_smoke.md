@@ -145,3 +145,91 @@
 ### 当前状态
 
 **阶段B/C 继续** - 下一步 staging 执行记录 commit。
+
+## [2026-05-22 13:31:50] [Session ID: 0bb1198d-77aa-4dd1-bf4d-65b82e83c8ea] [记录类型]: live smoke 继续
+
+### 当前现场
+
+- 用户刚刚结束了开启的 `rdog daemon mac.lab`。
+- 之前启动的隔离 target `mac.observe.lab` 已通过 `@ping` 和 `@capabilities`。
+- 下一步继续用 `mac.observe.lab --entry-point tcp/192.168.50.169:17448` 跑 `@observe -> ref target -> mouse fallback -> verify`。
+
+### 当前状态
+
+**进入阶段D** - 执行真实 macOS GUI smoke。
+
+## [2026-05-22 13:39:16] [Session ID: DECD1A1F-DE7A-4689-8762-F23D9FCF9708] [记录类型]: 当前 Session 接续 live smoke
+
+### 当前观察
+
+- 用户已结束之前开启的 `rdog daemon mac.lab`,所以本轮不再假设 `mac.lab` 仍处于原始状态。
+- 计划文件显示阶段D仍未完成,阶段I的文档和本地提交已经完成。
+- 上一轮摘要显示临时隔离 target `mac.observe.lab` 曾通过 `@ping` / `@capabilities`,但需要在本 Session 重新验证是否仍可达。
+
+### 下一步行动
+
+- 先对 `mac.observe.lab --entry-point tcp/192.168.50.169:17448` 重新执行 `@ping` / `@capabilities`。
+- 如果临时 target 仍可达,继续跑 `@observe -> ref target -> mouse fallback -> verify`。
+- 如果 ref mouse 再次出现 session bridge closed,立即收集远端日志,只把它记录为已观察现象,不直接下根因结论。
+
+### 当前状态
+
+**阶段D 继续** - 重新确认 live target,然后补齐真实 GUI smoke 证据链。
+
+## [2026-05-22 14:20:16] [Session ID: DECD1A1F-DE7A-4689-8762-F23D9FCF9708] [记录类型]: ref mouse 失败后的修复计划
+
+### 已观察现象
+
+- `@capabilities` 显示 `screenshot`、`accessibility`、`window_control`、`mouse_input` 都是 `available`。
+- fresh `@observe mode:"ax"` 返回 `schema:"rdog.observe.v1"` 和有效 `observation_id` / refs。
+- 同一 `rdog control` 子进程里,`@ax-get target:{ref,observation_id}` 可以解析同一个 observation ref。
+- 同一 target 的 raw `@mouse-move {x,y,coordinate_space:"os-logical"}` 和 relative no-op mouse 都成功。
+- `@mouse-move target:{ref,observation_id}` 仍在 3 秒默认 request timeout 后表现为 `Zenoh session bridge subscriber 在收到结果前关闭`。
+
+### 当前假设
+
+- 主假设: AX ref mouse target 的 current rect 解析走了全量 `capture_default_ax_snapshot(depth:8,max_elements:5000)`,在真实桌面 AX 树较大时超过 Zenoh client 默认 3 秒 timeout。
+- 最强备选解释: ref resolver 本身在某些 AX 路径上阻塞或返回错误,但 session bridge 没有按结构化 error 送回。
+- 推翻主假设的证据: 将 AX ref current rect 改成直接 retain backend id 并读取 rect 后,live `@mouse-move target:{ref,...}` 仍然超时或 bridge closed。
+
+### 下一步行动
+
+- 先修改 `src/control_ax.rs` / `src/control_ax/macos.rs`,新增按 `AxTarget` 直接解析当前 rect 的平台路径。
+- 保留非 macOS 的 snapshot fallback,避免影响其他平台。
+- 补单元测试约束 `control_mouse::target_tests` 至少覆盖 ref target 的 target_resolution 形态。
+- 重新编译和运行 focused tests 后,重启临时 `mac.observe.lab` daemon,再做 live GUI smoke。
+
+### 当前状态
+
+**阶段D 修复中** - 先修 ref mouse live timeout 候选问题,再补 smoke 证据链。
+
+## [2026-05-22 14:37:24] [Session ID: DECD1A1F-DE7A-4689-8762-F23D9FCF9708] [记录类型]: ref mouse 修复与 live smoke 通过
+
+### 已完成
+
+- [x] 修复 AX observation ref mouse target 的 current rect 解析路径。
+- [x] focused unit tests 通过。
+- [x] macOS live lane smoke 通过。
+
+### 验证证据
+
+- `@capabilities#100`: `screenshot`、`accessibility`、`window_control`、`mouse_input`、`zenoh_session_channel` 均为 `available`。
+- `@observe#101`: 返回 `kind:"observe"`、`schema:"rdog.observe.v1"`、`observation_id:"obs-1779431694917-1"`。
+- `@mouse-move#102`: 返回 `status:"ok"`,并且 `target_resolution.source:"observation_ref"`。
+- `@observe#103`: fresh verify 返回 `observation_id:"obs-1779431695476-2"`。
+- 证据摘要: `/tmp/rdog-observe-smoke-final-summary.json`。
+
+### 当前状态
+
+**阶段D 已通过,进入阶段E** - 接下来运行完整回归验证,然后整理本轮修复和 smoke 证据 commit。
+
+## [2026-05-22 14:53:36] [Session ID: DECD1A1F-DE7A-4689-8762-F23D9FCF9708] [记录类型]: 阶段E 完成
+
+### 已完成
+
+- [x] 阶段D: macOS live GUI smoke 已通过。
+- [x] 阶段E: 已记录 notes、ERRORFIX、WORKLOG,并准备创建最后一个本地 commit。
+
+### 当前状态
+
+**阶段E 提交中** - staging 指定文件,运行 cached diff check,然后提交 ref mouse 修复和 smoke 证据。

@@ -693,6 +693,27 @@ fn resolve_live_target_id(target: &AxTarget) -> io::Result<String> {
     }
 }
 
+pub(super) fn resolve_current_target_rect(target_id: &str) -> io::Result<AxResolvedTargetRect> {
+    ensure_trusted()?;
+
+    let parsed = parse_target_id(target_id)?;
+    let target_ref = retain_target_element(target_id)?;
+    let rect = copy_ax_rect(target_ref.as_ptr())?;
+    let window_id = format!("pid:{}/window:{}", parsed.pid, parsed.window_index);
+    let target_type = if parsed.path.is_empty() {
+        "window"
+    } else {
+        "element"
+    };
+
+    Ok(AxResolvedTargetRect {
+        target_id: target_id.to_owned(),
+        target_type,
+        window_id: Some(window_id),
+        rect,
+    })
+}
+
 fn retain_target_element(target_id: &str) -> io::Result<CfOwned> {
     let parsed = parse_target_id(target_id)?;
     let app = unsafe { CfOwned::new(AXUIElementCreateApplication(parsed.pid)) }
