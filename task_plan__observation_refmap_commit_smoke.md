@@ -233,3 +233,21 @@
 ### 当前状态
 
 **阶段E 提交中** - staging 指定文件,运行 cached diff check,然后提交 ref mouse 修复和 smoke 证据。
+
+## [2026-05-22 15:01:33] [Session ID: DECD1A1F-DE7A-4689-8762-F23D9FCF9708] [记录类型]: Ralph stop hook fresh verification
+
+### 当前观察
+
+- Stop hook 提示 Ralph state 仍为 active 且 phase 为 `starting`。
+- 当前代码提交已经完成到 `98d57a6 Fix observation ref mouse live smoke`。
+- Goal mode 当前无 active goal。
+
+### 下一步行动
+
+- 执行提交后 fresh verification: `cargo fmt -- --check`、`git diff --check`、`cargo test --package rustdog --bin rdog --quiet`、`cargo test --package rustdog --test control_lanes --quiet`、`cargo test --package rustdog --test control_mode --quiet`、`cargo check --package rustdog --bin rdog --quiet`。
+- 验证通过后写入 Ralph completion audit,把 active 状态置为 false。
+- 检查 worktree 和临时 daemon 残留。
+
+### 当前状态
+
+**Ralph hook 收口中** - 补提交后 fresh evidence,再停止。
