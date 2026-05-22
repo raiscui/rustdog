@@ -28,3 +28,19 @@
 
 - 对已经有 backend id 的 observation ref,mouse fallback 不应该为了拿 rect 重建完整 AX snapshot。
 - live lane 里 `session bridge closed` 可能是 timeout 表象,需要先用同一 ref 的只读解析和 raw mouse path 拆开验证。
+
+## [2026-05-22 15:31:20] [Session ID: 019e38be-b9d9-76f0-aabc-fad94a2bcf12] 任务名称: observation refmap Ralph deslop 收尾
+
+### 任务内容
+- 按 ai-slop-cleaner 的 Ralph changed-files scope,对 ref mouse 修复和 completion audit 做只读 deslop 复核。
+- 覆盖文件范围: src/control_ax.rs,src/control_ax/macos.rs,以及 observation_refmap_commit_smoke 支线记录文件。
+
+### 完成过程
+- 扫描 fallback/legacy/temporary/workaround/timeout/snapshot/direct 等信号。
+- 将命中项归类为产品契约、显式平台失败、旧有 macOS API 兼容边界,或本轮已验证的 direct resolver。
+- 运行 focused regression: cargo test --package rustdog --bin rdog control_ax::tests::direct_ax_target_id_should_resolve_ids_and_observation_refs_without_snapshot -- --exact --quiet。
+- 运行 git diff --check,确认记录追加没有 whitespace 问题。
+
+### 总结感悟
+- 这次没有发现 masking fallback slop,无需代码改动。
+- 这里最重要的是保留 mouse fallback 作为产品契约的语义,不要为了清理词面而误删已经由 live smoke 锁住的行为边界。

@@ -70,3 +70,33 @@
 
 - 已验证结论: 修复后,AX observation ref mouse target 可以在 3 秒 Zenoh session timeout 内完成 current rect 解析和 mouse move。
 - 修复点: AX ref current rect 不再为了一个 backend id 重建完整 AX snapshot,而是直接按 target id retain 当前 AX element/window 并读取 rect。
+
+## [2026-05-22 15:29:16] [Session ID: 019e38be-b9d9-76f0-aabc-fad94a2bcf12] 笔记: deslop 归类
+
+## 来源
+
+### 来源1: ai-slop-cleaner scope scan
+
+- 范围: 98d57a6 与 7cbc2b6 涉及的文件。
+- 扫描文件:
+  - src/control_ax.rs
+  - src/control_ax/macos.rs
+  - task_plan__observation_refmap_commit_smoke.md
+  - notes__observation_refmap_commit_smoke.md
+  - WORKLOG__observation_refmap_commit_smoke.md
+  - ERRORFIX__observation_refmap_commit_smoke.md
+
+## 综合发现
+
+### Fallback-like 归类
+
+- 本次新增 direct id / observation ref rect resolver 不是 masking fallback。它把已有 backend id 直接交给平台层读取当前 rect,失败时仍返回结构化 io::Error,没有吞错或静默默认。
+- semantic AX locator 继续走 snapshot resolver,这是保留语义查询路径的兼容边界。它不是新增绕路,而是避免把 semantic selector 和已解析 ref 混在同一条快速路径里。
+- 非 macOS direct rect resolver 返回 Unsupported,属于显式失败语义,不是 silent skip。
+- 文档里的 mouse fallback 是产品契约用语,表示鼠标作为 AX/semantic action 之后的降级 lane。它通过 live smoke 证据锁住 target_resolution.source=observation_ref,不是未验证 fallback。
+- macOS 旧有 fallback_visible_windows / snapshot_optional_ax_error / clipboard restore skipped 等命中属于历史代码中的外部 API 兼容或权限/状态保留语义。本轮未新增这些路径,也没有发现需要在本次收尾里改动的 masking fallback。
+
+### 结论
+
+- 当前 deslop 复核不需要代码改动。
+- 本轮应只记录归类结果,避免为了清理术语而破坏已经验证的 observation-ref mouse fallback 合同。
