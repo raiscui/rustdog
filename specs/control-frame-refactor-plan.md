@@ -130,6 +130,37 @@ struct ControlExecutionOutcome {
 
 ## 分阶段实施计划
 
+## 2026-05-18 当前 baseline
+
+这份计划的前几项已经部分落地。
+后续继续实现时,不要再把这些内容当成待新增能力:
+
+- `src/control_frames.rs` 已定义 `ControlFrame`、`SaveFileFrame`、PTY lifecycle frames 和 `ControlExecutionOutcome`。
+- `src/control_core.rs` 已让显式控制请求与裸 shell 行统一返回 `ControlExecutionOutcome`。
+- `src/screenshot.rs` 已能返回 image `@savefile`、manifest `@savefile` 和最终 bundle `@response`。
+- `src/control_session.rs` 已新增薄 `ControlPeerSession`,当前职责只包括 frame ordering、dispatch report request-id correlation、ordered outbound dispatch 和 lifecycle gate。
+- TCP / WebSocket receiver 已通过 `ControlPeerSession` dispatch outcome。
+- Zenoh session channel 已通过 `ControlPeerSession` 发布 outcome frame,但 queryable 仍保留 bootstrap / legacy / compatibility 角色。
+- Zenoh queryable 对 `@screenshot`、PTY、mouse、AX、window、type-text、`@savefile` 这类 session-channel-only 富命令返回 code 78,不会再通过 legacy query reply 或旧 `__rdog_session__` query payload 发送 `@savefile` / lifecycle frame。
+
+`ControlPeerSession` 明确不拥有以下内容:
+
+- `@savefile` 落盘目录、文件名冲突策略或持久化 policy。
+- screenshot capture backend。
+- PTY process spawn / kill / detach / attach 的实际动作。
+- TCP / WebSocket / Zenoh 的 socket、publisher、subscriber 构造。
+- macOS / Windows / Linux 权限探测。
+
+PTY lifecycle 语义在这条线上保持如下单义规则:
+
+| 触发来源 | 对外 frame | 进程动作执行者 | session core 职责 |
+| --- | --- | --- | --- |
+| 远端进程自然退出 | `@pty-exit` | PTY runtime | 判断为 terminal complete |
+| `@pty-close` | `@pty-closed reason:"force_close"` | PTY runtime / adapter | 判断为 terminal complete |
+| control session 断开 | `@pty-closed reason:"control_disconnect"` | PTY runtime / adapter | 判断为 terminal complete |
+| transport 丢失 | `@pty-closed reason:"transport_lost"` | PTY runtime / adapter | 判断为 terminal complete |
+| explicit `@pty-detach` | `@pty-detached` | PTY runtime / adapter | 判断为 detach,不是 terminal |
+
 ## Phase 1: 先改 core 抽象,不改协议语法
 
 ### 目标
@@ -288,7 +319,9 @@ rdog/<ns>/session/<session_id>/to-control
 - `src/control_actions.rs`
   - 执行结果抽象改造
 - `src/control_protocol.rs`
-  - 后续补 `@savefile`
+  - 已拆成协议入口父模块 + `control_protocol/parsers/*` + `control_protocol/tests.rs`
+  - 父模块保留 `parse_control_line()` 和现有 helper re-export,避免打断 `control_ax` / `control_mouse` / `control_window` 的旧导入路径
+  - 后续补新协议命令时,优先把 payload parser 放到语义子模块,不要再把解析细节堆回父模块
 - `src/shell.rs`
   - TCP / WebSocket session loop 改造
 - `src/control_transport.rs`

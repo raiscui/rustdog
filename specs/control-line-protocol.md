@@ -56,22 +56,32 @@ line-control 会把每一行输入分成 3 类:
 ```text
 @ping
 @ping#1
+@capabilities
+@capabilities#2
 @key:"right-option"
 @key#7:"right-option"
 @key#7:{key:"right-option",hold_ms:200,mode:"press_release"}
 @paste
 @paste#8
 @paste:"hello"
+@observe#9
+@observe#10:{mode:"hybrid",include_screenshot:true,include_ax:true,include_windows:true,ax_required:false,ax_mode:"interactive"}
+@observe#11:{mode:"window",target:{app:"System Settings"},limit:5}
 @mouse-move#10:{x:1200,y:540,coordinate_space:"os-logical"}
 @mouse-move#11:{dx:10,dy:-5,coordinate_space:"relative"}
 @mouse-button#12:{button:"left",mode:"press"}
 @mouse-button#13:{button:"left",mode:"release"}
 @click#14:{x:1200,y:540,button:"left",count:1}
+@click#15:{target:{ref:"@e4",observation_id:"obs-123"},button:"left",count:1}
+@click#16:{target:{selector_id:"sel-v1-...",auto_refind:false},button:"left"}
 @drag#15:{from:{x:900,y:420},to:{x:1200,y:540},button:"left"}
 @wheel#16:{x:1200,y:540,delta_y:-3}
 @screenshot#17:{include_ax:true,ax_required:false}
 @ax-tree#18:{scope:"windows",depth:4,max_elements:1000}
 @ax-press#19:{target:{id:"pid:123/window:0/path:3.2"}}
+@selector-get#20:{selector_id:"sel-v1-...",include_history:true}
+@selector-resolve#21:{selector_id:"sel-v1-...",dry_run:true,include_explanations:true}
+@selector-refind#22:{selector_id:"sel-v1-...",policy:"safe",min_confidence:0.9,include_explanations:true}
 @script:"printf READY"
 @script#42:"printf READY"
 @cmd:"printf READY"
@@ -118,6 +128,7 @@ printf 'PLAIN_OK'
 #### 无 payload
 
 - `ping`
+- `capabilities`
 
 #### 需要 payload
 
@@ -147,6 +158,7 @@ printf 'PLAIN_OK'
 
 ```text
 @ping#1
+@capabilities#2
 @cmd#42:"printf READY"
 @key#7:"right-option"
 ```
@@ -186,6 +198,74 @@ printf 'PLAIN_OK'
 @ping
 @ping#1
 ```
+
+### `@capabilities`
+
+用于读取当前 daemon 的结构化能力诊断。
+这个请求不接受 payload。
+
+示例:
+
+```text
+@capabilities
+@capabilities#2
+```
+
+返回值使用 `rdog.capabilities.v1`:
+
+```json
+{"kind":"capabilities","schema":"rdog.capabilities.v1","status":"complete","capabilities":{"screenshot":{"status":"available"},"accessibility":{"status":"permission_denied","error_code":77}}}
+```
+
+语义要求:
+
+- `permission_denied` 对应 code `77`,表示能力存在但当前进程缺权限。
+- `unsupported` 对应 code `78`,表示当前平台或 backend 不支持该能力。
+- macOS Accessibility、macOS Screen Recording、Windows UIPI 和 Linux display backend 状态必须以结构化字段暴露,不能让 agent 按 OS 名字猜。
+- `gui_agent_recipe` 固定为 `@capabilities -> observe -> locate -> activate_or_focus -> semantic_action -> verify -> fallback_recipe`。
+
+### `@observe`
+
+用于一次性读取 GUI 观察状态。
+它是只读 facade,不会激活窗口、聚焦元素、按按钮、写文本、滚动或移动鼠标。
+
+示例:
+
+```text
+@observe
+@observe#9:{mode:"hybrid",include_screenshot:true,include_ax:true,include_windows:true,ax_required:false,ax_mode:"interactive"}
+@observe#10:{mode:"window",target:{app:"System Settings"},limit:5}
+@observe#11:{mode:"ax",target:{app:"System Settings"},ax_mode:"interactive",ax_required:false}
+@observe#12:{mode:"visual",include_screenshot:true,include_manifest:true}
+```
+
+请求字段:
+
+- `mode`: `hybrid`、`visual`、`ax`、`window`,默认是 `hybrid`。
+- `target`: 可选对象,支持 `app` / `process` / `process_name`、`bundle_id`、`window_title` / `title`、`window_title_contains` / `title_contains`。
+- `include_screenshot`: 是否采集 visual section。
+- `include_ax`: 是否采集 accessibility section。
+- `ax_required`: 为 true 时,AX 权限或 backend 失败会让请求失败。
+- `include_windows`: 是否采集 window section。
+- `include_manifest`: visual section 是否返回 manifest `@savefile`。
+- `include_refs`: 是否返回 `refs` 摘要。
+- `include_selectors`: 是否返回 `selectors` 摘要。
+- `limit`: 限制 window/ref sample 数量,必须大于 0。
+- `ax_mode`、`ax_depth`、`ax_max_elements`、`ax_include_values`: 复用 AX tree 预算模型。
+
+返回值使用 `rdog.observe.v1`:
+
+```json
+{"kind":"observe","schema":"rdog.observe.v1","status":"complete","mode":"hybrid","primary_observation_source":"accessibility","observation":{"observation_id":"obs-..."},"refs":{"count":3,"sample":[{"section":"accessibility","observation_id":"obs-...","ref":"@e1","kind":"ax-element","name":"OK"}]},"selectors":{"count":3,"sample":[]},"recovery":{"selector_refind_available":true,"scoring_version":"rdog.selector.score.v1"}}
+```
+
+语义要求:
+
+- `status` 可以是 `complete`、`partial`、`permission_denied` 或 `unsupported`。
+- visual 截图仍通过 `@savefile` 返回 image / manifest,再由最终 `@response` 收口。
+- `target` 当前只过滤 window 和 AX summary;visual section 仍是 virtual desktop screenshot,并应标记 `target_applied:false`。
+- `mode:"hybrid"` 不创建一个合并 ref 命名空间。`refs.sample[]` 里的每个条目都必须带 `section` 和自己的 `observation_id`。
+- 旧的 `@screenshot include_ax`、`@ax-tree`、`@ax-find`、`@ax-get`、`@window-find` 仍是稳定 lower-level lanes。
 
 ### `@key`
 
@@ -317,12 +397,25 @@ mode = "press_release"
 @mouse-button#12:{button:"left",mode:"press"}
 @mouse-button#13:{button:"left",mode:"release"}
 @click#14:{x:1200,y:540,button:"left",count:1,hold_ms:80}
+@click#17:{target:{ref:"@e4",observation_id:"obs-123"},button:"left",count:1}
+@click#18:{target:{selector_id:"sel-v1-...",auto_refind:false},button:"left"}
+@click#19:{target:{selector_id:"sel-v1-...",auto_refind:true,policy:"safe",min_confidence:0.9},button:"left"}
 @drag#15:{from:{x:900,y:420},to:{x:1200,y:540},button:"left",duration_ms:450,steps:24}
+@drag#20:{from:{ref:"@e1",observation_id:"obs-123"},to:{x:1200,y:540},button:"left"}
 @wheel#16:{x:1200,y:540,delta_y:-3}
+@wheel#21:{target:{ref:"@e8",observation_id:"obs-123"},delta_y:-3}
+@mouse-move#22:{target:{ref:"@e9",observation_id:"obs-123"}}
 ```
 
 行为边界:
 
+- 鼠标是 fallback lane。能用 `@ax-action`、`@ax-set-value`、`@type-text`、`@ax-scroll`、`@window-activate` 时,不要默认改走鼠标。
+- 优先使用最新 observation 的 `target:{ref,observation_id}` / `from:{ref,observation_id}` / `to:{ref,observation_id}`。
+  daemon 会在动作前重新解析当前 AX/window rect,不会把 observation 里的旧 rect 当执行真相源。
+- 坐标 payload 继续兼容,成功响应会带 `target_resolution.source:"coordinate_fallback"`。
+- selector target 默认 no-action。`auto_refind:false` 返回 `performed:false`、`gate_decision:"handoff_required"` 和 recovery `@selector-refind`。
+- `auto_refind:true` 是显式 opt-in。只有 typed selector-refind 返回 `decision:"rebound"` 且 fresh target 验证到当前 rect 后才执行 mouse。
+  `blocked`、`not_found`、`needs_disambiguation`、低置信度、rect 缺失都必须保持 no-action。
 - `@click`、`@drag` 和带 `x/y` 的 `@wheel` 只接受 `coordinate_space:"os-logical"`。
 - `@mouse-move` 可以使用 `coordinate_space:"relative"` 和 `dx/dy` 做安全的相对移动。
 - `@mouse-button mode:"press"` 不会自动松开。

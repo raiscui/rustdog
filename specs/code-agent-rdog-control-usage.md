@@ -100,6 +100,8 @@ flowchart LR
 | 能力 | 输入示例 | 返回形态 | 适合 agent 做什么 |
 | --- | --- | --- | --- |
 | 活性检查 | `@ping` | `@response "pong"` | 判断目标是否在线 |
+| 能力诊断 | `@capabilities#1` | `rdog.capabilities.v1` structured `@response` | 在 GUI / 权限 / 平台敏感动作前确定可用 lane |
+| 观察 | `@observe#2:{mode:"hybrid",include_screenshot:true,include_ax:true,include_windows:true}` | `rdog.observe.v1` observation bundle + optional `@savefile` frames | 推荐的 GUI 观察入口,先读屏幕/AX/窗口/ref/selector 摘要 |
 | one-shot shell | `printf READY` | `@response "READY"` | 跑简单命令,不保留 cwd |
 | 带 id shell | `@cmd#42:"printf READY"` | `@response {"id":42,"value":"READY"}` | 并行或批处理时关联结果 |
 | 显式脚本 | `@script:"git status --short"` | `@response ...` | 远端执行命令文本 |
@@ -107,18 +109,25 @@ flowchart LR
 | 粘贴 | `@paste` | structured paste report | 对远端当前焦点执行系统粘贴,需要焦点正确 |
 | 截图 | `@screenshot#7` | image `@savefile` + manifest `@savefile` + `@response ...screenshot-bundle...` | 采集远端屏幕证据与坐标 manifest |
 | 截图 + AX | `@screenshot#8:{include_ax:true,ax_required:false}` | screenshot bundle,manifest 可含 `accessibility` | 同时采集远端屏幕和 macOS UI 结构 |
-| AX tree | `@ax-tree#9:{scope:"windows",depth:4,max_elements:1000}` | structured AX `@response` | 不截图,只读取当前 macOS UI 结构 |
-| AX action | `@ax-action#10:{target:{id:"pid:123/window:0/path:3.2"},action:"AXPress"}` | structured AX `@response` | 对按钮/菜单项执行 allowlisted AX semantic action |
-| AXPress | `@ax-press#10:{target:{id:"pid:123/window:0/path:3.2"}}` | structured AX `@response` | 对按钮/菜单项等 AX 元素执行 `AXPress` |
-| AX set value | `@ax-set-value#11:{target:{id:"pid:123/window:0/path:8.2"},value:"hello",mode:"replace"}` | structured AX `@response` | 向 settable 文本字段直接写 `AXValue` |
-| AX focus | `@ax-focus#12:{window_id:"pid:123/window:0",activate:true}` | structured AX `@response` | 在不默认动鼠标的前提下聚焦元素或窗口 |
-| AX scroll | `@ax-scroll#13:{target:{id:"pid:123/window:0/path:8.2"},direction:"down",pages:2}` | structured AX `@response` | 用 AX locator + targeted scroll event 滚动 |
-| type-text | `@type-text#14:{target:{id:"pid:123/window:0/path:8.2"},text:"hello",mode:"ax-value"}` | structured AX `@response` | 普通文本输入入口,支持 AXValue / targeted keyboard / clipboard |
-| 鼠标移动 | `@mouse-move#10:{x:1200,y:540,coordinate_space:"os-logical"}` | structured mouse `@response` | 按 manifest 坐标移动远端指针 |
+| 窗口发现 | `@window-find#9:{app:"TextEdit",title_contains:"release-notes",limit:5}` | structured `@response` + `observation` | 先拿窗口 ref,再做 activate/close |
+| 窗口激活/关闭 | `@window-activate#10:{target:{ref:"@e1",observation_id:"obs-..."}}` | structured `@response` | 对短期 window ref 做后续生命周期操作 |
+| AX tree | `@ax-tree#9:{scope:"windows",depth:4,max_elements:1000}` | structured AX `@response` + `observation` | 不截图,只读取当前 macOS UI 结构 |
+| AX find | `@ax-find#9:{role:"AXButton",name_contains:"Cancel",limit:20}` | structured AX `@response` + `observation` | 先拿短期 ref,再做后续语义动作 |
+| AX get | `@ax-get#9:{target:{ref:"@e2",observation_id:"obs-..."},depth:2,include_values:false}` | structured AX `@response` + `observation` | 针对一个短期 ref drill down |
+| AX action | `@ax-action#10:{target:{ref:"@e2",observation_id:"obs-..."},action:"AXPress"}` | structured AX `@response` | 对按钮/菜单项执行 allowlisted AX semantic action |
+| AXPress | `@ax-press#10:{target:{ref:"@e2",observation_id:"obs-..."}}` | structured AX `@response` | 对按钮/菜单项等 AX 元素执行 `AXPress` |
+| AX set value | `@ax-set-value#11:{target:{ref:"@e2",observation_id:"obs-..."},value:"hello",mode:"replace"}` | structured AX `@response` | 向 settable 文本字段直接写 `AXValue` |
+| AX focus | `@ax-focus#12:{target:{ref:"@e2",observation_id:"obs-..."},activate:true}` | structured AX `@response` | 在不默认动鼠标的前提下聚焦元素或窗口 |
+| AX scroll | `@ax-scroll#13:{target:{ref:"@e2",observation_id:"obs-..."},direction:"down",pages:2}` | structured AX `@response` | 用 AX locator + targeted scroll event 滚动 |
+| type-text | `@type-text#14:{target:{ref:"@e2",observation_id:"obs-..."},text:"hello",mode:"ax-value"}` | structured AX `@response` | 普通文本输入入口,支持 AXValue / targeted keyboard / clipboard |
+| selector get | `@selector-get#20:{selector_id:"sel-v1-..."}` | structured selector `@response` | 查看 stale hint 给出的 stable selector |
+| selector resolve | `@selector-resolve#21:{selector_id:"sel-v1-...",dry_run:true}` | candidate set + fresh observation refs | 只读定位,不执行动作 |
+| selector refind | `@selector-refind#22:{selector_id:"sel-v1-...",policy:"safe",include_explanations:true}` | `rebound` / `needs_disambiguation` / `not_found` / `blocked` decision | stale ref 后做可解释语义恢复,但仍不执行动作 |
+| 鼠标移动 | `@mouse-move#10:{target:{ref:"@e9",observation_id:"obs-..."}}` 或 `{x:1200,y:540}` | structured mouse `@response` | 优先按 observation ref 移动;坐标是 fallback |
 | 鼠标按钮 | `@mouse-button#11:{button:"left",mode:"press"}` | structured mouse `@response` | 原始 press / release / click |
-| 点击 | `@click#12:{x:1200,y:540}` | structured mouse `@response` | 根据截图坐标点击远端桌面 |
-| 拖拽 | `@drag#13:{from:{x:900,y:420},to:{x:1200,y:540}}` | structured mouse `@response` | 按 os-logical 坐标拖拽 |
-| 滚轮 | `@wheel#14:{x:1200,y:540,delta_y:-3}` | structured mouse `@response` | 移到目标点后滚动 |
+| 点击 | `@click#12:{target:{ref:"@e4",observation_id:"obs-..."}}` 或 `{x:1200,y:540}` | structured mouse `@response` | ref 定位后点击;坐标点击是显式 fallback |
+| 拖拽 | `@drag#13:{from:{ref:"@e1",observation_id:"obs-..."},to:{x:1200,y:540}}` | structured mouse `@response` | from/to 都可用 ref 或坐标 endpoint |
+| 滚轮 | `@wheel#14:{target:{ref:"@e8",observation_id:"obs-..."},delta_y:-3}` 或 `{x:1200,y:540,delta_y:-3}` | structured mouse `@response` | ref 定位 scroll container 后滚动;坐标滚动是 fallback |
 | PTY / TUI | `rdog control mac.lab --pty -- codex` | `@pty-*` frame 流 | 跑 `codex`、shell、vim、REPL |
 | PTY detach | `--pty-detach SESSION_ID` | `@pty-detached ...` | 保留远端进程,解绑当前控制端 |
 | PTY attach | `--pty-attach SESSION_ID` | `@pty-attached ...` 后继续输出 | 重新接管远端 PTY |
@@ -143,6 +152,49 @@ agent 应按下面的规则解析输出:
 - `@savefile {...}`: 文件型结果,不应把 base64 原样展示给用户
 - 同一个 request id 可能返回多个 `@savefile`。
   默认 `@screenshot#id` 至少返回一个 virtual-desktop JPEG 和一个 manifest JSON。
+
+### 2. GUI agent 必须先读能力诊断
+
+GUI / 截图 / AX / 鼠标 / 文本输入任务先发送:
+
+```text
+@capabilities#1
+```
+
+返回值里的 `capabilities.*.status` 是 agent 选择控制 lane 的依据。
+不要从平台名字猜 macOS Accessibility、Screen Recording、Windows UIPI 或 Linux display backend 是否可用。
+
+固定 GUI workflow:
+
+```text
+@capabilities -> @observe -> locate -> activate_or_focus -> semantic_action -> verify -> fallback_recipe
+```
+
+执行口径:
+
+- `permission_denied`: 停止该 lane,解释缺少的权限。它对应 code `77`。
+- `unsupported`: 换另一条 lane,不要重复执行同一命令。它对应 code `78`。
+- `unknown`: 可以做非破坏性 smoke,但必须准备处理结构化错误。
+- `available`: 仍要在动作后用截图、AX tree、window state 或 command output 验证。
+
+`@observe` 观察入口:
+
+```text
+@observe#6:{mode:"hybrid",include_screenshot:true,include_ax:true,include_windows:true,ax_required:false,ax_mode:"interactive"}
+@observe#7:{mode:"window",target:{app:"System Settings"},limit:5}
+@observe#8:{mode:"ax",target:{app:"System Settings"},ax_mode:"interactive",ax_required:false}
+@observe#9:{mode:"visual",include_screenshot:true,include_manifest:true}
+```
+
+`@observe` 是当前推荐的只读 facade。
+它把 visual screenshot、AX summary、window summary、refs、selectors 和 recovery hint 收束成 `rdog.observe.v1` bundle。
+它不会 activate/focus/press/set value/type/scroll/click。
+旧的 `@screenshot` / `@ax-tree` / `@ax-find` / `@ax-get` / `@window-find` 仍是稳定 lower-level lanes,不是 deprecated。
+`ax_mode:"skeleton"` 是浅层 `windows` preset 的兼容别名。
+
+首版 `target` 只过滤 window 和 AX summary。
+visual section 仍是 virtual desktop screenshot,应返回 `target_applied:false`。
+`mode:"hybrid"` 不创建合并 observation; top-level `observation` 只指向一个主 observation,每个 `refs.sample[]` 都必须带 `section`、`observation_id`、`ref`、`kind` 和可选 `name`。
 
 默认截图请求:
 
@@ -180,6 +232,7 @@ agent 应按下面的规则解析输出:
 AX metadata 会写入 manifest 的 `accessibility` 字段,使用 `rdog.ax.v1` schema。
 它包含窗口,标题,rect,元素 role/name/description/actions 等结构信息。
 AX rect 继续使用 `coordinate_space:"os-logical"`。
+它也会带 observation header,让后续 `@ax-get` / `@ax-press` / `@ax-set-value` 可以复用短期 ref。
 
 权限语义:
 
@@ -193,25 +246,57 @@ AX rect 继续使用 `coordinate_space:"os-logical"`。
 @ax-tree#10:{scope:"windows",depth:4,max_elements:1000,include_values:true}
 ```
 
-`@ax-press` 可以使用 manifest/tree 中的短期 id:
+`@observe`、`@ax-tree`、`@ax-find`、`@ax-get`、`@window-find`、`@screenshot include_ax` 都会返回短期 `observation_id` 和 `ref`。
+这些 ref 只在当前 observation 内有效。
+如果 daemon 返回 `OBSERVATION_EXPIRED` 或 `STALE_REF`,不要猜测匹配结果,直接重新观察。
+`observation.selector_count` 表示 daemon 已经为这次 observation 写入多少个 durable selector record。
+如果错误 payload 里有 `durable.selector_hint_available:true`,先把 `durable.selector_id` 当成 stable selector 检查,不要把旧 `@eN` 当成复活。
+
+推荐恢复顺序:
+
+```text
+@selector-get#20:{selector_id:"sel-v1-..."}
+@selector-refind#21:{selector_id:"sel-v1-...",policy:"safe",min_confidence:0.9,include_explanations:true}
+@ax-get#22:{target:{ref:"@e-new",observation_id:"obs-new"},depth:1,include_values:false}
+```
+
+`@selector-refind` 是 P3 semantic re-find。
+它返回 `decision:"rebound"` 时,`fresh_target` 只表示 stable selector 已恢复成新的 observation ref。
+这不表示按钮已经按下、窗口已经聚焦、文本已经写入或动作已经验证成功。
+`decision:"rebound"` 必须带 `verify_hint`; 后续动作必须先执行该 verify hint,再显式发送 `@ax-action` / `@ax-set-value` / `@window-activate` 等 side-effect 命令。
+`decision:"needs_disambiguation"`、`decision:"not_found"`、`decision:"blocked"` 都不能自动行动。
+其中 `blocked` 是正常 selector response,用于表达权限、backend、capability 或 schema 阻断,并且不得带 `fresh_target`。
+`@selector-resolve` 保持 P2 只读 dry-run 语义,适合查看 raw candidates,不是恢复决策层。
+旧 `@eN` 仍然不能跨 daemon 重启复活。
+
+durable observation state 当前由 daemon 写入这些文件:
+
+- `meta.json`: `rdog.observation.state.v1`
+- `index.json`: `rdog.observation.index.v1`
+- `observations.jsonl`: `rdog.observation.record.v1`
+- `selectors.jsonl`: `rdog.selector.record.v1`
+- `ref_cache.jsonl`: `rdog.ref-cache.v1`,只作为 hint-only cache
+
+`@ax-press` 可以使用 manifest/tree 中的短期 id 或 ref:
 
 ```text
 @ax-press#11:{target:{id:"pid:123/window:0/path:3.2"}}
+@ax-press#12:{target:{ref:"@e2",observation_id:"obs-..."}}
 ```
 
 也可以使用语义 locator,但必须避免匹配到多个元素:
 
 ```text
-@ax-press#12:{target:{process:"System Information",window_title:"关于本机",role:"AXButton",description:"关闭按钮"}}
+@ax-press#13:{target:{process:"System Information",window_title:"关于本机",role:"AXButton",description:"关闭按钮"}}
 ```
 
-建议优先使用刚刚从 manifest 或 `@ax-tree` 读到的 `id`。
+建议优先使用刚刚从 manifest 或 `@ax-tree` 读到的 `id` / `ref`。
 如果元素已经消失或 locator 歧义,daemon 会返回 code 64。
 
 如果目标元素支持的并不只是 `AXPress`,可以显式走 `@ax-action`:
 
 ```text
-@ax-action#13:{target:{id:"pid:123/window:0/path:3.2"},action:"AXShowMenu"}
+@ax-action#14:{target:{id:"pid:123/window:0/path:3.2"},action:"AXShowMenu"}
 ```
 
 当前只允许安全 allowlist:
@@ -226,19 +311,19 @@ AX rect 继续使用 `coordinate_space:"os-logical"`。
 文本字段如果是 settable `AXValue`,优先用:
 
 ```text
-@ax-set-value#14:{target:{id:"pid:123/window:0/path:8.2"},value:"hello",mode:"replace"}
-@type-text#15:{target:{id:"pid:123/window:0/path:8.2"},text:"hello",mode:"ax-value"}
+@ax-set-value#15:{target:{id:"pid:123/window:0/path:8.2"},value:"hello",mode:"replace"}
+@type-text#16:{target:{id:"pid:123/window:0/path:8.2"},text:"hello",mode:"ax-value"}
 ```
 
 如果需要非鼠标键盘投递,可以显式用:
 
 ```text
-@key#16:{key:"Return",delivery:"pid-targeted",pid:556}
-@key#17:{key:"Cmd+W",delivery:"window-targeted",window_id:"pid:556/window:0"}
-@type-text#18:{target:{id:"pid:556/window:0/path:8.2"},text:"hello",mode:"targeted-keyboard"}
-@type-text#19:{target:{id:"pid:556/window:0/path:8.2"},text:"hello",mode:"clipboard",allow_clipboard:true}
-@ax-focus#20:{window_id:"pid:556/window:0",activate:true}
-@ax-scroll#21:{target:{id:"pid:556/window:0/path:10.1"},direction:"down",pages:2}
+@key#17:{key:"Return",delivery:"pid-targeted",pid:556}
+@key#18:{key:"Cmd+W",delivery:"window-targeted",window_id:"pid:556/window:0"}
+@type-text#19:{target:{id:"pid:556/window:0/path:8.2"},text:"hello",mode:"targeted-keyboard"}
+@type-text#20:{target:{id:"pid:556/window:0/path:8.2"},text:"hello",mode:"clipboard",allow_clipboard:true}
+@ax-focus#21:{window_id:"pid:556/window:0",activate:true}
+@ax-scroll#22:{target:{id:"pid:556/window:0/path:10.1"},direction:"down",pages:2}
 ```
 
 当前阶段:
@@ -264,7 +349,13 @@ AX rect 继续使用 `coordinate_space:"os-logical"`。
 
 鼠标命令直接复用这个 manifest 的坐标语义:
 
-- `@click`、`@drag`、带 `x/y` 的 `@wheel` 使用 `coordinate_space:"os-logical"`。
+- 鼠标是 fallback lane,不是默认 GUI 路径。只有 semantic/ref/selector lane 不可用、目标是 canvas/free-space/复杂拖拽,或用户明确要求真实指针控制时才优先使用。
+- `@observe` 返回 manifest 时用它;否则使用最新 `@screenshot` manifest。
+- 优先使用 `target:{ref,observation_id}` / `from:{ref,observation_id}` / `to:{ref,observation_id}`。
+  daemon 会在动作前重新解析当前 AX/window rect,不会复用陈旧截图 rect。
+- `target:{selector_id:"...",auto_refind:false}` 是 no-action handoff,只返回 recovery `@selector-refind`。
+  `auto_refind:true` 只有在 typed refind decision 为 `rebound` 且 fresh target 验证到当前 rect 后才会执行 mouse。
+- `@click`、`@drag`、带 `x/y` 的 `@wheel` 使用 `coordinate_space:"os-logical"`,并在响应里标记 `target_resolution.source:"coordinate_fallback"`。
 - 对默认 composite screenshot,图片点位换算为 `os_x = image_x + virtual_bounds.x`, `os_y = image_y + virtual_bounds.y`。
 - 如果点位落在 display gap 或 manifest 范围外,agent 应该先拒绝,不要把猜出来的坐标发送给 daemon。
 - `@mouse-move#id:{dx:0,dy:0,coordinate_space:"relative"}` 是安全 smoke,不会改变有效指针位置。
@@ -311,8 +402,8 @@ code agent 维护一个目标表即可:
 
 | target-name | 角色 | 常用能力 |
 | --- | --- | --- |
-| `mac.lab` | macOS 桌面 / GUI 操作 | `@key`, `@paste`, `@screenshot`, `--pty` |
-| `win11.lab` | Windows 桌面 / 权限现场 | `@key`, `@paste`, `@screenshot` |
+| `mac.lab` | macOS 桌面 / GUI 操作 | `@observe`, `@window-find`, `@ax-*`, `@key`, `@paste`, `@screenshot`, `@mouse-move`, `@click`, `@drag`, `@wheel`, `--pty` |
+| `win11.lab` | Windows 桌面 / 权限现场 | `@observe`, `@window-find`, `@key`, `@paste`, `@screenshot`, `@mouse-move`, `@click`, `@drag`, `@wheel` |
 | `linux-build.lab` | 构建 / 测试机 | `@cmd#id`, `@script`, `--pty -- bash` |
 | `mini-a.lab` | 设备桥 / 实验节点 | `@ping`, one-shot shell, SDK control |
 
@@ -403,8 +494,11 @@ rdog control linux-build.lab --entry-point tcp/10.8.0.20:17447
 `@ax-tree` / `@ax-press` 也受 macOS Accessibility 权限约束:
 
 - 权限主体是实际执行 AX 的 `rdog` 进程,通常是 daemon。
+- `@observe` 是只读命令,但它的 visual / AX / window section 仍分别受 Screen Recording、Accessibility 和平台 backend 能力约束。它不能绕过权限。
 - `@screenshot include_ax` 同时受 Screen Recording 和 Accessibility 两类权限影响。
 - `ax_required:false` 只表示 AX 失败可降级,不表示 Screen Recording 可以降级。
+- observation ref 是短期的,daemon 重启、TTL 到期、或再次观察后都不能把旧 `ref` 当成永久 selector 用。
+- durable observation state 默认只保存 metadata、selector draft 和 hint-only ref cache,不持久化 AXValue 原文或截图图像。
 - GUI 焦点窗口不对时,按键可能进入错误目标
 
 `@screenshot` 受屏幕录制权限约束:
@@ -435,16 +529,19 @@ rdog control linux-build.lab --entry-point tcp/10.8.0.20:17447
 1. 先 `@ping`。
 2. 不需要 TTY 时,用 `@cmd#id` 或 bare shell line。
 3. 需要关联结果时,用 request id。
-4. 需要 GUI 副作用时,用 `@key` / `@paste` / 鼠标命令,并先确认权限。
+4. 需要 GUI 时,先用 `@observe` 读当前 visual / AX / window bundle。
+   如果 `@observe` 不可用,降级到 `@screenshot include_ax`、`@ax-tree`、`@window-find`、`@ax-find` 或 `@ax-get`。
+5. 需要 GUI 副作用时,先用 semantic action: `@ax-action` / `@ax-set-value` / `@type-text` / `@ax-scroll` / targeted `@key` / `@window-activate`。
+   鼠标只作为 fallback lane。
    其中 `@paste` 是当前焦点粘贴,不是稳定文本输入。
-5. 需要视觉证据时,用 `@screenshot#id`,并解析所有同 id 的 `@savefile`。
+6. 需要视觉证据时,用 `@observe` 或 `@screenshot#id`,并解析所有同 id 的 `@savefile`。
    默认截图要同时读取 JPEG 和 manifest。
    后续点击/拖拽坐标必须从 manifest 的 `virtual_bounds` 和 `display.image_rect` 换算,不要只凭图片猜。
-6. 需要 TUI 或长期交互时,用 `--pty -- COMMAND`。
-7. 需要保留远端进程时,用 `--pty-detach`。
-8. 重新接管时,用 `--pty-attach`。
-9. 网络 timeout 后,重新 resolve target,不要永久缓存旧 control key。
-10. 不要假设裸 shell 行会保留 cwd 或 shell 状态。
+7. 需要 TUI 或长期交互时,用 `--pty -- COMMAND`。
+8. 需要保留远端进程时,用 `--pty-detach`。
+9. 重新接管时,用 `--pty-attach`。
+10. 网络 timeout 后,重新 resolve target,不要永久缓存旧 control key。
+11. 不要假设裸 shell 行会保留 cwd 或 shell 状态。
 
 ## 最小 smoke 命令
 

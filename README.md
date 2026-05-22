@@ -221,15 +221,18 @@ The usual shape is:
 | Capability | Example | Response shape | Use case |
 | --- | --- | --- | --- |
 | Ping | `@ping` | `@response "pong"` | Health check |
+| Capabilities | `@capabilities#1` | `rdog.capabilities.v1` structured `@response` | Choose a GUI / permission / platform lane before acting |
 | One-shot command | `@cmd#1:"pwd"` | `@response {"id":1,"value":"..."}` | Scripted automation |
 | Bare shell line | `pwd` | `@response "..."` | Human-friendly one-shot shell command |
+| Observe | `@observe#2:{mode:"hybrid",include_screenshot:true,include_ax:true,include_windows:true}` | `rdog.observe.v1` bundle + optional `@savefile` frames | Read visual / AX / window state plus observation refs and selector hints |
 | Screenshot | `@screenshot#7` | image `@savefile` + manifest `@savefile` + `@response ...screenshot-bundle...` | Remote visual evidence |
+| Selector inspect / re-find | `@selector-get#20:{selector_id:"sel-v1-..."}` / `@selector-refind#21:{selector_id:"sel-v1-...",policy:"safe"}` | structured selector `@response` | Recover from stale refs without reviving old `@eN` refs |
 | Save file | `@savefile:{...}` | local file in `./rdog_downloads/` | Transfer generated artifacts |
 | Key input | `@key:"F11"` | `@response 0` or permission error | GUI shortcut / desktop control |
 | Paste text | `@paste:"hello"` | `@response 0` or permission error | Text injection into focused UI |
-| Mouse move | `@mouse-move#8:{x:1200,y:540,coordinate_space:"os-logical"}` | structured mouse `@response` or permission error | Move the remote pointer using screenshot manifest coordinates |
+| Mouse move | `@mouse-move#8:{target:{ref:"@e9",observation_id:"obs-..."}}` or `{x:1200,y:540}` | structured mouse `@response` or permission error | Move by latest observation ref; raw coordinates are fallback |
 | Mouse button | `@mouse-button#9:{button:"left",mode:"press"}` | structured mouse `@response` or permission error | Press, release, or click a mouse button |
-| Click / drag / wheel | `@click#10:{x:1200,y:540}` | structured mouse `@response` or permission error | Desktop interaction after parsing screenshot coordinates |
+| Click / drag / wheel | `@click#10:{target:{ref:"@e4",observation_id:"obs-..."}}` or `{x:1200,y:540}` | structured mouse `@response` or permission error | Mouse fallback after semantic action/ref/selector workflow |
 | PTY | `@pty:"codex"` | `@pty-ready`, `@pty-output`, `@pty-exit` | TUI / shell / REPL |
 | PTY detach | `@pty-detach:{session_id:"..."}` | `@pty-detached ...` | Keep remote PTY running |
 | PTY attach | `@pty-attach:{session_id:"..."}` | `@pty-attached ...` | Reclaim remote PTY |
@@ -248,8 +251,13 @@ Important behavior:
 - `@screenshot:{display:"primary",layout:"single"}` is the explicit compatibility path for a single primary-display JPEG.
 - Default screenshot results are a bundle: one virtual-desktop JPEG `@savefile`, one manifest JSON `@savefile`, then a final `@response` whose value has `kind:"screenshot-bundle"`.
 - The manifest is the coordinate source of truth. For the default logical composite, `os_x = image_x + virtual_bounds.x` and `os_y = image_y + virtual_bounds.y`.
-- Absolute mouse commands use that same `coordinate_space:"os-logical"` contract.
+- `@observe` is read-only. It returns a `rdog.observe.v1` bundle with `visual`, `accessibility`, `windows`, `refs`, `selectors`, and `recovery` sections.
+- `@observe mode:"hybrid"` does not merge all refs into one namespace. Use each `refs.sample[]` item with its own `section`, `observation_id`, and `ref`.
+- Short refs such as `@e4` are observation-scoped. A stale or expired ref must be recovered by re-observing or by `@selector-get -> @selector-refind -> verify_hint`; never treat the old short ref as revived.
+- Mouse is a fallback lane. Prefer semantic AX/window commands first, then observation refs such as `target:{ref:"@e4",observation_id:"obs-..."}`, then raw coordinates.
+- Absolute coordinate mouse commands use that same `coordinate_space:"os-logical"` contract and report `target_resolution.source:"coordinate_fallback"`.
   Do not invent a second screen coordinate model for `@click`, `@drag`, or positioned `@wheel`.
+- Selector mouse targets are gated. `auto_refind:false` returns no-action handoff; `auto_refind:true` can execute only after typed selector re-find rebounds and verifies a fresh rect.
 - `@mouse-button mode:"press"` intentionally leaves the button pressed.
   Send a matching `@mouse-button:{button:"left",mode:"release"}` when recovering from interrupted raw press flows.
 - `@screenshot` saves file-style results through `@savefile`; the CLI stores them under `./rdog_downloads/` instead of dumping base64 to the terminal.
@@ -266,8 +274,8 @@ For code agents, prefer this decision tree:
 
 1. Need a quick deterministic command? Use `@cmd#id:"..."` or a bare shell line.
 2. Need response correlation? Use request ids such as `@cmd#7:"..."`.
-3. Need visual evidence or coordinates? Use `@screenshot#id` and parse the JPEG plus manifest.
-4. Need GUI or desktop side effects? Use `@key`, `@paste`, `@click`, `@drag`, `@wheel`, and `@screenshot`.
+3. Need visual evidence, refs, or coordinates? Prefer `@observe#id:{mode:"hybrid",include_screenshot:true,include_ax:true,include_windows:true}`; use `@screenshot#id` when you only need pixels and manifest.
+4. Need GUI or desktop side effects? Prefer semantic AX/window commands, use mouse by observation ref when semantics are unavailable, and keep raw coordinate mouse as fallback.
 5. Need real terminal behavior or persistent shell state? Use `--pty`.
 6. Need multiple hosts? Address them by stable daemon names such as `mac.lab`, `win11.lab`, or `linux-build.lab`.
 7. Need direct SDK integration? Use the Zenoh session channel model documented in [`specs/zenoh-sdk-integration-playbook.md`](./specs/zenoh-sdk-integration-playbook.md).

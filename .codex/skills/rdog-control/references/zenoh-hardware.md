@@ -110,12 +110,15 @@ Use screenshots/key/paste for GUI-only hardware tools:
 
 ```bash
 rdog control win11.lab <<'RDOG'
+@observe#0:{mode:"hybrid",include_screenshot:true,include_ax:false,include_windows:true}
 @key#1:{key:"F5",hold_ms:200,mode:"press_release"}
 @screenshot#2
 @mouse-move#3:{dx:0,dy:0,coordinate_space:"relative"}
 RDOG
 ```
 
+For GUI-only hardware tools, start with `@observe` when available.
+Use lower-level `@screenshot` when you specifically need a fresh coordinate manifest.
 For GUI-only tools that require mouse input, first capture a screenshot and parse the manifest.
 Then send `@click`, `@drag`, or `@wheel` with `coordinate_space:"os-logical"` coordinates from that manifest.
 Do not invent a second coordinate system for the hardware tool window.

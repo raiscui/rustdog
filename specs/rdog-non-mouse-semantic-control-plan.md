@@ -28,7 +28,8 @@
 4. 权限失败是一等结果:
    - Accessibility 权限不足: code `77`
    - 当前平台不支持: code `78`
-5. 不默认使用剪贴板 fallback。
+5. GUI agent 先读 `@capabilities`,再决定是否走 AX / mouse / type-text lane。
+6. 不默认使用剪贴板 fallback。
 
 ## 已落地范围
 
@@ -244,7 +245,8 @@ clipboard response 示例:
 
 ```mermaid
 flowchart TD
-    Start[需要 GUI 操作] --> Observe[@screenshot include_ax 或 @ax-tree]
+    Start[需要 GUI 操作] --> Cap[@capabilities]
+    Cap --> Observe[@screenshot include_ax 或 @ax-tree]
     Observe --> Find[@ax-find 或 @window-find]
     Find --> Ready{窗口可交互?}
     Ready -->|否| Activate[@window-activate]

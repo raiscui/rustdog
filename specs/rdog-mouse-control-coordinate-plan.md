@@ -16,6 +16,25 @@
 @wheel#15:{x:1200,y:540,delta_y:-3,coordinate_space:"os-logical"}
 ```
 
+P5 之后,这些命令也可以使用 observation ref target。
+坐标 payload 继续兼容,但 response 会把它标成 `target_resolution.source:"coordinate_fallback"`:
+
+```text
+@mouse-move#16:{target:{ref:"@e9",observation_id:"obs-..."}}
+@click#17:{target:{ref:"@e4",observation_id:"obs-..."},button:"left",count:1}
+@drag#18:{from:{ref:"@e1",observation_id:"obs-..."},to:{x:1200,y:540}}
+@wheel#19:{target:{ref:"@e8",observation_id:"obs-..."},delta_y:-3}
+```
+
+selector target 默认不是 action:
+
+```text
+@click#20:{target:{selector_id:"sel-v1-...",auto_refind:false}}
+```
+
+它返回 no-action handoff 和 `@selector-refind` recovery command。
+只有显式 `auto_refind:true`、typed selector-refind decision 为 `rebound`、fresh target 重新解析到当前 rect 时,才会继续生成 mouse plan。
+
 推荐实现顺序:
 
 1. `@mouse-move`

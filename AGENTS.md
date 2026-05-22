@@ -118,6 +118,11 @@ rustdog 首先被LLM agent 智能体使用，其次被人类使用。要以agent
   - 用途: 固定 `include_ax`、`ax_required`、`rdog.ax.v1` manifest schema、Accessibility 权限降级语义、AXPress target locator 和错误映射
   - 何时阅读: 准备实现或评审 AX screenshot manifest、`@ax-tree`、`@ax-press`、Accessibility 权限提示,或排查 AX 元素坐标/定位歧义前
 
+- `specs/rdog-observation-scoped-refmap-plan.md`
+  - 主题: observation-scoped refmap、durable selector、semantic re-find、`@observe` 与 mouse ref 化的长期路线图
+  - 用途: 固定 GUI observation 的短期 ref / 长期 selector / 重启恢复 / 语义重找 / 统一观察入口 / mouse fallback 当前契约和完整演进线,避免只做最小可用版后丢失后续目标
+  - 何时阅读: 修改 `src/control_observation*`、`src/control_mouse*`、`@observe`、selector 恢复、mouse ref target,或更新 `rdog-control` skill / README / control protocol 文档前
+
 - `specs/rdog-non-mouse-semantic-control-plan.md`
   - 主题: `@ax-action` / `@ax-set-value` / `@type-text` / `@key delivery` / `@ax-focus` / `@ax-scroll` 的非鼠标语义控制协议
   - 用途: 固定“非鼠标优先”协议能力,明确 `@ax-press` 兼容映射、AXValue 写入边界、`targeted-keyboard` / clipboard opt-in、`@key` 定向投递,以及 `@ax-focus activate:true` 复用 `@window-activate` 的边界
