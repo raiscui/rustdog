@@ -381,3 +381,133 @@
 
 ### 验证
 - 后续将再次运行 `git diff --check`,并查看尾部记录确认反引号内容保留完整。
+
+## [2026-05-18 14:53:01] [Session ID: 019e38be-b9d9-76f0-aabc-fad94a2bcf12] 错误修复: ControlPeerSession 初版集成时的 trait blanket 冲突与结果格式偏差
+
+### 问题
+- 初版 `cargo test --package rustdog --bin rdog -- control_session::tests` 报 `E0119 conflicting implementations of trait ControlPeerFrameSink for type Publisher<'_>`。
+- 后续一次 Zenoh 发现性测试还暴露出 `LineWriteFrameSink` 在非 test build 里产生 unused warning。
+- 同时 `should_emit_ordered_frames_without_owning_savefile_persistence` 里手写的 `@savefile` wire 期望字段顺序不对,实际输出是 `id` 而不是 `request_id`。
+- 第一次运行 Zenoh focused test 时还把 test harness 参数写错,误用了 `--exact`,正确写法应是 `-- --exact`。
+
+### 原因
+- 一开始把 `ControlPeerFrameSink` 做成了 `impl<W: Write>`,这会和外部 crate 未来给 `Publisher` 增加 `Write` 实现发生潜在冲突。
+- `@savefile` 的真实 wire 格式是 `ControlFrame::to_wire_message()` 的输出,不是手写 JSON 草稿。
+- `LineWriteFrameSink` 和部分 observability helper 只在 test path 使用,但没有显式标注用途,导致 warning 噪音。
+- cargo test 的 test harness 参数位置容易写错,需要放在 `--` 之后。
+
+### 修复
+- 去掉 blanket `impl<W: Write>`,改成显式 `LineWriteFrameSink` wrapper。
+- 给 `ControlTransport` 和 `zenoh::pubsub::Publisher` 分别实现 `ControlPeerFrameSink`。
+- 把测试期望改成真实 `@savefile` wire 输出。
+- 给测试专用 helper 加 `allow(dead_code)` / test-only import,把 warning 收干净。
+- 后续 Zenoh focused test 统一使用 `cargo test --package rustdog --test zenoh_router_client TEST_NAME -- --exact`。
+
+### 验证
+- `cargo test --package rustdog --bin rdog -- control_session::tests` 通过。
+- `cargo test --package rustdog --bin rdog -- control_frames::tests control_core::tests shell::tests` 通过。
+- `cargo test --package rustdog --test zenoh_router_client control_should_find_daemon_by_target_name_without_explicit_entrypoint -- --exact` 通过。
+- `cargo test --package rustdog --test zenoh_router_client control_should_detach_and_attach_pty_in_zenoh_profile -- --exact` 通过。
+- `cargo test --package rustdog --test zenoh_router_client control_should_execute_literal_shell_line_in_zenoh_profile -- --exact` 通过。
+- `cargo test --package rustdog --test zenoh_router_client control_session_should_reresolve_after_daemon_restart -- --exact` 通过。
+- `cargo test --package rustdog --test control_lanes daemon_control_lane_should_execute_script_via_rdog_control -- --exact` 通过。
+- `cargo test --package rustdog --test control_websocket control_cli_should_drive_websocket_daemon_end_to_end -- --exact` 通过。
+- `cargo fmt -- --check` 通过。
+- `git diff --check` 通过。
+
+### 以后避免
+- 不要再给外部消息 sink 写 blanket `impl<W: Write>`。
+- `@savefile` 这类 wire 断言尽量直接用真实 `to_wire_message()` 或 parser roundtrip,不要手搓字段顺序。
+- 测试专用 helper 直接标 test-only,不要留成 warning 噪音。
+
+## [2026-05-18 15:13:16] [Session ID: 019e38be-b9d9-76f0-aabc-fad94a2bcf12] 错误修复: screenshot live smoke 在显示器休眠时误判为实现失败
+
+### 问题
+- Architect review 要求补真实 `@screenshot -> @savefile` smoke。
+- 直接运行 TCP / WebSocket ignored screenshot tests 时,两条都失败为 `没有可截图的显示器`。
+
+### 原因
+- `system_profiler SPDisplaysDataType` 显示内置屏和外接屏均为 `Display Asleep: Yes`。
+- 这次失败路径发生在 screenshot backend 枚举显示器阶段,不是新 `ControlPeerSession` dispatch 阶段。
+- 单独提前执行 `caffeinate -u -t 5` 不足以让后续 smoke 测试稳定获得可截图显示器。
+
+### 修复
+- 用 `caffeinate -d -u -t 30` 包住整个 live smoke 测试命令,让 display awake assertion 覆盖实际截图窗口。
+
+### 验证
+- `caffeinate -d -u -t 30 cargo test --package rustdog --test control_lanes daemon_control_lane_should_execute_screenshot_and_save_file_via_rdog_control -- --exact --ignored --nocapture`: 通过。
+- `caffeinate -d -u -t 30 cargo test --package rustdog --test control_websocket control_cli_should_execute_screenshot_and_save_file_over_websocket -- --exact --ignored --nocapture`: 通过。
+
+### 以后避免
+- live screenshot smoke 如果报 `没有可截图的显示器`,先检查 display sleep 状态。
+- 需要验证截图链路时,把 `caffeinate -d -u` 包在测试命令外层,不要只在测试前单独运行一次。
+
+## [2026-05-18 16:30:01] [Session ID: codex-phase3-20260518-160435] 错误修复: Zenoh legacy queryable 仍可执行 rich screenshot
+
+### 问题
+- Phase 3 要求 Zenoh 富能力默认走 session channel。
+- 新增负向测试前,直接向 daemon queryable 发送 `@screenshot#7` 会返回 image `@savefile`、manifest `@savefile` 和 final `screenshot-bundle`。
+- 这让 queryable 仍然是富能力执行路径,和“queryable 降级为 bootstrap / legacy / compatibility”的目标冲突。
+
+### 原因
+- `handle_daemon_control_query()` 对无 `session_id` 的普通 payload 会直接 `parse_and_execute_control_line()`。
+- screenshot producer 返回多 frame outcome 后,旧 query/reply 分支会用 multiline payload 整体返回。
+- 旧 `__rdog_session__:<id>\n...` payload 也可能通过 queryable 触发 rich command,即使结果发到 `to-control`,仍绕过了 `to-daemon` 主路径。
+
+### 修复
+- 新增 `reject_session_channel_only_legacy_query()`。
+- 对 screenshot、PTY lifecycle、mouse、AX、window、type-text、`@savefile` 等 rich/session-only 命令,legacy queryable 返回 code 78。
+- 对旧 `__rdog_session__` query payload,将 code 78 response 发到 `to-control`,query reply 仅保留 `@response 0` ack。
+- 将 session bridge 普通 line-control outcome dispatch 改为复用 `ControlPeerSession::dispatch_outcome_ref()`。
+
+### 验证
+- `cargo test --package rustdog --test zenoh_router_client control_should_reject_rich_frame_over_legacy_queryable_path -- --exact`: 通过。
+- `cargo test --package rustdog --test zenoh_router_client control_should_reject_rich_frame_over_legacy_session_query_payload -- --exact`: 通过。
+- `cargo test --package rustdog --bin rdog -- zenoh_control::tests::legacy_queryable_should_reject_rich_screenshot_requests zenoh_control::tests::legacy_queryable_should_allow_bootstrap_and_compatibility_requests`: 通过。
+- `caffeinate -d -u -t 30 cargo test --package rustdog --test zenoh_router_client control_should_execute_screenshot_and_save_file_in_zenoh_profile -- --exact --ignored --nocapture`: 通过。
+- `cargo fmt -- --check`: 通过。
+- `git diff --check`: 通过。
+
+### 以后避免
+- Phase 3 类迁移不能只看 CLI 主路径是否走 session channel。
+- 还要给旧 queryable 入口补负向测试,同时覆盖 direct query payload 和旧 session query payload。
+
+## [2026-05-18 17:09:25] [Session ID: codex-phase4-20260518-163845] 错误修复: capabilities probe 在单平台编译下出现 dead_code warning
+
+### 问题
+- 新增 `src/control_capabilities.rs` 后,在当前 macOS target 上编译 `cargo test --package rustdog --test zenoh_router_client --no-run` 看到 `PermissionProbe::NotApplicable` / `Unknown` 的 dead_code warning。
+- 这类 warning 会污染本轮验证输出,不符合仓库里“warning 也要收干净”的要求。
+
+### 原因
+- `PermissionProbe` 的部分分支只在其他 target 或测试路径下才会被构造。
+- macOS 单平台编译时,这些分支对 dead_code 分析来说是可见但未构造。
+
+### 修复
+- 给 `PermissionProbe` 增加 `#[allow(dead_code)]`,并补充中文注释说明这是 cfg target 差异导致的正常现象。
+
+### 验证
+- `cargo test --package rustdog --test zenoh_router_client --no-run`: 通过,且不再出现该 warning。
+- `cargo test --package rustdog --bin rdog --no-run`: 通过。
+
+### 以后避免
+- 跨平台 probe 枚举在单平台编译下很容易触发 dead_code warning。
+- 这类类型要么明确 allow,要么按 target 拆分,不要让 warning 混进验证输出。
+## [2026-05-18 18:12:42] [Session ID: codex-phase5-20260518-173716] 错误修复: parser 子模块共享 helper 可见性
+
+### 问题
+- 拆分 `src/control_protocol/parsers.rs` 后,`key.rs`、`pty.rs`、`screenshot.rs` 编译时报 `E0432 unresolved imports`。
+
+### 原因
+- `split_object_fields`、`split_object_field`、`normalize_object_field_name` 被误留在 `key.rs`。
+- 但 PTY 和 screenshot parser 也依赖这三个对象字段 helper,所以它们应该属于 common parser registry。
+
+### 修复
+- 将三个 helper 移回 `src/control_protocol/parsers.rs`。
+- 子模块继续通过 `super::{...}` 引用 common helper。
+
+### 验证
+- `cargo test --package rustdog --bin rdog -- control_protocol::tests`: 14 passed。
+- `cargo test --package rustdog --bin rdog --no-run`: 通过。
+- `cargo test --package rustdog --test zenoh_router_client --no-run`: 通过。
+- `cargo test --package rustdog --test control_lanes --no-run`: 通过。
+- `cargo test --package rustdog --test control_websocket --no-run`: 通过。

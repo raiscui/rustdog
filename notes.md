@@ -665,3 +665,325 @@
 - 全局 skill 现在只是项目内 skill 的连接入口。
 - 后续维护只需要改仓库内 `.codex/skills/rdog-control`。
 - 旧全局目录已保留到 `/tmp/rdog-control-global-backup-20260518-104751` 作为回退点。
+
+## [2026-05-18 13:00:51] [Session ID: 019e38be-b9d9-76f0-aabc-fad94a2bcf12] 笔记: autoresearch rustdog 能力演进建议
+
+## 来源
+
+### 来源1: README 和项目经验
+
+- 路径: `README.md`
+- 要点:
+  - 当前项目定位已经是 remote control plane,不是单纯 reverse shell。
+  - `rdog control` 的 agent flow 是写 line-control、收 `@response` / `@savefile` / `@pty-*` frame。
+  - README 已列出 Zenoh target-name、PTY、GUI actions、structured responses。
+
+- 路径: `EXPERIENCE.md`
+- 要点:
+  - line-control 要保持显式协议请求和裸 shell 行分层。
+  - Zenoh autodiscovery 是主路径,`--entry-point` 是 fallback。
+  - PTY 完成条件必须由 `@pty-exit` / `@pty-closed` lifecycle frame 决定。
+  - macOS/Windows 权限要当作一等错误。
+  - `rdog-control` skill 已经是长期 agent 使用入口。
+
+### 来源2: 当前源码
+
+- 路径: `src/control_frames.rs`
+- 要点:
+  - `ControlFrame`、`ControlExecutionOutcome`、`SaveFileFrame` 和 PTY lifecycle frame 已经存在。
+  - 这推翻了“下一步先实现 ControlFrame”的旧候选判断。
+
+- 路径: `src/control_core.rs`
+- 要点:
+  - `execute_explicit_control_request` 已返回 `ControlExecutionOutcome`。
+  - `@screenshot` 已直接走 screenshot producer,可返回多 frame outcome。
+
+- 路径: `src/zenoh_control.rs`
+- 要点:
+  - 仍保留 control queryable。
+  - 已有 session bridge,通过 `to-daemon` / `to-control` channel 转发 frame。
+  - 当前缺口更像是缺少 transport-agnostic `ControlPeerSession`,不是缺少单个 Zenoh frame helper。
+
+- 路径: `src/screenshot.rs`
+- 要点:
+  - 默认 composite screenshot 会生成 image savefile、manifest savefile 和 final `screenshot-bundle` response。
+
+- 路径: `src/control_actions.rs`
+- 要点:
+  - mouse、AX、window、type-text 已接入 `SystemControlActionExecutor`。
+  - GUI 原子能力已经比较丰富,下一步重点应是 agent workflow 产品化和验证矩阵。
+
+### 来源3: 规格和测试
+
+- 路径: `specs/bidirectional-control-plane-plan.md`
+- 要点:
+  - 长期目标是 control 和 daemon 都是 control peers。
+  - `@savefile` 应作为普通双向结果/控制指令。
+
+- 路径: `specs/code-agent-rdog-control-usage.md`
+- 要点:
+  - agent 使用心智是 stdio bridge + Zenoh + daemon + host。
+  - 能力矩阵已经覆盖 shell、PTY、screenshot、AX、window、mouse。
+
+- 路径: `tests/zenoh_router_client.rs`
+- 要点:
+  - 已有 autodiscovery 测试和 session keyexpr 测试。
+  - PTY detach/attach/close 在 session channel 上已有覆盖。
+
+## 综合发现
+
+- 正式推荐的第一优先级是完成 `ControlPeerSession` 一等抽象,让 TCP / WebSocket / Zenoh 共享 frame dispatch、request id、savefile receiver 和 terminal lifecycle gate。
+- 第二优先级是把 Zenoh queryable 降级为 bootstrap / legacy,富能力默认走 session channel。
+- 第三优先级是把 GUI agent 能力从原子命令升级成 `observe -> locate -> act -> verify` recipe 和真实场景回归。
+- 第四优先级是做 `@capabilities` / `rdog doctor` 级别的结构化权限与平台诊断。
+- 第五优先级是把 SDK 对接文档升级成 conformance surface。
+- 第六优先级是结构性减负,因为多个核心文件已经超过项目建议线。
+
+## [2026-05-18 13:11:09] [Session ID: 019e38be-b9d9-76f0-aabc-fad94a2bcf12] 笔记: ralplan Architect 第一轮反馈
+
+## 来源
+
+### 来源1: Architect review
+
+- 结论: `ITERATE`
+- 要点:
+  - 支持 Option A 的方向,但要求把边界钉得更细。
+  - `ControlPeerSession` 不应成为更大的 wrapper。
+  - savefile receiver / 落盘策略已经分散在 client adapter 中,不能被粗暴塞进 core。
+  - queryable 保留 bootstrap / legacy fallback 会形成真实 tradeoff,但不能直接删掉。
+  - PTY close / session close 语义必须先讲清楚。
+
+## 综合发现
+
+- draft 已补 `Boundary Inventory`。
+- `ControlPeerSession should own` 已收窄为 frame ordering、request correlation、lifecycle gating、outbound fan-out 和 terminal completion detection。
+- `ControlPeerSession should not own` 明确排除 savefile on-disk policy、screenshot backend、PTY process spawn、transport construction 和 permission probing。
+- Phase 3 已改成迁移 / 硬化既有 Zenoh session channel。
+
+## [2026-05-18 13:11:09] [Session ID: 019e38be-b9d9-76f0-aabc-fad94a2bcf12] 笔记: ralplan Architect 第二轮反馈
+
+## 来源
+
+### 来源1: Architect review
+
+- 结论: `ITERATE`
+- 关键点:
+  - `savefile receiver policy` 这个词还会把 core 往回拉,应改成 `savefile routing / persistence policy` 并明确留在 adapter/policy。
+  - `@pty-close` 的单一语义已可冻结,需要直接把 `@pty-detach` 和 disconnect / transport lost 的行为写成固定结果。
+  - `outbound frame fan-out` 这个说法也偏宽,应收窄为 `ordered outbound frame queue`。
+
+## 综合发现
+
+- draft 已更新为单义边界。
+- Phase 1 不再把 savefile policy 放进 core。
+- Phase 0 冻结了 PTY close / detach / disconnect / transport lost 的默认动作。
+
+## [2026-05-18 13:11:09] [Session ID: 019e38be-b9d9-76f0-aabc-fad94a2bcf12] 笔记: ralplan Architect 第三轮通过
+
+## 来源
+
+### 来源1: Architect review
+
+- 结论: `APPROVE`
+- 仍需保留的实现提醒:
+  - `ControlPeerSession` 的 `terminal completion detection` 和 `session close / detach / attach state hooks` 只能是 wire-level gating。
+  - PTY process、savefile persistence、transport plumbing 都必须留给 adapter / backend / policy。
+
+## 综合发现
+
+- 计划的架构方向已经通过。
+- 下一步进入 Critic,重点检查 testable acceptance criteria、风险缓解和 execution handoff 是否完整。
+
+## [2026-05-18 13:11:09] [Session ID: 019e38be-b9d9-76f0-aabc-fad94a2bcf12] 笔记: ralplan Critic 第一轮反馈
+
+## 来源
+
+### 来源1: Critic review
+
+- 结论: `ITERATE`
+- 必须修改:
+  - `ControlPeerSession` 不能隐性拥有 PTY lifecycle owner 角色。
+  - PTY close 语义必须写清“谁执行进程动作”。
+  - TCP screenshot、WebSocket screenshot、Zenoh rich control、PTY lifecycle、capability failure 必须给具体命令或测试名。
+  - Observability 必须有测试计划,不能只列日志字段。
+  - Acceptance Criteria 必须有可观察信号。
+
+## 综合发现
+
+- draft 已补具体验证命令。
+- draft 已补新增测试名:
+  - `control_session::tests::should_emit_ordered_frames_without_owning_savefile_persistence`
+  - `control_session::tests::should_not_log_savefile_base64_payload`
+  - `control_session::tests::should_emit_terminal_completion_only_for_terminal_frames`
+  - `zenoh_control::tests::should_distinguish_session_timeout_transport_close_and_terminal_frames`
+  - `tests/zenoh_router_client::control_should_reject_rich_frame_over_legacy_queryable_path`
+- draft 已把首个结构性减负目标固定为 `src/control_protocol.rs`。
+
+## [2026-05-18 13:11:09] [Session ID: 019e38be-b9d9-76f0-aabc-fad94a2bcf12] 笔记: post-Critic Architect 通过
+
+## 来源
+
+### 来源1: Architect review
+
+- 结论: `APPROVE`
+- 合成建议:
+  - `session_id`、`frame_kind`、`request_id` 可以是 core invariant。
+  - `transport`、`target_name`、`savefile_path` 应由 adapter / policy 注入或在 adapter-level 测试验证。
+  - 不要让 observability 测试把 core 拉回 transport owner。
+
+## 综合发现
+
+- draft 已将该合成建议写入 Observability 执行约束和 Risks。
+
+## [2026-05-18 13:45:05] [Session ID: 019e38be-b9d9-76f0-aabc-fad94a2bcf12] 笔记: ralplan 最终通过
+
+## 来源
+
+### 来源1: Critic review
+
+- 结论: `APPROVE`
+- 非阻塞建议:
+  - `control_session::tests::should_log_frame_kind_request_id_and_target_without_payload_body` 中的 `target` 明确成 adapter 注入观测字段。
+  - Phase 1 的 parser 表述收紧为“接收已解析请求”或“委派现有 parser”。
+
+## 综合发现
+
+- final plan 已写入 `.omx/plans/ralplan-rustdog-control-peer-session-evolution.md`。
+- draft 与 final plan 内容一致,并吸收了 Critic 的非阻塞修订。
+
+## [2026-05-18 14:25:21] [Session ID: 019e38be-b9d9-76f0-aabc-fad94a2bcf12] 笔记: Ralph Phase 0-2 初版实现调查
+
+## 来源
+
+### 来源1: 源码只读调查
+
+- `src/control_frames.rs` 已有 `ControlFrame` / `ControlExecutionOutcome`,但没有 `ControlPeerSession`。
+- `src/shell.rs` 已在 TCP / WebSocket receiver 侧逐 frame 写 transport,但逻辑仍是 adapter 本地循环。
+- `src/zenoh_control.rs` 已有 session channel 和 `publish_outcome_to_session_channel()`,但 frame dispatch 也仍在 Zenoh adapter 内部。
+- `src/pty_control.rs` 已把 PTY terminal completion 固定在 `@pty-exit` / `@pty-closed`,这和 plan 的 session lifecycle gate 一致。
+
+### 来源2: 编译反馈
+
+- 初版 `ControlPeerFrameSink` 使用 `impl<W: Write>` blanket impl。
+- 编译报错 `E0119 conflicting implementations`,因为上游 crate 将来可能给 `zenoh::pubsub::Publisher` 实现 `Write`。
+- 修正为显式 `LineWriteFrameSink` wrapper,避免 blanket impl 和外部类型冲突。
+- 初版测试把 `@savefile` wire 字段写成 `request_id`,实际稳定字段是 `id`。
+- 修正测试期望,以真实 `SaveFileFrame::to_wire_message()` 语义为准。
+
+## 综合发现
+
+- 当前最稳的 Phase 0-2 落点是新增薄 `src/control_session.rs`,不要移动 PTY process ownership 或 savefile persistence。
+- `ControlPeerSession` 现在只拥有 ordering / dispatch / lifecycle decision / observability summary。
+- TCP / WebSocket 和 Zenoh 已开始通过同一个 session core dispatch frame,但 Phase 3 的 Zenoh rich-control 主路径迁移还没有提前展开。
+
+## [2026-05-18 15:13:16] [Session ID: 019e38be-b9d9-76f0-aabc-fad94a2bcf12] 笔记: screenshot live smoke 与显示器休眠
+
+## 来源
+
+### 来源1: Architect review
+
+- Verdict: `ITERATE`
+- 阻断项: Phase 2 缺真实运行态 `@screenshot -> @savefile` smoke 证据。
+
+### 来源2: 直接运行 ignored tests
+
+- TCP smoke 失败:
+  - `cargo test --package rustdog --test control_lanes daemon_control_lane_should_execute_screenshot_and_save_file_via_rdog_control -- --exact --ignored --nocapture`
+  - 输出包含 `@response {"id":7,"code":70,"error":"没有可截图的显示器"}`
+- WebSocket smoke 失败:
+  - `cargo test --package rustdog --test control_websocket control_cli_should_execute_screenshot_and_save_file_over_websocket -- --exact --ignored --nocapture`
+  - 输出同样包含 `没有可截图的显示器`
+
+### 来源3: 环境状态
+
+- `system_profiler SPDisplaysDataType` 显示内置屏和外接屏都是 `Display Asleep: Yes`。
+- `caffeinate -u -t 5` 后,系统报告仍显示 display asleep。
+
+### 来源4: 最小验证
+
+- `caffeinate -d -u -t 30 cargo test --package rustdog --test control_lanes daemon_control_lane_should_execute_screenshot_and_save_file_via_rdog_control -- --exact --ignored --nocapture`: 通过。
+- `caffeinate -d -u -t 30 cargo test --package rustdog --test control_websocket control_cli_should_execute_screenshot_and_save_file_over_websocket -- --exact --ignored --nocapture`: 通过。
+
+## 综合发现
+
+- 当前失败不是 TCP/WebSocket session dispatch 差异造成的,两条路径在显示器休眠时同样拿不到截图显示器。
+- live screenshot smoke 需要让 display awake assertion 覆盖整个测试窗口,单独提前执行一次 `caffeinate -u` 不够稳。
+- Phase 2 的 live smoke 证据现在已经补齐: TCP 和 WebSocket 都在同一环境处理方式下通过。
+
+## [2026-05-18 16:30:01] [Session ID: codex-phase3-20260518-160435] 笔记: Ralph Phase 3 Zenoh queryable 降级
+
+## 来源
+
+### 来源1: 最小红测
+
+- 新增 `tests/zenoh_router_client.rs::control_should_reject_rich_frame_over_legacy_queryable_path` 后,未改运行时时失败。
+- 失败输出证明直接对 Zenoh queryable 发送 `@screenshot#7` 会返回 image `@savefile`、manifest `@savefile` 和 final `screenshot-bundle`。
+- 这说明 queryable 当时仍是富能力执行路径之一,不只是 bootstrap / legacy compatibility。
+
+### 来源2: 边界复查
+
+- CLI `rdog control TARGET` 已经通过 `build_client_session_bridge()` 打开 session,再用 `to-daemon` publisher 发送普通 line-control。
+- `open_daemon_session_bridge()` 旧实现里普通 line-control outcome 手写循环发送 frame,这次改成复用 `ControlPeerSession::dispatch_outcome_ref()`。
+- 直接 queryable payload 和旧 `__rdog_session__:<id>\n...` query payload 都需要拦截 session-only 富命令,否则 queryable 仍有隐藏富能力路径。
+
+### 来源3: 外部 review 尝试
+
+- `omx ask claude --agent-prompt architect ...` 失败: 本机没有 `architect` prompt role。
+- `omx ask claude -p ...` 失败: provider 返回 402 insufficient balance。
+- `omx ask gemini -p ...` 30 秒无输出,已手动清理进程。
+- 因此本轮采用本地静态 review + focused tests 作为降级审查证据。
+
+## 综合发现
+
+- `reject_session_channel_only_legacy_query()` 在执行前拦截 screenshot、PTY lifecycle、mouse、AX、window、type-text 和 `@savefile`。
+- `@ping`、`@cmd` 和裸 shell 仍允许走 queryable compatibility。
+- 旧 `__rdog_session__` query payload 遇到富命令时只把 code 78 发到 `to-control`,query reply 只返回 ack,不会再执行 screenshot 或发送 `@savefile`。
+- Phase 3 的关键不是删除 queryable,而是让它无法继续成为富能力主执行通道。
+
+## [2026-05-18 17:00:55] [Session ID: codex-phase4-20260518-163845] 笔记: Phase 4 capabilities 单一真相源
+
+## 来源
+
+### 来源1: 当前代码入口
+
+- `src/control_protocol.rs` 原本没有 `@capabilities` kind。
+- `src/control_core.rs` 已有 `render_structured_success_response()`,可以直接返回 JSON object,不需要发明新的 frame。
+- `src/control_actions.rs` 已经把 `PermissionDenied` 和 `Unsupported` 映射到上层 code 语义,对应 code `77` / `78`。
+
+### 来源2: Phase 4 目标
+
+- GUI agent workflow 不能继续靠平台名猜能力。
+- 权限诊断必须结构化暴露 macOS Accessibility / Screen Recording、Windows UIPI、Linux backend。
+- `rdog doctor` 暂不作为第一入口,后续应复用同一份 capability model。
+
+## 综合发现
+
+- `@capabilities` 适合作为协议层单一真相源,返回 `rdog.capabilities.v1`。
+- report 中每个能力都应有 `status`,并且把 `permission_denied` 和 `unsupported` 明确区分。
+- GUI agent recipe 固定为 `@capabilities -> observe -> locate -> activate_or_focus -> semantic_action -> verify -> fallback_recipe`。
+- 这条命令只产生单条 `@response`,所以可以保留在 Zenoh legacy queryable 的 bootstrap / diagnosis 能力范围内,不必强制走 session channel。
+## [2026-05-18 17:55:18] [Session ID: codex-phase5-20260518-173716] 笔记: control_protocol 结构减负
+
+## 综合发现
+
+- 结构性减负第一刀选 `src/control_protocol.rs` 是正确的,因为它同时承载类型、payload parser 和测试,继续加 GUI / capability 命令会扩大修改半径。
+- 只把所有 parser 搬到单个 `parsers.rs` 不够,该文件会变成 1286 行的新大文件。
+- 最终拆分为父模块、common parser registry、`pty` / `screenshot` / `key` 三个 payload parser 子模块和独立测试模块。
+- 旧的 `crate::control_protocol::{normalize_object_field_name, object_inner, parse_quoted_payload, split_object_field, split_object_fields}` 导入路径保持不变。
+
+## 验证结论
+
+- `control_protocol::tests` 14 个用例通过,说明 line-control wire syntax、request id、错误路径和默认值未被拆分改动。
+- `rdog` bin、`zenoh_router_client`、`control_lanes`、`control_websocket` 的 no-run 编译通过,说明外层 transport / session 入口没有被 re-export 破坏。
+## [2026-05-18 18:12:42] [Session ID: codex-phase5-20260518-173716] 笔记: control_actions 测试拆分
+
+## 综合发现
+
+- `src/control_actions.rs` 的主执行路径本身不算最重,真正撑高行数的是内联测试块。
+- 把测试移到 `src/control_actions/tests.rs` 后,主文件回到 802 行,终于落回项目健康线。
+- 这类拆分对行为风险很低,因为测试文件仍然通过 `use super::*;` 直接访问同一模块的私有函数。
+
+## 验证结论
+
+- `control_actions::tests` 17 个用例通过。
+- `cargo test --package rustdog --bin rdog --no-run`、`cargo test --package rustdog --test zenoh_router_client --no-run`、`cargo test --package rustdog --test control_lanes --no-run`、`cargo test --package rustdog --test control_websocket --no-run` 都通过。

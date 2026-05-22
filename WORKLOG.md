@@ -490,3 +490,295 @@ Buttons:
 ### 总结感悟
 - 现在项目内 `.codex/skills/rdog-control` 是单一维护面。
 - 全局 skill 入口只负责让 Codex skill discovery 继续发现它。
+
+## [2026-05-18 13:00:51] [Session ID: 019e38be-b9d9-76f0-aabc-fad94a2bcf12] 任务名称: autoresearch rustdog 能力演进建议
+
+### 任务内容
+- 按 `$oh-my-codex:autoresearch` 的 `prompt-architect-artifact` 模式输出项目能力演进建议。
+- 将建议落到 `.omx/specs/autoresearch-rustdog-evolution/` 产物中,而不是只留在聊天里。
+
+### 完成过程
+- 读取 `README.md`、`EXPERIENCE.md`、核心 specs、当前源码和测试。
+- 对比初始候选方向和源码现状,确认 `ControlFrame` / `ControlExecutionOutcome` 已经落地。
+- 将正式建议收敛为: 优先完成 `ControlPeerSession` 一等抽象,再推进 Zenoh session channel、GUI agent recipe、权限诊断、SDK conformance 和结构性减负。
+- 写入 `mission.md`、`sandbox.md`、`report.md` 和 `result.json`。
+- 更新 autoresearch state 为 `artifact-approved`。
+
+### 验证
+- `jq -e '.architect_review.verdict == "approved" and (.output_artifact_path | length > 0)' .omx/specs/autoresearch-rustdog-evolution/result.json`: 通过。
+- `test -s .omx/specs/autoresearch-rustdog-evolution/report.md && test -s .omx/specs/autoresearch-rustdog-evolution/result.json`: 通过。
+- `git diff --check`: 通过。
+
+### 总结感悟
+- rustdog 下一阶段的主线不应是继续堆更多单点 GUI 命令,而是把现有能力收束成统一的 agent control runtime。
+- 当前最值得落地的下一张实施卡片是 `ControlPeerSession` core,让 TCP / WebSocket / Zenoh 共享 frame dispatch 和 request lifecycle。
+
+## [2026-05-18 13:45:05] [Session ID: 019e38be-b9d9-76f0-aabc-fad94a2bcf12] 任务名称: ralplan ControlPeerSession 能力演进实施规划
+
+### 任务内容
+- 将 `$ralplan` 的 P0-P5 能力演进建议转成 consensus plan。
+- 通过 Planner -> Architect -> Critic 的顺序闭环,最终输出到 `.omx/plans/`。
+
+### 完成过程
+- 先清理与 autoresearch 冲突的 active state,再创建 grounded context snapshot。
+- 读取 README、EXPERIENCE、核心 specs、源码和 tests,建立可追溯证据。
+- 写出 Planner 初稿和 RALPLAN-DR summary,再经过多轮 Architect / Critic 迭代。
+- 按反馈把 `ControlPeerSession` 的边界收窄到 ordering / correlation / lifecycle gating,并把 savefile persistence、PTY process、transport plumbing 留在 adapter / backend / policy 层。
+- 增加具体验证命令、observability 测试、acceptance criteria 和 ADR。
+- 将最终 plan 落到 `.omx/plans/ralplan-rustdog-control-peer-session-evolution.md`。
+
+### 总结感悟
+- 这个项目下一阶段最重要的不是再堆命令,而是把现有能力收束成统一的可验证 runtime。
+- 只要边界没钉死,session core 很容易悄悄变成第二个 transport wrapper。
+
+## [2026-05-18 13:48:36] [Session ID: 019e38be-b9d9-76f0-aabc-fad94a2bcf12] 任务名称: ralplan 最终收尾验证
+
+### 任务内容
+- 对已落盘的 `ralplan` consensus plan 做最终复核。
+- 重新确认 final plan 与 planner draft 内容一致,并检查工作区没有额外格式问题。
+
+### 完成过程
+- 执行 `git diff --check`。
+- 执行 `test -s .omx/plans/ralplan-rustdog-control-peer-session-evolution.md`。
+- 执行 `cmp -s .omx/drafts/ralplan-rustdog-control-peer-session-evolution-planner-draft.md .omx/plans/ralplan-rustdog-control-peer-session-evolution.md`。
+- 复核 `task_plan.md`、`notes.md`、`WORKLOG.md` 的收尾记录,确认这轮计划已经完整落盘。
+
+### 总结感悟
+- 计划类任务不只要“生成出来”,还要把验证证据补齐,这样后续接手的人才知道它不是半成品。
+- draft 保留,final 落盘,再加一次一致性校验,这个节奏对 consensus 工作流很稳。
+
+## [2026-05-18 14:53:01] [Session ID: 019e38be-b9d9-76f0-aabc-fad94a2bcf12] 任务名称: Ralph Phase 0-2 ControlPeerSession 实施
+
+### 任务内容
+- 执行 `.omx/plans/ralplan-rustdog-control-peer-session-evolution.md` 中 Ralph path 的 Phase 0-2。
+- 先把 `ControlPeerSession` 做成一等薄抽象,再让 TCP / WebSocket / Zenoh 复用 frame dispatch、result routing 和 PTY lifecycle gate。
+
+### 完成过程
+- 新增 `src/control_session.rs`,包含 `ControlPeerSession`、`ControlPeerFrameSink`、`LineWriteFrameSink`、line-control result routing 和 PTY lifecycle decision。
+- 在 `src/main.rs` 注册新模块。
+- 在 `src/shell.rs` 中让 TCP / WebSocket receiver 通过 `ControlPeerSession` dispatch outcome,client 侧通过共享 route helper 处理 `@response` / `@savefile`。
+- 在 `src/zenoh_control.rs` 中让 session channel outcome 发布复用 `ControlPeerSession`,并让普通 Zenoh client reply handling 复用同一套 result routing。
+- 更新 `specs/control-frame-refactor-plan.md`,把 `ControlFrame` / `ControlExecutionOutcome` / `ControlPeerSession` 的当前 baseline 和 PTY close 语义写清楚。
+- 记录 compile/test 中遇到的 trait blanket impl 冲突和 cargo test 参数位置问题到 `ERRORFIX.md`。
+
+### 验证
+- `cargo test --package rustdog --bin rdog -- control_session::tests`: 5 passed。
+- `cargo test --package rustdog --bin rdog -- control_frames::tests control_core::tests shell::tests`: 34 passed。
+- `cargo test --package rustdog --bin rdog --no-run`: 通过。
+- `cargo test --package rustdog --test control_lanes --no-run`: 通过。
+- `cargo test --package rustdog --test control_websocket --no-run`: 通过。
+- `cargo test --package rustdog --test zenoh_router_client --no-run`: 通过。
+- `cargo test --package rustdog --test control_lanes daemon_control_lane_should_execute_script_via_rdog_control -- --exact`: 通过。
+- `cargo test --package rustdog --test control_websocket control_cli_should_drive_websocket_daemon_end_to_end -- --exact`: 通过。
+- `cargo test --package rustdog --test zenoh_router_client control_should_find_daemon_by_target_name_without_explicit_entrypoint -- --exact`: 通过。
+- `cargo test --package rustdog --test zenoh_router_client control_should_execute_literal_shell_line_in_zenoh_profile -- --exact`: 通过。
+- `cargo test --package rustdog --test zenoh_router_client control_should_detach_and_attach_pty_in_zenoh_profile -- --exact`: 通过。
+- `cargo test --package rustdog --test zenoh_router_client control_session_should_reresolve_after_daemon_restart -- --exact`: 通过。
+- `caffeinate -d -u -t 30 cargo test --package rustdog --test control_lanes daemon_control_lane_should_execute_screenshot_and_save_file_via_rdog_control -- --exact --ignored --nocapture`: 通过。
+- `caffeinate -d -u -t 30 cargo test --package rustdog --test control_websocket control_cli_should_execute_screenshot_and_save_file_over_websocket -- --exact --ignored --nocapture`: 通过。
+- `cargo fmt -- --check`: 通过。
+- `git diff --check`: 通过。
+
+### 总结感悟
+- 这一阶段的关键不是把 session core 做大,而是把它稳定地放在 adapter 之间。
+- `ControlPeerSession` 现在仍然很薄,这是好事; savefile persistence、PTY process ownership 和 transport plumbing 都没有被它吞进去。
+- screenshot live smoke 需要让 display awake assertion 覆盖实际测试窗口,否则显示器休眠时会误报 `没有可截图的显示器`。
+
+## [2026-05-18 15:30:28] [Session ID: 019e38be-b9d9-76f0-aabc-fad94a2bcf12] 任务名称: Ralph Phase 0-2 deslop 与最终回归
+
+### 任务内容
+- 按 Ralph 规则对本轮 changed files 运行 `oh-my-codex:ai-slop-cleaner` 标准流程。
+- 清理后重跑完整 post-deslop regression。
+
+### 完成过程
+- deslop scope 限定在本轮改动文件:
+  - `src/control_session.rs`
+  - `src/main.rs`
+  - `src/shell.rs`
+  - `src/zenoh_control.rs`
+  - `specs/control-frame-refactor-plan.md`
+  - `task_plan.md`
+  - `notes.md`
+  - `WORKLOG.md`
+  - `ERRORFIX.md`
+- fallback-like 扫描没有发现新的 masking fallback。
+- 将 `LineWriteFrameSink` 收紧为 `#[cfg(test)]`,避免测试专用 writer adapter 成为生产 API 噪音。
+
+### 验证
+- `cargo test --package rustdog --bin rdog -- control_session::tests control_frames::tests control_core::tests shell::tests`: 34 passed。
+- `cargo test --package rustdog --bin rdog --no-run`: 通过。
+- `cargo test --package rustdog --test control_lanes --no-run`: 通过。
+- `cargo test --package rustdog --test control_websocket --no-run`: 通过。
+- `cargo test --package rustdog --test zenoh_router_client --no-run`: 通过。
+- `caffeinate -d -u -t 30 cargo test --package rustdog --test control_lanes daemon_control_lane_should_execute_screenshot_and_save_file_via_rdog_control -- --exact --ignored --nocapture`: 通过。
+- `caffeinate -d -u -t 30 cargo test --package rustdog --test control_websocket control_cli_should_execute_screenshot_and_save_file_over_websocket -- --exact --ignored --nocapture`: 通过。
+- `cargo fmt -- --check`: 通过。
+- `git diff --check`: 通过。
+
+### 总结感悟
+- 这次清理没有扩大 scope,只把测试专用 adapter 从生产 API 面上移走。
+- `ControlPeerSession` 继续保持薄边界,下一步 Phase 3 再决定是否把 Zenoh `dispatch_outcome_ref` 收紧成完整 report path。
+
+## [2026-05-18 15:40:23] [Session ID: codex-resume-20260518-154023] 任务名称: Ralph Phase 0-2 resume 收尾复核
+
+### 任务内容
+- 接续 `$ralph .omx/plans/ralplan-rustdog-control-peer-session-evolution.md` 的已完成现场。
+- 在当前回合内重新验证核心测试、编译面、live screenshot smoke、格式检查、diff 检查和 Ralph state。
+
+### 完成过程
+- 读取 Ralph / verification / humanizer 技能规则,确认收尾必须以 fresh evidence 为准。
+- 复查 `task_plan.md` 中 Phase 0-2 的完成记录。
+- 重新运行 focused unit tests、三条集成测试 no-run、两条 ignored screenshot savefile smoke。
+- 确认 `omx state read --input '{"mode":"ralph"}' --json` 返回 Ralph state 已不存在。
+- 保留 `.codex/skills/.DS_Store` 为未跟踪的本机噪音,没有纳入本轮改动。
+
+### 验证
+- `cargo test --package rustdog --bin rdog -- control_session::tests control_frames::tests control_core::tests shell::tests`: 34 passed。
+- `cargo test --package rustdog --bin rdog --no-run`: 通过。
+- `cargo test --package rustdog --test control_lanes --no-run`: 通过。
+- `cargo test --package rustdog --test control_websocket --no-run`: 通过。
+- `cargo test --package rustdog --test zenoh_router_client --no-run`: 通过。
+- `caffeinate -d -u -t 30 cargo test --package rustdog --test control_lanes daemon_control_lane_should_execute_screenshot_and_save_file_via_rdog_control -- --exact --ignored --nocapture`: 1 passed。
+- `caffeinate -d -u -t 30 cargo test --package rustdog --test control_websocket control_cli_should_execute_screenshot_and_save_file_over_websocket -- --exact --ignored --nocapture`: 1 passed。
+- `cargo fmt -- --check`: 通过。
+- `git diff --check`: 通过。
+- `omx state read --input '{"mode":"ralph"}' --json`: `{"exists":false,"mode":"ralph"}`。
+
+### 总结感悟
+- 这次 resume 后重新跑验证是必要的,因为最终交付不能只依赖上一轮摘要。
+- live screenshot smoke 继续需要 `caffeinate -d -u` 包住整个测试命令,这样显示器不会在截图窗口前进入休眠状态。
+
+## [2026-05-18 16:30:01] [Session ID: codex-phase3-20260518-160435] 任务名称: Ralph Phase 3 Zenoh session channel 收紧
+
+### 任务内容
+- 继续 `.omx/plans/ralplan-rustdog-control-peer-session-evolution.md` 的 Phase 3。
+- 把 Zenoh rich control 的主路径进一步收紧到 session channel,并让 legacy queryable 只保留 bootstrap / legacy compatibility。
+
+### 完成过程
+- 先做最小红测,新增 `control_should_reject_rich_frame_over_legacy_queryable_path`。
+- 发现 legacy queryable 直接 `@screenshot#7` 会产出 image / manifest / bundle 三个 frame,说明 queryable 仍是富能力执行通道。
+- 在 `src/zenoh_control.rs` 增加 `reject_session_channel_only_legacy_query()` 和 `is_session_channel_only_command()`,对 rich 命令提前返回 code 78。
+- 进一步把旧 `__rdog_session__:<id>\n...` payload 也收紧为只发 code 78 到 `to-control`,不再执行 rich screenshot。
+- 将 daemon session bridge 的普通 line-control outcome dispatch 改为复用 `ControlPeerSession::dispatch_outcome_ref()`。
+- 补了 unit / integration 负向测试,并重新跑了 Zenoh focused tests、screenshot live smoke、`cargo fmt -- --check` 和 `git diff --check`。
+- 外部 architect review 尝试失败后,按本地证据收尾。
+
+### 验证
+- `cargo test --package rustdog --test zenoh_router_client control_should_execute_literal_shell_line_in_zenoh_profile -- --exact`: 通过。
+- `cargo test --package rustdog --test zenoh_router_client control_should_find_daemon_by_target_name_without_explicit_entrypoint -- --exact`: 通过。
+- `cargo test --package rustdog --test zenoh_router_client control_should_reach_daemon_via_explicit_entrypoint_fallback -- --exact`: 通过。
+- `cargo test --package rustdog --test zenoh_router_client external_peer_should_send_control_request_via_zenoh_to_daemon_channel -- --exact`: 通过。
+- `cargo test --package rustdog --test zenoh_router_client control_should_reject_rich_frame_over_legacy_queryable_path -- --exact`: 通过。
+- `cargo test --package rustdog --test zenoh_router_client control_should_reject_rich_frame_over_legacy_session_query_payload -- --exact`: 通过。
+- `cargo test --package rustdog --test zenoh_router_client control_should_detach_and_attach_pty_in_zenoh_profile -- --exact`: 通过。
+- `cargo test --package rustdog --test zenoh_router_client control_session_should_reresolve_after_daemon_restart -- --exact`: 通过。
+- `caffeinate -d -u -t 30 cargo test --package rustdog --test zenoh_router_client control_should_execute_screenshot_and_save_file_in_zenoh_profile -- --exact --ignored --nocapture`: 通过。
+- `cargo test --package rustdog --bin rdog -- zenoh_control::tests::legacy_queryable_should_reject_rich_screenshot_requests zenoh_control::tests::legacy_queryable_should_allow_bootstrap_and_compatibility_requests`: 通过。
+- `cargo test --package rustdog --bin rdog --no-run`: 通过。
+- `cargo test --package rustdog --test zenoh_router_client --no-run`: 通过。
+- `cargo fmt -- --check`: 通过。
+- `git diff --check`: 通过。
+
+### 总结感悟
+- 这次最容易漏掉的不是 CLI 主路径,而是旧 queryable 兼容面。
+- 只要 direct query payload 还可以产出 `@savefile`,就说明富能力主路径还没真正收干净。
+- 把 direct query 和旧 session query payload 都补成负向测试之后,Phase 3 的边界才算稳了一点。
+
+## [2026-05-18 17:09:25] [Session ID: codex-phase4-20260518-163845] 任务名称: Ralph Phase 4 @capabilities 与 GUI agent recipe
+
+### 任务内容
+- 进入 `.omx/plans/ralplan-rustdog-control-peer-session-evolution.md` 的 Phase 4。
+- 新增 `@capabilities` 作为远程 daemon 能力诊断入口。
+- 将 GUI agent 工作流固定成先探测能力、再观察定位、再语义动作和验证。
+
+### 完成过程
+- 新增 `src/control_capabilities.rs`,生成 `rdog.capabilities.v1` report。
+- `src/control_protocol.rs` 支持 `@capabilities` 和 `@capabilities#id`,并拒绝 payload。
+- `src/control_core.rs` 直接渲染 capabilities structured `@response`,不把诊断逻辑塞进 action executor。
+- `src/control_actions.rs` 和测试 fake executor 补齐新枚举分支。
+- `src/zenoh_control.rs` 明确 `@capabilities` 可以留在 legacy queryable 的 bootstrap / diagnosis 范围内。
+- 更新 `.codex/skills/rdog-control`、`references/control-workflow.md`、`references/protocol.md`、`specs/control-line-protocol.md`、`specs/code-agent-rdog-control-usage.md` 和 `specs/rdog-non-mouse-semantic-control-plan.md`。
+- 用 `beautiful-mermaid-rs --ascii` 验证改动过的 Mermaid 决策流。
+- 修正一次新代码 warning,并把误插到 notes 中部的本轮笔记移动到文件末尾。
+
+### 验证
+- `cargo test --package rustdog --bin rdog -- control_capabilities::tests control_protocol::tests::parse_should_support_key_paste_script_cmd_and_screenshot control_protocol::tests::parse_should_support_optional_request_ids control_protocol::tests::parse_should_reject_unknown_or_empty_or_multiline_payloads_or_bad_request_ids control_core::tests::explicit_request_should_render_capabilities_report zenoh_control::tests::legacy_queryable_should_allow_bootstrap_and_compatibility_requests`: 8 passed。
+- `cargo test --package rustdog --bin rdog --no-run`: 通过。
+- `cargo test --package rustdog --test zenoh_router_client --no-run`: 通过。
+- `cargo test --package rustdog --all-targets --no-run`: 通过。
+- `cargo fmt -- --check`: 通过。
+- `git diff --check`: 通过。
+- `python3 ~/.codex/skills/.system/skill-creator/scripts/quick_validate.py .codex/skills/rdog-control`: 通过。
+
+### 总结感悟
+- `@capabilities` 应该是 `rdog doctor` 的上游模型,不要让 CLI doctor 和 control protocol 各自定义一份权限语义。
+- GUI agent 的关键不是多一个命令,而是先让权限和平台能力变成结构化结果,避免 agent 在截图、AX、鼠标和文本输入之间盲猜。
+
+## [2026-05-18 18:12:42] [Session ID: codex-phase5-20260518-173716] 任务名称: control_actions 测试拆分
+
+### 任务内容
+- 将 `src/control_actions.rs` 的内联测试迁移到 `src/control_actions/tests.rs`。
+- 保持 `@key`、`@paste`、mouse、AX、window、savefile 的执行逻辑不变。
+
+### 完成过程
+- 先确认 `src/control_actions.rs` 的行数主要被测试块撑高。
+- 新建同名子目录测试模块,让测试继续通过 `use super::*;` 访问私有 helper。
+- 主文件末尾只保留 `#[cfg(test)] mod tests;`,主执行路径没有做语义调整。
+
+### 验证
+- `cargo test --package rustdog --bin rdog -- control_actions::tests`: 17 passed。
+- `cargo test --package rustdog --bin rdog --no-run`: 通过。
+- `cargo test --package rustdog --test zenoh_router_client --no-run`: 通过。
+- `cargo test --package rustdog --test control_lanes --no-run`: 通过。
+- `cargo test --package rustdog --test control_websocket --no-run`: 通过。
+
+### 总结感悟
+- 控制动作层的第一轮减负,测试拆分是最低风险入口。
+- 后续如果继续拆 `control_actions`,更适合按 key input planner / paste report / platform error mapping 继续分层。
+
+## [2026-05-18 18:25:24] [Session ID: codex-phase5-20260518-173716] 任务名称: shell 测试拆分
+
+### 任务内容
+- 将 `src/shell.rs` 的末尾内联测试迁移到 `src/shell/tests.rs`。
+- 保持 control receiver、savefile receiver、JSON agent response、PTY bridge 相关逻辑不变。
+
+### 完成过程
+- 先确认 shell 主文件的主要减负入口是末尾测试块。
+- 新建 `src/shell/tests.rs`,把原测试块作为同名子模块迁移出去。
+- 主文件末尾只保留 `#[cfg(test)] mod tests;`。
+
+### 验证
+- `cargo test --package rustdog --bin rdog -- shell::tests`: 9 passed。
+- `cargo test --package rustdog --bin rdog --no-run`: 通过。
+- `cargo test --package rustdog --test zenoh_router_client --no-run`: 通过。
+- `cargo test --package rustdog --test control_lanes --no-run`: 通过。
+- `cargo test --package rustdog --test control_websocket --no-run`: 通过。
+- `cargo fmt -- --check && git diff --check`: 通过。
+
+### 总结感悟
+- `shell.rs` 现在回到 971 行,已经在健康线内。
+- 剩下最大的核心文件是 `src/zenoh_control.rs`,后续应按 bootstrap / target resolve / session bridge / tests helper 继续拆。
+
+## [2026-05-18 19:23:56] [Session ID: 019e38be-b9d9-76f0-aabc-fad94a2bcf12] 任务名称: zenoh_control 深层结构减负
+
+### 任务内容
+- 按 `LATER_PLANS.md` 继续 Phase 5 结构性减负。
+- 将 `src/zenoh_control.rs` 中的 session payload、target resolve、daemon bridge、client PTY/session bridge 逻辑拆成子模块。
+
+### 完成过程
+- 接上已创建的 `src/zenoh_control/target_resolve.rs`,把 `ResolvedTarget`、liveliness parse、target resolve、daemon-name guard 从父模块迁出。
+- 新建 `src/zenoh_control/daemon_bridge.rs`,迁出 `open_daemon_session_bridge()`、daemon bridge publish helper 和 PTY frame 描述 helper。
+- 新建 `src/zenoh_control/client_pty.rs`,迁出 `ZenohClientSessionBridge`、client session bridge open/close、PTY ready/attach、stdin/resize pump 和 session request helper。
+- 父模块 `src/zenoh_control.rs` 降到 906 行,新增子模块分别为 `client_pty.rs` 582 行、`daemon_bridge.rs` 366 行、`target_resolve.rs` 310 行、`session_payload.rs` 157 行。
+- 已将 `LATER_PLANS.md` 中“zenoh_control 深层拆分”完成项清除,避免已落地任务继续停留在待办列表里。
+
+### 验证
+- `cargo test --package rustdog --bin rdog -- zenoh_control::tests`: 6 passed。
+- `cargo test --package rustdog --bin rdog -- zenoh_control::target_resolve::tests`: 2 passed。
+- `cargo test --package rustdog --test zenoh_router_client --no-run`: 通过。
+- `cargo fmt -- --check`: 通过。
+- `git diff --check`: 通过。
+
+### 总结感悟
+- 这次最稳的拆分顺序是先 pure payload / target resolve,再 daemon bridge,最后 client PTY/session bridge。
+- `ZenohClientSessionBridge` 应由 client-side 子模块拥有,父模块只做入口编排,这样不用把 bridge 字段暴露给父模块。

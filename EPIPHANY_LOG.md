@@ -366,3 +366,30 @@
 - `tests/zenoh_router_client.rs::control_should_publish_key_event_after_successful_key_request`
 - `src/control_actions.rs::execute_key_with_dependencies`
 - `src/control_protocol.rs` / `src/control_core.rs` 中 code 77 权限错误契约
+
+## [2026-05-18 16:30:01] [Session ID: codex-phase3-20260518-160435] 主题: Zenoh queryable 兼容面可能悄悄变成第二主路径
+
+### 发现来源
+- 本轮 Phase 3 调整 `src/zenoh_control.rs` 时,新增 `control_should_reject_rich_frame_over_legacy_queryable_path` 后先暴露出 direct queryable `@screenshot#7` 会返回完整 `@savefile` / bundle。
+- 继续检查后又发现旧 `__rdog_session__:<id>\n...` query payload 也可能把 rich request 送进旧 queryable 分支。
+
+### 核心问题
+- 只要兼容层还能直接执行 rich command,queryable 就会成为隐藏的第二主路径。
+- 这种路径不一定体现在 `@response ...` 的表层,因为结果可能被转发到 `to-control`,更难在普通回归里一眼看出。
+
+### 为什么重要
+- 这类问题会让“session channel 主路径收紧”的口径失真。
+- 用户和后续维护者会以为 queryable 只是 bootstrap / legacy,但实际仍能做 screenshot、PTY 或 GUI action。
+
+### 未来风险
+- 如果后续再加 capability、doctor 或 GUI recipe,兼容层会很容易悄悄再长出一条富能力执行面。
+- 仅靠“CLI 主路径走 session”不够,必须持续保留 queryable 负向测试。
+
+### 当前结论
+- queryable 现在已经被收敛为 bootstrap / legacy / compatibility,且对 rich/session-only 命令返回 code 78。
+- direct query payload 和旧 session query payload 都需要各自有负向测试。
+
+### 后续讨论入口
+- `src/zenoh_control.rs` 的 `handle_daemon_control_query()` 和 `reject_session_channel_only_legacy_query()`
+- `tests/zenoh_router_client.rs::control_should_reject_rich_frame_over_legacy_queryable_path`
+- `tests/zenoh_router_client.rs::control_should_reject_rich_frame_over_legacy_session_query_payload`

@@ -230,3 +230,14 @@
 - 实现 `@click` / `@drag` 时,直接复用 manifest 的 `os-logical` 坐标语义。
 - 不要新增第二套屏幕坐标解释,也不要让 agent 只凭大图猜显示器偏移。
 - 如需要单屏调试模式,可以后续追加 `layout:"per-display"` 或 debug-only 输出,但不应改变默认 composite 契约。
+
+## [2026-05-18 17:09:25] [Session ID: codex-phase4-20260518-163845] 后续计划: `rdog doctor` 复用 `@capabilities` 模型
+
+### 背景
+- Phase 4 已先实现协议层 `@capabilities`,让远程 daemon 能返回 `rdog.capabilities.v1`。
+- 本轮没有新增 `rdog doctor` CLI,避免 CLI 和 protocol 同时定义两套权限语义。
+
+### 后续事项
+- 如果继续做 `rdog doctor`,应复用 `src/control_capabilities.rs` 的 report model。
+- doctor 可以增加本地 CLI 呈现、权限恢复提示和退出码,但不要重新发明 macOS Accessibility / Screen Recording、Windows UIPI、Linux backend 的状态字段。
+- 后续如把 capability report 暴露给 SDK conformance fixtures,也应以 `rdog.capabilities.v1` 为唯一 schema。
