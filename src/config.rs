@@ -31,6 +31,7 @@ const LINUX_EXAMPLE_CONFIG_TEMPLATE: &str = include_str!("../rdog_linux.toml");
 #[serde(default)]
 pub struct DaemonConfig {
     pub daemon: DaemonSettings,
+    pub observation: ObservationConfig,
     pub hidden: HiddenResidentConfig,
     pub outbound: OutboundConfig,
     pub inbound: InboundConfig,
@@ -52,6 +53,22 @@ pub struct DaemonSettings {
 #[serde(default)]
 pub struct HiddenResidentConfig {
     pub log_file: PathBuf,
+}
+
+/// GUI observation 持久化状态配置。
+///
+/// 这里的 durable state 只保存 observation metadata 和 selector 线索。
+/// 短期 `@eN` ref 仍然只能在当前 daemon 进程内使用。
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct ObservationConfig {
+    pub durable_enabled: bool,
+    pub state_dir: Option<PathBuf>,
+    pub retention_observations: usize,
+    pub retention_bytes: u64,
+    pub persist_values: bool,
+    pub persist_screenshots: bool,
+    pub write_ref_cache: bool,
 }
 
 /// 主动连出端点的配置。
@@ -130,6 +147,20 @@ impl Default for HiddenResidentConfig {
     fn default() -> Self {
         Self {
             log_file: PathBuf::from("rdog_hidden.log"),
+        }
+    }
+}
+
+impl Default for ObservationConfig {
+    fn default() -> Self {
+        Self {
+            durable_enabled: true,
+            state_dir: None,
+            retention_observations: 256,
+            retention_bytes: 50 * 1024 * 1024,
+            persist_values: false,
+            persist_screenshots: false,
+            write_ref_cache: true,
         }
     }
 }
@@ -330,6 +361,7 @@ fn validate_daemon_config(config: &DaemonConfig) -> io::Result<()> {
         &config.zenoh,
         config.outbound.enabled || config.inbound.enabled,
     )?;
+    validate_observation_config(&config.observation)?;
 
     Ok(())
 }
@@ -339,7 +371,8 @@ pub fn validate_zenoh_daemon_profile(config: &DaemonConfig) -> io::Result<()> {
     validate_zenoh_config(
         &config.zenoh,
         config.outbound.enabled || config.inbound.enabled,
-    )
+    )?;
+    validate_observation_config(&config.observation)
 }
 
 /// TCP daemon 路径的严格校验。
@@ -368,6 +401,36 @@ pub fn validate_tcp_daemon_profile(config: &DaemonConfig) -> io::Result<()> {
         config.inbound.port,
         config.inbound.shell.as_deref(),
     )?;
+    validate_observation_config(&config.observation)?;
+
+    Ok(())
+}
+
+fn validate_observation_config(config: &ObservationConfig) -> io::Result<()> {
+    if config.retention_observations == 0 {
+        return Err(io::Error::new(
+            ErrorKind::InvalidInput,
+            "observation.retention_observations 必须大于 0",
+        ));
+    }
+
+    if config.retention_bytes < 1024 * 1024 {
+        return Err(io::Error::new(
+            ErrorKind::InvalidInput,
+            "observation.retention_bytes 不能小于 1 MiB",
+        ));
+    }
+
+    if config
+        .state_dir
+        .as_ref()
+        .is_some_and(|path| path.as_os_str().is_empty())
+    {
+        return Err(io::Error::new(
+            ErrorKind::InvalidInput,
+            "observation.state_dir 不能是空字符串; 省略该字段表示使用平台默认路径",
+        ));
+    }
 
     Ok(())
 }
@@ -706,6 +769,97 @@ shell = "/bin/bash"
                 let config = load_daemon_config(None).map_err(to_figment_error)?;
 
                 assert_eq!(config.hidden.log_file, PathBuf::from("custom-hidden.log"));
+                Ok(())
+            });
+        }
+
+        #[test]
+        fn should_load_observation_config_from_toml_and_env() {
+            Jail::expect_with(|jail| {
+                jail.clear_env();
+                jail.create_file(
+                    default_platform_config_file_name(),
+                    r#"[observation]
+durable_enabled = true
+state_dir = "custom-observations"
+retention_observations = 16
+retention_bytes = 2097152
+persist_values = false
+persist_screenshots = false
+write_ref_cache = true
+
+[inbound]
+enabled = true
+host = "127.0.0.1"
+port = 4444
+shell = "/bin/bash"
+"#,
+                )?;
+                jail.set_env("RDOG_OBSERVATION__RETENTION_OBSERVATIONS", "32");
+
+                let config = load_daemon_config(None).map_err(to_figment_error)?;
+
+                assert!(config.observation.durable_enabled);
+                assert_eq!(
+                    config.observation.state_dir,
+                    Some(PathBuf::from("custom-observations"))
+                );
+                assert_eq!(config.observation.retention_observations, 32);
+                assert_eq!(config.observation.retention_bytes, 2_097_152);
+                assert!(!config.observation.persist_values);
+                assert!(!config.observation.persist_screenshots);
+                assert!(config.observation.write_ref_cache);
+                Ok(())
+            });
+        }
+
+        #[test]
+        fn should_reject_invalid_observation_retention() {
+            Jail::expect_with(|jail| {
+                jail.clear_env();
+                jail.create_file(
+                    default_platform_config_file_name(),
+                    r#"[observation]
+retention_observations = 0
+retention_bytes = 2097152
+
+[inbound]
+enabled = true
+host = "127.0.0.1"
+port = 4444
+shell = "/bin/bash"
+"#,
+                )?;
+
+                let err = load_daemon_config(None).unwrap_err();
+
+                assert_eq!(err.kind(), ErrorKind::InvalidInput);
+                assert!(err.to_string().contains("retention_observations"));
+                Ok(())
+            });
+        }
+
+        #[test]
+        fn should_reject_too_small_observation_retention_bytes() {
+            Jail::expect_with(|jail| {
+                jail.clear_env();
+                jail.create_file(
+                    default_platform_config_file_name(),
+                    r#"[observation]
+retention_bytes = 1024
+
+[inbound]
+enabled = true
+host = "127.0.0.1"
+port = 4444
+shell = "/bin/bash"
+"#,
+                )?;
+
+                let err = load_daemon_config(None).unwrap_err();
+
+                assert_eq!(err.kind(), ErrorKind::InvalidInput);
+                assert!(err.to_string().contains("retention_bytes"));
                 Ok(())
             });
         }

@@ -1,7 +1,17 @@
-use crate::control_ax::AxRect;
-use crate::control_protocol::{
-    normalize_object_field_name, object_inner, parse_quoted_payload, split_object_field,
-    split_object_fields,
+use crate::{
+    control_ax::AxRect,
+    control_observation::selector::{
+        AppSelector, DurableSelectorDraft, SelectorEnvelope, SelectorKind, SelectorRect,
+        SelectorRedaction, WindowSelector,
+    },
+    control_observation::{
+        observation_ref_name, record_observation_with_selectors, ObservationHeader,
+        ObservationRefEntry, ObservationRoot,
+    },
+    control_protocol::{
+        normalize_object_field_name, object_inner, parse_quoted_payload, split_object_field,
+        split_object_fields,
+    },
 };
 use serde::Serialize;
 use serde_json::json;
@@ -42,6 +52,8 @@ pub struct WindowCloseRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct WindowCommandTarget {
     pub window_id: Option<String>,
+    pub ref_id: Option<String>,
+    pub observation_id: Option<String>,
     pub query: WindowQuery,
 }
 
@@ -75,6 +87,8 @@ pub struct WindowFindResponse {
     pub platform: String,
     pub status: String,
     pub capabilities: WindowCapabilities,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub observation: Option<ObservationHeader>,
     pub match_count: usize,
     pub returned_count: usize,
     pub snapshot_id: String,
@@ -120,6 +134,8 @@ pub struct WindowCapabilities {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct WindowCandidate {
     pub window_id: String,
+    #[serde(skip_serializing_if = "Option::is_none", rename = "ref")]
+    pub ref_id: Option<String>,
     pub locator_lifetime: &'static str,
     pub app: WindowAppDescriptor,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -177,6 +193,12 @@ pub struct WindowSnapshotMeta {
     pub observed_at_unix_ms: u64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WindowResolvedTargetRect {
+    pub window_id: String,
+    pub rect: Option<AxRect>,
+}
+
 impl WindowSnapshotMeta {
     pub fn now() -> Self {
         let observed_at_unix_ms = SystemTime::now()
@@ -191,29 +213,26 @@ impl WindowSnapshotMeta {
 }
 
 impl WindowQuery {
-    pub fn validate_for_find(&self) -> io::Result<()> {
-        if self.app.is_none()
+    fn is_empty(&self) -> bool {
+        self.app.is_none()
             && self.app_contains.is_none()
             && self.bundle_id.is_none()
             && self.pid.is_none()
             && self.title.is_none()
             && self.title_contains.is_none()
-        {
+    }
+
+    pub fn validate_for_find(&self) -> io::Result<()> {
+        if self.is_empty() {
             return Err(invalid_data("@window-find 至少需要一个查询字段"));
         }
         Ok(())
     }
 
     pub fn validate_for_execute(&self, kind: &str) -> io::Result<()> {
-        if self.app.is_none()
-            && self.app_contains.is_none()
-            && self.bundle_id.is_none()
-            && self.pid.is_none()
-            && self.title.is_none()
-            && self.title_contains.is_none()
-        {
+        if self.is_empty() {
             return Err(invalid_data(format!(
-                "{kind} 至少需要 `window_id` 或一个查询字段"
+                "{kind} 至少需要 `window_id`、`target.ref + observation_id` 或一个查询字段"
             )));
         }
         Ok(())
@@ -234,7 +253,31 @@ impl WindowQuery {
 
 impl WindowCommandTarget {
     fn validate_for_execute(&self, kind: &str) -> io::Result<()> {
-        if self.window_id.is_some() {
+        let has_window_id = self.window_id.is_some();
+        let has_ref = self.ref_id.is_some();
+        let has_observation_id = self.observation_id.is_some();
+        let has_query = !self.query.is_empty();
+
+        if has_window_id {
+            if has_ref || has_observation_id || has_query {
+                return Err(invalid_data(format!(
+                    "{kind} target.window_id 不能与 ref / observation_id / query 混用"
+                )));
+            }
+            return Ok(());
+        }
+
+        if has_ref || has_observation_id {
+            if !has_ref || !has_observation_id {
+                return Err(invalid_data(format!(
+                    "{kind} target.ref 必须和 observation_id 一起出现"
+                )));
+            }
+            if has_query {
+                return Err(invalid_data(format!(
+                    "{kind} target.ref 不能和 query locator 混用"
+                )));
+            }
             return Ok(());
         }
         self.query.validate_for_execute(kind)
@@ -307,6 +350,7 @@ impl WindowFindResponse {
             platform: platform.into(),
             status: "unsupported".to_owned(),
             capabilities: WindowCapabilities::unsupported(),
+            observation: None,
             match_count: 0,
             returned_count: 0,
             snapshot_id: meta.snapshot_id,
@@ -387,6 +431,13 @@ pub fn execute_default_window_close(
     SystemWindowBackend.close(request)
 }
 
+pub fn resolve_default_window_target_rect(
+    target: &WindowCommandTarget,
+) -> io::Result<WindowResolvedTargetRect> {
+    target.validate_for_execute("@mouse target")?;
+    platform_resolve_target_rect(target)
+}
+
 pub fn parse_window_find_payload(input: &str) -> io::Result<WindowFindRequest> {
     let inner = object_inner(input, "@window-find")?;
     if inner.is_empty() {
@@ -442,6 +493,7 @@ pub fn parse_window_activate_payload(input: &str) -> io::Result<WindowActivateRe
     }
 
     let mut target = WindowCommandTarget::default();
+    let mut target_object_seen = false;
     let mut recipe = None::<String>;
     let mut steps = None::<Vec<String>>;
     let mut allow_ambiguous = None::<bool>;
@@ -459,6 +511,15 @@ pub fn parse_window_activate_payload(input: &str) -> io::Result<WindowActivateRe
                 "@window-activate",
                 parse_non_empty_string("@window-activate.window_id", raw_value)?,
             )?,
+            "target" => {
+                if target != WindowCommandTarget::default() {
+                    return Err(invalid_data(
+                        "@window-activate 不能同时使用 `target` 和根级窗口定位字段",
+                    ));
+                }
+                target = parse_window_target_payload(raw_value, "@window-activate")?;
+                target_object_seen = true;
+            }
             "recipe" => assign_once(
                 &mut recipe,
                 "recipe",
@@ -483,12 +544,19 @@ pub fn parse_window_activate_payload(input: &str) -> io::Result<WindowActivateRe
                 "@window-activate",
                 WindowSelectPolicy::from_literal(raw_value)?,
             )?,
-            _ => parse_window_query_field(
-                "@window-activate",
-                field_name.as_str(),
-                raw_value,
-                &mut target.query,
-            )?,
+            _ => {
+                if target_object_seen {
+                    return Err(invalid_data(
+                        "@window-activate 不能同时使用 `target` 和根级窗口定位字段",
+                    ));
+                }
+                parse_window_query_field(
+                    "@window-activate",
+                    field_name.as_str(),
+                    raw_value,
+                    &mut target.query,
+                )?
+            }
         }
     }
 
@@ -509,6 +577,7 @@ pub fn parse_window_close_payload(input: &str) -> io::Result<WindowCloseRequest>
     }
 
     let mut target = WindowCommandTarget::default();
+    let mut target_object_seen = false;
     let mut strategy = None::<WindowCloseStrategy>;
     let mut allow_ambiguous = None::<bool>;
     let mut select = None::<WindowSelectPolicy>;
@@ -525,6 +594,15 @@ pub fn parse_window_close_payload(input: &str) -> io::Result<WindowCloseRequest>
                 "@window-close",
                 parse_non_empty_string("@window-close.window_id", raw_value)?,
             )?,
+            "target" => {
+                if target != WindowCommandTarget::default() {
+                    return Err(invalid_data(
+                        "@window-close 不能同时使用 `target` 和根级窗口定位字段",
+                    ));
+                }
+                target = parse_window_target_payload(raw_value, "@window-close")?;
+                target_object_seen = true;
+            }
             "strategy" => assign_once(
                 &mut strategy,
                 "strategy",
@@ -543,12 +621,19 @@ pub fn parse_window_close_payload(input: &str) -> io::Result<WindowCloseRequest>
                 "@window-close",
                 WindowSelectPolicy::from_literal(raw_value)?,
             )?,
-            _ => parse_window_query_field(
-                "@window-close",
-                field_name.as_str(),
-                raw_value,
-                &mut target.query,
-            )?,
+            _ => {
+                if target_object_seen {
+                    return Err(invalid_data(
+                        "@window-close 不能同时使用 `target` 和根级窗口定位字段",
+                    ));
+                }
+                parse_window_query_field(
+                    "@window-close",
+                    field_name.as_str(),
+                    raw_value,
+                    &mut target.query,
+                )?
+            }
         }
     }
 
@@ -606,6 +691,122 @@ pub fn stale_error(window_id: &str) -> io::Error {
         "window_id": window_id,
     });
     io::Error::new(io::ErrorKind::InvalidInput, json.to_string())
+}
+
+pub(crate) fn attach_window_observation(
+    candidates: &mut [WindowCandidate],
+    source_command: &str,
+    platform: &str,
+) -> io::Result<ObservationHeader> {
+    let mut refs = Vec::with_capacity(candidates.len());
+    let mut selector_drafts = Vec::with_capacity(candidates.len());
+    for (index, candidate) in candidates.iter_mut().enumerate() {
+        let ref_id = observation_ref_name(index + 1);
+        candidate.ref_id = Some(ref_id.clone());
+        refs.push(ObservationRefEntry {
+            ref_id: ref_id.clone(),
+            backend_id: candidate.window_id.clone(),
+            kind: "window".to_owned(),
+        });
+        selector_drafts.push(window_candidate_selector_draft(
+            platform, candidate, &ref_id,
+        ));
+    }
+
+    record_observation_with_selectors(
+        "window",
+        source_command,
+        ObservationRoot {
+            schema: WINDOW_SCHEMA.to_owned(),
+            platform: platform.to_owned(),
+            coordinate_space: WINDOW_COORDINATE_SPACE.to_owned(),
+        },
+        refs,
+        selector_drafts,
+    )
+}
+
+fn window_candidate_selector_draft(
+    platform: &str,
+    candidate: &WindowCandidate,
+    ref_id: &str,
+) -> DurableSelectorDraft {
+    DurableSelectorDraft::new(
+        ref_id.to_owned(),
+        SelectorKind::Window,
+        candidate.window_id.clone(),
+        SelectorEnvelope {
+            platform: platform.to_owned(),
+            app: Some(AppSelector {
+                name: candidate.app.name.clone(),
+                bundle_id: candidate.app.bundle_id.clone(),
+                pid_hint: Some(candidate.app.pid),
+            }),
+            window: Some(WindowSelector {
+                title: candidate.title.clone(),
+                role: "window".to_owned(),
+                rect: candidate.rect.map(selector_rect_from_ax_rect),
+            }),
+            element: None,
+            anchors: Vec::new(),
+        },
+        SelectorRedaction::metadata_only(),
+    )
+}
+
+fn selector_rect_from_ax_rect(rect: AxRect) -> SelectorRect {
+    SelectorRect {
+        x: rect.x,
+        y: rect.y,
+        width: rect.width,
+        height: rect.height,
+    }
+}
+
+fn parse_window_target_payload(input: &str, kind: &str) -> io::Result<WindowCommandTarget> {
+    let inner = object_inner(input, "window target")?;
+    if inner.is_empty() {
+        return Err(invalid_data(format!("{kind}.target 不能为空")));
+    }
+
+    let mut target = WindowCommandTarget::default();
+    for field in split_object_fields(inner)? {
+        let (field_name, raw_value) = split_object_field(field)?;
+        let field_name = normalize_object_field_name(field_name)?;
+        parse_window_target_field(kind, field_name.as_str(), raw_value.trim(), &mut target)?;
+    }
+
+    target.validate_for_execute(kind)?;
+    Ok(target)
+}
+
+fn parse_window_target_field(
+    kind: &str,
+    field_name: &str,
+    raw_value: &str,
+    target: &mut WindowCommandTarget,
+) -> io::Result<()> {
+    match field_name {
+        "window_id" => assign_once(
+            &mut target.window_id,
+            "window_id",
+            kind,
+            parse_non_empty_string(&format!("{kind}.target.window_id"), raw_value)?,
+        ),
+        "ref" | "ref_id" => assign_once(
+            &mut target.ref_id,
+            "ref",
+            kind,
+            parse_non_empty_string(&format!("{kind}.target.ref"), raw_value)?,
+        ),
+        "observation_id" => assign_once(
+            &mut target.observation_id,
+            "observation_id",
+            kind,
+            parse_non_empty_string(&format!("{kind}.target.observation_id"), raw_value)?,
+        ),
+        _ => parse_window_query_field(kind, field_name, raw_value, &mut target.query),
+    }
 }
 
 fn parse_window_query_field(
@@ -774,6 +975,23 @@ fn platform_close(_request: &WindowCloseRequest) -> io::Result<WindowActionRepor
 }
 
 #[cfg(target_os = "macos")]
+fn platform_resolve_target_rect(
+    target: &WindowCommandTarget,
+) -> io::Result<WindowResolvedTargetRect> {
+    macos::resolve_target_rect(target)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn platform_resolve_target_rect(
+    _target: &WindowCommandTarget,
+) -> io::Result<WindowResolvedTargetRect> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "当前平台不支持 window target rect resolver",
+    ))
+}
+
+#[cfg(target_os = "macos")]
 mod macos;
 
 #[cfg(test)]
@@ -802,6 +1020,18 @@ mod tests {
         assert_eq!(request.target.window_id.as_deref(), Some("pid:1/window:0"));
         assert_eq!(request.recipe.as_deref(), Some("to_interact"));
         assert_eq!(request.steps, vec!["activate_app", "raise_window"]);
+
+        let request = parse_window_activate_payload(
+            r#"{target:{ref:"@e1",observation_id:"obs-1"},recipe:"to_interact"}"#,
+        )
+        .unwrap();
+        assert_eq!(request.target.ref_id.as_deref(), Some("@e1"));
+        assert_eq!(request.target.observation_id.as_deref(), Some("obs-1"));
+        assert!(parse_window_activate_payload(r#"{target:{ref:"@e1"}}"#).is_err());
+        assert!(parse_window_activate_payload(
+            r#"{target:{ref:"@e1",observation_id:"obs-1",app:"Terminal"}}"#
+        )
+        .is_err());
     }
 
     #[test]
@@ -822,6 +1052,7 @@ mod tests {
     fn ambiguous_and_stale_errors_should_encode_json_payload() {
         let candidate = WindowCandidate {
             window_id: "pid:1/window:0".to_owned(),
+            ref_id: None,
             locator_lifetime: "short_lived",
             app: WindowAppDescriptor {
                 name: "Terminal".to_owned(),
@@ -848,20 +1079,42 @@ mod tests {
 
     #[test]
     fn window_find_response_should_serialize_schema_and_snapshot() {
+        let mut matches = vec![WindowCandidate {
+            window_id: "pid:1/window:0".to_owned(),
+            ref_id: None,
+            locator_lifetime: "short_lived",
+            app: WindowAppDescriptor {
+                name: "Terminal".to_owned(),
+                pid: 1,
+                bundle_id: None,
+                hidden: false,
+                frontmost: false,
+            },
+            title: Some("rdog".to_owned()),
+            rect: None,
+            coordinate_space: WINDOW_COORDINATE_SPACE,
+            state: None,
+            recipes: None,
+        }];
+        let observation = attach_window_observation(&mut matches, "@window-find", "macos").unwrap();
         let response = WindowFindResponse {
             kind: "window-find",
             schema: WINDOW_SCHEMA,
             platform: "macos".to_owned(),
             status: "complete".to_owned(),
             capabilities: WindowCapabilities::complete(),
-            match_count: 0,
-            returned_count: 0,
+            observation: Some(observation),
+            match_count: 1,
+            returned_count: 1,
             snapshot_id: "window-snapshot-1".to_owned(),
             observed_at_unix_ms: 1,
-            matches: Vec::new(),
+            matches,
         };
         let json = response.to_value_json().unwrap();
         assert!(json.contains("\"schema\":\"rdog.window.v1\""));
         assert!(json.contains("\"snapshot_id\":\"window-snapshot-1\""));
+        assert!(json.contains("\"source_command\":\"@window-find\""));
+        assert!(json.contains("\"selector_count\":1"));
+        assert!(json.contains("\"ref\":\"@e1\""));
     }
 }

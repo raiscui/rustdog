@@ -1,6 +1,16 @@
-use crate::control_protocol::{
-    normalize_object_field_name, object_inner, parse_quoted_payload, split_object_field,
-    split_object_fields, KeyDelivery, KeyMode, KeyRequest,
+use crate::{
+    control_observation::selector::{
+        AppSelector, DurableSelectorDraft, ElementSelector, SelectorEnvelope, SelectorKind,
+        SelectorRect, SelectorRedaction, WindowSelector,
+    },
+    control_observation::{
+        observation_ref_name, record_observation_with_selectors, resolve_observation_ref,
+        stale_observation_ref_error, ObservationHeader, ObservationRefEntry, ObservationRoot,
+    },
+    control_protocol::{
+        normalize_object_field_name, object_inner, parse_quoted_payload, split_object_field,
+        split_object_fields, KeyDelivery, KeyMode, KeyRequest,
+    },
 };
 use serde::Serialize;
 use serde_json::json;
@@ -222,6 +232,8 @@ impl ClipboardRestoreStatus {
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct AxTarget {
     pub id: Option<String>,
+    pub ref_id: Option<String>,
+    pub observation_id: Option<String>,
     pub process: Option<String>,
     pub window_title: Option<String>,
     pub role: Option<String>,
@@ -232,17 +244,35 @@ pub struct AxTarget {
 
 impl AxTarget {
     fn validate(&self) -> io::Result<()> {
+        let has_ref = self.ref_id.is_some();
+        let has_observation_id = self.observation_id.is_some();
+        let has_semantic = self.process.is_some()
+            || self.window_title.is_some()
+            || self.role.is_some()
+            || self.subrole.is_some()
+            || self.name.is_some()
+            || self.description.is_some();
+
         if self.id.is_some() {
+            if has_ref || has_observation_id || has_semantic {
+                return Err(invalid_data(
+                    "AX target id 不能与 ref / observation_id / semantic locator 混用",
+                ));
+            }
             return Ok(());
         }
 
-        if self.process.is_none()
-            && self.window_title.is_none()
-            && self.role.is_none()
-            && self.subrole.is_none()
-            && self.name.is_none()
-            && self.description.is_none()
-        {
+        if has_ref || has_observation_id {
+            if !has_ref || !has_observation_id {
+                return Err(invalid_data("AX target.ref 必须和 observation_id 一起出现"));
+            }
+            if has_semantic {
+                return Err(invalid_data("AX target.ref 不能和 semantic locator 混用"));
+            }
+            return Ok(());
+        }
+
+        if !has_semantic {
             return Err(invalid_data("AX target 不能为空"));
         }
 
@@ -287,6 +317,8 @@ pub struct AxSnapshot {
     pub capture_status: String,
     pub permission_status: String,
     pub coordinate_space: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub observation: Option<ObservationHeader>,
     pub window_count: usize,
     pub element_count: usize,
     pub truncated: bool,
@@ -312,6 +344,7 @@ impl AxSnapshot {
             capture_status: "complete".to_owned(),
             permission_status: "granted".to_owned(),
             coordinate_space: "os-logical",
+            observation: None,
             window_count: windows.len(),
             element_count,
             truncated,
@@ -338,11 +371,62 @@ impl AxSnapshot {
             capture_status: capture_status.into(),
             permission_status: permission_status.into(),
             coordinate_space: "os-logical",
+            observation: None,
             window_count: 0,
             element_count: 0,
             truncated: false,
             windows: Vec::new(),
         }
+    }
+
+    pub fn with_observation(mut self, source_command: &str) -> io::Result<Self> {
+        let mut refs = Vec::new();
+        let mut selector_drafts = Vec::new();
+        let mut next_ref_index = 1usize;
+        for window in &mut self.windows {
+            let ref_id = match &window.ref_id {
+                Some(ref_id) => {
+                    reserve_existing_ref_index(ref_id, &mut next_ref_index);
+                    ref_id.clone()
+                }
+                None => {
+                    let ref_id = observation_ref_name(next_ref_index);
+                    next_ref_index += 1;
+                    window.ref_id = Some(ref_id.clone());
+                    ref_id
+                }
+            };
+            refs.push(ObservationRefEntry {
+                ref_id: ref_id.clone(),
+                backend_id: window.id.clone(),
+                kind: "window".to_owned(),
+            });
+            selector_drafts.push(window_selector_draft(&self.platform, window, &ref_id));
+            let app_selector = app_selector_for_window(window);
+            let window_selector = window_selector_for_ax_window(window);
+            collect_element_refs(
+                &self.platform,
+                &app_selector,
+                &window_selector,
+                &mut next_ref_index,
+                &mut window.elements,
+                &mut refs,
+                &mut selector_drafts,
+            );
+        }
+
+        self.observation = Some(record_observation_with_selectors(
+            "ax",
+            source_command,
+            ObservationRoot {
+                schema: self.schema.to_owned(),
+                platform: self.platform.clone(),
+                coordinate_space: self.coordinate_space.to_owned(),
+            },
+            refs,
+            selector_drafts,
+        )?);
+        Ok(self)
     }
 
     pub fn to_tree_value_json(&self) -> io::Result<String> {
@@ -353,6 +437,7 @@ impl AxSnapshot {
             "capture_status": self.capture_status,
             "permission_status": self.permission_status,
             "coordinate_space": self.coordinate_space,
+            "observation": self.observation,
             "window_count": self.window_count,
             "element_count": self.element_count,
             "truncated": self.truncated,
@@ -376,6 +461,8 @@ impl AxSnapshot {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct AxWindow {
     pub id: String,
+    #[serde(skip_serializing_if = "Option::is_none", rename = "ref")]
+    pub ref_id: Option<String>,
     pub pid: i32,
     pub process_name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -399,6 +486,8 @@ impl AxWindow {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct AxElement {
     pub id: String,
+    #[serde(skip_serializing_if = "Option::is_none", rename = "ref")]
+    pub ref_id: Option<String>,
     pub role: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub subrole: Option<String>,
@@ -435,6 +524,143 @@ impl AxElement {
                 .iter()
                 .any(|child| child.contains_id(target_id))
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AxResolvedTargetRect {
+    pub target_id: String,
+    pub target_type: &'static str,
+    pub window_id: Option<String>,
+    pub rect: Option<AxRect>,
+}
+
+fn collect_element_refs(
+    platform: &str,
+    app_selector: &AppSelector,
+    window_selector: &WindowSelector,
+    next_ref_index: &mut usize,
+    elements: &mut [AxElement],
+    refs: &mut Vec<ObservationRefEntry>,
+    selector_drafts: &mut Vec<DurableSelectorDraft>,
+) {
+    for element in elements {
+        let ref_id = match &element.ref_id {
+            Some(ref_id) => {
+                reserve_existing_ref_index(ref_id, next_ref_index);
+                ref_id.clone()
+            }
+            None => {
+                let ref_id = observation_ref_name(*next_ref_index);
+                *next_ref_index += 1;
+                element.ref_id = Some(ref_id.clone());
+                ref_id
+            }
+        };
+        refs.push(ObservationRefEntry {
+            ref_id: ref_id.clone(),
+            backend_id: element.id.clone(),
+            kind: "element".to_owned(),
+        });
+        selector_drafts.push(element_selector_draft(
+            platform,
+            app_selector,
+            window_selector,
+            element,
+            &ref_id,
+        ));
+
+        if !element.children.is_empty() {
+            collect_element_refs(
+                platform,
+                app_selector,
+                window_selector,
+                next_ref_index,
+                &mut element.children,
+                refs,
+                selector_drafts,
+            );
+        }
+    }
+}
+
+fn window_selector_draft(platform: &str, window: &AxWindow, ref_id: &str) -> DurableSelectorDraft {
+    DurableSelectorDraft::new(
+        ref_id.to_owned(),
+        SelectorKind::AxWindow,
+        window.id.clone(),
+        SelectorEnvelope {
+            platform: platform.to_owned(),
+            app: Some(app_selector_for_window(window)),
+            window: Some(window_selector_for_ax_window(window)),
+            element: None,
+            anchors: Vec::new(),
+        },
+        SelectorRedaction::metadata_only(),
+    )
+}
+
+fn element_selector_draft(
+    platform: &str,
+    app_selector: &AppSelector,
+    window_selector: &WindowSelector,
+    element: &AxElement,
+    ref_id: &str,
+) -> DurableSelectorDraft {
+    DurableSelectorDraft::new(
+        ref_id.to_owned(),
+        SelectorKind::AxElement,
+        element.id.clone(),
+        SelectorEnvelope {
+            platform: platform.to_owned(),
+            app: Some(app_selector.clone()),
+            window: Some(window_selector.clone()),
+            element: Some(ElementSelector {
+                role: element.role.clone(),
+                subrole: element.subrole.clone(),
+                name: element.name.clone(),
+                description: element.description.clone(),
+                actions: element.actions.clone(),
+                ax_path: element.ax_path.clone(),
+            }),
+            anchors: Vec::new(),
+        },
+        SelectorRedaction::metadata_only(),
+    )
+}
+
+fn app_selector_for_window(window: &AxWindow) -> AppSelector {
+    AppSelector {
+        name: window.process_name.clone(),
+        bundle_id: None,
+        pid_hint: Some(window.pid),
+    }
+}
+
+fn window_selector_for_ax_window(window: &AxWindow) -> WindowSelector {
+    WindowSelector {
+        title: window.title.clone(),
+        role: window.role.clone(),
+        rect: window.rect.map(selector_rect_from_ax_rect),
+    }
+}
+
+fn selector_rect_from_ax_rect(rect: AxRect) -> SelectorRect {
+    SelectorRect {
+        x: rect.x,
+        y: rect.y,
+        width: rect.width,
+        height: rect.height,
+    }
+}
+
+fn reserve_existing_ref_index(ref_id: &str, next_ref_index: &mut usize) {
+    let Some(index) = ref_id
+        .strip_prefix("@e")
+        .and_then(|value| value.parse::<usize>().ok())
+    else {
+        return;
+    };
+    *next_ref_index = (*next_ref_index).max(index.saturating_add(1));
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -749,7 +975,7 @@ mod query;
 
 pub use query::{
     build_ax_find_response_json, build_ax_get_response_json, parse_ax_find_payload,
-    parse_ax_get_payload, AxFindRequest, AxGetRequest,
+    parse_ax_get_payload, AxFindQuery, AxFindRequest, AxGetRequest,
 };
 
 pub trait AxBackend {
@@ -792,6 +1018,45 @@ impl AxBackend for SystemAxBackend {
 
 pub fn capture_default_ax_snapshot(request: &AxTreeRequest) -> io::Result<AxSnapshot> {
     SystemAxBackend.snapshot(request)
+}
+
+pub fn resolve_current_ax_target_rect(target: &AxTarget) -> io::Result<AxResolvedTargetRect> {
+    let request = AxTreeRequest {
+        depth: 8,
+        max_elements: 5000,
+        include_values: false,
+        ..AxTreeRequest::default()
+    };
+    let snapshot = capture_default_ax_snapshot(&request)?;
+    if snapshot.capture_status != "complete" {
+        return Err(ax_snapshot_status_error(&snapshot));
+    }
+
+    let target_id = resolve_target_id_in_snapshot(&snapshot, target)?;
+    for window in &snapshot.windows {
+        if window.id == target_id {
+            return Ok(AxResolvedTargetRect {
+                target_id,
+                target_type: "window",
+                window_id: Some(window.id.clone()),
+                rect: window.rect,
+            });
+        }
+
+        if let Some(element) = find_ax_element_by_id(&window.elements, &target_id) {
+            return Ok(AxResolvedTargetRect {
+                target_id,
+                target_type: "element",
+                window_id: Some(window.id.clone()),
+                rect: element.rect,
+            });
+        }
+    }
+
+    Err(io::Error::new(
+        io::ErrorKind::InvalidInput,
+        format!("AX target id 已失效或不存在: {target_id}"),
+    ))
 }
 
 pub fn perform_default_ax_press(request: &AxPressRequest) -> io::Result<AxActionReport> {
@@ -1195,6 +1460,8 @@ pub fn resolve_target_id_in_snapshot(
     snapshot: &AxSnapshot,
     target: &AxTarget,
 ) -> io::Result<String> {
+    target.validate().map_err(to_invalid_input)?;
+
     if let Some(id) = &target.id {
         if snapshot.contains_element_id(id) {
             return Ok(id.clone());
@@ -1202,7 +1469,20 @@ pub fn resolve_target_id_in_snapshot(
         return Err(invalid_input(format!("AX target id 已失效或不存在: {id}")));
     }
 
-    target.validate().map_err(to_invalid_input)?;
+    if let (Some(observation_id), Some(ref_id)) =
+        (target.observation_id.as_deref(), target.ref_id.as_deref())
+    {
+        let entry = resolve_observation_ref(observation_id, ref_id)?;
+        if snapshot.contains_element_id(&entry.backend_id) {
+            return Ok(entry.backend_id);
+        }
+        return Err(stale_observation_ref_error(
+            observation_id,
+            ref_id,
+            format!("backend id 已不在当前 AX snapshot 中: {}", entry.backend_id),
+        ));
+    }
+
     let mut matches = Vec::<String>::new();
 
     for window in &snapshot.windows {
@@ -1235,6 +1515,35 @@ fn collect_matching_element_ids(
     }
 }
 
+fn find_ax_element_by_id<'a>(elements: &'a [AxElement], target_id: &str) -> Option<&'a AxElement> {
+    for element in elements {
+        if element.id == target_id {
+            return Some(element);
+        }
+        if let Some(found) = find_ax_element_by_id(&element.children, target_id) {
+            return Some(found);
+        }
+    }
+    None
+}
+
+fn ax_snapshot_status_error(snapshot: &AxSnapshot) -> io::Error {
+    let kind = match snapshot.capture_status.as_str() {
+        "permission_denied" => io::ErrorKind::PermissionDenied,
+        "unsupported" => io::ErrorKind::Unsupported,
+        _ => io::ErrorKind::Other,
+    };
+    let value = json!({
+        "kind": "ax-target-resolution",
+        "error_code": "AX_SNAPSHOT_UNAVAILABLE",
+        "capture_status": snapshot.capture_status.as_str(),
+        "permission_status": snapshot.permission_status.as_str(),
+        "platform": snapshot.platform.as_str(),
+        "message": "AX snapshot 不可用,无法解析 mouse target rect",
+    });
+    io::Error::new(kind, value.to_string())
+}
+
 fn parse_ax_target(input: &str) -> io::Result<AxTarget> {
     let inner = object_inner(input, "AX target")?;
     if inner.is_empty() {
@@ -1243,6 +1552,8 @@ fn parse_ax_target(input: &str) -> io::Result<AxTarget> {
 
     let mut target = AxTarget::default();
     let mut id_seen = false;
+    let mut ref_seen = false;
+    let mut observation_id_seen = false;
     let mut process_seen = false;
     let mut window_title_seen = false;
     let mut role_seen = false;
@@ -1259,6 +1570,17 @@ fn parse_ax_target(input: &str) -> io::Result<AxTarget> {
             "id" => {
                 reject_duplicate(&mut id_seen, "AX target", "id")?;
                 target.id = Some(parse_non_empty_string("AX target.id", raw_value)?);
+            }
+            "ref" | "ref_id" => {
+                reject_duplicate(&mut ref_seen, "AX target", "ref")?;
+                target.ref_id = Some(parse_non_empty_string("AX target.ref", raw_value)?);
+            }
+            "observation_id" => {
+                reject_duplicate(&mut observation_id_seen, "AX target", "observation_id")?;
+                target.observation_id = Some(parse_non_empty_string(
+                    "AX target.observation_id",
+                    raw_value,
+                )?);
             }
             "process" | "process_name" => {
                 reject_duplicate(&mut process_seen, "AX target", "process")?;
@@ -1421,16 +1743,16 @@ fn parse_ax_tree_scope(input: &str) -> io::Result<AxTreeScope> {
 pub(crate) fn parse_ax_mode_payload(kind: &str, input: &str) -> io::Result<AxMode> {
     let mode = parse_quoted_payload(input)?;
     match mode.to_ascii_lowercase().as_str() {
-        "windows" | "summary" => Ok(AxMode::Windows),
+        "windows" | "summary" | "skeleton" => Ok(AxMode::Windows),
         "interactive" | "controls" => Ok(AxMode::Interactive),
         "full" => Ok(AxMode::Full),
         _ => Err(invalid_data(format!(
-            "{kind} 当前只支持 mode/ax_mode=\"windows\" | \"interactive\" | \"full\": {mode}"
+            "{kind} 当前只支持 mode/ax_mode=\"windows\" | \"skeleton\" | \"interactive\" | \"full\": {mode}"
         ))),
     }
 }
 
-fn parse_ax_depth(input: &str) -> io::Result<u8> {
+pub(crate) fn parse_ax_depth(input: &str) -> io::Result<u8> {
     let depth = input
         .parse::<u8>()
         .map_err(|_| invalid_data(format!("@ax-tree 的 `depth` 必须是无符号整数: {input}")))?;
@@ -1440,7 +1762,7 @@ fn parse_ax_depth(input: &str) -> io::Result<u8> {
     Ok(depth)
 }
 
-fn parse_ax_max_elements(input: &str) -> io::Result<u16> {
+pub(crate) fn parse_ax_max_elements(input: &str) -> io::Result<u16> {
     let max_elements = input.parse::<u16>().map_err(|_| {
         invalid_data(format!(
             "@ax-tree 的 `max_elements` 必须是无符号整数: {input}"
@@ -1620,6 +1942,7 @@ mod tests {
             "macos",
             vec![AxWindow {
                 id: "pid:1/window:0".to_owned(),
+                ref_id: None,
                 pid: 1,
                 process_name: "System Information".to_owned(),
                 title: Some("关于本机".to_owned()),
@@ -1634,6 +1957,7 @@ mod tests {
                 focused: Some(true),
                 elements: vec![AxElement {
                     id: "pid:1/window:0/path:0".to_owned(),
+                    ref_id: None,
                     role: "AXButton".to_owned(),
                     subrole: None,
                     name: Some("关闭".to_owned()),
@@ -1655,12 +1979,23 @@ mod tests {
         let value = snapshot.to_tree_value_json().unwrap();
         assert!(value.contains(r#""kind":"ax-tree""#));
         assert!(value.contains(r#""schema":"rdog.ax.v1""#));
+
+        let observed = snapshot.with_observation("@ax-tree").unwrap();
+        let value: serde_json::Value =
+            serde_json::from_str(&observed.to_tree_value_json().unwrap()).unwrap();
+        assert_eq!(value["observation"]["scope"], "ax");
+        assert_eq!(value["observation"]["source_command"], "@ax-tree");
+        assert_eq!(value["observation"]["ref_count"], 2);
+        assert_eq!(value["observation"]["selector_count"], 2);
+        assert_eq!(value["windows"][0]["ref"], "@e1");
+        assert_eq!(value["windows"][0]["elements"][0]["ref"], "@e2");
     }
 
     #[test]
     fn resolve_target_should_reject_stale_or_ambiguous_locators() {
         let button = |id: &str| AxElement {
             id: id.to_owned(),
+            ref_id: None,
             role: "AXButton".to_owned(),
             subrole: None,
             name: Some("OK".to_owned()),
@@ -1677,6 +2012,7 @@ mod tests {
             "macos",
             vec![AxWindow {
                 id: "pid:1/window:0".to_owned(),
+                ref_id: None,
                 pid: 1,
                 process_name: "App".to_owned(),
                 title: Some("Win".to_owned()),
@@ -1722,6 +2058,7 @@ mod tests {
     fn secure_element_should_serialize_redaction_without_value() {
         let element = AxElement {
             id: "pid:1/window:0/path:0".to_owned(),
+            ref_id: None,
             role: "AXSecureTextField".to_owned(),
             subrole: None,
             name: Some("Password".to_owned()),
@@ -1779,6 +2116,17 @@ mod tests {
         );
         assert!(parse_ax_press_payload(r#"{target:{}}"#).is_err());
         assert!(parse_ax_press_payload(r#"{target:{process:"App"}}"#).is_err());
+
+        let request =
+            parse_ax_press_payload(r#"{target:{ref:"@e2",observation_id:"obs-1"}}"#).unwrap();
+        assert_eq!(request.target.ref_id.as_deref(), Some("@e2"));
+        assert_eq!(request.target.observation_id.as_deref(), Some("obs-1"));
+
+        assert!(parse_ax_press_payload(r#"{target:{ref:"@e2"}}"#).is_err());
+        assert!(parse_ax_press_payload(
+            r#"{target:{ref:"@e2",observation_id:"obs-1",role:"AXButton"}}"#
+        )
+        .is_err());
     }
 
     #[test]

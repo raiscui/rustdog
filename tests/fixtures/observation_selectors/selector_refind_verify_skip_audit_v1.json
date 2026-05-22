@@ -1,0 +1,13 @@
+{
+  "kind": "selector-refind-verify-skip-audit",
+  "schema": "rdog.selector.verify-skip-audit.v1",
+  "selector_id": "sel-v1-test",
+  "fresh_target": {
+    "observation_id": "obs-new",
+    "ref": "@e4"
+  },
+  "skip_reason": "caller accepted risk for read-only verification fixture",
+  "request_id": 42,
+  "actor": "test",
+  "timestamp_unix_ms": 1770000000000
+}

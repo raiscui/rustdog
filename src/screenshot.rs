@@ -41,6 +41,27 @@ pub fn execute_screenshot_request(
     }
 }
 
+/// 生成 composite screenshot 的文件 frame 和轻量摘要。
+///
+/// `@observe` 复用这个入口,避免反解析 `@screenshot` 的 response 文本。
+/// 这里只返回 `@savefile` frames,最终 `@response` 由调用方自己组织。
+pub fn execute_screenshot_bundle_request(
+    request_id: Option<u64>,
+    request: &ScreenshotRequest,
+) -> io::Result<(Vec<ControlFrame>, ScreenshotBundleSummary)> {
+    validate_composite_request(request)?;
+    let displays = capture_all_display_images()?;
+    let screenshot_id = current_unix_epoch_millis().to_string();
+    let accessibility = build_accessibility_manifest(request, capture_default_ax_snapshot)?;
+    build_composite_screenshot_parts_with_id_and_ax(
+        request_id,
+        request,
+        displays,
+        &screenshot_id,
+        accessibility,
+    )
+}
+
 fn execute_primary_screenshot_request_with_capture<F>(
     request_id: Option<u64>,
     request: &ScreenshotRequest,
@@ -85,13 +106,19 @@ where
     let displays = capture()?;
     let screenshot_id = current_unix_epoch_millis().to_string();
     let accessibility = build_accessibility_manifest(request, capture_ax)?;
-    build_composite_screenshot_outcome_with_id_and_ax(
+    let (mut frames, summary) = build_composite_screenshot_parts_with_id_and_ax(
         request_id,
         request,
         displays,
         &screenshot_id,
         accessibility,
-    )
+    )?;
+    frames.push(ControlFrame::ResponseLine(
+        render_screenshot_bundle_response(request_id, &summary)?,
+    ));
+    Ok(ControlExecutionOutcome {
+        outbound_frames: frames,
+    })
 }
 
 fn build_primary_screenshot_outcome(
@@ -140,6 +167,7 @@ fn build_composite_screenshot_outcome_with_id(
     )
 }
 
+#[cfg(test)]
 fn build_composite_screenshot_outcome_with_id_and_ax(
     request_id: Option<u64>,
     request: &ScreenshotRequest,
@@ -147,6 +175,28 @@ fn build_composite_screenshot_outcome_with_id_and_ax(
     screenshot_id: &str,
     accessibility: Option<AxSnapshot>,
 ) -> io::Result<ControlExecutionOutcome> {
+    let (mut frames, summary) = build_composite_screenshot_parts_with_id_and_ax(
+        request_id,
+        request,
+        displays,
+        screenshot_id,
+        accessibility,
+    )?;
+    frames.push(ControlFrame::ResponseLine(
+        render_screenshot_bundle_response(request_id, &summary)?,
+    ));
+    Ok(ControlExecutionOutcome {
+        outbound_frames: frames,
+    })
+}
+
+fn build_composite_screenshot_parts_with_id_and_ax(
+    request_id: Option<u64>,
+    request: &ScreenshotRequest,
+    displays: Vec<CapturedDisplay>,
+    screenshot_id: &str,
+    accessibility: Option<AxSnapshot>,
+) -> io::Result<(Vec<ControlFrame>, ScreenshotBundleSummary)> {
     validate_composite_request(request)?;
 
     let bundle = build_screenshot_bundle_with_ax(displays, screenshot_id, accessibility)?;
@@ -176,20 +226,22 @@ fn build_composite_screenshot_outcome_with_id_and_ax(
         height: None,
     };
 
-    let response = render_screenshot_bundle_response(
-        request_id,
-        &image_filename,
-        &manifest_filename,
-        bundle.display_count,
-    )?;
+    let summary = ScreenshotBundleSummary {
+        kind: "screenshot-bundle",
+        layout: "composite",
+        coordinate_space: "os-logical",
+        image: image_filename,
+        manifest: manifest_filename,
+        display_count: bundle.display_count,
+    };
 
-    Ok(ControlExecutionOutcome {
-        outbound_frames: vec![
+    Ok((
+        vec![
             ControlFrame::SaveFile(image_frame),
             ControlFrame::SaveFile(manifest_frame),
-            ControlFrame::ResponseLine(response),
         ],
-    })
+        summary,
+    ))
 }
 
 fn build_accessibility_manifest<A>(
@@ -211,13 +263,16 @@ where
     };
 
     match capture_ax(&ax_request) {
-        Ok(snapshot) => Ok(Some(snapshot)),
+        Ok(snapshot) => Ok(Some(snapshot.with_observation("@screenshot include_ax")?)),
         Err(err) if err.kind() == io::ErrorKind::PermissionDenied && !request.ax_required => {
-            Ok(Some(AxSnapshot::permission_denied(current_ax_platform())))
+            Ok(Some(
+                AxSnapshot::permission_denied(current_ax_platform())
+                    .with_observation("@screenshot include_ax")?,
+            ))
         }
-        Err(err) if err.kind() == io::ErrorKind::Unsupported && !request.ax_required => {
-            Ok(Some(AxSnapshot::unsupported()))
-        }
+        Err(err) if err.kind() == io::ErrorKind::Unsupported && !request.ax_required => Ok(Some(
+            AxSnapshot::unsupported().with_observation("@screenshot include_ax")?,
+        )),
         Err(err) => Err(err),
     }
 }
@@ -384,6 +439,16 @@ struct ScreenshotBundleResponse<'a> {
     image: &'a str,
     manifest: &'a str,
     display_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScreenshotBundleSummary {
+    pub kind: &'static str,
+    pub layout: &'static str,
+    pub coordinate_space: &'static str,
+    pub image: String,
+    pub manifest: String,
+    pub display_count: usize,
 }
 
 #[cfg(test)]
@@ -679,17 +744,15 @@ fn render_primary_screenshot_success_response(request_id: Option<u64>) -> String
 
 fn render_screenshot_bundle_response(
     request_id: Option<u64>,
-    image_filename: &str,
-    manifest_filename: &str,
-    display_count: usize,
+    summary: &ScreenshotBundleSummary,
 ) -> io::Result<String> {
     let summary = ScreenshotBundleResponse {
-        kind: "screenshot-bundle",
-        layout: "composite",
-        coordinate_space: "os-logical",
-        image: image_filename,
-        manifest: manifest_filename,
-        display_count,
+        kind: summary.kind,
+        layout: summary.layout,
+        coordinate_space: summary.coordinate_space,
+        image: &summary.image,
+        manifest: &summary.manifest,
+        display_count: summary.display_count,
     };
     let value = serde_json::to_string(&summary)
         .map_err(|err| io::Error::other(format!("screenshot response 序列化失败: {err}")))?;

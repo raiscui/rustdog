@@ -1,5 +1,8 @@
 use super::*;
-use crate::control_ax::AxRect;
+use crate::{
+    control_ax::AxRect,
+    control_observation::{resolve_observation_ref, stale_observation_ref_error},
+};
 use std::{
     ffi::CString,
     io,
@@ -174,6 +177,11 @@ pub(super) fn find(request: &WindowFindRequest) -> io::Result<WindowFindResponse
     candidates.retain(|candidate| request.query.matches_candidate(candidate));
     let match_count = candidates.len();
     candidates.truncate(usize::from(request.limit));
+    let observation = Some(attach_window_observation(
+        &mut candidates,
+        "@window-find",
+        "macos",
+    )?);
 
     Ok(WindowFindResponse {
         kind: "window-find",
@@ -181,6 +189,7 @@ pub(super) fn find(request: &WindowFindRequest) -> io::Result<WindowFindResponse
         platform: "macos".to_owned(),
         status: "complete".to_owned(),
         capabilities: WindowCapabilities::complete(),
+        observation,
         match_count,
         returned_count: candidates.len(),
         snapshot_id: meta.snapshot_id,
@@ -411,6 +420,24 @@ pub(super) fn close(request: &WindowCloseRequest) -> io::Result<WindowActionRepo
     }
 }
 
+pub(super) fn resolve_target_rect(
+    target: &WindowCommandTarget,
+) -> io::Result<WindowResolvedTargetRect> {
+    ensure_trusted()?;
+
+    let find_response = find(&WindowFindRequest {
+        query: target.query.clone(),
+        limit: DEFAULT_WINDOW_FIND_LIMIT,
+        include_state: false,
+        include_recipes: false,
+    })?;
+    let (resolved, _, _) = resolve_single_window(&find_response, target, false, None, None)?;
+    Ok(WindowResolvedTargetRect {
+        window_id: window_id(resolved.app.pid, resolved.window_index),
+        rect: resolved.rect,
+    })
+}
+
 fn enumerate_candidates(
     include_state: bool,
     include_recipes: bool,
@@ -470,6 +497,25 @@ fn resolve_single_window_with_resolver(
     strategy: Option<WindowCloseStrategy>,
     mut resolve_window_id: impl FnMut(&str) -> io::Result<ResolvedWindow>,
 ) -> io::Result<(ResolvedWindow, String, u64)> {
+    if let (Some(observation_id), Some(ref_id)) =
+        (target.observation_id.as_deref(), target.ref_id.as_deref())
+    {
+        let entry = resolve_observation_ref(observation_id, ref_id)?;
+        if entry.kind != "window" {
+            return Err(stale_observation_ref_error(
+                observation_id,
+                ref_id,
+                format!("ref kind 不是 window: {}", entry.kind),
+            ));
+        }
+        let resolved = resolve_window_id(&entry.backend_id)?;
+        return Ok((
+            resolved,
+            find_response.snapshot_id.clone(),
+            find_response.observed_at_unix_ms,
+        ));
+    }
+
     if let Some(window_id) = target.window_id.as_deref() {
         let resolved = resolve_window_id(window_id)?;
         return Ok((
@@ -683,6 +729,7 @@ fn to_candidate(
 
     WindowCandidate {
         window_id: window_id(window.app.pid, window.window_index),
+        ref_id: None,
         locator_lifetime: "short_lived",
         app: WindowAppDescriptor {
             name: window.app.name,
@@ -1331,7 +1378,7 @@ mod tests {
         let request = WindowActivateRequest {
             target: WindowCommandTarget {
                 window_id: Some("pid:1/window:0".to_owned()),
-                query: WindowQuery::default(),
+                ..WindowCommandTarget::default()
             },
             recipe: Some("to_interact".to_owned()),
             steps: Vec::new(),
@@ -1410,6 +1457,7 @@ mod tests {
         let candidates = vec![
             WindowCandidate {
                 window_id: "pid:11/window:0".to_owned(),
+                ref_id: None,
                 locator_lifetime: "short_lived",
                 app: WindowAppDescriptor {
                     name: "Editor".to_owned(),
@@ -1426,6 +1474,7 @@ mod tests {
             },
             WindowCandidate {
                 window_id: "pid:11/window:1".to_owned(),
+                ref_id: None,
                 locator_lifetime: "short_lived",
                 app: WindowAppDescriptor {
                     name: "Editor".to_owned(),
@@ -1483,6 +1532,7 @@ mod tests {
             platform: "macos".to_owned(),
             status: "complete".to_owned(),
             capabilities: WindowCapabilities::complete(),
+            observation: None,
             match_count: 30,
             returned_count: 20,
             snapshot_id: "window-snapshot-42".to_owned(),
@@ -1491,7 +1541,7 @@ mod tests {
         };
         let target = WindowCommandTarget {
             window_id: Some("pid:77/window:25".to_owned()),
-            query: WindowQuery::default(),
+            ..WindowCommandTarget::default()
         };
 
         let resolved = resolve_single_window_with_resolver(
@@ -1526,5 +1576,79 @@ mod tests {
         assert_eq!(resolved.0.window_index, 25);
         assert_eq!(resolved.1, "window-snapshot-42");
         assert_eq!(resolved.2, 42);
+    }
+
+    #[test]
+    fn resolve_single_window_should_use_observation_ref_lookup() {
+        let mut matches = vec![WindowCandidate {
+            window_id: "pid:88/window:2".to_owned(),
+            ref_id: None,
+            locator_lifetime: "short_lived",
+            app: WindowAppDescriptor {
+                name: "Editor".to_owned(),
+                pid: 88,
+                bundle_id: Some("com.example.Editor".to_owned()),
+                hidden: false,
+                frontmost: false,
+            },
+            title: Some("Ref Target".to_owned()),
+            rect: None,
+            coordinate_space: WINDOW_COORDINATE_SPACE,
+            state: None,
+            recipes: None,
+        }];
+        let observation = attach_window_observation(&mut matches, "@window-find", "macos").unwrap();
+        let target_ref = matches[0].ref_id.clone().unwrap();
+        let find_response = WindowFindResponse {
+            kind: "window-find",
+            schema: WINDOW_SCHEMA,
+            platform: "macos".to_owned(),
+            status: "complete".to_owned(),
+            capabilities: WindowCapabilities::complete(),
+            observation: Some(observation.clone()),
+            match_count: 1,
+            returned_count: 1,
+            snapshot_id: "window-snapshot-99".to_owned(),
+            observed_at_unix_ms: 99,
+            matches,
+        };
+        let target = WindowCommandTarget {
+            ref_id: Some(target_ref),
+            observation_id: Some(observation.observation_id),
+            ..WindowCommandTarget::default()
+        };
+
+        let resolved = resolve_single_window_with_resolver(
+            &find_response,
+            &target,
+            false,
+            None,
+            None,
+            |window_id| {
+                assert_eq!(window_id, "pid:88/window:2");
+                Ok(ResolvedWindow {
+                    app: RunningApp {
+                        pid: 88,
+                        name: "Editor".to_owned(),
+                        bundle_id: Some("com.example.Editor".to_owned()),
+                        hidden: false,
+                        frontmost: false,
+                    },
+                    window_index: 2,
+                    title: Some("Ref Target".to_owned()),
+                    rect: None,
+                    minimized: false,
+                    fullscreen_space: false,
+                    focused: false,
+                    current_space: true,
+                    occluded: false,
+                })
+            },
+        )
+        .unwrap();
+
+        assert_eq!(resolved.0.window_index, 2);
+        assert_eq!(resolved.1, "window-snapshot-99");
+        assert_eq!(resolved.2, 99);
     }
 }

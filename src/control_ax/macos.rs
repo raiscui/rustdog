@@ -531,6 +531,7 @@ fn fallback_visible_windows(
         .enumerate()
         .map(|(index, window)| AxWindow {
             id: format!("pid:{pid}/window:{index}"),
+            ref_id: None,
             pid,
             process_name: process_name.to_owned(),
             title: window.title.clone(),
@@ -589,6 +590,7 @@ fn build_window(
 
     Ok(AxWindow {
         id: format!("pid:{pid}/window:{window_index}"),
+        ref_id: None,
         pid,
         process_name: process_name.to_owned(),
         title,
@@ -660,6 +662,7 @@ fn build_element(
                 .collect::<Vec<_>>()
                 .join(".")
         ),
+        ref_id: None,
         role,
         subrole,
         name,

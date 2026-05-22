@@ -1,18 +1,34 @@
 use std::io;
 
+mod parsers;
+
+pub(crate) use self::parsers::{
+    normalize_object_field_name, object_inner, parse_quoted_payload, split_object_field,
+    split_object_fields,
+};
+
+use self::parsers::{
+    parse_control_header, parse_key_payload, parse_pty_attach_payload, parse_pty_close_payload,
+    parse_pty_detach_payload, parse_pty_payload, parse_screenshot_payload,
+    require_non_empty_payload,
+};
+
 use crate::control_ax::{
     parse_ax_action_payload, parse_ax_find_payload, parse_ax_focus_payload, parse_ax_get_payload,
-    parse_ax_mode_payload, parse_ax_press_payload, parse_ax_scroll_payload,
-    parse_ax_set_value_payload, parse_ax_tree_payload, parse_type_text_payload, AxActionRequest,
-    AxFindRequest, AxFocusRequest, AxGetRequest, AxMode, AxPressRequest, AxScrollRequest,
-    AxSetValueRequest, AxTreeRequest, TypeTextRequest, DEFAULT_AX_DEPTH, DEFAULT_AX_INCLUDE_VALUES,
-    DEFAULT_AX_MAX_ELEMENTS,
+    parse_ax_press_payload, parse_ax_scroll_payload, parse_ax_set_value_payload,
+    parse_ax_tree_payload, parse_type_text_payload, AxActionRequest, AxFindRequest, AxFocusRequest,
+    AxGetRequest, AxMode, AxPressRequest, AxScrollRequest, AxSetValueRequest, AxTreeRequest,
+    TypeTextRequest, DEFAULT_AX_DEPTH, DEFAULT_AX_INCLUDE_VALUES, DEFAULT_AX_MAX_ELEMENTS,
 };
 use crate::control_frames::SaveFileFrame;
 use crate::control_mouse::{
     parse_click_payload, parse_drag_payload, parse_mouse_button_payload, parse_mouse_move_payload,
     parse_wheel_payload, ClickRequest, DragRequest, MouseButtonRequest, MouseMoveRequest,
     WheelRequest,
+};
+use crate::control_observation::{
+    parse_observe_payload, ObserveRequest, SelectorGetRequest, SelectorRefindPolicy,
+    SelectorRefindRequest, SelectorRefindSource, SelectorResolveRequest,
 };
 use crate::control_window::{
     parse_window_activate_payload, parse_window_close_payload, parse_window_find_payload,
@@ -60,6 +76,11 @@ pub enum ControlCommand {
     WindowFind(WindowFindRequest),
     WindowActivate(WindowActivateRequest),
     WindowClose(WindowCloseRequest),
+    Capabilities,
+    Observe(ObserveRequest),
+    SelectorGet(SelectorGetRequest),
+    SelectorResolve(SelectorResolveRequest),
+    SelectorRefind(SelectorRefindRequest),
     SaveFile(SaveFileFrame),
 }
 
@@ -298,6 +319,20 @@ pub fn parse_control_line(line: &str) -> io::Result<ControlParseResult> {
         }));
     }
 
+    if kind.eq_ignore_ascii_case("capabilities") && !has_payload {
+        return Ok(ControlParseResult::Control(ControlRequest {
+            request_id,
+            command: ControlCommand::Capabilities,
+        }));
+    }
+
+    if kind.eq_ignore_ascii_case("observe") && !has_payload {
+        return Ok(ControlParseResult::Control(ControlRequest {
+            request_id,
+            command: ControlCommand::Observe(ObserveRequest::default()),
+        }));
+    }
+
     let Some((_, payload)) = command.split_once(':') else {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -346,6 +381,20 @@ pub fn parse_control_line(line: &str) -> io::Result<ControlParseResult> {
             ControlCommand::WindowActivate(parse_window_activate_payload(payload)?)
         }
         "window-close" => ControlCommand::WindowClose(parse_window_close_payload(payload)?),
+        "observe" => ControlCommand::Observe(parse_observe_payload(payload)?),
+        "selector-get" => ControlCommand::SelectorGet(parse_selector_get_payload(payload)?),
+        "selector-resolve" => {
+            ControlCommand::SelectorResolve(parse_selector_resolve_payload(payload)?)
+        }
+        "selector-refind" => {
+            ControlCommand::SelectorRefind(parse_selector_refind_payload(payload)?)
+        }
+        "capabilities" => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "@capabilities 不接受 payload,请直接发送 @capabilities 或 @capabilities#id",
+            ))
+        }
         "savefile" => ControlCommand::SaveFile(SaveFileFrame::parse_object_payload(payload)?),
         _ => {
             return Err(io::Error::new(
@@ -361,2096 +410,318 @@ pub fn parse_control_line(line: &str) -> io::Result<ControlParseResult> {
     }))
 }
 
-fn parse_pty_payload(input: &str) -> io::Result<PtyOpenRequest> {
-    let trimmed = input.trim();
-
-    if trimmed.starts_with('"') {
-        let command_line = parse_pty_command_line_payload(trimmed)?;
-        return default_pty_request(command_line);
-    }
-
-    if trimmed.starts_with('{') {
-        return parse_pty_object_payload(trimmed);
-    }
-
-    Err(io::Error::new(
-        io::ErrorKind::InvalidData,
-        format!("@pty payload 必须是字符串或对象: {input}"),
-    ))
-}
-
-fn parse_pty_object_payload(input: &str) -> io::Result<PtyOpenRequest> {
-    let inner = object_inner(input, "@pty")?;
-    let mut cmd = None::<String>;
-    let mut args = None::<Vec<String>>;
-    let mut argv = None::<Vec<String>>;
-    let mut cols = None::<u16>;
-    let mut rows = None::<u16>;
-
+fn parse_selector_get_payload(input: &str) -> io::Result<SelectorGetRequest> {
+    let inner = object_inner(input, "@selector-get")?;
     if inner.is_empty() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            "@pty 对象 payload 不能为空",
+            "@selector-get 对象 payload 不能为空",
         ));
     }
+
+    let mut selector_id = None::<String>;
+    let mut include_history = None::<bool>;
+    for field in split_object_fields(inner)? {
+        let (field_name, raw_value) = split_object_field(field)?;
+        let field_name = normalize_object_field_name(field_name)?;
+        match field_name.as_str() {
+            "selector_id" => assign_selector_field(
+                &mut selector_id,
+                "selector_id",
+                "@selector-get",
+                parse_quoted_payload(raw_value.trim())?,
+            )?,
+            "include_history" => assign_selector_field(
+                &mut include_history,
+                "include_history",
+                "@selector-get",
+                parse_selector_bool("@selector-get", "include_history", raw_value.trim())?,
+            )?,
+            _ => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("@selector-get 不支持字段: {field_name}"),
+                ));
+            }
+        }
+    }
+
+    Ok(SelectorGetRequest {
+        selector_id: require_selector_string("@selector-get.selector_id", selector_id)?,
+        include_history: include_history.unwrap_or(false),
+    })
+}
+
+fn parse_selector_resolve_payload(input: &str) -> io::Result<SelectorResolveRequest> {
+    let inner = object_inner(input, "@selector-resolve")?;
+    if inner.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "@selector-resolve 对象 payload 不能为空",
+        ));
+    }
+
+    let mut selector_id = None::<String>;
+    let mut limit = None::<u16>;
+    let mut dry_run = None::<bool>;
+    let mut include_explanations = None::<bool>;
+    for field in split_object_fields(inner)? {
+        let (field_name, raw_value) = split_object_field(field)?;
+        let field_name = normalize_object_field_name(field_name)?;
+        let raw_value = raw_value.trim();
+        match field_name.as_str() {
+            "selector_id" => assign_selector_field(
+                &mut selector_id,
+                "selector_id",
+                "@selector-resolve",
+                parse_quoted_payload(raw_value)?,
+            )?,
+            "limit" => assign_selector_field(
+                &mut limit,
+                "limit",
+                "@selector-resolve",
+                parse_selector_limit("@selector-resolve", raw_value)?,
+            )?,
+            "dry_run" => assign_selector_field(
+                &mut dry_run,
+                "dry_run",
+                "@selector-resolve",
+                parse_selector_bool("@selector-resolve", "dry_run", raw_value)?,
+            )?,
+            "include_explanations" => assign_selector_field(
+                &mut include_explanations,
+                "include_explanations",
+                "@selector-resolve",
+                parse_selector_bool("@selector-resolve", "include_explanations", raw_value)?,
+            )?,
+            _ => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("@selector-resolve 不支持字段: {field_name}"),
+                ));
+            }
+        }
+    }
+
+    Ok(SelectorResolveRequest {
+        selector_id: require_selector_string("@selector-resolve.selector_id", selector_id)?,
+        limit: limit.unwrap_or(10),
+        dry_run: dry_run.unwrap_or(true),
+        include_explanations: include_explanations.unwrap_or(true),
+    })
+}
+
+fn parse_selector_refind_payload(input: &str) -> io::Result<SelectorRefindRequest> {
+    let inner = object_inner(input, "@selector-refind")?;
+    if inner.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "@selector-refind 对象 payload 不能为空",
+        ));
+    }
+
+    let mut selector_id = None::<String>;
+    let mut limit = None::<u16>;
+    let mut policy = None::<SelectorRefindPolicy>;
+    let mut min_confidence_milli = None::<u16>;
+    let mut include_explanations = None::<bool>;
+    let mut include_history = None::<bool>;
+    let mut source = None::<SelectorRefindSource>;
 
     for field in split_object_fields(inner)? {
         let (field_name, raw_value) = split_object_field(field)?;
         let field_name = normalize_object_field_name(field_name)?;
         let raw_value = raw_value.trim();
-
         match field_name.as_str() {
-            "cmd" => cmd = Some(parse_quoted_payload(raw_value)?),
-            "args" => args = Some(parse_string_array(raw_value)?),
-            "argv" => argv = Some(parse_string_array(raw_value)?),
-            "cols" => cols = Some(parse_pty_dimension("cols", raw_value)?),
-            "rows" => rows = Some(parse_pty_dimension("rows", raw_value)?),
+            "selector_id" => assign_selector_field(
+                &mut selector_id,
+                "selector_id",
+                "@selector-refind",
+                parse_quoted_payload(raw_value)?,
+            )?,
+            "limit" => assign_selector_field(
+                &mut limit,
+                "limit",
+                "@selector-refind",
+                parse_selector_limit("@selector-refind", raw_value)?,
+            )?,
+            "policy" => assign_selector_field(
+                &mut policy,
+                "policy",
+                "@selector-refind",
+                parse_selector_refind_policy(raw_value)?,
+            )?,
+            "min_confidence" => assign_selector_field(
+                &mut min_confidence_milli,
+                "min_confidence",
+                "@selector-refind",
+                parse_selector_min_confidence(raw_value)?,
+            )?,
+            "include_explanations" => assign_selector_field(
+                &mut include_explanations,
+                "include_explanations",
+                "@selector-refind",
+                parse_selector_bool("@selector-refind", "include_explanations", raw_value)?,
+            )?,
+            "include_history" => assign_selector_field(
+                &mut include_history,
+                "include_history",
+                "@selector-refind",
+                parse_selector_bool("@selector-refind", "include_history", raw_value)?,
+            )?,
+            "source" => assign_selector_field(
+                &mut source,
+                "source",
+                "@selector-refind",
+                parse_selector_refind_source(raw_value)?,
+            )?,
             _ => {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
-                    format!("@pty 对象 payload 包含未知字段: {field_name}"),
-                ))
-            }
-        }
-    }
-
-    let cmd = require_non_empty_payload("pty.cmd", cmd.unwrap_or_default(), |value| value)?;
-    if args.is_some() && argv.is_some() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "@pty 对象 payload 不能同时包含 `args` 和 legacy `argv`",
-        ));
-    }
-
-    let args = if let Some(args) = args {
-        validate_pty_args(&args)?;
-        args
-    } else if let Some(argv) = argv {
-        normalize_legacy_pty_argv(&cmd, argv)?
-    } else {
-        Vec::new()
-    };
-
-    Ok(PtyOpenRequest {
-        cmd,
-        args,
-        cols: cols.unwrap_or(80),
-        rows: rows.unwrap_or(24),
-    })
-}
-
-fn default_pty_request(cmd: String) -> io::Result<PtyOpenRequest> {
-    let argv = split_shell_style_words(&cmd)?;
-    let cmd =
-        require_non_empty_payload("pty", argv.first().cloned().unwrap_or_default(), |value| {
-            value
-        })?;
-    let args = argv.into_iter().skip(1).collect::<Vec<_>>();
-    validate_pty_args(&args)?;
-
-    Ok(PtyOpenRequest {
-        cmd,
-        args,
-        cols: 80,
-        rows: 24,
-    })
-}
-
-fn split_shell_style_words(input: &str) -> io::Result<Vec<String>> {
-    let mut words = Vec::new();
-    let mut current = String::new();
-    let mut chars = input.chars().peekable();
-    let mut in_single_quote = false;
-    let mut in_double_quote = false;
-    let mut saw_token = false;
-
-    while let Some(ch) = chars.next() {
-        if in_single_quote {
-            if ch == '\'' {
-                in_single_quote = false;
-            } else {
-                current.push(ch);
-            }
-            saw_token = true;
-            continue;
-        }
-
-        if in_double_quote {
-            match ch {
-                '"' => in_double_quote = false,
-                '\\' => {
-                    let Some(next) = chars.next() else {
-                        return Err(io::Error::new(
-                            io::ErrorKind::InvalidData,
-                            "@pty 字符串简写存在未完成的反斜杠转义",
-                        ));
-                    };
-                    current.push(next);
-                }
-                _ => current.push(ch),
-            }
-            saw_token = true;
-            continue;
-        }
-
-        match ch {
-            '\'' => {
-                in_single_quote = true;
-                saw_token = true;
-            }
-            '"' => {
-                in_double_quote = true;
-                saw_token = true;
-            }
-            '\\' => {
-                let Some(next) = chars.next() else {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        "@pty 字符串简写存在未完成的反斜杠转义",
-                    ));
-                };
-                current.push(next);
-                saw_token = true;
-            }
-            ch if ch.is_whitespace() => {
-                if saw_token {
-                    words.push(std::mem::take(&mut current));
-                    saw_token = false;
-                }
-            }
-            _ => {
-                current.push(ch);
-                saw_token = true;
-            }
-        }
-    }
-
-    if in_single_quote || in_double_quote {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "@pty 字符串简写存在未闭合的引号",
-        ));
-    }
-
-    if saw_token {
-        words.push(current);
-    }
-
-    if words.is_empty() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "@pty 字符串简写不能为空",
-        ));
-    }
-
-    Ok(words)
-}
-
-fn parse_pty_command_line_payload(input: &str) -> io::Result<String> {
-    let bytes = input.as_bytes();
-    if bytes.len() < 2 || bytes.first() != Some(&b'"') {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("@pty 字符串 payload 必须使用双引号包裹: {input}"),
-        ));
-    }
-
-    let mut escaped = false;
-    let mut result = String::new();
-
-    for (index, byte) in bytes.iter().copied().enumerate().skip(1) {
-        if escaped {
-            match byte {
-                b'"' => result.push('"'),
-                b'\\' => result.push('\\'),
-                b'n' => result.push('\n'),
-                b'r' => result.push('\r'),
-                b't' => result.push('\t'),
-                other => {
-                    result.push('\\');
-                    result.push(other as char);
-                }
-            }
-            escaped = false;
-            continue;
-        }
-
-        match byte {
-            b'\\' => escaped = true,
-            b'"' => {
-                if input[index + 1..].trim().is_empty() {
-                    return Ok(result);
-                }
-
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!("@pty 字符串 payload 后存在多余内容: {input}"),
+                    format!("@selector-refind 不支持字段: {field_name}"),
                 ));
             }
-            other => result.push(other as char),
         }
     }
 
-    if escaped {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "@pty 字符串 payload 存在未完成的反斜杠转义",
-        ));
-    }
-
-    Err(io::Error::new(
-        io::ErrorKind::InvalidData,
-        format!("未闭合的 @pty 字符串 payload: {input}"),
-    ))
+    Ok(SelectorRefindRequest {
+        selector_id: require_selector_string("@selector-refind.selector_id", selector_id)?,
+        limit: limit.unwrap_or(crate::control_observation::refind::DEFAULT_REFIND_LIMIT),
+        policy: policy.unwrap_or(SelectorRefindPolicy::Safe),
+        min_confidence_milli: min_confidence_milli
+            .unwrap_or(crate::control_observation::refind::DEFAULT_REFIND_MIN_CONFIDENCE_MILLI),
+        include_explanations: include_explanations.unwrap_or(true),
+        include_history: include_history.unwrap_or(false),
+        source,
+    })
 }
 
-fn validate_pty_args(args: &[String]) -> io::Result<()> {
-    if args.iter().any(|item| item.is_empty()) {
+fn parse_selector_refind_policy(input: &str) -> io::Result<SelectorRefindPolicy> {
+    match parse_quoted_payload(input)?.as_str() {
+        "safe" => Ok(SelectorRefindPolicy::Safe),
+        "manual" => Ok(SelectorRefindPolicy::Manual),
+        other => Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("@selector-refind.policy 不支持: {other}"),
+        )),
+    }
+}
+
+fn parse_selector_min_confidence(input: &str) -> io::Result<u16> {
+    let value = input.parse::<f64>().map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "@selector-refind.min_confidence 必须是 0.0 到 1.0 之间的数字",
+        )
+    })?;
+    if !value.is_finite() || !(0.0..=1.0).contains(&value) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            "@pty 的 args 不能包含空参数",
+            "@selector-refind.min_confidence 必须在 0.0 到 1.0 之间",
+        ));
+    }
+    Ok((value * 1000.0).round() as u16)
+}
+
+fn parse_selector_refind_source(input: &str) -> io::Result<SelectorRefindSource> {
+    let inner = object_inner(input, "@selector-refind.source")?;
+    if inner.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "@selector-refind.source 不能为空对象",
         ));
     }
 
+    let mut observation_id = None::<String>;
+    let mut ref_id = None::<String>;
+    for field in split_object_fields(inner)? {
+        let (field_name, raw_value) = split_object_field(field)?;
+        let field_name = normalize_object_field_name(field_name)?;
+        let raw_value = raw_value.trim();
+        match field_name.as_str() {
+            "observation_id" => assign_selector_field(
+                &mut observation_id,
+                "observation_id",
+                "@selector-refind.source",
+                parse_quoted_payload(raw_value)?,
+            )?,
+            "ref" | "ref_id" => assign_selector_field(
+                &mut ref_id,
+                "ref",
+                "@selector-refind.source",
+                parse_quoted_payload(raw_value)?,
+            )?,
+            _ => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("@selector-refind.source 不支持字段: {field_name}"),
+                ));
+            }
+        }
+    }
+
+    Ok(SelectorRefindSource {
+        observation_id: require_selector_string(
+            "@selector-refind.source.observation_id",
+            observation_id,
+        )?,
+        ref_id: require_selector_string("@selector-refind.source.ref", ref_id)?,
+    })
+}
+
+fn assign_selector_field<T>(
+    slot: &mut Option<T>,
+    field_name: &str,
+    kind: &str,
+    value: T,
+) -> io::Result<()> {
+    if slot.is_some() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("{kind} 字段重复: {field_name}"),
+        ));
+    }
+    *slot = Some(value);
     Ok(())
 }
 
-fn normalize_legacy_pty_argv(cmd: &str, argv: Vec<String>) -> io::Result<Vec<String>> {
-    if argv.is_empty() || argv.iter().any(|item| item.is_empty()) {
+fn require_selector_string(kind: &str, value: Option<String>) -> io::Result<String> {
+    let value = value.unwrap_or_default();
+    if value.trim().is_empty() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            "@pty 的 legacy argv 不能为空,且不能包含空参数",
+            format!("{kind} 不能为空"),
         ));
     }
-
-    if argv[0] != cmd {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!(
-                "@pty 的 legacy argv[0] 必须与 cmd 一致: cmd={cmd}, argv[0]={}",
-                argv[0]
-            ),
-        ));
-    }
-
-    Ok(argv.into_iter().skip(1).collect())
-}
-
-fn parse_pty_close_payload(input: &str) -> io::Result<PtyCloseRequest> {
-    let inner = object_inner(input, "@pty-close")?;
-    let mut session_id = None::<String>;
-
-    if inner.is_empty() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "@pty-close 对象 payload 不能为空",
-        ));
-    }
-
-    for field in split_object_fields(inner)? {
-        let (field_name, raw_value) = split_object_field(field)?;
-        let field_name = normalize_object_field_name(field_name)?;
-        let raw_value = raw_value.trim();
-
-        match field_name.as_str() {
-            "session_id" => session_id = Some(parse_quoted_payload(raw_value)?),
-            _ => {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!("@pty-close 对象 payload 包含未知字段: {field_name}"),
-                ))
-            }
-        }
-    }
-
-    Ok(PtyCloseRequest {
-        session_id: require_non_empty_payload(
-            "pty-close.session_id",
-            session_id.unwrap_or_default(),
-            |value| value,
-        )?,
-    })
-}
-
-fn parse_pty_detach_payload(input: &str) -> io::Result<PtyDetachRequest> {
-    let inner = object_inner(input, "@pty-detach")?;
-    let mut session_id = None::<String>;
-
-    if inner.is_empty() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "@pty-detach 对象 payload 不能为空",
-        ));
-    }
-
-    for field in split_object_fields(inner)? {
-        let (field_name, raw_value) = split_object_field(field)?;
-        let field_name = normalize_object_field_name(field_name)?;
-        let raw_value = raw_value.trim();
-
-        match field_name.as_str() {
-            "session_id" => session_id = Some(parse_quoted_payload(raw_value)?),
-            _ => {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!("@pty-detach 对象 payload 包含未知字段: {field_name}"),
-                ))
-            }
-        }
-    }
-
-    Ok(PtyDetachRequest {
-        session_id: require_non_empty_payload(
-            "pty-detach.session_id",
-            session_id.unwrap_or_default(),
-            |value| value,
-        )?,
-    })
-}
-
-fn parse_pty_attach_payload(input: &str) -> io::Result<PtyAttachRequest> {
-    let trimmed = input.trim();
-
-    if trimmed.starts_with('"') {
-        let session_id = parse_quoted_payload(trimmed)?;
-        return Ok(PtyAttachRequest {
-            session_id: require_non_empty_payload("pty-attach", session_id, |value| value)?,
-            cols: 80,
-            rows: 24,
-        });
-    }
-
-    let inner = object_inner(trimmed, "@pty-attach")?;
-    let mut session_id = None::<String>;
-    let mut cols = None::<u16>;
-    let mut rows = None::<u16>;
-
-    if inner.is_empty() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "@pty-attach 对象 payload 不能为空",
-        ));
-    }
-
-    for field in split_object_fields(inner)? {
-        let (field_name, raw_value) = split_object_field(field)?;
-        let field_name = normalize_object_field_name(field_name)?;
-        let raw_value = raw_value.trim();
-
-        match field_name.as_str() {
-            "session_id" => session_id = Some(parse_quoted_payload(raw_value)?),
-            "cols" => cols = Some(parse_pty_dimension("cols", raw_value)?),
-            "rows" => rows = Some(parse_pty_dimension("rows", raw_value)?),
-            _ => {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!("@pty-attach 对象 payload 包含未知字段: {field_name}"),
-                ))
-            }
-        }
-    }
-
-    Ok(PtyAttachRequest {
-        session_id: require_non_empty_payload(
-            "pty-attach.session_id",
-            session_id.unwrap_or_default(),
-            |value| value,
-        )?,
-        cols: cols.unwrap_or(80),
-        rows: rows.unwrap_or(24),
-    })
-}
-
-pub(crate) fn object_inner<'a>(input: &'a str, kind: &str) -> io::Result<&'a str> {
-    let trimmed = input.trim();
-    trimmed
-        .strip_prefix('{')
-        .and_then(|value| value.strip_suffix('}'))
-        .map(str::trim)
-        .ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("{kind} payload 必须是对象: {input}"),
-            )
-        })
-}
-
-fn parse_pty_dimension(field_name: &str, input: &str) -> io::Result<u16> {
-    let value = input.parse::<u16>().map_err(|_| {
-        io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("@pty 的 `{field_name}` 必须是无符号整数: {input}"),
-        )
-    })?;
-
-    if value == 0 {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("@pty 的 `{field_name}` 必须大于 0"),
-        ));
-    }
-
     Ok(value)
 }
 
-fn parse_string_array(input: &str) -> io::Result<Vec<String>> {
-    let inner = input
-        .trim()
-        .strip_prefix('[')
-        .and_then(|value| value.strip_suffix(']'))
-        .ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("字符串数组必须使用方括号包裹: {input}"),
-            )
-        })?
-        .trim();
-
-    if inner.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    split_object_fields(inner)?
-        .into_iter()
-        .map(parse_quoted_payload)
-        .collect()
-}
-
-fn parse_screenshot_payload(input: &str) -> io::Result<ScreenshotRequest> {
-    let trimmed = input.trim();
-
-    if !trimmed.starts_with('{') {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("@screenshot payload 当前必须是对象: {input}"),
-        ));
-    }
-
-    let inner = trimmed
-        .strip_prefix('{')
-        .and_then(|value| value.strip_suffix('}'))
-        .ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("@screenshot 对象 payload 必须使用大括号包裹: {input}"),
-            )
-        })?
-        .trim();
-
-    if inner.is_empty() {
-        return Ok(ScreenshotRequest::default());
-    }
-
-    let mut target = None::<ScreenshotTarget>;
-    let mut display = None::<ScreenshotDisplaySelector>;
-    let mut layout = None::<ScreenshotLayout>;
-    let mut coordinate_space = None::<ScreenshotCoordinateSpace>;
-    let mut quality = None::<u8>;
-    let mut include_ax = None::<bool>;
-    let mut ax_required = None::<bool>;
-    let mut ax_mode = None::<AxMode>;
-    let mut ax_depth = None::<u8>;
-    let mut ax_max_elements = None::<u16>;
-    let mut ax_include_values = None::<bool>;
-
-    for field in split_object_fields(inner)? {
-        let (field_name, raw_value) = split_object_field(field)?;
-        let field_name = normalize_object_field_name(field_name)?;
-        let raw_value = raw_value.trim();
-
-        match field_name.as_str() {
-            "quality" => {
-                if quality.is_some() {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        "@screenshot 对象 payload 的 `quality` 字段重复",
-                    ));
-                }
-                quality = Some(parse_screenshot_quality(raw_value)?);
-            }
-            "target" => {
-                if target.is_some() {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        "@screenshot 对象 payload 的 `target` 字段重复",
-                    ));
-                }
-                target = Some(parse_screenshot_target(raw_value)?);
-            }
-            "format" => {
-                let format = parse_quoted_payload(raw_value)?;
-                if !format.eq_ignore_ascii_case("jpeg") {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        format!("@screenshot 当前只支持 format=\"jpeg\": {format}"),
-                    ));
-                }
-            }
-            "display" => {
-                if display.is_some() {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        "@screenshot 对象 payload 的 `display` 字段重复",
-                    ));
-                }
-                display = Some(parse_screenshot_display(raw_value)?);
-            }
-            "layout" => {
-                if layout.is_some() {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        "@screenshot 对象 payload 的 `layout` 字段重复",
-                    ));
-                }
-                layout = Some(parse_screenshot_layout(raw_value)?);
-            }
-            "coordinate_space" => {
-                if coordinate_space.is_some() {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        "@screenshot 对象 payload 的 `coordinate_space` 字段重复",
-                    ));
-                }
-                coordinate_space = Some(parse_screenshot_coordinate_space(raw_value)?);
-            }
-            "include_ax" => {
-                if include_ax.is_some() {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        "@screenshot 对象 payload 的 `include_ax` 字段重复",
-                    ));
-                }
-                include_ax = Some(parse_bool_field("@screenshot", "include_ax", raw_value)?);
-            }
-            "ax_required" => {
-                if ax_required.is_some() {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        "@screenshot 对象 payload 的 `ax_required` 字段重复",
-                    ));
-                }
-                ax_required = Some(parse_bool_field("@screenshot", "ax_required", raw_value)?);
-            }
-            "ax_mode" => {
-                if ax_mode.is_some() {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        "@screenshot 对象 payload 的 `ax_mode` 字段重复",
-                    ));
-                }
-                ax_mode = Some(parse_ax_mode_payload("@screenshot", raw_value)?);
-            }
-            "ax_depth" => {
-                if ax_depth.is_some() {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        "@screenshot 对象 payload 的 `ax_depth` 字段重复",
-                    ));
-                }
-                ax_depth = Some(parse_screenshot_ax_depth(raw_value)?);
-            }
-            "ax_max_elements" => {
-                if ax_max_elements.is_some() {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        "@screenshot 对象 payload 的 `ax_max_elements` 字段重复",
-                    ));
-                }
-                ax_max_elements = Some(parse_screenshot_ax_max_elements(raw_value)?);
-            }
-            "ax_include_values" => {
-                if ax_include_values.is_some() {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        "@screenshot 对象 payload 的 `ax_include_values` 字段重复",
-                    ));
-                }
-                ax_include_values = Some(parse_bool_field(
-                    "@screenshot",
-                    "ax_include_values",
-                    raw_value,
-                )?);
-            }
-            _ => {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!("@screenshot 对象 payload 包含未知字段: {field_name}"),
-                ))
-            }
-        }
-    }
-
-    let target = target.unwrap_or(ScreenshotTarget::Display);
-    let display = display.unwrap_or(ScreenshotDisplaySelector::All);
-    let layout = layout.unwrap_or(match display {
-        ScreenshotDisplaySelector::All => ScreenshotLayout::Composite,
-        ScreenshotDisplaySelector::Primary => ScreenshotLayout::Single,
-    });
-    let coordinate_space = coordinate_space.unwrap_or(ScreenshotCoordinateSpace::OsLogical);
-
-    validate_screenshot_layout(display, layout)?;
-    let ax_mode = ax_mode.unwrap_or(AxMode::Full);
-    let ax_preset = ax_mode.preset();
-
-    Ok(ScreenshotRequest {
-        target,
-        display,
-        layout,
-        coordinate_space,
-        quality: quality.unwrap_or(DEFAULT_SCREENSHOT_QUALITY),
-        include_ax: include_ax.unwrap_or(false),
-        ax_required: ax_required.unwrap_or(false),
-        ax_mode,
-        ax_depth: ax_depth.unwrap_or(ax_preset.depth),
-        ax_max_elements: ax_max_elements.unwrap_or(ax_preset.max_elements),
-        ax_include_values: ax_include_values.unwrap_or(ax_preset.include_values),
-    })
-}
-
-fn parse_screenshot_target(input: &str) -> io::Result<ScreenshotTarget> {
-    let target = parse_quoted_payload(input)?;
-    if target.eq_ignore_ascii_case("display") {
-        return Ok(ScreenshotTarget::Display);
-    }
-
-    Err(io::Error::new(
-        io::ErrorKind::InvalidData,
-        format!("@screenshot 当前只支持 target=\"display\": {target}"),
-    ))
-}
-
-fn parse_screenshot_display(input: &str) -> io::Result<ScreenshotDisplaySelector> {
-    let display = parse_quoted_payload(input)?;
-    if display.eq_ignore_ascii_case("all") {
-        return Ok(ScreenshotDisplaySelector::All);
-    }
-    if display.eq_ignore_ascii_case("primary") {
-        return Ok(ScreenshotDisplaySelector::Primary);
-    }
-
-    Err(io::Error::new(
-        io::ErrorKind::InvalidData,
-        format!("@screenshot 当前只支持 display=\"all\" 或 display=\"primary\": {display}"),
-    ))
-}
-
-fn parse_screenshot_layout(input: &str) -> io::Result<ScreenshotLayout> {
-    let layout = parse_quoted_payload(input)?;
-    if layout.eq_ignore_ascii_case("composite") {
-        return Ok(ScreenshotLayout::Composite);
-    }
-    if layout.eq_ignore_ascii_case("single") {
-        return Ok(ScreenshotLayout::Single);
-    }
-
-    Err(io::Error::new(
-        io::ErrorKind::InvalidData,
-        format!("@screenshot 当前只支持 layout=\"composite\" 或 layout=\"single\": {layout}"),
-    ))
-}
-
-fn parse_screenshot_coordinate_space(input: &str) -> io::Result<ScreenshotCoordinateSpace> {
-    let coordinate_space = parse_quoted_payload(input)?;
-    if coordinate_space.eq_ignore_ascii_case("os-logical") {
-        return Ok(ScreenshotCoordinateSpace::OsLogical);
-    }
-
-    Err(io::Error::new(
-        io::ErrorKind::InvalidData,
-        format!("@screenshot 当前只支持 coordinate_space=\"os-logical\": {coordinate_space}"),
-    ))
-}
-
-fn validate_screenshot_layout(
-    display: ScreenshotDisplaySelector,
-    layout: ScreenshotLayout,
-) -> io::Result<()> {
-    match (display, layout) {
-        (ScreenshotDisplaySelector::All, ScreenshotLayout::Composite)
-        | (ScreenshotDisplaySelector::Primary, ScreenshotLayout::Single) => Ok(()),
-        (ScreenshotDisplaySelector::All, ScreenshotLayout::Single) => Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "@screenshot display=\"all\" 必须使用 layout=\"composite\"",
-        )),
-        (ScreenshotDisplaySelector::Primary, ScreenshotLayout::Composite) => Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "@screenshot display=\"primary\" 必须使用 layout=\"single\"",
-        )),
-    }
-}
-
-fn parse_screenshot_quality(input: &str) -> io::Result<u8> {
-    let quality = input.parse::<u8>().map_err(|_| {
-        io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("@screenshot 的 `quality` 必须是无符号整数: {input}"),
-        )
-    })?;
-
-    if !(1..=100).contains(&quality) {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "@screenshot 的 `quality` 必须在 1..=100 之间",
-        ));
-    }
-
-    Ok(quality)
-}
-
-fn parse_screenshot_ax_depth(input: &str) -> io::Result<u8> {
-    let depth = input.parse::<u8>().map_err(|_| {
-        io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("@screenshot 的 `ax_depth` 必须是无符号整数: {input}"),
-        )
-    })?;
-
-    if depth == 0 {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "@screenshot 的 `ax_depth` 必须大于 0",
-        ));
-    }
-
-    Ok(depth)
-}
-
-fn parse_screenshot_ax_max_elements(input: &str) -> io::Result<u16> {
-    let max_elements = input.parse::<u16>().map_err(|_| {
-        io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("@screenshot 的 `ax_max_elements` 必须是无符号整数: {input}"),
-        )
-    })?;
-
-    if max_elements == 0 {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "@screenshot 的 `ax_max_elements` 必须大于 0",
-        ));
-    }
-
-    Ok(max_elements)
-}
-
-fn parse_bool_field(kind: &str, field_name: &str, input: &str) -> io::Result<bool> {
-    match input.trim().to_ascii_lowercase().as_str() {
+fn parse_selector_bool(kind: &str, field_name: &str, input: &str) -> io::Result<bool> {
+    match input {
         "true" => Ok(true),
         "false" => Ok(false),
         _ => Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            format!("{kind} 的 `{field_name}` 必须是 true 或 false: {input}"),
+            format!("{kind}.{field_name} 必须是 true 或 false"),
         )),
     }
 }
 
-fn parse_i32_field(kind: &str, field_name: &str, input: &str) -> io::Result<i32> {
-    input.trim().parse::<i32>().map_err(|_| {
+fn parse_selector_limit(kind: &str, input: &str) -> io::Result<u16> {
+    let value = input.parse::<u16>().map_err(|_| {
         io::Error::new(
             io::ErrorKind::InvalidData,
-            format!("{kind} 的 `{field_name}` 必须是整数: {input}"),
+            format!("{kind}.limit 必须是正整数"),
         )
-    })
-}
-
-fn parse_non_empty_string(kind: &str, input: &str) -> io::Result<String> {
-    let value = parse_quoted_payload(input)?;
-    if value.is_empty() {
+    })?;
+    if value == 0 {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            format!("{kind} 不能为空字符串"),
+            format!("{kind}.limit 必须大于 0"),
         ));
     }
     Ok(value)
 }
 
-fn parse_key_payload(input: &str) -> io::Result<KeyRequest> {
-    let trimmed = input.trim();
-
-    if trimmed.starts_with('"') {
-        let key = parse_quoted_payload(trimmed)?;
-        return default_key_request(key);
-    }
-
-    if trimmed.starts_with('{') {
-        return parse_key_object_payload(trimmed);
-    }
-
-    Err(io::Error::new(
-        io::ErrorKind::InvalidData,
-        format!("控制指令 payload 必须是字符串或对象: {input}"),
-    ))
-}
-
-fn default_key_request(key: String) -> io::Result<KeyRequest> {
-    require_non_empty_payload("key", key, |key| {
-        KeyRequest::legacy(key, DEFAULT_KEY_HOLD_MS, KeyMode::PressRelease)
-    })
-}
-
-fn parse_key_object_payload(input: &str) -> io::Result<KeyRequest> {
-    let inner = input
-        .strip_prefix('{')
-        .and_then(|value| value.strip_suffix('}'))
-        .ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("控制指令对象 payload 必须使用大括号包裹: {input}"),
-            )
-        })?
-        .trim();
-
-    let mut key = None::<String>;
-    let mut hold_ms = None::<u64>;
-    let mut mode = None::<KeyMode>;
-    let mut delivery = None::<KeyDelivery>;
-    let mut pid = None::<i32>;
-    let mut window_id = None::<String>;
-    let mut delivery_seen = false;
-
-    if inner.is_empty() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "@key 对象 payload 不能为空",
-        ));
-    }
-
-    for field in split_object_fields(inner)? {
-        let (field_name, raw_value) = split_object_field(field)?;
-        let field_name = normalize_object_field_name(field_name)?;
-        let raw_value = raw_value.trim();
-
-        match field_name.as_str() {
-            "key" => {
-                if key.is_some() {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        "@key 对象 payload 的 `key` 字段重复",
-                    ));
-                }
-                key = Some(parse_quoted_payload(raw_value)?);
-            }
-            "hold_ms" => {
-                if hold_ms.is_some() {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        "@key 对象 payload 的 `hold_ms` 字段重复",
-                    ));
-                }
-                hold_ms = Some(parse_hold_ms(raw_value)?);
-            }
-            "mode" => {
-                if mode.is_some() {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        "@key 对象 payload 的 `mode` 字段重复",
-                    ));
-                }
-                mode = Some(parse_key_mode(raw_value)?);
-            }
-            "delivery" => {
-                if delivery.is_some() {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        "@key 对象 payload 的 `delivery` 字段重复",
-                    ));
-                }
-                delivery_seen = true;
-                delivery = Some(parse_key_delivery(raw_value)?);
-            }
-            "pid" => {
-                if pid.is_some() {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        "@key 对象 payload 的 `pid` 字段重复",
-                    ));
-                }
-                pid = Some(parse_i32_field("@key", "pid", raw_value)?);
-            }
-            "window_id" => {
-                if window_id.is_some() {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        "@key 对象 payload 的 `window_id` 字段重复",
-                    ));
-                }
-                window_id = Some(parse_non_empty_string("@key.window_id", raw_value)?);
-            }
-            _ => {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!("@key 对象 payload 包含未知字段: {field_name}"),
-                ))
-            }
-        }
-    }
-
-    let key = key.ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::InvalidData,
-            "@key 对象 payload 缺少必填字段 `key`",
-        )
-    })?;
-
-    let delivery = delivery.unwrap_or(KeyDelivery::Global);
-    validate_key_delivery(delivery, pid, window_id.as_deref())?;
-    let response_mode = if delivery_seen || pid.is_some() || window_id.is_some() {
-        KeyResponseMode::Structured
-    } else {
-        KeyResponseMode::Legacy
-    };
-
-    default_key_request(key).map(|defaulted| KeyRequest {
-        key: defaulted.key,
-        hold_ms: hold_ms.unwrap_or(DEFAULT_KEY_HOLD_MS),
-        mode: mode.unwrap_or(KeyMode::PressRelease),
-        delivery,
-        pid,
-        window_id,
-        response_mode,
-    })
-}
-
-fn parse_key_delivery(input: &str) -> io::Result<KeyDelivery> {
-    let value = parse_quoted_payload(input)?;
-    match value.to_ascii_lowercase().as_str() {
-        "global" => Ok(KeyDelivery::Global),
-        "pid-targeted" | "pid_targeted" => Ok(KeyDelivery::PidTargeted),
-        "window-targeted" | "window_targeted" => Ok(KeyDelivery::WindowTargeted),
-        _ => Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!(
-                "@key 的 `delivery` 只支持 \"global\" | \"pid-targeted\" | \"window-targeted\": {value}"
-            ),
-        )),
-    }
-}
-
-fn validate_key_delivery(
-    delivery: KeyDelivery,
-    pid: Option<i32>,
-    window_id: Option<&str>,
-) -> io::Result<()> {
-    match delivery {
-        KeyDelivery::Global => {
-            if pid.is_some() || window_id.is_some() {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "@key delivery:\"global\" 不能同时携带 `pid` 或 `window_id`",
-                ));
-            }
-        }
-        KeyDelivery::PidTargeted => {
-            if pid.is_none() {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "@key delivery:\"pid-targeted\" 缺少必填字段 `pid`",
-                ));
-            }
-            if window_id.is_some() {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "@key delivery:\"pid-targeted\" 不能同时携带 `window_id`",
-                ));
-            }
-        }
-        KeyDelivery::WindowTargeted => {
-            if window_id.is_none() {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "@key delivery:\"window-targeted\" 缺少必填字段 `window_id`",
-                ));
-            }
-            if pid.is_some() {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "@key delivery:\"window-targeted\" 不能同时携带 `pid`",
-                ));
-            }
-        }
-    }
-
-    Ok(())
-}
-
-pub(crate) fn split_object_fields(input: &str) -> io::Result<Vec<&str>> {
-    let mut fields = Vec::new();
-    let mut start = 0usize;
-    let mut in_string = false;
-    let mut escaped = false;
-    let mut square_depth = 0usize;
-    let mut object_depth = 0usize;
-
-    for (index, byte) in input.as_bytes().iter().copied().enumerate() {
-        if escaped {
-            escaped = false;
-            continue;
-        }
-
-        match byte {
-            b'\\' if in_string => escaped = true,
-            b'"' => in_string = !in_string,
-            b'[' if !in_string => square_depth += 1,
-            b']' if !in_string => {
-                square_depth = square_depth.checked_sub(1).ok_or_else(|| {
-                    io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        format!("对象 payload 存在多余的 `]`: {input}"),
-                    )
-                })?;
-            }
-            b'{' if !in_string => object_depth += 1,
-            b'}' if !in_string => {
-                object_depth = object_depth.checked_sub(1).ok_or_else(|| {
-                    io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        format!("对象 payload 存在多余的 `}}`: {input}"),
-                    )
-                })?;
-            }
-            b',' if !in_string && square_depth == 0 && object_depth == 0 => {
-                let field = input[start..index].trim();
-                if field.is_empty() {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        format!("@key 对象 payload 存在空字段: {input}"),
-                    ));
-                }
-                fields.push(field);
-                start = index + 1;
-            }
-            _ => {}
-        }
-    }
-
-    if in_string {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("@key 对象 payload 存在未闭合字符串: {input}"),
-        ));
-    }
-    if square_depth != 0 || object_depth != 0 {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("对象 payload 存在未闭合的数组或对象: {input}"),
-        ));
-    }
-
-    let tail = input[start..].trim();
-    if tail.is_empty() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("@key 对象 payload 末尾存在空字段: {input}"),
-        ));
-    }
-    fields.push(tail);
-    Ok(fields)
-}
-
-pub(crate) fn split_object_field(field: &str) -> io::Result<(&str, &str)> {
-    let mut in_string = false;
-    let mut escaped = false;
-    let mut square_depth = 0usize;
-    let mut object_depth = 0usize;
-
-    for (index, byte) in field.as_bytes().iter().copied().enumerate() {
-        if escaped {
-            escaped = false;
-            continue;
-        }
-
-        match byte {
-            b'\\' if in_string => escaped = true,
-            b'"' => in_string = !in_string,
-            b'[' if !in_string => square_depth += 1,
-            b']' if !in_string => {
-                square_depth = square_depth.checked_sub(1).ok_or_else(|| {
-                    io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        format!("对象字段存在多余的 `]`: {field}"),
-                    )
-                })?;
-            }
-            b'{' if !in_string => object_depth += 1,
-            b'}' if !in_string => {
-                object_depth = object_depth.checked_sub(1).ok_or_else(|| {
-                    io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        format!("对象字段存在多余的 `}}`: {field}"),
-                    )
-                })?;
-            }
-            b':' if !in_string && square_depth == 0 && object_depth == 0 => {
-                let field_name = field[..index].trim();
-                let field_value = field[index + 1..].trim();
-                if field_name.is_empty() || field_value.is_empty() {
-                    break;
-                }
-                return Ok((field_name, field_value));
-            }
-            _ => {}
-        }
-    }
-
-    Err(io::Error::new(
-        io::ErrorKind::InvalidData,
-        format!("@key 对象字段格式非法: {field}"),
-    ))
-}
-
-pub(crate) fn normalize_object_field_name(field_name: &str) -> io::Result<String> {
-    let trimmed = field_name.trim();
-    if trimmed.is_empty() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "@key 对象字段名不能为空",
-        ));
-    }
-
-    Ok(trimmed.trim_matches('"').to_ascii_lowercase())
-}
-
-fn parse_hold_ms(input: &str) -> io::Result<u64> {
-    input.parse::<u64>().map_err(|_| {
-        io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("@key 的 `hold_ms` 必须是无符号整数: {input}"),
-        )
-    })
-}
-
-fn parse_key_mode(input: &str) -> io::Result<KeyMode> {
-    let mode = parse_quoted_payload(input)?;
-    match mode.to_ascii_lowercase().as_str() {
-        "press_release" => Ok(KeyMode::PressRelease),
-        "press" => Ok(KeyMode::Press),
-        "release" => Ok(KeyMode::Release),
-        _ => Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("@key 的 `mode` 不支持该值: {mode}"),
-        )),
-    }
-}
-
-fn parse_control_header(command: &str) -> io::Result<(&str, Option<u64>)> {
-    let header = command
-        .split_once(':')
-        .map(|(header, _)| header)
-        .unwrap_or(command)
-        .trim();
-
-    if let Some((kind, request_id)) = header.split_once('#') {
-        let request_id = parse_request_id(request_id.trim(), command)?;
-        return Ok((kind.trim(), Some(request_id)));
-    }
-
-    Ok((header, None))
-}
-
-fn parse_request_id(input: &str, command: &str) -> io::Result<u64> {
-    if input.is_empty() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("控制指令 request id 不能为空: {command}"),
-        ));
-    }
-
-    input.parse::<u64>().map_err(|_| {
-        io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("控制指令 request id 必须是无符号整数: {command}"),
-        )
-    })
-}
-
-fn require_non_empty_payload<T>(
-    kind: &str,
-    payload: String,
-    constructor: impl FnOnce(String) -> T,
-) -> io::Result<T> {
-    if payload.is_empty() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("@{kind} 的 payload 不能为空"),
-        ));
-    }
-
-    if payload.contains('\n') {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("@{kind} 首版不支持多行 payload"),
-        ));
-    }
-
-    Ok(constructor(payload))
-}
-
-pub(crate) fn parse_quoted_payload(input: &str) -> io::Result<String> {
-    if !input.starts_with('"') {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("控制指令 payload 必须使用双引号包裹: {input}"),
-        ));
-    }
-
-    let mut escaped = false;
-    let mut result = String::new();
-
-    for (index, ch) in input.char_indices().skip(1) {
-        if escaped {
-            match ch {
-                '"' => result.push('"'),
-                '\\' => result.push('\\'),
-                'n' => result.push('\n'),
-                'r' => result.push('\r'),
-                't' => result.push('\t'),
-                other => {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        format!("不支持的转义序列: \\{other}"),
-                    ))
-                }
-            }
-            escaped = false;
-            continue;
-        }
-
-        match ch {
-            '\\' => escaped = true,
-            '"' => {
-                if input[index + 1..].trim().is_empty() {
-                    return Ok(result);
-                }
-
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!("控制指令 payload 后存在多余内容: {input}"),
-                ));
-            }
-            other => result.push(other),
-        }
-    }
-
-    Err(io::Error::new(
-        io::ErrorKind::InvalidData,
-        format!("未闭合的控制指令 payload: {input}"),
-    ))
-}
-
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::{
-        control_ax::{
-            AxActionName, AxActionRequest, AxMode, AxSetValueRequest, AxTarget, AxTreeScope,
-            AxValueSetMode, TypeTextMode, TypeTextRequest,
-        },
-        control_mouse::{
-            MouseButtonMode, MouseButtonName, MouseCoordinateSpace, MousePoint,
-            DEFAULT_MOUSE_CLICK_HOLD_MS, DEFAULT_MOUSE_CLICK_INTERVAL_MS,
-        },
-        control_window::{
-            WindowCloseStrategy, WindowCommandTarget, WindowQuery, WindowSelectPolicy,
-        },
-    };
-
-    #[test]
-    fn parse_should_route_plain_shell_lines_to_literal() {
-        assert_eq!(
-            parse_control_line("echo hi").unwrap(),
-            ControlParseResult::LiteralShellLine("echo hi".to_owned())
-        );
-    }
-
-    #[test]
-    fn parse_should_unescape_double_at_to_literal_shell_line() {
-        assert_eq!(
-            parse_control_line("@@echo hi").unwrap(),
-            ControlParseResult::LiteralShellLine("@echo hi".to_owned())
-        );
-    }
-
-    #[test]
-    fn parse_should_support_key_paste_script_cmd_and_screenshot() {
-        assert_eq!(
-            parse_control_line(r#"@key:"F11""#).unwrap(),
-            ControlParseResult::Control(ControlRequest {
-                request_id: None,
-                command: ControlCommand::Key(KeyRequest::legacy(
-                    "F11",
-                    DEFAULT_KEY_HOLD_MS,
-                    KeyMode::PressRelease,
-                )),
-            })
-        );
-        assert_eq!(
-            parse_control_line(r#"@paste:"hello""#).unwrap(),
-            ControlParseResult::Control(ControlRequest {
-                request_id: None,
-                command: ControlCommand::Paste(PasteRequest::legacy_text("hello")),
-            })
-        );
-        assert_eq!(
-            parse_control_line("@paste").unwrap(),
-            ControlParseResult::Control(ControlRequest {
-                request_id: None,
-                command: ControlCommand::Paste(PasteRequest::hotkey()),
-            })
-        );
-        assert_eq!(
-            parse_control_line(r#"@paste#12"#).unwrap(),
-            ControlParseResult::Control(ControlRequest {
-                request_id: Some(12),
-                command: ControlCommand::Paste(PasteRequest::hotkey()),
-            })
-        );
-        assert_eq!(
-            parse_control_line(r#"@script:"echo hi""#).unwrap(),
-            ControlParseResult::Control(ControlRequest {
-                request_id: None,
-                command: ControlCommand::Script("echo hi".to_owned()),
-            })
-        );
-        assert_eq!(
-            parse_control_line(r#"@cmd:"echo hi""#).unwrap(),
-            ControlParseResult::Control(ControlRequest {
-                request_id: None,
-                command: ControlCommand::Script("echo hi".to_owned()),
-            })
-        );
-        assert_eq!(
-            parse_control_line(
-                r#"@savefile:{filename:"shot.jpg",mime:"image/jpeg",encoding:"base64",data:"QUJD"}"#
-            )
-            .unwrap(),
-            ControlParseResult::Control(ControlRequest {
-                request_id: None,
-                command: ControlCommand::SaveFile(SaveFileFrame {
-                    request_id: None,
-                    filename: "shot.jpg".to_owned(),
-                    mime: "image/jpeg".to_owned(),
-                    encoding: "base64".to_owned(),
-                    data: "QUJD".to_owned(),
-                    quality: None,
-                    width: None,
-                    height: None,
-                }),
-            })
-        );
-        assert_eq!(
-            parse_control_line("@screenshot").unwrap(),
-            ControlParseResult::Control(ControlRequest {
-                request_id: None,
-                command: ControlCommand::Screenshot(ScreenshotRequest::default()),
-            })
-        );
-        assert_eq!(
-            parse_control_line(
-                r#"@screenshot:{target:"display",display:"primary",format:"jpeg",quality:80}"#
-            )
-            .unwrap(),
-            ControlParseResult::Control(ControlRequest {
-                request_id: None,
-                command: ControlCommand::Screenshot(ScreenshotRequest {
-                    display: ScreenshotDisplaySelector::Primary,
-                    layout: ScreenshotLayout::Single,
-                    quality: 80,
-                    ..ScreenshotRequest::default()
-                }),
-            })
-        );
-    }
-
-    #[test]
-    fn parse_should_support_screenshot_display_layout_and_coordinate_space() {
-        assert_eq!(
-            parse_control_line(
-                r#"@screenshot#7:{target:"display",display:"all",layout:"composite",coordinate_space:"os-logical",format:"jpeg",quality:80}"#
-            )
-            .unwrap(),
-            ControlParseResult::Control(ControlRequest {
-                request_id: Some(7),
-                command: ControlCommand::Screenshot(ScreenshotRequest {
-                    target: ScreenshotTarget::Display,
-                    display: ScreenshotDisplaySelector::All,
-                    layout: ScreenshotLayout::Composite,
-                    coordinate_space: ScreenshotCoordinateSpace::OsLogical,
-                    quality: 80,
-                    ..ScreenshotRequest::default()
-                }),
-            })
-        );
-
-        assert_eq!(
-            parse_control_line(r#"@screenshot:{display:"primary"}"#).unwrap(),
-            ControlParseResult::Control(ControlRequest {
-                request_id: None,
-                command: ControlCommand::Screenshot(ScreenshotRequest {
-                    display: ScreenshotDisplaySelector::Primary,
-                    layout: ScreenshotLayout::Single,
-                    ..ScreenshotRequest::default()
-                }),
-            })
-        );
-    }
-
-    #[test]
-    fn parse_should_support_mouse_requests() {
-        assert_eq!(
-            parse_control_line(r#"@mouse-move#1:{x:1,y:2,coordinate_space:"os-logical"}"#).unwrap(),
-            ControlParseResult::Control(ControlRequest {
-                request_id: Some(1),
-                command: ControlCommand::MouseMove(MouseMoveRequest {
-                    x: Some(1),
-                    y: Some(2),
-                    dx: None,
-                    dy: None,
-                    coordinate_space: MouseCoordinateSpace::OsLogical,
-                }),
-            })
-        );
-        assert_eq!(
-            parse_control_line(r#"@mouse-move#2:{dx:1,dy:-2,coordinate_space:"relative"}"#)
-                .unwrap(),
-            ControlParseResult::Control(ControlRequest {
-                request_id: Some(2),
-                command: ControlCommand::MouseMove(MouseMoveRequest {
-                    x: None,
-                    y: None,
-                    dx: Some(1),
-                    dy: Some(-2),
-                    coordinate_space: MouseCoordinateSpace::Relative,
-                }),
-            })
-        );
-        assert_eq!(
-            parse_control_line(r#"@mouse-button#3:{button:"left",mode:"press"}"#).unwrap(),
-            ControlParseResult::Control(ControlRequest {
-                request_id: Some(3),
-                command: ControlCommand::MouseButton(MouseButtonRequest {
-                    button: MouseButtonName::Left,
-                    mode: MouseButtonMode::Press,
-                    hold_ms: DEFAULT_MOUSE_CLICK_HOLD_MS,
-                }),
-            })
-        );
-        assert_eq!(
-            parse_control_line(r#"@click#4:{x:1,y:2}"#).unwrap(),
-            ControlParseResult::Control(ControlRequest {
-                request_id: Some(4),
-                command: ControlCommand::Click(ClickRequest {
-                    x: 1,
-                    y: 2,
-                    button: MouseButtonName::Left,
-                    count: 1,
-                    hold_ms: DEFAULT_MOUSE_CLICK_HOLD_MS,
-                    interval_ms: DEFAULT_MOUSE_CLICK_INTERVAL_MS,
-                    coordinate_space: MouseCoordinateSpace::OsLogical,
-                }),
-            })
-        );
-        assert_eq!(
-            parse_control_line(r#"@drag#5:{from:{x:1,y:2},to:{x:3,y:4}}"#).unwrap(),
-            ControlParseResult::Control(ControlRequest {
-                request_id: Some(5),
-                command: ControlCommand::Drag(DragRequest {
-                    from: MousePoint { x: 1, y: 2 },
-                    to: MousePoint { x: 3, y: 4 },
-                    button: MouseButtonName::Left,
-                    duration_ms: crate::control_mouse::DEFAULT_MOUSE_DRAG_DURATION_MS,
-                    steps: crate::control_mouse::DEFAULT_MOUSE_DRAG_STEPS,
-                    coordinate_space: MouseCoordinateSpace::OsLogical,
-                }),
-            })
-        );
-        assert_eq!(
-            parse_control_line(r#"@wheel#6:{delta_y:-3}"#).unwrap(),
-            ControlParseResult::Control(ControlRequest {
-                request_id: Some(6),
-                command: ControlCommand::Wheel(WheelRequest {
-                    x: None,
-                    y: None,
-                    delta_x: 0,
-                    delta_y: -3,
-                    coordinate_space: MouseCoordinateSpace::OsLogical,
-                }),
-            })
-        );
-    }
-
-    #[test]
-    fn parse_should_support_screenshot_ax_fields() {
-        assert_eq!(
-            parse_control_line(r#"@screenshot:{include_ax:true,ax_required:true}"#).unwrap(),
-            ControlParseResult::Control(ControlRequest {
-                request_id: None,
-                command: ControlCommand::Screenshot(ScreenshotRequest {
-                    include_ax: true,
-                    ax_required: true,
-                    ..ScreenshotRequest::default()
-                }),
-            })
-        );
-
-        assert_eq!(
-            parse_control_line(
-                r#"@screenshot:{ax_depth:4,ax_max_elements:1000,ax_include_values:false}"#
-            )
-            .unwrap(),
-            ControlParseResult::Control(ControlRequest {
-                request_id: None,
-                command: ControlCommand::Screenshot(ScreenshotRequest {
-                    ax_depth: 4,
-                    ax_max_elements: 1000,
-                    ax_include_values: false,
-                    ..ScreenshotRequest::default()
-                }),
-            })
-        );
-
-        assert_eq!(
-            parse_control_line(r#"@screenshot:{include_ax:true,ax_mode:"windows"}"#).unwrap(),
-            ControlParseResult::Control(ControlRequest {
-                request_id: None,
-                command: ControlCommand::Screenshot(ScreenshotRequest {
-                    include_ax: true,
-                    ax_mode: AxMode::Windows,
-                    ax_depth: crate::control_ax::AX_WINDOWS_DEPTH,
-                    ax_max_elements: crate::control_ax::AX_WINDOWS_MAX_ELEMENTS,
-                    ax_include_values: crate::control_ax::AX_WINDOWS_INCLUDE_VALUES,
-                    ..ScreenshotRequest::default()
-                }),
-            })
-        );
-    }
-
-    #[test]
-    fn parse_should_support_ax_tree_and_ax_commands() {
-        assert_eq!(
-            parse_control_line(r#"@ax-tree#1:{scope:"windows",depth:4,max_elements:1000}"#)
-                .unwrap(),
-            ControlParseResult::Control(ControlRequest {
-                request_id: Some(1),
-                command: ControlCommand::AxTree(AxTreeRequest {
-                    scope: AxTreeScope::Windows,
-                    depth: 4,
-                    max_elements: 1000,
-                    include_values: DEFAULT_AX_INCLUDE_VALUES,
-                }),
-            })
-        );
-
-        assert_eq!(
-            parse_control_line(r#"@ax-tree#4:{mode:"interactive"}"#).unwrap(),
-            ControlParseResult::Control(ControlRequest {
-                request_id: Some(4),
-                command: ControlCommand::AxTree(AxTreeRequest {
-                    scope: AxTreeScope::Windows,
-                    depth: crate::control_ax::AX_INTERACTIVE_DEPTH,
-                    max_elements: crate::control_ax::AX_INTERACTIVE_MAX_ELEMENTS,
-                    include_values: crate::control_ax::AX_INTERACTIVE_INCLUDE_VALUES,
-                }),
-            })
-        );
-
-        assert!(matches!(
-            parse_control_line(r#"@ax-find#5:{role:"AXButton",name_contains:"取消"}"#).unwrap(),
-            ControlParseResult::Control(ControlRequest {
-                request_id: Some(5),
-                command: ControlCommand::AxFind(_),
-            })
-        ));
-
-        assert!(matches!(
-            parse_control_line(r#"@ax-get#6:{target:{id:"pid:1/window:0/path:0"},depth:2}"#)
-                .unwrap(),
-            ControlParseResult::Control(ControlRequest {
-                request_id: Some(6),
-                command: ControlCommand::AxGet(_),
-            })
-        ));
-
-        assert_eq!(
-            parse_control_line(
-                r#"@ax-action#7:{target:{id:"pid:1/window:0/path:0"},action:"AXShowMenu"}"#
-            )
-            .unwrap(),
-            ControlParseResult::Control(ControlRequest {
-                request_id: Some(7),
-                command: ControlCommand::AxAction(AxActionRequest {
-                    target: AxTarget {
-                        id: Some("pid:1/window:0/path:0".to_owned()),
-                        ..AxTarget::default()
-                    },
-                    action: AxActionName::ShowMenu,
-                }),
-            })
-        );
-
-        assert_eq!(
-            parse_control_line(r#"@ax-press#2:{target:{id:"pid:1/window:0/path:0"}}"#).unwrap(),
-            ControlParseResult::Control(ControlRequest {
-                request_id: Some(2),
-                command: ControlCommand::AxPress(AxPressRequest {
-                    target: AxTarget {
-                        id: Some("pid:1/window:0/path:0".to_owned()),
-                        ..AxTarget::default()
-                    },
-                }),
-            })
-        );
-
-        assert_eq!(
-            parse_control_line(
-                r#"@ax-press#3:{target:{process:"System Information",window_title:"关于本机",role:"AXButton",description:"关闭按钮"}}"#
-            )
-            .unwrap(),
-            ControlParseResult::Control(ControlRequest {
-                request_id: Some(3),
-                command: ControlCommand::AxPress(AxPressRequest {
-                    target: AxTarget {
-                        process: Some("System Information".to_owned()),
-                        window_title: Some("关于本机".to_owned()),
-                        role: Some("AXButton".to_owned()),
-                        description: Some("关闭按钮".to_owned()),
-                        ..AxTarget::default()
-                    },
-                }),
-            })
-        );
-
-        assert_eq!(
-            parse_control_line(
-                r#"@ax-set-value#8:{target:{id:"pid:1/window:0/path:0"},value:"hello",mode:"append"}"#
-            )
-            .unwrap(),
-            ControlParseResult::Control(ControlRequest {
-                request_id: Some(8),
-                command: ControlCommand::AxSetValue(AxSetValueRequest {
-                    target: AxTarget {
-                        id: Some("pid:1/window:0/path:0".to_owned()),
-                        ..AxTarget::default()
-                    },
-                    value: "hello".to_owned(),
-                    mode: AxValueSetMode::Append,
-                }),
-            })
-        );
-
-        assert_eq!(
-            parse_control_line(
-                r#"@type-text#9:{target:{id:"pid:1/window:0/path:0"},text:"hello",mode:"ax-value",allow_clipboard:false}"#
-            )
-            .unwrap(),
-            ControlParseResult::Control(ControlRequest {
-                request_id: Some(9),
-                command: ControlCommand::TypeText(TypeTextRequest {
-                    target: AxTarget {
-                        id: Some("pid:1/window:0/path:0".to_owned()),
-                        ..AxTarget::default()
-                    },
-                    text: "hello".to_owned(),
-                    mode: TypeTextMode::AxValue,
-                    allow_clipboard: false,
-                }),
-            })
-        );
-    }
-
-    #[test]
-    fn parse_should_support_window_commands() {
-        assert_eq!(
-            parse_control_line(
-                r#"@window-find#201:{app:"Terminal",title_contains:"rdog",limit:5}"#
-            )
-            .unwrap(),
-            ControlParseResult::Control(ControlRequest {
-                request_id: Some(201),
-                command: ControlCommand::WindowFind(WindowFindRequest {
-                    query: WindowQuery {
-                        app: Some("Terminal".to_owned()),
-                        title_contains: Some("rdog".to_owned()),
-                        ..WindowQuery::default()
-                    },
-                    limit: 5,
-                    include_state: true,
-                    include_recipes: true,
-                }),
-            })
-        );
-
-        assert_eq!(
-            parse_control_line(
-                r#"@window-activate:{window_id:"pid:1/window:0",recipe:"to_interact",allow_ambiguous:false,select:"frontmost"}"#
-            )
-            .unwrap(),
-            ControlParseResult::Control(ControlRequest {
-                request_id: None,
-                command: ControlCommand::WindowActivate(WindowActivateRequest {
-                    target: WindowCommandTarget {
-                        window_id: Some("pid:1/window:0".to_owned()),
-                        query: WindowQuery::default(),
-                    },
-                    recipe: Some("to_interact".to_owned()),
-                    steps: Vec::new(),
-                    allow_ambiguous: false,
-                    select: Some(WindowSelectPolicy::Frontmost),
-                }),
-            })
-        );
-
-        assert_eq!(
-            parse_control_line(
-                r#"@window-close:{window_id:"pid:1/window:0",strategy:"terminate"}"#
-            )
-            .unwrap(),
-            ControlParseResult::Control(ControlRequest {
-                request_id: None,
-                command: ControlCommand::WindowClose(WindowCloseRequest {
-                    target: WindowCommandTarget {
-                        window_id: Some("pid:1/window:0".to_owned()),
-                        query: WindowQuery::default(),
-                    },
-                    strategy: WindowCloseStrategy::Terminate,
-                    allow_ambiguous: false,
-                    select: None,
-                }),
-            })
-        );
-    }
-
-    #[test]
-    fn parse_should_reject_invalid_mouse_payloads() {
-        assert!(parse_control_line(r#"@mouse-move:{x:1,y:2,dx:1,dy:2}"#).is_err());
-        assert!(parse_control_line(r#"@mouse-move:{dx:1,coordinate_space:"relative"}"#).is_err());
-        assert!(parse_control_line(r#"@mouse-button:{button:"side",mode:"press"}"#).is_err());
-        assert!(parse_control_line(r#"@mouse-button:{button:"left",mode:"hold"}"#).is_err());
-        assert!(parse_control_line(r#"@click:{x:1,y:2,count:0}"#).is_err());
-        assert!(parse_control_line(r#"@click:{x:1,y:2,coordinate_space:"native"}"#).is_err());
-        assert!(parse_control_line(r#"@drag:{from:{x:1,y:2},to:{x:3,y:4},steps:0}"#).is_err());
-        assert!(parse_control_line(r#"@drag:{from:{x:1},to:{x:3,y:4}}"#).is_err());
-        assert!(parse_control_line(r#"@wheel:{delta_y:0}"#).is_err());
-        assert!(parse_control_line(r#"@wheel:{x:1,delta_y:-3}"#).is_err());
-        assert!(parse_control_line(r#"@wheel:{delta_y:-3,unknown:1}"#).is_err());
-        assert!(
-            parse_control_line(r#"@wheel:{x:1,y:2,delta_y:-3,coordinate_space:"relative"}"#)
-                .is_err()
-        );
-    }
-
-    #[test]
-    fn parse_should_support_pty_open_and_close_requests() {
-        assert_eq!(
-            parse_control_line(r#"@pty:"codex""#).unwrap(),
-            ControlParseResult::Control(ControlRequest {
-                request_id: None,
-                command: ControlCommand::PtyOpen(PtyOpenRequest {
-                    cmd: "codex".to_owned(),
-                    args: vec![],
-                    cols: 80,
-                    rows: 24,
-                }),
-            })
-        );
-
-        assert_eq!(
-            parse_control_line(r#"@pty:"codex resume 019e02de-8814-72a2-ab0c-b06263cc0fba""#)
-                .unwrap(),
-            ControlParseResult::Control(ControlRequest {
-                request_id: None,
-                command: ControlCommand::PtyOpen(PtyOpenRequest {
-                    cmd: "codex".to_owned(),
-                    args: vec![
-                        "resume".to_owned(),
-                        "019e02de-8814-72a2-ab0c-b06263cc0fba".to_owned()
-                    ],
-                    cols: 80,
-                    rows: 24,
-                }),
-            })
-        );
-
-        assert_eq!(
-            parse_control_line(r#"@pty:"/bin/sh -c 'printf hello world'""#).unwrap(),
-            ControlParseResult::Control(ControlRequest {
-                request_id: None,
-                command: ControlCommand::PtyOpen(PtyOpenRequest {
-                    cmd: "/bin/sh".to_owned(),
-                    args: vec!["-c".to_owned(), "printf hello world".to_owned()],
-                    cols: 80,
-                    rows: 24,
-                }),
-            })
-        );
-
-        assert_eq!(
-            parse_control_line(r#"@pty:"/tmp/my\ helper --name \"fast mode\"""#).unwrap(),
-            ControlParseResult::Control(ControlRequest {
-                request_id: None,
-                command: ControlCommand::PtyOpen(PtyOpenRequest {
-                    cmd: "/tmp/my helper".to_owned(),
-                    args: vec!["--name".to_owned(), "fast mode".to_owned()],
-                    cols: 80,
-                    rows: 24,
-                }),
-            })
-        );
-
-        assert_eq!(
-            parse_control_line(r#"@pty:{cmd:"codex",args:["--profile","fast"],cols:120,rows:40}"#)
-                .unwrap(),
-            ControlParseResult::Control(ControlRequest {
-                request_id: None,
-                command: ControlCommand::PtyOpen(PtyOpenRequest {
-                    cmd: "codex".to_owned(),
-                    args: vec!["--profile".to_owned(), "fast".to_owned()],
-                    cols: 120,
-                    rows: 40,
-                }),
-            })
-        );
-
-        assert_eq!(
-            parse_control_line(
-                r#"@pty:{cmd:"codex",argv:["codex","--profile","fast"],cols:120,rows:40}"#
-            )
-            .unwrap(),
-            ControlParseResult::Control(ControlRequest {
-                request_id: None,
-                command: ControlCommand::PtyOpen(PtyOpenRequest {
-                    cmd: "codex".to_owned(),
-                    args: vec!["--profile".to_owned(), "fast".to_owned()],
-                    cols: 120,
-                    rows: 40,
-                }),
-            })
-        );
-
-        assert_eq!(
-            parse_control_line(r#"@pty-close:{session_id:"session-1"}"#).unwrap(),
-            ControlParseResult::Control(ControlRequest {
-                request_id: None,
-                command: ControlCommand::PtyClose(PtyCloseRequest {
-                    session_id: "session-1".to_owned(),
-                }),
-            })
-        );
-        assert_eq!(
-            parse_control_line(r#"@pty-detach:{session_id:"session-1"}"#).unwrap(),
-            ControlParseResult::Control(ControlRequest {
-                request_id: None,
-                command: ControlCommand::PtyDetach(PtyDetachRequest {
-                    session_id: "session-1".to_owned(),
-                }),
-            })
-        );
-        assert_eq!(
-            parse_control_line(r#"@pty-attach:"session-1""#).unwrap(),
-            ControlParseResult::Control(ControlRequest {
-                request_id: None,
-                command: ControlCommand::PtyAttach(PtyAttachRequest {
-                    session_id: "session-1".to_owned(),
-                    cols: 80,
-                    rows: 24,
-                }),
-            })
-        );
-        assert_eq!(
-            parse_control_line(r#"@pty-attach:{session_id:"session-1",cols:120,rows:40}"#).unwrap(),
-            ControlParseResult::Control(ControlRequest {
-                request_id: None,
-                command: ControlCommand::PtyAttach(PtyAttachRequest {
-                    session_id: "session-1".to_owned(),
-                    cols: 120,
-                    rows: 40,
-                }),
-            })
-        );
-    }
-
-    #[test]
-    fn parse_should_support_ping() {
-        assert_eq!(
-            parse_control_line("@ping").unwrap(),
-            ControlParseResult::Control(ControlRequest {
-                request_id: None,
-                command: ControlCommand::Ping,
-            })
-        );
-    }
-
-    #[test]
-    fn parse_should_support_optional_request_ids() {
-        assert_eq!(
-            parse_control_line(r#"@ping#42"#).unwrap(),
-            ControlParseResult::Control(ControlRequest {
-                request_id: Some(42),
-                command: ControlCommand::Ping,
-            })
-        );
-        assert_eq!(
-            parse_control_line(r#"@key#7:"F11""#).unwrap(),
-            ControlParseResult::Control(ControlRequest {
-                request_id: Some(7),
-                command: ControlCommand::Key(KeyRequest::legacy(
-                    "F11",
-                    DEFAULT_KEY_HOLD_MS,
-                    KeyMode::PressRelease,
-                )),
-            })
-        );
-        assert_eq!(
-            parse_control_line(r#"@pty#9:"codex""#).unwrap(),
-            ControlParseResult::Control(ControlRequest {
-                request_id: Some(9),
-                command: ControlCommand::PtyOpen(PtyOpenRequest {
-                    cmd: "codex".to_owned(),
-                    args: vec![],
-                    cols: 80,
-                    rows: 24,
-                }),
-            })
-        );
-        assert_eq!(
-            parse_control_line(r#"@cmd#42:"printf READY""#).unwrap(),
-            ControlParseResult::Control(ControlRequest {
-                request_id: Some(42),
-                command: ControlCommand::Script("printf READY".to_owned()),
-            })
-        );
-        assert_eq!(
-            parse_control_line(
-                r#"@savefile#9:{filename:"shot.jpg",mime:"image/jpeg",encoding:"base64",data:"QUJD"}"#
-            )
-            .unwrap(),
-            ControlParseResult::Control(ControlRequest {
-                request_id: Some(9),
-                command: ControlCommand::SaveFile(SaveFileFrame {
-                    request_id: None,
-                    filename: "shot.jpg".to_owned(),
-                    mime: "image/jpeg".to_owned(),
-                    encoding: "base64".to_owned(),
-                    data: "QUJD".to_owned(),
-                    quality: None,
-                    width: None,
-                    height: None,
-                }),
-            })
-        );
-        assert_eq!(
-            parse_control_line(r#"@screenshot#12"#).unwrap(),
-            ControlParseResult::Control(ControlRequest {
-                request_id: Some(12),
-                command: ControlCommand::Screenshot(ScreenshotRequest::default()),
-            })
-        );
-    }
-
-    #[test]
-    fn parse_should_support_key_object_payloads() {
-        assert_eq!(
-            parse_control_line(r#"@key#7:{key:"right-option",hold_ms:200,mode:"press_release"}"#)
-                .unwrap(),
-            ControlParseResult::Control(ControlRequest {
-                request_id: Some(7),
-                command: ControlCommand::Key(KeyRequest::legacy(
-                    "right-option",
-                    200,
-                    KeyMode::PressRelease,
-                )),
-            })
-        );
-
-        assert_eq!(
-            parse_control_line(r#"@key:{key:"right-option"}"#).unwrap(),
-            ControlParseResult::Control(ControlRequest {
-                request_id: None,
-                command: ControlCommand::Key(KeyRequest::legacy(
-                    "right-option",
-                    DEFAULT_KEY_HOLD_MS,
-                    KeyMode::PressRelease,
-                )),
-            })
-        );
-
-        assert_eq!(
-            parse_control_line(r#"@key#8:{key:"Return",delivery:"pid-targeted",pid:556}"#).unwrap(),
-            ControlParseResult::Control(ControlRequest {
-                request_id: Some(8),
-                command: ControlCommand::Key(KeyRequest {
-                    key: "Return".to_owned(),
-                    hold_ms: DEFAULT_KEY_HOLD_MS,
-                    mode: KeyMode::PressRelease,
-                    delivery: KeyDelivery::PidTargeted,
-                    pid: Some(556),
-                    window_id: None,
-                    response_mode: KeyResponseMode::Structured,
-                }),
-            })
-        );
-
-        assert_eq!(
-            parse_control_line(
-                r#"@key:{key:"Cmd+W",delivery:"window-targeted",window_id:"pid:556/window:0"}"#
-            )
-            .unwrap(),
-            ControlParseResult::Control(ControlRequest {
-                request_id: None,
-                command: ControlCommand::Key(KeyRequest {
-                    key: "Cmd+W".to_owned(),
-                    hold_ms: DEFAULT_KEY_HOLD_MS,
-                    mode: KeyMode::PressRelease,
-                    delivery: KeyDelivery::WindowTargeted,
-                    pid: None,
-                    window_id: Some("pid:556/window:0".to_owned()),
-                    response_mode: KeyResponseMode::Structured,
-                }),
-            })
-        );
-    }
-
-    #[test]
-    fn parse_should_reject_unknown_or_empty_or_multiline_payloads_or_bad_request_ids() {
-        assert!(parse_control_line(r#"@unknown:"x""#).is_err());
-        assert!(parse_control_line(r#"@key:"""#).is_err());
-        assert!(parse_control_line("@script:\"printf a\\nb\"").is_err());
-        assert!(parse_control_line(r#"@ping#:"x""#).is_err());
-        assert!(parse_control_line(r#"@ping#abc"#).is_err());
-        assert!(parse_control_line(r#"@ping#42:"x""#).is_err());
-        assert!(parse_control_line(r#"@key:{hold_ms:200}"#).is_err());
-        assert!(parse_control_line(r#"@key:{key:"x",hold_ms:"200"}"#).is_err());
-        assert!(parse_control_line(r#"@key:{key:"x",mode:"tap"}"#).is_err());
-        assert!(parse_control_line(r#"@key:{key:"x",unknown:1}"#).is_err());
-        assert!(parse_control_line(r#"@pty:"""#).is_err());
-        assert!(parse_control_line(r#"@pty:{cmd:"codex",args:[""]}"#).is_err());
-        assert!(
-            parse_control_line(r#"@pty:{cmd:"codex",args:["--a"],argv:["codex","--a"]}"#).is_err()
-        );
-        assert!(parse_control_line(r#"@pty:{cmd:"codex",argv:["other","--a"]}"#).is_err());
-        assert!(parse_control_line(r#"@screenshot:{quality:0}"#).is_err());
-        assert!(parse_control_line(r#"@screenshot:{quality:101}"#).is_err());
-        assert!(parse_control_line(r#"@screenshot:{format:"png"}"#).is_err());
-        assert!(parse_control_line(r#"@screenshot:{display:"secondary"}"#).is_err());
-        assert!(parse_control_line(r#"@screenshot:{layout:"separate"}"#).is_err());
-        assert!(parse_control_line(r#"@screenshot:{coordinate_space:"native"}"#).is_err());
-        assert!(parse_control_line(r#"@screenshot:{display:"all",layout:"single"}"#).is_err());
-        assert!(
-            parse_control_line(r#"@screenshot:{display:"primary",layout:"composite"}"#).is_err()
-        );
-        assert!(parse_control_line(r#"@screenshot:{display:"all",display:"primary"}"#).is_err());
-        assert!(parse_control_line(r#"@screenshot:{layout:"composite",layout:"single"}"#).is_err());
-        assert!(parse_control_line(r#"@screenshot:{quality:75,quality:80}"#).is_err());
-        assert!(parse_control_line(r#"@screenshot:{include_ax:true,include_ax:false}"#).is_err());
-        assert!(parse_control_line(r#"@screenshot:{include_ax:"true"}"#).is_err());
-        assert!(parse_control_line(r#"@screenshot:{ax_depth:0}"#).is_err());
-        assert!(parse_control_line(r#"@screenshot:{ax_max_elements:0}"#).is_err());
-        assert!(parse_control_line(r#"@screenshot:{ax_mode:"small"}"#).is_err());
-        assert!(parse_control_line(r#"@screenshot:{mode:"windows"}"#).is_err());
-        assert!(parse_control_line(r#"@ax-tree:{depth:0}"#).is_err());
-        assert!(parse_control_line(r#"@ax-tree:{max_elements:0}"#).is_err());
-        assert!(parse_control_line(r#"@ax-find:{limit:0,role:"AXButton"}"#).is_err());
-        assert!(parse_control_line(r#"@ax-find:{}"#).is_err());
-        assert!(parse_control_line(r#"@ax-get:{target:{}}"#).is_err());
-        assert!(parse_control_line(r#"@ax-press:{target:{}}"#).is_err());
-    }
-}
+mod tests;

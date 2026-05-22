@@ -1,0 +1,29 @@
+{
+  "kind": "selector-refind",
+  "schema": "rdog.selector.refind.v1",
+  "scoring_version": "rdog.selector.score.v1",
+  "status": "complete",
+  "selector_id": "sel-v1-test",
+  "decision": "not_found",
+  "policy": "safe",
+  "threshold": 0.9,
+  "source": null,
+  "last_seen": null,
+  "history": null,
+  "match_count": 0,
+  "candidates": [],
+  "recovery_recipe": [
+    {
+      "step": "selector-get",
+      "command": "@selector-get:{selector_id:\"sel-v1-test\",include_history:true}"
+    },
+    {
+      "step": "selector-refind",
+      "command": "@selector-refind:{selector_id:\"sel-v1-test\",policy:\"safe\",include_explanations:true}"
+    },
+    {
+      "step": "re-observe",
+      "command": "@screenshot:{include_ax:true,ax_required:false,ax_mode:\"interactive\"}"
+    }
+  ]
+}

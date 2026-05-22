@@ -1,5 +1,6 @@
 use crate::{
     config::{DaemonConfig, EndpointMode, InboundConfig, OutboundConfig},
+    control_observation::initialize_durable_observation_state,
     control_transport::ControlTransportKind,
     shell::{self, ShellMode},
 };
@@ -20,6 +21,8 @@ const ACCEPT_POLL_INTERVAL: Duration = Duration::from_millis(50);
 /// 启动 daemon 模式并监督所有启用的 worker。
 pub fn run(config: DaemonConfig) -> io::Result<()> {
     let retry_interval = config.retry_interval();
+    let observation_daemon_name = tcp_observation_daemon_name(&config);
+    initialize_durable_observation_state(&config.observation, None, &observation_daemon_name)?;
     let mut handles = Vec::new();
 
     // 每个 worker 都持有自己的停止标记。
@@ -92,9 +95,26 @@ pub fn run_zenoh_router(
             request_timeout_ms: config.zenoh.request_timeout_ms,
             startup_guard_window_ms: config.zenoh.startup_guard_window_ms,
             key_input_events: config.zenoh.key_input_events,
+            observation: config.observation,
         },
         shell,
     )
+}
+
+fn tcp_observation_daemon_name(config: &DaemonConfig) -> String {
+    if config.inbound.enabled {
+        if let (Some(host), Some(port)) = (&config.inbound.host, config.inbound.port) {
+            return format!("tcp-inbound-{host}-{port}");
+        }
+    }
+
+    if config.outbound.enabled {
+        if let (Some(host), Some(port)) = (&config.outbound.host, config.outbound.port) {
+            return format!("tcp-outbound-{host}-{port}");
+        }
+    }
+
+    "tcp-local".to_owned()
 }
 
 fn default_control_shell() -> &'static str {

@@ -11,6 +11,20 @@
 # outbound 或 inbound 失败后的重试间隔,单位是秒。
 retry_seconds = 5
 
+[observation]
+# 持久化 observation metadata 和 selector 线索。
+# 这不会让短期 `@eN` ref 跨 daemon 重启继续可用。
+durable_enabled = true
+
+# 省略 state_dir 时使用平台默认路径。
+# 如需固定路径,取消下一行注释并填写目录。
+# state_dir = "/home/you/.local/state/rdog/observations/mini-a.lab"
+retention_observations = 256
+retention_bytes = 52428800
+persist_values = false
+persist_screenshots = false
+write_ref_cache = true
+
 [outbound]
 # 主动反连模式。
 # 需要时改成 true,然后填写目标主机和端口。

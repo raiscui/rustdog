@@ -1,0 +1,105 @@
+{
+  "kind": "selector-refind",
+  "schema": "rdog.selector.refind.v1",
+  "scoring_version": "rdog.selector.score.v1",
+  "status": "complete",
+  "selector_id": "sel-v1-test",
+  "decision": "needs_disambiguation",
+  "policy": "safe",
+  "threshold": 0.9,
+  "source": null,
+  "last_seen": null,
+  "history": null,
+  "match_count": 2,
+  "candidates": [
+    {
+      "candidate_id": "cand-1",
+      "backend_id": "pid:123/window:0/path:7.3",
+      "kind": "ax-element",
+      "role": "AXButton",
+      "name": "储存空间",
+      "matched_fields": [
+        "app.bundle_id",
+        "app.name",
+        "window.title",
+        "element.role",
+        "element.name",
+        "element.actions"
+      ],
+      "missing_fields": [],
+      "observation": {
+        "observation_id": "obs-new",
+        "ref": "@e4"
+      },
+      "source": "ax-backend",
+      "scoring_version": "rdog.selector.score.v1",
+      "confidence": 0.95,
+      "confidence_milli": 950,
+      "confidence_band": "high",
+      "reason_codes": [
+        "app.bundle_id.exact",
+        "app.name.exact",
+        "window.title.exact",
+        "element.role.exact",
+        "element.name.exact",
+        "element.action.supported",
+        "hint.backend_id.match"
+      ],
+      "reject_reasons": [
+        "ambiguous.high_confidence_peer"
+      ],
+      "auto_rebind_eligible": false
+    },
+    {
+      "candidate_id": "cand-2",
+      "backend_id": "pid:999/window:0/path:1",
+      "kind": "ax-element",
+      "role": "AXButton",
+      "name": "储存空间",
+      "matched_fields": [
+        "app.bundle_id",
+        "app.name",
+        "window.title",
+        "element.role",
+        "element.name",
+        "element.actions"
+      ],
+      "missing_fields": [],
+      "observation": {
+        "observation_id": "obs-new",
+        "ref": "@e5"
+      },
+      "source": "ax-backend",
+      "scoring_version": "rdog.selector.score.v1",
+      "confidence": 0.91,
+      "confidence_milli": 910,
+      "confidence_band": "high",
+      "reason_codes": [
+        "app.bundle_id.exact",
+        "app.name.exact",
+        "window.title.exact",
+        "element.role.exact",
+        "element.name.exact",
+        "element.action.supported"
+      ],
+      "reject_reasons": [
+        "ambiguous.high_confidence_peer"
+      ],
+      "auto_rebind_eligible": false
+    }
+  ],
+  "recovery_recipe": [
+    {
+      "step": "selector-get",
+      "command": "@selector-get:{selector_id:\"sel-v1-test\",include_history:true}"
+    },
+    {
+      "step": "selector-refind",
+      "command": "@selector-refind:{selector_id:\"sel-v1-test\",policy:\"safe\",include_explanations:true}"
+    },
+    {
+      "step": "re-observe",
+      "command": "@screenshot:{include_ax:true,ax_required:false,ax_mode:\"interactive\"}"
+    }
+  ]
+}

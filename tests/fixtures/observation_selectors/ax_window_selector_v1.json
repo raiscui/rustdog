@@ -1,0 +1,37 @@
+{
+  "schema": "rdog.selector.v1",
+  "selector_id": "sel-v1-a1b01f7f414cc7ed",
+  "fingerprint": "sha256:a1b01f7f414cc7ed7aca67f0215dab9aa2480c1a546815cd09e0cb97b894c863",
+  "kind": "ax-window",
+  "platform": "macos",
+  "constraints": {
+    "app": {
+      "name": "System Settings",
+      "bundle_id": "com.apple.systempreferences"
+    },
+    "window": {
+      "role": "AXWindow",
+      "title": "储存空间",
+      "title_match": "exact"
+    }
+  },
+  "hints": {
+    "pid": 123,
+    "rect": {
+      "x": 10,
+      "y": 20,
+      "width": 300,
+      "height": 200
+    },
+    "backend_id": "pid:123/window:0"
+  },
+  "source": {
+    "observation_id": "obs-1",
+    "ref": "@w1",
+    "draft_selector_id": "sel-obs-1--w1"
+  },
+  "redaction": {
+    "value_persisted": false,
+    "screenshot_persisted": false
+  }
+}

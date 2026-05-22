@@ -1,0 +1,49 @@
+{
+  "schema": "rdog.selector.v1",
+  "selector_id": "sel-v1-29b3963a312473d5",
+  "fingerprint": "sha256:29b3963a312473d5a55a5e7c0e6e599e7aaec22d5d99e41c94e2ccedb7b8a24b",
+  "kind": "ax-element",
+  "platform": "macos",
+  "constraints": {
+    "app": {
+      "name": "System Settings",
+      "bundle_id": "com.apple.systempreferences"
+    },
+    "window": {
+      "role": "AXWindow",
+      "title": "储存空间",
+      "title_match": "exact"
+    },
+    "element": {
+      "role": "AXButton",
+      "name": "储存空间",
+      "name_match": "exact",
+      "actions": [
+        "AXPress"
+      ]
+    }
+  },
+  "hints": {
+    "pid": 123,
+    "rect": {
+      "x": 10,
+      "y": 20,
+      "width": 300,
+      "height": 200
+    },
+    "ax_path": [
+      7,
+      3
+    ],
+    "backend_id": "pid:123/window:0/path:7.3"
+  },
+  "source": {
+    "observation_id": "obs-1",
+    "ref": "@e1",
+    "draft_selector_id": "sel-obs-1--e1"
+  },
+  "redaction": {
+    "value_persisted": false,
+    "screenshot_persisted": false
+  }
+}

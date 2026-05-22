@@ -1,0 +1,78 @@
+{
+  "kind": "selector-refind",
+  "schema": "rdog.selector.refind.v1",
+  "scoring_version": "rdog.selector.score.v1",
+  "status": "complete",
+  "selector_id": "sel-v1-test",
+  "decision": "rebound",
+  "policy": "safe",
+  "threshold": 0.9,
+  "source": null,
+  "last_seen": null,
+  "history": null,
+  "match_count": 1,
+  "selected_candidate": {
+    "candidate_id": "cand-1",
+    "backend_id": "pid:123/window:0/path:7.3",
+    "kind": "ax-element",
+    "role": "AXButton",
+    "name": "储存空间",
+    "matched_fields": [
+      "app.bundle_id",
+      "app.name",
+      "window.title",
+      "element.role",
+      "element.name",
+      "element.actions"
+    ],
+    "missing_fields": [],
+    "observation": {
+      "observation_id": "obs-new",
+      "ref": "@e4"
+    },
+    "source": "ax-backend",
+    "scoring_version": "rdog.selector.score.v1",
+    "confidence": 0.95,
+    "confidence_milli": 950,
+    "confidence_band": "high",
+    "reason_codes": [
+      "app.bundle_id.exact",
+      "app.name.exact",
+      "window.title.exact",
+      "element.role.exact",
+      "element.name.exact",
+      "element.action.supported",
+      "hint.backend_id.match"
+    ],
+    "reject_reasons": [],
+    "auto_rebind_eligible": true
+  },
+  "fresh_target": {
+    "observation_id": "obs-new",
+    "ref": "@e4"
+  },
+  "verify_hint": {
+    "required_before_action": true,
+    "recommended": true,
+    "command": "@ax-get:{target:{ref:\"@e4\",observation_id:\"obs-new\"}}"
+  },
+  "recovery_recipe": [
+    {
+      "step": "selector-get",
+      "command": "@selector-get:{selector_id:\"sel-v1-test\",include_history:true}"
+    },
+    {
+      "step": "selector-refind",
+      "command": "@selector-refind:{selector_id:\"sel-v1-test\",policy:\"safe\",include_explanations:true}"
+    },
+    {
+      "step": "verify",
+      "command": "@ax-get:{target:{ref:\"@e4\",observation_id:\"obs-new\"}}"
+    },
+    {
+      "step": "explicit-action",
+      "note": "verify 通过后再发送 @ax-action / @ax-set-value / @window-activate 等 side-effect 命令"
+    }
+  ],
+  "candidates": []
+}

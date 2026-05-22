@@ -2,7 +2,12 @@ use std::io;
 
 use crate::{
     control_actions::{build_shell_command, ControlActionExecutor},
+    control_capabilities::current_capabilities_report_json,
     control_frames::ControlExecutionOutcome,
+    control_observation::{
+        build_observe_outcome, build_selector_get_response_json,
+        build_selector_refind_response_json, build_selector_resolve_response_json,
+    },
     control_protocol::{parse_control_line, ControlCommand, ControlParseResult, ControlRequest},
     screenshot::execute_screenshot_request,
 };
@@ -60,6 +65,52 @@ pub fn execute_explicit_control_request<E: ControlActionExecutor>(
         ControlCommand::Screenshot(screenshot_request) => {
             match execute_screenshot_request(request.request_id, screenshot_request) {
                 Ok(outcome) => outcome,
+                Err(err) => ControlExecutionOutcome::from_response_line(
+                    render_control_action_error_response(request.request_id, &err),
+                ),
+            }
+        }
+        ControlCommand::Capabilities => match current_capabilities_report_json() {
+            Ok(report_json) => ControlExecutionOutcome::from_response_line(
+                render_structured_success_response(request.request_id, &report_json),
+            ),
+            Err(err) => ControlExecutionOutcome::from_response_line(
+                render_control_action_error_response(request.request_id, &err),
+            ),
+        },
+        ControlCommand::Observe(observe_request) => {
+            match build_observe_outcome(request.request_id, observe_request) {
+                Ok(outcome) => outcome,
+                Err(err) => ControlExecutionOutcome::from_response_line(
+                    render_control_action_error_response(request.request_id, &err),
+                ),
+            }
+        }
+        ControlCommand::SelectorGet(selector_request) => {
+            match build_selector_get_response_json(selector_request) {
+                Ok(value_json) => ControlExecutionOutcome::from_response_line(
+                    render_structured_success_response(request.request_id, &value_json),
+                ),
+                Err(err) => ControlExecutionOutcome::from_response_line(
+                    render_control_action_error_response(request.request_id, &err),
+                ),
+            }
+        }
+        ControlCommand::SelectorResolve(selector_request) => {
+            match build_selector_resolve_response_json(selector_request) {
+                Ok(value_json) => ControlExecutionOutcome::from_response_line(
+                    render_structured_success_response(request.request_id, &value_json),
+                ),
+                Err(err) => ControlExecutionOutcome::from_response_line(
+                    render_control_action_error_response(request.request_id, &err),
+                ),
+            }
+        }
+        ControlCommand::SelectorRefind(selector_request) => {
+            match build_selector_refind_response_json(selector_request) {
+                Ok(value_json) => ControlExecutionOutcome::from_response_line(
+                    render_structured_success_response(request.request_id, &value_json),
+                ),
                 Err(err) => ControlExecutionOutcome::from_response_line(
                     render_control_action_error_response(request.request_id, &err),
                 ),
@@ -270,6 +321,7 @@ mod tests {
             PasteRequest,
         },
     };
+    use serde_json::Value;
     use std::sync::{Arc, Mutex};
 
     #[derive(Clone, Default)]
@@ -674,5 +726,52 @@ mod tests {
         );
 
         assert_eq!(outcome.outbound_frames.len(), 1);
+    }
+
+    #[test]
+    fn explicit_request_should_render_capabilities_report() {
+        let response =
+            parse_and_execute_control_line("@capabilities#12", "/bin/sh", &FakeExecutor::default())
+                .into_single_response_line();
+        let parsed: Value = serde_json::from_str(
+            response
+                .strip_prefix("@response ")
+                .expect("capabilities response should be wrapped as @response"),
+        )
+        .expect("capabilities response should be valid json");
+
+        assert_eq!(parsed["id"], 12);
+        assert_eq!(parsed["value"]["kind"], "capabilities");
+        assert_eq!(parsed["value"]["schema"], "rdog.capabilities.v1");
+        assert_eq!(parsed["value"]["gui_agent_recipe"][0], "@capabilities");
+        assert_eq!(
+            parsed["value"]["capabilities"]["line_control"]["status"],
+            "available"
+        );
+    }
+
+    #[test]
+    fn explicit_request_should_render_observe_without_action_executor() {
+        let executor = FakeExecutor::default();
+        let response =
+            parse_and_execute_control_line(r#"@observe#77:{mode:"window"}"#, "/bin/sh", &executor)
+                .into_single_response_line();
+        let parsed: Value = serde_json::from_str(
+            response
+                .strip_prefix("@response ")
+                .expect("observe response should be wrapped as @response"),
+        )
+        .expect("observe response should be valid json");
+
+        assert_eq!(parsed["id"], 77);
+        assert_eq!(parsed["value"]["kind"], "observe");
+        assert_eq!(parsed["value"]["schema"], "rdog.observe.v1");
+        assert_eq!(parsed["value"]["mode"], "window");
+        assert_eq!(parsed["value"]["windows"]["status"], "skipped");
+        assert!(executor
+            .commands
+            .lock()
+            .expect("commands lock should work")
+            .is_empty());
     }
 }

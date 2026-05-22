@@ -319,6 +319,20 @@ fn execute_composite_screenshot_request_should_embed_ax_when_requested() {
 
     let manifest = manifest_from_outcome(&outcome);
     assert_eq!(manifest["accessibility"]["capture_status"], "complete");
+    assert_eq!(
+        manifest["accessibility"]["observation"]["source_command"],
+        "@screenshot include_ax"
+    );
+    assert_eq!(manifest["accessibility"]["observation"]["scope"], "ax");
+    assert_eq!(
+        manifest["accessibility"]["observation"]["selector_count"],
+        2
+    );
+    assert_eq!(manifest["accessibility"]["windows"][0]["ref"], "@e1");
+    assert_eq!(
+        manifest["accessibility"]["windows"][0]["elements"][0]["ref"],
+        "@e2"
+    );
 }
 
 #[test]
@@ -640,6 +654,7 @@ fn fake_ax_snapshot() -> AxSnapshot {
         "macos",
         vec![AxWindow {
             id: "pid:123/window:0".to_owned(),
+            ref_id: None,
             pid: 123,
             process_name: "System Information".to_owned(),
             title: Some("关于本机".to_owned()),
@@ -654,6 +669,7 @@ fn fake_ax_snapshot() -> AxSnapshot {
             focused: Some(true),
             elements: vec![AxElement {
                 id: "pid:123/window:0/path:0".to_owned(),
+                ref_id: None,
                 role: "AXButton".to_owned(),
                 subrole: Some("AXCloseButton".to_owned()),
                 name: Some("关闭".to_owned()),

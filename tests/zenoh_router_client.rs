@@ -483,6 +483,10 @@ fn render_session_close_payload(session_id: &str) -> String {
     format!("__rdog_session_close__:{session_id}")
 }
 
+fn render_session_bridge_payload(session_id: &str, line: &str) -> String {
+    format!("__rdog_session__:{session_id}\n{line}")
+}
+
 #[test]
 fn control_should_find_daemon_by_target_name_without_explicit_entrypoint() {
     let daemon_name = unique_name("mini-a");
@@ -977,6 +981,141 @@ fn external_peer_should_send_control_request_via_zenoh_to_daemon_channel() {
     assert!(
         joined.contains(r#"@response {"id":13,"value":"REOPENED"}"#),
         "unexpected reopened-session frames:\n{joined}"
+    );
+}
+
+#[test]
+fn control_should_reject_rich_frame_over_legacy_queryable_path() {
+    let daemon_name = unique_name("legacy-rich");
+    let listen_port = next_port();
+    let (mut daemon, config_path, entrypoint) = start_zenoh_daemon(&daemon_name, listen_port);
+    let daemon_stdout = daemon.stdout.take().expect("daemon stdout should exist");
+    let (buffer, _collector) = spawn_output_collector(daemon_stdout);
+    wait_until_output_contains(
+        &mut daemon,
+        &buffer,
+        "zenoh router daemon ready",
+        Duration::from_secs(8),
+    )
+    .expect("daemon should report ready");
+
+    let session = open_zenoh_client(&entrypoint);
+    let control_key = build_control_key("lab", &daemon_name);
+    let replies = session
+        .get(control_key)
+        .payload("@screenshot#7")
+        .timeout(Duration::from_secs(8))
+        .wait()
+        .expect("legacy queryable request should send");
+    let mut payloads = Vec::new();
+    while let Ok(reply) = replies.recv() {
+        let Ok(sample) = reply.result() else {
+            continue;
+        };
+        payloads.push(
+            sample
+                .payload()
+                .try_to_string()
+                .expect("reply payload should be utf-8")
+                .to_string(),
+        );
+    }
+
+    stop_child(&mut daemon);
+    let _ = fs::remove_file(&config_path);
+
+    let joined = payloads.join("\n");
+    assert!(
+        joined.contains(r#""id":7"#) && joined.contains(r#""code":78"#),
+        "legacy queryable should reject rich screenshot with code 78, got:\n{joined}"
+    );
+    assert!(
+        joined.contains("session channel"),
+        "legacy queryable rejection should point callers to session channel:\n{joined}"
+    );
+    assert!(
+        !joined.contains("@savefile "),
+        "legacy queryable should not deliver rich savefile frames:\n{joined}"
+    );
+}
+
+#[test]
+fn control_should_reject_rich_frame_over_legacy_session_query_payload() {
+    let daemon_name = unique_name("legacy-session-rich");
+    let listen_port = next_port();
+    let (mut daemon, config_path, entrypoint) = start_zenoh_daemon(&daemon_name, listen_port);
+    let daemon_stdout = daemon.stdout.take().expect("daemon stdout should exist");
+    let (buffer, _collector) = spawn_output_collector(daemon_stdout);
+    wait_until_output_contains(
+        &mut daemon,
+        &buffer,
+        "zenoh router daemon ready",
+        Duration::from_secs(8),
+    )
+    .expect("daemon should report ready");
+
+    let session = open_zenoh_client(&entrypoint);
+    let session_id = uuid::Uuid::new_v4().to_string();
+    let control_key = build_control_key("lab", &daemon_name);
+    let to_control_key = build_session_to_control_key("lab", &session_id);
+    let subscriber = session
+        .declare_subscriber(to_control_key)
+        .wait()
+        .expect("subscriber should declare");
+
+    let replies = session
+        .get(control_key.clone())
+        .payload(render_session_open_payload(&session_id))
+        .timeout(Duration::from_secs(8))
+        .wait()
+        .expect("session open query should send");
+    let mut saw_open_ack = false;
+    while let Ok(reply) = replies.recv() {
+        if reply.result().is_ok() {
+            saw_open_ack = true;
+            break;
+        }
+    }
+    assert!(saw_open_ack, "session open should receive ack");
+
+    let replies = session
+        .get(control_key)
+        .payload(render_session_bridge_payload(&session_id, "@screenshot#7"))
+        .timeout(Duration::from_secs(8))
+        .wait()
+        .expect("legacy session query payload should send");
+    let mut saw_query_ack = false;
+    while let Ok(reply) = replies.recv() {
+        let Ok(sample) = reply.result() else {
+            continue;
+        };
+        let payload = sample
+            .payload()
+            .try_to_string()
+            .expect("ack payload should be utf-8");
+        if payload.contains("@response 0") {
+            saw_query_ack = true;
+            break;
+        }
+    }
+    assert!(saw_query_ack, "legacy session query should receive ack");
+
+    let rejection = recv_zenoh_text(&subscriber, Duration::from_secs(8));
+
+    stop_child(&mut daemon);
+    let _ = fs::remove_file(&config_path);
+
+    assert!(
+        rejection.contains(r#""id":7"#) && rejection.contains(r#""code":78"#),
+        "legacy session query should reject rich screenshot with code 78, got:\n{rejection}"
+    );
+    assert!(
+        rejection.contains("session channel"),
+        "legacy session query rejection should point callers to session channel:\n{rejection}"
+    );
+    assert!(
+        !rejection.contains("@savefile "),
+        "legacy session query should not deliver rich savefile frames:\n{rejection}"
     );
 }
 

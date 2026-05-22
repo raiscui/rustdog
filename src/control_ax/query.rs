@@ -1,8 +1,10 @@
 use super::{
     assign_once, invalid_data, parse_ax_depth, parse_ax_max_elements, parse_ax_mode_payload,
-    parse_ax_target, parse_bool_literal, required_field, resolve_target_id_in_snapshot, AxElement,
-    AxMode, AxRect, AxSnapshot, AxTarget, AxTreeRequest, AxWindow, AX_SCHEMA,
+    parse_ax_target, parse_bool_literal, required_field, resolve_observation_ref,
+    resolve_target_id_in_snapshot, AxElement, AxMode, AxRect, AxSnapshot, AxTarget, AxTreeRequest,
+    AxWindow, AX_SCHEMA,
 };
+use crate::control_observation::ObservationHeader;
 use crate::control_protocol::{
     normalize_object_field_name, object_inner, parse_quoted_payload, split_object_field,
     split_object_fields,
@@ -80,9 +82,19 @@ impl AxGetRequest {
     }
 
     fn capture_depth(&self) -> u8 {
-        let target_depth = self
-            .target
-            .id
+        let target_id = if let Some(id) = self.target.id.as_deref() {
+            Some(id.to_owned())
+        } else if let (Some(observation_id), Some(ref_id)) = (
+            self.target.observation_id.as_deref(),
+            self.target.ref_id.as_deref(),
+        ) {
+            resolve_observation_ref(observation_id, ref_id)
+                .ok()
+                .map(|entry| entry.backend_id)
+        } else {
+            None
+        };
+        let target_depth = target_id
             .as_deref()
             .and_then(target_id_path_depth)
             .unwrap_or(0);
@@ -98,6 +110,8 @@ struct AxFindResponse {
     capture_status: String,
     permission_status: String,
     coordinate_space: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    observation: Option<ObservationHeader>,
     match_count: usize,
     returned_count: usize,
     truncated: bool,
@@ -114,6 +128,8 @@ impl AxFindResponse {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 struct AxFindMatch {
     id: String,
+    #[serde(skip_serializing_if = "Option::is_none", rename = "ref")]
+    ref_id: Option<String>,
     window_id: String,
     pid: i32,
     process_name: String,
@@ -145,7 +161,11 @@ struct AxGetResponse {
     capture_status: String,
     permission_status: String,
     coordinate_space: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    observation: Option<ObservationHeader>,
     target_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    target_ref: Option<String>,
     target_type: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     window_id: Option<String>,
@@ -371,6 +391,7 @@ pub fn build_ax_find_response_json(
     snapshot: &AxSnapshot,
     request: &AxFindRequest,
 ) -> io::Result<String> {
+    let snapshot = snapshot.clone().with_observation("@ax-find")?;
     let mut matches = Vec::new();
     let mut match_count = 0usize;
 
@@ -391,6 +412,7 @@ pub fn build_ax_find_response_json(
         capture_status: snapshot.capture_status.clone(),
         permission_status: snapshot.permission_status.clone(),
         coordinate_space: snapshot.coordinate_space,
+        observation: snapshot.observation.clone(),
         match_count,
         returned_count: matches.len(),
         truncated: snapshot.truncated || match_count > matches.len(),
@@ -403,7 +425,9 @@ pub fn build_ax_get_response_json(
     snapshot: &AxSnapshot,
     request: &AxGetRequest,
 ) -> io::Result<String> {
-    let target_id = resolve_target_id_in_snapshot(snapshot, &request.target)?;
+    let snapshot = snapshot.clone().with_observation("@ax-get")?;
+    let target_id = resolve_target_id_in_snapshot(&snapshot, &request.target)?;
+    let target_ref = request.target.ref_id.clone();
 
     for window in &snapshot.windows {
         if window.id == target_id {
@@ -414,7 +438,9 @@ pub fn build_ax_get_response_json(
                 capture_status: snapshot.capture_status.clone(),
                 permission_status: snapshot.permission_status.clone(),
                 coordinate_space: snapshot.coordinate_space,
+                observation: snapshot.observation.clone(),
                 target_id,
+                target_ref,
                 target_type: "window",
                 window_id: Some(window.id.clone()),
                 pid: Some(window.pid),
@@ -434,7 +460,9 @@ pub fn build_ax_get_response_json(
                 capture_status: snapshot.capture_status.clone(),
                 permission_status: snapshot.permission_status.clone(),
                 coordinate_space: snapshot.coordinate_space,
+                observation: snapshot.observation.clone(),
                 target_id,
+                target_ref,
                 target_type: "element",
                 window_id: Some(window.id.clone()),
                 pid: Some(window.pid),
@@ -478,6 +506,7 @@ fn collect_element_matches(
         if matches.len() < usize::from(limit) {
             matches.push(AxFindMatch {
                 id: element.id.clone(),
+                ref_id: element.ref_id.clone(),
                 window_id: window.id.clone(),
                 pid: window.pid,
                 process_name: window.process_name.clone(),
@@ -589,6 +618,7 @@ mod tests {
     fn button(id: &str, name: &str) -> AxElement {
         AxElement {
             id: id.to_owned(),
+            ref_id: None,
             role: "AXButton".to_owned(),
             subrole: None,
             name: Some(name.to_owned()),
@@ -613,6 +643,7 @@ mod tests {
             "macos",
             vec![AxWindow {
                 id: "pid:1/window:0".to_owned(),
+                ref_id: None,
                 pid: 1,
                 process_name: "Terminal".to_owned(),
                 title: Some("rdog".to_owned()),
@@ -647,6 +678,9 @@ mod tests {
         assert!(value.contains(r#""kind":"ax-find""#));
         assert!(value.contains(r#""match_count":1"#));
         assert!(value.contains(r#""name":"Cancel""#));
+        let value: serde_json::Value = serde_json::from_str(&value).unwrap();
+        assert_eq!(value["observation"]["source_command"], "@ax-find");
+        assert_eq!(value["matches"][0]["ref"], "@e2");
     }
 
     #[test]
@@ -661,6 +695,30 @@ mod tests {
         let value = build_ax_get_response_json(&snapshot(), &request).unwrap();
         assert!(value.contains(r#""target_type":"element""#));
         assert!(value.contains(r#""name":"Cancel""#));
+        let value: serde_json::Value = serde_json::from_str(&value).unwrap();
+        assert_eq!(value["observation"]["source_command"], "@ax-get");
+        assert_eq!(value["element"]["ref"], "@e2");
+    }
+
+    #[test]
+    fn get_response_should_resolve_observation_ref_target() {
+        let observed = snapshot().with_observation("@ax-tree").unwrap();
+        let observation_id = observed
+            .observation
+            .as_ref()
+            .unwrap()
+            .observation_id
+            .clone();
+        let target_ref = observed.windows[0].elements[0].ref_id.as_deref().unwrap();
+        let request = parse_ax_get_payload(&format!(
+            r#"{{target:{{ref:"{target_ref}",observation_id:"{observation_id}"}},depth:1}}"#
+        ))
+        .unwrap();
+        let value = build_ax_get_response_json(&observed, &request).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&value).unwrap();
+        assert_eq!(value["target_ref"], target_ref);
+        assert_eq!(value["target_id"], "pid:1/window:0/path:0");
+        assert_eq!(value["target_type"], "element");
     }
 
     #[test]

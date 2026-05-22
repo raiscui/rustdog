@@ -1,0 +1,37 @@
+{
+  "schema": "rdog.selector.v1",
+  "selector_id": "sel-v1-9d7cad7794956408",
+  "fingerprint": "sha256:9d7cad7794956408537dd21ad4cc8edbd1c7a35db5e3c5061da998b78c98d5ea",
+  "kind": "window",
+  "platform": "macos",
+  "constraints": {
+    "app": {
+      "name": "TextEdit",
+      "bundle_id": "com.apple.TextEdit"
+    },
+    "window": {
+      "role": "AXWindow",
+      "title": "release-notes.txt",
+      "title_match": "exact"
+    }
+  },
+  "hints": {
+    "pid": 42,
+    "rect": {
+      "x": 120,
+      "y": 80,
+      "width": 640,
+      "height": 480
+    },
+    "backend_id": "pid:42/window:0"
+  },
+  "source": {
+    "observation_id": "obs-1",
+    "ref": "@w2",
+    "draft_selector_id": "sel-obs-1--w2"
+  },
+  "redaction": {
+    "value_persisted": false,
+    "screenshot_persisted": false
+  }
+}
