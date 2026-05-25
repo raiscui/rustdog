@@ -6,7 +6,7 @@ use std::{
         Arc,
     },
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use zenoh::Wait;
@@ -20,6 +20,14 @@ use crate::{
         build_session_to_control_key_with_root, build_session_to_daemon_key_with_root,
     },
 };
+
+/// 普通 line-control 请求在 session channel 上等待 final `@response` 的上限。
+///
+/// 这里故意不要复用 3 秒级的 Zenoh request timeout:
+/// - request timeout 适合 target resolve / session open 这种网络控制面操作。
+/// - `@window-activate`、`@script` 等普通控制指令可能包含真实 OS side-effect。
+/// - Zenoh FIFO `recv_timeout()` 的 `Ok(None)` 是一次等待超时 tick,不是 subscriber closed。
+const LINE_CONTROL_RESPONSE_TIMEOUT: Duration = Duration::from_secs(60);
 
 pub(super) struct ZenohClientSessionBridge {
     session_id: String,
@@ -545,17 +553,33 @@ pub(super) fn execute_remote_request(
         .map_err(to_io_error)?;
 
     let mut frames = Vec::new();
+    let response_deadline = Instant::now() + LINE_CONTROL_RESPONSE_TIMEOUT.max(timeout);
     loop {
+        let now = Instant::now();
+        if now >= response_deadline {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                format!(
+                    "Zenoh session bridge 在 {}ms 内未收到 final @response",
+                    LINE_CONTROL_RESPONSE_TIMEOUT.max(timeout).as_millis()
+                ),
+            ));
+        }
+
+        // ------------------------------------------------------------
+        // `recv_timeout()` 返回 `Ok(None)` 表示这轮等待超时。
+        // 它不是 subscriber closed,所以这里继续等待直到明确 deadline。
+        // 这样慢一点的 GUI side-effect,例如 `@window-activate`,
+        // 不会被误报为 “subscriber 在收到结果前关闭”。
+        // ------------------------------------------------------------
+        let recv_timeout = timeout.min(response_deadline.saturating_duration_since(now));
         let sample = session_bridge
             .subscriber
-            .recv_timeout(timeout)
-            .map_err(|err| io::Error::new(io::ErrorKind::TimedOut, err.to_string()))?
-            .ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::UnexpectedEof,
-                    "Zenoh session bridge subscriber 在收到结果前关闭",
-                )
-            })?;
+            .recv_timeout(recv_timeout)
+            .map_err(|err| io::Error::new(io::ErrorKind::TimedOut, err.to_string()))?;
+        let Some(sample) = sample else {
+            continue;
+        };
         let payload = sample.payload().try_to_string().map_err(to_io_error)?;
         frames.push(payload.to_string());
 

@@ -985,6 +985,52 @@ fn external_peer_should_send_control_request_via_zenoh_to_daemon_channel() {
 }
 
 #[test]
+fn control_should_wait_for_slow_session_channel_response() {
+    let daemon_name = unique_name("slow-response");
+    let listen_port = next_port();
+    let (mut daemon, config_path, entrypoint) = start_zenoh_daemon(&daemon_name, listen_port);
+    let daemon_stdout = daemon.stdout.take().expect("daemon stdout should exist");
+    let (buffer, _collector) = spawn_output_collector(daemon_stdout);
+    wait_until_output_contains(
+        &mut daemon,
+        &buffer,
+        "zenoh router daemon ready",
+        Duration::from_secs(8),
+    )
+    .expect("daemon should report ready");
+
+    let started_at = Instant::now();
+    let (status, stdout, stderr) = run_control(
+        &[
+            "--transport",
+            "zenoh",
+            "--target-name",
+            &daemon_name,
+            "--entry-point",
+            &entrypoint,
+        ],
+        r#"@script#21:"sleep 4; printf SLOW_READY""#,
+    );
+    let elapsed = started_at.elapsed();
+
+    stop_child(&mut daemon);
+    let _ = fs::remove_file(&config_path);
+
+    assert!(
+        status.success(),
+        "slow response should wait for final @response instead of treating recv timeout as subscriber closed\nelapsed={elapsed:?}\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        elapsed >= Duration::from_secs(4),
+        "test did not exercise the slow-response path: elapsed={elapsed:?}"
+    );
+    assert!(
+        stdout.contains(r#"@response {"id":21,"value":"SLOW_READY"}"#),
+        "slow script response should reach control stdout\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+}
+
+#[test]
 fn control_should_reject_rich_frame_over_legacy_queryable_path() {
     let daemon_name = unique_name("legacy-rich");
     let listen_port = next_port();
