@@ -1,4 +1,7 @@
 use super::*;
+
+mod bootstrap;
+
 use crate::{
     control_ax::{
         AxActionName, AxActionRequest, AxMode, AxSetValueRequest, AxTarget, AxTreeScope,

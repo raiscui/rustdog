@@ -58,6 +58,8 @@ line-control 会把每一行输入分成 3 类:
 @ping#1
 @capabilities
 @capabilities#2
+@bootstrap
+@bootstrap#3:{mode:"gui",capability_policy:"fresh",observe:{mode:"hybrid",include_screenshot:true,include_ax:true,include_windows:true,ax_required:false,ax_mode:"interactive"}}
 @key:"right-option"
 @key#7:"right-option"
 @key#7:{key:"right-option",hold_ms:200,mode:"press_release"}
@@ -129,6 +131,7 @@ printf 'PLAIN_OK'
 
 - `ping`
 - `capabilities`
+- `bootstrap`
 
 #### 需要 payload
 
@@ -146,6 +149,7 @@ printf 'PLAIN_OK'
 - `wheel`
 - `ax-tree`
 - `ax-press`
+- `bootstrap`
 
 ### request id 规则
 
@@ -223,6 +227,50 @@ printf 'PLAIN_OK'
 - `unsupported` 对应 code `78`,表示当前平台或 backend 不支持该能力。
 - macOS Accessibility、macOS Screen Recording、Windows UIPI 和 Linux display backend 状态必须以结构化字段暴露,不能让 agent 按 OS 名字猜。
 - `gui_agent_recipe` 固定为 `@capabilities -> observe -> locate -> activate_or_focus -> semantic_action -> verify -> fallback_recipe`。
+
+### `@bootstrap`
+
+用于一次性读取只读 preflight 状态。
+它组合 liveness、capabilities 和可选 observe bundle,不执行点击、输入、滚动、focus、activate 或鼠标移动。
+
+示例:
+
+```text
+@bootstrap
+@bootstrap#3:{mode:"basic",capability_policy:"fresh"}
+@bootstrap#4:{mode:"gui",capability_policy:"fresh",observe:{mode:"hybrid",include_screenshot:true,include_ax:true,include_windows:true,ax_required:false,ax_mode:"interactive"}}
+```
+
+请求字段:
+
+- `mode`: `basic` 或 `gui`,默认是 `basic`。
+- `capability_policy`: 第一版只允许 `fresh`,默认是 `fresh`。
+- `observe`: 只在 `mode:"gui"` 下允许。省略时使用默认 `@observe` hybrid 请求。
+- `include_trace`: 是否返回 trace,默认是 true。
+
+拒绝字段:
+
+- `action`
+- `click`
+- `press`
+- `type`
+- `key`
+- `allow_side_effects`
+
+返回值使用 `rdog.bootstrap.v1`:
+
+```json
+{"kind":"bootstrap","schema":"rdog.bootstrap.v1","status":"degraded","mode":"gui","liveness":{"status":"complete","reply":"pong"},"capability_policy":{"requested":"fresh","effective":"fresh","cache_ttl_ms":0},"capabilities":{"kind":"capabilities","schema":"rdog.capabilities.v1"},"observation":{"kind":"observe","schema":"rdog.observe.v1"},"lanes":{"visual":{"status":"permission_denied"},"accessibility":{"status":"complete"},"windows":{"status":"complete"}},"errors":[{"lane":"visual","status":"permission_denied","code":77}],"frames":{"savefile_count":0,"final_response_order":"savefiles-before-response"}}
+```
+
+`capability_policy:"cached"` 是保留字段,当前必须返回结构化错误:
+
+```json
+{"kind":"bootstrap","schema":"rdog.bootstrap.v1","status":"blocked","error_code":"BOOTSTRAP_CAPABILITY_CACHE_UNIMPLEMENTED","message":"capability_policy:\"cached\" is reserved for a future TTL cache; use capability_policy:\"fresh\""}
+```
+
+Zenoh 下所有 `@bootstrap` 都必须走 session channel,包括 `mode:"basic"`。
+旧 daemon 可用 fallback:在同一个 `rdog control` session 里发送 `@ping#1`、`@capabilities#2`、`@observe#3:{mode:"hybrid",include_screenshot:true,include_ax:true,include_windows:true,ax_required:false,ax_mode:"interactive"}`。
 
 ### `@observe`
 

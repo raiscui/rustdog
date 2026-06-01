@@ -135,13 +135,27 @@ rdog control mac.lab <<'RDOG'
 RDOG
 ```
 
+Fast read-only GUI bootstrap:
+
+```bash
+rdog control mac.lab <<'RDOG'
+@bootstrap#1:{mode:"gui",capability_policy:"fresh",observe:{mode:"hybrid",include_screenshot:true,include_ax:true,include_windows:true,ax_required:false,ax_mode:"interactive"}}
+RDOG
+```
+
+This is a single read-only composite protocol command.
+It returns `rdog.bootstrap.v1` with liveness, capabilities, observe, lane errors, frame count, and optional trace.
+It is session-channel-only over Zenoh, including `mode:"basic"`.
+For older daemons, fall back to one `rdog control` session containing `@ping#1`, `@capabilities#2`, and `@observe#3:{mode:"hybrid",include_screenshot:true,include_ax:true,include_windows:true,ax_required:false,ax_mode:"interactive"}`.
+
 For GUI agent work, use the fixed recipe:
 
 ```text
-@capabilities -> @observe -> locate -> activate/focus -> semantic action -> verify -> fallback
+@bootstrap -> locate -> activate/focus -> semantic action -> verify -> fallback
 ```
 
-Prefer `@observe:{mode:"hybrid",include_screenshot:true,include_ax:true,include_windows:true,ax_required:false,ax_mode:"interactive"}` for the observation step.
+On older daemons, use `@capabilities -> @observe -> locate -> activate/focus -> semantic action -> verify -> fallback`.
+Prefer `@observe:{mode:"hybrid",include_screenshot:true,include_ax:true,include_windows:true,ax_required:false,ax_mode:"interactive"}` for any extra observation step.
 If a target does not support it, use the lower-level lanes: `@screenshot include_ax`, `@ax-tree`, `@window-find`, `@ax-find`, or `@ax-get`.
 Those older commands are still stable and are not deprecated.
 

@@ -1,4 +1,5 @@
 use serde::Serialize;
+use serde_json::Value;
 use std::{
     io,
     time::{SystemTime, UNIX_EPOCH},
@@ -12,9 +13,18 @@ pub const CAPABILITIES_SCHEMA: &str = "rdog.capabilities.v1";
 /// - 协议层 `@capabilities` 直接返回它
 /// - 后续 `rdog doctor` 也应该复用同一份模型
 /// - GUI agent recipe 只消费结构化字段,不再靠平台名字猜能力
-pub fn current_capabilities_report_json() -> io::Result<String> {
+pub fn current_capabilities_report_value() -> io::Result<Value> {
     let report = build_capabilities_report(current_probe_snapshot());
-    serde_json::to_string(&report).map_err(|err| io::Error::other(err.to_string()))
+    serde_json::to_value(report).map_err(|err| io::Error::other(err.to_string()))
+}
+
+/// 生成当前 daemon 可直接返回给 control peer 的能力报告 JSON。
+///
+/// JSON 字符串只是 line-control 兼容边界。内部组合方应该优先使用
+/// `current_capabilities_report_value`,避免后续再把字符串解析回结构化值。
+pub fn current_capabilities_report_json() -> io::Result<String> {
+    let value = current_capabilities_report_value()?;
+    serde_json::to_string(&value).map_err(|err| io::Error::other(err.to_string()))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -537,6 +547,19 @@ mod tests {
             value["gui_agent_recipe"][4], "semantic_action",
             "recipe should make semantic action the primary act step"
         );
+    }
+
+    #[test]
+    fn current_report_value_should_expose_same_structured_contract() {
+        let value = current_capabilities_report_value().expect("capabilities value should build");
+
+        assert_eq!(value["kind"], "capabilities");
+        assert_eq!(value["schema"], CAPABILITIES_SCHEMA);
+        assert!(
+            value["capabilities"].is_object(),
+            "capabilities should stay structured"
+        );
+        assert_eq!(value["gui_agent_recipe"][0], "@capabilities");
     }
 
     #[test]

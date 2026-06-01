@@ -1,4 +1,5 @@
 use super::*;
+use crate::control_bootstrap::BootstrapMode;
 use crate::control_frames::SaveFileFrame;
 use crate::control_mouse::MouseEndpoint;
 use crate::control_protocol::{KeyMode, KeyRequest, PasteRequestKind};
@@ -149,6 +150,13 @@ impl ControlActionExecutor for FakeExecutor {
                     .unwrap_or("query-target")
             )
             .into_bytes(),
+            ControlCommand::Bootstrap(request) => {
+                let mode = match request.mode {
+                    BootstrapMode::Basic => "basic",
+                    BootstrapMode::Gui => "gui",
+                };
+                format!("BOOTSTRAP:{mode}:{}\n", request.include_trace).into_bytes()
+            }
             ControlCommand::Capabilities => b"CAPABILITIES\n".to_vec(),
             ControlCommand::SelectorGet(request) => {
                 format!("SELECTOR_GET:{}\n", request.selector_id).into_bytes()
@@ -205,6 +213,13 @@ fn bind_test_listener() -> TcpListener {
     {
         TcpListener::bind(("127.0.0.1", 0)).expect("ephemeral listener should bind")
     }
+}
+
+fn latest_response(output: &str) -> Option<serde_json::Value> {
+    output.lines().rev().find_map(|line| {
+        let json_text = line.strip_prefix("@response ")?;
+        serde_json::from_str(json_text).ok()
+    })
 }
 
 #[cfg(unix)]
@@ -346,6 +361,91 @@ fn control_receiver_should_wrap_success_response_with_request_id() {
         .expect("control receiver should finish");
 
     assert!(output.contains(r#"@response {"id":42,"value":"KEY:F11\n"}"#));
+}
+
+#[test]
+fn control_receiver_should_execute_basic_bootstrap_preflight() {
+    let (mut client, server) = connected_pair();
+    let executor = SystemControlActionExecutor::default();
+    let shell = control_test_shell();
+    let worker =
+        thread::spawn(move || run_control_receiver_with_executor(server, shell, &executor));
+
+    client
+        .write_all(br#"@bootstrap#601"#)
+        .expect("should write bootstrap request");
+    client.write_all(b"\n").expect("should finish control line");
+    client
+        .shutdown(Shutdown::Write)
+        .expect("should close write side");
+
+    let mut output = String::new();
+    client
+        .read_to_string(&mut output)
+        .expect("should read bootstrap response");
+
+    worker
+        .join()
+        .expect("worker should not panic")
+        .expect("control receiver should finish");
+
+    let response = latest_response(&output).expect("bootstrap should return @response JSON");
+    assert_eq!(response["id"].as_u64(), Some(601));
+    let value = &response["value"];
+    assert_eq!(value["kind"].as_str(), Some("bootstrap"));
+    assert_eq!(value["schema"].as_str(), Some("rdog.bootstrap.v1"));
+    assert_eq!(value["mode"].as_str(), Some("basic"));
+    assert_eq!(value["liveness"]["reply"].as_str(), Some("pong"));
+    assert_eq!(
+        value["capabilities"]["schema"].as_str(),
+        Some("rdog.capabilities.v1")
+    );
+    assert_eq!(
+        value["observation"]["status"].as_str(),
+        Some("not_requested")
+    );
+    assert_eq!(value["frames"]["savefile_count"].as_u64(), Some(0));
+}
+
+#[test]
+fn control_receiver_should_execute_gui_bootstrap_window_probe() {
+    let (mut client, server) = connected_pair();
+    let executor = SystemControlActionExecutor::default();
+    let shell = control_test_shell();
+    let worker =
+        thread::spawn(move || run_control_receiver_with_executor(server, shell, &executor));
+
+    client
+        .write_all(br#"@bootstrap#602:{mode:"gui",observe:{mode:"window"},include_trace:false}"#)
+        .expect("should write gui bootstrap request");
+    client.write_all(b"\n").expect("should finish control line");
+    client
+        .shutdown(Shutdown::Write)
+        .expect("should close write side");
+
+    let mut output = String::new();
+    client
+        .read_to_string(&mut output)
+        .expect("should read gui bootstrap response");
+
+    worker
+        .join()
+        .expect("worker should not panic")
+        .expect("control receiver should finish");
+
+    let response = latest_response(&output).expect("bootstrap should return @response JSON");
+    assert_eq!(response["id"].as_u64(), Some(602));
+    let value = &response["value"];
+    assert_eq!(value["kind"].as_str(), Some("bootstrap"));
+    assert_eq!(value["mode"].as_str(), Some("gui"));
+    assert_eq!(value["observation"]["kind"].as_str(), Some("observe"));
+    assert_eq!(value["observation"]["mode"].as_str(), Some("window"));
+    assert_eq!(
+        value["lanes"]["windows"]["status"].as_str(),
+        Some("skipped")
+    );
+    assert_eq!(value["frames"]["savefile_count"].as_u64(), Some(0));
+    assert!(value["trace"].is_null());
 }
 
 #[test]

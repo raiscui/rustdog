@@ -100,6 +100,7 @@ flowchart LR
 | 能力 | 输入示例 | 返回形态 | 适合 agent 做什么 |
 | --- | --- | --- | --- |
 | 活性检查 | `@ping` | `@response "pong"` | 判断目标是否在线 |
+| Bootstrap | `@bootstrap#1:{mode:"gui",capability_policy:"fresh"}` | `rdog.bootstrap.v1` structured `@response` + optional observe `@savefile` frames | 新 GUI 任务的一次只读起手探测,同时拿 liveness / capabilities / observation / lane errors |
 | 能力诊断 | `@capabilities#1` | `rdog.capabilities.v1` structured `@response` | 在 GUI / 权限 / 平台敏感动作前确定可用 lane |
 | 观察 | `@observe#2:{mode:"hybrid",include_screenshot:true,include_ax:true,include_windows:true}` | `rdog.observe.v1` observation bundle + optional `@savefile` frames | 推荐的 GUI 观察入口,先读屏幕/AX/窗口/ref/selector 摘要 |
 | one-shot shell | `printf READY` | `@response "READY"` | 跑简单命令,不保留 cwd |
@@ -153,21 +154,30 @@ agent 应按下面的规则解析输出:
 - 同一个 request id 可能返回多个 `@savefile`。
   默认 `@screenshot#id` 至少返回一个 virtual-desktop JPEG 和一个 manifest JSON。
 
-### 2. GUI agent 必须先读能力诊断
+### 2. GUI agent 必须先读 bootstrap / 能力诊断
 
-GUI / 截图 / AX / 鼠标 / 文本输入任务先发送:
+GUI / 截图 / AX / 鼠标 / 文本输入任务优先先发送:
 
 ```text
-@capabilities#1
+@bootstrap#1:{mode:"gui",capability_policy:"fresh",observe:{mode:"hybrid",include_screenshot:true,include_ax:true,include_windows:true,ax_required:false,ax_mode:"interactive"}}
 ```
 
-返回值里的 `capabilities.*.status` 是 agent 选择控制 lane 的依据。
+返回值里的 `capabilities.*.status`、`observation.status`、`lanes.*.status` 和 `errors[]` 是 agent 选择控制 lane 的依据。
 不要从平台名字猜 macOS Accessibility、Screen Recording、Windows UIPI 或 Linux display backend 是否可用。
+`capability_policy:"cached"` 当前是保留字段,会返回 `BOOTSTRAP_CAPABILITY_CACHE_UNIMPLEMENTED`;第一版使用 `fresh`。
+
+如果目标 daemon 不支持 `@bootstrap`,退回旧的三行只读 preflight:
+
+```text
+@ping#1
+@capabilities#2
+@observe#3:{mode:"hybrid",include_screenshot:true,include_ax:true,include_windows:true,ax_required:false,ax_mode:"interactive"}
+```
 
 固定 GUI workflow:
 
 ```text
-@capabilities -> @observe -> locate -> activate_or_focus -> semantic_action -> verify -> fallback_recipe
+@bootstrap -> locate -> activate_or_focus -> semantic_action -> verify -> fallback_recipe
 ```
 
 执行口径:

@@ -146,6 +146,10 @@ impl ControlActionExecutor for SystemControlActionExecutor {
             ControlCommand::WindowFind(request) => execute_window_find(request),
             ControlCommand::WindowActivate(request) => execute_window_activate(request),
             ControlCommand::WindowClose(request) => execute_window_close(request),
+            ControlCommand::Bootstrap(_) => Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "@bootstrap 是只读 preflight facade,由 control_core 直接组合 capabilities / observe,不应进入默认 executor 分支",
+            )),
             ControlCommand::Capabilities => Err(io::Error::new(
                 io::ErrorKind::Unsupported,
                 "@capabilities 由 control_core 直接生成能力报告,不应进入默认 executor 分支",

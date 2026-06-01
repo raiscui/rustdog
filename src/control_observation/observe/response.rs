@@ -2,7 +2,7 @@ use super::{
     producer::ProducedSections,
     refs::{collect_ref_samples, selector_count},
     request::ObserveRequest,
-    OBSERVE_SCHEMA,
+    ObserveBundle, OBSERVE_SCHEMA,
 };
 use crate::{control_ax::AxSnapshot, control_observation::ObservationHeader};
 use serde_json::{json, Value};
@@ -11,16 +11,31 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+#[cfg(test)]
 pub(super) struct ObserveResponse {
     pub(super) savefile_frames: Vec<crate::control_frames::ControlFrame>,
     pub(super) response_line: String,
 }
 
+#[cfg(test)]
 pub(super) fn render_observe_response(
     request_id: Option<u64>,
     request: &ObserveRequest,
     produced: ProducedSections,
 ) -> io::Result<ObserveResponse> {
+    let bundle = build_observe_bundle_from_sections(request, produced)?;
+    let response_line = render_observe_bundle_response_line(request_id, &bundle.value)?;
+
+    Ok(ObserveResponse {
+        savefile_frames: bundle.savefile_frames,
+        response_line,
+    })
+}
+
+pub(super) fn build_observe_bundle_from_sections(
+    request: &ObserveRequest,
+    produced: ProducedSections,
+) -> io::Result<ObserveBundle> {
     let observed_at_unix_ms = current_unix_ms();
     let accessibility_value = produced
         .accessibility
@@ -78,12 +93,19 @@ pub(super) fn render_observe_response(
             "scoring_version": "rdog.selector.score.v1",
         },
     });
-    let value_json = serde_json::to_string(&value)
-        .map_err(|err| io::Error::other(format!("observe response 序列化失败: {err}")))?;
-    Ok(ObserveResponse {
+    Ok(ObserveBundle {
         savefile_frames: produced.savefile_frames,
-        response_line: render_structured_response(request_id, &value_json),
+        value,
     })
+}
+
+pub(super) fn render_observe_bundle_response_line(
+    request_id: Option<u64>,
+    value: &Value,
+) -> io::Result<String> {
+    let value_json = serde_json::to_string(value)
+        .map_err(|err| io::Error::other(format!("observe response 序列化失败: {err}")))?;
+    Ok(render_structured_response(request_id, &value_json))
 }
 
 fn accessibility_section(snapshot: &AxSnapshot, request: &ObserveRequest) -> Value {

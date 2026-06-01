@@ -221,6 +221,7 @@ The usual shape is:
 | Capability | Example | Response shape | Use case |
 | --- | --- | --- | --- |
 | Ping | `@ping` | `@response "pong"` | Health check |
+| Bootstrap | `@bootstrap#1:{mode:"gui",capability_policy:"fresh"}` | `rdog.bootstrap.v1` structured `@response` + optional observe `@savefile` frames | One read-only GUI preflight: liveness, capabilities, observation, lane errors, and trace |
 | Capabilities | `@capabilities#1` | `rdog.capabilities.v1` structured `@response` | Choose a GUI / permission / platform lane before acting |
 | One-shot command | `@cmd#1:"pwd"` | `@response {"id":1,"value":"..."}` | Scripted automation |
 | Bare shell line | `pwd` | `@response "..."` | Human-friendly one-shot shell command |
@@ -261,6 +262,9 @@ Important behavior:
 - `@mouse-button mode:"press"` intentionally leaves the button pressed.
   Send a matching `@mouse-button:{button:"left",mode:"release"}` when recovering from interrupted raw press flows.
 - `@screenshot` saves file-style results through `@savefile`; the CLI stores them under `./rdog_downloads/` instead of dumping base64 to the terminal.
+- `@bootstrap` is read-only. Use `mode:"gui"` for the first GUI preflight on new daemons. It combines liveness, capabilities, and optional `@observe` output without pressing controls or moving the mouse.
+- `@bootstrap capability_policy:"cached"` is reserved and currently returns `BOOTSTRAP_CAPABILITY_CACHE_UNIMPLEMENTED`; use `capability_policy:"fresh"`.
+- If a daemon does not support `@bootstrap`, fall back to one session containing `@ping`, `@capabilities`, and `@observe`.
 - In a real TTY, `rdog control` renders simple `@response` values for humans.
 - In pipe/redirect mode, `rdog control` keeps raw protocol lines for programs.
 
@@ -274,11 +278,12 @@ For code agents, prefer this decision tree:
 
 1. Need a quick deterministic command? Use `@cmd#id:"..."` or a bare shell line.
 2. Need response correlation? Use request ids such as `@cmd#7:"..."`.
-3. Need visual evidence, refs, or coordinates? Prefer `@observe#id:{mode:"hybrid",include_screenshot:true,include_ax:true,include_windows:true}`; use `@screenshot#id` when you only need pixels and manifest.
-4. Need GUI or desktop side effects? Prefer semantic AX/window commands, use mouse by observation ref when semantics are unavailable, and keep raw coordinate mouse as fallback.
-5. Need real terminal behavior or persistent shell state? Use `--pty`.
-6. Need multiple hosts? Address them by stable daemon names such as `mac.lab`, `win11.lab`, or `linux-build.lab`.
-7. Need direct SDK integration? Use the Zenoh session channel model documented in [`specs/zenoh-sdk-integration-playbook.md`](./specs/zenoh-sdk-integration-playbook.md).
+3. Starting a fresh GUI task? Prefer `@bootstrap#id:{mode:"gui",capability_policy:"fresh"}`. On older daemons, fall back to `@ping`, `@capabilities`, and `@observe` in one session.
+4. Need visual evidence, refs, or coordinates after bootstrap? Prefer `@observe#id:{mode:"hybrid",include_screenshot:true,include_ax:true,include_windows:true}`; use `@screenshot#id` when you only need pixels and manifest.
+5. Need GUI or desktop side effects? Prefer semantic AX/window commands, use mouse by observation ref when semantics are unavailable, and keep raw coordinate mouse as fallback.
+6. Need real terminal behavior or persistent shell state? Use `--pty`.
+7. Need multiple hosts? Address them by stable daemon names such as `mac.lab`, `win11.lab`, or `linux-build.lab`.
+8. Need direct SDK integration? Use the Zenoh session channel model documented in [`specs/zenoh-sdk-integration-playbook.md`](./specs/zenoh-sdk-integration-playbook.md).
 
 Minimal scriptable smoke:
 
@@ -432,7 +437,8 @@ The current canonical profile is:
 - `control` uses Zenoh scouting / autodiscovery by default
 - `--entry-point` is a deterministic fallback when discovery is unavailable
 - `daemon_name` is the stable human target name
-- requests and results flow through session channels after bootstrap
+- after the Zenoh session-open bootstrap, line-control requests and results flow through session channels
+- line-control `@bootstrap` itself is also a session-channel command, not a legacy queryable request
 
 Minimal config:
 

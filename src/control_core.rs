@@ -2,6 +2,7 @@ use std::io;
 
 use crate::{
     control_actions::{build_shell_command, ControlActionExecutor},
+    control_bootstrap::build_bootstrap_outcome,
     control_capabilities::current_capabilities_report_json,
     control_frames::ControlExecutionOutcome,
     control_observation::{
@@ -80,6 +81,14 @@ pub fn execute_explicit_control_request<E: ControlActionExecutor>(
         },
         ControlCommand::Observe(observe_request) => {
             match build_observe_outcome(request.request_id, observe_request) {
+                Ok(outcome) => outcome,
+                Err(err) => ControlExecutionOutcome::from_response_line(
+                    render_control_action_error_response(request.request_id, &err),
+                ),
+            }
+        }
+        ControlCommand::Bootstrap(bootstrap_request) => {
+            match build_bootstrap_outcome(request.request_id, bootstrap_request) {
                 Ok(outcome) => outcome,
                 Err(err) => ControlExecutionOutcome::from_response_line(
                     render_control_action_error_response(request.request_id, &err),
@@ -181,11 +190,31 @@ pub fn parse_and_execute_control_line<E: ControlActionExecutor>(
             execute_literal_shell_line(&command, shell)
         }
         Err(err) => ControlExecutionOutcome::from_response_line(render_protocol_error_response(
-            None,
+            parse_request_id_for_error_response(line),
             64,
             &err.to_string(),
         )),
     }
+}
+
+/// 在 parser 已经失败时,尽量从控制行 header 保留 request id。
+///
+/// 这只用于错误响应相关性:
+/// - payload 校验失败时,`@cmd#42:...` 仍应返回 `id:42`
+/// - request id 本身非法时,这里返回 None,避免伪造不可确认的 id
+fn parse_request_id_for_error_response(line: &str) -> Option<u64> {
+    let command = line.strip_prefix('@')?.trim_start();
+    if command.starts_with('@') {
+        return None;
+    }
+
+    let header = command
+        .split_once(':')
+        .map(|(header, _)| header)
+        .unwrap_or(command)
+        .trim();
+    let (_, request_id) = header.split_once('#')?;
+    request_id.trim().parse::<u64>().ok()
 }
 
 /// 统一把 shell / action 执行结果序列化成 line-control 响应。
@@ -227,6 +256,20 @@ pub fn render_structured_success_response(request_id: Option<u64>, value_json: &
 
 /// line-control 协议错误统一走 code/error 对象响应。
 pub fn render_protocol_error_response(request_id: Option<u64>, code: i32, error: &str) -> String {
+    if let Ok(mut value) = serde_json::from_str::<serde_json::Value>(error) {
+        if let serde_json::Value::Object(object) = &mut value {
+            object
+                .entry("code".to_owned())
+                .or_insert(serde_json::Value::from(code));
+            if let Some(request_id) = request_id {
+                object.insert("id".to_owned(), serde_json::Value::from(request_id));
+            }
+            if let Ok(rendered) = serde_json::to_string(&value) {
+                return render_response_value(&rendered);
+            }
+        }
+    }
+
     render_response_error_object(request_id, code, error)
 }
 
@@ -773,5 +816,93 @@ mod tests {
             .lock()
             .expect("commands lock should work")
             .is_empty());
+    }
+
+    #[test]
+    fn explicit_request_should_render_basic_bootstrap_without_action_executor() {
+        let executor = FakeExecutor::default();
+        let response = parse_and_execute_control_line("@bootstrap#21", "/bin/sh", &executor)
+            .into_single_response_line();
+        let parsed: Value = serde_json::from_str(
+            response
+                .strip_prefix("@response ")
+                .expect("bootstrap response should be wrapped as @response"),
+        )
+        .expect("bootstrap response should be valid json");
+
+        assert_eq!(parsed["id"], 21);
+        assert_eq!(parsed["value"]["kind"], "bootstrap");
+        assert_eq!(parsed["value"]["schema"], "rdog.bootstrap.v1");
+        assert_eq!(parsed["value"]["mode"], "basic");
+        assert_eq!(parsed["value"]["liveness"]["reply"], "pong");
+        assert_eq!(parsed["value"]["capabilities"]["kind"], "capabilities");
+        assert_eq!(parsed["value"]["observation"]["status"], "not_requested");
+        assert_eq!(parsed["value"]["frames"]["savefile_count"], 0);
+        assert!(parsed["value"]["trace"].is_array());
+        assert!(executor
+            .commands
+            .lock()
+            .expect("commands lock should work")
+            .is_empty());
+    }
+
+    #[test]
+    fn explicit_request_should_render_gui_bootstrap_with_observe_bundle() {
+        let executor = FakeExecutor::default();
+        let response = parse_and_execute_control_line(
+            r#"@bootstrap#22:{mode:"gui",observe:{mode:"window"},include_trace:false}"#,
+            "/bin/sh",
+            &executor,
+        )
+        .into_single_response_line();
+        let parsed: Value = serde_json::from_str(
+            response
+                .strip_prefix("@response ")
+                .expect("bootstrap response should be wrapped as @response"),
+        )
+        .expect("bootstrap response should be valid json");
+
+        assert_eq!(parsed["id"], 22);
+        assert_eq!(parsed["value"]["kind"], "bootstrap");
+        assert_eq!(parsed["value"]["mode"], "gui");
+        assert_eq!(parsed["value"]["observation"]["kind"], "observe");
+        assert_eq!(parsed["value"]["observation"]["mode"], "window");
+        assert_eq!(parsed["value"]["lanes"]["windows"]["status"], "skipped");
+        assert_eq!(
+            parsed["value"]["frames"]["final_response_order"],
+            "savefiles-before-response"
+        );
+        assert!(parsed["value"]["trace"].is_null());
+        assert!(executor
+            .commands
+            .lock()
+            .expect("commands lock should work")
+            .is_empty());
+    }
+
+    #[test]
+    fn parse_error_should_preserve_bootstrap_cached_policy_structure() {
+        let response = parse_and_execute_control_line(
+            r#"@bootstrap#42:{capability_policy:"cached"}"#,
+            "/bin/sh",
+            &FakeExecutor::default(),
+        )
+        .into_single_response_line();
+        let parsed: Value = serde_json::from_str(
+            response
+                .strip_prefix("@response ")
+                .expect("bootstrap error should be wrapped as @response"),
+        )
+        .expect("bootstrap error should be valid json");
+
+        assert_eq!(parsed["kind"], "bootstrap");
+        assert_eq!(parsed["schema"], "rdog.bootstrap.v1");
+        assert_eq!(parsed["id"], 42);
+        assert_eq!(parsed["status"], "blocked");
+        assert_eq!(
+            parsed["error_code"],
+            "BOOTSTRAP_CAPABILITY_CACHE_UNIMPLEMENTED"
+        );
+        assert_eq!(parsed["code"], 64);
     }
 }

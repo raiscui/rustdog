@@ -1,6 +1,6 @@
 ---
 name: rdog-control
-description: Use when Codex needs to operate rustdog/rdog for remote control of LAN or reachable hosts, hardware bridge machines, lab devices, or microcontrollers. Covers `rdog daemon`, `rdog control`, Zenoh target-name discovery, `--entry-point` fallback, line-control commands like `@ping`, `@capabilities`, `@cmd`, `@key`, `@paste`, `@observe`, `@screenshot`, `@window-find`, `@window-activate`, `@window-close`, `@ax-tree`, `@ax-find`, `@ax-get`, `@ax-press`, `@selector-get`, `@selector-resolve`, `@selector-refind`, `@mouse-move`, `@mouse-button`, `@click`, `@drag`, `@wheel`, `@savefile`, and remote PTY flows such as `rdog control TARGET --pty -- COMMAND`.
+description: Use when Codex needs to operate rustdog/rdog for remote control of LAN or reachable hosts, hardware bridge machines, lab devices, or microcontrollers. Covers `rdog daemon`, `rdog control`, Zenoh target-name discovery, `--entry-point` fallback, line-control commands like `@ping`, `@bootstrap`, `@capabilities`, `@cmd`, `@key`, `@paste`, `@observe`, `@screenshot`, `@window-find`, `@window-activate`, `@window-close`, `@ax-tree`, `@ax-find`, `@ax-get`, `@ax-press`, `@selector-get`, `@selector-resolve`, `@selector-refind`, `@mouse-move`, `@mouse-button`, `@click`, `@drag`, `@wheel`, `@savefile`, and remote PTY flows such as `rdog control TARGET --pty -- COMMAND`.
 ---
 
 # Rdog Control
@@ -22,8 +22,10 @@ Use this skill when the user asks to control a named machine such as `mac.lab`, 
 
 - Prefer the installed `rdog` binary. Inside the rustdog repo, prefer `./target/debug/rdog` when it already exists.
 - Verify live syntax with `rdog --help`, `rdog control --help`, and `rdog daemon --help` if command shape matters.
-- Start with `@ping` before side-effectful work.
-- For GUI or platform-sensitive work, send `@capabilities` before acting. Treat `status:"permission_denied"` as a stop-and-explain result unless the user explicitly asks to change permissions.
+- Start with `@ping` for a minimal non-GUI liveness check.
+- For fresh GUI or platform-sensitive work, prefer one read-only `@bootstrap#id:{mode:"gui"}` request before acting. Treat `status:"permission_denied"` as a stop-and-explain lane unless the user explicitly asks to change permissions.
+- If the target daemon does not support `@bootstrap`, fall back to one `rdog control` session containing `@ping`, `@capabilities`, then `@observe` with screenshot / AX / windows.
+  This keeps old daemons usable while making new daemons return one structured `rdog.bootstrap.v1` preflight.
 - Use request ids for programmatic calls: `@cmd#1:"printf READY"`.
 - Treat `@cmd`, `@script`, and bare shell lines as remote code execution. Use them only on trusted targets.
 - Do not assume bare shell lines keep cwd, env, shell variables, or session state. Use PTY for stateful interaction.
@@ -33,11 +35,18 @@ Use this skill when the user asks to control a named machine such as `mac.lab`, 
 1. Need a quick host check:
    `printf '@ping\n' | rdog control TARGET`
 2. Need to know whether GUI, screenshot, AX, mouse, PTY, savefile, or Zenoh session paths are usable:
-   `printf '@capabilities#1\n' | rdog control TARGET`
+   prefer a single GUI bootstrap on new daemons:
+   ```bash
+   printf '@bootstrap#1:{mode:"gui",capability_policy:"fresh",observe:{mode:"hybrid",include_screenshot:true,include_ax:true,include_windows:true,ax_required:false,ax_mode:"interactive"}}\n' | rdog control TARGET
+   ```
+   Parse `rdog.bootstrap.v1` lanes: `liveness`, `capabilities`, `observation`, `lanes`, `errors`, and optional `trace`.
+   `capability_policy:"cached"` is reserved and currently returns `BOOTSTRAP_CAPABILITY_CACHE_UNIMPLEMENTED`; use `fresh`.
+   For older daemons, send `@ping#1`, `@capabilities#2`, and `@observe#3:{mode:"hybrid",include_screenshot:true,include_ax:true,include_windows:true,ax_required:false,ax_mode:"interactive"}` in one session.
+   For a minimal non-GUI report, `printf '@capabilities#1\n' | rdog control TARGET` remains valid.
    Read `capabilities.*.status`, `error_code`, `permissions`, and `failure_hints`.
    `permission_denied` maps to code `77`; `unsupported` maps to code `78`.
    Do not guess macOS Accessibility, macOS Screen Recording, Windows UIPI, or Linux display backend state from the OS name alone.
-3. Need GUI observation before choosing a lane:
+3. Need extra GUI observation after bootstrap:
    prefer `@observe#id:{mode:"hybrid",include_screenshot:true,include_ax:true,include_windows:true,ax_required:false,ax_mode:"interactive"}`.
    If `@observe` is unavailable, fall back to `@screenshot include_ax`, `@ax-tree`, `@window-find`, `@ax-find`, or `@ax-get`.
    `@observe` is read-only. It does not activate windows, press controls, type text, scroll, or move the mouse.
@@ -96,13 +105,15 @@ Use this skill when the user asks to control a named machine such as `mac.lab`, 
 
 Use this fixed workflow for GUI tasks:
 
-1. `@capabilities`: check screenshot, accessibility, window_control, keyboard_input, mouse_input, and type_text.
-2. Observe: prefer `@observe:{mode:"hybrid",include_screenshot:true,include_ax:true,include_windows:true,ax_required:false,ax_mode:"interactive"}`. Existing low-level observation commands remain valid.
-3. Locate: use `@window-find`, `@ax-find`, then `@ax-get` for one target.
-4. Activate/focus: use `@window-activate` or `@ax-focus activate:true` only when the state says the window is not interactable.
-5. Semantic action: prefer `@ax-action`, `@ax-set-value`, `@type-text`, `@ax-scroll`, or targeted `@key`.
-6. Verify: use a fresh screenshot, AX tree/get, window state, or command output. Do not treat a permission-denied screenshot as visual proof.
-7. Fallback recipe: only then use mouse by observation ref, selector-gated recovery, or coordinates from the latest manifest. If fallback is not allowed or capability status is `permission_denied`, return a limited result instead of improvising.
+1. Bootstrap: send `@bootstrap#id:{mode:"gui",capability_policy:"fresh"}` when starting a fresh GUI task.
+2. Fallback bootstrap: on older daemons, send `@ping`, `@capabilities`, and `@observe` together in one read-only control session.
+3. `@capabilities`: check screenshot, accessibility, window_control, keyboard_input, mouse_input, and type_text.
+4. Observe: prefer `@observe:{mode:"hybrid",include_screenshot:true,include_ax:true,include_windows:true,ax_required:false,ax_mode:"interactive"}` for extra observation. Existing low-level observation commands remain valid.
+5. Locate: use `@window-find`, `@ax-find`, then `@ax-get` for one target.
+6. Activate/focus: use `@window-activate` or `@ax-focus activate:true` only when the state says the window is not interactable.
+7. Semantic action: prefer `@ax-action`, `@ax-set-value`, `@type-text`, `@ax-scroll`, or targeted `@key`.
+8. Verify: use a fresh screenshot, AX tree/get, window state, or command output. Do not treat a permission-denied screenshot as visual proof.
+9. Fallback recipe: only then use mouse by observation ref, selector-gated recovery, or coordinates from the latest manifest. If fallback is not allowed or capability status is `permission_denied`, return a limited result instead of improvising.
 
 Observation rule:
 `@observe`, `@screenshot include_ax`, `@ax-tree`, `@ax-find`, `@ax-get`, and `@window-find` return an `observation` header plus short refs such as `@e1`.

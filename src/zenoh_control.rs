@@ -562,7 +562,7 @@ pub fn send_single_control_line(
     )
 }
 
-/// legacy queryable 只保留 bootstrap / 简单兼容请求。
+/// legacy queryable 只保留简单兼容请求。
 ///
 /// `@screenshot`、PTY、GUI 语义控制和 `@savefile` 都可能产生多 frame、
 /// lifecycle frame 或文件传输语义,必须走 session channel。
@@ -579,7 +579,7 @@ fn reject_session_channel_only_legacy_query(line: &str) -> Option<String> {
     Some(render_protocol_error_response(
         request.request_id,
         78,
-        "Zenoh legacy queryable path only supports bootstrap and legacy compatibility; rich control must use session channel to-daemon/to-control",
+        "Zenoh legacy queryable path only supports simple compatibility requests; @bootstrap and rich control must use session channel to-daemon/to-control",
     ))
 }
 
@@ -609,6 +609,7 @@ fn is_session_channel_only_command(command: &ControlCommand) -> bool {
             | ControlCommand::WindowFind(_)
             | ControlCommand::WindowActivate(_)
             | ControlCommand::WindowClose(_)
+            | ControlCommand::Bootstrap(_)
             | ControlCommand::SaveFile(_)
     )
 }
@@ -858,7 +859,22 @@ mod tests {
     }
 
     #[test]
-    fn legacy_queryable_should_allow_bootstrap_and_compatibility_requests() {
+    fn legacy_queryable_should_reject_bootstrap_requests() {
+        for line in [
+            "@bootstrap#9",
+            r#"@bootstrap#10:{mode:"basic"}"#,
+            r#"@bootstrap#11:{mode:"gui",observe:{mode:"window"}}"#,
+        ] {
+            let response = reject_session_channel_only_legacy_query(line)
+                .expect("bootstrap should be session-channel-only");
+
+            assert!(response.contains(r#""code":78"#));
+            assert!(response.contains("session channel"));
+        }
+    }
+
+    #[test]
+    fn legacy_queryable_should_allow_simple_compatibility_requests() {
         assert!(reject_session_channel_only_legacy_query("@ping").is_none());
         assert!(reject_session_channel_only_legacy_query("@capabilities#1").is_none());
         assert!(reject_session_channel_only_legacy_query(r#"@cmd#42:"printf READY""#).is_none());

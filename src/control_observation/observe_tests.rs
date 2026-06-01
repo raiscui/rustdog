@@ -87,6 +87,36 @@ fn render_observe_response_should_keep_section_ref_scope() {
 }
 
 #[test]
+fn build_observe_bundle_should_expose_value_without_response_line_parsing() {
+    let request = ObserveRequest {
+        mode: ObserveMode::Ax,
+        include_screenshot: false,
+        include_windows: false,
+        ..ObserveRequest::for_mode(ObserveMode::Ax)
+    };
+    let snapshot = AxSnapshot::complete("macos", vec![fake_ax_window()], false)
+        .with_observation("@observe ax")
+        .unwrap();
+    let produced = ProducedSections {
+        savefile_frames: Vec::new(),
+        visual: None,
+        windows: None,
+        window_observation: None,
+        primary_observation: snapshot.observation.clone(),
+        accessibility: Some(snapshot),
+    };
+
+    let bundle = build_observe_bundle_from_sections(&request, produced).unwrap();
+
+    assert!(bundle.savefile_frames.is_empty());
+    assert_eq!(bundle.value["kind"], "observe");
+    assert_eq!(bundle.value["schema"], OBSERVE_SCHEMA);
+    assert_eq!(bundle.value["mode"], "ax");
+    assert_eq!(bundle.value["primary_observation_source"], "accessibility");
+    assert_eq!(bundle.value["visual"]["status"], "not_requested");
+}
+
+#[test]
 fn select_primary_observation_should_record_visual_when_it_is_the_only_section() {
     let request = ObserveRequest::for_mode(ObserveMode::Visual);
     let observation = select_primary_observation(&request, None, None)

@@ -8,6 +8,7 @@
 | --- | --- |
 | `@@echo hi` | literal shell line `@echo hi` |
 | `@ping` | explicit protocol request |
+| `@bootstrap` | read-only liveness + capabilities + optional observe preflight |
 | `@capabilities` | structured capability report request |
 | `@cmd#42:"printf READY"` | explicit protocol request with request id |
 | `printf PLAIN_OK` | bare one-shot shell line |
@@ -20,6 +21,8 @@ Bare shell lines do not have request ids.
 ```text
 @ping
 @ping#1
+@bootstrap
+@bootstrap#6:{mode:"gui",capability_policy:"fresh",observe:{mode:"hybrid",include_screenshot:true,include_ax:true,include_windows:true,ax_required:false,ax_mode:"interactive"}}
 @capabilities
 @capabilities#7
 @cmd:"printf READY"
@@ -110,6 +113,26 @@ Common error codes:
 - `gui_agent_recipe`
 
 Treat `permission_denied` as an actionable answer, not as a generic failure.
+
+`@bootstrap` returns a structured read-only preflight report:
+
+- `kind:"bootstrap"`
+- `schema:"rdog.bootstrap.v1"`
+- `status:"complete"`, `status:"degraded"`, or `status:"blocked"`
+- `liveness`
+- `capability_policy`
+- `capabilities`
+- `observation`
+- `lanes`
+- `errors`
+- `frames`
+- optional `trace`
+
+Use `@bootstrap#id:{mode:"gui",capability_policy:"fresh"}` as the first GUI read when the daemon supports it.
+It does not click, type, scroll, focus, activate, or move the mouse.
+`capability_policy:"cached"` is reserved for a future TTL cache and currently returns `BOOTSTRAP_CAPABILITY_CACHE_UNIMPLEMENTED`.
+All `@bootstrap` requests are Zenoh session-channel-only, including `mode:"basic"`.
+For older daemons, fall back to `@ping`, `@capabilities`, and `@observe` in one control session.
 
 When stdin or stdout is not a real TTY, `rdog control` preserves raw protocol lines.
 This is the preferred mode for code agents.

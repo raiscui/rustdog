@@ -20,6 +20,7 @@ use crate::control_ax::{
     AxGetRequest, AxMode, AxPressRequest, AxScrollRequest, AxSetValueRequest, AxTreeRequest,
     TypeTextRequest, DEFAULT_AX_DEPTH, DEFAULT_AX_INCLUDE_VALUES, DEFAULT_AX_MAX_ELEMENTS,
 };
+use crate::control_bootstrap::{parse_bootstrap_payload, BootstrapRequest};
 use crate::control_frames::SaveFileFrame;
 use crate::control_mouse::{
     parse_click_payload, parse_drag_payload, parse_mouse_button_payload, parse_mouse_move_payload,
@@ -76,6 +77,7 @@ pub enum ControlCommand {
     WindowFind(WindowFindRequest),
     WindowActivate(WindowActivateRequest),
     WindowClose(WindowCloseRequest),
+    Bootstrap(BootstrapRequest),
     Capabilities,
     Observe(ObserveRequest),
     SelectorGet(SelectorGetRequest),
@@ -326,6 +328,13 @@ pub fn parse_control_line(line: &str) -> io::Result<ControlParseResult> {
         }));
     }
 
+    if kind.eq_ignore_ascii_case("bootstrap") && !has_payload {
+        return Ok(ControlParseResult::Control(ControlRequest {
+            request_id,
+            command: ControlCommand::Bootstrap(BootstrapRequest::default()),
+        }));
+    }
+
     if kind.eq_ignore_ascii_case("observe") && !has_payload {
         return Ok(ControlParseResult::Control(ControlRequest {
             request_id,
@@ -381,6 +390,7 @@ pub fn parse_control_line(line: &str) -> io::Result<ControlParseResult> {
             ControlCommand::WindowActivate(parse_window_activate_payload(payload)?)
         }
         "window-close" => ControlCommand::WindowClose(parse_window_close_payload(payload)?),
+        "bootstrap" => ControlCommand::Bootstrap(parse_bootstrap_payload(payload)?),
         "observe" => ControlCommand::Observe(parse_observe_payload(payload)?),
         "selector-get" => ControlCommand::SelectorGet(parse_selector_get_payload(payload)?),
         "selector-resolve" => {

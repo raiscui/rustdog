@@ -1,4 +1,5 @@
 use crate::control_frames::{ControlExecutionOutcome, ControlFrame};
+use serde_json::Value;
 use std::io;
 
 #[path = "observe/producer.rs"]
@@ -16,6 +17,25 @@ pub(crate) use request::{ObserveMode, ObserveTarget};
 
 const OBSERVE_SCHEMA: &str = "rdog.observe.v1";
 
+/// `@observe` 的结构化产物。
+///
+/// 后续 `@bootstrap` 这类组合命令应该消费这个外壳:
+/// - `savefile_frames` 保持先发 frame 的顺序语义
+/// - `value` 是已经组装好的 observe lane,无需反解析 `@response`
+#[derive(Debug, Clone, PartialEq)]
+pub struct ObserveBundle {
+    pub savefile_frames: Vec<ControlFrame>,
+    pub value: Value,
+}
+
+pub fn build_observe_bundle(
+    request_id: Option<u64>,
+    request: &ObserveRequest,
+) -> io::Result<ObserveBundle> {
+    let produced = producer::produce_observe_sections(request_id, request)?;
+    response::build_observe_bundle_from_sections(request, produced)
+}
+
 /// 组合 observation producer 与 response renderer。
 ///
 /// `@observe` 的 savefile frame 必须先于最终 response line 发出,
@@ -24,22 +44,20 @@ pub fn build_observe_outcome(
     request_id: Option<u64>,
     request: &ObserveRequest,
 ) -> io::Result<ControlExecutionOutcome> {
-    let produced = producer::produce_observe_sections(request_id, request)?;
-    let response = response::render_observe_response(request_id, request, produced)?;
-    let mut outbound_frames = response.savefile_frames;
-    outbound_frames.push(ControlFrame::ResponseLine(response.response_line));
+    let bundle = build_observe_bundle(request_id, request)?;
+    let response_line = response::render_observe_bundle_response_line(request_id, &bundle.value)?;
+    let mut outbound_frames = bundle.savefile_frames;
+    outbound_frames.push(ControlFrame::ResponseLine(response_line));
     Ok(ControlExecutionOutcome { outbound_frames })
 }
 
 #[cfg(test)]
 use producer::{select_primary_observation, ProducedSections};
 #[cfg(test)]
-use response::render_observe_response;
+use response::{build_observe_bundle_from_sections, render_observe_response};
 
 #[cfg(test)]
 use crate::control_ax::{AxElement, AxSnapshot};
-#[cfg(test)]
-use serde_json::Value;
 
 #[cfg(test)]
 #[path = "observe_tests.rs"]
