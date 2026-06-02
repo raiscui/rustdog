@@ -824,3 +824,159 @@
 ### 当前状态
 
 **目前在阶段A** - 正在盘点 git diff,准备按主题拆分 staging 和 commit。
+
+## [2026-05-25 09:03:40] [Session ID: omx-1779670884813-rnokx6] [任务计划]: 使用 rdog-control 点击浏览器左侧小红书下方首页按钮
+
+### 目标
+- 通过 `rdog control mac.lab` 测试真实 GUI 控制能力, 找到左侧浏览器里“小红书”下面的“首页”按钮并完成点击。
+
+### 阶段
+- [ ] 阶段1: 确认 `rdog` 二进制和目标可达性。
+- [ ] 阶段2: 读取 `@capabilities` 和 `@observe` 动态证据, 判断截图、AX、窗口和鼠标能力是否可用。
+- [ ] 阶段3: 定位“小红书”下面的“首页”按钮, 优先使用 AX 语义动作, 必要时用 observation ref 鼠标 fallback。
+- [ ] 阶段4: 用新的观察结果验证点击已经发生, 并记录证据。
+
+### 关键问题
+1. 当前假设: `mac.lab` 是本轮可控的目标机器, 因为项目记忆和 skill 都把它作为当前 Zenoh target-name shorthand。
+2. 备选解释: 目标可能不是 `mac.lab`, 或当前浏览器不在前台/不可见, 需要先通过 `@window-find` / `@observe` 重新定位。
+3. 推翻条件: `@ping` 失败、`@capabilities` 无可用 GUI 能力, 或观察结果中找不到“小红书”与“首页”。
+
+### 做出的决定
+- 先走 `@ping -> @capabilities -> @observe` 的证据链, 不直接盲点坐标。
+- 优先使用 AX/action/ref 这类语义或 observation-scoped 目标, 只有在定位清楚后才使用鼠标 fallback。
+
+### 状态
+**目前在阶段1** - 已确认 `./target/debug/rdog` 存在, 准备对 `mac.lab` 做 live ping 和 GUI capability 探测。
+
+## [2026-05-25 09:04:54] [Session ID: omx-1779670884813-rnokx6] [状态变更]: 首次连接未发现 router, 准备临时启动本机 daemon
+
+### 现象
+- `./target/debug/rdog control mac.lab` 返回: `Zenoh autodiscovery 在 3000ms 内未找到可连接的 router locator`。
+
+### 假设与备选解释
+- 当前假设: 本机没有正在运行的 `rdog daemon` router, 所以 control 客户端无法发现 `mac.lab`。
+- 备选解释: daemon 在其他网段或需要显式 `--entry-point`, 但当前没有已知 entry point。
+
+### 下一步
+- 临时启动 `./target/debug/rdog daemon --transport zenoh --name mac.lab --namespace lab`。
+- 启动后再次运行 `@ping` 和 `@capabilities`。
+
+### 状态
+**目前仍在阶段1** - 准备启动本机 daemon, 然后重新验证 target 可达性。
+
+## [2026-05-25 09:05:33] [Session ID: omx-1779670884813-rnokx6] [状态变更]: daemon 可达, request id 用法已修正
+
+### 现象
+- 本机 `rdog daemon --transport zenoh --name mac.lab --namespace lab` 已启动成功。
+- `rdog control mac.lab` 已能选中 target,输出 `zenoh client control target selected`。
+- 但 `@ping#ping` / `@capabilities#cap` 返回 code 64,因为 request id 必须是无符号整数。
+
+### 结论
+- 上一假设“router/daemon 不可达”已被启动 daemon 后的动态证据推翻。
+- 当前只是协议输入格式错误,应使用 `@ping#1` / `@capabilities#2`。
+
+### 状态
+**阶段1 部分完成** - target 已可达,接下来用数字 request id 进入 capability 探测。
+
+## [2026-05-25 09:09:34] [Session ID: omx-1779670884813-rnokx6] [状态变更]: 已定位 Chrome 小红书左侧首页按钮坐标
+
+### 现象
+- `@observe#3` 能找到 Chrome 窗口,但 Chrome 网页内容没有暴露可直接 AXPress 的“首页”按钮。
+- `@screenshot#5` 成功保存截图和 manifest。
+- manifest: `virtual_bounds={x:0,y:-124,width:3390,height:1080}`, `image_to_os` 为 `os_x=image_x+virtual_bounds.x; os_y=image_y+virtual_bounds.y`。
+
+### 定位
+- 裁剪图显示左侧栏“小红书”下方的“首页”按钮。
+- 估算按钮中心为 screenshot image `(78,343)`。
+- 换算后 OS logical 坐标为 `(78,219)`。
+
+### 决定
+- 因 AX 没有网页按钮 ref,本次使用显式 `coordinate_fallback` 点击。
+- 点击后用新的截图验证 Chrome 小红书仍处于可见状态,并检查按钮区域。
+
+### 状态
+**进入阶段3** - 准备执行 `@click#6:{x:78,y:219,...}`。
+
+## [2026-05-25 09:15:06] [Session ID: omx-1779670884813-rnokx6] [完成]: rdog-control 已点击小红书左侧首页按钮
+
+### 阶段完成情况
+- [x] 阶段1: 确认 `rdog` 二进制和目标可达性。
+- [x] 阶段2: 读取 `@capabilities` 和 `@observe` 动态证据, 判断截图、AX、窗口和鼠标能力是否可用。
+- [x] 阶段3: 定位“小红书”下面的“首页”按钮, 优先使用 AX 语义动作, 必要时用 observation ref 鼠标 fallback。
+- [x] 阶段4: 用新的观察结果验证点击已经发生, 并记录证据。
+
+### 关键证据
+- `@ping#1`: 返回 `pong`。
+- `@capabilities#2`: screenshot / accessibility / window_control / mouse_input 均为 `available`。
+- `@observe#3`: 找到 Chrome 窗口 `pid:8231/window:0`,标题“小红书 - 你的生活兴趣社区 - Google Chrome - Rais”。
+- `@screenshot#5`: 保存 `rdog_downloads/screenshot-1779671276512-virtual-desktop.jpg` 和 manifest。
+- `@click#6`: `status:"ok"`, `target_resolution.source:"coordinate_fallback"`,点击坐标 `(78,219)`。
+- `@screenshot#7`: 保存点击后验证图 `rdog_downloads/screenshot-1779671397531-virtual-desktop.jpg`。
+
+### 遇到错误
+- 首次 `rdog control mac.lab` 未发现 router: 已通过临时启动本机 daemon 解决。
+- 使用 `@ping#ping` / `@capabilities#cap` 返回 code 64: 已修正为数字 request id。
+- `@window-activate#4` 两次触发 session bridge subscriber 提前关闭: 不阻塞本次点击,已写入 `LATER_PLANS.md` 后续调查。
+
+### 收尾
+- 本轮临时启动的 `rdog daemon` 已用 `Ctrl-C` 停止。
+- `notes.md` 因超过 1000 行已完成 continuous-learning 最小续档。
+
+### 状态
+**本轮任务已完成** - 已通过 rdog 点击小红书左侧“首页”按钮,并用点击响应和点击后截图完成验证。
+
+## [2026-05-25 09:52:43] [Session ID: omx-1779670884813-rnokx6] [支线索引]: 修复 `@window-activate` over Zenoh session bridge 返回路径
+
+### 启用原因
+- 用户要求修复上轮 live smoke 发现的 `@window-activate` 通过 Zenoh session bridge 执行时 subscriber 提前关闭问题。
+- 默认 `task_plan.md` 已接近 1000 行,本轮使用独立支线上下文,避免修复过程把默认计划再次推过阈值。
+
+### 支线上下文集
+- `task_plan__window_activate_fix.md`
+- `notes__window_activate_fix.md`
+- `WORKLOG__window_activate_fix.md`
+- `ERRORFIX__window_activate_fix.md`
+
+### 当前状态
+**目前在根因调查阶段** - 先复现失败,再阅读 `@window-activate` parser / action / Zenoh session bridge 返回路径,确认静态和动态证据后再修改代码。
+
+## [2026-05-26 10:00:00] [Session ID: omx-1779670884813-rnokx6] [支线索引]: 测试 rdog 捕捉小红书左侧按钮列表
+
+### 启用原因
+- 用户要求测试 rdog 是否能捕捉左侧显示器浏览器中小红书页面的左侧按钮列表,包括“首页”“点点”“直播”等。
+- 这是 live GUI observation / screenshot 验证任务,与代码修复主线不同,启用独立支线上下文避免污染默认计划。
+
+### 支线上下文集
+- `task_plan__xhs_left_nav_capture.md`
+- `notes__xhs_left_nav_capture.md`
+- `WORKLOG__xhs_left_nav_capture.md`
+
+### 当前状态
+**准备阶段** - 先确认 rdog target 可达和 GUI 能力,再用 observe/screenshot/manifest 验证按钮列表是否可被捕捉。
+
+## [2026-05-27 11:19:38] [Session ID: codex-native-20260527-111938] [支线索引]: 点击左侧显示器浏览器内小红书 website 的“首页”
+
+### 启用原因
+- 用户要求通过 `$rdog-control` 操作左侧显示器浏览器中的小红书 website,点击“首页”。
+- 默认 `task_plan.md` 已接近 1000 行,本轮使用独立支线上下文避免 live GUI 证据污染主线。
+
+### 支线上下文集
+- `task_plan__xhs_home_click.md`
+- `notes__xhs_home_click.md`
+- `WORKLOG__xhs_home_click.md`
+
+### 当前状态
+**准备阶段** - 先确认 target 可达和 GUI 能力,再优先使用 `AXWebArea` 内的 `AXLink.description:"首页"` 执行 `AXPress`; 若 AX 语义路径不可用,才使用截图 manifest 坐标 fallback。
+
+## [2026-05-27 17:25:54] [Session ID: codex-native-20260527-computer-use-density] [支线索引]: computer-use 高密度 primitive 与 Phase 0 bench baseline
+
+### 启用原因
+- 用户要求把前一轮 autoresearch 结论落成正式规格,修正 web cookbook 里的 AX target 示例,并先实现 Phase 0 bench baseline,暂不进入 side-effectful `@web-act`。
+- 默认 `task_plan.md` 已接近 1000 行,本轮使用独立支线上下文避免继续污染主线。
+
+### 支线上下文集
+- `task_plan__computer_use_density.md`
+- `WORKLOG__computer_use_density.md`
+
+### 当前状态
+**收尾验证阶段** - 相关 spec、cookbook 修正和 Phase 0 fixture/test 已落地,正在完成格式、测试和 diff 检查。

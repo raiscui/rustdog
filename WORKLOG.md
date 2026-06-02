@@ -782,3 +782,34 @@ Buttons:
 ### 总结感悟
 - 这次最稳的拆分顺序是先 pure payload / target resolve,再 daemon bridge,最后 client PTY/session bridge。
 - `ZenohClientSessionBridge` 应由 client-side 子模块拥有,父模块只做入口编排,这样不用把 bridge 字段暴露给父模块。
+
+## [2026-05-25 09:15:06] [Session ID: omx-1779670884813-rnokx6] 任务名称: rdog-control 点击 Chrome 小红书左侧首页按钮
+
+### 任务内容
+- 使用 repo 内 `./target/debug/rdog` 真实测试 `rdog control mac.lab`。
+- 在 Chrome 小红书页面左侧栏,点击“小红书”下方的“首页”按钮。
+- 完成后保留动态证据,并清理本轮临时启动的 daemon。
+
+### 完成过程
+- 首次 `rdog control mac.lab` 未发现 Zenoh router,因此临时启动 `./target/debug/rdog daemon --transport zenoh --name mac.lab --namespace lab`。
+- 用数字 request id 重新发送 `@ping#1` 和 `@capabilities#2`,确认 target 可达且 GUI 能力 available。
+- 用 `@observe#3` 找到 Chrome 窗口 `pid:8231/window:0`,标题为“小红书 - 你的生活兴趣社区 - Google Chrome - Rais”。
+- Chrome 网页内容没有暴露可直接 AXPress 的“首页”按钮,所以改用 `@screenshot#5` 读取 JPEG 和 manifest。
+- 根据 manifest `virtual_bounds.y=-124` 和裁剪图定位,将 image 坐标 `(78,343)` 换算为 OS logical `(78,219)`。
+- 执行 `@click#6:{x:78,y:219,button:"left",count:1,hold_ms:80,coordinate_space:"os-logical"}`,返回 `status:"ok"`。
+- 用 `@screenshot#7` 获取点击后验证图,左侧“首页”仍可见且保持高亮。
+- 停止本轮临时启动的 daemon。
+
+### 验证
+- `@ping#1`: `pong`。
+- `@capabilities#2`: `rdog.capabilities.v1`, screenshot / accessibility / window_control / mouse_input 均为 `available`。
+- `@click#6`: `kind:"mouse"`, `status:"ok"`, `released:true`, `target_resolution.source:"coordinate_fallback"`。
+- 验证截图:
+  - `rdog_downloads/screenshot-1779671276512-virtual-desktop.jpg`
+  - `rdog_downloads/screenshot-1779671276512-left-nav-crop.jpg`
+  - `rdog_downloads/screenshot-1779671397531-virtual-desktop.jpg`
+  - `rdog_downloads/screenshot-1779671397531-left-nav-crop.jpg`
+
+### 总结感悟
+- 对 Chrome 网页类界面,AX 不一定能给出网页内按钮。此时不要伪装语义点击,应明确降级到 screenshot manifest 坐标 fallback。
+- `@window-activate` 的 session bridge 异常值得后续修复,但本轮 `@click`、`@screenshot` 和 `@observe` 证据链已经足够完成用户指定点击任务。

@@ -241,3 +241,38 @@
 - 如果继续做 `rdog doctor`,应复用 `src/control_capabilities.rs` 的 report model。
 - doctor 可以增加本地 CLI 呈现、权限恢复提示和退出码,但不要重新发明 macOS Accessibility / Screen Recording、Windows UIPI、Linux backend 的状态字段。
 - 后续如把 capability report 暴露给 SDK conformance fixtures,也应以 `rdog.capabilities.v1` 为唯一 schema。
+
+## [2026-05-25 09:10:00] [Session ID: omx-1779670884813-rnokx6] 后续计划: 调查 `@window-activate` over Zenoh session bridge 提前关闭
+
+### 背景
+- 本轮 `$rdog-control` live GUI 点击任务中,`@window-activate#4:{window_id:"pid:8231/window:0"}` 单独执行和与 `@screenshot` 同 session 执行时,都返回 `Zenoh session bridge subscriber 在收到结果前关闭`。
+- 同一临时 daemon 下,`@ping`、`@capabilities`、`@observe`、`@screenshot`、`@click` 均可用。
+
+### 后续事项
+- 为 `@window-activate` 增加 focused live smoke 或最小集成测试,确认 daemon 是否实际执行了 action 但没有回传 frame。
+- 对比 `@click` / `@screenshot` 的 session-channel 返回路径,检查 `window_control` action 是否遗漏 terminal frame 或提前关闭 session bridge。
+- 修复时不要把普通 `@click` 改成隐式激活路径。窗口激活仍应保持显式 `@window-activate`。
+
+## [2026-05-25 10:25:20] [Session ID: omx-1779670884813-rnokx6] 完成记录: `@window-activate` over Zenoh session bridge 提前关闭已修复
+
+### 对应旧计划
+- 对应 `2026-05-25 09:10:00` 的“调查 `@window-activate` over Zenoh session bridge 提前关闭”。
+
+### 完成结果
+- 已修复 `src/zenoh_control/client_pty.rs::execute_remote_request()` 中把 Zenoh FIFO `recv_timeout()` 的 `Ok(None)` 误判为 subscriber closed 的问题。
+- 已增加 `tests/zenoh_router_client.rs::control_should_wait_for_slow_session_channel_response` 防回归。
+- 已用 live `@window-activate` over Zenoh session bridge 验证返回 `status:"ok"`。
+
+### 备注
+- 本文件遵守追加记录,未删除历史计划原文。后续整理 LATER_PLANS 时可将旧计划与本完成记录一起归档。
+
+## [2026-05-26 10:18:30] [Session ID: omx-1779670884813-rnokx6] 后续计划: 调查 `@ax-find` 对 Chrome WebArea 深层 description 的 false negative
+
+### 背景
+- 小红书左侧导航按钮在 `@ax-get` 深读 `AXWebArea` 时可以捕捉到,形式为 `AXLink.description`。
+- 但 `@ax-find` 使用 `description_contains:"首页"` / `"点点"` / `"直播"`,即使 `depth:10,max_elements:3000,truncated:false`,仍返回 `match_count:0`。
+
+### 后续事项
+- 检查 `@ax-find` 的搜索对象是否只遍历了某个 flattened summary,而没有覆盖 `@ax-get` 能拿到的 WebArea 深层节点。
+- 增加针对 `AXLink.description` 的 focused fixture 或 live regression。
+- 目标是让 agent 能直接用 `@ax-find description_contains` 定位网页内语义链接,减少必须手工深读 WebArea 的步骤。

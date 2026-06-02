@@ -185,3 +185,27 @@
 
 - 这条经验已经沉淀成全局 skill:
   - `/Users/cuiluming/.codex/skills/rdog-control/SKILL.md`
+
+## [2026-05-25 09:10:00] rdog-control GUI live smoke: Chrome 网页 AX 不足时使用截图 manifest 坐标 fallback
+
+- `rdog control mac.lab` 做 GUI 任务时,证据链应先固定为:
+  - `@ping#1`
+  - `@capabilities#2`
+  - `@observe#3:{mode:"hybrid",include_screenshot:false,include_ax:true,include_windows:true,ax_required:false,ax_mode:"interactive"}`
+  - 必要时再 `@screenshot#id` 读取 JPEG + manifest。
+
+- 如果 Chrome / 网页内容只暴露外层 AXWindow / AXGroup,没有网页内按钮 ref,不要假装可以 AXPress。
+  - 正确 fallback 是读取 screenshot manifest 的 `virtual_bounds` 和 `image_to_os`。
+  - 先裁剪/查看目标区域,确认 UI 目标。
+  - 再用 `@click:{x,y,coordinate_space:"os-logical"}` 明确记录 `target_resolution.source:"coordinate_fallback"`。
+
+- 本次 live 验证的坐标换算案例:
+  - screenshot image size: `3390x1080`
+  - manifest `virtual_bounds={x:0,y:-124,width:3390,height:1080}`
+  - 左侧“小红书/首页”按钮中心约 `image=(78,343)`
+  - OS logical 坐标为 `(78,219)`
+  - `@click#6` 返回 `status:"ok"`, `released:true`, `source:"coordinate_fallback"`。
+
+- 操作注意:
+  - request id 必须是无符号整数,例如 `@ping#1`,不能用 `@ping#ping`。
+  - 如果 `rdog control mac.lab` 报 autodiscovery 找不到 router,先确认 `rdog daemon` 是否运行; 临时启动的 daemon 完成任务后要停止。
