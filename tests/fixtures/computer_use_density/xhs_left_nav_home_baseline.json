@@ -1,0 +1,141 @@
+{
+  "schema": "rdog.computer-use-density.bench.v1",
+  "suite": "computer-use-density",
+  "case": "xhs-left-nav-home",
+  "description": "Baseline low-level command sequence for locating and pressing the Xiaohongshu page-owned 首页 link under Chrome AXWebArea.",
+  "dense_target": {
+    "max_backend_request_count": 2,
+    "max_agent_decision_points": 1,
+    "required_scope": "active_web_area",
+    "required_action": "AXPress"
+  },
+  "variants": [
+    {
+      "variant": "baseline-low-level",
+      "source": "task_plan__xhs_home_click.md",
+      "status": "baseline",
+      "metrics": {
+        "backend_request_count": 8,
+        "control_frame_count": 10,
+        "agent_decision_points": 7,
+        "semantic_action_count": 1,
+        "mouse_fallback_count": 0,
+        "stale_ref_recovery_count": 0,
+        "stale_visual_block_count": 0,
+        "verification_passed": true,
+        "false_success_count": 0,
+        "trace_step_count": 0
+      },
+      "steps": [
+        {
+          "name": "capabilities",
+          "command": "@capabilities#1",
+          "expected_frame_count": 1,
+          "agent_decision_after": true,
+          "purpose": "Confirm screenshot, accessibility, window control, and input capabilities."
+        },
+        {
+          "name": "find-browser-window",
+          "command": "@window-find#2:{app:\"Google Chrome\",title_contains:\"小红书\",limit:5,include_state:true,include_recipes:false}",
+          "expected_frame_count": 1,
+          "agent_decision_after": true,
+          "purpose": "Find the candidate Chrome window and read frontmost/occluded/interactable state."
+        },
+        {
+          "name": "activate-browser-window",
+          "command": "@window-activate#3:{window_id:\"pid:8231/window:0\"}",
+          "expected_frame_count": 1,
+          "agent_decision_after": true,
+          "purpose": "Make the target browser window interactable when window state requires it."
+        },
+        {
+          "name": "read-window-ax",
+          "command": "@ax-get#4:{target:{id:\"pid:8231/window:0\"},depth:4,max_elements:300,include_values:false}",
+          "expected_frame_count": 1,
+          "agent_decision_after": true,
+          "purpose": "Read enough of the browser AXWindow to discover the page AXWebArea path."
+        },
+        {
+          "name": "read-web-area",
+          "command": "@ax-get#5:{target:{id:\"pid:8231/window:0/path:0.0.0.0.1.0.0.0\"},depth:8,max_elements:2000,include_values:true}",
+          "expected_frame_count": 1,
+          "agent_decision_after": true,
+          "purpose": "Search page-owned content inside AXWebArea for description/name/value match."
+        },
+        {
+          "name": "press-home-link",
+          "command": "@ax-action#6:{target:{id:\"pid:8231/window:0/path:0.0.0.0.1.0.0.0.0.0.0.1.1.0.0.0\"},action:\"AXPress\"}",
+          "expected_frame_count": 1,
+          "agent_decision_after": true,
+          "purpose": "Perform the semantic action on the matched AXLink."
+        },
+        {
+          "name": "verify-web-area",
+          "command": "@ax-get#7:{target:{id:\"pid:8231/window:0/path:0.0.0.0.1.0.0.0\"},depth:4,max_elements:800,include_values:true}",
+          "expected_frame_count": 1,
+          "agent_decision_after": true,
+          "purpose": "Verify page state using a fresh AX read."
+        },
+        {
+          "name": "verify-visual",
+          "command": "@screenshot#8:{include_ax:false}",
+          "expected_frame_count": 3,
+          "agent_decision_after": false,
+          "purpose": "Optional visual evidence; must be blocked if screenshot freshness reports SCREENSHOT_STALE_FRAME."
+        }
+      ]
+    },
+    {
+      "variant": "dense-web-find",
+      "source": "specs/rdog-computer-use-density-plan.md",
+      "status": "dense-read-only",
+      "metrics": {
+        "backend_request_count": 1,
+        "control_frame_count": 1,
+        "agent_decision_points": 0,
+        "semantic_action_count": 0,
+        "mouse_fallback_count": 0,
+        "stale_ref_recovery_count": 0,
+        "stale_visual_block_count": 0,
+        "verification_passed": true,
+        "false_success_count": 0,
+        "trace_step_count": 4
+      },
+      "steps": [
+        {
+          "name": "find-page-owned-home-link",
+          "command": "@web-find#1:{target:{browser:\"active\"},match:{text:\"首页\"},roles:[\"AXLink\",\"AXButton\"],limit:10}",
+          "expected_frame_count": 1,
+          "agent_decision_after": false,
+          "purpose": "Find page-owned candidates inside the active Chrome AXWebArea without drilling AX paths manually."
+        }
+      ]
+    },
+    {
+      "variant": "dense-web-act",
+      "source": "specs/rdog-computer-use-density-plan.md",
+      "status": "dense-action",
+      "metrics": {
+        "backend_request_count": 1,
+        "control_frame_count": 1,
+        "agent_decision_points": 0,
+        "semantic_action_count": 1,
+        "mouse_fallback_count": 0,
+        "stale_ref_recovery_count": 1,
+        "stale_visual_block_count": 0,
+        "verification_passed": true,
+        "false_success_count": 0,
+        "trace_step_count": 7
+      },
+      "steps": [
+        {
+          "name": "press-page-owned-home-link",
+          "command": "@web-act#1:{target:{browser:\"active\"},match:{text:\"首页\"},action:\"press\",verify:true,roles:[\"AXLink\",\"AXButton\"],limit:1}",
+          "expected_frame_count": 1,
+          "agent_decision_after": false,
+          "purpose": "Resolve the active AXWebArea candidate, perform AXPress, retry one stale-like target, and verify through a fresh AX snapshot."
+        }
+      ]
+    }
+  ]
+}

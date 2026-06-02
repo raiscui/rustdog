@@ -1,6 +1,6 @@
 ---
 name: rdog-control
-description: Use when Codex needs to operate rustdog/rdog for remote control of LAN or reachable hosts, hardware bridge machines, lab devices, or microcontrollers. Covers `rdog daemon`, `rdog control`, Zenoh target-name discovery, `--entry-point` fallback, line-control commands like `@ping`, `@bootstrap`, `@capabilities`, `@cmd`, `@key`, `@paste`, `@observe`, `@screenshot`, `@window-find`, `@window-activate`, `@window-close`, `@ax-tree`, `@ax-find`, `@ax-get`, `@ax-press`, `@selector-get`, `@selector-resolve`, `@selector-refind`, `@mouse-move`, `@mouse-button`, `@click`, `@drag`, `@wheel`, `@savefile`, and remote PTY flows such as `rdog control TARGET --pty -- COMMAND`.
+description: Use when Codex needs to operate rustdog/rdog for remote control of LAN or reachable hosts, hardware bridge machines, lab devices, or microcontrollers. Covers `rdog daemon`, `rdog control`, Zenoh target-name discovery, `--entry-point` fallback, line-control commands like `@ping`, `@bootstrap`, `@capabilities`, `@cmd`, `@key`, `@paste`, `@observe`, `@screenshot`, `@window-find`, `@window-activate`, `@window-close`, `@web-find`, `@web-act`, `@gui-bench`, `@ax-tree`, `@ax-find`, `@ax-get`, `@ax-press`, `@selector-get`, `@selector-resolve`, `@selector-refind`, `@mouse-move`, `@mouse-button`, `@click`, `@drag`, `@wheel`, `@savefile`, and remote PTY flows such as `rdog control TARGET --pty -- COMMAND`.
 ---
 
 # Rdog Control
@@ -35,28 +35,30 @@ Use this skill when the user asks to control a named machine such as `mac.lab`, 
 1. Need a quick host check:
    `printf '@ping\n' | rdog control TARGET`
 2. Need to know whether GUI, screenshot, AX, mouse, PTY, savefile, or Zenoh session paths are usable:
-   prefer a single GUI bootstrap on new daemons:
+   `printf '@capabilities#1\n' | rdog control TARGET`
+   Read `capabilities.*.status`, `error_code`, `permissions`, and `failure_hints`.
+   `permission_denied` maps to code `77`; `unsupported` maps to code `78`.
+   Do not guess macOS Accessibility, macOS Screen Recording, Windows UIPI, or Linux display backend state from the OS name alone.
+3. Need a fast GUI bootstrap before choosing a lane:
+   prefer the productized read-only bootstrap:
    ```bash
    printf '@bootstrap#1:{mode:"gui",capability_policy:"fresh",observe:{mode:"hybrid",include_screenshot:true,include_ax:true,include_windows:true,ax_required:false,ax_mode:"interactive"}}\n' | rdog control TARGET
    ```
    Parse `rdog.bootstrap.v1` lanes: `liveness`, `capabilities`, `observation`, `lanes`, `errors`, and optional `trace`.
    `capability_policy:"cached"` is reserved and currently returns `BOOTSTRAP_CAPABILITY_CACHE_UNIMPLEMENTED`; use `fresh`.
    For older daemons, send `@ping#1`, `@capabilities#2`, and `@observe#3:{mode:"hybrid",include_screenshot:true,include_ax:true,include_windows:true,ax_required:false,ax_mode:"interactive"}` in one session.
-   For a minimal non-GUI report, `printf '@capabilities#1\n' | rdog control TARGET` remains valid.
-   Read `capabilities.*.status`, `error_code`, `permissions`, and `failure_hints`.
-   `permission_denied` maps to code `77`; `unsupported` maps to code `78`.
-   Do not guess macOS Accessibility, macOS Screen Recording, Windows UIPI, or Linux display backend state from the OS name alone.
-3. Need extra GUI observation after bootstrap:
+   If daemon screenshot is permission-denied but AX is available, keep AX/window evidence and use another explicitly stated visual source if the local environment permits it.
+4. Need GUI observation before choosing a lane:
    prefer `@observe#id:{mode:"hybrid",include_screenshot:true,include_ax:true,include_windows:true,ax_required:false,ax_mode:"interactive"}`.
    If `@observe` is unavailable, fall back to `@screenshot include_ax`, `@ax-tree`, `@window-find`, `@ax-find`, or `@ax-get`.
    `@observe` is read-only. It does not activate windows, press controls, type text, scroll, or move the mouse.
-4. Need deterministic one-shot automation:
+5. Need deterministic one-shot automation:
    `@cmd#id:"COMMAND"` or a bare shell line.
-5. Need a window that might be hidden, minimized, occluded, or in another desktop state:
+6. Need a window that might be hidden, minimized, occluded, or in another desktop state:
    start with `@window-find`, then explicitly `@window-activate`, then do input or AX actions.
    Default close should use `@window-close` without strategy.
    Only use `strategy:"terminate"` or `strategy:"kill"` when the user clearly wants escalation.
-6. Need GUI or desktop side effects on a window that is already interactable:
+7. Need GUI or desktop side effects on a window that is already interactable:
    `@key`, `@paste`, semantic AX/window commands, then mouse fallback by ref or coordinate, then `@screenshot` for evidence.
    Bare `@paste` means focus-based system paste (`Cmd+V` on macOS, `Ctrl+V` on Windows/Linux).
    Use it only when the remote foreground focus is already correct.
@@ -71,7 +73,7 @@ Use this skill when the user asks to control a named machine such as `mac.lab`, 
    Selector mouse targets default to no action; `auto_refind:false` returns a recovery `@selector-refind` command, and `auto_refind:true` executes only after typed selector re-find rebounds and verifies a fresh rect.
    A safe no-op mouse smoke is `@mouse-move#id:{dx:0,dy:0,coordinate_space:"relative"}`.
    Raw `@mouse-button mode:"press"` does not auto-release; recover with the matching `mode:"release"`.
-7. Need macOS UI structure or semantic button/menu activation:
+8. Need macOS UI structure or semantic button/menu activation:
    start with a token-friendly AX summary, not a full tree:
    `@screenshot#id:{include_ax:true,ax_required:false,ax_mode:"interactive"}`.
    If you only need window inventory, use:
@@ -80,6 +82,32 @@ Use this skill when the user asks to control a named machine such as `mac.lab`, 
    `@screenshot#id:{include_ax:true,ax_required:false,ax_depth:2,ax_max_elements:200,ax_include_values:false}`
    and
    `@screenshot#id:{include_ax:true,ax_required:false,ax_depth:1,ax_max_elements:80,ax_include_values:false}`.
+   For active browser page content, prefer the read-only helper first:
+   `@web-find#id:{target:{browser:"active"},match:{text:"首页"},roles:["AXLink","AXButton"],limit:10}`.
+   It searches inside the active `AXWebArea`, excludes browser chrome, and does not perform actions.
+   If multiple browser windows make `target:{browser:"active"}` ambiguous, first use `@window-find` or `@observe` to get the intended `window_id`, then scope the same query:
+   `@web-find#id:{target:{window_id:"pid:96405/window:3"},match:{text:"首页"},roles:["AXLink","AXButton"],limit:10}`.
+   If you have a fresh window observation ref instead, use:
+   `@web-find#id:{target:{window_ref:"@e1",observation_id:"obs-..."},match:{text:"首页"},roles:["AXLink","AXButton"],limit:10}`.
+   `window_ref` is short-lived and must come from the same daemon's current observation store. It is not a durable selector.
+   Window-scoped `@web-find` is still read-only. It does not activate or focus the window.
+   When the user explicitly wants a simple page-content press, use:
+   `@web-act#id:{target:{browser:"active"},match:{text:"首页"},action:"press",verify:true}`.
+   It executes only a unique `AXPress` match, re-finds once on stale-like target errors, verifies with a fresh AXWebArea subtree or AX snapshot, and does not use mouse fallback.
+   The same `target.window_id` shape works for `@web-act` when side effects are intended:
+   `@web-act#id:{target:{window_id:"pid:96405/window:3"},match:{text:"首页"},action:"press",verify:true}`.
+   `target.window_ref + observation_id` also works for `@web-act`, but only when the user intends side effects.
+   For page-changing tasks where the user cares about visible content, verify with a fresh screenshot or screenshot diff before calling the task successful.
+   For repeated page-content clicks after `@web-find` has returned a stable page-owned AX id, direct `@ax-action` on that id is the fastest semantic path; if it returns stale/not found, re-run `@web-find` and refresh the cached id.
+   For feed-changing pages, treat `performed:true` as action evidence only; require before/after visual evidence such as a cropped screenshot diff.
+   To inspect the current computer-use density baseline without touching the live GUI, use:
+   `@gui-bench#id:{suite:"computer-use-density",case:"xhs-left-nav-home",variant:"baseline-low-level"}`.
+   It runs the built-in fixture runner and returns `rdog.gui-bench.v1` metrics; `dense_target_passed:false` is expected for the low-level baseline.
+   Use `variant:"all"` to compare `baseline-low-level`, `dense-web-find`, and `dense-web-act`.
+   Add `write_artifact:true` only when you explicitly want a JSON file under `target/rdog-bench/`.
+   Use live replay only when real GUI side effects are intended:
+   `@gui-bench#id:{suite:"computer-use-density",case:"xhs-left-nav-home",variant:"dense-web-act",runner:"live",allow_side_effects:true}`.
+   `runner:"live"` rejects `variant:"all"` and records `runs[].live_replay`; for `dense-web-act`, require both `performed:true` and `verified:true` before calling it passed.
    Use `@ax-find#id:{role:"AXButton",name_contains:"Cancel",limit:20}` to get a compact match list,
    use `@ax-get#id:{target:{id:"pid:123/window:0/path:3"},depth:2,include_values:false}` to drill into one element,
    use `@ax-tree#id:{mode:"interactive"}` to read AX structure without a screenshot,
@@ -94,11 +122,11 @@ Use this skill when the user asks to control a named machine such as `mac.lab`, 
    Preferred non-mouse order is:
    `@ax-find/@ax-get -> @ax-action or @ax-set-value/@type-text -> mouse only as explicit fallback`.
    Short refs like `@e8` live inside one observation only. If the daemon says `OBSERVATION_EXPIRED` or `STALE_REF`, prefer the durable selector workflow when the error payload provides one; otherwise re-run `@ax-find`, `@ax-tree`, `@window-find`, or `@screenshot include_ax` before trying again.
-8. Need a real terminal, TUI, shell state, `Ctrl-C`, or `Ctrl-D`:
+9. Need a real terminal, TUI, shell state, `Ctrl-C`, or `Ctrl-D`:
    `rdog control TARGET --pty -- COMMAND`.
-9. Need to control hardware or a microcontroller:
+10. Need to control hardware or a microcontroller:
    control the bridge host with `rdog control`, then run the bridge's serial, flashing, SDK, or device CLI from that host. Do not assume rdog can magically execute code inside MCU firmware unless that firmware exposes a compatible control path.
-10. Need direct app integration instead of spawning `rdog control`:
+11. Need direct app integration instead of spawning `rdog control`:
    read `references/zenoh-hardware.md` and use the session-channel model.
 
 ## GUI Agent Recipe
@@ -109,11 +137,11 @@ Use this fixed workflow for GUI tasks:
 2. Fallback bootstrap: on older daemons, send `@ping`, `@capabilities`, and `@observe` together in one read-only control session.
 3. `@capabilities`: check screenshot, accessibility, window_control, keyboard_input, mouse_input, and type_text.
 4. Observe: prefer `@observe:{mode:"hybrid",include_screenshot:true,include_ax:true,include_windows:true,ax_required:false,ax_mode:"interactive"}` for extra observation. Existing low-level observation commands remain valid.
-5. Locate: use `@window-find`, `@ax-find`, then `@ax-get` for one target.
+5. Locate: for active browser page content use `@web-find`; if the task is an explicit simple press, use `@web-act` instead. Otherwise use `@window-find`, `@ax-find`, then `@ax-get` for one target.
 6. Activate/focus: use `@window-activate` or `@ax-focus activate:true` only when the state says the window is not interactable.
 7. Semantic action: prefer `@ax-action`, `@ax-set-value`, `@type-text`, `@ax-scroll`, or targeted `@key`.
 8. Verify: use a fresh screenshot, AX tree/get, window state, or command output. Do not treat a permission-denied screenshot as visual proof.
-9. Fallback recipe: only then use mouse by observation ref, selector-gated recovery, or coordinates from the latest manifest. If fallback is not allowed or capability status is `permission_denied`, return a limited result instead of improvising.
+8. Fallback recipe: only then use mouse by observation ref, selector-gated recovery, or coordinates from the latest manifest. If fallback is not allowed or capability status is `permission_denied`, return a limited result instead of improvising.
 
 Observation rule:
 `@observe`, `@screenshot include_ax`, `@ax-tree`, `@ax-find`, `@ax-get`, and `@window-find` return an `observation` header plus short refs such as `@e1`.
@@ -168,6 +196,11 @@ Examples include `open x-apple.systempreferences:...`, launching System Settings
 Treat `open` as a fire-and-return action, not as proof that the target window and AX tree are settled.
 After the launch returns, start a fresh `rdog control TARGET` session and then run `@window-find`, `@ax-*`, or `@screenshot`.
 If a session reports `Zenoh session bridge subscriber ... closed before receiving result` immediately after a launch, retry once in a new session before classifying it as permission denied or unsupported.
+
+## Scenario Cookbooks
+
+- Read `references/cookbook-web-content.md` when the user wants to inspect, search, or click controls inside the active browser page, not browser chrome such as tabs, address bar, toolbar buttons, extensions, or bookmarks.
+- Future scenario cookbooks can follow the same pattern for apps such as WeChat or Finder, but do not create empty cookbook files before a scenario has verified experience to record.
 
 ## Reference Loading
 

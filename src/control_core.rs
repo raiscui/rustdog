@@ -584,6 +584,33 @@ mod tests {
     }
 
     #[test]
+    fn explicit_request_should_forward_structured_other_error_json() {
+        #[derive(Clone)]
+        struct StructuredOtherExecutor;
+
+        impl ControlActionExecutor for StructuredOtherExecutor {
+            fn execute(
+                &self,
+                _command: &ControlCommand,
+                _shell: &str,
+            ) -> io::Result<ActionExecutionResult> {
+                Err(io::Error::other(
+                    r#"{"kind":"screenshot-stale-frame","error_code":"SCREENSHOT_STALE_FRAME","error":"stale visual frame","display_count":2}"#,
+                ))
+            }
+        }
+
+        let response =
+            parse_and_execute_control_line(r#"@key#17:"F11""#, "/bin/sh", &StructuredOtherExecutor)
+                .into_single_response_line();
+
+        assert_eq!(
+            response,
+            r#"@response {"code":70,"display_count":2,"error":"stale visual frame","error_code":"SCREENSHOT_STALE_FRAME","id":17,"kind":"screenshot-stale-frame"}"#
+        );
+    }
+
+    #[test]
     fn explicit_request_should_render_structured_success_without_double_escaping() {
         #[derive(Clone)]
         struct StructuredExecutor;

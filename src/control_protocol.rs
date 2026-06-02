@@ -22,6 +22,7 @@ use crate::control_ax::{
 };
 use crate::control_bootstrap::{parse_bootstrap_payload, BootstrapRequest};
 use crate::control_frames::SaveFileFrame;
+use crate::control_gui_bench::{parse_gui_bench_payload, GuiBenchRequest};
 use crate::control_mouse::{
     parse_click_payload, parse_drag_payload, parse_mouse_button_payload, parse_mouse_move_payload,
     parse_wheel_payload, ClickRequest, DragRequest, MouseButtonRequest, MouseMoveRequest,
@@ -30,6 +31,9 @@ use crate::control_mouse::{
 use crate::control_observation::{
     parse_observe_payload, ObserveRequest, SelectorGetRequest, SelectorRefindPolicy,
     SelectorRefindRequest, SelectorRefindSource, SelectorResolveRequest,
+};
+use crate::control_web::{
+    parse_web_act_payload, parse_web_find_payload, WebActRequest, WebFindRequest,
 };
 use crate::control_window::{
     parse_window_activate_payload, parse_window_close_payload, parse_window_find_payload,
@@ -77,6 +81,9 @@ pub enum ControlCommand {
     WindowFind(WindowFindRequest),
     WindowActivate(WindowActivateRequest),
     WindowClose(WindowCloseRequest),
+    WebFind(WebFindRequest),
+    WebAct(WebActRequest),
+    GuiBench(GuiBenchRequest),
     Bootstrap(BootstrapRequest),
     Capabilities,
     Observe(ObserveRequest),
@@ -390,6 +397,9 @@ pub fn parse_control_line(line: &str) -> io::Result<ControlParseResult> {
             ControlCommand::WindowActivate(parse_window_activate_payload(payload)?)
         }
         "window-close" => ControlCommand::WindowClose(parse_window_close_payload(payload)?),
+        "web-find" => ControlCommand::WebFind(parse_web_find_payload(payload)?),
+        "web-act" => ControlCommand::WebAct(parse_web_act_payload(payload)?),
+        "gui-bench" => ControlCommand::GuiBench(parse_gui_bench_payload(payload)?),
         "bootstrap" => ControlCommand::Bootstrap(parse_bootstrap_payload(payload)?),
         "observe" => ControlCommand::Observe(parse_observe_payload(payload)?),
         "selector-get" => ControlCommand::SelectorGet(parse_selector_get_payload(payload)?),

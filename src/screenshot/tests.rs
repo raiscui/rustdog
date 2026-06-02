@@ -452,6 +452,133 @@ fn execute_composite_screenshot_request_should_fail_ax_permission_denied_when_re
 }
 
 #[test]
+fn execute_composite_screenshot_request_should_fail_stale_repeated_frame_before_ax() {
+    let request = ScreenshotRequest {
+        include_ax: true,
+        ..ScreenshotRequest::default()
+    };
+    let mut last = None;
+    let stale_displays = || {
+        vec![fake_display(
+            "one",
+            LogicalRect {
+                x: 0,
+                y: 0,
+                width: 2,
+                height: 2,
+            },
+            Size {
+                width: 2,
+                height: 2,
+            },
+            Rgba([7, 8, 9, 255]),
+        )]
+    };
+
+    let first = execute_composite_screenshot_request_with_capture_and_ax(
+        Some(1),
+        &request,
+        || Ok(stale_displays()),
+        |_| Ok(fake_ax_snapshot()),
+    )
+    .expect("first screenshot should establish freshness baseline");
+    assert_eq!(first.outbound_frames.len(), 3);
+
+    let mut ax_called = false;
+    let guarded_first = execute_composite_screenshot_request_with_capture_ax_and_freshness(
+        Some(2),
+        &request,
+        || Ok(stale_displays()),
+        |_| {
+            ax_called = true;
+            Ok(fake_ax_snapshot())
+        },
+        |displays| {
+            reject_stale_composite_fingerprint(composite_capture_fingerprint(displays), &mut last)
+        },
+    )
+    .expect("first guarded frame should establish local baseline");
+    assert_eq!(guarded_first.outbound_frames.len(), 3);
+
+    ax_called = false;
+    let err = execute_composite_screenshot_request_with_capture_ax_and_freshness(
+        Some(3),
+        &request,
+        || Ok(stale_displays()),
+        |_| {
+            ax_called = true;
+            Ok(fake_ax_snapshot())
+        },
+        |displays| {
+            reject_stale_composite_fingerprint(composite_capture_fingerprint(displays), &mut last)
+        },
+    )
+    .expect_err("second identical guarded frame should fail as stale");
+
+    assert!(
+        !ax_called,
+        "stale visual frame should stop before AX capture"
+    );
+    assert_eq!(err.kind(), io::ErrorKind::Other);
+
+    let payload: Value =
+        serde_json::from_str(&err.to_string()).expect("stale error should be structured json");
+    assert_eq!(payload["kind"], "screenshot-stale-frame");
+    assert_eq!(payload["error_code"], "SCREENSHOT_STALE_FRAME");
+    assert_eq!(
+        payload["guard_policy"],
+        "reject-consecutive-identical-composite-fingerprint"
+    );
+    assert_eq!(payload["display_count"], 1);
+    assert_eq!(payload["displays"][0]["id"], "one");
+    assert_eq!(payload["displays"][0]["backend"], "fake");
+    assert!(payload["displays"][0]["pixel_hash"]
+        .as_str()
+        .is_some_and(|hash| !hash.is_empty()));
+}
+
+#[test]
+fn stale_freshness_guard_should_allow_changed_frame_after_error() {
+    let mut last = None;
+    let first = vec![fake_display(
+        "one",
+        LogicalRect {
+            x: 0,
+            y: 0,
+            width: 1,
+            height: 1,
+        },
+        Size {
+            width: 1,
+            height: 1,
+        },
+        Rgba([0, 0, 0, 255]),
+    )];
+    let changed = vec![fake_display(
+        "one",
+        LogicalRect {
+            x: 0,
+            y: 0,
+            width: 1,
+            height: 1,
+        },
+        Size {
+            width: 1,
+            height: 1,
+        },
+        Rgba([255, 255, 255, 255]),
+    )];
+
+    let first_fingerprint = composite_capture_fingerprint(&first);
+    reject_stale_composite_fingerprint(first_fingerprint.clone(), &mut last)
+        .expect("first frame should be accepted");
+    reject_stale_composite_fingerprint(first_fingerprint, &mut last)
+        .expect_err("same frame should be rejected");
+    reject_stale_composite_fingerprint(composite_capture_fingerprint(&changed), &mut last)
+        .expect("changed frame should be accepted after stale error");
+}
+
+#[test]
 fn build_screenshot_outcome_should_emit_primary_single_image_for_primary_request() {
     let image = RgbaImage::from_pixel(2, 1, Rgba([255, 0, 0, 255]));
     let request = ScreenshotRequest {
@@ -601,6 +728,7 @@ fn manifest_should_use_snake_case_schema_fields() {
 
 #[test]
 fn real_capture_smoke_should_capture_or_report_permission_denied() {
+    reset_screenshot_freshness_cache_for_tests();
     let request = ScreenshotRequest::default();
 
     match execute_screenshot_request(Some(99), &request) {

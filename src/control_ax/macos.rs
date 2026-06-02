@@ -268,6 +268,40 @@ pub(super) fn snapshot(request: &AxTreeRequest) -> io::Result<AxSnapshot> {
     Ok(AxSnapshot::complete("macos", windows, state.truncated))
 }
 
+pub(super) fn capture_current_subtree(
+    target_id: &str,
+    request: &AxTreeRequest,
+) -> io::Result<AxCapturedSubtree> {
+    ensure_trusted()?;
+
+    let parsed = parse_target_id(target_id)?;
+    if parsed.path.is_empty() {
+        return Err(invalid_input(
+            "AX subtree capture 需要 element target id,不能直接使用 window id",
+        ));
+    }
+
+    let element_ref = retain_target_element(target_id)?;
+    let mut state = BuildState {
+        element_count: 1,
+        truncated: false,
+    };
+    let element = build_element(
+        parsed.pid,
+        parsed.window_index,
+        element_ref.as_ptr(),
+        parsed.path,
+        request.depth,
+        request,
+        &mut state,
+    )?;
+
+    Ok(AxCapturedSubtree {
+        element,
+        truncated: state.truncated,
+    })
+}
+
 pub(super) fn perform_action(request: &AxActionRequest) -> io::Result<AxPerformedActionReport> {
     ensure_trusted()?;
 

@@ -66,6 +66,15 @@ Bare shell lines do not have request ids.
 @wheel#16:{x:1200,y:540,delta_y:-3}
 @wheel#21:{target:{ref:"@e8",observation_id:"obs-123"},delta_y:-3}
 @mouse-move#22:{target:{ref:"@e9",observation_id:"obs-123"}}
+@web-find#40:{target:{browser:"active"},match:{text:"首页"},roles:["AXLink","AXButton"],limit:10}
+@web-find#400:{target:{window_id:"pid:96405/window:3"},match:{text:"首页"},roles:["AXLink","AXButton"],limit:10}
+@web-find#402:{target:{window_ref:"@e1",observation_id:"obs-123"},match:{text:"首页"},roles:["AXLink","AXButton"],limit:10}
+@web-act#41:{target:{browser:"active"},match:{text:"首页"},action:"press",verify:true}
+@web-act#401:{target:{window_id:"pid:96405/window:3"},match:{text:"首页"},action:"press",verify:true}
+@web-act#403:{target:{window_ref:"@e1",observation_id:"obs-123"},match:{text:"首页"},action:"press",verify:true}
+@gui-bench#42:{suite:"computer-use-density",case:"xhs-left-nav-home",variant:"baseline-low-level"}
+@gui-bench#43:{suite:"computer-use-density",case:"xhs-left-nav-home",variant:"all",write_artifact:true}
+@gui-bench#44:{suite:"computer-use-density",case:"xhs-left-nav-home",variant:"dense-web-act",runner:"live",allow_side_effects:true}
 @pty:"codex"
 @pty:{cmd:"codex",args:["resume","019e..."],cols:120,rows:40}
 @pty-close:{session_id:"..."}
@@ -134,6 +143,31 @@ It does not click, type, scroll, focus, activate, or move the mouse.
 All `@bootstrap` requests are Zenoh session-channel-only, including `mode:"basic"`.
 For older daemons, fall back to `@ping`, `@capabilities`, and `@observe` in one control session.
 
+`@gui-bench` returns a structured fixture-runner report:
+
+- `kind:"gui-bench"`
+- `schema:"rdog.gui-bench.v1"`
+- `runner:"fixture"`
+- `metrics`
+- `thresholds`
+- `checks`
+- `threshold_failures`
+- `steps_summary`
+- `runs`
+- `dense_target_passed`
+- optional `artifact`
+
+Phase 3B supports `suite:"computer-use-density"`, `case:"xhs-left-nav-home"`, and variants `baseline-low-level`, `dense-web-find`, `dense-web-act`, or `all`.
+It is read-only and does not touch the live GUI.
+For this baseline, `status:"complete"` with `dense_target_passed:false` is expected.
+It means the runner completed and the old low-level flow failed the density target.
+For `variant:"all"`, compare `runs[]`; top-level `metrics` is omitted because there is no single selected variant.
+`write_artifact:true` writes the same report under `target/rdog-bench/`; the default is false.
+Phase 3D adds live replay opt-in: `runner:"live"` must be paired with `allow_side_effects:true`.
+Live replay rejects `variant:"all"` and only replays one selected dense variant.
+For `dense-web-act`, `runs[].live_replay.performed` and `runs[].live_replay.verified` must be true before treating the replay as passing.
+The default remains `runner:"fixture"`, which never touches the live GUI.
+
 When stdin or stdout is not a real TTY, `rdog control` preserves raw protocol lines.
 This is the preferred mode for code agents.
 
@@ -149,6 +183,16 @@ File-like results can return one or more `@savefile` frames before a final resul
 
 The receiver should decode and save `data`, not dump base64 into the user-visible answer.
 The CLI stores downloaded files under `./rdog_downloads/`.
+
+Freshness / stale guard can stop a composite screenshot before any `@savefile` frame.
+When this happens, treat the response as a hard visual-evidence failure and keep the payload for diagnosis:
+
+```text
+@response {"id":7,"code":70,"kind":"screenshot-stale-frame","error_code":"SCREENSHOT_STALE_FRAME","guard_policy":"reject-consecutive-identical-composite-fingerprint","error":"...","display_count":2,"displays":[...]}
+```
+
+This means the daemon captured the same display layout and pixel fingerprint twice in a row.
+Do not use older screenshot files as proof after this error.
 
 ## Screenshot
 

@@ -128,6 +128,7 @@ Operate a GUI and capture evidence:
 
 ```bash
 rdog control mac.lab <<'RDOG'
+@ping#199
 @capabilities#200
 @observe#201:{mode:"hybrid",include_screenshot:true,include_ax:true,include_windows:true,ax_required:false,ax_mode:"interactive"}
 @key#202:{key:"F11",hold_ms:200,mode:"press_release"}
@@ -147,6 +148,7 @@ This is a single read-only composite protocol command.
 It returns `rdog.bootstrap.v1` with liveness, capabilities, observe, lane errors, frame count, and optional trace.
 It is session-channel-only over Zenoh, including `mode:"basic"`.
 For older daemons, fall back to one `rdog control` session containing `@ping#1`, `@capabilities#2`, and `@observe#3:{mode:"hybrid",include_screenshot:true,include_ax:true,include_windows:true,ax_required:false,ax_mode:"interactive"}`.
+`@observe` is the preferred combined screenshot / AX / window read; if screenshot is permission-denied, keep the AX/window evidence and use an explicitly stated alternate visual source only when the local workflow allows it.
 
 For GUI agent work, use the fixed recipe:
 

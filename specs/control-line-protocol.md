@@ -132,6 +132,9 @@ printf 'PLAIN_OK'
 - `ping`
 - `capabilities`
 - `bootstrap`
+- `observe`
+- `paste`
+- `screenshot`
 
 #### 需要 payload
 
@@ -148,8 +151,28 @@ printf 'PLAIN_OK'
 - `drag`
 - `wheel`
 - `ax-tree`
+- `ax-find`
+- `ax-get`
+- `ax-focus`
+- `ax-scroll`
+- `ax-action`
 - `ax-press`
+- `ax-set-value`
+- `type-text`
+- `window-find`
+- `window-activate`
+- `window-close`
+- `web-find`
+- `web-act`
+- `gui-bench`
 - `bootstrap`
+- `observe`
+- `selector-get`
+- `selector-resolve`
+- `selector-refind`
+- `savefile`
+- `pty-detach`
+- `pty-attach`
 
 ### request id 规则
 
@@ -651,6 +674,9 @@ rdog control TARGET --pty-attach SESSION_ID
 
 - 文件型结果可以先返回一个或多个 `@savefile ...`,再返回最终 `@response ...`
   例如默认 `@screenshot#id` 会先返回 virtual-desktop JPEG,再返回 manifest JSON,最后返回 `@response ...screenshot-bundle...`
+- 如果 composite `@screenshot` / `@observe include_screenshot` 触发 freshness / stale guard,请求必须在输出 `@savefile` 之前终止,并返回结构化错误:
+  `@response {"id":7,"code":70,"kind":"screenshot-stale-frame","error_code":"SCREENSHOT_STALE_FRAME","guard_policy":"reject-consecutive-identical-composite-fingerprint",...}`
+  这表示连续捕获到完全相同的显示器布局和像素指纹,疑似截图后端返回旧帧。客户端应停止使用本次视觉证据,保留错误 payload 供后续分析。
 - `@pty` 会切入 PTY frame 流,返回 `@pty-ready` / `@pty-output` / `@pty-exit` / `@pty-closed` / `@pty-detached` / `@pty-attached`
 
 ### 无 request id 的响应

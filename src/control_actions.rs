@@ -6,6 +6,7 @@ use crate::{
         perform_default_type_text,
     },
     control_frames::{default_savefile_directory, SaveFileFrame},
+    control_gui_bench::build_gui_bench_response_json,
     control_mouse::{
         build_click_plan, build_drag_plan, build_mouse_button_plan, build_mouse_move_plan,
         build_wheel_plan, perform_mouse_plan, prepare_click_request, prepare_drag_request,
@@ -17,6 +18,7 @@ use crate::{
         ControlCommand, KeyMode, KeyRequest, KeyResponseMode, PasteRequest, PasteRequestKind,
         DEFAULT_KEY_HOLD_MS,
     },
+    control_web::{build_default_web_act_response_json, build_default_web_find_response_json},
     control_window::{
         execute_default_window_activate, execute_default_window_close, execute_default_window_find,
     },
@@ -146,6 +148,9 @@ impl ControlActionExecutor for SystemControlActionExecutor {
             ControlCommand::WindowFind(request) => execute_window_find(request),
             ControlCommand::WindowActivate(request) => execute_window_activate(request),
             ControlCommand::WindowClose(request) => execute_window_close(request),
+            ControlCommand::WebFind(request) => execute_web_find(request),
+            ControlCommand::WebAct(request) => execute_web_act(request),
+            ControlCommand::GuiBench(request) => execute_gui_bench(request),
             ControlCommand::Bootstrap(_) => Err(io::Error::new(
                 io::ErrorKind::Unsupported,
                 "@bootstrap 是只读 preflight facade,由 control_core 直接组合 capabilities / observe,不应进入默认 executor 分支",
@@ -638,6 +643,39 @@ fn execute_window_close(
         stdout: Vec::new(),
         stderr: Vec::new(),
         response_value_json: Some(response.to_value_json()?),
+    })
+}
+
+fn execute_web_find(
+    request: &crate::control_web::WebFindRequest,
+) -> io::Result<ActionExecutionResult> {
+    Ok(ActionExecutionResult {
+        exit_code: 0,
+        stdout: Vec::new(),
+        stderr: Vec::new(),
+        response_value_json: Some(build_default_web_find_response_json(request)?),
+    })
+}
+
+fn execute_web_act(
+    request: &crate::control_web::WebActRequest,
+) -> io::Result<ActionExecutionResult> {
+    Ok(ActionExecutionResult {
+        exit_code: 0,
+        stdout: Vec::new(),
+        stderr: Vec::new(),
+        response_value_json: Some(build_default_web_act_response_json(request)?),
+    })
+}
+
+fn execute_gui_bench(
+    request: &crate::control_gui_bench::GuiBenchRequest,
+) -> io::Result<ActionExecutionResult> {
+    Ok(ActionExecutionResult {
+        exit_code: 0,
+        stdout: Vec::new(),
+        stderr: Vec::new(),
+        response_value_json: Some(build_gui_bench_response_json(request)?),
     })
 }
 

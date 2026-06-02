@@ -1,6 +1,7 @@
 use super::*;
 
 mod bootstrap;
+mod web_gui;
 
 use crate::{
     control_ax::{
@@ -599,112 +600,6 @@ fn parse_should_support_window_commands() {
                 select: None,
             }),
         })
-    );
-}
-
-#[test]
-fn parse_should_support_selector_commands() {
-    assert_eq!(
-        parse_control_line(r#"@selector-get#301:{selector_id:"sel-v1-abc",include_history:true}"#)
-            .unwrap(),
-        ControlParseResult::Control(ControlRequest {
-            request_id: Some(301),
-            command: ControlCommand::SelectorGet(SelectorGetRequest {
-                selector_id: "sel-v1-abc".to_owned(),
-                include_history: true,
-            }),
-        })
-    );
-    assert_eq!(
-        parse_control_line(
-            r#"@selector-resolve#302:{selector_id:"sel-v1-abc",limit:5,dry_run:true,include_explanations:false}"#
-        )
-        .unwrap(),
-        ControlParseResult::Control(ControlRequest {
-            request_id: Some(302),
-            command: ControlCommand::SelectorResolve(SelectorResolveRequest {
-                selector_id: "sel-v1-abc".to_owned(),
-                limit: 5,
-                dry_run: true,
-                include_explanations: false,
-            }),
-        })
-    );
-    assert_eq!(
-        parse_control_line(
-            r#"@selector-refind#303:{selector_id:"sel-v1-abc",limit:7,policy:"manual",min_confidence:0.75,include_explanations:false,include_history:true,source:{observation_id:"obs-old",ref:"@e8"}}"#
-        )
-        .unwrap(),
-        ControlParseResult::Control(ControlRequest {
-            request_id: Some(303),
-            command: ControlCommand::SelectorRefind(SelectorRefindRequest {
-                selector_id: "sel-v1-abc".to_owned(),
-                limit: 7,
-                policy: SelectorRefindPolicy::Manual,
-                min_confidence_milli: 750,
-                include_explanations: false,
-                include_history: true,
-                source: Some(SelectorRefindSource {
-                    observation_id: "obs-old".to_owned(),
-                    ref_id: "@e8".to_owned(),
-                }),
-            }),
-        })
-    );
-    assert_eq!(
-        parse_control_line(r#"@selector-refind:{selector_id:"sel-v1-abc"}"#).unwrap(),
-        ControlParseResult::Control(ControlRequest {
-            request_id: None,
-            command: ControlCommand::SelectorRefind(SelectorRefindRequest {
-                selector_id: "sel-v1-abc".to_owned(),
-                limit: crate::control_observation::refind::DEFAULT_REFIND_LIMIT,
-                policy: SelectorRefindPolicy::Safe,
-                min_confidence_milli:
-                    crate::control_observation::refind::DEFAULT_REFIND_MIN_CONFIDENCE_MILLI,
-                include_explanations: true,
-                include_history: false,
-                source: None,
-            }),
-        })
-    );
-    assert!(
-        parse_control_line(r#"@selector-refind:{selector_id:"sel",min_confidence:1.01}"#).is_err()
-    );
-    assert!(parse_control_line(r#"@selector-refind:{selector_id:"sel",policy:"auto"}"#).is_err());
-    assert!(parse_control_line(
-        r#"@selector-refind:{selector_id:"sel",source:{observation_id:"obs"}}"#
-    )
-    .is_err());
-}
-
-#[test]
-fn parse_should_reject_invalid_mouse_payloads() {
-    assert!(parse_control_line(r#"@mouse-move:{x:1,y:2,dx:1,dy:2}"#).is_err());
-    assert!(parse_control_line(r#"@mouse-move:{dx:1,coordinate_space:"relative"}"#).is_err());
-    assert!(parse_control_line(r#"@mouse-button:{button:"side",mode:"press"}"#).is_err());
-    assert!(parse_control_line(r#"@mouse-button:{button:"left",mode:"hold"}"#).is_err());
-    assert!(parse_control_line(r#"@click:{x:1,y:2,count:0}"#).is_err());
-    assert!(parse_control_line(r#"@click:{x:1,y:2,coordinate_space:"native"}"#).is_err());
-    assert!(parse_control_line(r#"@click:{target:{ref:"@e1"}}"#).is_err());
-    assert!(
-        parse_control_line(r#"@click:{x:1,y:2,target:{ref:"@e1",observation_id:"obs-1"}}"#)
-            .is_err()
-    );
-    assert!(parse_control_line(
-        r#"@click:{target:{ref:"@e1",selector_id:"sel-v1",observation_id:"obs-1"}}"#
-    )
-    .is_err());
-    assert!(
-        parse_control_line(r#"@click:{target:{selector_id:"sel-v1",observation_id:"obs-1"}}"#)
-            .is_err()
-    );
-    assert!(parse_control_line(r#"@drag:{from:{x:1,y:2},to:{x:3,y:4},steps:0}"#).is_err());
-    assert!(parse_control_line(r#"@drag:{from:{x:1},to:{x:3,y:4}}"#).is_err());
-    assert!(parse_control_line(r#"@wheel:{delta_y:0}"#).is_err());
-    assert!(parse_control_line(r#"@wheel:{x:1,delta_y:-3}"#).is_err());
-    assert!(parse_control_line(r#"@wheel:{delta_y:-3,unknown:1}"#).is_err());
-    assert!(
-        parse_control_line(r#"@wheel:{x:1,y:2,delta_y:-3,coordinate_space:"relative"}"#).is_err()
     );
 }
 

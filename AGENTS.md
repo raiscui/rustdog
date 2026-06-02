@@ -33,6 +33,11 @@ rustdog 首先被LLM agent 智能体使用，其次被人类使用。要以agent
   - 用途: 给 Codex 和其他 code agent 的项目内稳定入口,让 `rdog control` 的使用约定和协议文档一起版本化
   - 何时阅读: 需要改 `rdog control` 相关协议、示例、README、PTY 或 GUI 控制行为前
 
+- `.codex/skills/rdog-control/references/cookbook-web-content.md`
+  - 主题: 浏览器当前激活页面内的 Web 内容 AX 操作 cookbook
+  - 用途: 固定 `AXWebArea` 优先的网页内容搜索、按钮/链接匹配、`AXPress` 优先与浏览器 chrome 隔离策略
+  - 何时阅读: 用户要检查、列举或点击浏览器当前网页内控件,并且明确要求 AX 证据而不是 OCR / 图像识别时
+
 - `.codex/skills/self-learning.zenoh-duplicate-name-local-guard/SKILL.md`
   - 主题: Zenoh 同机重复 `daemon_name` / `service_name` 只靠 liveliness 检查会漏掉启动竞争窗口
   - 用途: 固定“本地 PID/lock guard + 网络 liveliness 双层约束”的修复模式
@@ -68,6 +73,16 @@ rustdog 首先被LLM agent 智能体使用，其次被人类使用。要以agent
   - 用途: 说明旧 `WORKLOG.md` 超过 1000 行后的归档位置,以及本轮 skill 创建、验证和硬件/单片机表述边界沉淀范围
   - 何时阅读: 需要追溯 `rdog-control` skill 为什么创建、旧 WORKLOG 为什么被续档,或查找 2026-05-12 前默认工作记录时
 
+- `archive/manifests/ARCHIVE_MANIFEST__2026-05-25_rdog_control_notes.md`
+  - 主题: 2026-05-25 `$rdog-control` live GUI 点击任务触发默认 `notes.md` 超过 1000 行后的续档说明
+  - 用途: 说明旧 `notes.md` 归档位置,以及 Chrome 小红书“首页”按钮坐标 fallback live smoke 的经验沉淀范围
+  - 何时阅读: 需要追溯本轮 `rdog control mac.lab` GUI live smoke、`notes.md` 为什么变短,或排查 `@window-activate` session bridge 提前关闭线索时
+
+- `archive/manifests/ARCHIVE_MANIFEST__2026-06-01_computer_use_density_task_plan.md`
+  - 主题: 2026-06-01 computer-use density 支线 `task_plan__computer_use_density.md` 续档说明
+  - 用途: 说明旧支线 task plan 超过 1000 行后的归档位置,以及 `@web-find target.window_id` / `target.window_ref` 产品化经验沉淀范围
+  - 何时阅读: 需要追溯 computer-use density Phase 3F 之后的长计划、window-scoped Web target 验证证据,或确认为何当前支线 task plan 变短时
+
 - `specs/zenoh-control-plane-plan.md`
   - 主题: `rustdog` 的 canonical Zenoh router/serial control-plane 规划
   - 用途: 固定 daemon 内嵌 router、control client、native `transport_serial`、autodiscovery 默认接入 + `--entry-point` fallback、identity/keyexpr、CLI/config、runtime 边界与验证矩阵
@@ -87,6 +102,11 @@ rustdog 首先被LLM agent 智能体使用，其次被人类使用。要以agent
   - 主题: code agent 使用 `rdog daemon` / `rdog control` 在局域网或可达远程网络上操控和协调主机的操作指南
   - 用途: 固定真实 CLI 入口、target-name 寻址、line-control/PTY/截图/按键能力矩阵、Zenoh session channel 模型、安全权限边界和 smoke 命令
   - 何时阅读: 需要让 code agent 通过 `rdog control <target-name>` 控制不同主机、编排多主机任务、或解释 `rdog control` 相比 SSH 的独特性之前
+
+- `specs/rdog-computer-use-density-plan.md`
+  - 主题: computer-use 类 GUI/Web 任务的高密度 primitive 与 bench suite 规划
+  - 用途: 固定 `@gui-probe`、`@web-find`、`@web-act`、`@gui-act`、`@gui-bench` 的演进方向,以及用 `backend_request_count` / `agent_decision_points` 等指标衡量任务密度
+  - 何时阅读: 准备减少 agent 手动串联 `@ping` / `@capabilities` / `@window-find` / `@ax-get` 等低级请求,实现 Web/GUI 高密度任务 primitive 或 bench baseline 前
 
 - `specs/zenoh-sdk-agent-prompts.md`
   - 主题: 给编程智能体直接使用的 Rust / Unity Zenoh 对接实现提示模板

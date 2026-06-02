@@ -508,6 +508,12 @@ pub struct AxElement {
     pub children: Vec<AxElement>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AxCapturedSubtree {
+    pub element: AxElement,
+    pub truncated: bool,
+}
+
 impl AxElement {
     fn tree_count(&self) -> usize {
         1 + self
@@ -1018,6 +1024,13 @@ impl AxBackend for SystemAxBackend {
 
 pub fn capture_default_ax_snapshot(request: &AxTreeRequest) -> io::Result<AxSnapshot> {
     SystemAxBackend.snapshot(request)
+}
+
+pub fn capture_current_ax_subtree(
+    target_id: &str,
+    request: &AxTreeRequest,
+) -> io::Result<AxCapturedSubtree> {
+    platform_capture_current_subtree(target_id, request)
 }
 
 pub fn resolve_current_ax_target_rect(target: &AxTarget) -> io::Result<AxResolvedTargetRect> {
@@ -1856,6 +1869,25 @@ fn invalid_input(message: impl Into<String>) -> io::Error {
 #[cfg(target_os = "macos")]
 fn platform_snapshot(request: &AxTreeRequest) -> io::Result<AxSnapshot> {
     macos::snapshot(request)
+}
+
+#[cfg(target_os = "macos")]
+fn platform_capture_current_subtree(
+    target_id: &str,
+    request: &AxTreeRequest,
+) -> io::Result<AxCapturedSubtree> {
+    macos::capture_current_subtree(target_id, request)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn platform_capture_current_subtree(
+    _target_id: &str,
+    _request: &AxTreeRequest,
+) -> io::Result<AxCapturedSubtree> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "AX subtree capture 当前只支持 macOS",
+    ))
 }
 
 #[cfg(target_os = "macos")]

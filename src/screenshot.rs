@@ -7,6 +7,7 @@ use image::{
 use serde::Serialize;
 use std::{
     io,
+    sync::{Mutex, OnceLock},
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -27,12 +28,15 @@ pub fn execute_screenshot_request(
     request: &ScreenshotRequest,
 ) -> io::Result<ControlExecutionOutcome> {
     match request.display {
-        ScreenshotDisplaySelector::All => execute_composite_screenshot_request_with_capture_and_ax(
-            request_id,
-            request,
-            || capture_all_display_images(),
-            |ax_request| capture_default_ax_snapshot(ax_request),
-        ),
+        ScreenshotDisplaySelector::All => {
+            execute_composite_screenshot_request_with_capture_ax_and_freshness(
+                request_id,
+                request,
+                || capture_all_display_images(),
+                |ax_request| capture_default_ax_snapshot(ax_request),
+                reject_stale_composite_capture,
+            )
+        }
         ScreenshotDisplaySelector::Primary => {
             execute_primary_screenshot_request_with_capture(request_id, request, || {
                 capture_primary_display_image()
@@ -49,8 +53,24 @@ pub fn execute_screenshot_bundle_request(
     request_id: Option<u64>,
     request: &ScreenshotRequest,
 ) -> io::Result<(Vec<ControlFrame>, ScreenshotBundleSummary)> {
+    execute_screenshot_bundle_request_with_freshness(
+        request_id,
+        request,
+        reject_stale_composite_capture,
+    )
+}
+
+fn execute_screenshot_bundle_request_with_freshness<F>(
+    request_id: Option<u64>,
+    request: &ScreenshotRequest,
+    freshness_check: F,
+) -> io::Result<(Vec<ControlFrame>, ScreenshotBundleSummary)>
+where
+    F: FnOnce(&[CapturedDisplay]) -> io::Result<()>,
+{
     validate_composite_request(request)?;
     let displays = capture_all_display_images()?;
+    freshness_check(&displays)?;
     let screenshot_id = current_unix_epoch_millis().to_string();
     let accessibility = build_accessibility_manifest(request, capture_default_ax_snapshot)?;
     build_composite_screenshot_parts_with_id_and_ax(
@@ -84,14 +104,16 @@ fn execute_composite_screenshot_request_with_capture<F>(
 where
     F: FnOnce() -> io::Result<Vec<CapturedDisplay>>,
 {
-    execute_composite_screenshot_request_with_capture_and_ax(
+    execute_composite_screenshot_request_with_capture_ax_and_freshness(
         request_id,
         request,
         capture,
         |ax_request| capture_default_ax_snapshot(ax_request),
+        |_| Ok(()),
     )
 }
 
+#[cfg(test)]
 fn execute_composite_screenshot_request_with_capture_and_ax<F, A>(
     request_id: Option<u64>,
     request: &ScreenshotRequest,
@@ -102,8 +124,30 @@ where
     F: FnOnce() -> io::Result<Vec<CapturedDisplay>>,
     A: FnOnce(&AxTreeRequest) -> io::Result<AxSnapshot>,
 {
+    execute_composite_screenshot_request_with_capture_ax_and_freshness(
+        request_id,
+        request,
+        capture,
+        capture_ax,
+        |_| Ok(()),
+    )
+}
+
+fn execute_composite_screenshot_request_with_capture_ax_and_freshness<F, A, S>(
+    request_id: Option<u64>,
+    request: &ScreenshotRequest,
+    capture: F,
+    capture_ax: A,
+    freshness_check: S,
+) -> io::Result<ControlExecutionOutcome>
+where
+    F: FnOnce() -> io::Result<Vec<CapturedDisplay>>,
+    A: FnOnce(&AxTreeRequest) -> io::Result<AxSnapshot>,
+    S: FnOnce(&[CapturedDisplay]) -> io::Result<()>,
+{
     validate_composite_request(request)?;
     let displays = capture()?;
+    freshness_check(&displays)?;
     let screenshot_id = current_unix_epoch_millis().to_string();
     let accessibility = build_accessibility_manifest(request, capture_ax)?;
     let (mut frames, summary) = build_composite_screenshot_parts_with_id_and_ax(
@@ -333,6 +377,24 @@ struct CapturedDisplay {
     image: RgbaImage,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CompositeCaptureFingerprint {
+    display_count: usize,
+    display_fingerprints: Vec<DisplayCaptureFingerprint>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DisplayCaptureFingerprint {
+    id: String,
+    backend: &'static str,
+    os_rect: LogicalRect,
+    native_capture_size: Size,
+    pixel_hash: u64,
+}
+
+static LAST_COMPOSITE_FINGERPRINT: OnceLock<Mutex<Option<CompositeCaptureFingerprint>>> =
+    OnceLock::new();
+
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 enum ScreenshotBackend {
     SckRs,
@@ -547,6 +609,116 @@ fn build_screenshot_bundle_with_ax(
         image_size,
         display_count,
     })
+}
+
+fn reject_stale_composite_capture(displays: &[CapturedDisplay]) -> io::Result<()> {
+    let fingerprint = composite_capture_fingerprint(displays);
+    let cache = LAST_COMPOSITE_FINGERPRINT.get_or_init(|| Mutex::new(None));
+    let mut last = cache
+        .lock()
+        .map_err(|_| io::Error::other("screenshot freshness cache lock poisoned"))?;
+
+    reject_stale_composite_fingerprint(fingerprint, &mut last)
+}
+
+fn reject_stale_composite_fingerprint(
+    fingerprint: CompositeCaptureFingerprint,
+    last: &mut Option<CompositeCaptureFingerprint>,
+) -> io::Result<()> {
+    if last.as_ref() == Some(&fingerprint) {
+        let payload = stale_screenshot_error_payload(&fingerprint)?;
+        return Err(io::Error::other(payload));
+    }
+
+    *last = Some(fingerprint);
+    Ok(())
+}
+
+fn composite_capture_fingerprint(displays: &[CapturedDisplay]) -> CompositeCaptureFingerprint {
+    CompositeCaptureFingerprint {
+        display_count: displays.len(),
+        display_fingerprints: displays.iter().map(display_capture_fingerprint).collect(),
+    }
+}
+
+fn display_capture_fingerprint(display: &CapturedDisplay) -> DisplayCaptureFingerprint {
+    DisplayCaptureFingerprint {
+        id: display.metadata.id.clone(),
+        backend: display.metadata.backend.as_str(),
+        os_rect: display.metadata.os_rect,
+        native_capture_size: display.metadata.native_capture_size,
+        pixel_hash: rgba_image_hash(&display.image),
+    }
+}
+
+fn rgba_image_hash(image: &RgbaImage) -> u64 {
+    let mut hash = 0xcbf2_9ce4_8422_2325u64;
+    update_fnv1a_u32(&mut hash, image.width());
+    update_fnv1a_u32(&mut hash, image.height());
+    update_fnv1a_bytes(&mut hash, image.as_raw());
+    hash
+}
+
+fn update_fnv1a_u32(hash: &mut u64, value: u32) {
+    update_fnv1a_bytes(hash, &value.to_le_bytes());
+}
+
+fn update_fnv1a_bytes(hash: &mut u64, bytes: &[u8]) {
+    const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+
+    for byte in bytes {
+        *hash ^= u64::from(*byte);
+        *hash = hash.wrapping_mul(FNV_PRIME);
+    }
+}
+
+fn stale_screenshot_error_payload(fingerprint: &CompositeCaptureFingerprint) -> io::Result<String> {
+    #[derive(Serialize)]
+    struct StaleScreenshotError<'a> {
+        kind: &'static str,
+        error_code: &'static str,
+        error: &'static str,
+        guard_policy: &'static str,
+        backend_policy: &'static str,
+        display_count: usize,
+        displays: Vec<StaleDisplayReport<'a>>,
+        recovery_hint: &'static str,
+    }
+
+    #[derive(Serialize)]
+    struct StaleDisplayReport<'a> {
+        id: &'a str,
+        backend: &'a str,
+        os_rect: LogicalRect,
+        native_capture_size: Size,
+        pixel_hash: String,
+    }
+
+    let displays = fingerprint
+        .display_fingerprints
+        .iter()
+        .map(|display| StaleDisplayReport {
+            id: &display.id,
+            backend: display.backend,
+            os_rect: display.os_rect,
+            native_capture_size: display.native_capture_size,
+            pixel_hash: format!("{:016x}", display.pixel_hash),
+        })
+        .collect();
+
+    let report = StaleScreenshotError {
+        kind: "screenshot-stale-frame",
+        error_code: "SCREENSHOT_STALE_FRAME",
+        error: "连续两次 composite screenshot 捕获到完全相同的显示器布局和像素指纹,疑似截图后端返回旧帧",
+        guard_policy: "reject-consecutive-identical-composite-fingerprint",
+        backend_policy: backend_policy_for_current_platform(),
+        display_count: fingerprint.display_count,
+        displays,
+        recovery_hint: "保留现场后检查截图后端状态; 可重启 daemon 验证是否由 long-running capture backend stale 引起",
+    };
+
+    serde_json::to_string(&report)
+        .map_err(|err| io::Error::other(format!("stale screenshot error 序列化失败: {err}")))
 }
 
 fn validate_captured_displays(displays: &[CapturedDisplay]) -> io::Result<()> {
@@ -978,6 +1150,14 @@ fn current_unix_epoch_millis() -> u128 {
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_millis())
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+fn reset_screenshot_freshness_cache_for_tests() {
+    let cache = LAST_COMPOSITE_FINGERPRINT.get_or_init(|| Mutex::new(None));
+    if let Ok(mut last) = cache.lock() {
+        *last = None;
+    }
 }
 
 #[cfg(test)]

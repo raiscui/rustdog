@@ -150,6 +150,22 @@ impl ControlActionExecutor for FakeExecutor {
                     .unwrap_or("query-target")
             )
             .into_bytes(),
+            ControlCommand::WebFind(request) => {
+                format!("WEB_FIND:{}\n", request.limit).into_bytes()
+            }
+            ControlCommand::WebAct(request) => {
+                format!("WEB_ACT:{}:{}\n", request.action.as_str(), request.verify).into_bytes()
+            }
+            ControlCommand::GuiBench(request) => format!(
+                "GUI_BENCH:{}:{}:{}:{}:{}:{}\n",
+                request.suite,
+                request.case_name,
+                request.variant,
+                request.runner.as_str(),
+                request.allow_side_effects,
+                request.write_artifact
+            )
+            .into_bytes(),
             ControlCommand::Bootstrap(request) => {
                 let mode = match request.mode {
                     BootstrapMode::Basic => "basic",
@@ -446,6 +462,152 @@ fn control_receiver_should_execute_gui_bootstrap_window_probe() {
     );
     assert_eq!(value["frames"]["savefile_count"].as_u64(), Some(0));
     assert!(value["trace"].is_null());
+}
+
+#[test]
+fn control_receiver_should_execute_gui_bench_with_real_fixture_runner() {
+    let (mut client, server) = connected_pair();
+    let executor = SystemControlActionExecutor::default();
+    let shell = control_test_shell();
+    let worker =
+        thread::spawn(move || run_control_receiver_with_executor(server, shell, &executor));
+
+    client
+        .write_all(
+            br#"@gui-bench#501:{suite:"computer-use-density",case:"xhs-left-nav-home",variant:"baseline-low-level"}"#,
+        )
+        .expect("should write gui-bench request");
+    client.write_all(b"\n").expect("should finish control line");
+    client
+        .shutdown(Shutdown::Write)
+        .expect("should close write side");
+
+    let mut output = String::new();
+    client
+        .read_to_string(&mut output)
+        .expect("should read gui-bench response");
+
+    worker
+        .join()
+        .expect("worker should not panic")
+        .expect("control receiver should finish");
+
+    let response = latest_response(&output).expect("gui-bench should return @response JSON");
+    assert_eq!(response["id"].as_u64(), Some(501));
+    let value = &response["value"];
+    assert_eq!(value["kind"].as_str(), Some("gui-bench"));
+    assert_eq!(value["schema"].as_str(), Some("rdog.gui-bench.v1"));
+    assert_eq!(value["status"].as_str(), Some("complete"));
+    assert_eq!(value["runner"].as_str(), Some("fixture"));
+    assert_eq!(value["dense_target_passed"].as_bool(), Some(false));
+    assert_eq!(value["metrics"]["backend_request_count"].as_u64(), Some(8));
+    assert!(value["threshold_failures"]
+        .as_array()
+        .expect("threshold_failures should be array")
+        .iter()
+        .any(|failure| failure.as_str() == Some("baseline-low-level:backend_request_count")));
+}
+
+#[test]
+fn control_receiver_should_execute_gui_bench_all_variants() {
+    let (mut client, server) = connected_pair();
+    let executor = SystemControlActionExecutor::default();
+    let shell = control_test_shell();
+    let worker =
+        thread::spawn(move || run_control_receiver_with_executor(server, shell, &executor));
+
+    client
+        .write_all(
+            br#"@gui-bench#502:{suite:"computer-use-density",case:"xhs-left-nav-home",variant:"all"}"#,
+        )
+        .expect("should write gui-bench all request");
+    client.write_all(b"\n").expect("should finish control line");
+    client
+        .shutdown(Shutdown::Write)
+        .expect("should close write side");
+
+    let mut output = String::new();
+    client
+        .read_to_string(&mut output)
+        .expect("should read gui-bench all response");
+
+    worker
+        .join()
+        .expect("worker should not panic")
+        .expect("control receiver should finish");
+
+    let response = latest_response(&output).expect("gui-bench should return @response JSON");
+    assert_eq!(response["id"].as_u64(), Some(502));
+    let value = &response["value"];
+    assert_eq!(value["variant"].as_str(), Some("all"));
+    assert_eq!(value["variant_count"].as_u64(), Some(3));
+    assert_eq!(value["runs"].as_array().unwrap().len(), 3);
+    assert!(value["threshold_failures"]
+        .as_array()
+        .expect("threshold_failures should be array")
+        .iter()
+        .any(|failure| failure.as_str() == Some("baseline-low-level:backend_request_count")));
+}
+
+#[test]
+fn control_receiver_should_write_gui_bench_artifact_for_ci_collection() {
+    let expected_path =
+        Path::new("target/rdog-bench/computer-use-density__xhs-left-nav-home__all.json");
+    let _ = fs::remove_file(expected_path);
+
+    let (mut client, server) = connected_pair();
+    let executor = SystemControlActionExecutor::default();
+    let shell = control_test_shell();
+    let worker =
+        thread::spawn(move || run_control_receiver_with_executor(server, shell, &executor));
+
+    client
+        .write_all(
+            br#"@gui-bench#503:{suite:"computer-use-density",case:"xhs-left-nav-home",variant:"all",write_artifact:true}"#,
+        )
+        .expect("should write gui-bench artifact request");
+    client.write_all(b"\n").expect("should finish control line");
+    client
+        .shutdown(Shutdown::Write)
+        .expect("should close write side");
+
+    let mut output = String::new();
+    client
+        .read_to_string(&mut output)
+        .expect("should read gui-bench artifact response");
+
+    worker
+        .join()
+        .expect("worker should not panic")
+        .expect("control receiver should finish");
+
+    let response = latest_response(&output).expect("gui-bench should return @response JSON");
+    assert_eq!(response["id"].as_u64(), Some(503));
+
+    let value = &response["value"];
+    let artifact_path = value["artifact"]["path"]
+        .as_str()
+        .expect("artifact path should be present");
+    assert_eq!(artifact_path, expected_path.display().to_string());
+
+    let artifact_text =
+        fs::read_to_string(artifact_path).expect("gui-bench artifact should be written");
+    let artifact: serde_json::Value =
+        serde_json::from_str(&artifact_text).expect("artifact should be valid JSON");
+
+    assert_eq!(artifact["schema"].as_str(), Some("rdog.gui-bench.v1"));
+    assert_eq!(artifact["runner"].as_str(), Some("fixture"));
+    assert_eq!(artifact["variant"].as_str(), Some("all"));
+    assert_eq!(artifact["variant_count"].as_u64(), Some(3));
+    assert_eq!(artifact["artifact"]["path"].as_str(), Some(artifact_path));
+    assert_eq!(artifact["runs"].as_array().unwrap().len(), 3);
+    assert!(artifact["threshold_failures"]
+        .as_array()
+        .expect("threshold_failures should be array")
+        .iter()
+        .any(|failure| failure.as_str() == Some("baseline-low-level:backend_request_count")));
+
+    let _ = fs::remove_file(artifact_path);
 }
 
 #[test]

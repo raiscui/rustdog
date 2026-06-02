@@ -121,6 +121,8 @@ flowchart LR
 | AX focus | `@ax-focus#12:{target:{ref:"@e2",observation_id:"obs-..."},activate:true}` | structured AX `@response` | 在不默认动鼠标的前提下聚焦元素或窗口 |
 | AX scroll | `@ax-scroll#13:{target:{ref:"@e2",observation_id:"obs-..."},direction:"down",pages:2}` | structured AX `@response` | 用 AX locator + targeted scroll event 滚动 |
 | type-text | `@type-text#14:{target:{ref:"@e2",observation_id:"obs-..."},text:"hello",mode:"ax-value"}` | structured AX `@response` | 普通文本输入入口,支持 AXValue / targeted keyboard / clipboard |
+| Web find | `@web-find#15:{target:{browser:"active"},match:{text:"首页"}}` / `@web-find#16:{target:{window_id:"pid:96405/window:3"},match:{text:"首页"}}` / `@web-find#17:{target:{window_ref:"@e1",observation_id:"obs-..."},match:{text:"首页"}}` | `rdog.web-find.v1` structured `@response` | 只读定位浏览器页面内 AXWebArea 控件;多浏览器窗口时用 `window_id` 或 fresh `window_ref` 避免 active ambiguity |
+| Web act | `@web-act#18:{target:{window_ref:"@e1",observation_id:"obs-..."},match:{text:"首页"},action:"press",verify:true}` | `rdog.web-act.v1` structured `@response` | 明确允许副作用时,对唯一 page-owned AXPress 目标执行语义点击 |
 | selector get | `@selector-get#20:{selector_id:"sel-v1-..."}` | structured selector `@response` | 查看 stale hint 给出的 stable selector |
 | selector resolve | `@selector-resolve#21:{selector_id:"sel-v1-...",dry_run:true}` | candidate set + fresh observation refs | 只读定位,不执行动作 |
 | selector refind | `@selector-refind#22:{selector_id:"sel-v1-...",policy:"safe",include_explanations:true}` | `rebound` / `needs_disambiguation` / `not_found` / `blocked` decision | stale ref 后做可解释语义恢复,但仍不执行动作 |
@@ -232,6 +234,10 @@ visual section 仍是 virtual desktop screenshot,应返回 `target_applied:false
 - `image`
 - `manifest`
 - `display_count`
+
+如果返回 `kind:"screenshot-stale-frame"` / `error_code:"SCREENSHOT_STALE_FRAME"`,说明 freshness guard 在 `@savefile` 之前终止了请求。
+这不是截图成功,不要复用旧截图文件继续做视觉判断。
+保留响应里的 `guard_policy`、`displays[].pixel_hash`、`backend`、`os_rect` 等字段,下一步分析截图后端为什么返回可疑旧帧。
 
 如果目标是 macOS GUI 自动化,可以显式请求 AX metadata:
 
