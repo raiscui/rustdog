@@ -86,12 +86,44 @@ pub fn run_zenoh_router(
 
     crate::config::validate_zenoh_daemon_profile(&config)?;
 
+    // ------------------------------------------------------------
+    // 把 unixpipe endpoint 注入到 listen_endpoints 列表。
+    // 规则由 `zenoh_runtime::compose_listen_endpoints` 统一管理:
+    // - 用户显式禁 (`unixpipe.enabled = false`) → 不注入
+    // - 用户已经在 listen_endpoints 里显式声明 unixpipe/... → 不覆盖
+    // - 否则用 (namespace, daemon_name) 自动推导 FIFO base 路径并注入到最前
+    // ------------------------------------------------------------
+    let composed_listen_endpoints = crate::zenoh_runtime::compose_listen_endpoints(
+        &config.zenoh,
+        &config.zenoh.namespace,
+        &daemon_name,
+    )?;
+
+    // ------------------------------------------------------------
+    // 清理 stale FIFO 文件,避免 Zenoh listener `mkfifo` EEXIST 启动失败。
+    // unixpipe.enabled = false 时也跳过(本步已经没注入 endpoint)。
+    // ------------------------------------------------------------
+    if config.zenoh.unixpipe.enabled {
+        let base_path = match config.zenoh.unixpipe.socket_path.as_ref() {
+            Some(explicit) => explicit.clone(),
+            None => crate::zenoh_runtime::unixpipe_socket_path(
+                &config.zenoh.namespace,
+                &daemon_name,
+            )?,
+        };
+        crate::zenoh_runtime::cleanup_stale_unixpipe_socket(&base_path)?;
+        log::info!(
+            "zenoh unixpipe fast path 启用: base={}",
+            base_path.display()
+        );
+    }
+
     let shell = default_control_shell();
     crate::zenoh_control::run_router_daemon(
         crate::zenoh_control::ZenohDaemonRuntimeConfig {
             namespace: config.zenoh.namespace,
             daemon_name,
-            listen_endpoints: config.zenoh.listen_endpoints,
+            listen_endpoints: composed_listen_endpoints,
             request_timeout_ms: config.zenoh.request_timeout_ms,
             startup_guard_window_ms: config.zenoh.startup_guard_window_ms,
             key_input_events: config.zenoh.key_input_events,
