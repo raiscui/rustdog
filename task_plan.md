@@ -980,3 +980,22 @@
 
 ### 当前状态
 **收尾验证阶段** - 相关 spec、cookbook 修正和 Phase 0 fixture/test 已落地,正在完成格式、测试和 diff 检查。
+## [2026-06-20 20:50:00] [Session ID: omx-1781788115552-szl2hn] [支线索引]: rdog control macOS 本地 fast path (方向 A: Zenoh unixpipe)
+
+### 启用原因
+- 用户在 macOS 上跑 `rdog daemon -c ./rdog_macos.toml` + `rdog control mac.lab` 觉得慢。
+- 当前 `rdog control` 默认走 Zenoh client session + UDP scout + UDP query/reply,本机 ping 一次 200~500ms。
+- 用户给的方向:走"方向 A - Zenoh unixpipe transport",在 daemon + control 都是本机时,把 Zenoh link 层从 UDP 换成 Unix domain socket,提速 2~5x。
+- 用户在 OMX plan 入口里确认走方向 A,产出可执行 plan,落 `.omx/plans/zenoh-unixpipe-fast-path.md` + `specs/zenoh-unixpipe-fast-path-plan.md`。
+
+### 计划阶段
+- [x] 阶段1: 把 plan 写完,落到 `.omx/plans/zenoh-unixpipe-fast-path.md` 和 `specs/zenoh-unixpipe-fast-path-plan.md`。
+- [x] 阶段2: 在 `Cargo.toml` 启用 `transport_unixpipe` feature,跑 `cargo check` 确认能编译过(zenoh-link-unixpipe 子 crate 会被下载)。
+- [x] 阶段3: 在 `src/zenoh_runtime.rs` / `src/config.rs` 加 unixpipe endpoint 推导和加入 listen_endpoints 的逻辑。
+- [x] 阶段4: 在 `src/zenoh_control.rs` / `src/zenoh_runtime.rs` 让 client 端优先尝试 unixpipe connect,失败再回退 UDP scout(实施时改为 `Path::exists` 检查,理由见 EPIPHANY_LOG)。
+- [x] 阶段5: 写单元测试(23 个新单测)和集成测试(3 个 e2e)。
+- [x] 阶段6: 同步更新 `rdog_macos.toml`(`[zenoh.unixpipe]` 注释段已加);`specs/zenoh-control-plane-plan.md` 同步 TODO 在 LATER_PLANS.md。
+- [x] 阶段7: 跑本地 `@ping` benchmark 验证真实延迟改善(0.02s 10 次稳定),验证证据落 WORKLOG。
+
+### 状态
+**实施完成,等用户验收**。剩余 5 项 follow-up 在 LATER_PLANS.md(主要是 spec / EXPERIENCE / skill 的 doc 同步)。
