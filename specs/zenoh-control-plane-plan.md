@@ -100,6 +100,33 @@ The daemon still must:
 - reply with the same explicit control semantics as today
 - map PTY frames through `session/<id>/to-daemon` and `session/<id>/to-control`, including `@pty-ready`, `@pty-output`, `@pty-exit`, `@pty-closed`, `@pty-detached`, and `@pty-attached`
 
+## Local fast path: unixpipe
+
+macOS / Linux 上同机 `rdog daemon` + `rdog control <target>` 必须自动走 `transport_unixpipe`,
+避免 UDP loopback 上的 Zenoh link 协议栈开销。`rdog control` 客户端的 fast path 行为契约:
+
+1. **路径推导**:base 路径 = `$TMPDIR/rdog-{namespace}-{daemon_name}.pipe`,
+   `$TMPDIR` 不存在时回退 `/tmp`。macOS 上 `$TMPDIR` 是 per-user(例如 `/var/folders/.../T/`),
+   自然提供权限隔离,免 chmod。Linux 上 `$TMPDIR` 不一定存在,直接 `/tmp` 兜底。
+2. **路径长度上限**:base 必须 ≤ 95 字节(`sun_path` 104 字节 - `_downlink` 9 字节后缀)。
+   超过时 daemon 启动 fail-fast。
+3. **client 端 fast path 判定**:`Path::exists` 检查 `<base>_uplink` 是否存在。
+   - **不**主动 open FIFO 探活(那会让 Zenoh request channel 单 reader 复用机制看到 EOF 并破坏 daemon 状态)。
+   - 存在 → 把 `unixpipe/{base}` 作为唯一 connect endpoint 传给 `zenoh::open`。
+   - 不存在 → 走原来的 `autodiscover_router_endpoints` 路径。
+4. **daemon 端**:启用 `unixpipe.enabled = true` 时自动把 `unixpipe/{base}` 注入 `listen_endpoints` 列表最前。
+   启动时调用 `cleanup_stale_unixpipe_socket` unlink `<base>` / `<base>_uplink` / `<base>_downlink`
+   三个残留文件。
+5. **远端 fallback**:Unix 平台用户显式 `unixpipe.enabled = false` 可以关掉;跨主机场景 daemon
+   端 unixpipe 不在另一台机器的 `$TMPDIR` 里,client 端 `Path::exists` 自然返回 false,透明走 UDP scout。
+6. **CLI 不动**:`rdog control <target>` 仍然是无 flag 命令,fast path 对用户透明。
+7. **日志约定**(实施时的实际字符串):
+   - daemon 启动: `info: zenoh unixpipe fast path 启用: base=<path>`
+   - client fast path 触发: `info: unixpipe endpoint detected, taking fast path (path: <path>)`
+   - client fallback: 走原 scout 日志(无 unixpipe 日志)。
+
+详细规格和测试见 `specs/zenoh-unixpipe-fast-path-plan.md`。
+
 ## Configuration contract
 
 ### Daemon router config
