@@ -910,11 +910,13 @@ rdog control mac.lab @ping @capabilities#1 @cmd#7:"printf READY"
 CLI 行为:
 
 - 末尾连续以 `@` 开头的 1..N 个 token 当作 one-shot line 列表,按输入顺序串行执行。
-- N=1 时复用 `--pty-close` / `--pty-detach` 的 `send_single_control_line_*` 管线;
-  N>1 时复用新加的 `send_control_lines_*` 管线:
+  N=1 也是这条管线,跟 N>1 完全等价,不再有 N=1 / N>1 的分叉。
+- 统一复用 `send_control_lines_*` 管线(TCP / WebSocket / Zenoh 三套入口都对应同名函数):
   - 共享同一条 transport(TCP / WebSocket / Zenoh session bridge),不开新连接
   - 走完整 frame 收口循环,能正确处理 `@screenshot` 等 `@savefile` 多 frame 场景
   - 任一 line 失败整组退出,不做行级重试(避免半成功半失败状态)
+- `send_single_control_line_*` 这条独立管线**只**给 `--pty-close` / `--pty-detach` 用,
+  带 retry-on-timeout 旧契约,不要跟 one-shot 入口混用。
 - 与 `--pty` / `--pty-close` / `--pty-detach` / `--pty-attach` 互斥。
 - 多个 `@` token 必须放在 host 末尾连续段,前面位置参数不能以 `@` 开头,否则 main.rs 拒绝。
 - 上限是 `host: num_args = 0..=32`(2 个 target 位置参数 + 30 个 one-shot line),

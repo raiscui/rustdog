@@ -986,35 +986,70 @@ fn control_one_shot_should_reject_at_line_without_target() {
 }
 
 #[test]
-fn control_one_shot_should_reject_two_at_lines() {
-    // 多个以 `@` 开头 trailing tokens,main.rs 会拒绝。
+fn control_one_shot_should_accept_two_at_lines_and_run_in_order_for_tcp_lane() {
+    // 2 个 `@` line 必须被 clap `num_args = 0..=32` 接受,
+    // 走和 N=1 / N>1 一样的 `send_control_lines_tcp` → `run_line_control_lines` 路径,
+    // 共享同一条 TCP 连接,顺序串行执行。这条用例锁住 one-shot N=1 / N>1 已经统一
+    // 走 `send_control_lines_*` 这条契约,不让 spec / test 再退回老设计。
+    let port = next_free_port();
     let binary = rdog_binary_path();
+    let mut daemon = Command::new(&binary)
+        .arg("daemon")
+        .env("RDOG_OUTBOUND__ENABLED", "false")
+        .env("RDOG_INBOUND__ENABLED", "true")
+        .env("RDOG_INBOUND__HOST", "127.0.0.1")
+        .env("RDOG_INBOUND__PORT", port.to_string())
+        .env("RDOG_INBOUND__SHELL", "/bin/sh")
+        .env("RDOG_INBOUND__MODE", "control")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("daemon should start");
+
+    assert!(
+        wait_until_port_is_busy(&mut daemon, port, Duration::from_secs(3)),
+        "daemon control lane never started listening on port {port}",
+    );
+
+    // 一次发 2 条 line,共享同一条 TCP 连接,顺序串行
     let output = Command::new(&binary)
-        .args(["control", "127.0.0.1", "5555", "@ping", "@capabilities"])
+        .args([
+            "control",
+            "127.0.0.1",
+            &port.to_string(),
+            "@ping",
+            "@capabilities#1",
+        ])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .output()
         .expect("control sender should run to completion");
 
-    let combined = format!(
-        "{}{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
 
     assert!(
-        !output.status.success(),
-        "control one-shot with 2 `@` lines should fail at clap level"
+        output.status.success(),
+        "control 2 `@` lines should be accepted and exit 0; stderr={}",
+        String::from_utf8_lossy(&output.stderr)
     );
-    // 4 个位置参数触发 clap `num_args = 0..=3` 拒绝,错误信息可能略有不同。
+    // 两条响应都在,且顺序为 1) ping 2) capabilities#1
+    let pong_pos = stdout
+        .find(r#"@response "pong""#)
+        .expect("pong should appear");
+    let caps_pos = stdout
+        .find(r#"@response {"id":1,"value":{"capabilities""#)
+        .expect("capabilities id=1 should appear");
     assert!(
-        combined.contains("unexpected argument")
-            || combined.contains("takes from 0 to 3 values")
-            || combined.contains("错误")
-            || combined.contains("error"),
-        "stdout+stderr should explain extra positional, got: {combined}"
+        pong_pos < caps_pos,
+        "responses should appear in input order; stdout={stdout}"
     );
+
+    daemon
+        .kill()
+        .expect("daemon should stop after test cleanup");
+    let _ = daemon.wait();
 }
 
 #[test]

@@ -525,10 +525,12 @@ pub fn run_client_pty_attach(
 ///
 /// 用法: `send_control_lines(namespace, target_name, router_entrypoints, timeout, &lines)`
 /// 一次性发一组 line,共享同一条 session,任一行失败整组退出。
-/// 单 line 形式 `send_single_control_line` 是它的 1-行 特例。
+/// 这是 `rdog control <target> @<line> [@<line> ...]` one-shot 入口的主路径;
+/// N=1 也走这条,N=1 / N>1 完全等价,不再有 N=1 / N>1 的分叉。
 ///
-/// 失败语义: 任一行 execute_remote_request 报错立即返回,不重试单行(避免半成功半失败
-/// 状态对 agent 不友好)。retry 行为只发生在 `send_single_control_line` 那条原有路径。
+/// `send_single_control_line` 是**独立**的单帧入口,只给 `--pty-close` / `--pty-detach` 用,
+/// 保留 retry-on-timeout 旧契约。两条管线不能合并:retry 在多 line 批量里会导致
+/// 前面已成功的 line 被重复执行,产生半成功半失败状态对 agent 不友好。
 pub fn send_control_lines(
     namespace: Option<String>,
     target_name: Option<String>,
