@@ -14,6 +14,14 @@ use zenoh::config::EndPoint;
 use crate::control_transport::ControlTransportKind;
 
 const DEFAULT_CONFIG_FILE_NAME: &str = "rdog.toml";
+
+/// unixpipe socket 路径总长上限(单位:字节)。
+///
+/// macOS 的 `sun_path` 限制是 104 字节。
+/// 我们留 4 字节给末尾 NUL + 拼装容差,把所有"自动推导"和"显式覆盖"路径都卡在 100 字节以内。
+/// 超过时 daemon 启动 fail-fast,避免运行时 bind 报 ENAMETOOLONG。
+pub(crate) const UNIXPIPE_SOCKET_PATH_MAX_BYTES: usize = 100;
+
 const LEGACY_CONFIG_FILE_NAME: &str = "rcat.toml";
 const WINDOWS_CONFIG_FILE_NAME: &str = "rdog_win.toml";
 const MACOS_CONFIG_FILE_NAME: &str = "rdog_macos.toml";
@@ -108,6 +116,10 @@ pub struct ZenohConfig {
     pub request_timeout_ms: u64,
     pub startup_guard_window_ms: u64,
     pub key_input_events: KeyInputEventsConfig,
+    /// 本机 fast path 的 unixpipe 配置。
+    /// macOS / Linux 默认 `enabled = true`,Windows 编译期强制 `false`。
+    /// 客户端可以借此走 Unix domain socket,避免 UDP loopback 的协议开销。
+    pub unixpipe: UnixpipeConfig,
 }
 
 /// `@key` 成功执行后,对外发布 Zenoh 键盘事件的配置。
@@ -117,6 +129,25 @@ pub struct KeyInputEventsConfig {
     pub enabled: bool,
     #[serde(alias = "key_expr")]
     pub keyexpr: String,
+}
+
+/// 本机 fast path 的 unixpipe 配置。
+///
+/// `enabled = true` 时,daemon 会按 (namespace, daemon_name) 推导一条 Unix domain socket
+/// 路径,加入 zenoh listen_endpoints。客户端优先尝试 unixpipe connect,失败再回退 UDP scout。
+///
+/// 注意:Windows 上 `enabled` 在编译期被强制为 `false`,运行时不可改。
+/// 不用 `#[derive(Default)]` 是因为 unix / windows 平台 `enabled` 默认值不同,
+/// 需要两个 `impl Default` 走 `#[cfg(unix)]` / `#[cfg(windows)]` 分支。
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct UnixpipeConfig {
+    /// 是否启用 unixpipe endpoint。
+    /// macOS / Linux 默认 `true`,Windows 默认 `false`(编译期强制)。
+    pub enabled: bool,
+    /// 显式覆盖 socket 路径。None = 按 (namespace, daemon_name) 自动推导 `$TMPDIR/rdog-{ns}-{name}.sock`。
+    /// 显式给的路径在配置校验时必须满足 `sun_path` 长度上限(<= 100 字节)。
+    pub socket_path: Option<PathBuf>,
 }
 
 /// daemon 端点的会话模式。
@@ -177,6 +208,7 @@ impl Default for ZenohConfig {
             request_timeout_ms: 3_000,
             startup_guard_window_ms: 1_000,
             key_input_events: KeyInputEventsConfig::default(),
+            unixpipe: UnixpipeConfig::default(),
         }
     }
 }
@@ -186,6 +218,26 @@ impl Default for KeyInputEventsConfig {
         Self {
             enabled: false,
             keyexpr: String::new(),
+        }
+    }
+}
+
+#[cfg(unix)]
+impl Default for UnixpipeConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            socket_path: None,
+        }
+    }
+}
+
+#[cfg(windows)]
+impl Default for UnixpipeConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            socket_path: None,
         }
     }
 }
@@ -527,6 +579,35 @@ fn validate_zenoh_config(config: &ZenohConfig, tcp_endpoints_enabled: bool) -> i
         return Err(io::Error::new(
             ErrorKind::InvalidInput,
             "router profile 至少需要一个非 serial 的 listen endpoint,供 `rdog control` 自动发现并加入网络（`--entry-point` 仅作 fallback）",
+        ));
+    }
+
+    validate_unixpipe_config(&config.unixpipe)?;
+
+    Ok(())
+}
+
+fn validate_unixpipe_config(config: &UnixpipeConfig) -> io::Result<()> {
+    let Some(path) = config.socket_path.as_ref() else {
+        return Ok(());
+    };
+
+    let path_str = path.as_os_str();
+    if path_str.is_empty() {
+        return Err(io::Error::new(
+            ErrorKind::InvalidInput,
+            "zenoh.unixpipe.socket_path 不能为空字符串",
+        ));
+    }
+
+    if path_str.len() > UNIXPIPE_SOCKET_PATH_MAX_BYTES {
+        return Err(io::Error::new(
+            ErrorKind::InvalidInput,
+            format!(
+                "zenoh.unixpipe.socket_path 太长: {} 字节,上限 {} 字节(macOS sun_path 限制 104 字节,Zenoh unixpipe 会派生 _uplink/_downlink FIFO,留 9 字节容差)",
+                path_str.len(),
+                UNIXPIPE_SOCKET_PATH_MAX_BYTES
+            ),
         ));
     }
 
@@ -1113,6 +1194,69 @@ shell = "/bin/bash"
                 assert!(err.to_string().contains("keyexpr 非法"));
                 Ok(())
             });
+        }
+
+        #[test]
+        fn unixpipe_default_should_match_platform_expectation() {
+            // macOS / Linux 上 UnixpipeConfig::default().enabled 必须为 true,
+            // Windows 上必须为 false。Windows 编译期 `impl Default` 与 unix 不互通,
+            // 跨平台 default 值差异是产品契约,本测试锁住。
+            #[cfg(unix)]
+            {
+                let cfg = UnixpipeConfig::default();
+                assert!(cfg.enabled, "unix 平台 default 应该启用 unixpipe fast path");
+                assert!(cfg.socket_path.is_none(), "未显式给路径时 socket_path 必须为 None");
+            }
+            #[cfg(windows)]
+            {
+                let cfg = UnixpipeConfig::default();
+                assert!(!cfg.enabled, "Windows 平台 default 必须禁用 unixpipe");
+                assert!(cfg.socket_path.is_none());
+            }
+        }
+
+        #[test]
+        fn zenoh_config_default_should_include_unixpipe_field() {
+            // 防止新增字段后忘记在 ZenohConfig::default() 初始化,造成 toml 反序列化缺字段
+            // 时静默走错默认值。
+            let cfg = ZenohConfig::default();
+            // socket_path 在 default 下必然 None。
+            assert!(cfg.unixpipe.socket_path.is_none());
+            // enabled 跟平台走(已由 unixpipe_default_should_match_platform_expectation 锁住)。
+            #[cfg(unix)]
+            assert!(cfg.unixpipe.enabled);
+            #[cfg(windows)]
+            assert!(!cfg.unixpipe.enabled);
+        }
+
+        #[test]
+        fn validate_unixpipe_config_should_reject_oversized_socket_path() {
+            // 101 字节的 path 必须被拒绝(> 100 字节上限)。
+            let oversized: String = std::iter::repeat('a').take(101).collect();
+            let mut cfg = UnixpipeConfig::default();
+            cfg.socket_path = Some(PathBuf::from(oversized));
+
+            let err = validate_unixpipe_config(&cfg).unwrap_err();
+            assert_eq!(err.kind(), ErrorKind::InvalidInput);
+            assert!(err.to_string().contains("zenoh.unixpipe.socket_path 太长"));
+            assert!(err.to_string().contains("101 字节"));
+        }
+
+        #[test]
+        fn validate_unixpipe_config_should_accept_under_limit_socket_path() {
+            // 100 字节正好踩上限,必须能通过(> 100 才会 fail)。
+            let at_limit: String = std::iter::repeat('a').take(100).collect();
+            let mut cfg = UnixpipeConfig::default();
+            cfg.socket_path = Some(PathBuf::from(at_limit));
+
+            validate_unixpipe_config(&cfg).expect("100 字节应该通过");
+        }
+
+        #[test]
+        fn validate_unixpipe_config_should_skip_when_socket_path_is_none() {
+            // socket_path == None 时,enabled 与否都应当直接通过(socket 路径由 daemon 端自动推导)。
+            let cfg = UnixpipeConfig::default();
+            validate_unixpipe_config(&cfg).expect("socket_path=None 时必须通过");
         }
     }
 
