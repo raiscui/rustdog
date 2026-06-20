@@ -521,6 +521,83 @@ pub fn run_client_pty_attach(
     run_client_pty_attach_over_session_bridge_owned(session_bridge, attach_line, true)
 }
 
+/// 一组 line-control 请求复用同一条 Zenoh session bridge 串行执行。
+///
+/// 用法: `send_control_lines(namespace, target_name, router_entrypoints, timeout, &lines)`
+/// 一次性发一组 line,共享同一条 session,任一行失败整组退出。
+/// 单 line 形式 `send_single_control_line` 是它的 1-行 特例。
+///
+/// 失败语义: 任一行 execute_remote_request 报错立即返回,不重试单行(避免半成功半失败
+/// 状态对 agent 不友好)。retry 行为只发生在 `send_single_control_line` 那条原有路径。
+pub fn send_control_lines(
+    namespace: Option<String>,
+    target_name: Option<String>,
+    router_entrypoints: Vec<String>,
+    request_timeout_ms: u64,
+    lines: &[String],
+) -> io::Result<()> {
+    if lines.is_empty() {
+        return Ok(());
+    }
+    let namespace =
+        crate::zenoh_identity::resolve_namespace(namespace.as_deref(), target_name.as_deref())?;
+    let router_entrypoints = zenoh_runtime::resolve_client_connect_endpoints(
+        &router_entrypoints,
+        Duration::from_millis(request_timeout_ms),
+    )?;
+    let session = zenoh_runtime::open_client_session(&router_entrypoints)?;
+    let current_target = resolve_target(
+        &session,
+        &namespace,
+        target_name.as_deref(),
+        Duration::from_millis(request_timeout_ms),
+    )?;
+    let mut session_bridge = build_client_session_bridge(
+        &session,
+        &current_target.keyexpr_root,
+        &namespace,
+        &current_target.control_key,
+        Duration::from_millis(request_timeout_ms),
+    )?;
+    let save_dir = default_savefile_directory()?;
+    let display = ControlResponseDisplay::from_stdio();
+    let timeout = Duration::from_millis(request_timeout_ms);
+
+    let mut result: io::Result<()> = Ok(());
+    for (idx, line) in lines.iter().enumerate() {
+        match execute_remote_request(
+            &session,
+            &current_target.control_key,
+            line,
+            timeout,
+            &mut session_bridge,
+        ) {
+            Ok(response) => {
+                if let Err(err) = handle_reply_payload(response.as_str(), &save_dir, display) {
+                    result = Err(err);
+                    break;
+                }
+            }
+            Err(err) => {
+                log::warn!(
+                    "zenoh control multi-line request failed at line index {idx} (line={line}): {err}"
+                );
+                result = Err(err);
+                break;
+            }
+        }
+    }
+
+    // best-effort close: 上面 `result` 已经是请求侧结果,关闭失败不掩盖它
+    let _ = close_client_session_bridge(&mut session_bridge);
+
+    result
+}
+
+/// 单行 line-control 入口,保留 retry-on-timeout 行为不变(用于 `--pty-close` 风格调用)。
+///
+/// 内部委托给 `send_control_lines` + `[line.to_string()]`,但额外保留 `execute_remote_request_with_retry_on_timeout`
+/// 旧的 retry-on-timeout 行为,避免改动既有 PTY 关闭/分离的稳定契约。
 pub fn send_single_control_line(
     namespace: Option<String>,
     target_name: Option<String>,

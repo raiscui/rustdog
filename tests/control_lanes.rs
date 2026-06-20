@@ -96,28 +96,6 @@ fn spawn_output_collector(
     (buffer, handle)
 }
 
-fn wait_until_output_contains(
-    buffer: &Arc<Mutex<String>>,
-    needle: &str,
-    timeout: Duration,
-) -> bool {
-    let deadline = Instant::now() + timeout;
-
-    while Instant::now() < deadline {
-        if buffer
-            .lock()
-            .expect("buffer lock should work")
-            .contains(needle)
-        {
-            return true;
-        }
-
-        thread::sleep(Duration::from_millis(20));
-    }
-
-    false
-}
-
 fn key_request_response_is_acceptable(stdout: &str) -> bool {
     if stdout.contains(r#"@response {"id":7,"value":0}"#) {
         return true;
@@ -741,8 +719,12 @@ fn listen_local_interactive_should_reach_connect_control_lane() {
     let mut listener = Command::new(&binary)
         .args(["listen", "--local-interactive", &port.to_string()])
         .stdin(Stdio::piped())
+        // 两个 stream 都要 pipe:
+        // - stdout 收 `pipe_thread(stream → stdout())` 转发的 `@response` 帧
+        // - stderr 收 init_logger 的 `info:` / `warn:` 等日志(包括 "Connection Received")
+        //   (2026-06-19 init_logger 切到 stderr 之前这些日志是走 stdout 的)
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .spawn()
         .expect("listener should start");
 
@@ -771,16 +753,45 @@ fn listen_local_interactive_should_reach_connect_control_lane() {
         .stdout
         .take()
         .expect("listener stdout pipe should exist");
-    let (output_buffer, output_thread) = spawn_output_collector(listener_stdout);
+    let listener_stderr = listener
+        .stderr
+        .take()
+        .expect("listener stderr pipe should exist");
+    let (stdout_buffer, stdout_thread) = spawn_output_collector(listener_stdout);
+    let (stderr_buffer, stderr_thread) = spawn_output_collector(listener_stderr);
+    // listener 把连接返回的 `@response` 帧从 socket 转发到 stdout
+    // (见 listener/mod.rs::Mode::LocalInteractive 里的 pipe_thread),
+    // 而 init_logger 的 "Connection Received" 走 stderr。
+    // 合并两个 buffer 方便后续断言。
+    let combined_output = move || {
+        format!(
+            "{}{}",
+            stdout_buffer.lock().expect("stdout lock").clone(),
+            stderr_buffer.lock().expect("stderr lock").clone()
+        )
+    };
+    fn wait_until_combined_contains<F>(combined: &F, needle: &str, timeout: Duration) -> bool
+    where
+        F: Fn() -> String,
+    {
+        let deadline = Instant::now() + timeout;
+        while Instant::now() < deadline {
+            if combined().contains(needle) {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        false
+    }
 
     assert!(
-        wait_until_output_contains(
-            &output_buffer,
+        wait_until_combined_contains(
+            &combined_output,
             "Connection Received",
             Duration::from_secs(5)
         ),
         "listener never reported Connection Received. output so far:\n{}",
-        output_buffer.lock().expect("buffer lock should work"),
+        combined_output(),
     );
 
     listener
@@ -800,13 +811,13 @@ fn listen_local_interactive_should_reach_connect_control_lane() {
         .expect("listener stdin should flush");
 
     assert!(
-        wait_until_output_contains(
-            &output_buffer,
+        wait_until_combined_contains(
+            &combined_output,
             r#"@response "LISTEN_OK""#,
-            Duration::from_secs(5)
+            Duration::from_secs(5),
         ),
         "listener never printed control return payload. output so far:\n{}",
-        output_buffer.lock().expect("buffer lock should work"),
+        combined_output(),
     );
 
     drop(listener.stdin.take());
@@ -817,13 +828,13 @@ fn listen_local_interactive_should_reach_connect_control_lane() {
     let connector_status = connector
         .wait()
         .expect("connect control receiver should exit after socket close");
-    output_thread
+    stdout_thread
         .join()
-        .expect("output collection should not panic");
-    let output = output_buffer
-        .lock()
-        .expect("buffer lock should work")
-        .clone();
+        .expect("stdout collection should not panic");
+    stderr_thread
+        .join()
+        .expect("stderr collection should not panic");
+    let output = combined_output();
 
     assert!(
         listener_status.success(),
@@ -836,5 +847,324 @@ fn listen_local_interactive_should_reach_connect_control_lane() {
     assert!(
         output.contains(r#"@response "LISTEN_OK""#),
         "listener output never contained control return payload: {output}",
+    );
+}
+
+// =====================================================================
+// one-shot CLI 入口 e2e: `rdog control <target> @<line>` 这种无状态形式
+// 替代 `printf '@<line>\n' | rdog control <target>` 的常见组合。
+// =====================================================================
+
+#[test]
+fn control_one_shot_should_send_ping_and_exit_for_tcp_lane() {
+    let port = next_free_port();
+    let binary = rdog_binary_path();
+    let mut daemon = Command::new(&binary)
+        .arg("daemon")
+        .env("RDOG_OUTBOUND__ENABLED", "false")
+        .env("RDOG_INBOUND__ENABLED", "true")
+        .env("RDOG_INBOUND__HOST", "127.0.0.1")
+        .env("RDOG_INBOUND__PORT", port.to_string())
+        .env("RDOG_INBOUND__SHELL", "/bin/sh")
+        .env("RDOG_INBOUND__MODE", "control")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("daemon should start");
+
+    assert!(
+        wait_until_port_is_busy(&mut daemon, port, Duration::from_secs(3)),
+        "daemon control lane never started listening on port {port}",
+    );
+
+    // 关键变化: `rdog control 127.0.0.1 <port> @ping` 一行结束,
+    // 不再需要 `printf '@ping\n' | rdog control ...`。
+    let output = Command::new(&binary)
+        .args(["control", "127.0.0.1", &port.to_string(), "@ping"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .expect("control sender should run to completion");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert!(
+        output.status.success(),
+        "control one-shot should exit 0; stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        stdout.contains(r#"@response "pong""#),
+        "stdout did not contain @response pong: {stdout}"
+    );
+
+    daemon
+        .kill()
+        .expect("daemon should stop after test cleanup");
+    let _ = daemon.wait();
+}
+
+#[test]
+fn control_one_shot_should_send_ping_with_request_id() {
+    let port = next_free_port();
+    let binary = rdog_binary_path();
+    let mut daemon = Command::new(&binary)
+        .arg("daemon")
+        .env("RDOG_OUTBOUND__ENABLED", "false")
+        .env("RDOG_INBOUND__ENABLED", "true")
+        .env("RDOG_INBOUND__HOST", "127.0.0.1")
+        .env("RDOG_INBOUND__PORT", port.to_string())
+        .env("RDOG_INBOUND__SHELL", "/bin/sh")
+        .env("RDOG_INBOUND__MODE", "control")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("daemon should start");
+
+    assert!(
+        wait_until_port_is_busy(&mut daemon, port, Duration::from_secs(3)),
+        "daemon control lane never started listening on port {port}",
+    );
+
+    let output = Command::new(&binary)
+        .args(["control", "127.0.0.1", &port.to_string(), "@ping#7"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .expect("control sender should run to completion");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert!(
+        output.status.success(),
+        "control one-shot should exit 0; stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        stdout.contains(r#"@response {"id":7,"value":"pong"}"#),
+        "stdout did not contain id=7 pong response: {stdout}"
+    );
+
+    daemon
+        .kill()
+        .expect("daemon should stop after test cleanup");
+    let _ = daemon.wait();
+}
+
+#[test]
+fn control_one_shot_should_reject_at_line_without_target() {
+    // 没有 target 但给了 one-shot line,应该报错并退出非 0。
+    // 注: rdog 的错误日志当前默认走 stdout,所以既要检查 exit code
+    // 也要在 stdout 里确认错误文案,不要假设错误一定在 stderr。
+    let binary = rdog_binary_path();
+    let output = Command::new(&binary)
+        .args(["control", "@ping"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .expect("control sender should run to completion");
+
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    assert!(
+        !output.status.success(),
+        "control one-shot without target should fail"
+    );
+    assert!(
+        combined.contains("one-shot line 需要 control 目标"),
+        "stdout+stderr should explain missing target, got: {combined}"
+    );
+}
+
+#[test]
+fn control_one_shot_should_reject_two_at_lines() {
+    // 多个以 `@` 开头 trailing tokens,main.rs 会拒绝。
+    let binary = rdog_binary_path();
+    let output = Command::new(&binary)
+        .args(["control", "127.0.0.1", "5555", "@ping", "@capabilities"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .expect("control sender should run to completion");
+
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    assert!(
+        !output.status.success(),
+        "control one-shot with 2 `@` lines should fail at clap level"
+    );
+    // 4 个位置参数触发 clap `num_args = 0..=3` 拒绝,错误信息可能略有不同。
+    assert!(
+        combined.contains("unexpected argument")
+            || combined.contains("takes from 0 to 3 values")
+            || combined.contains("错误")
+            || combined.contains("error"),
+        "stdout+stderr should explain extra positional, got: {combined}"
+    );
+}
+
+#[test]
+fn control_multi_one_shot_should_run_lines_in_order_for_tcp_lane() {
+    let port = next_free_port();
+    let binary = rdog_binary_path();
+    let mut daemon = Command::new(&binary)
+        .arg("daemon")
+        .env("RDOG_OUTBOUND__ENABLED", "false")
+        .env("RDOG_INBOUND__ENABLED", "true")
+        .env("RDOG_INBOUND__HOST", "127.0.0.1")
+        .env("RDOG_INBOUND__PORT", port.to_string())
+        .env("RDOG_INBOUND__SHELL", "/bin/sh")
+        .env("RDOG_INBOUND__MODE", "control")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("daemon should start");
+
+    assert!(
+        wait_until_port_is_busy(&mut daemon, port, Duration::from_secs(3)),
+        "daemon control lane never started listening on port {port}",
+    );
+
+    // 一次发 3 条 line,共享同一条 TCP 连接,顺序串行
+    let output = Command::new(&binary)
+        .args([
+            "control",
+            "127.0.0.1",
+            &port.to_string(),
+            "@ping",
+            "@capabilities#1",
+            r#"@cmd#7:"printf READY""#,
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .expect("control sender should run to completion");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert!(
+        output.status.success(),
+        "control multi one-shot should exit 0; stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    // 三条响应都在,且顺序为 1) ping 2) capabilities 3) cmd#7 READY
+    let pong_pos = stdout
+        .find(r#"@response "pong""#)
+        .expect("pong should appear");
+    let caps_pos = stdout
+        .find(r#"@response {"id":1,"value":{"capabilities""#)
+        .expect("capabilities id=1 should appear");
+    let ready_pos = stdout
+        .find(r#"@response {"id":7,"value":"READY""#)
+        .expect("cmd#7 READY should appear");
+    assert!(
+        pong_pos < caps_pos && caps_pos < ready_pos,
+        "responses should appear in input order; stdout={stdout}"
+    );
+
+    daemon
+        .kill()
+        .expect("daemon should stop after test cleanup");
+    let _ = daemon.wait();
+}
+
+#[test]
+fn control_multi_one_shot_should_run_with_one_line_for_tcp_lane() {
+    // 1 line 的多 line 形式应该等价于单 line one-shot
+    let port = next_free_port();
+    let binary = rdog_binary_path();
+    let mut daemon = Command::new(&binary)
+        .arg("daemon")
+        .env("RDOG_OUTBOUND__ENABLED", "false")
+        .env("RDOG_INBOUND__ENABLED", "true")
+        .env("RDOG_INBOUND__HOST", "127.0.0.1")
+        .env("RDOG_INBOUND__PORT", port.to_string())
+        .env("RDOG_INBOUND__SHELL", "/bin/sh")
+        .env("RDOG_INBOUND__MODE", "control")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("daemon should start");
+
+    assert!(
+        wait_until_port_is_busy(&mut daemon, port, Duration::from_secs(3)),
+        "daemon control lane never started listening on port {port}",
+    );
+
+    let output = Command::new(&binary)
+        .args(["control", "127.0.0.1", &port.to_string(), "@ping"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .expect("control sender should run to completion");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert!(
+        output.status.success(),
+        "control 1-line multi-form should exit 0; stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        stdout.contains(r#"@response "pong""#),
+        "stdout did not contain pong: {stdout}"
+    );
+
+    daemon
+        .kill()
+        .expect("daemon should stop after test cleanup");
+    let _ = daemon.wait();
+}
+
+#[test]
+fn control_multi_one_shot_should_reject_at_line_in_middle_of_host() {
+    // 中间夹 `@` 应当被 main.rs 拒绝
+    let binary = rdog_binary_path();
+    let output = Command::new(&binary)
+        .args([
+            "control",
+            "127.0.0.1",
+            "5555",
+            "@ping",
+            "extra",
+            "@capabilities",
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .expect("control sender should run to completion");
+
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    assert!(
+        !output.status.success(),
+        "control with @ in middle of host should fail"
+    );
+    assert!(
+        combined.contains("前面位置参数不应以 `@` 开头") || combined.contains("前面位置参数不应以"),
+        "stderr+stdout should explain trailing-only @ rule, got: {combined}"
     );
 }

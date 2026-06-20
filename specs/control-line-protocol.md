@@ -888,6 +888,43 @@ rdog control 127.0.0.1 5555
 
 然后持续输入请求。
 
+### 想要无状态单发命令(one-shot CLI 入口)
+
+如果只是临时发一条或多条 line-control 请求、不想保留 stdin 桥接,
+直接拼接 target 和 `@<line>` 即可,不需要 `printf ... | rdog control ...`:
+
+```text
+rdog control mac.lab @ping
+rdog control mac.lab @capabilities#1
+rdog control 127.0.0.1 5555 @ping
+rdog control --url ws://127.0.0.1:5555/control @ping
+rdog control --target-name mac.lab @observe#1:{mode:"hybrid",include_ax:true}
+```
+
+单 line 形式就是多 line 形式 N=1 的特例,共享同一条 transport:
+
+```text
+rdog control mac.lab @ping @capabilities#1 @cmd#7:"printf READY"
+```
+
+CLI 行为:
+
+- 末尾连续以 `@` 开头的 1..N 个 token 当作 one-shot line 列表,按输入顺序串行执行。
+- N=1 时复用 `--pty-close` / `--pty-detach` 的 `send_single_control_line_*` 管线;
+  N>1 时复用新加的 `send_control_lines_*` 管线:
+  - 共享同一条 transport(TCP / WebSocket / Zenoh session bridge),不开新连接
+  - 走完整 frame 收口循环,能正确处理 `@screenshot` 等 `@savefile` 多 frame 场景
+  - 任一 line 失败整组退出,不做行级重试(避免半成功半失败状态)
+- 与 `--pty` / `--pty-close` / `--pty-detach` / `--pty-attach` 互斥。
+- 多个 `@` token 必须放在 host 末尾连续段,前面位置参数不能以 `@` 开头,否则 main.rs 拒绝。
+- 上限是 `host: num_args = 0..=32`(2 个 target 位置参数 + 30 个 one-shot line),
+  覆盖典型 GUI 任务 preflight + action 序列;再大就该走 stdin 形式。
+- 不修改 line-control 协议本身;只是把 "先发 N 行,等收口,退出" 暴露成 CLI 显式入口。
+
+这条路径存在的意义不是取代 stdin streaming,
+而是把 `printf '@ping\n' | rdog control TARGET` 这种"必须借助 shell 才能拼出
+一行"的心智负担降下来,让 code agent 和人类都能用更短、更确定的方式发请求。
+
 ### 想要稳定请求-响应关联
 
 优先使用显式协议请求:
@@ -896,6 +933,13 @@ rdog control 127.0.0.1 5555
 @cmd#42:"printf READY"
 @key#7:"right-option"
 @ping#1
+```
+
+也直接可以用 one-shot 入口带上 id:
+
+```text
+rdog control mac.lab @ping#1
+rdog control mac.lab @cmd#42:"printf READY"
 ```
 
 ### 想保留终端式 shell 体验
