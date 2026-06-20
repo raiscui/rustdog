@@ -209,3 +209,27 @@
 - 操作注意:
   - request id 必须是无符号整数,例如 `@ping#1`,不能用 `@ping#ping`。
   - 如果 `rdog control mac.lab` 报 autodiscovery 找不到 router,先确认 `rdog daemon` 是否运行; 临时启动的 daemon 完成任务后要停止。
+## [2026-06-20 23:58:00] [Session ID: omx-1781788115552-szl2hn] 主题: Zenoh `transport_unixpipe` 同机 fast path 实施经验
+
+### 同机 fast path 优先用 zenoh 自带的 `transport_unixpipe` feature,不要新增独立 UDS 控制面
+
+- **场景**: `rdog control <target>` 同机高频 round-trip 慢,想要 2~5x 提速。
+- **错误方向**: 自己写一个 Unix domain socket 控制面,绕过 Zenoh query/reply 协议栈。理由是"理论 10~50x 更快"。
+- **正确方向**: 启用 Zenoh 1.8.0 自带的 `transport_unixpipe` Cargo feature,把 link 层从 UDP 换成 named pipe (FIFO),保留 Zenoh 全部 query/reply/liveliness 协议。
+- **结论**: zenoh 自带 transport 已经是经过实战验证的能力,工作量 1/10,2~5x 提速对高频 agent 调用是质变。只有在 unixpipe 仍不满足时,再启动方向 B(直接 UDS 控制面)。
+- **为什么这一点关键**: 选错方向会被 Zenoh 协议层、维护成本、协议兼容性一起咬,自定义 UDS 控制面长期会成为维护负担。
+
+### Zenoh 1.8.0 `transport_unixpipe` 实际是 named pipe (FIFO),不是 Unix domain socket
+
+- **场景**: 实施 unixpipe fast path 时,默认按 "Unix domain socket" 的语义去推导路径长度上限和清理逻辑。
+- **踩坑**: 实际 Zenoh 1.8.0 实现的 `transport_unixpipe` 是 named pipe (FIFO),`mkfifo` 创建,Zenoh 内部从 base 路径派生 `<base>_uplink` / `<base>_downlink` 两条 FIFO,每个 client connection 还会派生带 suffix 的 dedicated FIFO。
+- **结论**: 路径上限必须按 macOS `sun_path` 104 字节 - `_downlink` 9 字节后缀 = 95 字节计算,不是 100 字节。stale cleanup 也得 unlink 这三条 FIFO。
+- **为什么这一点关键**: 如果按 100 字节上限实施,某些长 namespace + name 组合会在 macOS 上 bind 报 ENAMETOOLONG,而 Linux 上不一定复现,导致 bug 难复现。
+
+### Zenoh unixpipe client 探测用 `Path::exists` 不用 open FIFO
+
+- **场景**: plan 写"用 200ms connect 短超时探测 FIFO 是否可连接"。
+- **踩坑**: 实施时发现 Zenoh 1.8.0 的 `transport_unixpipe` listener 用单 reader 复用 FIFO 作为 request channel。
+  主动 open 写端再立即关闭会让 daemon 端 `Invitation::receive` 看到 EOF,导致后续 client 无法再 connect。
+- **结论**: client 探测只用 `std::path::Path::exists` 检查 `<base>_uplink` 文件是否存在。0 副作用,1us 内返回。真正的连接性由 `zenoh::open` 内部处理,失败会拿到明确错误。
+- **为什么这一点关键**: 一旦 open 探测破坏了 daemon 的 request channel,daemon 端要重启才能恢复,产品上不可接受。

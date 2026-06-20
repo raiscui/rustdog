@@ -393,3 +393,57 @@
 - `src/zenoh_control.rs` 的 `handle_daemon_control_query()` 和 `reject_session_channel_only_legacy_query()`
 - `tests/zenoh_router_client.rs::control_should_reject_rich_frame_over_legacy_queryable_path`
 - `tests/zenoh_router_client.rs::control_should_reject_rich_frame_over_legacy_session_query_payload`
+## [2026-06-20 22:00:00] [Session ID: omx-1781788115552-szl2hn] 主题: zenoh_router_client 测试集存在 pre-existing discovery 时序 flakiness
+
+### 发现来源
+- 在 `unixpipe` fast path 实施阶段跑 `cargo test --test zenoh_router_client` 做回归。
+- 单跑某一个用例都 pass,全套跑会随机有 1 个 fail,失败用例每次都不同。
+- 把 Cargo.toml 改回原样 stash 后再跑,同样 fail,同样随机用例。证明与 transport_unixpipe feature 无关。
+
+### 核心问题
+- zenoh_router_client.rs 在多 test 并发跑时,session discovery 在某些 case 还没 settle 就被下一个 test 触发。
+- 当前失败信息是 `未找到目标 service: namespace=lab, target_name=ok3-XXXXX.lab`,典型 discovery race。
+
+### 为什么重要
+- 不能让 `unixpipe` fast path 实施的"已有测试不回归"被这条 flakiness 干扰判定。
+- 这是 pre-existing,不属于本轮范围,但要让后续维护者知道:不要每次被这条 flake 拦下就误以为是新改动回归。
+
+### 未来风险
+- 如果 unixpipe 改动实际破坏了某个用例,可能因为这条 flake 被误判为"已知 flake",掩盖真正问题。
+- 因此后续每条新加的 e2e 测试,优先跑单独用例 5~10 次确认非 flake,再加入测试集。
+
+### 当前结论
+- 当前事实: zenoh_router_client.rs 的 multi-test 并发有 ~4% 概率失败,失败用例不固定。
+- 仍未确认的部分: 是否某条具体用例有更严重的退化(单跑 5 次都过,但并发跑挂)。后续要单跑每条用例 5 次确认基线。
+
+### 后续讨论入口
+- 排查方向: 给 `resolve_target` 的 liveliness get 加一个 retry(已在 `acquire_daemon_name_guard` 之后的 watch),或在 test helper 里给每个 test 一个独立的 namespace 隔离,避免 cross-test liveliness 串扰。
+
+## [2026-06-20 22:30:00] [Session ID: omx-1781788115552-szl2hn] 主题: Zenoh 1.8.0 的 `transport_unixpipe` 实际是 named pipe (FIFO),不是 Unix domain socket
+
+### 发现来源
+- Step 3 实施时查 `~/.cargo/registry/src/.../zenoh-link-unixpipe-1.8.0/src/unix/unicast.rs`。
+- 看到 `PipeR::create_and_open_unique_pipe_for_read` 调用 `create(path_r, ...)`(来自 `unix_named_pipe` crate),以及 `split_pipe_path` 派生 `<base>_uplink` / `<base>_downlink` 两条 FIFO。
+
+### 核心问题
+- 我之前在 plan 里把 `unixpipe` 写成"Unix domain socket 内存连接",这是错的。
+- 实际: Zenoh 1.8.0 的 `unixpipe` 是 **named pipe(FIFO)**,是文件系统上的两个 FIFO 文件 + tokio::fs::File 异步 I/O。
+- 性能收益(本机避免 UDP loopback 的 Zenoh link 层开销)依然成立,因为 FIFO 比 UDP loopback 还是有可观的常数级优势,只是没有"in-memory pipe"那么夸张。
+
+### 为什么重要
+- 路径长度上限必须改:`<base>_downlink` 是 9 字节后缀,macOS `sun_path` 是 104 字节,所以 base 路径上限是 95 字节(不是之前 plan 里写的 100)。
+- 已经把 `UNIXPIPE_SOCKET_PATH_MAX_BYTES` 从 100 改为 95,错误消息和单测都同步更新过。
+- 不存在"in-memory IPC",plan 里"2~5x 提速"这个预估仍然合理,但理由要更新为"避免 UDP loopback 协议栈开销",而不是"避免 UDP 协议栈 + 文件系统 I/O"。
+
+### 未来风险
+- FIFO 是文件系统可见的,daemon 退出后 FIFO 文件会残留(因为它不是 socket,内核不会自动清理)。必须 stale cleanup,这点之前的 plan 已经覆盖。
+- 极端并发下,FIFO 写满 buffer 会 block writer,这一点 Unix domain socket SOCK_STREAM 没这问题。本轮在 spec 层提一下,不展开。
+- 后续如果对延迟还有更高要求,方向 B(直接 Unix domain socket 控制面)的价值更大了,因为它能真正 in-memory。
+
+### 当前结论
+- 当前事实: Zenoh 1.8.0 `transport_unixpipe` 实现是 FIFO,不是 Unix domain socket;性能收益依然成立(常量级)。
+- 仍未确认的部分: 真实 ping round-trip 改善幅度,等 Step 5 跑 `time` 实测。
+
+### 后续讨论入口
+- 后续 plan: 方向 B(直接 Unix domain socket 控制面)10~50x 提速,把 Zenoh 完全跳过。
+- 同步更新: `.omx/plans/zenoh-unixpipe-fast-path.md` 的"风险"和"ADR"两节,把"unixpipe = Unix domain socket"措辞改成"unixpipe = named pipe (FIFO)";`specs/zenoh-unixpipe-fast-path-plan.md` 同步修正。

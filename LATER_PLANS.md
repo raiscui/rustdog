@@ -276,3 +276,22 @@
 - 检查 `@ax-find` 的搜索对象是否只遍历了某个 flattened summary,而没有覆盖 `@ax-get` 能拿到的 WebArea 深层节点。
 - 增加针对 `AXLink.description` 的 focused fixture 或 live regression。
 - 目标是让 agent 能直接用 `@ax-find description_contains` 定位网页内语义链接,减少必须手工深读 WebArea 的步骤。
+## [2026-06-20 23:55:00] [Session ID: omx-1781788115552-szl2hn] 后续建议
+
+### rdog control macOS 本地 fast path 收尾
+
+- [ ] 把 `specs/zenoh-control-plane-plan.md` 补上 "Local fast path: unixpipe" 节,把 unixpipe exists-check 契约写进去
+- [ ] `EXPERIENCE.md` 沉淀 2 条经验:
+  - "Zenoh 本机 fast path 优先用 unixpipe transport 而不是新增独立 UDS 控制面"
+  - "unixpipe client 探测用 `Path::exists` 不用 open FIFO:Zenoh 1.8.0 request channel 单 reader 复用,主动 open 探测会破坏 daemon"
+- [ ] `.codex/skills/rdog-control/SKILL.md` 补 troubleshooting 段:"同机 ping 慢? 确认 `rdog_macos.toml` 启用了 `[zenoh.unixpipe]`,或检查 `RUST_LOG=info` 日志里有没有 `unixpipe endpoint detected` 这行"
+- [ ] `rdog_linux.toml` 模板加同样的 `[zenoh.unixpipe]` 注释段(目前只改了 `rdog_macos.toml`)
+- [ ] 把 plan 文件 `.omx/plans/zenoh-unixpipe-fast-path.md` 里"策略"小节也同步成"实际采用 exists-check 不用 connect 探测",跟 spec 对齐
+- [ ] 启动独立 plan:方向 B(直接 UDS 控制面,10~50x 提速),作为 unixpipe 体验确认后的 follow-up
+
+### 已有 flake 待处理
+
+- [ ] `zenoh_router_client` 测试集多测试并发 ~4% flake,失败用例不固定。
+  - 已记录到 EPIPHANY_LOG。
+  - 排查方向: 给 `resolve_target` 的 liveliness get 加 retry,或 test helper 给每个 test 独立 namespace。
+  - 不属于本轮范围,留作 follow-up。

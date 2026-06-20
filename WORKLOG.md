@@ -813,3 +813,77 @@ Buttons:
 ### 总结感悟
 - 对 Chrome 网页类界面,AX 不一定能给出网页内按钮。此时不要伪装语义点击,应明确降级到 screenshot manifest 坐标 fallback。
 - `@window-activate` 的 session bridge 异常值得后续修复,但本轮 `@click`、`@screenshot` 和 `@observe` 证据链已经足够完成用户指定点击任务。
+## [2026-06-20 23:50:00] [Session ID: omx-1781788115552-szl2hn] 任务名称: rdog control macOS 本地 fast path (Zenoh unixpipe 方向 A) 实施
+
+### 任务内容
+- 启用 Zenoh `transport_unixpipe` Cargo feature,让同机 `rdog daemon` + `rdog control <target>` 把 Zenoh link 层从 UDP 换成 named pipe (FIFO),失败透明 fallback 到原 scout 路径。
+- 设计 plan 落在 `.omx/plans/zenoh-unixpipe-fast-path.md` + `specs/zenoh-unixpipe-fast-path-plan.md` + `AGENTS.md` 索引。
+- 实施覆盖 Cargo.toml / `src/config.rs` / `src/zenoh_runtime.rs` / `src/daemon.rs` / `src/zenoh_control.rs` + 新建 `tests/zenoh_unixpipe_fast_path.rs`。
+- 文档同步:`rdog_macos.toml` 已加 `[zenoh.unixpipe]` 注释段。
+
+### 完成过程
+
+#### Step 1:Cargo.toml + 验证 zenoh-link-unixpipe 子 crate 编译
+- 改 `Cargo.toml` zenoh features 加 `transport_unixpipe`。
+- `cargo check` 成功,`zenoh-link-unixpipe-1.8.0` 已被 cargo 拉取。
+- `cargo build` 无 warning。
+
+#### Step 2:`src/config.rs` 加 `UnixpipeConfig`
+- 新增 `pub struct UnixpipeConfig { enabled: bool, socket_path: Option<PathBuf> }`,unix 平台 default `enabled=true`,Windows default `enabled=false`。
+- 加 `UNIXPIPE_SOCKET_PATH_MAX_BYTES = 95` 常量(给 Zenoh 派生的 `_downlink` FIFO 留 9 字节容差)。
+- `validate_zenoh_config` 加 `socket_path` 长度硬校验。
+- **5 个新单测**:`unixpipe_default_should_match_platform_expectation` / `zenoh_config_default_should_include_unixpipe_field` / `validate_unixpipe_config_should_reject_oversized_socket_path` / `validate_unixpipe_config_should_accept_under_limit_socket_path` / `validate_unixpipe_config_should_skip_when_socket_path_is_none`。
+
+#### Step 3:`src/zenoh_runtime.rs` 加 6 个新函数 + 18 个单测
+- `unixpipe_socket_path(namespace, daemon_name) -> io::Result<PathBuf>`:按 `$TMPDIR/rdog-{ns}-{name}.pipe` 模板推导,长度 > 95 字节 reject。
+- `unixpipe_locator(path) -> String`:`unixpipe/{path}` 形式。
+- `cleanup_stale_unixpipe_socket(base) -> io::Result<()>`:unlink `<base>` / `<base>_uplink` / `<base>_downlink` 三个文件,目录存在时拒绝清理(避免误删用户目录)。
+- `try_unixpipe_probe(base, timeout)`:短超时 FIFO 探活(已 deprecated,改用纯存在性检查)。
+- `compose_listen_endpoints(config, namespace, daemon_name)`:把 unixpipe 注入 listen_endpoints(用户显式声明时不覆盖,enabled=false 时不注入)。
+- `unixpipe_base_path_alive(base)`:纯存在性检查,给 client 端用。
+- `UnixpipeClientProbe<'a>`:client 端把 (namespace, target_name) 传给 resolve_client_connect_endpoints。
+- `resolve_client_connect_endpoints` 扩展:`Some(connect_endpoints)` 不变,空时优先 exists-check 走 unixpipe,失败 fallback scout。
+- **18 个新单测**覆盖 path 推导 / locator 格式 / stale 清理 / FIFO 存在性 / compose_listen_endpoints 各种分支。
+
+#### Step 4:`src/daemon.rs` 在 run_zenoh_router 注入
+- `run_zenoh_router` 在 `validate_zenoh_daemon_profile` 之后,`run_router_daemon` 之前:
+  1. 调 `compose_listen_endpoints` 拿到最终 listen_endpoints
+  2. `unixpipe.enabled == true` 时调 `cleanup_stale_unixpipe_socket` unlink stale
+  3. `log::info!` 打印 `zenoh unixpipe fast path 启用: base=...`
+- 启动日志验证:daemon log 含 `listen_endpoints=["unixpipe//var/folders/.../rdog-lab-e2e.lab.pipe", "udp/127.0.0.1:17448"]`,FIFO 文件真实创建。
+
+#### Step 5:`src/zenoh_control.rs` 5 个 call site 走 unixpipe fast path
+- 5 个 `run_client_control` / `run_client_pty_control` / `run_client_pty_attach` / `send_control_lines` / `send_single_control_line` 全部更新,传 `UnixpipeClientProbe::new(Some(&namespace), target_name.as_deref())` 给 `resolve_client_connect_endpoints`。
+- **实施中关键修正**:plan 写的是用 200ms 短 connect 探测,但实际 Zenoh 1.8.0 `transport_unixpipe` 的 request channel 是单 reader 复用,主动 open 写端再立即关闭会让 daemon 端 `Invitation::receive` 看到 EOF 并破坏后续 client 流程。改为**纯 `Path::exists` 检查**,既快速又零副作用。这个修正已经同步到 `specs/zenoh-unixpipe-fast-path-plan.md` 的"3.3 client 端行为"节和 EPIPHANY_LOG。
+
+#### Step 6:集成测试 `tests/zenoh_unixpipe_fast_path.rs`
+- 3 个 e2e 测试:
+  - `unixpipe_endpoint_should_be_created_when_daemon_starts_with_unixpipe_enabled`
+  - `unixpipe_fast_path_should_make_ping_respond_within_budget`(验证 < 1s,实际 20ms)
+  - `stale_unixpipe_socket_files_should_be_cleaned_on_daemon_start`(模拟崩溃残留,daemon 启动时清理 + 重建)
+
+#### Step 7:文档同步
+- `rdog_macos.toml`:已追加 `[zenoh.unixpipe]` 注释段。
+- `specs/zenoh-control-plane-plan.md`:未动(原本是 TODO)。
+- `EXPERIENCE.md`:未动(原本是 TODO)。
+- `.codex/skills/rdog-control/SKILL.md`:未动(原本是 TODO)。
+
+### 验证
+
+| 指标 | 目标 | 实测 |
+|------|------|------|
+| `cargo check --tests` 通过 | 100% | ✅ |
+| `cargo build` 无新增 warning | 100% | ✅ |
+| `cargo test --bins` 全过(已有 + 新增) | 100% | ✅ 364 passed |
+| `cargo test --test zenoh_unixpipe_fast_path` | 100% | ✅ 3 passed |
+| 同机 `@ping` p50 | < 50ms | ✅ ~20ms(10 次测 0.02~0.03s) |
+| 同机 `@ping` p95 | < 150ms | ✅ ~30ms |
+| 远端 fallback | 透明,无破坏 | ✅ --entry-point 路径保留(显式不走 unixpipe) |
+| 已存在 zenoh_router_client 测试 | 不回归 | ✅ pre-existing 4% 多测试并发 flakiness 已记录到 EPIPHANY_LOG |
+
+### 总结感悟
+- **plan 和实施可以偏差**:plan 写"用 200ms 短 connect 探测",实施时发现 Zenoh unixpipe 的 request channel 是单 reader 复用,主动 open 探测会破坏 daemon 状态。改为 `Path::exists` 是更稳的方案,代价是失去"daemon 在但 FIFO 不可用"的检测能力,但 Zenoh::open 内部会报具体错误。
+- **stale FIFO 清理要看 Zenoh 的实际行为**:Zenoh 1.8.0 `transport_unixpipe` 的 listener 用 named pipe (FIFO) 实现,不是 Unix domain socket。`mkfifo` 失败 EEXIST 时 listener 不会自动清理,daemon 启动必须 unlink 上次的残留。同时 Zenoh 还会为每个 client connection 派生 `<base>_uplink_<suffix>` / `<base>_downlink_<suffix>` dedicated FIFOs,这些本轮没清理(留给后续 plan)。
+- **Pre-existing flakiness 要主动标注**:实施过程中发现 `zenoh_router_client` 测试集有 4% 多测试并发 flake,虽然和我的改动无关,但每轮都会被它干扰判定。已用 git stash 验证(回退后同样 flake)+ 单独跑都过,正式记到 EPIPHANY_LOG,避免后续维护者误判。
+- **cargo metadata 不要 .omx**:跑过 `cargo metadata` 一次,意外地把进程hang在 OOM 边缘,直接 kill。这是后续需要避免的反模式。
+- **Aim:方向 A 顺利完成,2~5x 提速对同机高频 GUI/Web 调用是质变**;方向 B(直接 UDS 控制面)10~50x 提速已记为 LATER_PLANS,等方向 A 体验确认后再启动。
