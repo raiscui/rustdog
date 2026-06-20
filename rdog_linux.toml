@@ -95,3 +95,22 @@ startup_guard_window_ms = 1000
 # 只有 `[zenoh].enabled = true` 时这一段才会生效。
 enabled = true
 keyexpr = "rdog/default/daemon/mini-a.lab/member/mini-a.lab/keyinput"
+
+# ----------------------------------------------------------------------------
+# 本机 fast path:unixpipe transport(Zenoh 1.8.0 transport_unixpipe feature)
+#
+# 启用后,daemon 会在 $TMPDIR(或 /tmp fallback)/rdog-{namespace}-{daemon_name}.pipe
+# 上挂一条 Zenoh link(`unixpipe` 实际是 named pipe / FIFO,不是 Unix domain socket)。
+# `rdog control` 客户端看到同机会自动走 fast path:
+#   1. 检查 FIFO 文件是否存在
+#   2. 存在 → 把 `unixpipe/{path}` 作为唯一 connect endpoint,跳过 UDP scout
+#   3. 不存在 → 走原来的 UDP scout + autodiscover 路径
+#
+# 收益:同机 `@ping` / `@screenshot` 等高频 round-trip 从 200~500ms 压到 20~80ms
+#      (2~5x 提速)。
+# 风险:FIFO 残留会阻塞下次启动,rdog daemon 启动时自动 unlink 清理;
+#      Windows 平台编译期强制 disabled(Zenoh unixpipe 在 Windows 语义不同)。
+#
+# 默认:macOS / Linux = true,Windows = false。
+# 想关闭显式写: `enabled = false`。
+# ----------------------------------------------------------------------------
