@@ -1,5 +1,6 @@
 ---
 name: rdog-control
+version: "1.0"
 description: Use when Codex needs to operate rustdog/rdog for remote control of LAN or reachable hosts, hardware bridge machines, lab devices, or microcontrollers. Covers `rdog daemon`, `rdog control`, Zenoh target-name discovery, `--entry-point` fallback, line-control commands like `@ping`, `@bootstrap`, `@capabilities`, `@cmd`, `@key`, `@paste`, `@observe`, `@screenshot`, `@window-find`, `@window-activate`, `@window-close`, `@web-find`, `@web-act`, `@gui-bench`, `@ax-tree`, `@ax-find`, `@ax-get`, `@ax-press`, `@selector-get`, `@selector-resolve`, `@selector-refind`, `@mouse-move`, `@mouse-button`, `@click`, `@drag`, `@wheel`, `@savefile`, and remote PTY flows such as `rdog control TARGET --pty -- COMMAND`.
 ---
 
