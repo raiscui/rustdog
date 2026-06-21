@@ -1,6 +1,5 @@
 use std::{
-    fs,
-    io,
+    fs, io,
     net::{IpAddr, SocketAddr},
     path::{Path, PathBuf},
     str::FromStr,
@@ -41,7 +40,9 @@ pub fn resolve_client_connect_endpoints(
     // 那一步会拿到错误并决定如何 fallback。
     #[cfg(unix)]
     {
-        if let Some((namespace, target_name)) = unixpipe_probe.namespace.zip(unixpipe_probe.target_name) {
+        if let Some((namespace, target_name)) =
+            unixpipe_probe.namespace.zip(unixpipe_probe.target_name)
+        {
             if let Ok(base_path) = unixpipe_socket_path(namespace, target_name) {
                 if unixpipe_base_path_alive(&base_path) {
                     log::info!(
@@ -318,9 +319,7 @@ fn validate_unixpipe_component(field: &str, value: &str) -> io::Result<()> {
     if value.contains('/') || value.contains(char::is_whitespace) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            format!(
-                "unixpipe 路径组件 `{field}` 不能包含 `/` 或空白字符(实际: {value:?})"
-            ),
+            format!("unixpipe 路径组件 `{field}` 不能包含 `/` 或空白字符(实际: {value:?})"),
         ));
     }
     Ok(())
@@ -375,7 +374,10 @@ pub fn cleanup_stale_unixpipe_socket(base: &Path) -> io::Result<()> {
                     if err.kind() != io::ErrorKind::NotFound {
                         return Err(io::Error::new(
                             err.kind(),
-                            format!("清理 stale unixpipe 文件 {} 失败: {err}", candidate.display()),
+                            format!(
+                                "清理 stale unixpipe 文件 {} 失败: {err}",
+                                candidate.display()
+                            ),
                         ));
                     }
                 }
@@ -386,7 +388,10 @@ pub fn cleanup_stale_unixpipe_socket(base: &Path) -> io::Result<()> {
             Err(err) => {
                 return Err(io::Error::new(
                     err.kind(),
-                    format!("检查 unixpipe 路径 {} 元数据失败: {err}", candidate.display()),
+                    format!(
+                        "检查 unixpipe 路径 {} 元数据失败: {err}",
+                        candidate.display()
+                    ),
                 ));
             }
         }
@@ -499,6 +504,111 @@ pub fn compose_listen_endpoints(
     Ok(composed)
 }
 
+/// 在 $TMPDIR(或 /tmp fallback)下扫描所有 unixpipe FIFO,
+/// 找一条唯一可用的本地 daemon,返回它的 daemon_name。
+///
+/// `namespace_filter = Some(ns)` 时,只扫描 `rdog-{ns}-*.pipe_uplink`;`None` 时扫描全部。
+///
+/// 关键实现细节:
+/// - Zenoh 1.8.0 `transport_unixpipe` listener 实际只创建 `<base>_uplink` 和 `<base>_downlink`
+///   两个 FIFO 文件,`<base>`(=`rdog-{ns}-{name}.pipe`)本身不一定存在。
+/// - 因此扫描对象是 `*.pipe_uplink`,不是 `*.pipe`。同名 daemon 的 `<base>_downlink`
+///   也存在,但只看 `_uplink` 就足够,避免双倍计数。
+/// - 候选 base 路径必须以 `rdog-` 开头,中间段 `{ns}-{name}` 用第一个 `-` 切分。
+/// - 0/1/>1 个候选分别返回 Ok(1) / NotFound(0) / AlreadyExists(>1)。
+pub fn find_local_daemon_name(namespace_filter: Option<&str>) -> io::Result<String> {
+    let tmpdir = std::env::var_os("TMPDIR")
+        .map(PathBuf::from)
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| PathBuf::from("/tmp"));
+
+    let prefix = "rdog-";
+    let uplink_suffix = ".pipe_uplink";
+
+    let entries = match fs::read_dir(&tmpdir) {
+        Ok(entries) => entries,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => {
+            return Err(no_local_daemon_error(namespace_filter));
+        }
+        Err(err) => {
+            return Err(io::Error::new(
+                err.kind(),
+                format!("扫描 {tmpdir:?} 失败: {err}"),
+            ));
+        }
+    };
+
+    let mut candidates: Vec<String> = Vec::new();
+
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(_) => continue,
+        };
+        let file_name = match entry.file_name().to_str() {
+            Some(name) => name.to_string(),
+            None => continue,
+        };
+
+        // 只看 `<base>_uplink` 文件,base = `rdog-{ns}-{name}.pipe`
+        if !file_name.starts_with(prefix) || !file_name.ends_with(uplink_suffix) {
+            continue;
+        }
+
+        // 中间段 = "{ns}-{name}",找第一个 `-` 作为分隔
+        let middle = &file_name[prefix.len()..file_name.len() - uplink_suffix.len()];
+        let Some(dash_idx) = middle.find('-') else {
+            continue;
+        };
+        let ns = &middle[..dash_idx];
+        let name = &middle[dash_idx + 1..];
+        if ns.is_empty() || name.is_empty() {
+            continue;
+        }
+
+        // namespace 过滤
+        if let Some(filter) = namespace_filter {
+            if ns != filter {
+                continue;
+            }
+        }
+
+        candidates.push(name.to_string());
+    }
+
+    candidates.sort();
+    candidates.dedup();
+
+    match candidates.len() {
+        0 => Err(no_local_daemon_error(namespace_filter)),
+        1 => Ok(candidates.remove(0)),
+        _ => Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            format!(
+                "本机发现多个 unixpipe daemon: [{}];请显式指定 target name(例如 `rdog control <name> @<line>`)",
+                candidates
+                    .iter()
+                    .map(|name| format!("`{name}`"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        )),
+    }
+}
+
+fn no_local_daemon_error(namespace_filter: Option<&str>) -> io::Error {
+    let detail = match namespace_filter {
+        Some(ns) => format!("namespace={ns} 的本地 daemon"),
+        None => "本地 daemon".to_string(),
+    };
+    io::Error::new(
+        io::ErrorKind::NotFound,
+        format!(
+            "未找到{detail};请先启动 `rdog daemon`,或显式指定 target name(例如 `rdog control <name> @<line>`)"
+        ),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -520,7 +630,10 @@ mod tests {
             None => unsafe { env::remove_var("TMPDIR") },
         }
         let path = result.expect("路径推导应该成功");
-        assert_eq!(path, PathBuf::from("/tmp/rdog-tmpdir-test/rdog-lab-mac.lab.pipe"));
+        assert_eq!(
+            path,
+            PathBuf::from("/tmp/rdog-tmpdir-test/rdog-lab-mac.lab.pipe")
+        );
     }
 
     #[test]
@@ -607,6 +720,111 @@ mod tests {
         let _ = fs::remove_dir_all(&base);
     }
 
+    // -----------------------------------------------------------------
+    // find_local_daemon_name(rdog control self / 空 target 用)
+    // -----------------------------------------------------------------
+
+    fn make_mock_unixpipe(namespace: &str, daemon_name: &str) -> PathBuf {
+        // 模拟 daemon 写出的 <base>_uplink FIFO,让 find_local_daemon_name 把它认作真 daemon。
+        // 注意:base 本身不创建(Zenoh 1.8.0 不创建 base 文件),只创建 _uplink。
+        let tmpdir = std::env::var_os("TMPDIR")
+            .map(PathBuf::from)
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or_else(|| PathBuf::from("/tmp"));
+        let base = tmpdir.join(format!("rdog-{namespace}-{daemon_name}.pipe"));
+        let uplink = base.with_file_name(format!(
+            "{}_uplink",
+            base.file_name().unwrap().to_str().unwrap()
+        ));
+        let status = std::process::Command::new("mkfifo")
+            .arg(&uplink)
+            .status()
+            .expect("mkfifo 调用应该成功");
+        assert!(status.success());
+        base
+    }
+
+    fn cleanup_mock_unixpipe(base: &Path) {
+        let uplink = base.with_file_name(format!(
+            "{}_uplink",
+            base.file_name().unwrap().to_str().unwrap()
+        ));
+        let _ = fs::remove_file(&uplink);
+    }
+
+    #[test]
+    fn find_local_daemon_name_should_resolve_unique_match_in_namespace() {
+        let base = make_mock_unixpipe("rdogfindunique", "findme.findunique");
+
+        let result = find_local_daemon_name(Some("rdogfindunique"));
+        cleanup_mock_unixpipe(&base);
+
+        result.expect("唯一候选必须能找到");
+    }
+
+    #[test]
+    fn find_local_daemon_name_should_filter_by_namespace() {
+        let base_keep = make_mock_unixpipe("rdogkeepns", "keep.keepns");
+        let base_skip = make_mock_unixpipe("rdogotherns", "skip.otherns");
+
+        let result = find_local_daemon_name(Some("rdogkeepns"));
+        cleanup_mock_unixpipe(&base_keep);
+        cleanup_mock_unixpipe(&base_skip);
+
+        assert_eq!(
+            result.expect("keepns namespace 必须找到 keep"),
+            "keep.keepns"
+        );
+    }
+
+    #[test]
+    fn find_local_daemon_name_should_error_when_no_match() {
+        let result = find_local_daemon_name(Some(
+            "rdog-nonexistent-ns-for-test-12345",
+        ));
+        let err = result.unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::NotFound);
+        assert!(err.to_string().contains("未找到"));
+    }
+
+    #[test]
+    fn find_local_daemon_name_should_error_when_multiple_match() {
+        // 在一个不跟其他测试冲突的 namespace 放两个 daemon,触发多候选
+        let base1 = make_mock_unixpipe("rdogmulti", "first.multi");
+        let base2 = make_mock_unixpipe("rdogmulti", "second.multi");
+
+        let result = find_local_daemon_name(Some("rdogmulti"));
+        cleanup_mock_unixpipe(&base1);
+        cleanup_mock_unixpipe(&base2);
+
+        let err = result.unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::AlreadyExists);
+        let msg = err.to_string();
+        assert!(msg.contains("多个"), "错误信息应提示多个: {msg}");
+        assert!(msg.contains("first.multi"), "应列出 first.multi: {msg}");
+        assert!(msg.contains("second.multi"), "应列出 second.multi: {msg}");
+    }
+
+    #[test]
+    fn find_local_daemon_name_should_skip_files_without_uplink_sibling() {
+        // 创建一个文件,名字像 rdog-lab-fake.pipe 但没有 _uplink 兄弟
+        // find_local_daemon_name 必须跳过它
+        let tmpdir = std::env::var_os("TMPDIR")
+            .map(PathBuf::from)
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or_else(|| PathBuf::from("/tmp"));
+        let base = tmpdir.join("rdog-rdogfakens-fake.pipe");
+        let _ = fs::remove_file(&base);
+        fs::write(&base, b"not a fifo").expect("写入 fake 文件");
+
+        let result = find_local_daemon_name(Some("rdogfakens"));
+        let _ = fs::remove_file(&base);
+
+        // 没有 _uplink 兄弟,不能算 daemon
+        let err = result.unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::NotFound);
+    }
+
     #[test]
     fn try_unixpipe_probe_should_return_not_found_when_fifo_missing() {
         let base = PathBuf::from("/tmp/rdog-probe-missing.pipe");
@@ -636,7 +854,10 @@ mod tests {
         let elapsed = start.elapsed();
 
         assert_eq!(err.kind(), io::ErrorKind::TimedOut);
-        assert!(elapsed >= Duration::from_millis(140), "应该在 timeout 之后返回");
+        assert!(
+            elapsed >= Duration::from_millis(140),
+            "应该在 timeout 之后返回"
+        );
 
         let _ = fs::remove_file(&uplink);
     }
