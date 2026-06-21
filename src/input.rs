@@ -70,7 +70,12 @@ pub enum Command {
     /// Connect as a line-based control sender over stdio
     Control {
         /// WebSocket URL for the remote control endpoint, for example `ws://127.0.0.1:5555/control`
-        #[clap(long, conflicts_with = "host")]
+        ///
+        /// 注意: clap 层不再设 `conflicts_with = "host"`,
+        /// 因为 `rdog control --url ws://... @<one-shot-line>` 这种调用形式
+        /// 需要 `@<line>` 进 host。`resolve_inferred_control` 会拒绝
+        /// `--url` 和非空 host 同时传入的真正冲突。
+        #[clap(long)]
         url: Option<String>,
 
         /// Explicit transport to use for the control lane.
@@ -108,10 +113,31 @@ pub enum Command {
         #[clap(long = "pty-attach", conflicts_with_all = ["pty", "pty_close", "pty_detach"])]
         pty_attach: Option<String>,
 
-        /// TCP host/port, TCP port shorthand, or Zenoh target-name shorthand.
+        /// TCP host/port, TCP port shorthand, Zenoh target-name shorthand,
+        /// Zenoh 本机 fast path 入口(`self` 关键字或空 target),或
+        /// `<target> @<one-shot-line> [@<one-shot-line> ...]` 多 line 形式。
         ///
-        /// 单个非端口值会被推断为 Zenoh target-name。
-        #[clap(value_name = "HOST_OR_TARGET", num_args = 0..=2, conflicts_with = "url")]
+        /// 规则:
+        /// - 0..2 个常规位置参数: 维持旧行为(Zenoh target / TCP port / TCP host+port)
+        /// - 末尾连续以 `@` 开头的 1..N 个 token: one-shot line 列表
+        ///   - 单个: `rdog control mac.lab @ping`
+        ///   - 多个: `rdog control mac.lab @ping @capabilities#1 @observe#3`
+        ///   - 必须放在 host 最后,前面位置参数不能以 `@` 开头
+        /// - `self` 关键字 = 本机 fast path:扫描 $TMPDIR/rdog-{ns}-*.pipe_uplink 找唯一 daemon
+        ///   - `rdog control self @ping` 显式快捷
+        ///   - `rdog control --namespace lab @ping` 空 target + --namespace 隐式快捷
+        ///   - 都要求 `--namespace` 或 daemon_name 后缀可推断,且本机只能有 1 个 daemon
+        ///
+        /// 32 是经验上限:2 个 target 位置参数(target 或 host+port) + 30 个 one-shot line,
+        /// 覆盖典型 GUI 任务 preflight + action 序列;再大就该走 stdin 形式。
+        ///
+        /// 不再设 `conflicts_with = "url"`,one-shot 入口
+        /// `rdog control --url ws://... @<line>` 需要 `@<line>` 进 host 末尾。
+        /// 真正的 `--url` + 非 `@` host 冲突在 `resolve_inferred_control` 里检测。
+        #[clap(
+            value_name = "HOST_OR_TARGET_OR_SELF[@ONE_SHOT_LINE]...",
+            num_args = 0..=32,
+        )]
         host: Vec<String>,
 
         /// Command argv for `--pty`; must appear after `--`.
@@ -164,6 +190,33 @@ pub enum Command {
     Config {
         #[clap(subcommand)]
         command: ConfigCommand,
+    },
+
+    /// Structured diff of two AxSnapshot JSON files
+    AxDiff {
+        /// Path to the "before" AxSnapshot JSON
+        #[clap(long)]
+        before: Option<PathBuf>,
+
+        /// Path to the "after" AxSnapshot JSON
+        #[clap(long)]
+        after: Option<PathBuf>,
+
+        /// Output format: text | json | summary. Defaults to text.
+        #[clap(long)]
+        format: Option<String>,
+
+        /// Only print summary counts, not per-field changes.
+        #[clap(long)]
+        quiet: bool,
+
+        /// Limit text output to first N element changes.
+        #[clap(long, value_name = "N")]
+        top_changes: Option<usize>,
+
+        /// Maximum recursion depth for nested element field comparisons.
+        #[clap(long, default_value = "4")]
+        max_depth: usize,
     },
 }
 
@@ -370,6 +423,191 @@ mod tests {
                 assert_eq!(pty_close, None);
                 assert_eq!(pty_detach, None);
                 assert_eq!(pty_attach.as_deref(), Some("sess-2"));
+            }
+            command => panic!("unexpected command: {command:?}"),
+        }
+    }
+
+    #[test]
+    fn control_should_parse_target_with_one_shot_line() {
+        // `rdog control mac.lab @ping` 在 clap 层只把 `@ping` 收进 host
+        // (num_args 0..=3 允许尾部 `@...`);main.rs 会再把它剥出来当 one-shot。
+        let opts = Opts::parse_from(["rdog", "control", "mac.lab", "@ping"]);
+
+        match opts.command {
+            Command::Control {
+                host,
+                pty,
+                pty_close,
+                pty_detach,
+                pty_attach,
+                ..
+            } => {
+                assert_eq!(host, vec!["mac.lab".to_string(), "@ping".to_string()]);
+                assert!(!pty);
+                assert_eq!(pty_close, None);
+                assert_eq!(pty_detach, None);
+                assert_eq!(pty_attach, None);
+            }
+            command => panic!("unexpected command: {command:?}"),
+        }
+    }
+
+    #[test]
+    fn control_should_parse_host_port_with_one_shot_line() {
+        let opts = Opts::parse_from(["rdog", "control", "127.0.0.1", "5555", "@capabilities#1"]);
+
+        match opts.command {
+            Command::Control { host, pty, .. } => {
+                assert_eq!(
+                    host,
+                    vec![
+                        "127.0.0.1".to_string(),
+                        "5555".to_string(),
+                        "@capabilities#1".to_string()
+                    ]
+                );
+                assert!(!pty);
+            }
+            command => panic!("unexpected command: {command:?}"),
+        }
+    }
+
+    #[test]
+    fn control_should_parse_url_with_one_shot_line() {
+        let opts = Opts::parse_from([
+            "rdog",
+            "control",
+            "--url",
+            "ws://127.0.0.1:5555/control",
+            "@ping#7",
+        ]);
+
+        match opts.command {
+            Command::Control { url, host, pty, .. } => {
+                assert_eq!(url.as_deref(), Some("ws://127.0.0.1:5555/control"));
+                assert_eq!(host, vec!["@ping#7".to_string()]);
+                assert!(!pty);
+            }
+            command => panic!("unexpected command: {command:?}"),
+        }
+    }
+
+    #[test]
+    fn control_should_parse_target_name_with_one_shot_line() {
+        let opts = Opts::parse_from(["rdog", "control", "--target-name", "mac.lab", "@observe#1"]);
+
+        match opts.command {
+            Command::Control {
+                target_name,
+                host,
+                pty,
+                ..
+            } => {
+                assert_eq!(target_name.as_deref(), Some("mac.lab"));
+                assert_eq!(host, vec!["@observe#1".to_string()]);
+                assert!(!pty);
+            }
+            command => panic!("unexpected command: {command:?}"),
+        }
+    }
+
+    #[test]
+    fn control_should_parse_one_shot_line_with_object_payload() {
+        // 验证对象 payload(用单引号 shell 引用)能完整保留进 host
+        let opts = Opts::parse_from([
+            "rdog",
+            "control",
+            "mac.lab",
+            r#"@key#7:{key:"right-control",hold_ms:200}"#,
+        ]);
+
+        match opts.command {
+            Command::Control { host, .. } => {
+                assert_eq!(
+                    host,
+                    vec![
+                        "mac.lab".to_string(),
+                        r#"@key#7:{key:"right-control",hold_ms:200}"#.to_string()
+                    ]
+                );
+            }
+            command => panic!("unexpected command: {command:?}"),
+        }
+    }
+
+    #[test]
+    fn control_should_accept_many_at_lines_as_positionals() {
+        // num_args 0..=32 允许一组 target + 多个 one-shot line 在 host 里
+        let opts = Opts::parse_from([
+            "rdog",
+            "control",
+            "mac.lab",
+            "@ping",
+            "@capabilities#1",
+            r#"@observe#3:{mode:"hybrid"}"#,
+        ]);
+
+        match opts.command {
+            Command::Control { host, .. } => {
+                assert_eq!(host.len(), 4);
+                assert_eq!(host[0], "mac.lab");
+                assert_eq!(host[1], "@ping");
+                assert_eq!(host[2], "@capabilities#1");
+                assert_eq!(host[3], r#"@observe#3:{mode:"hybrid"}"#);
+            }
+            command => panic!("unexpected command: {command:?}"),
+        }
+    }
+
+    #[test]
+    fn control_should_accept_thirty_two_positionals() {
+        // 验证 num_args 0..=32 上限: 1 target + 31 @cmd#i = 32 host positionals
+        let mut args: Vec<String> = vec![
+            "rdog".to_string(),
+            "control".to_string(),
+            "mac.lab".to_string(),
+        ];
+        for i in 0..31 {
+            args.push(format!(r#"@cmd#{i}"#));
+        }
+        let opts = Opts::parse_from(args);
+
+        match opts.command {
+            Command::Control { host, .. } => {
+                assert_eq!(host.len(), 32);
+            }
+            command => panic!("unexpected command: {command:?}"),
+        }
+    }
+
+    #[test]
+    fn control_should_reject_thirty_three_positionals() {
+        // num_args = 0..=32 应当让 clap 拒绝第 33 个位置参数
+        let mut args: Vec<String> = vec![
+            "rdog".to_string(),
+            "control".to_string(),
+            "mac.lab".to_string(),
+        ];
+        for i in 0..32 {
+            args.push(format!(r#"@cmd#{i}"#));
+        }
+        let result = Opts::try_parse_from(args);
+
+        assert!(
+            result.is_err(),
+            "expected clap to reject 33 positionals, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn control_without_one_shot_line_should_stay_compatible() {
+        // 验证现有调用形式 `rdog control mac.lab` 不受影响
+        let opts = Opts::parse_from(["rdog", "control", "mac.lab"]);
+
+        match opts.command {
+            Command::Control { host, .. } => {
+                assert_eq!(host, vec!["mac.lab".to_string()]);
             }
             command => panic!("unexpected command: {command:?}"),
         }

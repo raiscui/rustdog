@@ -1,11 +1,12 @@
 use clap::Parser;
 use fern::colors::{Color, ColoredLevelConfig};
 use fern::Dispatch;
-use std::{io::stdout, path::PathBuf, process::exit};
+use std::{io::stderr, path::PathBuf, process::exit};
 
 use crate::input::{Command, ConfigCommand, Transport};
 use crate::listener::{listen, Mode, Opts};
 
+mod ax_diff;
 mod config;
 mod control_actions;
 mod control_ax;
@@ -55,6 +56,31 @@ fn host_from_opts(host: Vec<String>) -> Result<(String, String), String> {
     Ok(fixed_host)
 }
 
+/// 把 host 末尾连续以 `@` 开头的一组元素抽出当 one-shot line 列表。
+///
+/// 这是 `rdog control <target> @<line> [@<line> ...]` 这种无状态 CLI 入口的
+/// 核心分流步骤。抽出来变成纯函数,方便单测覆盖:
+/// - 空 host
+/// - 末尾一个 `@` 元素
+/// - 末尾 N 个 `@` 元素(单 line 形式就是 N=1 的特例)
+/// - 末尾不是 `@` 开头(返回空 Vec,沿用旧 stdio 桥接)
+/// - 多个元素、中间夹着非 `@` 时,只 pop 末尾连续 `@` 段,中间那一个留给后续校验报错
+fn extract_one_shot_lines(host: Vec<String>) -> (Vec<String>, Vec<String>) {
+    let mut host = host;
+    let mut lines = Vec::new();
+    while let Some(last) = host.last() {
+        if last.starts_with('@') {
+            // safe unwrap: last() returned Some in this branch
+            lines.push(host.pop().unwrap());
+        } else {
+            break;
+        }
+    }
+    // 保持用户输入顺序,不是 pop 出来的反序
+    lines.reverse();
+    (host, lines)
+}
+
 #[derive(Debug, Eq, PartialEq)]
 enum ControlInvocation {
     Tcp {
@@ -68,6 +94,11 @@ enum ControlInvocation {
         namespace: Option<String>,
         target_name: Option<String>,
         entry_point: Vec<String>,
+    },
+    /// 本机 fast path:用 `rdog control self @<line>` 或空 target 触发,
+    /// 通过扫描 $TMPDIR/rdog-*.pipe_uplink 找唯一 unixpipe daemon。
+    ZenohLocal {
+        namespace: Option<String>,
     },
 }
 
@@ -116,18 +147,47 @@ fn resolve_inferred_control(
     positional: Vec<String>,
 ) -> Result<ControlInvocation, String> {
     if let Some(url) = url {
+        // --url 和非空 host 位置参数同时传入是真冲突。
+        // 注:one-shot 入口 (`rdog control --url ws://... @<line>`) 已经在
+        // main.rs 里把 `@<line>` 从 host 末尾剥出来了,这里看到的 host 一定不含
+        // `@<line>`,所以非空就是真正的冲突,直接报错。
+        if !positional.is_empty() {
+            return Err(
+                "`--url` 不能和位置参数 (target / host port) 同时传入;one-shot `@<line>` 只能跟在 URL 之后"
+                    .to_string(),
+            );
+        }
         reject_zenoh_options_for_url(namespace, target_name, entry_point)?;
         return Ok(ControlInvocation::WebSocket { url });
     }
 
     let has_zenoh_options = namespace.is_some() || target_name.is_some() || !entry_point.is_empty();
+
+    // `rdog control self @<line>` / `rdog control @<line>` 这种"省掉 target 名"的快捷入口。
+    // 不允许和 --target-name 或 --entry-point 一起用(避免歧义)。
+    if positional.as_slice() == ["self"] {
+        if target_name.is_some() {
+            return Err(
+                "`rdog control self` 不能和 `--target-name` 同时传入;两者只能选一个"
+                    .to_string(),
+            );
+        }
+        if !entry_point.is_empty() {
+            return Err(
+                "`rdog control self` 不能和 `--entry-point` 同时传入;--entry-point 必须指定明确 target"
+                    .to_string(),
+            );
+        }
+        return Ok(ControlInvocation::ZenohLocal { namespace });
+    }
+
     if has_zenoh_options {
         return resolve_zenoh_control(None, namespace, target_name, entry_point, positional);
     }
 
     match positional.as_slice() {
         [] => Err(
-            "缺少 control 目标: TCP 请写 `rdog control HOST PORT`,Zenoh 请写 `rdog control <target-name>`"
+            "缺少 control 目标: TCP 请写 `rdog control HOST PORT`,Zenoh 请写 `rdog control <target-name>`,或本机 fast path 写 `rdog control self --namespace <ns> @<line>`"
                 .to_string(),
         ),
         [single] if single.parse::<u16>().is_ok() => Ok(ControlInvocation::Tcp {
@@ -146,7 +206,14 @@ fn resolve_inferred_control(
             let (host, port) = host_from_opts(positional)?;
             Ok(ControlInvocation::Tcp { host, port })
         }
-        _ => unreachable!("clap already limits control positional arguments to at most two"),
+        // host: num_args = 0..=3 时,3 个非 `@` 位置参数是用户错误。
+        // 3 个位置参数 + 1 个 trailing `@<line>` 会被 clap 在 num_args 处拦下,
+        // 不会到这一步;到这里一定是 3 个非 `@` 元素,直接报错。
+        _ => Err(format!(
+            "control 位置参数最多 2 个 (target / host port);one-shot `@<line>` 必须放在最后;收到 {} 个位置参数 {:?}",
+            positional.len(),
+            positional
+        )),
     }
 }
 
@@ -162,6 +229,13 @@ fn resolve_zenoh_control(
     }
 
     let target_name = merge_zenoh_target_name(target_name, positional)?;
+
+    // 没有 target_name 也没有 --entry-point → 本机 fast path。
+    // 这种情况通常是 `rdog control --namespace lab @<line>`(空 target + 只有 namespace)。
+    if target_name.is_none() && entry_point.is_empty() {
+        return Ok(ControlInvocation::ZenohLocal { namespace });
+    }
+
     Ok(ControlInvocation::Zenoh {
         namespace,
         target_name,
@@ -268,8 +342,13 @@ fn init_logger(command: &Command) -> Result<(), String> {
         .level(level);
 
     match hidden_mode::log_target_for_command(command) {
-        hidden_mode::LogTarget::Stdout => dispatch
-            .chain(stdout())
+        // ------------------------------------------------------------
+        // 非 hidden 命令的日志走 stderr(Unix 习惯:错误/警告不应混入 stdout,
+        // 否则 agent 走 pipe / redirect 解析 stdout 时会被噪音打断)。
+        // hidden 子进程走 file 不变,保持 Windows 隐藏 resident 模式契约。
+        // ------------------------------------------------------------
+        hidden_mode::LogTarget::Stderr => dispatch
+            .chain(stderr())
             .apply()
             .map_err(|err| err.to_string()),
         hidden_mode::LogTarget::File(path) => {
@@ -334,6 +413,51 @@ fn run(opts: input::Opts) -> Result<(), String> {
             host,
             pty_command,
         } => {
+            // ------------------------------------------------------------
+            // one-shot 入口:把 `rdog control <target> @<line> [@<line> ...]`
+            // 这种无状态形式替代 `printf ... | rdog control <target>`。
+            //
+            // clap 端 `host: num_args = 0..=32` 已经把 1..N 个 `@<line>`
+            // 收进 host 末尾,这里 pop 出来后按输入顺序串行执行,
+            // 共享同一条 transport(TCP / WebSocket / Zenoh session bridge)。
+            // ------------------------------------------------------------
+            let (host, one_shot_lines) = extract_one_shot_lines(host);
+            if !one_shot_lines.is_empty() {
+                if one_shot_lines.iter().any(|line| line.is_empty()) {
+                    return Err("one-shot line 不能为空".to_string());
+                }
+                if host.iter().any(|item| item.starts_with('@')) {
+                    return Err(
+                        "one-shot 模式只支持尾部连续 `@<line> [@<line> ...]`;前面位置参数不应以 `@` 开头"
+                            .to_string(),
+                    );
+                }
+                if pty {
+                    return Err("`rdog control <target> @<line> ...` 与 `--pty` 互斥".to_string());
+                }
+                if pty_close.is_some() {
+                    return Err(
+                        "`rdog control <target> @<line> ...` 与 `--pty-close` 互斥".to_string()
+                    );
+                }
+                if pty_detach.is_some() {
+                    return Err(
+                        "`rdog control <target> @<line> ...` 与 `--pty-detach` 互斥".to_string()
+                    );
+                }
+                if pty_attach.is_some() {
+                    return Err(
+                        "`rdog control <target> @<line> ...` 与 `--pty-attach` 互斥".to_string()
+                    );
+                }
+                if host.is_empty() && url.is_none() && target_name.is_none() && namespace.is_none() {
+                    return Err(
+                        "one-shot line 需要 control 目标:请提供位置参数 target / host port、`--url`、`--target-name` 或 `--namespace`(用于本机 fast path)"
+                            .to_string(),
+                    );
+                }
+            }
+
             if pty && pty_command.is_empty() {
                 return Err("`rdog control --pty` 需要在 `--` 后提供远端命令".to_string());
             }
@@ -350,6 +474,10 @@ fn run(opts: input::Opts) -> Result<(), String> {
             match invocation {
                 ControlInvocation::Tcp { host, port } => {
                     let port = parse_port(&port)?;
+                    if !one_shot_lines.is_empty() {
+                        send_control_lines_tcp(&host, port, &one_shot_lines)?;
+                        return Ok(());
+                    }
                     if pty {
                         shell::control_remote_pty(&host, port, &pty_command)
                             .map_err(|err| err.to_string())?;
@@ -376,6 +504,10 @@ fn run(opts: input::Opts) -> Result<(), String> {
                     }
                 }
                 ControlInvocation::WebSocket { url } => {
+                    if !one_shot_lines.is_empty() {
+                        send_control_lines_websocket(&url, &one_shot_lines)?;
+                        return Ok(());
+                    }
                     if pty {
                         shell::control_remote_url_pty(&url, &pty_command)
                             .map_err(|err| err.to_string())?;
@@ -404,6 +536,15 @@ fn run(opts: input::Opts) -> Result<(), String> {
                     target_name,
                     entry_point,
                 } => {
+                    if !one_shot_lines.is_empty() {
+                        send_control_lines_zenoh(
+                            namespace,
+                            target_name,
+                            entry_point,
+                            &one_shot_lines,
+                        )?;
+                        return Ok(());
+                    }
                     if pty {
                         shell::control_remote_zenoh_pty(
                             namespace,
@@ -443,6 +584,62 @@ fn run(opts: input::Opts) -> Result<(), String> {
                         shell::control_remote_zenoh(namespace, target_name, entry_point)
                             .map_err(|err| err.to_string())?;
                     }
+                }
+                ControlInvocation::ZenohLocal { namespace } => {
+                    // `rdog control self @<line>` / 空 target 的本机 fast path。
+                    // PTY 不支持(one-shot 支持,直接走 send_control_lines_zenoh 复用同 session)。
+                    if pty
+                        || pty_close.is_some()
+                        || pty_detach.is_some()
+                        || pty_attach.is_some()
+                    {
+                        return Err(
+                            "`rdog control self` / 空 target 不支持 PTY 操作,请显式指定 target name"
+                                .to_string(),
+                        );
+                    }
+
+                    // 扫描 $TMPDIR/rdog-{ns}-*.pipe_uplink 找唯一 daemon。
+                    let target_name = zenoh_runtime::find_local_daemon_name(
+                        namespace.as_deref(),
+                    )
+                    .map_err(|err| err.to_string())?;
+
+                    // 推断 namespace(从 daemon_name 的点后缀),显式给的优先。
+                    let resolved_namespace = namespace
+                        .clone()
+                        .or_else(|| crate::zenoh_identity::infer_namespace_from_daemon_name(&target_name));
+
+                    // 找不到 namespace 的两种情况:
+                    // 1. 用户没传 --namespace 且 daemon_name 没点后缀(无法推断)
+                    // 2. 用户传了 --namespace 但 daemon 不存在
+                    // 这两种都属于用户配置错,统一报"需要 --namespace"。
+                    let resolved_namespace = match resolved_namespace {
+                        Some(ns) => ns,
+                        None => {
+                            return Err(format!(
+                                "`rdog control self` 找不到 namespace;请传 `--namespace`(例如 `--namespace lab`)。daemon_name={target_name:?} 没有可推断的 namespace 后缀"
+                            ));
+                        }
+                    };
+
+                    // one-shot 走 send_control_lines_zenoh(单 session 串行);
+                    // 否则走 control_remote_zenoh(交互式 stdin/stdout)。
+                    if !one_shot_lines.is_empty() {
+                        send_control_lines_zenoh(
+                            Some(resolved_namespace),
+                            Some(target_name),
+                            vec![],
+                            &one_shot_lines,
+                        )?;
+                        return Ok(());
+                    }
+                    shell::control_remote_zenoh(
+                        Some(resolved_namespace),
+                        Some(target_name),
+                        vec![],
+                    )
+                    .map_err(|err| err.to_string())?;
                 }
             }
         }
@@ -491,6 +688,54 @@ fn run(opts: input::Opts) -> Result<(), String> {
                 }
             }
         },
+        Command::AxDiff {
+            before,
+            after,
+            format,
+            quiet,
+            top_changes,
+            max_depth,
+        } => {
+            // 把 clap 解析的 Option<PathBuf> / Option<String> 装成 ax_diff 自己的 argv
+            // 形态,这样子模块可以独立 --help / 测试,不需要把 clap 类型泄漏到 ax_diff 内部。
+            let mut argv: Vec<String> = Vec::new();
+            if let Some(b) = before {
+                argv.push("--before".to_string());
+                argv.push(b.display().to_string());
+            }
+            if let Some(a) = after {
+                argv.push("--after".to_string());
+                argv.push(a.display().to_string());
+            }
+            if let Some(f) = format {
+                argv.push("--format".to_string());
+                argv.push(f);
+            }
+            if quiet {
+                argv.push("--quiet".to_string());
+            }
+            if let Some(n) = top_changes {
+                argv.push("--top-changes".to_string());
+                argv.push(n.to_string());
+            }
+            argv.push("--max-depth".to_string());
+            argv.push(max_depth.to_string());
+            // 退出码约定: 0=相同, 1=有差异, 2=用法错误, 3=JSON 解析失败。
+            // 这里不走 main.rs 通用 Err 路径, 因为 main 通用路径会把任意
+            // Err 变成 exit 1, 会让 ax_diff 的 2/3 退出码被吞掉。
+            match ax_diff::parse_options(&argv) {
+                Ok(opts) => {
+                    let code = ax_diff::run(opts);
+                    if code != 0 {
+                        std::process::exit(code);
+                    }
+                }
+                Err(err) => {
+                    eprintln!("rdog ax-diff 参数错误: {err}");
+                    std::process::exit(2);
+                }
+            }
+        }
     }
 
     Ok(())
@@ -604,10 +849,43 @@ fn send_single_control_line_zenoh(
         .map_err(|err| err.to_string())
 }
 
+/// TCP 多 line one-shot 入口:一次性发一组 `@<line>`,共享同一条 TCP 连接。
+///
+/// 与 `send_single_control_line_tcp` 的区别:
+/// - 走完整 frame 收口循环,能正确处理 `@screenshot` 这种 `@savefile` 多 frame 场景
+/// - 一次 connect,不再每条重连
+/// - 任一行失败整组退出
+fn send_control_lines_tcp(host: &str, port: u16, lines: &[String]) -> Result<(), String> {
+    let mut transport = control_transport::ControlTransport::connect_tcp(host, port)
+        .map_err(|err| err.to_string())?;
+    shell::run_line_control_lines(&mut transport, lines).map_err(|err| err.to_string())
+}
+
+/// WebSocket 多 line one-shot 入口,语义同 `send_control_lines_tcp`。
+fn send_control_lines_websocket(url: &str, lines: &[String]) -> Result<(), String> {
+    let mut transport = control_transport::ControlTransport::connect_websocket(url)
+        .map_err(|err| err.to_string())?;
+    shell::run_line_control_lines(&mut transport, lines).map_err(|err| err.to_string())
+}
+
+/// Zenoh 多 line one-shot 入口:复用一条 session bridge 串行执行一组 `@<line>`。
+///
+/// 任一行失败整组退出,不做行级重试(避免半成功半失败状态)。
+fn send_control_lines_zenoh(
+    namespace: Option<String>,
+    target_name: Option<String>,
+    entry_point: Vec<String>,
+    lines: &[String],
+) -> Result<(), String> {
+    zenoh_control::send_control_lines(namespace, target_name, entry_point, 3_000, lines)
+        .map_err(|err| err.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        parse_port, resolve_control_invocation, resolve_daemon_transport, ControlInvocation,
+        extract_one_shot_lines, parse_port, resolve_control_invocation, resolve_daemon_transport,
+        ControlInvocation,
     };
     use crate::{
         config::{DaemonConfig, ZenohConfig},
@@ -805,5 +1083,99 @@ mod tests {
             resolve_daemon_transport(None, false, &config),
             Transport::Tcp
         );
+    }
+
+    // ------------------------------------------------------------
+    // extract_one_shot_lines 单元测试
+    // ------------------------------------------------------------
+
+    #[test]
+    fn extract_one_shot_lines_should_return_empty_vec_when_host_is_empty() {
+        let (host, lines) = extract_one_shot_lines(Vec::new());
+        assert!(host.is_empty());
+        assert!(lines.is_empty());
+    }
+
+    #[test]
+    fn extract_one_shot_lines_should_leave_non_at_tail_untouched() {
+        let (host, lines) = extract_one_shot_lines(vec!["mac.lab".to_string()]);
+        assert_eq!(host, vec!["mac.lab".to_string()]);
+        assert!(lines.is_empty());
+    }
+
+    #[test]
+    fn extract_one_shot_lines_should_leave_host_port_untouched() {
+        let (host, lines) =
+            extract_one_shot_lines(vec!["127.0.0.1".to_string(), "5555".to_string()]);
+        assert_eq!(host, vec!["127.0.0.1".to_string(), "5555".to_string()]);
+        assert!(lines.is_empty());
+    }
+
+    #[test]
+    fn extract_one_shot_lines_should_pop_single_trailing_at_line_after_target() {
+        let (host, lines) =
+            extract_one_shot_lines(vec!["mac.lab".to_string(), "@ping".to_string()]);
+        assert_eq!(host, vec!["mac.lab".to_string()]);
+        assert_eq!(lines, vec!["@ping".to_string()]);
+    }
+
+    #[test]
+    fn extract_one_shot_lines_should_pop_single_trailing_at_line_after_host_port() {
+        let (host, lines) = extract_one_shot_lines(vec![
+            "127.0.0.1".to_string(),
+            "5555".to_string(),
+            "@capabilities#1".to_string(),
+        ]);
+        assert_eq!(host, vec!["127.0.0.1".to_string(), "5555".to_string()]);
+        assert_eq!(lines, vec!["@capabilities#1".to_string()]);
+    }
+
+    #[test]
+    fn extract_one_shot_lines_should_pop_consecutive_at_lines_in_input_order() {
+        // 多个连续 `@` 起始 token 都要 pop,且按用户输入顺序返回
+        let (host, lines) = extract_one_shot_lines(vec![
+            "mac.lab".to_string(),
+            "@ping".to_string(),
+            "@capabilities#1".to_string(),
+            "@observe#3".to_string(),
+        ]);
+        assert_eq!(host, vec!["mac.lab".to_string()]);
+        assert_eq!(
+            lines,
+            vec![
+                "@ping".to_string(),
+                "@capabilities#1".to_string(),
+                "@observe#3".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn extract_one_shot_lines_should_stop_popping_at_non_at_element() {
+        // 末尾非 `@` 时,前面所有 `@` 都不动
+        let (host, lines) = extract_one_shot_lines(vec![
+            "mac.lab".to_string(),
+            "@ping".to_string(),
+            "extra".to_string(),
+        ]);
+        assert_eq!(
+            host,
+            vec![
+                "mac.lab".to_string(),
+                "@ping".to_string(),
+                "extra".to_string()
+            ]
+        );
+        assert!(lines.is_empty());
+    }
+
+    #[test]
+    fn extract_one_shot_lines_should_keep_object_payload_intact() {
+        // 对象 payload 整段保留
+        let payload = r#"@key#7:{key:"right-control",hold_ms:200}"#;
+        let (host, lines) =
+            extract_one_shot_lines(vec!["mac.lab".to_string(), payload.to_string()]);
+        assert_eq!(host, vec!["mac.lab".to_string()]);
+        assert_eq!(lines, vec![payload.to_string()]);
     }
 }
