@@ -195,7 +195,11 @@ fn run_control_ping(args: &[&str]) -> (std::process::ExitStatus, String, String)
 fn unique_daemon_name(prefix: &str) -> String {
     // daemon_name 必须带 `.lab` 后缀,namespace 才能从名字后缀推断出来。
     // 见 `crate::zenoh_identity::infer_namespace_from_daemon_name`。
-    format!("{prefix}-{}-{}.{RDOG_NAMESPACE}", std::process::id(), next_port())
+    format!(
+        "{prefix}-{}-{}.{RDOG_NAMESPACE}",
+        std::process::id(),
+        next_port()
+    )
 }
 
 /// 等 FIFO 出现,或返回 NotFound。
@@ -223,10 +227,33 @@ fn cleanup_unixpipe_artifacts(base: &PathBuf) {
     let _ = fs::remove_file(format!("{}_uplink", base.display()));
     let _ = fs::remove_file(format!("{}_downlink", base.display()));
     // Zenoh 还会创建带 suffix 的 dedicated FIFO,尽力清掉,避免跨测试污染。
-    if let Ok(entries) = fs::read_dir(base.parent().unwrap_or_else(|| std::path::Path::new("/tmp"))) {
+    if let Ok(entries) = fs::read_dir(
+        base.parent()
+            .unwrap_or_else(|| std::path::Path::new("/tmp")),
+    ) {
         for entry in entries.flatten() {
             if let Some(name) = entry.file_name().to_str() {
                 if name.starts_with(base.file_name().unwrap().to_str().unwrap()) {
+                    let _ = fs::remove_file(entry.path());
+                }
+            }
+        }
+    }
+}
+
+/// 清理 namespace 下所有 rdog-{ns}-*.pipe* 残留,避免多 test 之间的 FIFO 污染。
+/// 用途:`self` / 空 target 的 e2e 强依赖 namespace 范围内只能有 1 个 daemon,
+/// 旧 test 残留的 fifo 会让 fast path 误报"多候选"。
+fn cleanup_namespace_artifacts(namespace: &str) {
+    let tmpdir = std::env::var_os("TMPDIR")
+        .map(PathBuf::from)
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| PathBuf::from("/tmp"));
+    let prefix = format!("rdog-{namespace}-");
+    if let Ok(entries) = fs::read_dir(&tmpdir) {
+        for entry in entries.flatten() {
+            if let Some(name) = entry.file_name().to_str() {
+                if name.starts_with(&prefix) {
                     let _ = fs::remove_file(entry.path());
                 }
             }
@@ -248,8 +275,12 @@ fn unixpipe_endpoint_should_be_created_when_daemon_starts_with_unixpipe_enabled(
         start_zenoh_daemon_with_combined_output(&daemon_name, next_port(), true);
 
     // 等待 daemon 起来 + log
-    wait_for_marker(&combined, "zenoh router daemon ready", Duration::from_secs(8))
-        .expect("daemon should be ready");
+    wait_for_marker(
+        &combined,
+        "zenoh router daemon ready",
+        Duration::from_secs(8),
+    )
+    .expect("daemon should be ready");
 
     // 验证 FIFO 文件被创建
     let uplink_path = format!("{}_uplink", base_path.display());
@@ -272,8 +303,12 @@ fn unixpipe_fast_path_should_make_ping_respond_within_budget() {
     let (mut child, _config_path, _entry, combined) =
         start_zenoh_daemon_with_combined_output(&daemon_name, next_port(), true);
 
-    wait_for_marker(&combined, "zenoh router daemon ready", Duration::from_secs(8))
-        .expect("daemon should be ready");
+    wait_for_marker(
+        &combined,
+        "zenoh router daemon ready",
+        Duration::from_secs(8),
+    )
+    .expect("daemon should be ready");
 
     // 给 listener 一点时间 settle。
     let uplink_path = format!("{}_uplink", base_path.display());
@@ -286,8 +321,14 @@ fn unixpipe_fast_path_should_make_ping_respond_within_budget() {
     let (status, stdout, stderr) = run_control_ping(&[daemon_name.as_str()]);
     let elapsed = start.elapsed();
 
-    assert!(status.success(), "control @ping should succeed, stderr={stderr}");
-    assert!(stdout.contains("pong"), "@ping 响应应该包含 pong, stdout={stdout}");
+    assert!(
+        status.success(),
+        "control @ping should succeed, stderr={stderr}"
+    );
+    assert!(
+        stdout.contains("pong"),
+        "@ping 响应应该包含 pong, stdout={stdout}"
+    );
 
     // 远端 IP 通过 multicast 走不通时 control 会 fallback 到 10s+;unixpipe 路径必须 < 1s。
     assert!(
@@ -324,9 +365,13 @@ fn stale_unixpipe_socket_files_should_be_cleaned_on_daemon_start() {
     // 重新创建新的 FIFO 是 daemon 自己的事,我们只验证旧的被 unlink。
     let base_only = base_path.clone();
     let uplink_path = format!("{}_uplink", base_path.display());
-    
-    wait_for_marker(&combined, "zenoh router daemon ready", Duration::from_secs(8))
-        .expect("daemon should be ready");
+
+    wait_for_marker(
+        &combined,
+        "zenoh router daemon ready",
+        Duration::from_secs(8),
+    )
+    .expect("daemon should be ready");
 
     // base 本身不会作为 FIFO 存在,daemon 只创建 _uplink 和 _downlink。
     // 老的 _uplink 和 _downlink 应该被 unlink,然后 daemon 重新创建新的 _uplink。
@@ -341,4 +386,167 @@ fn stale_unixpipe_socket_files_should_be_cleaned_on_daemon_start() {
     let _ = child.kill();
     let _ = child.wait();
     cleanup_unixpipe_artifacts(&base_path);
+}
+
+
+// ============================================================================
+// self / 空 target 入口(`rdog control self @<line>` / `rdog control @<line>`)
+// ============================================================================
+
+fn run_control_with_args(args: &[&str]) -> (std::process::ExitStatus, String, String) {
+    let mut child = Command::new(rdog_binary_path())
+        .arg("control")
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("control should start");
+
+    child
+        .stdin
+        .as_mut()
+        .expect("stdin should exist")
+        .write_all(b"@ping\n")
+        .expect("should send control line");
+    drop(child.stdin.take());
+
+    let output = child
+        .wait_with_output()
+        .expect("should collect control output");
+    (
+        output.status,
+        String::from_utf8_lossy(&output.stdout).to_string(),
+        String::from_utf8_lossy(&output.stderr).to_string(),
+    )
+}
+
+#[test]
+fn self_target_with_explicit_namespace_should_find_local_daemon() {
+    // 独立 namespace,完全跟其他 `lab` 测试隔离,允许 cargo test 默认并发。
+    let ns = "selfexp";
+    cleanup_namespace_artifacts(ns);
+
+    let daemon_name = format!("selftest.{ns}");
+    let base_path = derive_unixpipe_base_path(ns, &daemon_name);
+    cleanup_unixpipe_artifacts(&base_path);
+
+    let (mut child, _config_path, _entry, combined) =
+        start_zenoh_daemon_with_combined_output(&daemon_name, next_port(), true);
+
+    wait_for_marker(&combined, "zenoh router daemon ready", Duration::from_secs(8))
+        .expect("daemon should be ready");
+
+    let uplink_path = format!("{}_uplink", base_path.display());
+    assert!(
+        wait_for_fifo(std::path::Path::new(&uplink_path), Duration::from_secs(2)),
+        "expected {uplink_path} to be created"
+    );
+
+    let (status, stdout, stderr) = run_control_with_args(&["self", "--namespace", ns]);
+    let _ = child.kill();
+    let _ = child.wait();
+    cleanup_unixpipe_artifacts(&base_path);
+
+    assert!(status.success(), "control self should succeed, stderr={stderr}");
+    assert!(stdout.contains("pong"), "@ping 应该返回 pong,stdout={stdout}");
+}
+
+#[test]
+fn empty_target_with_namespace_should_find_local_daemon() {
+    let ns = "emptytgt";
+    cleanup_namespace_artifacts(ns);
+
+    let daemon_name = format!("only.{ns}");
+    let base_path = derive_unixpipe_base_path(ns, &daemon_name);
+    cleanup_unixpipe_artifacts(&base_path);
+
+    let (mut child, _config_path, _entry, combined) =
+        start_zenoh_daemon_with_combined_output(&daemon_name, next_port(), true);
+
+    wait_for_marker(&combined, "zenoh router daemon ready", Duration::from_secs(8))
+        .expect("daemon should be ready");
+
+    let uplink_path = format!("{}_uplink", base_path.display());
+    assert!(
+        wait_for_fifo(std::path::Path::new(&uplink_path), Duration::from_secs(2)),
+        "expected {uplink_path} to be created"
+    );
+
+    let (status, stdout, stderr) = run_control_with_args(&["--namespace", ns]);
+    let _ = child.kill();
+    let _ = child.wait();
+    cleanup_unixpipe_artifacts(&base_path);
+
+    assert!(status.success(), "control 空 target + --namespace 应该成功,stderr={stderr}");
+    assert!(stdout.contains("pong"), "@ping 应该返回 pong,stdout={stdout}");
+}
+
+#[test]
+fn self_target_should_error_when_no_local_daemon_running() {
+    // 清理掉所有残留 FIFO,确保本地没有 daemon
+    let tmpdir = std::env::var_os("TMPDIR")
+        .map(PathBuf::from)
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| PathBuf::from("/tmp"));
+    if let Ok(entries) = std::fs::read_dir(&tmpdir) {
+        for entry in entries.flatten() {
+            if let Some(name) = entry.file_name().to_str() {
+                if name.starts_with("rdog-") && name.ends_with(".pipe_uplink") {
+                    let _ = std::fs::remove_file(entry.path());
+                }
+            }
+        }
+    }
+
+    let (status, _stdout, stderr) =
+        run_control_with_args(&["self", "--namespace", "rdog-namespace-no-such-daemon-12345"]);
+    assert!(!status.success(), "没有本地 daemon 时 control self 应该失败");
+    let err_lower = stderr.to_lowercase();
+    assert!(
+        err_lower.contains("not found") || err_lower.contains("未找到"),
+        "应该报未找到本地 daemon,实际 stderr={stderr}"
+    );
+}
+
+#[test]
+fn self_target_should_error_when_multiple_local_daemons() {
+    // 在同 namespace 启动两个 daemon
+    let daemon_name_a = unique_daemon_name("self-multi-a");
+    let daemon_name_b = unique_daemon_name("self-multi-b");
+    let base_a = derive_unixpipe_base_path(RDOG_NAMESPACE, &daemon_name_a);
+    let base_b = derive_unixpipe_base_path(RDOG_NAMESPACE, &daemon_name_b);
+    cleanup_unixpipe_artifacts(&base_a);
+    cleanup_unixpipe_artifacts(&base_b);
+
+    let (mut child_a, _cp_a, _e_a, combined_a) =
+        start_zenoh_daemon_with_combined_output(&daemon_name_a, next_port(), true);
+    let (mut child_b, _cp_b, _e_b, combined_b) =
+        start_zenoh_daemon_with_combined_output(&daemon_name_b, next_port(), true);
+
+    wait_for_marker(&combined_a, "zenoh router daemon ready", Duration::from_secs(8))
+        .expect("daemon A should be ready");
+    wait_for_marker(&combined_b, "zenoh router daemon ready", Duration::from_secs(8))
+        .expect("daemon B should be ready");
+
+    // 等两个 fifo 都出现
+    let uplink_a = format!("{}_uplink", base_a.display());
+    let uplink_b = format!("{}_uplink", base_b.display());
+    assert!(wait_for_fifo(std::path::Path::new(&uplink_a), Duration::from_secs(2)));
+    assert!(wait_for_fifo(std::path::Path::new(&uplink_b), Duration::from_secs(2)));
+
+    let (status, _stdout, stderr) = run_control_with_args(&["self", "--namespace", RDOG_NAMESPACE]);
+    let _ = child_a.kill();
+    let _ = child_a.wait();
+    let _ = child_b.kill();
+    let _ = child_b.wait();
+    cleanup_unixpipe_artifacts(&base_a);
+    cleanup_unixpipe_artifacts(&base_b);
+
+    assert!(!status.success(), "两个本地 daemon 时 control self 应该失败(歧义)");
+    let err_lower = stderr.to_lowercase();
+    assert!(
+        err_lower.contains("already exists") || err_lower.contains("多个"),
+        "应该报多个 daemon 冲突,实际 stderr={stderr}"
+    );
 }
