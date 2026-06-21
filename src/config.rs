@@ -1205,7 +1205,10 @@ shell = "/bin/bash"
             {
                 let cfg = UnixpipeConfig::default();
                 assert!(cfg.enabled, "unix 平台 default 应该启用 unixpipe fast path");
-                assert!(cfg.socket_path.is_none(), "未显式给路径时 socket_path 必须为 None");
+                assert!(
+                    cfg.socket_path.is_none(),
+                    "未显式给路径时 socket_path 必须为 None"
+                );
             }
             #[cfg(windows)]
             {
