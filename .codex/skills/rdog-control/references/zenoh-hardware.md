@@ -93,11 +93,10 @@ Important boundary:
 Use `rdog control` to drive the machine that has physical access:
 
 ```bash
-rdog control mini-a.lab <<'RDOG'
-@ping
-@cmd#1:"ls /dev/tty* | head"
-@cmd#2:"python3 tools/read_sensor.py --port /dev/ttyACM1"
-RDOG
+rdog control mini-a.lab \
+  @ping \
+  '@cmd#1:"ls /dev/tty* | head"' \
+  '@cmd#2:"python3 tools/read_sensor.py --port /dev/ttyACM1"'
 ```
 
 Use PTY when the vendor tool is interactive:
@@ -109,12 +108,11 @@ rdog control mini-a.lab --pty -- /bin/bash
 Use screenshots/key/paste for GUI-only hardware tools:
 
 ```bash
-rdog control win11.lab <<'RDOG'
-@observe#0:{mode:"hybrid",include_screenshot:true,include_ax:false,include_windows:true}
-@key#1:{key:"F5",hold_ms:200,mode:"press_release"}
-@screenshot#2
-@mouse-move#3:{dx:0,dy:0,coordinate_space:"relative"}
-RDOG
+rdog control win11.lab \
+  '@observe#0:{mode:"hybrid",include_screenshot:true,include_ax:false,include_windows:true}' \
+  '@key#1:{key:"F5",hold_ms:200,mode:"press_release"}' \
+  @screenshot#2 \
+  '@mouse-move#3:{dx:0,dy:0,coordinate_space:"relative"}'
 ```
 
 For GUI-only hardware tools, start with `@observe` when available.

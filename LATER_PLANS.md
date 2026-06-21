@@ -276,25 +276,67 @@
 - 检查 `@ax-find` 的搜索对象是否只遍历了某个 flattened summary,而没有覆盖 `@ax-get` 能拿到的 WebArea 深层节点。
 - 增加针对 `AXLink.description` 的 focused fixture 或 live regression。
 - 目标是让 agent 能直接用 `@ax-find description_contains` 定位网页内语义链接,减少必须手工深读 WebArea 的步骤。
+
+## [2026-06-19 01:05:00] [Session ID: CURRENT_SESSION] 主题: rdog control one-shot 入口落地后续
+
+### 背景
+- 2026-06-19 已经完成 `rdog control <target> @<line>` 入口
+- 落地时识别出 2 类值得后续补的硬化点
+
+### 后续事项
+- [DONE 2026-06-19] 给 Zenoh one-shot 入口补 e2e(同 02:05 合并到 3 个 `control_multi_one_shot_*` 测试,覆盖 2/3 line 顺序 + robust 3 line 烟测)
+- [DONE 2026-06-19] `src/main.rs::init_logger` 走 stderr;4 个 e2e 已修(control_lanes::listen_local, control_pty::detach_attach, shell_pty::reverse_shell);Zenoh e2e 24+ 用 sh -c "exec rdog ... 2>&1" 兼容层处理;后续可把兼容层退役,统一改测试用合流 buffer
+
+## [2026-06-19 02:05:00] [Session ID: CURRENT_SESSION] 主题: rdog control 多 line one-shot 落地后续
+
+### 背景
+- 2026-06-19 完成多 line one-shot 落地 (N=1..32,共享一条 transport)
+- 与 01:05 同日条目里的 Zenoh one-shot 单 line e2e 一起,后续可一并补
+
+### 后续事项
+- [DONE 2026-06-19] 已合并到 01:05 的"已 done"条目
+  - 拉一个 router fixture,启 daemon profile,跑 `rdog control <target> @ping @capabilities#1` 验证 Zenoh session bridge 共享 + 多 frame 收口 + 顺序输出
+  - 顺便补单 line Zenoh e2e(01:05 登记的旧 follow-up)
+- 32 上限是否合理需要观察:如果 agent 实际跑 GUI 任务需要更多 line,提到 64 或 128;如果从来用不到 30,降到 16
+
+## [2026-06-19 05:05:00] [Session ID: CURRENT_SESSION] 主题: sh wrapper 退役 + 合流 helper 落地后续
+
+### 背景
+- 2026-06-19 已完成 `start_zenoh_daemon_with_combined_output` 落地,sh wrapper 退役
+- 24+ Zenoh e2e 改用合流 buffer,不再依赖 stdout 上的 log marker
+
+### 后续事项
+- (无,本任务清理完毕)
+- 历史上 LATER_PLANS 里 1 条 "sh wrapper 临时兼容层退役" 候选任务已 done
+
+## [2026-06-20 12:10:00] [Session ID: omx-1781926953468-5fb1e6] 后续计划: 完整整理根目录旧支线六文件
+
+### 背景
+- 本轮因默认 `WORKLOG.md` 超过 1000 行, 只执行了最小安全续档。
+- 工作区仍存在多个带后缀的旧支线上下文文件, 本轮没有展开完整 `continuous-learning` 清理, 避免偏离用户要求的 skill 更新任务。
+
+### 后续动作
+- 单独开一次完整 `continuous-learning` 任务, 按后缀分组读取根目录旧支线六文件。
+- 判断哪些支线仍活跃, 哪些应归档到 `archive/branch_contexts/`。
+- 若产生新的长期知识, 同步更新 `EXPERIENCE.md` 与 `AGENTS.md` 索引。
+
+## [2026-06-20 18:47:00] [Session ID: omx-1781934324141-q2nzhz] 完成记录: 根目录旧支线六文件整理已执行
+
+### 对应旧计划
+- 对应 `2026-06-20 12:10:00` 的"完整整理根目录旧支线六文件"。
+
+### 完成结果
+- 已按后缀分组检索根目录支线六文件。
+- 已将 23 个旧支线组、90 个文件归档到 `archive/branch_contexts/<suffix>/`。
+- 已生成 manifest: `archive/manifests/ARCHIVE_MANIFEST__2026-06-20_branch_context_cleanup.md`。
+- 已在 `AGENTS.md` 为新 manifest 建立索引。
+
+### 备注
+- 默认六文件仍为当前活跃入口,没有归档。
+- 如果后续还要提交本轮 continuous-learning 结果,应单独做 scoped commit,不要和业务代码改动混合。
+
 ## [2026-06-20 23:55:00] [Session ID: omx-1781788115552-szl2hn] 后续建议
 
-### rdog control macOS 本地 fast path 收尾
-
-- [ ] 把 `specs/zenoh-control-plane-plan.md` 补上 "Local fast path: unixpipe" 节,把 unixpipe exists-check 契约写进去
-- [ ] `EXPERIENCE.md` 沉淀 2 条经验:
-  - "Zenoh 本机 fast path 优先用 unixpipe transport 而不是新增独立 UDS 控制面"
-  - "unixpipe client 探测用 `Path::exists` 不用 open FIFO:Zenoh 1.8.0 request channel 单 reader 复用,主动 open 探测会破坏 daemon"
-- [ ] `.codex/skills/rdog-control/SKILL.md` 补 troubleshooting 段:"同机 ping 慢? 确认 `rdog_macos.toml` 启用了 `[zenoh.unixpipe]`,或检查 `RUST_LOG=info` 日志里有没有 `unixpipe endpoint detected` 这行"
-- [ ] `rdog_linux.toml` 模板加同样的 `[zenoh.unixpipe]` 注释段(目前只改了 `rdog_macos.toml`)
-- [ ] 把 plan 文件 `.omx/plans/zenoh-unixpipe-fast-path.md` 里"策略"小节也同步成"实际采用 exists-check 不用 connect 探测",跟 spec 对齐
-- [ ] 启动独立 plan:方向 B(直接 UDS 控制面,10~50x 提速),作为 unixpipe 体验确认后的 follow-up
-
-### 已有 flake 待处理
-
-- [ ] `zenoh_router_client` 测试集多测试并发 ~4% flake,失败用例不固定。
-  - 已记录到 EPIPHANY_LOG。
-  - 排查方向: 给 `resolve_target` 的 liveliness get 加 retry,或 test helper 给每个 test 独立 namespace。
-  - 不属于本轮范围,留作 follow-up。
 ### rdog control macOS 本地 fast path 收尾(2026-06-21 大部分完成)
 
 - [x] 把 `specs/zenoh-control-plane-plan.md` 补上 "Local fast path: unixpipe" 节,把 unixpipe exists-check 契约写进去

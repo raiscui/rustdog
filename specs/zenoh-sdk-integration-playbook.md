@@ -522,3 +522,97 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 ## 14. 一句话给编程智能体
 
 当前版本里,把 `rdog daemon` 当成一个通过 Zenoh router 暴露的 **service_name = daemon_name** 的单成员服务。client 会话启动后先找 `alive` 并解析一次 target,后续请求默认复用当前 target; 若 timeout,再 re-resolve 并 retry 一次。默认优先 autodiscovery, `--entry-point` 只是 fallback。
+
+---
+
+## 15. AX snapshot 结构化 diff (`rdog ax-diff`)
+
+### 15.1 目的
+
+第三方 app / 编程智能体通过 Zenoh SDK 触发 GUI action 后,
+需要确认"action 真的让目标状态变了"。
+
+之前通常的做法是: 抓 before / after 截图, 用图像 diff 或 OCR 比对。
+这种方法对 model 来说开销大, 而且要再开一轮"看图"才能给结论。
+
+`rdog ax-diff` 是 `rdog` 的子命令, 直接对两份 `rdog.ax.v1` JSON 快照做
+**结构化 diff**, 按 `window id` / `element id` 配对, 输出 added/removed/modified
+列表 + 字段级 before/after。退出码 0=相同, 1=有差异, 2=用法错误, 3=JSON 解析失败。
+
+第三方 app / agent 在自己的 SDK 集成里, **不需要重新发明这套 diff 逻辑**;
+只需要抓两份快照写到本地 JSON 文件, 然后用 shell 或 Zenoh SDK 之外的标准
+subprocess 方式跑 `rdog ax-diff`, 拿到退出码 + 文本/JSON 报告即可。
+
+### 15.2 推荐 workflow
+
+1. 抓 before 快照:
+   - 走 `@observe` over Zenoh session channel, 或直接走 SDK 的
+     `query` + `@observe` payload。典型请求:
+     `@observe#1:{mode:"hybrid",include_screenshot:false,include_ax:true,include_windows:true,ax_mode:"interactive"}`
+   - 把 `value.windows` 写到 `before.json`
+     (完整 `value` 也能直接喂给 `rdog ax-diff`, 它会忽略非 `windows` 字段)
+
+2. 触发 action (AXPress / AXAction / @web-act / @ax-set-value / @type-text …)
+
+3. 抓 after 快照, 写 `after.json`
+
+4. 跑 `rdog ax-diff`:
+   ```bash
+   rdog ax-diff --before before.json --after after.json --format text
+   rdog ax-diff --before before.json --after after.json --format json
+   rdog ax-diff --before before.json --after after.json --format summary
+   ```
+
+5. 根据 exit code 决定下一步:
+   - `0` 表示完全无变化, 大概率 action 没生效或目标选错
+   - `1` 表示有差异, 解析报告 (text / json) 决定是预期变化还是被改错了
+   - `2` 是命令用法错误, 检查 --before / --after / --format
+   - `3` 是 JSON 解析失败, 抓的快照文件被截断或编码错误
+
+### 15.3 输出契约
+
+`rdog ax-diff` 规范化时移除 `observation` 块、`ref` 字段、`ax_path` 索引等
+**drift 字段**。diff key 是 `id` (`pid:.../window:N/path:...`), 跨次观察稳定。
+
+`--format text` 默认输出:
+- 一行 summary: `windows: +N -N ~N | elements: +N -N ~N`
+- 每个改动 window / element 单独一段, 含字段级 before/after 简明值
+
+`--format summary` 只打 summary 一行, 适合 CI smoke 和 agent 轮询。
+
+`--format json` 是完整结构化 diff, 程序消费用。`windows[]` 和 `elements[]`
+永远包含 `kind` (`Added` / `Removed` / `Modified`) 和 (modified 情况下) `changed_fields[]`
+(`field` / `before` / `after`)。
+
+`--top-changes N` 限制 text 输出的 element 改动条数, 适合 model context 紧张场景;
+不影响 summary 计数和 json 完整输出。超出截断会打 "... 还有 N 个 element 改动被截断 (...)"。
+
+### 15.4 不要重新发明
+
+第三方 app / agent 在实现 "action 前后 evidence" 时, 不要再走以下任一路径:
+
+- ❌ 字符串 `diff before.json after.json` —— 会被 `observation` 块 / `ref` 漂移淹没
+- ❌ `jq -S` + `diff` —— 同上
+- ❌ 截图前后 diff / OCR 比对 —— 浪费 model 一轮 image 理解, 且遗漏语义级变化
+- ❌ 在自己的 SDK 集成里写一份 element-by-element diff —— 这正是 `rdog ax-diff` 的职责
+
+如果一定要在 SDK 集成里做 "in-process" 校验, 至少:
+- 用 `pid:.../window:.../path:...` 作 diff key
+- 跳过 `observation` / `ref` / `ax_path` 字段
+- actions 数组按 multiset 处理 (新增单项要被识别)
+
+### 15.5 CI smoke
+
+仓库在 `.codex/skills/rdog-control/scripts/ci_smoke_ax_diff.sh` 提供了一份
+CI smoke 脚本, 用 `examples/xhs_{before,after}.json` fixture 跑 14 项断言,
+覆盖三种 format / 退出码 / --top-changes / 用法错误 / JSON 解析失败 / 内部一致性。
+
+第三方 app / agent 集成时, 可以把这套 fixture 当作"action 前后 diff 协议"的
+最简 regression net, 在自己的 CI 流程里复用。
+
+### 15.6 路径与执行
+
+- `rdog ax-diff` 子命令是 `rdog` binary 的一部分, 不需要 daemon, 纯本地 CLI
+- 退出码遵循 Unix 习惯: 0=无差异, 1=有差异, 2=用法错误, 3=输入错误
+- 性能: 大约 O(window 数 + element 数), 千级 element 毫秒级完成
+- 不引入新依赖: 用 `clap` (已存在) + `serde_json` (已存在), 复用现有 AX schema 字段

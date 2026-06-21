@@ -25,18 +25,22 @@ rustdog 首先被LLM agent 智能体使用，其次被人类使用。要以agent
 
 - `EXPERIENCE.md`
   - 主题: 本项目已经验证过的协议设计经验与边界
-  - 用途: 帮助后续改协议时避免把 `@exit`、显式协议请求和裸 shell 行再次混淆
-  - 何时阅读: 做协议演进、回顾历史判断口径、沉淀经验时
+  - 用途: 帮助后续改协议时避免把 `@exit`、显式协议请求和裸 shell 行再次混淆;沉淀跨平台修复、Zenoh peer/peer、log 路径等隐性契约教训
+  - 何时阅读: 做协议演进、回顾历史判断口径、沉淀经验时;改 daemon 启动日志 / log target 路径 / e2e polling 假设前
 
 - `.codex/skills/rdog-control/SKILL.md`
-  - 主题: 项目内 `rdog control` 复用 skill,覆盖 Zenoh target-name、line-control、PTY、AX、鼠标和硬件桥接
-  - 用途: 给 Codex 和其他 code agent 的项目内稳定入口,让 `rdog control` 的使用约定和协议文档一起版本化
-  - 何时阅读: 需要改 `rdog control` 相关协议、示例、README、PTY 或 GUI 控制行为前
+  - 主题: rdog-control skill,覆盖 Zenoh target-name、line-control、PTY、AX、鼠标和硬件桥接,以及 `rdog ax-diff` 结构化 AX JSON diff
+  - 用途: agent-agnostic skill 入口,同时服务 Codex / Claude / GPT / openai-compatible / MCP / 人类。让 `rdog control` 使用约定和协议文档一起版本化
+  - 何时阅读: 改 rdog control 相关协议、示例、README、PTY、GUI 控制、ax-diff 子命令,或调整 agent 适用范围前
 
 - `.codex/skills/rdog-control/references/cookbook-web-content.md`
-  - 主题: 浏览器当前激活页面内的 Web 内容 AX 操作 cookbook
-  - 用途: 固定 `AXWebArea` 优先的网页内容搜索、按钮/链接匹配、`AXPress` 优先与浏览器 chrome 隔离策略
-  - 何时阅读: 用户要检查、列举或点击浏览器当前网页内控件,并且明确要求 AX 证据而不是 OCR / 图像识别时
+  - 主题: 浏览器当前激活页面内的 Web 内容 AX 操作 cookbook,evidence 模式从"截图前后 diff"切到"AX JSON 结构化 diff"
+  - 用途: 固定 `AXWebArea` 优先的网页内容搜索、按钮/链接匹配、`AXPress` 优先、浏览器 chrome 隔离策略,以及用 `rdog ax-diff` 做 action 前/后比对的标准化流程
+  - 何时阅读: 用户要检查、列举或点击浏览器当前网页内控件,或要在 AX JSON 层做 action 前/后 evidence 对比时
+- `.codex/skills/rdog-control/examples/`
+  - 主题: rdog ax-diff 的小红书首页 before/after AX snapshot fixture
+  - 用途: 给 cookbook 的 AX JSON diff 章节和 CI smoke 脚本一个可直接复用的最小例子
+  - 何时阅读: 需要给 agent / 测试脚本演示 `rdog ax-diff` 输入/输出格式时
 
 - `.codex/skills/self-learning.zenoh-duplicate-name-local-guard/SKILL.md`
   - 主题: Zenoh 同机重复 `daemon_name` / `service_name` 只靠 liveliness 检查会漏掉启动竞争窗口
@@ -83,169 +87,16 @@ rustdog 首先被LLM agent 智能体使用，其次被人类使用。要以agent
   - 用途: 说明旧支线 task plan 超过 1000 行后的归档位置,以及 `@web-find target.window_id` / `target.window_ref` 产品化经验沉淀范围
   - 何时阅读: 需要追溯 computer-use density Phase 3F 之后的长计划、window-scoped Web target 验证证据,或确认为何当前支线 task plan 变短时
 
-- `specs/zenoh-control-plane-plan.md`
-  - 主题: `rustdog` 的 canonical Zenoh router/serial control-plane 规划
-  - 用途: 固定 daemon 内嵌 router、control client、native `transport_serial`、autodiscovery 默认接入 + `--entry-point` fallback、identity/keyexpr、CLI/config、runtime 边界与验证矩阵
-  - 何时阅读: 规划或实现 Zenoh router/serial transport、daemon/control 互联,或准备把 control plane 从 TCP 扩到 Zenoh 之前
+- `archive/manifests/ARCHIVE_MANIFEST__2026-06-20_worklog_rollover.md`
+  - 主题: 2026-06-20 默认 `WORKLOG.md` 超过 1000 行后的续档说明
+  - 用途: 说明 2026-05-12 到 2026-06-20 默认 WORKLOG 归档位置,以及 one-shot / Zenoh / GUI control 相关工作记录摘要
+  - 何时阅读: 需要追溯 2026-06-20 前默认 WORKLOG 记录,或确认为何当前默认 `WORKLOG.md` 变短时
 
-- `specs/zenoh-peer-peer-lan-profile.md`
-  - 主题: 历史性的同 LAN `daemon = peer`、`control = peer` 规格草案
-  - 用途: 保留旧 peer/peer 语义、peer discovery 行为、entry point fallback、唯一性约束与 CLI/config 的历史记录; 新实现不以此为主路径
-  - 何时阅读: 仅在回顾旧 peer/peer 设计、做迁移对照或排查历史行为时
+- `archive/manifests/ARCHIVE_MANIFEST__2026-06-20_branch_context_cleanup.md`
+  - 主题: 2026-06-20 根目录旧支线六文件完整整理说明
+  - 用途: 说明 23 个旧支线组、90 个支线六文件归档到 `archive/branch_contexts/<suffix>/` 的映射和摘要
+  - 何时阅读: 需要追溯 `agent_desktop_review`、`observation_refmap_*`、`computer_use_density`、`xhs_*`、`rdog_*` 等旧支线上下文,或确认根目录为什么只保留默认六文件入口时
 
-- `specs/zenoh-sdk-integration-playbook.md`
-  - 主题: 其他 app 使用 Zenoh SDK 对接 `rdog` daemon 的操作手册
-  - 用途: 固定当前 service/member keyexpr、query payload / reply contract、discovery / resolve / retry 策略,辅导编程智能体实现对接
-  - 何时阅读: 需要让第三方 app 或编程智能体直接通过 Zenoh SDK 对接 `rdog` daemon 之前
-
-- `specs/code-agent-rdog-control-usage.md`
-  - 主题: code agent 使用 `rdog daemon` / `rdog control` 在局域网或可达远程网络上操控和协调主机的操作指南
-  - 用途: 固定真实 CLI 入口、target-name 寻址、line-control/PTY/截图/按键能力矩阵、Zenoh session channel 模型、安全权限边界和 smoke 命令
-  - 何时阅读: 需要让 code agent 通过 `rdog control <target-name>` 控制不同主机、编排多主机任务、或解释 `rdog control` 相比 SSH 的独特性之前
-
-- `specs/rdog-computer-use-density-plan.md`
-  - 主题: computer-use 类 GUI/Web 任务的高密度 primitive 与 bench suite 规划
-  - 用途: 固定 `@gui-probe`、`@web-find`、`@web-act`、`@gui-act`、`@gui-bench` 的演进方向,以及用 `backend_request_count` / `agent_decision_points` 等指标衡量任务密度
-  - 何时阅读: 准备减少 agent 手动串联 `@ping` / `@capabilities` / `@window-find` / `@ax-get` 等低级请求,实现 Web/GUI 高密度任务 primitive 或 bench baseline 前
-
-- `specs/zenoh-sdk-agent-prompts.md`
-  - 主题: 给编程智能体直接使用的 Rust / Unity Zenoh 对接实现提示模板
-  - 用途: 提供可复制 prompt,指导智能体用 Zenoh Rust SDK 或 `mhama/zenoh-unity-plugin` 对接 `rdog` daemon
-  - 何时阅读: 需要把对接手册进一步变成“智能体可直接执行的实现提示”之前
-
-- `specs/zenoh-unity-querier-wrapper-design.md`
-  - 主题: Unity 使用 `mhama/zenoh-unity-plugin` 对接 `rdog` daemon 的最小 query/reply wrapper 设计草图
-  - 用途: 说明当前插件已有 wrapper 能力、缺失的 query/reply 封装层,以及给智能体的最小封装建议
-  - 何时阅读: 需要让 Unity 侧真正开始实现 `rdog` control query/reply 对接前
-
-- `specs/zenoh-screenshot-control-plan.md`
-  - 主题: `@screenshot` 远程截图能力的控制面规划
-  - 用途: 固定“截图请求继续走显式 control plane,默认 all-display composite JPEG + manifest JSON 通过 `@savefile` 返回,再以 `@response ...screenshot-bundle...` 收口; macOS 用 `sck-rs` 主路径 + `xcap` fallback,其他平台走 `xcap`”这一轮方案
-  - 何时阅读: 准备实现或评审 `@screenshot`、截图结果响应格式、截图后端选择或 screenshot control 测试方案前
-
-- `specs/rdog-multi-display-screenshot-coordinate-plan.md`
-  - 主题: 多显示器 `@screenshot` bundle 和截图坐标/OS 鼠标坐标契约
-  - 用途: 固定 `display:"all"`、`layout:"composite"`、`coordinate_space:"os-logical"`、virtual desktop JPEG、manifest JSON、`display:"primary"` 兼容入口、gap/rotation 和 Screen Recording 权限边界
-  - 何时阅读: 准备实现或评审多显示器截图、manifest schema、后续 `@click` / `@drag` 坐标换算、或排查 screenshot 坐标偏移前
-
-- `specs/rdog-mouse-control-coordinate-plan.md`
-  - 主题: `@mouse-move` / `@mouse-button` / `@click` / `@drag` / `@wheel` 鼠标控制方案
-  - 用途: 固定鼠标控制必须复用 screenshot manifest 的 `os-logical` 坐标语义,以及 press/release、click、drag、wheel 的协议字段、错误边界和验证矩阵
-  - 何时阅读: 准备实现或评审鼠标移动、点击、拖拽、滚轮、button press/release,或排查多显示器鼠标坐标偏移前
-
-- `specs/rdog-ax-screenshot-manifest-control-plan.md`
-  - 主题: `@screenshot` manifest 集成 macOS AX 窗口/UI 元素结构,以及 `@ax-tree` / `@ax-press` AX control 方案
-  - 用途: 固定 `include_ax`、`ax_required`、`rdog.ax.v1` manifest schema、Accessibility 权限降级语义、AXPress target locator 和错误映射
-  - 何时阅读: 准备实现或评审 AX screenshot manifest、`@ax-tree`、`@ax-press`、Accessibility 权限提示,或排查 AX 元素坐标/定位歧义前
-
-- `specs/rdog-observation-scoped-refmap-plan.md`
-  - 主题: observation-scoped refmap、durable selector、semantic re-find、`@observe` 与 mouse ref 化的长期路线图
-  - 用途: 固定 GUI observation 的短期 ref / 长期 selector / 重启恢复 / 语义重找 / 统一观察入口 / mouse fallback 当前契约和完整演进线,避免只做最小可用版后丢失后续目标
-  - 何时阅读: 修改 `src/control_observation*`、`src/control_mouse*`、`@observe`、selector 恢复、mouse ref target,或更新 `rdog-control` skill / README / control protocol 文档前
-
-- `specs/rdog-non-mouse-semantic-control-plan.md`
-  - 主题: `@ax-action` / `@ax-set-value` / `@type-text` / `@key delivery` / `@ax-focus` / `@ax-scroll` 的非鼠标语义控制协议
-  - 用途: 固定“非鼠标优先”协议能力,明确 `@ax-press` 兼容映射、AXValue 写入边界、`targeted-keyboard` / clipboard opt-in、`@key` 定向投递,以及 `@ax-focus activate:true` 复用 `@window-activate` 的边界
-  - 何时阅读: 准备实现或评审非鼠标 GUI 控制、更新 `rdog-control` skill,或判断某个交互是否该先走 AX/value 而不是鼠标前
-
-- `specs/rdog-window-control-plan.md`
-  - 主题: `@window-find` / `@window-activate` / `@window-close` 的窗口状态与窗口生命周期控制方案
-  - 用途: 固定截图不可见窗口的 agent 工作流、window state schema、graceful/terminate/kill 关闭边界、以及 hidden/minimized/occluded/cross-space 的诚实状态语义
-  - 何时阅读: 准备实现或评审窗口发现、窗口激活、窗口关闭、被遮挡窗口交互,或更新 `rdog-control` skill 的窗口控制指引前
-
-- `specs/bidirectional-control-plane-plan.md`
-  - 主题: 控制面从单向 request/reply 升级为真正双向 control peer 的规划
-  - 用途: 固定“daemon 和 control 双方都能主动发送 `@key` / `@script` / `@savefile` 等显式控制指令,Zenoh 不再停留在单向 query/reply”这一轮新的架构方向
-  - 何时阅读: 准备继续实现 `@savefile`、`@screenshot`、daemon 主动下发控制指令,或评审 TCP/WebSocket/Zenoh 控制模型是否仍然单向时
-
-- `specs/control-frame-refactor-plan.md`
-  - 主题: control core / outbound frame / session 抽象的分阶段重构计划
-  - 用途: 固定从 `String @response` 返回模型演进到 `ControlExecutionOutcome + ControlFrame + ControlPeerSession` 的实施顺序,以及 TCP/WebSocket 先行、Zenoh 后续迁移的验证路径
-  - 何时阅读: 准备开始写双向控制代码、评估先改哪层抽象、或 review `@savefile`/双向 frame 改造顺序时
-- `specs/zenoh-unixpipe-fast-path-plan.md`
-  - 主题: rdog control macOS / Linux 本机 fast path(Zenoh `transport_unixpipe`)规划
-  - 用途: 固定"同机 daemon + control 自动走 Unix domain socket,失败透明 fallback 到 UDP/TCP"的契约,以及 socket 路径推导规则、daemon/client 行为边界、错误处理、验收标准
-  - 何时阅读: 修改 `src/zenoh_runtime.rs` / `src/zenoh_control.rs` / `src/config.rs` 的 unixpipe 相关逻辑、`Cargo.toml` 的 `transport_unixpipe` feature、`rdog_macos.toml` / `rdog_linux.toml` 模板,或排查"同机 ping 慢" / "socket bind 失败" / "远端 fallback 是否生效"前
-
-- `specs/zenoh-control-plane-plan.md`
-  - 主题: `rustdog` 的 canonical Zenoh router/serial control-plane 规划
-  - 用途: 固定 daemon 内嵌 router、control client、native `transport_serial`、autodiscovery 默认接入 + `--entry-point` fallback、identity/keyexpr、CLI/config、runtime 边界与验证矩阵
-  - 何时阅读: 规划或实现 Zenoh router/serial transport、daemon/control 互联,或准备把 control plane 从 TCP 扩到 Zenoh 之前
-
-- `specs/zenoh-peer-peer-lan-profile.md`
-  - 主题: 历史性的同 LAN `daemon = peer`、`control = peer` 规格草案
-  - 用途: 保留旧 peer/peer 语义、peer discovery 行为、entry point fallback、唯一性约束与 CLI/config 的历史记录; 新实现不以此为主路径
-  - 何时阅读: 仅在回顾旧 peer/peer 设计、做迁移对照或排查历史行为时
-
-- `specs/zenoh-sdk-integration-playbook.md`
-  - 主题: 其他 app 使用 Zenoh SDK 对接 `rdog` daemon 的操作手册
-  - 用途: 固定当前 service/member keyexpr、query payload / reply contract、discovery / resolve / retry 策略,辅导编程智能体实现对接
-  - 何时阅读: 需要让第三方 app 或编程智能体直接通过 Zenoh SDK 对接 `rdog` daemon 之前
-
-- `specs/code-agent-rdog-control-usage.md`
-  - 主题: code agent 使用 `rdog daemon` / `rdog control` 在局域网或可达远程网络上操控和协调主机的操作指南
-  - 用途: 固定真实 CLI 入口、target-name 寻址、line-control/PTY/截图/按键能力矩阵、Zenoh session channel 模型、安全权限边界和 smoke 命令
-  - 何时阅读: 需要让 code agent 通过 `rdog control <target-name>` 控制不同主机、编排多主机任务、或解释 `rdog control` 相比 SSH 的独特性之前
-
-- `specs/rdog-computer-use-density-plan.md`
-  - 主题: computer-use 类 GUI/Web 任务的高密度 primitive 与 bench suite 规划
-  - 用途: 固定 `@gui-probe`、`@web-find`、`@web-act`、`@gui-act`、`@gui-bench` 的演进方向,以及用 `backend_request_count` / `agent_decision_points` 等指标衡量任务密度
-  - 何时阅读: 准备减少 agent 手动串联 `@ping` / `@capabilities` / `@window-find` / `@ax-get` 等低级请求,实现 Web/GUI 高密度任务 primitive 或 bench baseline 前
-
-- `specs/zenoh-sdk-agent-prompts.md`
-  - 主题: 给编程智能体直接使用的 Rust / Unity Zenoh 对接实现提示模板
-  - 用途: 提供可复制 prompt,指导智能体用 Zenoh Rust SDK 或 `mhama/zenoh-unity-plugin` 对接 `rdog` daemon
-  - 何时阅读: 需要把对接手册进一步变成“智能体可直接执行的实现提示”之前
-
-- `specs/zenoh-unity-querier-wrapper-design.md`
-  - 主题: Unity 使用 `mhama/zenoh-unity-plugin` 对接 `rdog` daemon 的最小 query/reply wrapper 设计草图
-  - 用途: 说明当前插件已有 wrapper 能力、缺失的 query/reply 封装层,以及给智能体的最小封装建议
-  - 何时阅读: 需要让 Unity 侧真正开始实现 `rdog` control query/reply 对接前
-
-- `specs/zenoh-screenshot-control-plan.md`
-  - 主题: `@screenshot` 远程截图能力的控制面规划
-  - 用途: 固定“截图请求继续走显式 control plane,默认 all-display composite JPEG + manifest JSON 通过 `@savefile` 返回,再以 `@response ...screenshot-bundle...` 收口; macOS 用 `sck-rs` 主路径 + `xcap` fallback,其他平台走 `xcap`”这一轮方案
-  - 何时阅读: 准备实现或评审 `@screenshot`、截图结果响应格式、截图后端选择或 screenshot control 测试方案前
-
-- `specs/rdog-multi-display-screenshot-coordinate-plan.md`
-  - 主题: 多显示器 `@screenshot` bundle 和截图坐标/OS 鼠标坐标契约
-  - 用途: 固定 `display:"all"`、`layout:"composite"`、`coordinate_space:"os-logical"`、virtual desktop JPEG、manifest JSON、`display:"primary"` 兼容入口、gap/rotation 和 Screen Recording 权限边界
-  - 何时阅读: 准备实现或评审多显示器截图、manifest schema、后续 `@click` / `@drag` 坐标换算、或排查 screenshot 坐标偏移前
-
-- `specs/rdog-mouse-control-coordinate-plan.md`
-  - 主题: `@mouse-move` / `@mouse-button` / `@click` / `@drag` / `@wheel` 鼠标控制方案
-  - 用途: 固定鼠标控制必须复用 screenshot manifest 的 `os-logical` 坐标语义,以及 press/release、click、drag、wheel 的协议字段、错误边界和验证矩阵
-  - 何时阅读: 准备实现或评审鼠标移动、点击、拖拽、滚轮、button press/release,或排查多显示器鼠标坐标偏移前
-
-- `specs/rdog-ax-screenshot-manifest-control-plan.md`
-  - 主题: `@screenshot` manifest 集成 macOS AX 窗口/UI 元素结构,以及 `@ax-tree` / `@ax-press` AX control 方案
-  - 用途: 固定 `include_ax`、`ax_required`、`rdog.ax.v1` manifest schema、Accessibility 权限降级语义、AXPress target locator 和错误映射
-  - 何时阅读: 准备实现或评审 AX screenshot manifest、`@ax-tree`、`@ax-press`、Accessibility 权限提示,或排查 AX 元素坐标/定位歧义前
-
-- `specs/rdog-observation-scoped-refmap-plan.md`
-  - 主题: observation-scoped refmap、durable selector、semantic re-find、`@observe` 与 mouse ref 化的长期路线图
-  - 用途: 固定 GUI observation 的短期 ref / 长期 selector / 重启恢复 / 语义重找 / 统一观察入口 / mouse fallback 当前契约和完整演进线,避免只做最小可用版后丢失后续目标
-  - 何时阅读: 修改 `src/control_observation*`、`src/control_mouse*`、`@observe`、selector 恢复、mouse ref target,或更新 `rdog-control` skill / README / control protocol 文档前
-
-- `specs/rdog-non-mouse-semantic-control-plan.md`
-  - 主题: `@ax-action` / `@ax-set-value` / `@type-text` / `@key delivery` / `@ax-focus` / `@ax-scroll` 的非鼠标语义控制协议
-  - 用途: 固定“非鼠标优先”协议能力,明确 `@ax-press` 兼容映射、AXValue 写入边界、`targeted-keyboard` / clipboard opt-in、`@key` 定向投递,以及 `@ax-focus activate:true` 复用 `@window-activate` 的边界
-  - 何时阅读: 准备实现或评审非鼠标 GUI 控制、更新 `rdog-control` skill,或判断某个交互是否该先走 AX/value 而不是鼠标前
-
-- `specs/rdog-window-control-plan.md`
-  - 主题: `@window-find` / `@window-activate` / `@window-close` 的窗口状态与窗口生命周期控制方案
-  - 用途: 固定截图不可见窗口的 agent 工作流、window state schema、graceful/terminate/kill 关闭边界、以及 hidden/minimized/occluded/cross-space 的诚实状态语义
-  - 何时阅读: 准备实现或评审窗口发现、窗口激活、窗口关闭、被遮挡窗口交互,或更新 `rdog-control` skill 的窗口控制指引前
-
-- `specs/bidirectional-control-plane-plan.md`
-  - 主题: 控制面从单向 request/reply 升级为真正双向 control peer 的规划
-  - 用途: 固定“daemon 和 control 双方都能主动发送 `@key` / `@script` / `@savefile` 等显式控制指令,Zenoh 不再停留在单向 query/reply”这一轮新的架构方向
-  - 何时阅读: 准备继续实现 `@savefile`、`@screenshot`、daemon 主动下发控制指令,或评审 TCP/WebSocket/Zenoh 控制模型是否仍然单向时
-
-- `specs/control-frame-refactor-plan.md`
-  - 主题: control core / outbound frame / session 抽象的分阶段重构计划
-  - 用途: 固定从 `String @response` 返回模型演进到 `ControlExecutionOutcome + ControlFrame + ControlPeerSession` 的实施顺序,以及 TCP/WebSocket 先行、Zenoh 后续迁移的验证路径
-  - 何时阅读: 准备开始写双向控制代码、评估先改哪层抽象、或 review `@savefile`/双向 frame 改造顺序时
 - `specs/zenoh-unixpipe-fast-path-plan.md`
   - 主题: rdog control macOS / Linux 本机 fast path(Zenoh `transport_unixpipe`)规划
   - 用途: 固定"同机 daemon + control 自动走 Unix domain socket,失败透明 fallback 到 UDP/TCP"的契约,以及 socket 路径推导规则、daemon/client 行为边界、错误处理、验收标准;包含 2026-06-21 加的 `self` / 空 target 入口设计

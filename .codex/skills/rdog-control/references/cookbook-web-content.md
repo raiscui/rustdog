@@ -220,10 +220,65 @@ When answering the user, cite the AX facts:
 - action availability, for example `actions:["AXPress"]`
 - the selected path or ref
 - `action_result.performed`
-- visual proof when the task changes visible content, for example a cropped before/after screenshot diff
+- **structural proof when the task changes visible content: a before/after `rdog ax-diff` of two `@observe` snapshots.**
 
-For feed-changing pages, the success criterion is the feed changing, not merely `performed:true`.
-If daemon `@screenshot` is permission-denied but the agent is on the same Mac, local `screencapture` can be used as visual evidence; say explicitly that the visual proof came from local capture, not daemon screenshot.
+### Prefer AX-JSON Diff Over Screenshot Diff
+
+For "did the action actually take effect" verification, prefer running `rdog ax-diff`
+on two `@observe` JSON snapshots over comparing cropped before/after screenshots.
+
+Reasons:
+
+- AX diff is structured and stable: each window / element is paired by id
+  (`pid:.../window:N/path:...`). It survives renumbering of `@eN` refs and
+  observation-id drift, both of which break naive `diff` or `jq` use.
+- AX diff tells you *which semantic field* changed (for example
+  `description` from "点点" to "点点 ai", or `actions.added` = "AXShowMenu")
+  instead of just "these pixels differ".
+- AX diff is cheaper for the model. The text output is small
+  (`windows: +N -N ~N | elements: +N -N ~N` plus per-change lines) and the
+  model does not need a separate image-recognition round to interpret it.
+- For feed-changing pages, a successful click often changes element `value`
+  / `description` / `actions` fields rather than render geometry, so
+  screenshot diff is a strictly weaker signal.
+
+Recommended workflow:
+
+```bash
+# 1) 抓 before 快照
+rdog control mac.lab '@observe#1:{mode:"hybrid",include_screenshot:false,include_ax:true,include_windows:true,ax_mode:"interactive"}'
+# 把 value.windows 抽取到 before.json (or 用 @savefile / @response 的 value 字段)
+
+# 2) 触发动作 (AXPress)
+rdog control mac.lab '@ax-action#2:{target:{id:"pid:.../window:0/path:0.0"},action:"AXPress"}'
+
+# 3) 抓 after 快照
+rdog control mac.lab '@observe#3:{mode:"hybrid",include_screenshot:false,include_ax:true,include_windows:true,ax_mode:"interactive"}'
+
+# 4) 结构化 diff
+rdog ax-diff --before before.json --after after.json --format text
+```
+
+`rdog ax-diff` exit code is 0 when snapshots are identical, 1 when they differ,
+2 on usage error, 3 on JSON parse failure. That makes it usable directly in
+CI / smoke scripts:
+
+```bash
+rdog ax-diff --before before.json --after after.json --quiet   || echo "AX 前后不一致, 触发告警"
+```
+
+`--format json` is intended for machine consumers (other agents, dashboards,
+bench runner). The JSON shape is stable; `windows[]` and `elements[]` always
+contain a `kind` of `Added` / `Removed` / `Modified` and (for modified entries)
+a `changed_fields[]` array with `field` / `before` / `after`.
+
+### When To Still Use Screenshot Diff
+
+AX diff cannot detect purely visual changes that do not surface in the
+accessibility tree (some custom-drawn Canvas content, animated transitions
+without semantic state changes, very low-level rendering glitches).
+For those, keep the legacy before/after cropped screenshot diff path —
+but only as a fallback, not as the default verification.
 
 ## Known Limitation
 

@@ -209,6 +209,52 @@
 - 操作注意:
   - request id 必须是无符号整数,例如 `@ping#1`,不能用 `@ping#ping`。
   - 如果 `rdog control mac.lab` 报 autodiscovery 找不到 router,先确认 `rdog daemon` 是否运行; 临时启动的 daemon 完成任务后要停止。
+
+## [2026-06-20 09:30:00] log 输出路径是隐性契约,改动必须先查 e2e
+
+- `rdog` CLI 的 `log::info!` 输出是 e2e 测试的隐性"启动 sentinel"。
+  - 大量 Zenoh e2e 用 `wait_until_output_contains(buffer, "zenoh router daemon ready", ...)` 等日志字符串做 daemon 启动就绪判断。
+  - 类似地,`Connection Received` (listener) / `PTY ready` / `remote PTY closed` 等都是 e2e 关注的 log marker。
+
+- 任何"输出路径"相关的改动(比如 `init_logger` 走 stderr 而不是 stdout)必须:
+  - 先 grep 仓库里"谁 pipe 这个 stream 等这个 marker"
+  - 一次性把所有依赖改掉,或者用合流 buffer 兼容(后者更省事)
+
+- 教训:2026-06-19 把 `init_logger` 从 stdout 切到 stderr 时,看似一行修复(`stdout()` → `stderr()`),实际连带改 4 个 e2e(control_lanes / control_pty / shell_pty / zenoh_router_client)。
+  - zenoh_router_client 还有 24+ 个测试只 pipe stdout,改用 `sh -c "exec rdog ... 2>&1"` sh wrapper 临时兼容。
+  - 后续把这个 sh wrapper 退役,改用 `start_zenoh_daemon_with_combined_output` 在 helper 内部合流 stdout+stderr,这才把"输出路径"耦合彻底解开。
+
+- 给后续改 daemon/control 启动行为的经验:
+  - 改 log level / log target / log format 之前先 `rg "log::info|log::error|log::warn"` 看 e2e 依赖
+  - 改 daemon 启动的 "ready" 日志之前先看 e2e 怎么等 daemon ready
+  - 如果新设计要换 log 路径,要么同步改 e2e,要么用合流 buffer helper(`start_zenoh_daemon_with_combined_output` 是这次产出的现成模板)
+
+- `start_zenoh_daemon_with_combined_output` 这个 helper 的价值:
+  - 调用方只看到一个合流的 `Arc<Mutex<String>>`
+  - 后续 init_logger 路径再变,改 helper 内部就行
+  - 24+ 个测试都不用动
+
+## [2026-06-20 18:45:00] scoped skill metadata commit 与旧支线归档经验
+
+- mixed worktree 里同一个文件已经有非本轮改动时,不要为了提交一行 metadata 直接 `git add <file>`。
+  - 本轮 `.codex/skills/rdog-control/SKILL.md` 工作区已有 agent-agnostic / one-shot 文档改动。
+  - 用户只要求补 `version: "1.0"`,因此正确做法是从 HEAD 内容生成临时文件,只插入版本字段,用 `git hash-object` + `git update-index --cacheinfo` 写入 index,再提交。
+  - 这样 commit `9d74d7e` 只包含 1 行新增,不会把其它未审阅 diff 混进去。
+
+- `rdog-control` 这类 agent-facing skill 应显式维护 frontmatter 版本号。
+  - 版本字段让 Codex / Claude / GPT / openai-compatible / MCP / human operator 能判断 skill 文档兼容边界。
+  - 如果只是补 metadata,提交信息应聚焦到 skill metadata,不要顺手夹带 cookbook / protocol / source code 改动。
+
+- 根目录旧支线六文件会显著污染每次上下文检索。
+  - 本轮 `$continuous-learning` 将 23 个旧支线组、90 个文件归档到 `archive/branch_contexts/<suffix>/`。
+  - 归档前必须先按后缀分组摘要,再生成 manifest,不要把 `__suffix` 文件平铺搬走。
+  - 后续追溯旧支线时先看 `archive/manifests/ARCHIVE_MANIFEST__2026-06-20_branch_context_cleanup.md`。
+
+- docs/specs 同步检查不能把不存在目录当作成功搜索。
+  - 本轮首次 `rg docs specs plans roadmap milestones ...` 因缺少 `docs/` / `plans/` / `roadmap/` / `milestones/` 返回 exit code 2。
+  - 修正做法是只搜索实际存在的 `README.md`、`AGENTS.md`、`EXPERIENCE.md` 和 `specs/`。
+  - 搜索暴露 `README.md` 与 `specs/code-agent-rdog-control-usage.md` 对 one-shot N=1 / N>1 管线仍有旧描述,已同步为统一 `send_control_lines_*` 口径。
+
 ## [2026-06-20 23:58:00] [Session ID: omx-1781788115552-szl2hn] 主题: Zenoh `transport_unixpipe` 同机 fast path 实施经验
 
 ### 同机 fast path 优先用 zenoh 自带的 `transport_unixpipe` feature,不要新增独立 UDS 控制面
@@ -233,6 +279,7 @@
   主动 open 写端再立即关闭会让 daemon 端 `Invitation::receive` 看到 EOF,导致后续 client 无法再 connect。
 - **结论**: client 探测只用 `std::path::Path::exists` 检查 `<base>_uplink` 文件是否存在。0 副作用,1us 内返回。真正的连接性由 `zenoh::open` 内部处理,失败会拿到明确错误。
 - **为什么这一点关键**: 一旦 open 探测破坏了 daemon 的 request channel,daemon 端要重启才能恢复,产品上不可接受。
+
 ## [2026-06-21 15:30:00] [Session ID: omx-1781788115552-szl2hn] 主题: rdog control self / 空 target 本机 fast path 实施经验
 
 ### Zenoh 1.8.0 unixpipe 实际只创建 `<base>_uplink` 和 `<base>_downlink` 文件

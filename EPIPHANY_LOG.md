@@ -393,6 +393,76 @@
 - `src/zenoh_control.rs` 的 `handle_daemon_control_query()` 和 `reject_session_channel_only_legacy_query()`
 - `tests/zenoh_router_client.rs::control_should_reject_rich_frame_over_legacy_queryable_path`
 - `tests/zenoh_router_client.rs::control_should_reject_rich_frame_over_legacy_session_query_payload`
+
+## [2026-06-19 01:00:00] [Session ID: CURRENT_SESSION] 主题: rdog 日志默认走 stdout 而不是 stderr,e2e 测试断言要合流
+
+### 发现来源
+- 给 rdog control 加 one-shot CLI 入口后写 e2e 测试 `tests/control_lanes.rs::control_one_shot_*`
+- 测试断言 `output.status.success() && stderr.contains("错误文案")` 全部失败,stderr 一直为空
+- 手动跑 daemon + rdog control 复现,错误信息确实出现在 stdout
+
+### 核心问题
+- `src/main.rs::init_logger` 用 fern + `log_target_for_command`,非 hidden 模式走 `LogTarget::Stdout`
+- `run()` 出错时统一 `log::error!("{err}"); exit(1);`,`log::error!` 走 stdout
+- 违反 Unix 习惯:错误/警告应当走 stderr
+- 影响:所有依赖 rdog CLI 退出码 + stderr 的 agent / 脚本会拿不到错误描述
+
+### 为什么重要
+- 后续任何给 rdog CLI 加 e2e 的测试,断言 `stderr.contains("...")` 都会假阴性
+- 任何把 rdog 嵌进 shell pipeline 拿错误日志的脚本会拿空
+- 长尾可观察性下降
+
+### 未来风险
+- 如果不修,所有新 CLI 子命令的 e2e 都会写错断言
+- 真正的 stderr 信息(skill 加载、权限降级、bootstrap 警告)被 stdout 冲掉,debug 难度上升
+
+### 当前结论
+- 已知事实:`init_logger` 默认走 stdout,exit code 仍然正确
+- 仍未确认:是否所有 release profile 都走 stdout,还是仅 debug 走;以及是否存在依赖 stdout 行为的下游(目前没有发现)
+- 当前缓解:e2e 断言用 `format!("{}{}", stdout, stderr)` 合流检查
+
+### 后续讨论入口
+- 看 `src/main.rs::init_logger` + `src/hidden_mode.rs::log_target_for_command`
+- 决定方向:全量切 stderr,还是给 `--log-target` flag 让用户选,还是保留 stdout 但增加 `--quiet` 抑制成功路径的 stdout
+- 不在 one-shot 任务范围内展开
+
+## [2026-06-19 04:15:00] [Session ID: CURRENT_SESSION] 主题: init_logger 走 stdout 修复完成 + 测试基础设施连带修
+
+### 解决路径
+- `src/main.rs::init_logger` 非 hidden 模式改走 `stderr()`,`src/hidden_mode.rs` 给 `LogTarget::Stdout` enum variant 加注释说明实际走 stderr(保留名字做向后兼容)
+- 4 个 e2e 因为 log 路径变了需要修:
+  - `tests/control_lanes::listen_local_interactive_should_reach_connect_control_lane` - listener 同时 pipe stdout+stderr,合流
+  - `tests/control_pty::control_pty_detach_should_allow_later_attach` - attach stdout+stderr 合流
+  - `tests/shell_pty::reverse_shell_should_run_with_tty_semantics` - 同上,改用 combined_output closure + wait loop
+- `tests/zenoh_router_client` 的 24+ 现有测试只 pipe stdout 等 "zenoh router daemon ready" marker,改 `start_zenoh_daemon_with_config` 用 `sh -c "exec rdog ... 2>&1"` 兼容层,`exec` 让 rdog 替换 sh 进程避免孤儿,`2>&1` 把 stderr 合成到 stdout
+
+### 状态
+- 修完了,但暴露了一个更大的事实:rdog 仓库里大量 e2e 用 `log::info!` 输出做"启动就绪" sentinel,这是隐性契约。
+- 后续推进正式规格或实现时,任何"输出路径"相关的改动都要先查 e2e 是否依赖 log 输出做 polling。
+- "log target" 实际语义在 2026-06-19 之前是 stdout,改完是 stderr;enum variant 名字仍叫 Stdout 是历史 API 稳定妥协。
+
+### 后续讨论入口
+- `tests/zenoh_router_client.rs::start_zenoh_daemon_with_config` 的 sh wrapper 是临时兼容层,理想做法是统一改测试用 stdout+stderr 合流,然后把 sh wrapper 退役。
+- `LogTarget::Stdout` 名字可考虑改名 `Stderr`,但需要先 grep 所有使用方做兼容性 audit。
+
+## [2026-06-19 05:10:00] [Session ID: CURRENT_SESSION] 主题: sh wrapper 退役完成,Zenoh e2e 改用合流 buffer
+
+### 解决路径
+- 加 `start_zenoh_daemon_with_combined_output` helper,内部把 stdout+stderr 合流到一个 `Arc<Mutex<String>>`
+- 重构 `spawn_output_collector` → `spawn_output_collector_to(reader, buffer)`,让多个 collector 写同一个 buffer
+- `start_zenoh_daemon_with_config` 回退到直接 `Command::new(rdog_binary_path())`,去掉 sh wrapper
+- 24+ Zenoh e2e 改用合流 buffer,不再依赖 stdout 上的 log marker
+
+### 状态
+- 全部完成
+- 历史上 2026-06-19 04:15 那条"init_logger 走 stderr 测试兼容 sh wrapper"已经退役
+- 后续任何 log 路径变化,改 `start_zenoh_daemon_with_combined_output` 内部就行,不用再动 24+ 测试
+
+### 经验教训
+- **同一文件多个相似 `impl Trait` 函数会触发 rustc 解析器 bug**: 两个相邻的 `fn f(reader: impl Read + Send + 'static,)` 定义,后一个的 `'static` 被误判为 char literal。改用显式 generic `<R: Read + Send + 'static>` 解决
+- **临时兼容层(sh wrapper)会变成永久债务**: 一开始为了"少改测试"用的 sh -c "exec rdog ... 2>&1",现在必须退役,改成正式 API
+- **批量改测试时识别变体**: 不同测试用 `buffer` / `daemon_buffer` / `first_buffer` / `second_buffer` 等不同变量名,需要分别处理
+
 ## [2026-06-20 22:00:00] [Session ID: omx-1781788115552-szl2hn] 主题: zenoh_router_client 测试集存在 pre-existing discovery 时序 flakiness
 
 ### 发现来源

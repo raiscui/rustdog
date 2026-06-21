@@ -99,6 +99,7 @@ flowchart LR
 
 | 能力 | 输入示例 | 返回形态 | 适合 agent 做什么 |
 | --- | --- | --- | --- |
+| one-shot CLI 入口 | `rdog control mac.lab @ping` / `rdog control mac.lab @ping @capabilities#1 @cmd#7:"..."` / `rdog control 127.0.0.1 5555 @capabilities#1` / `rdog control --url ws://... @ping` | line-control 协议原样响应(同下面各 `@<kind>` 行) | 不依赖 stdin / heredoc / `printf`,直接在命令尾部拼一行或多行 `@<line>` 就能发并等收口退出;N=1 和 N>1 统一复用 `send_control_lines_*` 管线,共享同一条 transport 与 frame 收口逻辑 |
 | 活性检查 | `@ping` | `@response "pong"` | 判断目标是否在线 |
 | Bootstrap | `@bootstrap#1:{mode:"gui",capability_policy:"fresh"}` | `rdog.bootstrap.v1` structured `@response` + optional observe `@savefile` frames | 新 GUI 任务的一次只读起手探测,同时拿 liveness / capabilities / observation / lane errors |
 | 能力诊断 | `@capabilities#1` | `rdog.capabilities.v1` structured `@response` | 在 GUI / 权限 / 平台敏感动作前确定可用 lane |
@@ -138,6 +139,40 @@ flowchart LR
 
 ## 推荐使用方式
 
+### 0. 单条请求优先用 one-shot CLI 入口
+
+如果只是临时发一条或多条 line-control 请求(典型 agent 起步:`@ping` / `@capabilities` / `@bootstrap` / `@observe`),
+不要再绕 `printf ... | rdog control ...`,直接拼接 target 和 `@<line>`:
+
+```bash
+# 单 line
+rdog control mac.lab @ping
+rdog control mac.lab @capabilities#1
+rdog control 127.0.0.1 5555 @ping
+rdog control --url ws://127.0.0.1:5555/control @ping
+rdog control --target-name mac.lab '@observe#1:{mode:"hybrid",include_ax:true}'
+
+# 多 line,共享同一条 transport,顺序串行
+rdog control mac.lab @ping @capabilities#1 '@cmd#7:"printf READY"'
+rdog control 127.0.0.1 5555 @ping @capabilities#1 @observe#3
+```
+
+特性:
+
+- N=1 和 N>1 统一复用 `send_control_lines_*` 管线,共享同一条 transport,
+  包含 Zenoh session bridge、savefile 收口。
+- 走完整 frame 收口循环,能正确处理 `@screenshot` 等 `@savefile` 多 frame 场景;
+  任一 line 失败整组退出。
+- `send_single_control_line_*` 只保留给 `--pty-close` / `--pty-detach` 这类 PTY lifecycle sugar,不要和 one-shot CLI 入口混用。
+- 与 `--pty` / `--pty-close` / `--pty-detach` / `--pty-attach` 互斥。
+- 末尾 `@<line>` 必须是 1..N 个连续 token,以 `@` 开头;
+  多个 `@` token 必须放在 host 末尾连续段,前面位置参数不能以 `@` 开头。
+- 上限 `host: num_args = 0..=32`(2 target + 30 line),覆盖典型 GUI 任务。
+- 不修改 line-control 协议;只是把 "先发 N 行,等收口,退出" 暴露成 CLI 显式入口。
+- 现有 `printf ... | rdog control ...` 的 stdin streaming 形式完全不受影响。
+
+只有"需要长期持续 stdin 桥接"才回到下面的 `1.` 路径。
+
 ### 1. 普通自动化优先用 line-control
 
 如果任务不需要真实 TTY,用普通 control line 即可:
@@ -145,6 +180,8 @@ flowchart LR
 ```bash
 printf '@ping\n@cmd#1:"pwd"\n@cmd#2:"git status --short"\n' | rdog control mac.lab
 ```
+
+只发单行时更推荐直接用 `0. one-shot CLI 入口`。
 
 agent 应按下面的规则解析输出:
 

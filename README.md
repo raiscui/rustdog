@@ -135,7 +135,25 @@ Connect to it:
 rdog control 127.0.0.1 5555
 ```
 
-Send commands from a script or another agent:
+For a one-shot request (no stdin, no shell), append the `@<line>` directly:
+
+```bash
+rdog control 127.0.0.1 5555 @ping
+rdog control 127.0.0.1 5555 @capabilities#1
+rdog control mac.lab @ping
+rdog control --url ws://127.0.0.1:5555/control @ping
+```
+
+For multiple one-shot lines on the same connection, append more `@<line>` after the target.
+The CLI sends each line in order, waits for `@response` / `@savefile` frames, prints them, and exits.
+Single-line and multi-line invocations both use the `send_control_lines_*` pipeline, so the protocol itself is unchanged.
+
+```bash
+rdog control mac.lab @ping @capabilities#1 '@cmd#7:"printf READY"'
+rdog control 127.0.0.1 5555 @ping @capabilities#1 @observe#3
+```
+
+Send multiple commands from a script or another agent (long-running stdin bridge):
 
 ```bash
 printf '@ping\n@cmd#1:"pwd"\n@cmd#2:"git status --short"\n' | rdog control 127.0.0.1 5555
