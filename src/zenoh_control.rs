@@ -57,7 +57,6 @@ use crate::{
     zenoh_runtime,
 };
 
-
 /// daemon 侧运行时所需的最小参数。
 #[derive(Debug, Clone)]
 pub struct ZenohDaemonRuntimeConfig {
@@ -387,10 +386,7 @@ pub fn run_client_control(
     let router_entrypoints = zenoh_runtime::resolve_client_connect_endpoints(
         &router_entrypoints,
         Duration::from_millis(request_timeout_ms),
-        zenoh_runtime::UnixpipeClientProbe::new(
-            Some(&namespace),
-            target_name.as_deref(),
-        ),
+        zenoh_runtime::UnixpipeClientProbe::new(Some(&namespace), target_name.as_deref()),
     )?;
     let mut session = zenoh_runtime::open_client_session(&router_entrypoints)?;
     let stdin = std::io::stdin();
@@ -472,10 +468,7 @@ pub fn run_client_pty_control(
     let router_entrypoints = zenoh_runtime::resolve_client_connect_endpoints(
         &router_entrypoints,
         Duration::from_millis(request_timeout_ms),
-        zenoh_runtime::UnixpipeClientProbe::new(
-            Some(&namespace),
-            target_name.as_deref(),
-        ),
+        zenoh_runtime::UnixpipeClientProbe::new(Some(&namespace), target_name.as_deref()),
     )?;
     let session = zenoh_runtime::open_client_session(&router_entrypoints)?;
     let current_target = resolve_target(
@@ -512,10 +505,7 @@ pub fn run_client_pty_attach(
     let router_entrypoints = zenoh_runtime::resolve_client_connect_endpoints(
         &router_entrypoints,
         Duration::from_millis(request_timeout_ms),
-        zenoh_runtime::UnixpipeClientProbe::new(
-            Some(&namespace),
-            target_name.as_deref(),
-        ),
+        zenoh_runtime::UnixpipeClientProbe::new(Some(&namespace), target_name.as_deref()),
     )?;
     let session = zenoh_runtime::open_client_session(&router_entrypoints)?;
     let current_target = resolve_target(
@@ -559,10 +549,7 @@ pub fn send_control_lines(
     let router_entrypoints = zenoh_runtime::resolve_client_connect_endpoints(
         &router_entrypoints,
         Duration::from_millis(request_timeout_ms),
-        zenoh_runtime::UnixpipeClientProbe::new(
-            Some(&namespace),
-            target_name.as_deref(),
-        ),
+        zenoh_runtime::UnixpipeClientProbe::new(Some(&namespace), target_name.as_deref()),
     )?;
     let session = zenoh_runtime::open_client_session(&router_entrypoints)?;
     let current_target = resolve_target(
@@ -629,10 +616,7 @@ pub fn send_single_control_line(
     let router_entrypoints = zenoh_runtime::resolve_client_connect_endpoints(
         &router_entrypoints,
         Duration::from_millis(request_timeout_ms),
-        zenoh_runtime::UnixpipeClientProbe::new(
-            Some(&namespace),
-            target_name.as_deref(),
-        ),
+        zenoh_runtime::UnixpipeClientProbe::new(Some(&namespace), target_name.as_deref()),
     )?;
     let mut session = zenoh_runtime::open_client_session(&router_entrypoints)?;
     let mut current_target = resolve_target(

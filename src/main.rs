@@ -168,8 +168,7 @@ fn resolve_inferred_control(
     if positional.as_slice() == ["self"] {
         if target_name.is_some() {
             return Err(
-                "`rdog control self` 不能和 `--target-name` 同时传入;两者只能选一个"
-                    .to_string(),
+                "`rdog control self` 不能和 `--target-name` 同时传入;两者只能选一个".to_string(),
             );
         }
         if !entry_point.is_empty() {
@@ -590,11 +589,7 @@ fn run(opts: input::Opts) -> Result<(), String> {
                 ControlInvocation::ZenohLocal { namespace } => {
                     // `rdog control self @<line>` / 空 target 的本机 fast path。
                     // PTY 不支持(one-shot 支持,直接走 send_control_lines_zenoh 复用同 session)。
-                    if pty
-                        || pty_close.is_some()
-                        || pty_detach.is_some()
-                        || pty_attach.is_some()
-                    {
+                    if pty || pty_close.is_some() || pty_detach.is_some() || pty_attach.is_some() {
                         return Err(
                             "`rdog control self` / 空 target 不支持 PTY 操作,请显式指定 target name"
                                 .to_string(),
@@ -602,15 +597,13 @@ fn run(opts: input::Opts) -> Result<(), String> {
                     }
 
                     // 扫描 $TMPDIR/rdog-{ns}-*.pipe_uplink 找唯一 daemon。
-                    let target_name = zenoh_runtime::find_local_daemon_name(
-                        namespace.as_deref(),
-                    )
-                    .map_err(|err| err.to_string())?;
+                    let target_name = zenoh_runtime::find_local_daemon_name(namespace.as_deref())
+                        .map_err(|err| err.to_string())?;
 
                     // 推断 namespace(从 daemon_name 的点后缀),显式给的优先。
-                    let resolved_namespace = namespace
-                        .clone()
-                        .or_else(|| crate::zenoh_identity::infer_namespace_from_daemon_name(&target_name));
+                    let resolved_namespace = namespace.clone().or_else(|| {
+                        crate::zenoh_identity::infer_namespace_from_daemon_name(&target_name)
+                    });
 
                     // 找不到 namespace 的两种情况:
                     // 1. 用户没传 --namespace 且 daemon_name 没点后缀(无法推断)

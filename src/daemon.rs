@@ -106,10 +106,9 @@ pub fn run_zenoh_router(
     if config.zenoh.unixpipe.enabled {
         let base_path = match config.zenoh.unixpipe.socket_path.as_ref() {
             Some(explicit) => explicit.clone(),
-            None => crate::zenoh_runtime::unixpipe_socket_path(
-                &config.zenoh.namespace,
-                &daemon_name,
-            )?,
+            None => {
+                crate::zenoh_runtime::unixpipe_socket_path(&config.zenoh.namespace, &daemon_name)?
+            }
         };
         crate::zenoh_runtime::cleanup_stale_unixpipe_socket(&base_path)?;
         log::info!(

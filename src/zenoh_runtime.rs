@@ -779,9 +779,7 @@ mod tests {
 
     #[test]
     fn find_local_daemon_name_should_error_when_no_match() {
-        let result = find_local_daemon_name(Some(
-            "rdog-nonexistent-ns-for-test-12345",
-        ));
+        let result = find_local_daemon_name(Some("rdog-nonexistent-ns-for-test-12345"));
         let err = result.unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::NotFound);
         assert!(err.to_string().contains("未找到"));
