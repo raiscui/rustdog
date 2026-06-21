@@ -270,6 +270,47 @@ If a session reports `Zenoh session bridge subscriber ... closed before receivin
   - `rdog control self --pty -- bash` 会报 "`rdog control self` 不支持 PTY 操作"。
     PTY 需要长 session 复用,跟"短任务一次性执行"语义不符。改用 `rdog control <name> --pty -- bash` 显式 target。
 
+## Agent Tool Use Pattern
+
+When an AI agent invokes `rdog control` via a shell tool, follow this end-to-end pattern. Do not invent or simplify the output.
+
+1. Invoke `rdog control TARGET @<frame> [@<frame>#<id> ...]` through the shell tool.
+2. Capture the **full** stdout/stderr. Do not strip `info:` / `warn:` / `error:` lines. The `info:` lines carry the ZID, transport path, and scout details that prove the request actually reached the daemon over the fast path; stripping them hides whether the call fell back to UDP scout.
+3. Locate the final `@response` line. That is the daemon's reply.
+4. Report the full stdout to the user, then quote the `@response` line in plain language. Do not paraphrase, fabricate, or shorten the daemon output.
+
+Concrete end-to-end example (verbatim stdout for a one-shot ping on the local fast path):
+
+```text
+$ rdog control @ping
+info: unixpipe endpoint detected, taking fast path (path: /var/folders/.../rdog-lab-mac.lab.pipe)
+info: Using ZID: <zid>
+info: Listening scout messages on 224.0.0.224:7446
+@response "pong"
+info: close session zid=<zid>
+```
+
+The agent's reply to the user should look like:
+
+> I ran `rdog control @ping`. The daemon replied:
+> ```text
+> info: unixpipe endpoint detected, taking fast path (path: .../rdog-lab-mac.lab.pipe)
+> info: Using ZID: <zid>
+> info: Listening scout messages on 224.0.0.224:7446
+> @response "pong"
+> info: close session zid=<zid>
+> ```
+> The `@response "pong"` confirms the local daemon is reachable.
+
+Anti-patterns to avoid:
+
+- Do **not** output only `@response "pong"` and skip the `info:` lines. That hides whether the call actually used the fast path or silently fell back to UDP scout.
+- Do **not** invent a `pong` line above the `@response` line. The daemon's reply is the `@response` line; the `info:` lines come from the client.
+- Do **not** paste a fabricated `rdog control TARGET @<line>` command. The real command must be the one the user asked for (or the canonical SKILL.md equivalent), and it must be invoked through the shell tool.
+- Do **not** loop the same paragraph multiple times after the shell call returned. If the first invocation already returned a complete stdout, quote it once and stop.
+
+If the stdout contains no `@response` line, the daemon did not reply; report the failure with the captured `info:` / `error:` lines instead of guessing what the daemon "probably" returned.
+
 ## Reference Loading
 
 - Read `references/control-workflow.md` for exact command forms, target selection, safety, and common host/hardware workflows.
