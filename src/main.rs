@@ -186,10 +186,15 @@ fn resolve_inferred_control(
     }
 
     match positional.as_slice() {
-        [] => Err(
-            "缺少 control 目标: TCP 请写 `rdog control HOST PORT`,Zenoh 请写 `rdog control <target-name>`,或本机 fast path 写 `rdog control self --namespace <ns> @<line>`"
-                .to_string(),
-        ),
+        // 空 target + 无 --namespace: 走 ZenohLocal 本机 fast path。
+        // 跟 `self` 关键字路径一样,只是更简洁(`rdog control @<line>`)。
+        [] => {
+            if has_zenoh_options {
+                // has_zenoh_options 已被前面的 if 拦截,这里走不到。
+                unreachable!("空 positional + zenoh_options 已被前面 has_zenoh_options 分支接走");
+            }
+            return Ok(ControlInvocation::ZenohLocal { namespace: None });
+        }
         [single] if single.parse::<u16>().is_ok() => Ok(ControlInvocation::Tcp {
             host: "0.0.0.0".to_string(),
             port: single.to_string(),
@@ -450,12 +455,9 @@ fn run(opts: input::Opts) -> Result<(), String> {
                         "`rdog control <target> @<line> ...` 与 `--pty-attach` 互斥".to_string()
                     );
                 }
-                if host.is_empty() && url.is_none() && target_name.is_none() && namespace.is_none() {
-                    return Err(
-                        "one-shot line 需要 control 目标:请提供位置参数 target / host port、`--url`、`--target-name` 或 `--namespace`(用于本机 fast path)"
-                            .to_string(),
-                    );
-                }
+                // one-shot line 不再前置拦截:空 target + 无 namespace
+                // 会进入 ZenohLocal dispatch,让 find_local_daemon_name(None) 扫本地 daemon,
+                // 找不到再返回清晰错误(避免和 self 路径语义不一致)。
             }
 
             if pty && pty_command.is_empty() {
