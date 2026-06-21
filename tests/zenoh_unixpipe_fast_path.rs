@@ -388,7 +388,6 @@ fn stale_unixpipe_socket_files_should_be_cleaned_on_daemon_start() {
     cleanup_unixpipe_artifacts(&base_path);
 }
 
-
 // ============================================================================
 // self / 空 target 入口(`rdog control self @<line>` / `rdog control @<line>`)
 // ============================================================================
@@ -434,8 +433,12 @@ fn self_target_with_explicit_namespace_should_find_local_daemon() {
     let (mut child, _config_path, _entry, combined) =
         start_zenoh_daemon_with_combined_output(&daemon_name, next_port(), true);
 
-    wait_for_marker(&combined, "zenoh router daemon ready", Duration::from_secs(8))
-        .expect("daemon should be ready");
+    wait_for_marker(
+        &combined,
+        "zenoh router daemon ready",
+        Duration::from_secs(8),
+    )
+    .expect("daemon should be ready");
 
     let uplink_path = format!("{}_uplink", base_path.display());
     assert!(
@@ -448,8 +451,14 @@ fn self_target_with_explicit_namespace_should_find_local_daemon() {
     let _ = child.wait();
     cleanup_unixpipe_artifacts(&base_path);
 
-    assert!(status.success(), "control self should succeed, stderr={stderr}");
-    assert!(stdout.contains("pong"), "@ping 应该返回 pong,stdout={stdout}");
+    assert!(
+        status.success(),
+        "control self should succeed, stderr={stderr}"
+    );
+    assert!(
+        stdout.contains("pong"),
+        "@ping 应该返回 pong,stdout={stdout}"
+    );
 }
 
 #[test]
@@ -464,8 +473,12 @@ fn empty_target_with_namespace_should_find_local_daemon() {
     let (mut child, _config_path, _entry, combined) =
         start_zenoh_daemon_with_combined_output(&daemon_name, next_port(), true);
 
-    wait_for_marker(&combined, "zenoh router daemon ready", Duration::from_secs(8))
-        .expect("daemon should be ready");
+    wait_for_marker(
+        &combined,
+        "zenoh router daemon ready",
+        Duration::from_secs(8),
+    )
+    .expect("daemon should be ready");
 
     let uplink_path = format!("{}_uplink", base_path.display());
     assert!(
@@ -478,8 +491,14 @@ fn empty_target_with_namespace_should_find_local_daemon() {
     let _ = child.wait();
     cleanup_unixpipe_artifacts(&base_path);
 
-    assert!(status.success(), "control 空 target + --namespace 应该成功,stderr={stderr}");
-    assert!(stdout.contains("pong"), "@ping 应该返回 pong,stdout={stdout}");
+    assert!(
+        status.success(),
+        "control 空 target + --namespace 应该成功,stderr={stderr}"
+    );
+    assert!(
+        stdout.contains("pong"),
+        "@ping 应该返回 pong,stdout={stdout}"
+    );
 }
 
 #[test]
@@ -501,7 +520,10 @@ fn self_target_should_error_when_no_local_daemon_running() {
 
     let (status, _stdout, stderr) =
         run_control_with_args(&["self", "--namespace", "rdog-namespace-no-such-daemon-12345"]);
-    assert!(!status.success(), "没有本地 daemon 时 control self 应该失败");
+    assert!(
+        !status.success(),
+        "没有本地 daemon 时 control self 应该失败"
+    );
     let err_lower = stderr.to_lowercase();
     assert!(
         err_lower.contains("not found") || err_lower.contains("未找到"),
@@ -524,16 +546,30 @@ fn self_target_should_error_when_multiple_local_daemons() {
     let (mut child_b, _cp_b, _e_b, combined_b) =
         start_zenoh_daemon_with_combined_output(&daemon_name_b, next_port(), true);
 
-    wait_for_marker(&combined_a, "zenoh router daemon ready", Duration::from_secs(8))
-        .expect("daemon A should be ready");
-    wait_for_marker(&combined_b, "zenoh router daemon ready", Duration::from_secs(8))
-        .expect("daemon B should be ready");
+    wait_for_marker(
+        &combined_a,
+        "zenoh router daemon ready",
+        Duration::from_secs(8),
+    )
+    .expect("daemon A should be ready");
+    wait_for_marker(
+        &combined_b,
+        "zenoh router daemon ready",
+        Duration::from_secs(8),
+    )
+    .expect("daemon B should be ready");
 
     // 等两个 fifo 都出现
     let uplink_a = format!("{}_uplink", base_a.display());
     let uplink_b = format!("{}_uplink", base_b.display());
-    assert!(wait_for_fifo(std::path::Path::new(&uplink_a), Duration::from_secs(2)));
-    assert!(wait_for_fifo(std::path::Path::new(&uplink_b), Duration::from_secs(2)));
+    assert!(wait_for_fifo(
+        std::path::Path::new(&uplink_a),
+        Duration::from_secs(2)
+    ));
+    assert!(wait_for_fifo(
+        std::path::Path::new(&uplink_b),
+        Duration::from_secs(2)
+    ));
 
     let (status, _stdout, stderr) = run_control_with_args(&["self", "--namespace", RDOG_NAMESPACE]);
     let _ = child_a.kill();
@@ -543,7 +579,10 @@ fn self_target_should_error_when_multiple_local_daemons() {
     cleanup_unixpipe_artifacts(&base_a);
     cleanup_unixpipe_artifacts(&base_b);
 
-    assert!(!status.success(), "两个本地 daemon 时 control self 应该失败(歧义)");
+    assert!(
+        !status.success(),
+        "两个本地 daemon 时 control self 应该失败(歧义)"
+    );
     let err_lower = stderr.to_lowercase();
     assert!(
         err_lower.contains("already exists") || err_lower.contains("多个"),
