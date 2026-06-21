@@ -233,3 +233,28 @@
   主动 open 写端再立即关闭会让 daemon 端 `Invitation::receive` 看到 EOF,导致后续 client 无法再 connect。
 - **结论**: client 探测只用 `std::path::Path::exists` 检查 `<base>_uplink` 文件是否存在。0 副作用,1us 内返回。真正的连接性由 `zenoh::open` 内部处理,失败会拿到明确错误。
 - **为什么这一点关键**: 一旦 open 探测破坏了 daemon 的 request channel,daemon 端要重启才能恢复,产品上不可接受。
+## [2026-06-21 15:30:00] [Session ID: omx-1781788115552-szl2hn] 主题: rdog control self / 空 target 本机 fast path 实施经验
+
+### Zenoh 1.8.0 unixpipe 实际只创建 `<base>_uplink` 和 `<base>_downlink` 文件
+
+- **场景**: 实现 `find_local_daemon_name()` 扫描 $TMPDIR 找本机 daemon 时,按 `*.pipe` 后缀找文件名,发现死活找不到 daemon。
+- **踩坑**: Zenoh 1.8.0 `transport_unixpipe` listener 实际只创建 `<base>_uplink` 和 `<base>_downlink` 两个 FIFO 文件。
+  `<base>` 本身(=`rdog-{ns}-{name}.pipe`)不一定存在(只是路径标识符)。
+- **结论**: 扫描 unixpipe daemon 必须按 `*.pipe_uplink` 后缀,不是 `*.pipe`。
+- **为什么这一点关键**: 文档没写明这个细节,只看 Zenoh 1.8.0 source 才看出来。如果按 `*.pipe` 扫,永远找不到任何 daemon。
+
+### `rdog control self` 实现时必须强制 PTY 互斥但允许 one-shot
+
+- **场景**: `rdog control self @<line>` 既要走 fast path,又要支持 `@ping` 之类的 one-shot。
+- **踩坑**: 一开始我把 PTY 和 one-shot 都禁了,导致 `rdog control self @ping` 也报错"不支持 one-shot"。
+- **结论**: PTY 必须禁(PTY 涉及长生命周期 session 复用,本机 fast path 短任务不适用);
+  one-shot 必须允(一个 `rdog control self @ping @capabilities#1` 就能一次发 2 条命令)。
+- **实现**: PTY 互斥检查在 ZenohLocal dispatch 入口,one-shot 复用 `send_control_lines_zenoh` 走单 session 串行。
+- **为什么这一点关键**: 这是用户最常用的交互模式,禁了就没法用 self 走 batch 任务。
+
+### 跨测试 namespace 隔离:e2e test 必须用独立 namespace,不能用共享 `lab`
+
+- **场景**: `tests/zenoh_unixpipe_fast_path.rs` 加了 `self_target_*` 系列 e2e,要求 namespace 范围内只有 1 个 daemon。
+- **踩坑**: 已有测试用 `lab` namespace,新测试也用 `lab`,并发跑时会跨测试污染,`find_local_daemon_name` 报"多候选"错。
+- **结论**: e2e test 必须用独立 namespace(如 `selfexp`/`selfinf`/`selfmulti`),保证并发安全;或用 `--test-threads=1` 串行。
+- **为什么这一点关键**: unixpipe 路径是文件,跨测试隔离比 Zenoh scout 这种内存协议更难;不留心容易出 nondeterministic 失败。

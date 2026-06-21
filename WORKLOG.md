@@ -887,3 +887,48 @@ Buttons:
 - **Pre-existing flakiness 要主动标注**:实施过程中发现 `zenoh_router_client` 测试集有 4% 多测试并发 flake,虽然和我的改动无关,但每轮都会被它干扰判定。已用 git stash 验证(回退后同样 flake)+ 单独跑都过,正式记到 EPIPHANY_LOG,避免后续维护者误判。
 - **cargo metadata 不要 .omx**:跑过 `cargo metadata` 一次,意外地把进程hang在 OOM 边缘,直接 kill。这是后续需要避免的反模式。
 - **Aim:方向 A 顺利完成,2~5x 提速对同机高频 GUI/Web 调用是质变**;方向 B(直接 UDS 控制面)10~50x 提速已记为 LATER_PLANS,等方向 A 体验确认后再启动。
+## [2026-06-21 15:40:00] [Session ID: omx-1781788115552-szl2hn] 任务名称: 实现 rdog control self / 空 target 入口
+
+### 任务内容
+- 加 `rdog control self @<line>` 和 `rdog control --namespace <ns> @<line>`(空 target)两种"省掉 target 名"快捷入口。
+- 走本机 unixpipe fast path,失败时报清晰错误。
+
+### 完成过程
+
+#### Step 1:`src/zenoh_runtime.rs` 加 `find_local_daemon_name()`
+- 扫描 `$TMPDIR/rdog-{ns}-*.pipe_uplink`,用第一个 `-` 切分 `{ns}-{name}`。
+- 0/1/>1 个候选分别返回 NotFound / Ok / AlreadyExists,错误信息带 hint。
+- 关键实现:Zenoh 1.8.0 unixpipe 实际只创建 `<base>_uplink` 和 `<base>_downlink`,扫 `*.pipe_uplink` 不要扫 `*.pipe`。
+- 5 个新单测全过(unique/filter/no-match/multiple/no-uplink)。
+
+#### Step 2:`src/main.rs` 加 `ControlInvocation::ZenohLocal` 变体
+- `resolve_inferred_control` 加 `self` 关键字分支(互斥 `--target-name` 和 `--entry-point`)。
+- `resolve_zenoh_control` 检测"target_name=None && entry_point=空"也走 ZenohLocal(空 target + `--namespace`)。
+- Dispatch 入口加 PTY 互斥检查,但允许 one-shot(走 `send_control_lines_zenoh`)。
+- one-shot line 前置检查加上 `namespace` 也能避免"需要 control 目标"误报。
+
+#### Step 3:`tests/zenoh_unixpipe_fast_path.rs` 加 4 个 e2e
+- `self_target_with_explicit_namespace_should_find_local_daemon`:`rdog control self --namespace ns @ping`
+- `empty_target_with_namespace_should_find_local_daemon`:`rdog control --namespace ns @ping`
+- `self_target_should_error_when_no_local_daemon_running`:没 daemon 时清晰 NotFound
+- `self_target_should_error_when_multiple_local_daemons`:多 daemon 时 AlreadyExists 列出候选
+
+每个 e2e 用独立 namespace(selfexp/emptytgt/selfmulti),跟原有 lab namespace 测试隔离,允许 `cargo test` 默认并发。
+
+#### Step 4:文档 + CLI help
+- `src/input.rs` host 字段 doc 加上 `self` 关键字和空 target 入口说明
+- `specs/zenoh-unixpipe-fast-path-plan.md` 补"self / 空 target 入口"小节
+- `LATER_PLANS.md` 把已经做完的勾掉
+- `EXPERIENCE.md` 沉淀 3 条新经验
+
+### 验证
+- 369 unit + 7 e2e + 26 zenoh_router_client 全过
+- 真实 e2e 7 个场景全对:self/empty/multi/one-shot/no-daemon/two-daemons
+- 20x benchmark 自/empty 入口都 0.02s(同 fast path)
+- PTY 操作正确报错
+- 多 daemon 正确列出候选
+
+### 总结感悟
+- **FIFO 文件命名 vs base 路径**:Zenoh 1.8.0 unixpipe 是 named pipe 实现,base 路径只是逻辑标识,实际文件是 `<base>_uplink` 和 `<base>_downlink`。scan 必须按 `*.pipe_uplink` 而不是 `*.pipe`。
+- **PTY 互斥但 one-shot 必须支持**:本机 fast path 短任务,PTY 长 session 不适用;one-shot 是用户最常用模式,必须支持复用单 session 串行发多 line。
+- **e2e namespace 隔离**:unixpipe 是文件系统级别的资源(每个 daemon 一个 FIFO),跨测试隔离比内存协议更难;`cargo test` 默认并发时,namespace 共享会让 fast path 测试 nondeterministic 失败。

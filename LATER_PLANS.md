@@ -295,3 +295,19 @@
   - 已记录到 EPIPHANY_LOG。
   - 排查方向: 给 `resolve_target` 的 liveliness get 加 retry,或 test helper 给每个 test 独立 namespace。
   - 不属于本轮范围,留作 follow-up。
+### rdog control macOS 本地 fast path 收尾(2026-06-21 大部分完成)
+
+- [x] 把 `specs/zenoh-control-plane-plan.md` 补上 "Local fast path: unixpipe" 节,把 unixpipe exists-check 契约写进去
+- [x] `EXPERIENCE.md` 沉淀经验
+- [x] `rdog_linux.toml` 模板加同样的 `[zenoh.unixpipe]` 注释段
+- [x] 把 plan 文件 `.omx/plans/zenoh-unixpipe-fast-path.md` 同步成"实际采用 exists-check"
+- [x] **`rdog control self @<line>` / 空 target 入口**:2026-06-21 已实现
+- [ ] `.codex/skills/rdog-control/SKILL.md` 补 troubleshooting 段
+- [ ] 启动独立 plan:方向 B(直接 UDS 控制面,10~50x 提速),作为 unixpipe 体验确认后的 follow-up
+
+### 已有 flake 待处理
+
+- [ ] `zenoh_router_client` 测试集多测试并发 ~4% flake,失败用例不固定。
+  - 已记录到 EPIPHANY_LOG。
+  - 排查方向: 给 `resolve_target` 的 liveliness get 加 retry,或 test helper 给每个 test 独立 namespace。
+  - 不属于本轮范围,留作 follow-up。
