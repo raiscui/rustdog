@@ -1,7 +1,7 @@
 ---
 name: rdog-control
 version: "1.0"
-description: Use when Codex needs to operate rustdog/rdog for remote control of LAN or reachable hosts, hardware bridge machines, lab devices, or microcontrollers. Covers `rdog daemon`, `rdog control`, Zenoh target-name discovery, `--entry-point` fallback, line-control commands like `@ping`, `@bootstrap`, `@capabilities`, `@cmd`, `@key`, `@paste`, `@observe`, `@screenshot`, `@window-find`, `@window-activate`, `@window-close`, `@web-find`, `@web-act`, `@gui-bench`, `@ax-tree`, `@ax-find`, `@ax-get`, `@ax-press`, `@selector-get`, `@selector-resolve`, `@selector-refind`, `@mouse-move`, `@mouse-button`, `@click`, `@drag`, `@wheel`, `@savefile`, and remote PTY flows such as `rdog control TARGET --pty -- COMMAND`.
+description: Use when an AI agent, coding assistant, automation tool, or operator needs to control a named LAN or reachable host, hardware bridge machine, lab device, or microcontroller through `rustdog`/`rdog`. Covers `rdog daemon`, `rdog control`, Zenoh target-name discovery, `--entry-point` fallback, the **local fast path** shortcuts `rdog control @<line>` and `rdog control self @<line>` (and `rdog control --namespace <ns> @<line>`) which scan `$TMPDIR/rdog-{ns}-*.pipe_uplink` to find the unique local daemon when no `TARGET` is given, line-control commands like `@ping`, `@bootstrap`, `@capabilities`, `@cmd`, `@key`, `@paste`, `@observe`, `@screenshot`, `@window-find`, `@window-activate`, `@window-close`, `@web-find`, `@web-act`, `@gui-bench`, `@ax-tree`, `@ax-find`, `@ax-get`, `@ax-press`, `@selector-get`, `@selector-resolve`, `@selector-refind`, `@mouse-move`, `@mouse-button`, `@click`, `@drag`, `@wheel`, `@savefile`, remote PTY flows such as `rdog control TARGET --pty -- COMMAND`, and the `rdog ax-diff` subcommand for structured AX snapshot diff. Works for Codex, Claude, GPT, openai-compatible clients, MCP agents, and human operators.
 ---
 
 # Rdog Control
@@ -10,12 +10,15 @@ description: Use when Codex needs to operate rustdog/rdog for remote control of 
 
 Treat `rdog control` as a stdio-friendly remote control bridge, not as SSH.
 
-The normal path is:
+The normal short-task path is:
 
 1. a trusted target runs `rdog daemon`
-2. Codex runs `rdog control TARGET`
-3. Codex writes one line-control command per line
-4. Codex parses `@response`, `@savefile`, or `@pty-*` frames
+2. an agent (Codex, Claude, GPT, openai-compatible client, MCP, or a human operator) runs `rdog control TARGET @ping @capabilities#1 ...`
+3. each trailing `@<line>` is executed in order on one shared control connection
+4. the agent parses `@response`, `@savefile`, or `@pty-*` frames
+
+This skill is **agent-agnostic**. The same `rdog control TARGET '@observe#1:...'` one-shot invocation works the same whether the caller is a Codex native subagent, a Claude tool-call bridge, a local Python script driven by an openai-compatible LLM, or a human running it from zsh.
+The old stdin / heredoc / pipeline session form is still supported for long generated batches or deliberate bare-shell compatibility, but it is no longer the primary example shape.
 
 Use this skill when the user asks to control a named machine such as `mac.lab`, `win11.lab`, `linux-build.lab`, `mini-a.lab`, a hardware bridge host, or a microcontroller reachable through a bridge/Zenoh/serial setup.
 
@@ -23,9 +26,13 @@ Use this skill when the user asks to control a named machine such as `mac.lab`, 
 
 - Prefer the installed `rdog` binary. Inside the rustdog repo, prefer `./target/debug/rdog` when it already exists.
 - Verify live syntax with `rdog --help`, `rdog control --help`, and `rdog daemon --help` if command shape matters.
+- **如果 daemon 跟 agent 在同一台机器上,优先用本机 fast path**:`rdog control @ping` 或 `rdog control self @ping`
+  省略 `TARGET` 写法,客户端扫 `$TMPDIR/rdog-{ns}-*.pipe_uplink` 找唯一 daemon。
+  Zenoh `transport_unixpipe` 让本机 round-trip 降到 ~20ms(对比跨 socket ~200ms+)。
+  多个 daemon 同机时仍要显式 `rdog control <name> @ping`。详细见 "Local Shortcut Forms"。
 - Start with `@ping` for a minimal non-GUI liveness check.
 - For fresh GUI or platform-sensitive work, prefer one read-only `@bootstrap#id:{mode:"gui"}` request before acting. Treat `status:"permission_denied"` as a stop-and-explain lane unless the user explicitly asks to change permissions.
-- If the target daemon does not support `@bootstrap`, fall back to one `rdog control` session containing `@ping`, `@capabilities`, then `@observe` with screenshot / AX / windows.
+- If the target daemon does not support `@bootstrap`, fall back to one trailing one-shot invocation containing `@ping`, `@capabilities`, then `@observe` with screenshot / AX / windows.
   This keeps old daemons usable while making new daemons return one structured `rdog.bootstrap.v1` preflight.
 - Use request ids for programmatic calls: `@cmd#1:"printf READY"`.
 - Treat `@cmd`, `@script`, and bare shell lines as remote code execution. Use them only on trusted targets.
@@ -33,21 +40,55 @@ Use this skill when the user asks to control a named machine such as `mac.lab`, 
 
 ## Decision Flow
 
+0. **Are you on the same machine as the daemon you want to control?**
+   Skip `TARGET` and use the **local fast path** shortcut:
+
+   ```bash
+   # 显式 `self` 关键字(本机 fast path,需要先确定本机只有 1 个 daemon)
+   rdog control self @ping
+   rdog control self @ping @capabilities#1 @observe#3
+   rdog control self --namespace lab @ping        # 显式 namespace 时也走 `self` 路径
+
+   # 空 target + --namespace(隐式本机 fast path,跟 `self` 等价)
+   rdog control --namespace lab @ping
+   rdog control --namespace lab @ping @capabilities#1
+
+   # 完全省略 target 名(短到极致,等价于 `rdog control self @<line>`)
+   rdog control @ping
+   rdog control @ping @capabilities#1 @observe#3
+   ```
+
+   客户端会扫 `$TMPDIR/rdog-{ns}-*.pipe_uplink` 找唯一 daemon:
+   - **找到 0 个** → 报 `未找到本地 daemon`,提示启动 daemon 或显式指定 target name
+   - **找到 1 个** → 等价于 `rdog control <name> @<line>`,Zenoh 走 unixpipe 本机 link(2~5x 加速)
+   - **找到 ≥2 个** → 报 `本机发现多个 unixpipe daemon: [a, b]`,要求显式指定 target name
+
+   适用场景:AGI agent 跟 daemon 同机跑、agent 知道"我只需要连本机那一个"、批量 GUI 任务想省掉每个 command 都打 target name 的输入成本。
+   不支持 PTY 长时间会话(one-shot 多 line 支持,单 session 串行发)。
+
+   如果本机有多个 daemon(不同 namespace),`rdog control self @ping` 会因为找不到唯一匹配而报错——这时必须显式 `rdog control <specific-name> @ping`。
+   `rdog_macos.toml` / `rdog_linux.toml` 默认已经开启 `[zenoh.unixpipe] enabled = true`,无需额外配置。
+
 1. Need a quick host check:
-   `printf '@ping\n' | rdog control TARGET`
+   `rdog control TARGET @ping`
+   For multiple lines, append more `@<line>`:
+   `rdog control TARGET @ping @capabilities#1 @observe#3`
+   (shared connection, ordered, fail-fast on first error)
 2. Need to know whether GUI, screenshot, AX, mouse, PTY, savefile, or Zenoh session paths are usable:
-   `printf '@capabilities#1\n' | rdog control TARGET`
+   `rdog control TARGET @capabilities#1`
    Read `capabilities.*.status`, `error_code`, `permissions`, and `failure_hints`.
    `permission_denied` maps to code `77`; `unsupported` maps to code `78`.
    Do not guess macOS Accessibility, macOS Screen Recording, Windows UIPI, or Linux display backend state from the OS name alone.
 3. Need a fast GUI bootstrap before choosing a lane:
    prefer the productized read-only bootstrap:
    ```bash
-   printf '@bootstrap#1:{mode:"gui",capability_policy:"fresh",observe:{mode:"hybrid",include_screenshot:true,include_ax:true,include_windows:true,ax_required:false,ax_mode:"interactive"}}\n' | rdog control TARGET
+   rdog control TARGET '@bootstrap#1:{mode:"gui",capability_policy:"fresh",observe:{mode:"hybrid",include_screenshot:true,include_ax:true,include_windows:true,ax_required:false,ax_mode:"interactive"}}'
    ```
+   (use single quotes around the line to keep the shell from interpreting `{` / `:` / `"`)
    Parse `rdog.bootstrap.v1` lanes: `liveness`, `capabilities`, `observation`, `lanes`, `errors`, and optional `trace`.
    `capability_policy:"cached"` is reserved and currently returns `BOOTSTRAP_CAPABILITY_CACHE_UNIMPLEMENTED`; use `fresh`.
-   For older daemons, send `@ping#1`, `@capabilities#2`, and `@observe#3:{mode:"hybrid",include_screenshot:true,include_ax:true,include_windows:true,ax_required:false,ax_mode:"interactive"}` in one session.
+   For older daemons, use one trailing one-shot invocation:
+   `rdog control TARGET @ping#1 @capabilities#2 '@observe#3:{mode:"hybrid",include_screenshot:true,include_ax:true,include_windows:true,ax_required:false,ax_mode:"interactive"}'`.
    If daemon screenshot is permission-denied but AX is available, keep AX/window evidence and use another explicitly stated visual source if the local environment permits it.
 4. Need GUI observation before choosing a lane:
    prefer `@observe#id:{mode:"hybrid",include_screenshot:true,include_ax:true,include_windows:true,ax_required:false,ax_mode:"interactive"}`.
@@ -130,12 +171,16 @@ Use this skill when the user asks to control a named machine such as `mac.lab`, 
 11. Need direct app integration instead of spawning `rdog control`:
    read `references/zenoh-hardware.md` and use the session-channel model.
 
+Compatibility note:
+stdin, heredoc, and pipeline input still work, for example when a script generates a large batch or when you intentionally need raw bare shell lines.
+Treat pipeline input as a compatibility path only; for smoke tests and short batches, prefer `rdog control TARGET @ping` or `rdog control TARGET @a @b @c`.
+
 ## GUI Agent Recipe
 
 Use this fixed workflow for GUI tasks:
 
 1. Bootstrap: send `@bootstrap#id:{mode:"gui",capability_policy:"fresh"}` when starting a fresh GUI task.
-2. Fallback bootstrap: on older daemons, send `@ping`, `@capabilities`, and `@observe` together in one read-only control session.
+2. Fallback bootstrap: on older daemons, send `@ping`, `@capabilities`, and `@observe` together with one trailing one-shot invocation.
 3. `@capabilities`: check screenshot, accessibility, window_control, keyboard_input, mouse_input, and type_text.
 4. Observe: prefer `@observe:{mode:"hybrid",include_screenshot:true,include_ax:true,include_windows:true,ax_required:false,ax_mode:"interactive"}` for extra observation. Existing low-level observation commands remain valid.
 5. Locate: for active browser page content use `@web-find`; if the task is an explicit simple press, use `@web-act` instead. Otherwise use `@window-find`, `@ax-find`, then `@ax-get` for one target.
@@ -202,6 +247,28 @@ If a session reports `Zenoh session bridge subscriber ... closed before receivin
 
 - Read `references/cookbook-web-content.md` when the user wants to inspect, search, or click controls inside the active browser page, not browser chrome such as tabs, address bar, toolbar buttons, extensions, or bookmarks.
 - Future scenario cookbooks can follow the same pattern for apps such as WeChat or Finder, but do not create empty cookbook files before a scenario has verified experience to record.
+
+## Local Fast Path Troubleshooting
+
+`rdog control @<line>` / `rdog control self @<line>` 走本机 fast path 时,常见错误和排查:
+
+- **`未找到本地 daemon`**:
+  - 0 个 daemon 在跑。`RUST_LOG=info rdog daemon -c ./rdog_macos.toml` 启一个。
+  - daemon 启了但没创建 FIFO。检查 daemon 启动日志有没有 `info: zenoh unixpipe fast path 启用: base=...`。
+    没有说明 `[zenoh.unixpipe] enabled = false` 被关了,或者平台是 Windows(强制 disabled)。
+  - `$TMPDIR` 不一致。Zenoh unixpipe 用 `$TMPDIR` 写 FIFO,daemon 和 client 必须在同一用户(同一 `$TMPDIR`)。
+- **`本机发现多个 unixpipe daemon: [a, b]`**:
+  - 多个 daemon 在跑(同 namespace)。用 `ls $TMPDIR/rdog-*.pipe_uplink` 看候选。
+  - 显式 `rdog control <name> @<line>` 选一个,或者用 `rdog control --namespace <ns> @<line>` 缩小扫描。
+- **`缺少 control 目标`**(old 错误,2026-06-21 之前版本会出):
+  - 升级到包含 `d3fdc9b` 之后的 rdog,前置拦截已移除。
+- **本机 fast path 后 round-trip 仍 ~200ms**:
+  - 检查 client log `info: unixpipe endpoint detected, taking fast path` 是否出现。
+    没出现说明 fallback 到了 UDP scout,大概率 FIFO 不存在或同名多个。
+  - macOS 上 `sun_path` 限制 104 字节,`{base}_downlink` 9 字节后缀,base 必须 ≤ 95 字节;daemon_name + namespace 过长会被 daemon 启动 fail-fast。
+- **PTY 不支持**:
+  - `rdog control self --pty -- bash` 会报 "`rdog control self` 不支持 PTY 操作"。
+    PTY 需要长 session 复用,跟"短任务一次性执行"语义不符。改用 `rdog control <name> --pty -- bash` 显式 target。
 
 ## Reference Loading
 
