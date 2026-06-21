@@ -1,0 +1,53 @@
+{
+  "kind": "ax-tree",
+  "schema": "rdog.ax.v1",
+  "platform": "macos",
+  "window_count": 1,
+  "element_count": 3,
+  "truncated": false,
+  "observation": {"source_command": "@observe#1", "scope": "ax", "ref_count": 3, "selector_count": 3},
+  "windows": [{
+    "id": "pid:8231/window:0",
+    "ref": "@e1",
+    "pid": 8231,
+    "process_name": "Google Chrome",
+    "title": "小红书 - 你的生活兴趣社区 - Google Chrome",
+    "role": "AXWindow",
+    "elements": [{
+      "id": "pid:8231/window:0/path:0",
+      "ref": "@e2",
+      "role": "AXWebArea",
+      "ax_path": [0],
+      "actions": [],
+      "children": [
+        {
+          "id": "pid:8231/window:0/path:0.0",
+          "ref": "@e3",
+          "role": "AXLink",
+          "description": "首页",
+          "ax_path": [0, 0],
+          "actions": ["AXPress"],
+          "children": []
+        },
+        {
+          "id": "pid:8231/window:0/path:0.1",
+          "ref": "@e4",
+          "role": "AXLink",
+          "description": "点点",
+          "ax_path": [0, 1],
+          "actions": ["AXPress"],
+          "children": []
+        },
+        {
+          "id": "pid:8231/window:0/path:0.2",
+          "ref": "@e5",
+          "role": "AXLink",
+          "description": "直播",
+          "ax_path": [0, 2],
+          "actions": ["AXPress"],
+          "children": []
+        }
+      ]
+    }]
+  }]
+}

@@ -1,4 +1,10 @@
 interface:
   display_name: "Rdog Control"
   short_description: "Control LAN hosts and devices with rdog"
-  default_prompt: "Use $rdog-control to control a LAN host, device, or microcontroller with rdog control and follow the repo's line-control, PTY, and Zenoh target-name rules."
+  default_prompt: |
+    Use $rdog-control to control a LAN host, device, or microcontroller with
+    rdog control, and follow the repo's line-control, PTY, Zenoh target-name,
+    AX-window rules, and the `rdog ax-diff` subcommand for structured AX
+    snapshot diff. This skill is agent-agnostic: the same `rdog control
+    TARGET '@observe#1:...'` one-shot flow works for Codex, Claude, GPT,
+    openai-compatible clients, MCP agents, and human operators.

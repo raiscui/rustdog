@@ -87,28 +87,6 @@ fn spawn_output_collector(
     (buffer, handle)
 }
 
-fn wait_until_output_contains(
-    buffer: &Arc<Mutex<String>>,
-    needle: &str,
-    timeout: Duration,
-) -> bool {
-    let deadline = Instant::now() + timeout;
-
-    while Instant::now() < deadline {
-        if buffer
-            .lock()
-            .expect("buffer lock should work")
-            .contains(needle)
-        {
-            return true;
-        }
-
-        thread::sleep(Duration::from_millis(20));
-    }
-
-    false
-}
-
 #[test]
 fn reverse_shell_should_run_with_tty_semantics() {
     let port = next_free_port();
@@ -116,8 +94,12 @@ fn reverse_shell_should_run_with_tty_semantics() {
     let mut listener = Command::new(&binary)
         .args(["listen", &port.to_string()])
         .stdin(Stdio::piped())
+        // 2026-06-19 init_logger 切到 stderr 之后,
+        // listener 把 "Connection Received" log 走 stderr 而不是 stdout。
+        // 同时 stdout 还会收 listener 把远端 shell 输出 pipe_thread 出来的字节。
+        // 两个 stream 都要 pipe,合流检查。
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .spawn()
         .expect("listener should start");
 
@@ -127,7 +109,22 @@ fn reverse_shell_should_run_with_tty_semantics() {
         .stdout
         .take()
         .expect("listener stdout pipe should exist");
-    let (output_buffer, output_thread) = spawn_output_collector(listener_stdout);
+    let listener_stderr = listener
+        .stderr
+        .take()
+        .expect("listener stderr pipe should exist");
+    let (stdout_buffer, stdout_thread) = spawn_output_collector(listener_stdout);
+    let (stderr_buffer, stderr_thread) = spawn_output_collector(listener_stderr);
+    // 2026-06-19 init_logger 切到 stderr 之后,"Connection Received" log 走 stderr,
+    // 但 TTY=111 这种 shell 输出走 stdout (经 pipe_thread 转发)。
+    // 合流两个 buffer 才能完整断言。
+    let combined_output = || {
+        format!(
+            "{}{}",
+            stdout_buffer.lock().expect("stdout lock").clone(),
+            stderr_buffer.lock().expect("stderr lock").clone()
+        )
+    };
 
     let mut connector = Command::new(&binary)
         .args(["connect", "-s", "/bin/bash", "127.0.0.1", &port.to_string()])
@@ -137,15 +134,26 @@ fn reverse_shell_should_run_with_tty_semantics() {
         .spawn()
         .expect("connector should start");
 
-    assert!(
-        wait_until_output_contains(
-            &output_buffer,
-            "Connection Received",
-            Duration::from_secs(5)
-        ),
-        "listener never reported Connection Received. output so far:\n{}",
-        output_buffer.lock().expect("buffer lock should work"),
-    );
+    // 2026-06-19 init_logger 切到 stderr 之后,"Connection Received" 走 stderr。
+    // 这里用循环 polling 等到出现,而不是单次 check;
+    // connector 启动 → listener accept → log::info! → stderr 收集,
+    // 全链路可能要 100ms ~ 1s。
+    {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let mut got = false;
+        while std::time::Instant::now() < deadline {
+            if combined_output().contains("Connection Received") {
+                got = true;
+                break;
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+        assert!(
+            got,
+            "listener never reported Connection Received. output so far:\n{}",
+            combined_output(),
+        );
+    }
 
     let command = b"python3 -c 'import os; print(\"TTY=%d%d%d\" % (os.isatty(0), os.isatty(1), os.isatty(2)))'\n";
     listener
@@ -167,17 +175,34 @@ fn reverse_shell_should_run_with_tty_semantics() {
         .flush()
         .expect("listener stdin should flush");
 
+    let combined_output_for_tty = || combined_output();
+    let has_tty = {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let mut found = false;
+        while std::time::Instant::now() < deadline {
+            if combined_output().contains("TTY=111") {
+                found = true;
+                break;
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+        found
+    };
     assert!(
-        wait_until_output_contains(&output_buffer, "TTY=111", Duration::from_secs(5)),
+        has_tty,
         "shell never reported TTY=111. output so far:\n{}",
-        output_buffer.lock().expect("buffer lock should work"),
+        combined_output(),
     );
 
     let listener_status = listener.wait().expect("listener should exit");
     let connector_status = connector.wait().expect("connector should exit");
-    output_thread
+    stdout_thread
         .join()
-        .expect("output collector should finish");
+        .expect("stdout collector should finish");
+    stderr_thread
+        .join()
+        .expect("stderr collector should finish");
+    let _ = combined_output_for_tty; // 抑制 unused 警告
 
     assert!(
         listener_status.success(),

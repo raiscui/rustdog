@@ -15,7 +15,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 static HIDDEN_SESSION_ENABLED: AtomicBool = AtomicBool::new(false);
 
 pub enum LogTarget {
-    Stdout,
+    /// 非 hidden 命令的日志目标:走 stderr(Unix 习惯)。
+    ///
+    /// 历史背景: 早期(2026-06-19 之前)这个 variant 叫 `Stdout` 且真的写 stdout,
+    /// 改 init_logger 走 stderr 之后保留 `Stdout` 名字做向后兼容。
+    /// 2026-06-20 改名为 `Stderr`,把"日志走 stderr"事实写进 enum 名字。
+    Stderr,
     File(PathBuf),
 }
 
@@ -36,7 +41,7 @@ pub fn log_target_for_command(command: &Command) -> LogTarget {
             log_file: Some(path),
             ..
         } => LogTarget::File(path.clone()),
-        _ => LogTarget::Stdout,
+        _ => LogTarget::Stderr,
     }
 }
 
@@ -93,7 +98,7 @@ mod tests {
         };
 
         match log_target_for_command(&command) {
-            LogTarget::Stdout => {}
+            LogTarget::Stderr => {}
             LogTarget::File(path) => panic!("unexpected file target: {}", path.display()),
         }
     }
@@ -108,7 +113,10 @@ mod tests {
 
         match log_target_for_command(&command) {
             LogTarget::File(path) => assert_eq!(path, PathBuf::from("rdog_hidden.log")),
-            LogTarget::Stdout => panic!("hidden child should not use stdout"),
+            // 这个测试只是验证 hidden child 不会落到 stderr 这条分支。
+            // (注:LogTarget 早期叫 Stdout 且真的写 stdout,2026-06-19 切到 stderr,
+            // 2026-06-20 改名为 Stderr 以反映实际语义。)
+            LogTarget::Stderr => panic!("hidden child should not use stderr"),
         }
     }
 

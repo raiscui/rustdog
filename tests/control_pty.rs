@@ -834,12 +834,17 @@ fn control_pty_detach_should_allow_later_attach() {
         .lock()
         .expect("daemon stderr buffer lock should work")
         .clone();
+    // 合流 attach 客户端的 stdout + stderr。
+    // 2026-06-19 init_logger 切到 stderr 后,
+    // 客户端把 "remote PTY closed" 这种 io::Error 通过 log::error 打印,
+    // 不再走 stdout,这里合流检查才能命中"force_close"。
+    let attach_combined = format!("{attach_stdout}{attach_stderr}");
     assert!(
-        attach_stdout.contains("SECOND"),
+        attach_combined.contains("SECOND"),
         "reattached client should continue receiving future PTY output after attach\nstdout:\n{attach_stdout}\nstderr:\n{attach_stderr}\ndaemon-stdout:\n{daemon_stdout}\ndaemon-stderr:\n{daemon_stderr}"
     );
     assert!(
-        attach_stdout.contains("remote PTY closed before natural exit: force_close"),
+        attach_combined.contains("remote PTY closed before natural exit: force_close"),
         "reattached client should observe force-close terminal semantics after out-of-band close\nstdout:\n{attach_stdout}\nstderr:\n{attach_stderr}\ndaemon-stdout:\n{daemon_stdout}\ndaemon-stderr:\n{daemon_stderr}"
     );
 
