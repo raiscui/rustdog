@@ -8,7 +8,7 @@ use serde::Serialize;
 use std::{
     io,
     sync::{Mutex, OnceLock},
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use crate::{
@@ -379,6 +379,13 @@ struct CapturedDisplay {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct CompositeCaptureFingerprint {
+    /// 抓帧时刻,用于 stale guard 的 TTL 早退。
+    ///
+    /// daemon 长跑场景下 `LAST_COMPOSITE_FINGERPRINT` 里存的是 N 小时前的
+    /// fingerprint,如果继续跟当前帧做严格比对,会把"用户视角的第一次请求"
+    /// 当成 stale 拒掉。带 `captured_at` 之后,gap 超过 cache TTL 就视为
+    /// 缓存陈旧,直接放行,不再误判。
+    captured_at: Instant,
     display_count: usize,
     display_fingerprints: Vec<DisplayCaptureFingerprint>,
 }
@@ -625,8 +632,41 @@ fn reject_stale_composite_fingerprint(
     fingerprint: CompositeCaptureFingerprint,
     last: &mut Option<CompositeCaptureFingerprint>,
 ) -> io::Result<()> {
-    if last.as_ref() == Some(&fingerprint) {
-        let payload = stale_screenshot_error_payload(&fingerprint)?;
+    // stale guard 的 cache TTL:超过这个间隔就视为缓存陈旧,直接放行。
+    //
+    // daemon 长跑(N 小时~N 天)期间,`LAST_COMPOSITE_FINGERPRINT` 里存的是
+    // 上一次请求的 fingerprint。SCK 抓帧 + WindowServer 没标 dirty 时
+    // composite hash 可能跨请求不变,如果严格比对,会把"用户视角的第一次
+    // 请求"误判成 stale 而拒掉。带时间窗口后,长间隔请求一律放行,
+    // 短间隔(用户连续多次 observe)撞 hash 才走真正的 stale 检测。
+    const CACHE_TTL: Duration = Duration::from_secs(30);
+
+    if let Some(prev) = last.take() {
+        // 取出旧值后再判断,避免 borrow 和赋值冲突。
+        let gap = fingerprint
+            .captured_at
+            .saturating_duration_since(prev.captured_at);
+
+        // 无论后续走哪条分支,`last` 都要更新成最新的 fingerprint,
+        // 提前把当前 fingerprint 放回去。
+        *last = Some(fingerprint);
+
+        // 长间隔 → 缓存已陈旧,直接放行(用户视角的"第一次请求"场景)
+        if gap >= CACHE_TTL {
+            return Ok(());
+        }
+
+        // 短间隔 + 不同 hash → 屏确实变了,放行
+        if prev.display_fingerprints
+            != last.as_ref().expect("just set above").display_fingerprints
+        {
+            return Ok(());
+        }
+
+        // 短间隔 + 同 hash → 才是真正可疑的 stale
+        let payload = stale_screenshot_error_payload(
+            last.as_ref().expect("just set above"),
+        )?;
         return Err(io::Error::other(payload));
     }
 
@@ -636,6 +676,7 @@ fn reject_stale_composite_fingerprint(
 
 fn composite_capture_fingerprint(displays: &[CapturedDisplay]) -> CompositeCaptureFingerprint {
     CompositeCaptureFingerprint {
+        captured_at: Instant::now(),
         display_count: displays.len(),
         display_fingerprints: displays.iter().map(display_capture_fingerprint).collect(),
     }

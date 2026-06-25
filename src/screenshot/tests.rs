@@ -3,6 +3,7 @@ use crate::control_ax::{
     AxElement, AxRect, AxSnapshot, AxWindow, DEFAULT_AX_DEPTH, DEFAULT_AX_MAX_ELEMENTS,
 };
 use serde_json::Value;
+use std::time::Duration;
 
 #[test]
 fn build_virtual_bounds_should_union_negative_and_positive_display_rects() {
@@ -576,6 +577,122 @@ fn stale_freshness_guard_should_allow_changed_frame_after_error() {
         .expect_err("same frame should be rejected");
     reject_stale_composite_fingerprint(composite_capture_fingerprint(&changed), &mut last)
         .expect("changed frame should be accepted after stale error");
+}
+
+#[test]
+fn stale_freshness_guard_should_allow_after_cache_ttl() {
+    // 长间隔的同 hash 请求应该被 cache TTL 早退放行,
+    // 不再被 stale guard 误判。这覆盖 daemon 跑 N 小时后
+    // "用户视角的第一次请求"的实际场景。
+    let mut last = None;
+    let displays = vec![fake_display(
+        "one",
+        LogicalRect {
+            x: 0,
+            y: 0,
+            width: 1,
+            height: 1,
+        },
+        Size {
+            width: 1,
+            height: 1,
+        },
+        Rgba([0, 0, 0, 255]),
+    )];
+
+    // 第一次请求:建立 baseline
+    reject_stale_composite_fingerprint(composite_capture_fingerprint(&displays), &mut last)
+        .expect("first frame should be accepted");
+
+    // 模拟 "31s 后" 的同 hash 请求:用 Instant::now() + 31s 不需要真的 sleep
+    let stale_displays_hash = displays.clone();
+    let fp_first = composite_capture_fingerprint(&stale_displays_hash);
+    let fp_later = CompositeCaptureFingerprint {
+        captured_at: fp_first.captured_at + Duration::from_secs(31),
+        display_count: fp_first.display_count,
+        display_fingerprints: fp_first.display_fingerprints.clone(),
+    };
+
+    reject_stale_composite_fingerprint(fp_later, &mut last)
+        .expect("31s 后的同 hash 请求应该被 TTL 早退放行,不再 stale");
+}
+
+#[test]
+fn stale_freshness_guard_should_still_reject_within_ttl() {
+    // 短间隔的同 hash 请求仍然走真 stale 检测(保留原有的诊断能力)。
+    let mut last = None;
+    let displays = vec![fake_display(
+        "one",
+        LogicalRect {
+            x: 0,
+            y: 0,
+            width: 1,
+            height: 1,
+        },
+        Size {
+            width: 1,
+            height: 1,
+        },
+        Rgba([0, 0, 0, 255]),
+    )];
+
+    let fp1 = composite_capture_fingerprint(&displays);
+    let fp2 = CompositeCaptureFingerprint {
+        captured_at: fp1.captured_at + Duration::from_secs(5),
+        display_count: fp1.display_count,
+        display_fingerprints: fp1.display_fingerprints.clone(),
+    };
+
+    reject_stale_composite_fingerprint(fp1, &mut last)
+        .expect("first frame should be accepted");
+    reject_stale_composite_fingerprint(fp2, &mut last)
+        .expect_err("5s 内的同 hash 请求仍应被拒,保留 stale detection");
+}
+
+#[test]
+fn stale_freshness_guard_should_allow_changed_frame_within_ttl() {
+    // 短间隔 + 不同 hash → 屏真的变了,放行。
+    let mut last = None;
+    let first = vec![fake_display(
+        "one",
+        LogicalRect {
+            x: 0,
+            y: 0,
+            width: 1,
+            height: 1,
+        },
+        Size {
+            width: 1,
+            height: 1,
+        },
+        Rgba([0, 0, 0, 255]),
+    )];
+    let changed = vec![fake_display(
+        "one",
+        LogicalRect {
+            x: 0,
+            y: 0,
+            width: 1,
+            height: 1,
+        },
+        Size {
+            width: 1,
+            height: 1,
+        },
+        Rgba([255, 255, 255, 255]),
+    )];
+
+    let fp1 = composite_capture_fingerprint(&first);
+    let fp2 = CompositeCaptureFingerprint {
+        captured_at: fp1.captured_at + Duration::from_secs(2),
+        display_count: 1,
+        display_fingerprints: vec![display_capture_fingerprint(&changed[0])],
+    };
+
+    reject_stale_composite_fingerprint(fp1, &mut last)
+        .expect("first frame should be accepted");
+    reject_stale_composite_fingerprint(fp2, &mut last)
+        .expect("2s 后不同 hash 应该放行");
 }
 
 #[test]
