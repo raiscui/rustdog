@@ -175,6 +175,53 @@ Compatibility note:
 stdin, heredoc, and pipeline input still work, for example when a script generates a large batch or when you intentionally need raw bare shell lines.
 Treat pipeline input as a compatibility path only; for smoke tests and short batches, prefer `rdog control TARGET @ping` or `rdog control TARGET @a @b @c`.
 
+## Local Key Chords
+
+Outside a `@pty` session, `@key` is a **local** control action that delivers
+keystrokes to the focused app via enigo. It supports chord syntax: separate
+the modifier key(s) and the main key with `+`.
+
+```bash
+# Single key
+rdog control '@key:"F11"'
+rdog control '@key:"Return"'
+
+# Two-key chord (most common in browser / editor shortcuts)
+rdog control '@key:"Cmd+R"'            # refresh the active browser page
+rdog control '@key:"Cmd+Shift+R"'      # hard refresh (bypass cache)
+rdog control '@key:"Cmd+L"'            # focus URL bar
+rdog control '@key:"Cmd+T"'            # new tab
+rdog control '@key:"Cmd+W"'            # close tab
+rdog control '@key:"Cmd+,"'            # open Settings
+rdog control '@key:"Alt+F4"'           # close window (Windows)
+rdog control '@key:"Ctrl+Shift+P"'     # VSCode command palette
+
+# Full object form (hold_ms, mode, delivery are still available)
+rdog control '@key#7:{key:"Cmd+R",hold_ms:80,mode:"press_release"}'
+```
+
+**Modifier aliases** (all case-insensitive):
+
+| Form | Aliases |
+|---|---|
+| Cmd | `cmd` / `command` / `meta` / `super` |
+| Alt | `alt` / `option` |
+| Ctrl | `ctrl` / `control` |
+| Shift | `shift` |
+| Side-specific (macOS) | `left-cmd` / `right-cmd` / `left-alt` / `right-alt` |
+
+**Main key options:** named keys (`F1`–`F12`, `Return`, `Tab`, `Space`,
+`Esc`, `Backspace`, `Delete`, `Home` / `End` / `PageUp` / `PageDown`, arrow
+keys) or any single Unicode character via `Key::Unicode`.
+
+**Inside a `@pty` session**, `@key` is **remote stdin text** instead — the
+bytes go to the running program, not the local OS. See
+`references/protocol.md` for the full PTY streaming rules.
+
+Verify every chord with a fresh `@observe` / `@screenshot`. Do not assume
+the GUI re-rendered just because `@key` returned `@response 0` — SPA
+refreshes can keep the same AX tree hash while still changing the feed.
+
 ## GUI Agent Recipe
 
 Use this fixed workflow for GUI tasks:

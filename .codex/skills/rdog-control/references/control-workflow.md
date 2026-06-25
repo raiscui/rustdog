@@ -209,6 +209,23 @@ rdog control mac.lab \
   @screenshot#203
 ```
 
+`@key` outside a `@pty` session is a local control action — it delivers the
+keystroke through enigo, not as remote stdin. Chord syntax is `Modifier+Key`:
+
+```bash
+# refresh the active browser page (instead of a long osascript Cmd+R roundtrip)
+rdog control mac.lab '@key#210:"Cmd+R"'
+
+# focus URL bar, then verify
+rdog control mac.lab \
+  '@key#220:"Cmd+L"' \
+  @observe#221:{mode:"hybrid",include_screenshot:true,include_ax:true,ax_required:false,ax_mode:"interactive"}
+```
+
+See the "Local Key Chords" section in `SKILL.md` for the full modifier /
+main-key grammar. Inside a `@pty` session, `@key` reverts to remote stdin
+and chord syntax is not local.
+
 Fast read-only GUI bootstrap:
 
 ```bash

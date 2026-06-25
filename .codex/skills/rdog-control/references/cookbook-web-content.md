@@ -203,6 +203,41 @@ It is a side-effectful live workflow and must stay opt-in.
 - Do not mix current-tab page controls with background tabs.
 - Do not create browser-specific one-off guesses before checking whether the page exposes standard AX roles.
 
+## Browser-Level Shortcuts
+
+For browser-chrome actions (refresh, focus URL bar, new tab) prefer local
+key chords via `@key` over `@cmd` + `osascript` round-trips. `@key` outside
+a `@pty` session delivers keystrokes through enigo, no AppleScript needed.
+
+```bash
+# refresh the active page
+rdog control '@key:"Cmd+R"'
+
+# hard refresh (bypass HTTP cache)
+rdog control '@key:"Cmd+Shift+R"'
+
+# focus URL bar (then you can drive navigation with @paste + Return)
+rdog control '@key:"Cmd+L"'
+
+# new tab / close tab / reopen last closed tab
+rdog control '@key:"Cmd+T"'
+rdog control '@key:"Cmd+W"'
+rdog control '@key:"Cmd+Shift+T"'
+
+# focus the page-owned search box instead of the URL bar
+rdog control '@key:"Cmd+K"'
+```
+
+`@key` is a single-shot local action, so verify with a fresh `@observe` /
+`@screenshot` after each chord. Do not assume the page re-rendered just
+because `@key` returned `@response 0` — SPA refreshes may keep the same
+AX tree hash while still changing the feed.
+
+Use browser-level shortcuts only for browser-chrome interactions. Page-owned
+controls (like a sidebar "首页" link inside a web app) should still go
+through `@web-find` / `@web-act` / `@ax-action` so the action is scoped to
+the page's `AXWebArea`.
+
 ## Evidence Pattern
 
 A good evidence chain for this scenario includes:

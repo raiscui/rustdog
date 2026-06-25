@@ -503,8 +503,12 @@ Only `@pty-exit` and `@pty-closed` are terminal completion frames.
 
 During PTY streaming, input bytes are transparent:
 
-- `@key` is remote stdin text, not a local control action
-- `@script` is remote stdin text
+- Inside a `@pty` session, `@key` and `@script` are streamed as remote stdin text
+  (the bytes go to the running program, not to the local OS).
+- Outside a `@pty` session, `@key` is a **local** control action that supports key
+  chords via `+` syntax, e.g. `@key:"Cmd+R"` triggers a Cmd+R keystroke on the
+  local machine. See the "Local Key Chords" section in `SKILL.md` for the
+  full modifier / main-key grammar and examples.
 - `~.` is not intercepted
 - `Ctrl-C` and `Ctrl-D` go to the remote PTY program
 
