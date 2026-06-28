@@ -1,0 +1,5 @@
+[
+  { "WindowSize": { "width": 1200.0, "height": 800.0, "mode": "precondition" } },
+  { "Observe": { "mode": "window" } },
+  { "Exit": null }
+]

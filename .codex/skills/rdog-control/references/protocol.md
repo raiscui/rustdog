@@ -41,6 +41,8 @@ Bare shell lines do not have request ids.
 @window-find#11:{app:"TextEdit",title_contains:"release-notes",limit:5,include_state:true,include_recipes:true}
 @window-activate#12:{target:{ref:"@e1",observation_id:"obs-123"}}
 @window-activate#13:{window_id:"pid:123/window:0"}
+@window-resize#18:{target:{ref:"@e1",observation_id:"obs-123"},size:{width:1200,height:800,unit:"os-logical",box:"outer"},origin:"keep",verify:true}
+@window-resize#19:{target:{window_id:"pid:123/window:0"},size:{width:1200,height:800,unit:"os-logical",box:"outer"},origin:"keep",verify:true}
 @window-close#14:{target:{ref:"@e1",observation_id:"obs-123"}}
 @window-close#15:{window_id:"pid:123/window:0"}
 @window-close#16:{window_id:"pid:123/window:0",strategy:"terminate"}
@@ -248,12 +250,14 @@ Common forms:
 @observe#21:{mode:"ax",target:{app:"System Settings"},ax_mode:"interactive",ax_required:false}
 @observe#22:{mode:"visual",include_screenshot:true,include_manifest:true}
 @observe#23:{mode:"hybrid",include_screenshot:true,include_ax:true,include_windows:true,ax_required:false,ax_mode:"interactive"}
+@observe#24:{mode:"hybrid",scope:{display:{id:"d2"}},include_screenshot:true,include_ax:true,include_windows:true,ax_required:false,ax_mode:"interactive"}
 ```
 
 Request fields:
 
 - `mode`: `hybrid`, `visual`, `ax`, or `window`. Default is `hybrid`.
 - `target`: optional `app`, `bundle_id`, `window_title`, or `window_title_contains`.
+- `scope.display`: optional display selector object for multi-display filtering.
 - `include_screenshot`: controls the visual screenshot section.
 - `include_ax`: controls the accessibility section.
 - `ax_required`: when true, AX permission/backend failure makes the request fail.
@@ -268,8 +272,10 @@ Response rules:
 
 - `visual` uses the same composite screenshot producer as `@screenshot`.
   Image and manifest data still arrive as `@savefile` frames before the final `@response`.
-- `target` only filters window and AX summaries in the first version.
-  Visual screenshots remain virtual-desktop screenshots and report `target_applied:false`.
+- `target` filters window and AX summaries.
+  `scope.display` filters window and AX summaries through the shared display resolver.
+- Visual screenshots remain virtual-desktop screenshots in the metadata-only display-scope path.
+  Scoped visual sections must report `scope_applied:false` and `scope_reason:"metadata_only"` unless the image was actually cropped to the display.
 - `hybrid` does not create a merged observation namespace.
   The top-level `observation` points at one primary section, and `refs.sample[]` items carry both `section` and `observation_id`.
 - `refs.sample[]` is intentionally compact.
@@ -279,6 +285,38 @@ Response rules:
 - Old observation commands remain valid.
   Use `@screenshot`, `@window-find`, `@ax-tree`, `@ax-find`, and `@ax-get` when you need a narrower lane.
 
+## Display Scope
+
+Display scope is the canonical multi-display filter and guard shape.
+Use it when a host has more than one display, when the user names a monitor, or when a coordinate/window should pin the action to one display.
+
+Request examples:
+
+```text
+@observe#30:{mode:"hybrid",scope:{display:{id:"d2"}}}
+@window-find#31:{title_contains:"Chrome",scope:{display:{name_contains:"DELL"}}}
+@ax-find#32:{role:"AXButton",name_contains:"Publish",scope:{display:{contains_point:{x:1800,y:500}}}}
+@web-find#33:{text_contains:"Submit",scope:{display:{window_id:"pid:123/window:0"}}}
+@web-find#34:{text_contains:"Submit",scope:{display:{window_ref:"@e4",observation_id:"obs-..."}}}
+@click#35:{target:{ref:"@e12",observation_id:"obs-..."},guard:{display:{id:"d2"}}}
+```
+
+Supported selector fields:
+
+- `id`: display id such as `d1` or `d2`.
+- `name_contains`: case-insensitive display name fragment.
+- `contains_point`: an `os-logical` point `{x,y}` that must fall inside a display rect.
+- `window_id`: resolve to the display with the largest overlap against the window rect.
+- `window_ref + observation_id`: resolve a window ref from a fresh observation, then use its window rect.
+
+Rules:
+
+- The request shape is always `scope:{display:{...}}` for reads and `guard:{display:{...}}` for mouse actions.
+- Top-level `display_id:"d2"` is rejected as a request field.
+- `scope:{display:{ref:"@d2"}}` is rejected; `@eN` refs are observation UI refs, not display refs.
+- Responses may include `display_id`, `display_id_stability:"session"`, `stable_key`, and `primary` as resolved identity fields.
+- A display selector that matches multiple displays must fail with an ambiguity error instead of falling back to primary.
+
 ## Window Control
 
 Window control is the structured state-and-lifecycle layer for windows that may not be visible in the screenshot.
@@ -287,7 +325,10 @@ Common requests:
 
 ```text
 @window-find#11:{app:"TextEdit",title_contains:"release-notes",limit:5,include_state:true,include_recipes:true}
+@window-find#16:{title_contains:"Chrome",scope:{display:{id:"d2"}},limit:5}
 @window-activate#12:{window_id:"pid:123/window:0"}
+@window-resize#17:{target:{window_id:"pid:123/window:0"},size:{width:1200,height:800,unit:"os-logical",box:"outer"},origin:"keep",verify:true}
+@window-resize#18:{target:{ref:"@e1",observation_id:"obs-..."},size:{width:1200,height:800,unit:"os-logical",box:"outer"},origin:"keep",verify:true}
 @window-close#13:{window_id:"pid:123/window:0"}
 @window-close#14:{window_id:"pid:123/window:0",strategy:"terminate"}
 @window-close#15:{window_id:"pid:123/window:0",strategy:"kill"}
@@ -327,7 +368,8 @@ If the daemon returns `OBSERVATION_EXPIRED` or `STALE_REF`, re-run `@window-find
 
 Phase 1 rules:
 
-- `@window-activate` is the explicit path that may unhide, unminimize, activate, raise, or attempt a Space hop
+- `@window-resize` is the preferred high-density path when the next work needs a fixed window size; it may unhide, unminimize, activate, raise, or attempt a Space hop by default before resizing
+- `@window-activate` is the backup explicit path for restoring/focusing a window without changing its size
 - ordinary `@click` / `@key` do not auto-activate
 - default `@window-close` is graceful
 - `strategy:"terminate"` and `strategy:"kill"` are explicit escalation only
@@ -336,7 +378,8 @@ Phase 1 rules:
 Typical agent flow:
 
 ```text
-@window-find -> @window-activate -> @click / @key / @ax-press / @window-close
+@window-find -> @click / @key / @ax-press / @window-close
+@window-find -> @window-resize -> @click / @key / @ax-press / @window-close
 ```
 
 ## AX Metadata And Semantic UI Control
@@ -363,6 +406,7 @@ Find first, then drill into one target:
 ```text
 @ax-find#301:{role:"AXButton",name_contains:"Cancel",limit:20}
 @ax-find#302:{action:"AXPress",mode:"interactive",limit:30}
+@ax-find#305:{role:"AXButton",name_contains:"Cancel",scope:{display:{id:"d2"}},limit:20}
 @ax-get#303:{target:{ref:"@e2",observation_id:"obs-123"},depth:2,include_values:false}
 @ax-press#304:{target:{ref:"@e2",observation_id:"obs-123"}}
 ```
@@ -457,8 +501,9 @@ Common requests:
 @mouse-button#13:{button:"left",mode:"release"}
 @click#14:{x:1200,y:540,button:"left",count:1,hold_ms:80}
 @click#17:{target:{ref:"@e4",observation_id:"obs-123"},button:"left",count:1}
+@click#23:{target:{ref:"@e4",observation_id:"obs-123"},guard:{display:{id:"d2"}},button:"left",count:1}
 @click#18:{target:{selector_id:"sel-v1-29b3963a312473d5",auto_refind:false},button:"left"}
-@drag#15:{from:{x:900,y:420},to:{x:1200,y:540},button:"left",duration_ms:450,steps:24}
+@drag#15:{from:{x:900,y:420},to:{x:1200,y:540},guard:{display:{id:"d2"}},button:"left",duration_ms:450,steps:24}
 @drag#20:{from:{ref:"@e1",observation_id:"obs-123"},to:{x:1200,y:540},button:"left"}
 @wheel#16:{x:1200,y:540,delta_y:-3}
 @wheel#21:{target:{ref:"@e8",observation_id:"obs-123"},delta_y:-3}
@@ -474,6 +519,8 @@ Rules for agents:
 - `auto_refind:true` is explicit opt-in. It can execute only when typed selector-refind returns `decision:"rebound"` and the fresh target verifies to a current rect. `blocked`, `not_found`, `needs_disambiguation`, low confidence, or missing rect must stay no-action.
 - Read the screenshot manifest before sending absolute `@click`, `@drag`, or positioned `@wheel`.
 - Reject points in display gaps or outside the manifest bounds before sending the command.
+- On multi-display hosts, use `guard:{display:{...}}` on `@mouse-move`, `@click`, `@drag`, and `@wheel`.
+  `@mouse-button` has no target point and does not accept display guard.
 - Use `@mouse-move#id:{dx:0,dy:0,coordinate_space:"relative"}` as the safest real control-path smoke.
 - `@mouse-button mode:"press"` intentionally leaves the button down.
   Always send the matching `mode:"release"` during recovery.

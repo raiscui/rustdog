@@ -21,8 +21,8 @@ pub use report::MouseExecutionReport;
 #[allow(unused_imports)]
 pub use request::{
     ClickRequest, DragRequest, MouseAnchor, MouseButtonMode, MouseButtonName, MouseButtonRequest,
-    MouseCoordinateSpace, MouseEndpoint, MouseMoveRequest, MousePoint, MouseRefTarget,
-    MouseSelectorTarget, WheelRequest, DEFAULT_MOUSE_CLICK_HOLD_MS,
+    MouseCoordinateSpace, MouseDisplayGuard, MouseEndpoint, MouseMoveRequest, MousePoint,
+    MouseRefTarget, MouseSelectorTarget, WheelRequest, DEFAULT_MOUSE_CLICK_HOLD_MS,
     DEFAULT_MOUSE_CLICK_INTERVAL_MS, DEFAULT_MOUSE_DRAG_DURATION_MS, DEFAULT_MOUSE_DRAG_STEPS,
 };
 pub use target::{

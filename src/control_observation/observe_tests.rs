@@ -41,6 +41,37 @@ fn parse_observe_payload_should_reject_unknowns_and_duplicate_fields() {
 }
 
 #[test]
+fn parse_observe_payload_should_accept_display_scope_selectors() {
+    let request = parse_observe_payload(r#"{scope:{display:{id:"d2"}}}"#).unwrap();
+    assert_eq!(
+        request
+            .display_scope
+            .as_ref()
+            .map(|scope| scope.display.to_value()),
+        Some(serde_json::json!({"id": "d2"}))
+    );
+
+    let request = parse_observe_payload(
+        r#"{mode:"hybrid",scope:{display:{window_ref:"@e4",observation_id:"obs-1"}}}"#,
+    )
+    .unwrap();
+    assert_eq!(
+        request
+            .display_scope
+            .as_ref()
+            .map(|scope| scope.display.to_value()),
+        Some(serde_json::json!({"window_ref": "@e4", "observation_id": "obs-1"}))
+    );
+}
+
+#[test]
+fn parse_observe_payload_should_reject_display_scope_legacy_shapes() {
+    assert!(parse_observe_payload(r#"{display_id:"d2"}"#).is_err());
+    assert!(parse_observe_payload(r#"{scope:{display:{ref:"@d2"}}}"#).is_err());
+    assert!(parse_observe_payload(r#"{scope:{display:{window_ref:"@e4"}}}"#).is_err());
+}
+
+#[test]
 fn render_observe_response_should_keep_section_ref_scope() {
     let request = ObserveRequest {
         mode: ObserveMode::Ax,
@@ -58,6 +89,7 @@ fn render_observe_response_should_keep_section_ref_scope() {
         window_observation: None,
         primary_observation: snapshot.observation.clone(),
         accessibility: Some(snapshot),
+        display_scope_resolution: None,
     };
 
     let response = render_observe_response(Some(9), &request, produced).unwrap();
@@ -104,6 +136,7 @@ fn build_observe_bundle_should_expose_value_without_response_line_parsing() {
         window_observation: None,
         primary_observation: snapshot.observation.clone(),
         accessibility: Some(snapshot),
+        display_scope_resolution: None,
     };
 
     let bundle = build_observe_bundle_from_sections(&request, produced).unwrap();

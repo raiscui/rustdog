@@ -150,6 +150,11 @@ impl ControlActionExecutor for FakeExecutor {
                     .unwrap_or("query-target")
             )
             .into_bytes(),
+            ControlCommand::WindowResize(request) => format!(
+                "WINDOW_RESIZE:{}x{}\n",
+                request.size.width, request.size.height
+            )
+            .into_bytes(),
             ControlCommand::WebFind(request) => {
                 format!("WEB_FIND:{}\n", request.limit).into_bytes()
             }

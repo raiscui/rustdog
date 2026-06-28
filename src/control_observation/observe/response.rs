@@ -4,7 +4,10 @@ use super::{
     request::ObserveRequest,
     ObserveBundle, OBSERVE_SCHEMA,
 };
-use crate::{control_ax::AxSnapshot, control_observation::ObservationHeader};
+use crate::{
+    control_ax::AxSnapshot, control_display_scope::display_scope_report,
+    control_observation::ObservationHeader,
+};
 use serde_json::{json, Value};
 use std::{
     io,
@@ -70,7 +73,7 @@ pub(super) fn build_observe_bundle_from_sections(
         accessibility_value.unwrap_or_else(|| json!({"status": "not_requested"}));
     let status = observe_status(&visual_value, &accessibility_value, &windows_value);
 
-    let value = json!({
+    let mut value = json!({
         "kind": "observe",
         "schema": OBSERVE_SCHEMA,
         "status": status,
@@ -93,6 +96,18 @@ pub(super) fn build_observe_bundle_from_sections(
             "scoring_version": "rdog.selector.score.v1",
         },
     });
+    if let Some(resolution) = produced.display_scope_resolution.as_ref() {
+        value["scope"] = json!({
+            "display": display_scope_report(resolution),
+        });
+    } else if let Some(scope) = request.display_scope.as_ref() {
+        value["scope"] = json!({
+            "display": {
+                "selector": scope.display.to_value(),
+                "status": "unresolved",
+            },
+        });
+    }
     Ok(ObserveBundle {
         savefile_frames: produced.savefile_frames,
         value,

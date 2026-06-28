@@ -25,14 +25,14 @@ rdog control --url ws://127.0.0.1:5555/control
 ## Local Shortcut Forms (本机 fast path)
 
 当 agent 跟 daemon 在同一台机器上跑、且只需要连本机 daemon 时,
-可以省略 `TARGET`,让客户端扫 `$TMPDIR/rdog-{ns}-*.pipe_uplink` 找唯一本地 daemon。
+可以省略 `TARGET`。客户端会先读 local-default registry,再 fallback 到 `$TMPDIR/rdog-{ns}-*.pipe_uplink` 唯一候选扫描。
 底层走 Zenoh `transport_unixpipe`(Zenoh 1.8.0 的 named pipe / FIFO transport),本机 link
 比 UDP loopback 快 2~5x,典型 `rdog control @ping` round-trip ≈ 20ms。
 
 ```bash
 # === 显式 self 关键字 ===
 # 等价于 `rdog control <name> @<line>`,但省略 target name。
-# client 扫所有 namespace 下唯一的 fifo,自动选它。
+# client 优先使用 local-default registry,没有 registry 时才扫唯一 FIFO。
 rdog control self @ping
 rdog control self @ping @capabilities#1 @observe#3
 
@@ -53,14 +53,21 @@ rdog control @ping @capabilities#1 @observe#3
 
 **客户端扫描规则**(`src/zenoh_runtime.rs::find_local_daemon_name`):
 
-1. 路径模板 `{tmpdir}/rdog-{namespace}-{daemon_name}.pipe`
-2. 找所有匹配 `rdog-*.pipe_uplink`(Zenoh 实际只创建 `_uplink` 和 `_downlink` 两个 FIFO,<base> 本身不一定存在)
-3. 把中间段 `{ns}-{name}` 用第一个 `-` 切分
-4. 如果传了 `--namespace`,只保留 `ns == filter` 的候选
-5. 排序 + dedup 后:
+1. 先读 local-default registry。
+   - registry 由 daemon 启动时的 `[zenoh.unixpipe] local_default = true` 写入。
+   - 每次读取都会检查 schema、namespace、pid 存活和 `<base>_uplink` 是否存在。
+   - stale registry 会被清理。
+2. 有且只有一个有效 registry → 使用 registry 里的 `daemon_name`。
+3. 多个有效 registry → 报 `AlreadyExists`,要求加 `--namespace` 或显式 target。
+4. 没有有效 registry → fallback 到 FIFO 扫描:
+   - 路径模板 `{tmpdir}/rdog-{namespace}-{daemon_name}.pipe`
+   - 找所有匹配 `rdog-*.pipe_uplink`(Zenoh 实际只创建 `_uplink` 和 `_downlink` 两个 FIFO,<base> 本身不一定存在)
+   - 把中间段 `{ns}-{name}` 用第一个 `-` 切分
+   - 如果传了 `--namespace`,只保留 `ns == filter` 的候选
+5. FIFO 候选排序 + dedup 后:
    - **0 个** → `NotFound` 错,提示启动 daemon 或显式指定 target
    - **1 个** → 用这唯一的一个,namespace 必要时从 `daemon_name` 的点后缀推断(`mac.lab` → `lab`)
-   - **≥2 个** → `AlreadyExists` 错,列出全部候选,要求显式指定 target
+   - **≥2 个** → `AlreadyExists` 错,列出全部候选,要求显式指定 target 或开启 `local_default`
 
 **错误样例**:
 
@@ -72,14 +79,14 @@ error: 未找到本地 daemon;请先启动 `rdog daemon`,或显式指定 target 
 
 # ≥2 个 daemon(本机有 mac.lab 和 other.lab 同 namespace)
 $ rdog control @ping
-error: 本机发现多个 unixpipe daemon: [`mac.lab`, `other.lab`];
-       请显式指定 target name(例如 `rdog control <name> @<line>`)
+error: 本机发现多个 unixpipe FIFO 候选,且没有可用 local-default registry: [`mac.lab`, `other.lab`];
+       请显式指定 target name,或在 daemon 配置中设置 `[zenoh.unixpipe] local_default = true`
 ```
 
 **和显式 target 的关系**:
 
 - `rdog control <name> @ping` = 强制指定 daemon,即使本地有多个也不歧义
-- `rdog control self @ping` / `rdog control @ping` = 依赖本机唯一 daemon 假设,歧义时让用户显式
+- `rdog control self @ping` / `rdog control @ping` = 优先使用 local-default registry;没有 registry 时才依赖本机唯一 FIFO 假设
 - `rdog control --entry-point udp/...` = 显式指定 entry point(跨主机场景)
 
 **PTY / 长会话**:
@@ -90,8 +97,17 @@ error: 本机发现多个 unixpipe daemon: [`mac.lab`, `other.lab`];
 
 **配置**:
 
-`rdog_macos.toml` / `rdog_linux.toml` 默认 `[zenoh.unixpipe] enabled = true`,
-Windows 默认 `enabled = false`(zenoh unixpipe 在 Windows 语义不同)。如需关闭:
+`rdog_macos.toml` / `rdog_linux.toml` 示例里显式打开 `[zenoh.unixpipe] local_default = true`,
+让 `rdog control @ping` / `rdog control @screenshot` 默认选择当前配置中的 daemon。
+Windows 默认 `enabled = false`(zenoh unixpipe 在 Windows 语义不同)。
+
+```toml
+[zenoh.unixpipe]
+enabled = true
+local_default = true
+```
+
+如需关闭:
 
 ```toml
 [zenoh.unixpipe]
@@ -242,13 +258,27 @@ For older daemons, fall back to one trailing one-shot invocation containing `@pi
 For GUI agent work, use the fixed recipe:
 
 ```text
-@bootstrap -> locate -> activate/focus -> semantic action -> verify -> fallback
+@bootstrap -> locate -> semantic action -> verify -> fallback
+@bootstrap -> locate -> @window-resize -> semantic action -> verify
 ```
 
-On older daemons, use `@capabilities -> @observe -> locate -> activate/focus -> semantic action -> verify -> fallback`.
+On older daemons, use `@capabilities -> @observe -> locate -> semantic action -> verify -> fallback`.
+Use backup `@window-activate` only when the task is to restore/focus a window without changing its size.
 Prefer `@observe:{mode:"hybrid",include_screenshot:true,include_ax:true,include_windows:true,ax_required:false,ax_mode:"interactive"}` for any extra observation step.
 If a target does not support it, use the lower-level lanes: `@screenshot include_ax`, `@ax-tree`, `@window-find`, `@ax-find`, or `@ax-get`.
 Those older commands are still stable and are not deprecated.
+
+For dual-display or multi-display hosts, scope the read before choosing refs or coordinates:
+
+```bash
+rdog control mac.lab \
+  '@bootstrap#1:{mode:"gui",capability_policy:"fresh",observe:{mode:"hybrid",scope:{display:{id:"d2"}},include_screenshot:true,include_ax:true,include_windows:true,ax_required:false,ax_mode:"interactive"}}'
+```
+
+Use the same `scope:{display:{...}}` shape on `@observe`, `@window-find`, `@ax-find`, and `@web-find`.
+Use `guard:{display:{...}}` on `@mouse-move`, `@click`, `@drag`, and `@wheel` when falling back to pointer control.
+Supported selectors are `id`, `name_contains`, `contains_point`, `window_id`, and `window_ref + observation_id`.
+Do not use top-level `display_id:"d2"` in requests, and do not invent display refs such as `ref:"@d2"`.
 
 Read these capability entries before choosing the act path:
 
@@ -291,6 +321,7 @@ If a selector is used, `auto_refind:false` must stop with no action, and `auto_r
 Before sending coordinate `@click`, `@drag`, or positioned `@wheel`, parse the manifest from `@screenshot` / `@observe`.
 Mouse is a fallback lane, not the default GUI path.
 Use it when semantic/ref/selector lanes are unavailable, the target is canvas/free-space/drag-heavy, or the user explicitly asks for real pointer control.
+On multi-display hosts, add `guard:{display:{...}}` so the resolved point cannot silently land on another display or a display gap.
 Selector mouse targets are gated:
 `auto_refind:false` returns no-action handoff and a recovery `@selector-refind` command.
 `auto_refind:true` may execute only when typed refind returns `rebound` and the fresh ref verifies to a current rect.
@@ -298,7 +329,17 @@ For the default composite screenshot, convert `image_x/image_y` to OS coordinate
 Do not click into display gaps.
 For raw button flows, `@mouse-button mode:"press"` does not auto-release; send the matching `mode:"release"` if the flow is interrupted.
 
-Discover and recover a non-visible window before clicking:
+When a workflow needs a fixed window size, resize directly.
+`@window-resize` recovers/activates the target window by default, then resizes and verifies it in one report:
+
+```bash
+rdog control mac.lab \
+  '@window-find#20:{app:"TextEdit",title_contains:"release-notes",limit:5,include_state:true,include_recipes:true}' \
+  '@window-resize#21:{target:{window_id:"pid:123/window:0"},size:{width:1200,height:800,unit:"os-logical",box:"outer"},origin:"keep",verify:true}' \
+  '@click#22:{x:1200,y:540,button:"left",count:1}'
+```
+
+Discover and recover a non-visible window before clicking only when no resize is needed:
 
 ```bash
 rdog control mac.lab \
@@ -324,6 +365,7 @@ rdog control mac.lab \
 - the agent needs an honest `limited` result for cross-Space or fullscreen situations
 
 Do not treat ordinary `@click` or `@key` as an implicit window restore path in Phase 1.
+`@window-resize` is the exception for fixed-size work: it is allowed to restore/activate by default because resizing usually means the following actions will work inside that window.
 
 Read macOS UI structure without blowing up the agent context:
 

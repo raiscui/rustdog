@@ -571,6 +571,7 @@ fn resolve_window_selector_candidates(
 ) -> io::Result<Vec<serde_json::Value>> {
     let request = crate::control_window::WindowFindRequest {
         query: window_query_from_selector(selector),
+        display_scope: None,
         limit,
         include_state: true,
         include_recipes: false,
@@ -712,6 +713,7 @@ fn ax_find_request_from_selector(
     crate::control_ax::AxFindRequest {
         tree: crate::control_ax::AxTreeRequest::default(),
         query,
+        display_scope: None,
         limit,
     }
 }

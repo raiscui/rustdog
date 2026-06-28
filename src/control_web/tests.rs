@@ -19,6 +19,20 @@ fn parse_web_find_should_accept_active_browser_match_and_roles() {
 }
 
 #[test]
+fn parse_web_find_should_accept_display_scope_and_reject_display_id() {
+    let request =
+        parse_web_find_payload(r#"{match:{text:"首页"},scope:{display:{id:"d2"}}}"#).unwrap();
+
+    assert!(request.display_scope.is_some());
+    assert!(
+        parse_web_find_payload(r#"{match:{text:"首页"},display_id:"d2"}"#)
+            .unwrap_err()
+            .to_string()
+            .contains("scope")
+    );
+}
+
+#[test]
 fn parse_web_find_should_accept_window_id_target() {
     let request =
         parse_web_find_payload(r#"{target:{window_id:"pid:96405/window:3"},match:{text:"首页"}}"#)

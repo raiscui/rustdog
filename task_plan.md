@@ -1,628 +1,812 @@
-# 任务计划: 默认主线上下文 (2026-06-18 续档后入口)
+# 任务计划: 本机 unixpipe 默认 daemon 选择方案
 
-## 续档记录
-旧 `task_plan.md` 已超过 1000 行,迁移到:
-- `archive/default_history/task_plan__2026-06-18_continuation.md`
-
-## 当前活跃支线上下文
-- `task_plan__rdog_control_skill_v2.md` - rdog-control skill v2 优化 + rdog ax-diff 子命令 (本轮完成)
-
-## 状态
-**主线目前空闲** - 等待用户下个任务
-
-## [2026-06-18 18:50:00] [Session ID: omx-1781772311603-1rcjkc] [支线索引]: rdog ax-diff 后续 3 项落地
-
-### 启用原因
-- 用户要求:
-  1. 加 `--top-changes N` 限制 model context 紧张场景
-  2. 给 rdog ax-diff 加 CI smoke 脚本 (用 examples/ fixture 跑并断言 expected summary)
-  3. 把 rdog ax-diff 加到 specs/zenoh-sdk-integration-playbook.md
-
-### 支线上下文集
-- `task_plan__rdog_ax_diff_followup.md`
-- `notes__rdog_ax_diff_followup.md`
-- `WORKLOG__rdog_ax_diff_followup.md`
-- `LATER_PLANS__rdog_ax_diff_followup.md`
-
-## [2026-06-18 21:10:00] [Session ID: omx-1781772311603-1rcjkc] [状态变更]: rdog ax-diff 后续 3 项落地完成
-
-### 完成结果
-- --top-changes N 已实现, 4 个新测试, 327 total 测试通过
-- CI smoke 脚本 14/14 通过
-- spec 第 15 章已追加
-- cargo fmt / diff-check 干净
-
-## [2026-06-19 00:00:00] [Session ID: CURRENT_SESSION] [任务启动]: rdog control one-shot CLI 入口
+## [2026-06-25 13:53:53] [Session ID: native-hook-20260625-135331] [计划]: `$oh-my-codex:plan` 本机 default daemon registry 方案
 
 ### 目标
-- 落地方案 A: `rdog control <target> @<line>` 这种无状态直接命令方式
-- 不引入新协议,只把"先发一行、等收口、退出"行为暴露为 CLI 显式入口
-- 复用现有 `send_single_control_line_tcp/websocket/zenoh`,不重写 Zenoh session bridge / retry / savefile 收口
+
+为 `rdog control @screenshot` 在本机多个 unixpipe FIFO 候选存在时的自动选路问题,制定一份可执行计划,先落到 `.omx/plans/`,本轮不修改源码。
 
 ### 阶段
-- [ ] 阶段1: 在 `Command::Control` 增加 `one_shot_line: Vec<String>`,与 `--pty` / `--pty-close` / `--pty-detach` / `--pty-attach` 互斥
-- [ ] 阶段2: `main.rs` 加 one-shot 分发 (TCP / WebSocket / Zenoh 三路),复用现有 `send_single_control_line_*`
-- [ ] 阶段3: 加单测覆盖解析与互斥
-- [ ] 阶段4: 加 e2e 集成测试 (TCP + Zenoh)
-- [ ] 阶段5: 同步 `specs/control-line-protocol.md` / `specs/code-agent-rdog-control-usage.md` / `README.md` / `.codex/skills/rdog-control/SKILL.md`
-- [ ] 阶段6: cargo fmt + cargo test 全跑,记录 WORKLOG
+
+- [x] 阶段1: 处理超过 1000 行的旧 `task_plan.md`,建立新的当前任务入口。
+- [x] 阶段2: 复核 unixpipe / local target 相关代码事实和文档事实。
+- [x] 阶段3: 编写 `.omx/plans/rdog-local-default-unixpipe-daemon-plan.md`。
+- [x] 阶段4: 验证计划文件引用、结构和后续交付说明。
+
+### 关键问题
+
+1. 当前错误不在 `@screenshot` 实现层,而在 `ZenohLocal` 空 target 自动选择层。
+2. 计划优先采用 local-default registry / guard 作为单一真相源,避免直接按 `$TMPDIR` FIFO 数量猜目标。
+3. 固定 pipe alias 可作为后续增强,但不应替代真实 `(namespace, daemon_name)` 身份。
 
 ### 做出的决定
-- one-shot 模式只接第一个 `@` token,第二个起报错 (避免和 stdin loop 语义混淆)
-- TCP 走 `[host, port, @line]` 形式;`[host, port]` 不带 `@` 维持现状
-- 不改 line-control 协议,只改 CLI 入口
+
+- 使用 `$oh-my-codex:plan` direct mode,因为用户已经同意前一轮推荐方向,不需要再走访谈。
+- 本轮只写计划,不实现代码。
+- 旧 `task_plan.md` 因超过 1000 行先移动到 `archive/default_history/`,新任务从新文件开始记录。
 
 ### 状态
-**目前在阶段1** - 准备改 `src/input.rs` 加 `one_shot_line` 字段
 
-## [2026-06-19 00:30:00] [Session ID: CURRENT_SESSION] [状态变更]: 阶段 1-4 完成
+**目前在阶段4** - 计划文件已经生成,正在验证引用、结构和交付说明。
 
-### 完成项
-- 阶段1 ✅ `Command::Control` 扩展 `host: num_args = 0..=3`,在 main.rs 提取 `extract_one_shot_line` 辅助函数把末尾 `@<line>` 抽出来
-- 阶段2 ✅ main.rs 三个 transport 分支都加了 one-shot dispatch,复用现有 `send_single_control_line_tcp/websocket/zenoh`
-- 阶段3 ✅ 单测 7 个 `extract_one_shot_line` + 8 个 input.rs clap 解析,全过
-- 阶段4 ✅ e2e 4 个 `tests/control_lanes.rs::control_one_shot_*`,全过;既有 12 个 control_lanes 测试不受影响
-- 移除 `--url` / `host` 的 clap `conflicts_with`,在 `resolve_inferred_control` 手动校验非空 host + `--url` 冲突
+## [2026-06-25 14:03:40] [Session ID: native-hook-20260625-135331] [阶段进展]: 代码事实复核与计划初稿完成
+
+### 已完成
+
+- 复核 `ZenohLocal` 入口在 `src/main.rs`。
+- 复核 `find_local_daemon_name()` 多候选错误来自 `$TMPDIR` FIFO 扫描。
+- 复核 one-shot `@screenshot` 拿到明确 target 后会走 `zenoh_control::send_control_lines()`。
+- 复核 daemon 端 unixpipe endpoint 注入和 stale FIFO 清理位置。
+- 生成计划文件 `.omx/plans/rdog-local-default-unixpipe-daemon-plan.md`。
+- 为本次 `task_plan.md` 续档 manifest 补充 `AGENTS.md` 索引。
+
+### 发现
+
+- `specs/zenoh-control-plane-plan.md` 已经使用 FIFO / 95 字节口径。
+- `specs/zenoh-unixpipe-fast-path-plan.md` 与 `src/config.rs` 注释仍有 "socket" / 100 字节旧口径,计划中已列为执行时必须同步的文档漂移。
+- `AGENTS.md` 中索引的 `.codex/skills/self-learning.zenoh-duplicate-name-local-guard/SKILL.md` 当前磁盘未找到,计划中列为后续清理项。
+
+### 状态
+
+**目前在阶段4** - 准备做计划文件结构和路径引用检查。
+
+## [2026-06-25 14:07:20] [Session ID: native-hook-20260625-135331] [完成]: `$oh-my-codex:plan` local-default unixpipe 方案完成
+
+### 验证结果
+
+- `rtk ls .omx/plans/rdog-local-default-unixpipe-daemon-plan.md ...`: 计划文件、续档 manifest、新 `task_plan.md` 均存在。
+- `rtk grep "^## (...)" .omx/plans/rdog-local-default-unixpipe-daemon-plan.md`: 12 个必要章节齐全。
+- `rtk grep "src/main.rs|src/zenoh_runtime.rs|..." .omx/plans/rdog-local-default-unixpipe-daemon-plan.md`: 关键代码和规格引用存在。
+- `rtk git diff --check`: 通过。
+
+### 状态
+
+**目前在完成** - 本轮只读规划任务已完成,没有修改业务源码。
+
+## [2026-06-25 14:26:02] [Session ID: 019efd3b-9edc-7e11-9168-461c6e467d1d] [目标启动]: 实现 local-default unixpipe daemon
+
+### 目标
+
+按 `.omx/plans/rdog-local-default-unixpipe-daemon-plan.md` 实现 local-default registry + guard,让 `rdog control @...` / `rdog control self @...` 不再因为多个本地 FIFO 候选直接失败。
+
+### 阶段
+
+- [x] 阶段1: Goal preflight,读取计划、上下文和当前工作区状态。
+- [ ] 阶段2: 补最小可证伪测试,锁定现有多 FIFO 场景下 local-default 缺失的问题。
+- [ ] 阶段3: 实现 runtime registry / guard、配置字段、daemon 写入和 client 读取。
+- [ ] 阶段4: 同步模板、spec、rdog-control skill 和 AGENTS 索引。
+- [ ] 阶段5: 运行 focused tests、build、回归和可行 live smoke。
+- [ ] 阶段6: 收尾记录 WORKLOG / ERRORFIX / LATER_PLANS,并标记 goal complete。
+
+### 约束
+
+- 不改变 `@screenshot` payload / manifest 语义。
+- 不把 `localhost` 作为真实 `daemon_name`。
+- 不盲删 `$TMPDIR/rdog-*.pipe_*`。
+- 不回退或覆盖当前工作区中与本任务无关的既有改动。
 
 ### 当前状态
-**目前在阶段5** - 同步文档
 
-## [2026-06-19 00:50:00] [Session ID: CURRENT_SESSION] [状态变更]: 阶段 5-6 完成
+**目前在阶段2** - 准备先补 runtime 层单测,再实现 registry 读取和写入。
 
-### 完成项
-- 阶段5 ✅ 同步文档:
-  - `specs/control-line-protocol.md` 新增 "想要无状态单发命令(one-shot CLI 入口)" 章节
-  - `specs/code-agent-rdog-control-usage.md` 能力矩阵首行新增 one-shot 入口行 + 顶级 "0. 单条请求优先用 one-shot CLI 入口" 推荐
-  - `README.md` TCP control lane 段加 one-shot 入口示例
-  - `.codex/skills/rdog-control/SKILL.md` Decision Flow 步骤 1/2/3 改为 one-shot 形式
-- 阶段6 ✅ cargo fmt --check 通过;342 unit + 57 integration 测试全过(忽略 screenshot/macOS 权限相关)
-- 既有 `control_pty_detach_should_allow_later_attach` 在并行跑时偶发 Connection reset by peer,隔离跑通过,属既有时序问题,与本任务无关
+## [2026-06-25 14:39:30] [Session ID: 019efd3b-9edc-7e11-9168-461c6e467d1d] [阶段进展]: 接续 local-default 实现
 
-### 关键设计决策
-- **不新增 clap positional field**:clap 限制两个有 `num_args` range 的 positional,扩展 `host: num_args = 0..=3` 让 `@<line>` 借 host 末尾落地,在 main.rs 抽 `extract_one_shot_line` 纯函数剥出来
-- **去掉 `--url` / `host` 的 clap `conflicts_with`**:one-shot 入口 `--url ws://... @<line>` 需要 `@<line>` 进 host,改在 `resolve_inferred_control` 手动校验真正的 `--url` + 非空 host 冲突
-- **复用现有 `send_single_control_line_*`**:Zenoh 那边自动拿到 session bridge、retry-on-timeout、savefile 收口
-- **不改 line-control 协议**:只改 CLI 入口,所有 `@<kind>` 文档和 daemon 行为不变
+### 当前观察
 
-### 后续建议
-- 单元测试 `extract_one_shot_line` 已经覆盖 7 个 case,可以考虑加 1-2 个 main.rs 级别的 integration test 验证"拒绝 host 中间出现 @ 元素"分支(目前是直接 panic-style 错误,需要 daemon 跑起来才能验证)
-- Zenoh one-shot e2e 暂未在本轮加,需要 router fixture 拉起,后续可补 `tests/zenoh_router_client.rs::control_one_shot_*`
-- 错误日志当前默认走 stdout 而不是 stderr,违反 Unix 习惯;后续可单独立 task 把 `init_logger` 改成走 stderr
+- 上一轮已经在 `src/zenoh_runtime.rs` 插入 local-default registry / guard 半成品,但尚未编译和测试。
+- 当前工作区存在大量 display scope 相关既有改动,本轮只碰 local-default unixpipe 相关文件,不回退其它修改。
+- 已确认 `find_local_daemon_name()` 现在应先走 local-default registry,再 fallback 到旧 FIFO 唯一扫描。
 
-## [2026-06-19 01:30:00] [Session ID: CURRENT_SESSION] [任务启动]: rdog control 多 line one-shot(共享一条连接)
+### 下一步行动
 
-### 目标
-- 落地方案 A: `rdog control <target> @<line1> @<line2> ...` 一次发多 line
-- 顺序串行执行,共享同一条 transport(TCP / WebSocket / Zenoh session bridge)
-- 任一 line 失败 → 退出非 0,后续不再发
-
-### 阶段
-- [ ] 阶段1: 抽出"建 Zenoh session bridge"和"发单 line"两段函数
-- [ ] 阶段2: input.rs 把 `host` num_args 上限提到 `0..=32`(target/host+port + 多个 @line)
-- [ ] 阶段3: main.rs 改 `extract_one_shot_line` 为 `extract_one_shot_lines`,返回 `Vec<String>`;Control 分支加多 line dispatch (TCP / WebSocket / Zenoh 共享一个 transport)
-- [ ] 阶段4: 加单测 (extract_one_shot_lines 边界) + e2e (多 line TCP 顺序)
-- [ ] 阶段5: 同步 4 份文档
-- [ ] 阶段6: cargo fmt + 全量 test + WORKLOG
-
-### 做出的决定
-- 走方案 A,共享一条连接,不每条重连
-- 任一失败即停,exit code 非 0
-- 简化 Zenoh 错误重试:整组失败就退出,不做行级重连
+- [ ] 修正 `src/zenoh_runtime.rs` 中 local-default 半成品的 cfg / guard 生命周期 / 测试隔离问题。
+- [ ] 补 runtime 单测覆盖 registry 优先、stale 清理、缺失 uplink、多默认冲突和旧 FIFO fallback。
+- [ ] 再进入配置、daemon 启动写 registry 和 e2e 集成。
 
 ### 状态
-**目前在阶段1** - 准备读 zenoh_control.rs 拆 `send_single_control_line`
 
-## [2026-06-19 01:55:00] [Session ID: CURRENT_SESSION] [状态变更]: 多 line one-shot 全部阶段完成
+**目前在阶段2/3 交界** - 先把 runtime 层变成可编译、可测试的稳定底座。
 
-### 完成项
-- 阶段1 ✅ `src/zenoh_control.rs` 新增 `send_control_lines` (N=1..N 串行复用 session bridge),`send_single_control_line` 保留 retry-on-timeout 行为不变
-- 阶段2 ✅ `src/input.rs` 把 `host: num_args` 从 `0..=3` 提到 `0..=32`,value_name 改 `HOST_OR_TARGET[@ONE_SHOT_LINE]...`
-- 阶段3 ✅ `src/main.rs` `extract_one_shot_line` → `extract_one_shot_lines` (返回 `Vec<String>` 保留输入顺序);Control 分支用 `one_shot_lines.is_empty()` 守卫;3 个 transport 分支 dispatch 到新 helper;新加 `send_control_lines_tcp/websocket/zenoh` 三个 helper
-- 阶段3 配套 ✅ `src/shell.rs` 新增 `pub fn run_line_control_lines(transport, lines)`,复用完整 frame 收口循环,处理 `@savefile` 多 frame 场景
-- 阶段4 ✅ 单测 8 个 `extract_one_shot_lines` (含连续 `@`、停在非 `@`、对象 payload 等);3 个 e2e `control_multi_one_shot_*`(3 line 顺序、1 line 等价、中间夹非 @ 拒绝)
-- 阶段5 ✅ 4 份文档同步:`specs/control-line-protocol.md` "想要无状态单发命令"段补多 line 行为 + N=1/N>1 区分;`specs/code-agent-rdog-control-usage.md` 能力矩阵行 + "0. 单条请求" 段补多 line 示例;`README.md` TCP control lane 段加多 line 示例;`.codex/skills/rdog-control/SKILL.md` Decision Flow 步骤 1 加多 line 例子
-- 阶段6 ✅ cargo fmt --check 干净;344 unit + 60 integration = 404 测试全过
+## [2026-06-25 14:52:00] [Session ID: 019efd3b-9edc-7e11-9168-461c6e467d1d] [阶段进展]: runtime registry 单测通过
 
-### 关键设计决策
-- **N=1 / N>1 走不同管线**:N=1 沿用 `send_single_control_line_*` (含 retry-on-timeout) 保持与 PTY 关闭/分离的稳定契约;N>1 走新 `send_control_lines_*` (走完整 frame 收口循环,能正确处理 `@screenshot` 多 frame 场景)
-- **Zenoh 多 line 不做行级重试**:任一行失败整组退出,避免半成功半失败状态对 agent 不友好
-- **`extract_one_shot_lines` 返回 `Vec<String>` 保持输入顺序**:用户写 `rdog control mac.lab @a @b @c` 时,a/b/c 按这个顺序执行
-- **32 上限**:2 个 target 位置参数 + 30 个 one-shot line,经验值,覆盖典型 GUI preflight + action 序列;再大该走 stdin
+### 已完成
 
-### 后续建议
-- Zenoh multi-line e2e 仍需 router fixture 拉起,在 `tests/zenoh_router_client.rs` 补
-- `init_logger` 走 stdout 的坑仍未修,见 `EPIPHANY_LOG.md` 同日条目
-- 32 上限是拍脑袋的数,如果 agent 实际需要更多,可以提到 64 或 128,但应该先观察
-
-## [2026-06-19 02:30:00] [Session ID: CURRENT_SESSION] [任务启动]: Zenoh multi-line e2e + init_logger 走 stderr
-
-### 目标
-- 补 Zenoh multi-line one-shot e2e (LATER_PLANS 1.5)
-- 修 init_logger 走 stdout 的坑 (LATER_PLANS 1.6 / EPIPHANY_LOG 2026-06-19)
-- 两个修复一起做,因为都跟 main.rs 的"日志/控制面"边界有关
-
-### 阶段
-- [ ] 阶段1: 改 `src/main.rs::init_logger`,非 hidden 模式走 stderr
-- [ ] 阶段2: 验证现有 e2e (控制_lanes 4 个 one-shot + 3 个 multi + 13 个 control_lanes + 1 个 connnect_modes 等) 还能过
-- [ ] 阶段3: 修 README / spec / skill 等文档里 "errors logged to stdout" 的口径
-- [ ] 阶段4: 在 `tests/zenoh_router_client.rs` 加 3 个 Zenoh multi-line e2e
-- [ ] 阶段5: cargo fmt + 全量 test
-- [ ] 阶段6: 写 WORKLOG + 清理 LATER_PLANS / EPIPHANY_LOG
-
-### 做出的决定
-- 日志全走 stderr(非 hidden 命令);hidden_mode::LogTarget::File 走 file 不变
-- 不再加 `--log-target` flag,简单的 stderr 切换够用
-- 测试里现在通过 stdout+stderr 合流检测错误文案,这次修完后可以只走 stderr
-
-### 状态
-**目前在阶段1** - 准备改 init_logger
-
-## [2026-06-19 02:50:00] [Session ID: CURRENT_SESSION] [状态变更]: 阶段1-2 完成,2 个回归修好
-
-### 完成项
-- 阶段1 ✅ `src/main.rs::init_logger` 改走 stderr (Unix 习惯)
-- 阶段1 配套 ✅ `src/hidden_mode.rs` 给 `LogTarget::Stdout` enum variant 加注释说明实际走 stderr,保留名字做向后兼容
-- 阶段1 配套 ✅ `src/zenoh_control.rs` 清掉 `send_control_lines` 多余的 `mut`
-- 阶段2 ✅ 修 `tests/control_lanes.rs::listen_local_interactive_should_reach_connect_control_lane`:
-  - listener 改为同时 pipe stdout + stderr
-  - 合流两 buffer 做断言("Connection Received" 走 stderr,`@response` 走 stdout)
-  - 删了不再被使用的 `wait_until_output_contains` helper
-- 阶段2 ✅ 修 `tests/control_pty.rs::control_pty_detach_should_allow_later_attach`:
-  - `attach_combined = format!("{stdout}{stderr}")` 合流
-  - 同样因 `remote PTY closed` 这类 io::Error 通过 log::error 走 stderr 而断言失败
+- 修正 local-default registry / guard 的 Unix cfg 边界。
+- guard drop 改为按自身持有的 record / pid 路径清理,避免误删别的 daemon registry。
+- registry 目录优先使用用户 state dir,测试用 thread-local override 隔离。
+- 新增 runtime 单测覆盖 registry 优先、stale pid、缺失 uplink、启动宽限、多默认冲突和 guard 抢占。
 
 ### 验证
-- `cargo build --tests` 干净,无 warning
-- `tests/control_lanes` 5/5 连跑全过
-- `tests/control_pty` 单跑 `control_pty_detach_should_allow_later_attach` 通过
-- 全量 `cargo test` 在并行跑时仍有既有的 port collision flake(`daemon_outbound_control_lane_should_execute_remote_script`),隔离跑通过,与本任务无关
 
-### 当前状态
-**目前在阶段3** - 准备改 README / spec / skill 同步"日志走 stderr"事实
-
-## [2026-06-19 04:00:00] [Session ID: CURRENT_SESSION] [状态变更]: 阶段 1-6 全部完成
-
-### 完成项
-- 阶段1 ✅ `init_logger` 走 stderr
-- 阶段2 ✅ 修 `tests/control_lanes::listen_local_interactive_should_reach_connect_control_lane`(合流 stdout+stderr)
-- 阶段2 ✅ 修 `tests/control_pty::control_pty_detach_should_allow_later_attach`(合流 attach stdout+stderr)
-- 阶段2 ✅ 修 `tests/shell_pty::reverse_shell_should_run_with_tty_semantics`(合流 + 改 wait 循环)
-- 阶段3 ✅ 文档无需同步: `README.md` / specs / skill 都没显式声明"日志走 stdout",所以 init_logger 改动是隐性契约
-- 阶段4 ✅ `tests/zenoh_router_client` 加 3 个 Zenoh multi-line e2e
-  - `control_multi_one_shot_should_run_lines_in_order_for_zenoh_profile`
-  - `control_multi_one_shot_should_run_three_lines_in_order_for_zenoh_profile`
-  - `control_multi_one_shot_should_run_three_lines_with_3_responses_in_zenoh_profile`(替代原本的 fail-fast 烟测,因为后者依赖没设计的 response-code fail-fast 行为)
-- 阶段4 配套 ✅ 改 `start_zenoh_daemon_with_config`:`sh -c "exec rdog ... 2>&1"`,用 exec 让 rdog 替换 sh 进程(stop_child 能直接 kill rdog),用 2>&1 把 stderr 转发到 stdout(让 24+ 现有 Zenoh e2e 还能从 stdout 找 "zenoh router daemon ready" marker)
-- 阶段5 ✅ cargo fmt --check 干净,无 warning
-- 阶段6 ✅ cargo test: 344 unit + 60 control_lanes/pty/etc + 26 zenoh = 430 通过,0 失败
-
-### 关键设计决策
-- **stderr 而不是 stdout**: Unix 习惯;但要让 24+ 既有的 Zenoh e2e 不大改,采用 sh -c "exec rdog ... 2>&1" 把 stderr 合成到 stdout
-- **wait loop 而不是单次 check**: `combined_output` 单次调用无法等到 connector 触发的异步 log;必须 5s 内 20ms 间隔 polling
-- **不加新的 fail-fast 语义**: send_control_lines 当前只在 protocol/connection 错误时中断,中间 line 返回 error response 仍然顺序执行;faile-fast 测试用稳健 3-line 烟测替代
-
-### 后续建议
-- `start_zenoh_daemon_with_config` 的 sh -c "exec" wrapper 是临时兼容层;理想做法是让所有测试统一改用 stderr+stdout 合流,然后让 sh wrapper 退役。后续 task 可一并处理。
-- `LogTarget::Stdout` enum variant 名字历史保留(注释说明语义),enum 仍叫 Stdout 但实际走 stderr。如果将来想切回真名,可改名 `Stderr`。
-
-## [2026-06-19 04:30:00] [Session ID: CURRENT_SESSION] [任务启动]: 退役 sh wrapper,统一改 Zenoh e2e 用合流 buffer
-
-### 目标
-- `tests/zenoh_router_client::start_zenoh_daemon_with_config` 的 `sh -c "exec rdog ... 2>&1"` 是临时兼容层
-- 改用新 helper `start_zenoh_daemon_with_combined_output`,内部把 stdout+stderr 合流到一个 buffer
-- 批量改 24+ 个 `start_zenoh_daemon(...)` 调用点
-- 跑全量 zenoh_router_client 测试验证
-
-### 阶段
-- [ ] 阶段1: 加 `start_zenoh_daemon_with_combined_output` + 必要的合流 helper
-- [ ] 阶段2: 改 `start_zenoh_daemon_with_config` 回退到直接 spawn(去掉 sh wrapper)
-- [ ] 阶段3: 批量改 24+ 调用点用新 helper
-- [ ] 阶段4: cargo fmt + 全量 test
-- [ ] 阶段5: WORKLOG + 验证 Zenoh 1次过
+- `rtk cargo test --package rustdog --bin rdog -- zenoh_runtime::tests`: 29 passed。
 
 ### 状态
-**目前在阶段1** - 写新 helper
 
-## [2026-06-19 04:50:00] [Session ID: CURRENT_SESSION] [状态变更]: 阶段 1-5 完成,sh wrapper 退役
+**目前在阶段3** - runtime 底座已通过 focused tests,继续配置字段、daemon 注册和 e2e。
 
-### 完成项
-- 阶段1 ✅ 加 `start_zenoh_daemon_with_combined_output` helper,内部 pipe stdout+stderr 合流到一个 buffer
-- 阶段1 配套 ✅ 重构 `spawn_output_collector` → `spawn_output_collector_to` 接受预建 buffer,让两个 collector 写同一个 buffer
-- 阶段2 ✅ `start_zenoh_daemon_with_config` 回退 sh wrapper,直接 `Command::new(rdog_binary_path())` spawn
-- 阶段3 ✅ 批量改 24+ 个 `start_zenoh_daemon` 调用点(包含 entrypoint 名、daemon_buffer 命名变体、daemon_should_fail_fast_on_duplicate_name、两个 restart test 的 second daemon 路径)
-- 阶段4 ✅ cargo fmt --check 干净,无 warning
-- 阶段5 ✅ zenoh_router_client 5/5 跑全过 (26 + 2 ignored);全量 cargo test 406/406
+## [2026-06-25 15:03:00] [Session ID: 019efd3b-9edc-7e11-9168-461c6e467d1d] [阶段进展]: 配置与 unixpipe e2e 通过
 
-### 关键设计决策
-- **合流 buffer 而非 sh wrapper**: 直接改 `spawn_output_collector` 抽出接受 buffer 参数,让两个 collector thread 写同一个 Arc<Mutex<String>>,既不需要 sh 也不需要 stdout 单独的 pipe,语义更直接
-- **generic `<R: Read + Send + 'static>` 而非 `impl Trait`**: 同一文件里两个相邻函数的 `impl Read + Send + 'static` 触发 rustc 解析器一个奇怪 bug,改用显式 generic 解决
-- **保留 `start_zenoh_daemon_with_config` 函数**: 给需要"自己接管 daemon 进程配置"(如 daemon_should_fail_fast、control_session_should_reresolve 的 second daemon)的测试用,这些测试自己 pipe stdout+stderr 然后合并
+### 已完成
 
-### 收益
-- sh wrapper 退役:`sh -c "exec rdog ... 2>&1"` 临时兼容层不需要了
-- 24+ Zenoh e2e 不再依赖 stdout 上的 log marker,改用合流 buffer 自然兼容 stderr
-- 后续任何 init_logger 路径再变化,改 `start_zenoh_daemon_with_combined_output` 内部就行,不用改 24+ 个调用点
+- `UnixpipeConfig` 新增 `local_default` / `local_alias`,默认不抢占本机默认身份。
+- `zenoh.unixpipe.socket_path` 长度口径从 100 字节更新为 95 字节。
+- daemon 启动时在 unixpipe 启用且 `local_default=true` 时注册 local-default registry,并持有 guard 到 daemon 退出。
+- 新增两个 e2e,覆盖空 target / self target 在额外 FIFO 候选存在时仍命中 local-default daemon。
 
-## [2026-06-20 09:00:00] [Session ID: CURRENT_SESSION] [任务启动]: LogTarget::Stdout 改名 Stderr + 隐性契约写入 EXPERIENCE.md
+### 验证
+
+- `rtk cargo test --package rustdog --bin rdog -- config::tests`: 33 passed。
+- `rtk cargo test --test zenoh_unixpipe_fast_path -- --test-threads=1`: 9 passed。
+
+### 状态
+
+**目前在阶段4** - 代码路径已过 focused 验证,开始同步模板、spec 和 `rdog-control` skill。
+
+## [2026-06-25 15:52:30] [Session ID: 019efd3b-9edc-7e11-9168-461c6e467d1d] [收口检查]: local-default unixpipe goal 最终核验
+
+### 当前接手状态
+
+- 上一轮已经实现 local-default registry / PID guard,并完成 unit、e2e、build 和 live smoke。
+- 已读回 `WORKLOG.md`、`ERRORFIX.md`、`LATER_PLANS.md`,确认本轮实现、验证证据和后续事项已记录。
+- 当前只做最终核验和临时产物清理,不再扩大源码改动范围。
+
+### 待完成
+
+- [x] 清理 live smoke 生成的本轮截图临时产物。
+- [x] 运行 `rtk git diff --check`。
+- [x] 运行 `rtk cargo fmt -- --check`。
+- [x] 确认不需要新增 `EPIPHANY_LOG.md` 条目后标记 goal complete。
+
+### 最终核验证据
+
+- `rtk git diff --check`: 通过。
+- `rtk cargo fmt -- --check`: 通过。
+- `rtk cargo test --package rustdog --bin rdog -- zenoh_runtime::tests`: 29 passed。
+- `rtk cargo test --test zenoh_unixpipe_fast_path`: 9 passed。
+- `rdog_downloads/screenshot-1782373362263-*`: 已清理,未删除 2026-06-23 历史截图。
+- `EPIPHANY_LOG.md`: 本轮没有新增架构级灾难点或重大未来风险,不追加。
+
+### 状态
+
+**目前在完成** - local-default unixpipe goal 已满足计划停止条件,准备标记 goal complete。
+
+## [2026-06-26 13:01:03] [Session ID: 019f023a-e4c3-7f73-9d7b-9393ef3d38ff] [设计讨论启动]: rdog UI script 支持
 
 ### 目标
-- 后续建议 #2:`LogTarget::Stdout` enum variant 改名为 `LogTarget::Stderr`,反映真实语义
-- 后续建议 #3:把"任何'输出路径'相关的改动要先查 e2e 是否依赖 log polling"这条隐性契约写到 EXPERIENCE.md
+
+讨论一种适配 rdog 的 UI script 设计,参考 iced_emg 的 `for_each_state_push_reverse_push_reverse_push3.json` 和 `docs/ui_script_command.md`,语法尽量接近原有脚本,但不照搬不适合 rdog 控制面的部分。
 
 ### 阶段
-- [ ] 阶段1: 改 `src/hidden_mode.rs` 的 enum variant 名字 + 注释
-- [ ] 阶段2: 改 `src/main.rs` 的 match 分支
-- [ ] 阶段3: 跑全量测试
-- [ ] 阶段4: 把"log 输出是隐性契约"写到 EXPERIENCE.md
-- [ ] 阶段5: 同步更新 EPIPHANY_LOG(去掉 "保留名字做向后兼容" 的话术)
-- [ ] 阶段6: WORKLOG 收尾
+
+- [x] 阶段1: 读取当前六文件上下文、相关 skill 和历史记忆入口。
+- [ ] 阶段2: 读取 iced_emg 脚本样例与命令文档,提取可复用语义。
+- [ ] 阶段3: 对照 rdog 当前 control 协议、one-shot、多 line、GUI/AX/window/mouse 能力,找出适配边界。
+- [ ] 阶段4: 形成 2-3 个设计方向,给出推荐方案、语法草案、执行模型和验证口径。
+
+### 关键问题
+
+1. iced_emg 的脚本是否偏"UI 状态机自动化",而 rdog 更像"远程 GUI/系统控制面"。
+2. rdog 第一版应优先作为显式 control frames 的 batch/flow wrapper,避免另起第二控制协议。
+3. 语法可以靠近 iced_emg,但目标选择、观测、权限、验证和错误回传必须复用 rdog 已有模型。
 
 ### 做出的决定
-- 一次到位改名字,不保留兼容层 — 用户已经看了两周过渡,这次清理干净
-- EXPERIENCE.md 写"log 路径隐性契约"一条,标时间戳和引用
+
+- 本轮先做设计讨论和证据梳理,不修改 Rust 源码。
+- 使用默认六文件上下文,因为这是 rdog control 协议主线相关设计,不是无关支线。
+- 如果发现长期规格值得落地,后续建议放到 `specs/` 并同步 `AGENTS.md` 索引。
 
 ### 状态
-**目前在阶段1** - 改 hidden_mode.rs
 
-## [2026-06-20 10:00:00] [Session ID: CURRENT_SESSION] [状态变更]: 阶段 1-6 完成
+**目前在阶段2** - 准备读取 iced_emg 样例和文档,再对照 rdog 现有协议。
 
-### 完成项
-- 阶段1 ✅ `src/hidden_mode.rs` enum variant `Stdout` → `Stderr`(5 处引用全改,带历史背景注释)
-- 阶段2 ✅ `src/main.rs::init_logger` 的 match 分支从 `LogTarget::Stdout` 改为 `LogTarget::Stderr`
-- 阶段3 ✅ cargo test 全过 406/406
-- 阶段4 ✅ `EXPERIENCE.md` 新增"log 输出路径是隐性契约,改动必须先查 e2e"一节,2026-06-20 时间戳
-- 阶段4 配套 ✅ `AGENTS.md` 索引里 `EXPERIENCE.md` 的"何时阅读"加一句"改 daemon 启动日志 / log target 路径 / e2e polling 假设前"
-- 阶段5 ✅ EPIPHANY_LOG 历史条目保留(说明历史脉络)
-- 阶段6 ⏳ WORKLOG 收尾
+## [2026-06-26 13:18:00] [Session ID: 019f023a-e4c3-7f73-9d7b-9393ef3d38ff] [阶段进展]: rdog UI script 设计证据收敛
 
-### 收益
-- enum 名字跟实际语义对齐:`Stderr` 一眼能看出是 stderr
-- 隐性契约教训永久沉淀到 EXPERIENCE.md,后续改 log 路径的人会看到
+### 已完成
 
-## [2026-06-20 13:08:35] [Session ID: omx-1781788115552-szl2hn] [只读分析]: multi-line one-shot N=1 / N>1 是否真的分叉
+- [x] 阶段1: 读取当前六文件上下文、相关 skill 和历史记忆入口。
+- [x] 阶段2: 读取 iced_emg 脚本样例与命令文档,提取可复用语义。
+- [x] 阶段3: 对照 rdog 当前 control 协议、one-shot、多 line、GUI/AX/window/mouse 能力,找出适配边界。
+- [x] 阶段4: 形成 2-3 个设计方向,给出推荐方案、语法草案、执行模型和验证口径。
 
-### 现象
-用户在问:`rdog control` 多 line one-shot 入口,N=1 vs N>1 是不是真的走了不同管线?能不能合并成一个函数?
+### 关键结论
 
-### 静态证据(代码读出来的当前真实状态)
-1. `src/main.rs` 三个 invocation 分支的 dispatch 全是这样:
-   ```rust
-   if !one_shot_lines.is_empty() {
-       send_control_lines_tcp(&host, port, &one_shot_lines)?;
-       return Ok(());
-   }
-   ```
-   同一个 `if !one_shot_lines.is_empty()` 一个分支处理 N=1 和 N>1,共享 `send_control_lines_*`。
-2. `send_control_lines_tcp` / `send_control_lines_websocket` / `send_control_lines_zenoh` 内部都直接 `shell::run_line_control_lines(&mut transport, lines)`,然后由 `run_line_control_lines` 迭代 lines,没有任何 `if lines.len() == 1` 的特判。
-3. `zenoh_control::send_control_lines` 同样,只判 `if lines.is_empty()`,然后 for 循环,没有 N=1 特判。
-4. `send_single_control_line_tcp` / `send_single_control_line_websocket` / `send_single_control_line_zenoh` 这三个函数,callers 全部都是 `pty_close` / `pty_detach` 分支,**没有一处是给 one-shot 用的**。
-5. `src/input.rs` 当前 `host` 的 clap 是 `num_args = 0..=32`(2 target + 30 one-shot line)。
+- iced_emg 的 UI Script 是进程内 winit 事件注入;rdog 的 UI script 应该是 control frames 的编排层。
+- `@script` / `@cmd` 已经表示 shell 执行,新的 UI flow 不应复用 `@script` 命名。
+- 第一版建议先做 CLI-side runner,读取本地 JSON,编译成现有 `@observe`、`@click`、`@screenshot`、`@key`、AX/window/web/control frames。
+- 坐标脚本可以兼容,但必须明确 `os-logical` 与 display guard,并鼓励 `Observe` / selector / semantic action 优先。
 
-### 静态证据(spec / test 的过时描述)
-1. `specs/control-line-protocol.md` 924-927 行还写着:
-   > "N=1 时复用 `--pty-close` / `--pty-detach` 的 `send_single_control_line_*` 管线;N>1 时复用新加的 `send_control_lines_*` 管线"
-   —— 这跟当前代码**完全相反**。代码已经统一了,spec 还停在旧设计。
-2. `src/zenoh_control.rs` 547-548 行 doc 还在说:
-   > "单 line 形式 `send_single_control_line` 是它的 1-行 特例"
-   —— 同样跟实际 callers 不符,容易让人以为 one-shot N=1 也走 `send_single_control_line`。
-3. `tests/control_lanes.rs::control_one_shot_should_reject_two_at_lines` 期望 2 个 `@` line 在 clap 层失败,这是 `num_args = 0..=3` 时代的行为。当前是 `0..=32`,本应被接受。
+### 状态
 
-### 动态证据(单测验证)
-跑 `cargo test --test control_lanes -- control_one_shot_should_reject_two_at_lines --exact --nocapture` → **通过**。
-但这是"侥幸通过":args `["control", "127.0.0.1", "5555", "@ping", "@capabilities"]` 走到 dispatch 的 TCP 分支时,127.0.0.1:5555 没有 daemon 在听,connect 失败,主进程退出非 0,assertion 满足。**失败原因根本不是 clap 拒绝**,而是网络不可达。
+**目前在完成** - 设计讨论证据已写入 `notes.md`,准备向用户交付推荐方案。
 
-### 结论
-- **多 line one-shot 的 N=1 / N>1 在代码层已经统一,没有分叉**。两者都走 `send_control_lines_*` → `run_line_control_lines`。
-- 真正存在的"两条管线"是:
-  - `send_control_lines_*`: one-shot 批量(1..N),共享 transport,fail-fast,无行级重试
-  - `send_single_control_line_*`: **专门给 `pty_close` / `pty_detach` 用的单帧**,带 `execute_remote_request_with_retry_on_timeout` 旧 retry 行为
-- 这两条管线**不能合并**,因为 retry-on-timeout 跟 fail-fast 在多 line 批量里语义冲突(中途超时重试会导致前面已成功的 line 被重复执行)。
-- spec + 一个 doc comment + 一个测试都描述的是"老设计",需要跟当前代码对齐。
-
-### 后续建议(本次不实施,等用户确认)
-1. 更新 `specs/control-line-protocol.md` 第 924-927 行,改成"无论 N=1 还是 N>1,one-shot 都走 `send_control_lines_*`;`send_single_control_line_*` 仅用于 `--pty-close` / `--pty-detach`"
-2. 更新 `src/zenoh_control.rs::send_control_lines` 的 doc,不要再误导说"`send_single_control_line` 是 1-行 特例"
-3. 修 `tests/control_lanes.rs::control_one_shot_should_reject_two_at_lines`:要么改成"2 个 `@` line 应当被接受并被 dispatch 到 TCP 路径,失败时报告"connect 失败""(直接起一个真 daemon 来跑这条),要么把 `num_args = 0..=3` 那段注释更新成"过去是 0..=3,现在是 0..=32"
-4. `src/main.rs` 三个 `send_control_lines_*` 函数体的注释里也都有"多 line"的字样,跟"1 line 的多 line 形式"这种说法的歧义,可以在 doc 里加一句"包括 N=1"
-
-## [2026-06-20 13:15:00] [Session ID: omx-1781788115552-szl2hn] [执行阶段]: 用户选 2 (spec + doc + test)
+## [2026-06-26 16:02:51] [Session ID: codex-20260626-ui-script-spec] [目标启动]: rdog UI script 规格落地
 
 ### 目标
-三处历史遗留描述跟当前代码对齐,锁住"one-shot N=1 / N>1 走 `send_control_lines_*` 同一管线"这条契约。
+
+把上一轮 rdog UI script 设计讨论整理成 `specs/rdog-ui-script-control-plan.md`,并同步 `AGENTS.md` 长期知识索引。本轮只做规格与记录,不修改 Rust 业务源码。
 
 ### 阶段
-- [ ] 阶段1: 改 `specs/control-line-protocol.md` 924-927,把"N=1 / N>1 走不同管线"改成"统一走 `send_control_lines_*`"
-- [ ] 阶段2: 改 `src/zenoh_control.rs::send_control_lines` doc,删掉"单 line 形式 `send_single_control_line` 是它的 1-行 特例"那句误导
-- [ ] 阶段3: 改 `tests/control_lanes.rs::control_one_shot_should_reject_two_at_lines`,重命名成 `control_one_shot_should_accept_two_at_lines_and_run_in_order_for_tcp_lane`,起真 daemon 跑两条 line,断言 @ping 在前 @capabilities#1 在后
-- [ ] 阶段4: 跑受影响单测 + 全量 `cargo test --test control_lanes`
-- [ ] 阶段5: WORKLOG 收尾
+
+- [x] 阶段1: 读取当前六文件上下文、上一轮设计笔记、iced_emg 样例和 rdog 相关规格。
+- [x] 阶段2: 创建 `specs/rdog-ui-script-control-plan.md`,明确 v1 CLI-side runner、JSON DSL、step 映射、安全策略和后续 daemon-side `@ui-flow`。
+- [x] 阶段3: 同步 `AGENTS.md` 索引,并把 `LATER_PLANS.md` 中对应待办标记为已完成记录。
+- [x] 阶段4: 验证 Mermaid 图、文档引用和 diff check。
+- [x] 阶段5: 追加 `WORKLOG.md`,回顾是否需要新增 `EPIPHANY_LOG.md`,然后交付。
+
+### 关键问题
+
+1. `@script` / `@cmd` 已经是 shell 执行语义,UI flow 不能复用这个命名。
+2. rdog 第一版应先做 CLI-side runner,把 JSON steps 编译成已有 line-control frames,避免新增第二套控制协议。
+3. 坐标兼容 iced_emg,但必须进入 rdog 的 `os-logical` / display guard / observation / semantic action 模型。
+
+### 做出的决定
+
+- 采用默认六文件上下文,因为这是 rdog control 协议主线的长期规格。
+- 文档状态写成 planning-only,不让读者误以为功能已经落地。
+- Mermaid 图落盘为普通 markdown code fence,验证时用 `beautiful-mermaid-rs` 从 stdin 渲染。
 
 ### 状态
-**目前在阶段1** - 改 spec
 
-### 完成项
-- 阶段1 ✅ `specs/control-line-protocol.md` 924-927 改成"one-shot 统一走 `send_control_lines_*`;`send_single_control_line_*` 只给 PTY 关闭/分离"
-- 阶段2 ✅ `src/zenoh_control.rs::send_control_lines` doc 删掉"`send_single_control_line` 是 1-行 特例"误导,改成"独立 PTY 关闭管线"
-- 阶段3 ✅ `tests/control_lanes.rs` 把 `control_one_shot_should_reject_two_at_lines` 改成 `control_one_shot_should_accept_two_at_lines_and_run_in_order_for_tcp_lane`,起真 daemon 跑 @ping + @capabilities#1,断言顺序
+**目前在完成** - 规格文件、长期索引、后续事项记录和验证都已完成。本轮没有新增需要写入 `EPIPHANY_LOG.md` 的架构级风险。
 
-### 验证
-- `cargo build --quiet` 通过,无 warning
-- `cargo test --test control_lanes` → 15 passed, 0 failed, 1 ignored(原样)
-- `cargo test --test zenoh_router_client -- control_multi_one_shot` → 3 passed
-- `cargo test --bin rdog` → 344 passed
+## [2026-06-26 16:08:50] [Session ID: codex-20260626-ui-script-spec] [完成]: rdog UI script 规格落地
+
+### 已完成
+
+- [x] 创建 `specs/rdog-ui-script-control-plan.md`。
+- [x] 同步 `AGENTS.md` 长期知识索引。
+- [x] 在 `LATER_PLANS.md` 追加完成记录,保留实现前 fixture tests 和 window resize 协议两个后续事项。
+- [x] 使用 `beautiful-mermaid-rs --ascii` 验证规格中的 flowchart 和 sequenceDiagram。
+- [x] 运行 `rtk git diff --check`,结果通过。
 
 ### 状态
-**已完成全部 5 个阶段,等 WORKLOG 收尾**
 
-## [2026-06-20 11:42:00] [Session ID: omx-1781926953468-5fb1e6] [任务启动]: rdog-control skill 主推多 line one-shot 写法
+**目前在完成** - 本轮只做文档规格落地,没有修改 Rust 业务源码。
+
+## [2026-06-26 16:15:58] [Session ID: codex-20260626-ui-script-fixtures] [目标启动]: UI script fixture tests 与 WindowSize resize 规划
 
 ### 目标
-- 将 `rdog-control` skill 里的主要示例改为 `rdog control mac.lab @a @b @c` 这种 trailing one-shot 写法。
-- 旧的 `printf ... | rdog control TARGET` 管道写法只作为兼容说明出现,不再作为主路径。
-- 优先改良现有文档表达,不新增重复章节。
+
+按用户要求推进两件事: 先落 UI script parser/runner fixture tests,再把 `WindowSize` 真正 resize 窗口的 rdog 控制能力规划清楚。本轮会新增 dry-run parser/compiler/runner 测试底座,并更新 specs。除 dry-run 内核外,不接真实 CLI、daemon 或平台窗口 resize 实现。
 
 ### 阶段
-- [ ] 阶段1: 搜索 `.codex/skills/rdog-control/` 内所有 `printf ... | rdog control` / heredoc / stdin 主路径示例
-- [ ] 阶段2: 更新 `SKILL.md` 的核心流程和决策流程,把多 line one-shot 作为默认推荐
-- [ ] 阶段3: 更新相关 reference 文档中的主示例,只保留必要兼容说明
-- [ ] 阶段4: 复查 diff,确认没有把需要 stdin 的场景误改掉
-- [ ] 阶段5: 记录 WORKLOG 并给出交付总结
+
+- [x] 阶段1: 读取当前任务记录、UI script 规格、control protocol、window control 代码和当前工作区状态。
+- [ ] 阶段2: 新增 `ui_script` parser/compiler/runner dry-run 内核与 fixture JSON。
+- [ ] 阶段3: 增加 parser/runner fixture tests,覆盖 iced-compatible 和 rdog-specific 脚本,以及 negative cases。
+- [ ] 阶段4: 规划 `@window-resize` / `WindowSize` resize 能力,同步规格和索引。
+- [ ] 阶段5: 运行 focused tests、格式检查、diff check,并记录 WORKLOG / LATER_PLANS / EPIPHANY 判断。
+
+### 关键问题
+
+1. 当前 `ControlCommand` 只有 `WindowFind` / `WindowActivate` / `WindowClose`,没有 resize 入口。
+2. UI script 第一阶段应该先做 dry-run fixture,避免真实 GUI 权限和窗口状态影响 DSL 契约测试。
+3. `WindowSize` 想真正 resize,应先设计 `@window-resize` 控制协议,再让 UI script 编译过去,不要让 `WindowSize` 自己绕开控制面。
+
+### 做出的决定
+
+- `ui_script` 内核先作为 `src/ui_script.rs` 模块接入 binary crate,测试直接用 fixture 文件。
+- dry-run compiler 只生成 control line 字符串和本地 runner action,不连接 daemon。
+- Window resize 先更新 `specs/rdog-window-control-plan.md` 和 `specs/rdog-ui-script-control-plan.md`,不写平台实现。
 
 ### 状态
-**目前在阶段1** - 准备搜索 skill 目录中的旧管道写法和相关描述。
 
-## [2026-06-20 11:50:00] [Session ID: omx-1781926953468-5fb1e6] [状态变更]: rdog-control skill 示例改写完成
+**目前在阶段2** - 准备新增模块、fixture 和测试。
 
-### 完成项
-- 阶段1 ✅ 已搜索 `.codex/skills/rdog-control/` 内旧 `printf | rdog control`、heredoc、stdin 主路径示例。
-- 阶段2 ✅ 已更新 `SKILL.md`, 核心契约和 Decision Flow 改为 `rdog control TARGET @a @b @c` trailing one-shot 主路径。
-- 阶段3 ✅ 已更新 `references/control-workflow.md`、`references/cookbook-web-content.md`、`references/zenoh-hardware.md`、`agents/openai.yaml`、`examples/README.md` 中相关示例。
-- 阶段4 ⏳ 正在做 diff / 空白检查, 并确认只保留必要的 stdin / heredoc / pipeline 兼容说明。
+## [2026-06-26 16:24:08] [Session ID: codex-20260626-ui-script-fixtures] [阶段进展]: fixture tests 与 resize 规划进入验证
 
-### 当前证据
-- 搜索 `printf .*rdog control|printf '@|<<<|<<'RDOG'|TARGET <<<` 后, 只剩 `--pty-detach <SESSION_ID>` 这类参数占位符误命中, 没有旧 stdin 示例残留。
+### 当前接手状态
 
-### 状态
-**目前在阶段4** - 准备运行 `git diff --check` 并复查本轮实际改动。
+- UI script dry-run 模块、fixture JSON、规格更新和索引更新已经由上一轮完成初稿。
+- 已知 focused 测试 `ui_script` 曾经通过 7 个用例,但还没有完成格式检查、Mermaid 验证和 diff check。
+- 当前工作区存在大量非本轮改动,本轮只核验并整理 UI script 与窗口 resize 规划相关文件。
 
-## [2026-06-20 11:54:00] [Session ID: omx-1781926953468-5fb1e6] [遇到错误]: grep pattern 里的反引号触发 shell 命令替换
+### 待完成
 
-### 现象
-- 我在验证命令里写了包含反引号的 grep pattern, shell 把 `rdog control` 当作命令替换执行。
-- 终端出现 `缺少 control 目标` 错误, 这是验证命令写法错误, 不是 rdog 代码或文档内容错误。
+- [x] 运行格式检查并修正必要格式问题。
+- [x] 运行 UI script focused tests。
+- [x] 验证新增 Mermaid 图语法。
+- [x] 运行 diff check。
+- [x] 追加 WORKLOG 和必要的 LATER_PLANS 记录。
 
-### 处理
-- 立即改用单引号包裹 grep pattern 重新验证。
-- 后续 shell 命令里凡是正文包含反引号, 都必须使用单引号或单引号 heredoc。
+### 遇到错误
+
+- Mermaid 查询命令第一次把包含反引号的正则放在了双引号中,zsh 触发 command substitution 并报 `parse error`。已改为单引号正则重跑,后续所有含反引号文本都必须单引号或避开 shell 解释。
 
 ### 状态
-**目前在阶段4** - 纠正验证命令后继续复查。
 
-## [2026-06-20 13:55:00] [Session ID: omx-1781788115552-szl2hn] [状态变更]: commit 阶段完成,分两个 scoped commit
+**目前在阶段5** - 准备执行验证命令,验证通过后收口记录。
 
-### 完成项
-- commit 1 `e41e8ce` "Land one-shot multi-line send_control_lines baseline" — 装前几轮已经写好但没 commit 的 pre-existing 工作:
-  - `src/zenoh_control.rs::send_control_lines` 整个函数(77 行,doc 仍是老的"1-行 特例"措辞)
-  - `specs/control-line-protocol.md` 整段"想要无状态单发命令"小节(44 行,内容仍描述老 N=1 / N>1 split)
-  - `tests/control_lanes.rs` 6 个 sibling one-shot test + 老的 reject test + 删除 `wait_until_output_collects` 工具函数 + 4 个现有 test 的小修(总计 404 +/37 -)
-  - **这一步必须先做**:如果跳过这步直接 commit 整个 working tree,git log 里 df5e381 就会混着前几轮没 review 的代码,做不了 scoped review
-- commit 2 `df5e381` "Fix one-shot N=1 / N>1 spec drift in line-control docs" — 装我本轮 surgical 改动:
-  - `specs/control-line-protocol.md` 把老 bullets 换成"统一走 send_control_lines_*" + "send_single_control_line_* 只给 PTY 关闭" (6 +/2 -)
-  - `src/zenoh_control.rs` doc 删"1-行 特例"误导句,补"两条管线不能合并的 reason"(4 +/4 -)
-  - `tests/control_lanes.rs` 把 `control_one_shot_should_reject_two_at_lines` 改成 `control_one_shot_should_accept_two_at_lines_and_run_in_order_for_tcp_lane`,起真 daemon 跑两条 line,断言 @pong < @capabilities#1 (50 +/15 -)
+## [2026-06-26 16:31:30] [Session ID: codex-20260626-ui-script-fixtures] [验证结果]: UI script fixture tests 与 resize 规划
 
-### 验证
-- `cargo build --quiet` 在两个 commit 边界都过
-- `cargo test --test control_lanes` 在两个 commit 边界都 15 passed, 0 failed, 1 ignored
-  - commit 1 边界: 老的 reject test 通过(connect 失败侥幸)
-  - commit 2 边界: 新的 accept test 真正起 daemon 跑,@pong 在 @capabilities#1 前
-- `cargo test --bin rdog` 在 commit 2 边界 344 passed
+### 已完成
 
-### 关键决策:为什么必须分 2 个 commit 而不是 1 个
-1. 用户的 pre-existing uncommitted 工作 + 我的 surgical 改动是**两种不同性质的工作**,review 关注点不一样:
-   - pre-existing:代码逻辑、API 设计、测试覆盖
-   - surgical:spec/doc/test 跟代码语义对齐
-2. 一个 commit 会让 reviewer 看不清"这次 PR 到底改了什么"——大块的函数体修改混着小块的 doc 修改
-3. 未来如果要 revert spec drift 修复(比如发现 `num_args = 0..=32` 决定回滚),只需要 revert df5e381,不用动 e41e8ce 里的基础函数
-4. AGENTS.md 里"scoped commit,不要把 mixed worktree 的无关改动一起带上"——前几轮的 pre-existing 不是"无关",但确实是"另一个人写的",分 commit 是更尊重原作者的做法
+- [x] `src/ui_script.rs` 单独 rustfmt 后通过 `rtk rustfmt --check src/main.rs src/ui_script.rs`。
+- [x] `cargo check --package rustdog --bin rdog --quiet` 通过,无 warning 输出。
+- [x] `rtk cargo test --package rustdog --bin rdog -- ui_script` 通过,7 passed。
+- [x] `specs/rdog-window-control-plan.md` 4 个 Mermaid 块通过 `beautiful-mermaid-rs --ascii`。
+- [x] `specs/rdog-ui-script-control-plan.md` 2 个 Mermaid 块通过 `beautiful-mermaid-rs --ascii`。
+- [x] `rtk cargo fmt -- --check` 通过。
+- [x] `rtk git diff --check` 通过。
+
+### 关键调整
+
+- `src/main.rs` 中的 `ui_script` 模块改为 test-only 编译,避免 dry-run 测试底座在正式 bin 编译中产生 dead_code warning。
+- `WindowSize` 仍只接受 `mode:"precondition"`。真实 resize 进入 `@window-resize` 后,再把 `mode:"resize"` 从规格升级到可编译 step。
 
 ### 状态
-**全部完成,可以 push**
 
-## [2026-06-20 11:58:00] [Session ID: omx-1781926953468-5fb1e6] [续档触发]: WORKLOG.md 超过 1000 行
+**目前在完成** - 验证和收口记录已完成,准备最终检查后交付。
 
-### 现象
-- `wc -l WORKLOG.md` 显示 1024 行, 已超过六文件续档阈值。
+## [2026-06-26 16:34:00] [Session ID: codex-20260626-ui-script-fixtures] [完成]: UI script fixture tests 与 WindowSize resize 规划
 
-### 处理策略
-- 不使用 subagent: 当前可用 subagent 工具明确要求非用户显式要求时不要 spawn。
-- 执行最小安全续档: 只处理已经超过阈值的默认 `WORKLOG.md`, 读取标题和尾部摘要后归档旧文件, 创建新的 `WORKLOG.md`。
-- 本次不清理其它支线文件, 避免偏离用户要求的 skill 更新任务。
+### 最终状态
 
-### 状态
-**目前在阶段4** - 先提取旧 `WORKLOG.md` 摘要, 再续档。
-
-## [2026-06-20 12:01:00] [Session ID: omx-1781926953468-5fb1e6] [遇到错误]: printf 分隔符以 `--` 开头被当作选项
-
-### 现象
-- 摘要命令使用 `printf "--- WORKLOG headings ---\n"`, bash 报 `printf: --: invalid option`。
-- 后续 `rg` 和 `tail` 仍然输出了摘要, 但这个 shell 写法不正确。
-
-### 处理
-- 立即改为 `printf "%s\n" "--- WORKLOG headings ---"` 重新运行摘要命令。
-
-### 状态
-**目前在阶段4** - 纠正验证命令后继续续档。
-
-## [2026-06-20 12:04:00] [Session ID: omx-1781926953468-5fb1e6] [行动记录]: 准备续档 WORKLOG.md
-
-### 行动目的
-- `WORKLOG.md` 已超过 1000 行, 按六文件规则必须续档后才能继续写入。
-- 本次只处理默认 `WORKLOG.md`, 不移动其它默认六文件或支线六文件。
-
-### 持续学习摘要
-- 旧 `WORKLOG.md` 覆盖 2026-05-12 到 2026-06-20 的主线记录。
-- 主要主题包括 rdog-control skill 收尾、截图/多显示器/鼠标坐标方案、ControlPeerSession 分阶段实施、Zenoh session channel 收紧、GUI recipe、one-shot CLI、多 line one-shot、日志 stderr 隐性契约、N=1/N>1 spec drift 修复和 scoped commit 经验。
-- 可复用经验已分别沉淀到现有 `EXPERIENCE.md`、`AGENTS.md` 索引、`specs/control-line-protocol.md`、`.codex/skills/rdog-control/SKILL.md` 等长期载体。本轮不需要新建 self-learning skill。
-
-### 状态
-**目前在阶段4** - 归档旧 WORKLOG 并创建新的 WORKLOG。
-
-## [2026-06-20 12:12:30] [Session ID: omx-1781926953468-5fb1e6] [完成]: rdog-control skill 主推多 line one-shot 写法
-
-### 完成项
-- 阶段1 ✅ 搜索旧 stdin / printf / heredoc 主路径示例。
-- 阶段2 ✅ 更新 `SKILL.md` 主推荐为 trailing multi-line one-shot。
-- 阶段3 ✅ 更新相关 reference / agent prompt / example 文档。
-- 阶段4 ✅ 完成搜索验证、diff 空白检查和 WORKLOG 超阈值续档。
-- 阶段5 ✅ 写入新的 `WORKLOG.md` 并补充 `LATER_PLANS.md` 后续完整整理事项。
-
-### 验证证据
-- `rtk grep -n "printf .*rdog control|printf '@|<<<|<<'RDOG'|TARGET <<<" .codex/skills/rdog-control || true` → 0 matches。
-- `rtk proxy git diff --check -- ...` → 0 输出, exit code 0。
-- `wc -l WORKLOG.md` → 12 行(续档后),后续追加本任务记录后仍远低于 1000 行。
-
-### 状态
-**全部阶段完成** - 可以交付。
-
-## [2026-06-20 14:20:00] [Session ID: omx-1781934324141-q2nzhz] [任务计划]: scoped commit rdog-control skill version + continuous-learning
-
-### 目标
-- 先提交本会话明确新增的 `.codex/skills/rdog-control/SKILL.md` frontmatter `version: "1.0"`。
-- 提交后执行 `$continuous-learning`, 汇总当前六文件与旧支线文件状态, 并沉淀必要经验。
-
-### 范围判断
-- 当前工作区存在大量历史未提交改动和旧支线六文件, 不能使用 `git add .`。
-- 本次 commit 只纳入版本字段, 不混入其它同文件既有 diff 或其它文件改动。
-- continuous-learning 发生在 commit 之后, 产生的知识沉淀另行保留为未提交变更, 除非用户后续要求再次提交。
-
-### 阶段
-- [ ] 阶段1: 检查 staged/unstaged 状态和目标文件 diff
-- [ ] 阶段2: 只 stage `version: "1.0"` 这一行
-- [ ] 阶段3: 运行最小验证并提交
-- [ ] 阶段4: 执行 continuous-learning 六文件检索总结与沉淀
-- [ ] 阶段5: 汇报 commit SHA、验证证据、持续学习结果和剩余未提交改动
-
-### 状态
-**目前在阶段1** - mixed worktree 已确认, 准备做 partial staged patch。
-
-## [2026-06-20 18:33:50] [Session ID: omx-1781934324141-q2nzhz] [更正记录]: 上一条计划时间戳手写错误
-
-### 说明
-- 上一条 `2026-06-20 14:20:00` 是手写时间, 与当前 `date` 输出不一致。
-- 后续本任务状态记录以 `date` 输出的 CST 时间为准。
-
-### 状态
-**目前在阶段1** - 继续 partial staged patch 前检查 HEAD 与工作区文件头。
-
-## [2026-06-20 18:34:40] [Session ID: omx-1781934324141-q2nzhz] [遇到错误]: partial staged patch hunk 行数不匹配
-
-### 现象
-- `git apply --cached /tmp/rdog-skill-version-only.patch` 返回 `corrupt patch`。
-
-### 原因
-- 手写 patch 的 hunk 行数与上下文行数不一致。
-- 这属于 staged patch 构造错误, 不是目标文件内容错误。
-
-### 处理
-- 不继续猜测式重试同一种 patch。
-- 改为从 HEAD 内容生成临时文件,只插入 `version: "1.0"`,再用 `git update-index --cacheinfo` 写入 index。
-
-### 状态
-**目前在阶段2** - 重新构造只含版本字段的 staged 内容。
-
-## [2026-06-20 18:35:20] [Session ID: omx-1781934324141-q2nzhz] [状态变更]: 版本字段已按 scoped patch 暂存
-
-### 完成项
-- 阶段1 ✅ 已确认工作区存在大量非本次改动,不能 `git add .`。
-- 阶段2 ✅ 已通过 index-only 方法只 stage `.codex/skills/rdog-control/SKILL.md` 的 `version: "1.0"` 一行。
-
-### 状态
-**目前在阶段3** - 正在运行提交前验证。
-
-## [2026-06-20 18:36:20] [Session ID: omx-1781934324141-q2nzhz] [状态变更]: scoped commit 完成,开始 continuous-learning
-
-### 完成项
-- 阶段3 ✅ `git diff --cached --check` 无输出,exit code 0。
-- 阶段3 ✅ staged 文件头确认包含 `version: "1.0"`。
-- 阶段3 ✅ 已提交 `9d74d7e Add rdog-control skill version metadata`,内容为 `.codex/skills/rdog-control/SKILL.md` 1 行新增。
-
-### 状态
-**目前在阶段4** - 开始 `$continuous-learning` 的六文件检索总结。
-
-## [2026-06-20 18:42:00] [Session ID: omx-1781934324141-q2nzhz] [遇到错误]: docs/specs 搜索包含不存在目录
-
-### 现象
-- `rg ... docs specs plans roadmap milestones ...` 返回 exit code 2。
-- 原因是本仓库当前没有 `docs/`、`plans/`、`roadmap/`、`milestones/` 目录。
-
-### 处理
-- 不能把这个错误当作成功搜索。
-- 改为只搜索实际存在的 `README.md`、`AGENTS.md`、`EXPERIENCE.md` 和 `specs/`。
-- 同时处理搜索结果暴露出的 one-shot pipeline 表述过期问题。
-
-### 状态
-**目前在阶段4** - 继续 docs/specs 同步检查。
-
-## [2026-06-20 18:48:30] [Session ID: omx-1781934324141-q2nzhz] [状态变更]: continuous-learning 沉淀与归档完成
-
-### 完成项
-- 阶段4 ✅ 已生成六文件摘要并写入 `notes.md`。
-- 阶段4 ✅ 已归档 23 个旧支线组、90 个文件。
-- 阶段4 ✅ 已生成 `archive/manifests/ARCHIVE_MANIFEST__2026-06-20_branch_context_cleanup.md`。
-- 阶段4 ✅ 已更新 `EXPERIENCE.md`、`AGENTS.md`、`LATER_PLANS.md`、`WORKLOG.md`。
-- 阶段4 ✅ 已检查并同步 `README.md` 与 `specs/code-agent-rdog-control-usage.md` 的 one-shot 管线描述。
-
-### 状态
-**目前在阶段5** - 准备运行最终验证和状态汇总。
-
-## [2026-06-20 18:49:40] [Session ID: omx-1781934324141-q2nzhz] [遇到错误]: 最终 rg 验证 pattern 反引号触发命令替换
-
-### 现象
-- `rg` 验证命令里包含反引号包裹的 `--pty-close`。
-- zsh 报 `command not found: --pty-close`。
-
-### 处理
-- 这不是文档命中结果,而是 shell quoting 错误。
-- 改用单引号包裹 pattern 重新运行。
-
-### 状态
-**目前在阶段5** - 重跑 stale wording 验证。
-
-## [2026-06-20 18:50:30] [Session ID: omx-1781934324141-q2nzhz] [完成]: git commit + continuous-learning 收口
-
-### 阶段完成情况
-- [x] 阶段1: 检查 staged/unstaged 状态和目标文件 diff。
-- [x] 阶段2: 只 stage `version: "1.0"` 这一行。
-- [x] 阶段3: 运行最小验证并提交。
-- [x] 阶段4: 执行 continuous-learning 六文件检索总结与沉淀。
-- [x] 阶段5: 汇报 commit SHA、验证证据、持续学习结果和剩余未提交改动。
+- [x] parser / dry-run runner fixture tests 已落地。
+- [x] `WindowSize` resize 规划已同步到 UI script 与 window control specs。
+- [x] `AGENTS.md` 长期知识索引已更新。
+- [x] `notes.md`、`WORKLOG.md`、`LATER_PLANS.md` 已追加本轮结论、验证和后续事项。
+- [x] 结束前已回顾 `EPIPHANY_LOG.md`,本轮没有新增架构级灾难点或重大未来风险,不追加。
 
 ### 最终验证
-- `git diff --cached --check`: 无输出。
-- `git diff --check`: 无输出。
-- stale wording 搜索: 无 `N=1 复用` / `N>1 复用` / `same one-shot pipeline as \`--pty-close\`` 残留。
-- 根目录六文件候选清单只剩默认六文件。
+
+- `cargo check --package rustdog --bin rdog --quiet`: 通过,无 warning 输出。
+- `rtk cargo test --package rustdog --bin rdog -- ui_script`: 7 passed。
+- `rtk rustfmt --check src/main.rs src/ui_script.rs`: 通过。
+- `rtk cargo fmt -- --check`: 通过。
+- `rtk git diff --check`: 通过。
+- `beautiful-mermaid-rs --ascii`: 6 个 Mermaid 块通过。
+- 行尾空白检查: 本轮相关 Rust / JSON / Markdown 文件无输出。
 
 ### 状态
-**全部阶段完成** - 等待用户决定是否要把 continuous-learning 后续改动再做第二个 scoped commit。
 
-## [2026-06-20 20:50:00] [Session ID: omx-1781788115552-szl2hn] [支线索引]: rdog control macOS 本地 fast path (方向 A: Zenoh unixpipe)
+**目前在完成** - 所有本轮待办已勾选,可以交付。
 
-### 启用原因
-- 用户在 macOS 上跑 `rdog daemon -c ./rdog_macos.toml` + `rdog control mac.lab` 觉得慢。
-- 当前 `rdog control` 默认走 Zenoh client session + UDP scout + UDP query/reply,本机 ping 一次 200~500ms。
-- 用户给的方向:走"方向 A - Zenoh unixpipe transport",在 daemon + control 都是本机时,把 Zenoh link 层从 UDP 换成 Unix domain socket,提速 2~5x。
-- 用户在 OMX plan 入口里确认走方向 A,产出可执行 plan,落 `.omx/plans/zenoh-unixpipe-fast-path.md` + `specs/zenoh-unixpipe-fast-path-plan.md`。
+## [2026-06-26 18:10:24] [Session ID: codex-20260626-window-resize-default-activate] [目标启动]: @window-resize 默认激活语义
 
-### 计划阶段
-- [x] 阶段1: 把 plan 写完,落到 `.omx/plans/zenoh-unixpipe-fast-path.md` 和 `specs/zenoh-unixpipe-fast-path-plan.md`。
-- [x] 阶段2: 在 `Cargo.toml` 启用 `transport_unixpipe` feature,跑 `cargo check` 确认能编译过(zenoh-link-unixpipe 子 crate 会被下载)。
-- [x] 阶段3: 在 `src/zenoh_runtime.rs` / `src/config.rs` 加 unixpipe endpoint 推导和加入 listen_endpoints 的逻辑。
-- [x] 阶段4: 在 `src/zenoh_control.rs` / `src/zenoh_runtime.rs` 让 client 端优先尝试 unixpipe connect,失败再回退 UDP scout(实施时改为 `Path::exists` 检查,理由见 EPIPHANY_LOG)。
-- [x] 阶段5: 写单元测试(23 个新单测)和集成测试(3 个 e2e)。
-- [x] 阶段6: 同步更新 `rdog_macos.toml`(`[zenoh.unixpipe]` 注释段已加);`specs/zenoh-control-plane-plan.md` 同步 TODO 在 LATER_PLANS.md。
-- [x] 阶段7: 跑本地 `@ping` benchmark 验证真实延迟改善(0.02s 10 次稳定),验证证据落 WORKLOG。
+### 目标
+
+按用户决策更新窗口 resize 规划: `@window-resize` 默认执行激活/恢复目标窗口,请求里不用显式写 `activate:true`。`@window-activate` 在 skill 和规格中的描述弱化为备用能力,用于只恢复窗口但不 resize 的场景。
+
+### 阶段
+
+- [x] 阶段1: 读取当前任务上下文和 `rdog-control` skill。
+- [x] 阶段2: 搜索 specs / skill / references 中的窗口控制口径。
+- [x] 阶段3: 更新 `@window-resize` 默认激活语义、target 统一入口和 `@window-activate` 备用定位。
+- [x] 阶段4: 验证 Mermaid / diff check,并记录 WORKLOG / LATER_PLANS / EPIPHANY 判断。
+
+### 做出的决定
+
+- `@window-resize` v1 默认会执行 resize 所需的窗口恢复步骤,不要求用户写 `activate:true`。
+- 如果后续需要禁用恢复动作,另行设计显式 opt-out 字段,但默认口径不暴露 `activate:true`。
+- `@window-activate` 不再作为 resize 前的推荐必经步骤,只保留给"只恢复窗口"或 resize 恢复失败后的手动备用。
 
 ### 状态
-**实施完成,等用户验收**。剩余 5 项 follow-up 在 LATER_PLANS.md(主要是 spec / EXPERIENCE / skill 的 doc 同步)。
+
+**目前在完成** - 已同步规格、skill 和 references,验证通过,准备交付。
+
+## [2026-06-26 18:15:52] [Session ID: codex-20260626-window-resize-default-activate] [完成]: @window-resize 默认激活语义
+
+### 已完成
+
+- [x] `@window-resize` 默认恢复/激活目标窗口,请求中不出现 `activate:true`。
+- [x] resize target 统一为 `target:{...}` 入口,示例不再使用顶层 `window_id`。
+- [x] `@window-activate` 在 specs / skill / references 中弱化为备用恢复能力。
+- [x] UI script `WindowSize mode:"resize"` 后续编译路径同步为直接发 `@window-resize`。
+- [x] `rdog-control` skill 版本更新为 `1.4`。
+
+### 验证
+
+- `beautiful-mermaid-rs --ascii`: `specs/rdog-window-control-plan.md` 4 个 Mermaid 块通过。
+- `rtk git diff --check`: 通过。
+- 行尾空白检查: 通过。
+- 旧口径残留检查: 未发现 `activate:false`、顶层 `@window-resize:{window_id...}` 或 `@window-find -> @window-activate` 主路径。
+
+### EPIPHANY 判断
+
+- 本轮是已确定设计口径的文档同步,没有新增架构级灾难点或重大未来风险,不追加 `EPIPHANY_LOG.md`。
+
+### 状态
+
+**目前在完成** - 所有本轮待办已勾选。
+
+## [2026-06-28 13:06:52] [Session ID: codex-20260628-finder-window-resize-live] [目标启动]: Finder @window-resize live 验证
+
+### 目标
+
+对当前本机 Finder 窗口执行一次 `@window-resize` live 验证: 先发现窗口,再 resize 到一个明确尺寸,最后重新读取窗口 rect 验证结果。这个动作会真实恢复/激活并调整 Finder 窗口。
+
+### 阶段
+
+- [ ] 阶段1: 检查本机 rdog daemon 是否可用。
+- [ ] 阶段2: 用 `@window-find` 查找 Finder 窗口并记录原始 rect。
+- [ ] 阶段3: 对明确的 Finder `window_id` 执行 `@window-resize`。
+- [ ] 阶段4: 再次 `@window-find` 验证 `after_rect`。
+- [ ] 阶段5: 记录验证结果到 notes / WORKLOG,并判断是否需要 LATER_PLANS / EPIPHANY。
+
+### 做出的决定
+
+- 未指定目标尺寸时,采用 `1000x700` logical px 作为温和验证尺寸。
+- 不使用顶层 `window_id`,只使用 canonical `target:{window_id:"..."}`。
+- 不加 `activate:true`,使用 `@window-resize` 默认恢复/激活语义。
+
+### 状态
+
+**目前在阶段1** - 准备执行 live `rdog control @ping`。
+
+## [2026-06-28 13:08:00] [Session ID: codex-20260628-finder-window-resize-live] [阶段进展]: rdog daemon liveness 通过
+
+### 已完成
+
+- [x] `rtk proxy rdog control @ping` 返回 `@response "pong"`。
+- [x] 本机 fast path 使用 unixpipe endpoint `/var/folders/58/3f9_69ts3bx4slnb8tgl572m0000gn/T/rdog-lab-mac.lab.pipe`。
+
+### 状态
+
+**目前在阶段2** - 准备执行 `@window-find` 查询 Finder 窗口。
+
+## [2026-06-28 13:09:00] [Session ID: codex-20260628-finder-window-resize-live] [阶段进展]: Finder window-find 成功
+
+### 已发现窗口
+
+- `@window-find#1:{app_contains:"Finder",limit:10,include_state:true,include_recipes:true}` 返回 `status:"complete"`。
+- `match_count`: 2。
+- 选定目标: `window_id:"pid:877/window:0"`。
+- 目标标题: `docs`。
+- 原始 rect: `{x:271,y:247,width:920,height:436}`。
+- 目标状态: `occluded:true,minimized:false,current_space:true`。
+
+### 选择理由
+
+- 第二个 Finder match 的 rect 是 `{x:0,y:-124,width:3390,height:1080}`,更像桌面/Space 级 Finder 元素,不适合作为普通窗口 resize 目标。
+
+### 状态
+
+**目前在阶段3** - 准备对 `pid:877/window:0` 执行 `@window-resize` 到 `1000x700`。
+
+## [2026-06-28 13:10:00] [Session ID: codex-20260628-finder-window-resize-live] [错误]: 当前 live daemon 不支持 @window-resize
+
+### 现象
+
+- 执行 `@window-resize#2:{target:{window_id:"pid:877/window:0"},size:{width:1000,height:700,unit:"os-logical",box:"outer"},origin:"keep",verify:true}`。
+- 返回: `@response {"id":2,"code":64,"error":"不支持的控制指令类型: window-resize"}`。
+
+### 当前假设
+
+- 当前 unixpipe fast path 连接到的 live daemon 不是本轮源码实现后的二进制,所以 daemon 侧 parser 不认识 `window-resize`。
+
+### 备选解释
+
+- 也可能是 client/daemon 中只有一侧更新,另一侧仍旧;需要确认当前 `rdog` 路径、版本和 daemon 进程来源。
+
+### 下一步
+
+- [ ] 确认当前 `rdog` 可执行文件路径与 daemon 进程。
+- [ ] 如果需要,用当前 workspace 源码启动可验证 daemon,再重跑 Finder resize。
+
+### 状态
+
+**目前在阶段3 调试中** - 先确认 live daemon 二进制来源,不把 unsupported 误报为 resize 功能失败。
+
+## [2026-06-28 13:14:00] [Session ID: codex-20260628-finder-window-resize-live] [阶段进展]: 确认 live daemon 是旧二进制
+
+### 已确认
+
+- `which rdog`: `/Users/cuiluming/.cargo/bin/rdog`。
+- `rdog --version`: `rustdog 3.0.0`。
+- live daemon 进程: `pid 63448`,命令为 `rdog daemon -c ./rdog_macos.toml`。
+- 当前 workspace 源码已通过 `cargo build --package rustdog --bin rdog`,生成 `target/debug/rdog`。
+
+### 结论
+
+- `@window-resize` unsupported 来自旧 live daemon,不是 Finder resize backend 的动态失败。
+
+### 下一步
+
+- [ ] 短暂停掉旧 daemon。
+- [ ] 用 `target/debug/rdog daemon -c ./rdog_macos.toml` 启动当前源码 daemon。
+- [ ] 重跑 `@ping` / `@window-find` / `@window-resize` / `@window-find`。
+
+### 状态
+
+**目前在阶段3 调试中** - 准备用当前源码 daemon 重跑 live 验证。
+
+## [2026-06-28 13:16:00] [Session ID: codex-20260628-finder-window-resize-live] [阶段进展]: 当前源码 daemon 下 resize 已执行
+
+### 已完成
+
+- [x] 停止旧 daemon `pid 63448`。
+- [x] 启动当前 workspace daemon: `./target/debug/rdog daemon -c ./rdog_macos.toml`。
+- [x] `./target/debug/rdog control @ping` 返回 `@response "pong"`。
+- [x] 重新 `@window-find` 获取 Finder 窗口: `pid:877/window:0`,标题 `docs`,原始 rect `{x:271,y:247,width:920,height:436}`。
+- [x] 执行 `@window-resize#4` 请求 `1000x700`。
+
+### resize 返回
+
+- action: `resize`。
+- status: `clamped`。
+- error_code: `WINDOW_RESIZE_CLAMPED`。
+- before_rect: `{x:271,y:247,width:920,height:436}`。
+- requested_rect: `{x:271,y:247,width:1000,height:700}`。
+- after_rect: `{x:271,y:247,width:1000,height:652}`。
+- delta: `{x:0,y:0,width:0,height:-48}`。
+- steps: `activate_app ok`, `raise_window ok`, `check_size_settable ok`, `set_size ok`, `verify_rect failed reason WINDOW_RESIZE_CLAMPED`。
+
+### 遇到错误
+
+- 后验验证第一次误用 `@window-find#5:{target:{window_id:"pid:877/window:0"}}`,返回 `@window-find 对象 payload 包含未知字段: target`。
+- 这是验证命令 shape 错误,不是 resize 后端错误。下一步改用 query 字段重新查 Finder `docs` 窗口。
+
+### 状态
+
+**目前在阶段4** - 准备重跑正确的 `@window-find` 后验验证。
+
+## [2026-06-28 13:24:00] [Session ID: codex-20260628-finder-window-resize-live] [完成]: Finder @window-resize live 验证
+
+### 最终状态
+
+- [x] 阶段1: 检查本机 rdog daemon 是否可用。
+- [x] 阶段2: 用 `@window-find` 查找 Finder 窗口并记录原始 rect。
+- [x] 阶段3: 对明确的 Finder `window_id` 执行 `@window-resize`。
+- [x] 阶段4: 再次 `@window-find` 验证 `after_rect`。
+- [x] 阶段5: 记录验证结果到 notes / WORKLOG,并判断是否需要 LATER_PLANS / EPIPHANY。
+
+### 验证结果
+
+- 初始 live daemon 返回 `不支持的控制指令类型: window-resize`,确认它是旧二进制。
+- 用当前 workspace `target/debug/rdog` 重启 daemon 后,`@window-resize` 成功执行。
+- Finder 目标窗口: `window_id:"pid:877/window:0"`,标题 `docs`。
+- resize 请求: `1000x700`, `origin:"keep"`, `verify:true`。
+- resize report: `status:"clamped"`, `error_code:"WINDOW_RESIZE_CLAMPED"`。
+- before_rect: `{x:271,y:247,width:920,height:436}`。
+- requested_rect: `{x:271,y:247,width:1000,height:700}`。
+- after_rect: `{x:271,y:247,width:1000,height:652}`。
+- independent `@window-find#7` 最终读回 rect: `{x:271,y:247,width:1000,height:652}`。
+
+### daemon 状态
+
+- 当前源码 daemon 已在 tmux session `rdog-debug-daemon` 中运行。
+- liveness: `./target/debug/rdog control @ping` 返回 `@response "pong"`。
+
+### EPIPHANY 判断
+
+- 本轮主要是 live smoke 和环境版本差异验证。旧 installed daemon 与 workspace debug daemon 不一致会影响后续 live 验证,已记录到 `LATER_PLANS.md`,不追加 `EPIPHANY_LOG.md`。
+
+### 状态
+
+**目前在完成** - Finder resize 已验证,结果是可执行但被 Finder/macOS clamp 到 `1000x652`。
+
+## [2026-06-28 13:30:07] [Session ID: codex-20260628-finder-window-resize-live] [收尾补记]: live 验证证据已落盘
+
+### 已完成
+
+- [x] `notes.md` 已追加 Finder live resize 证据,包含旧 daemon unsupported、debug daemon 成功、resize report 和独立后验验证。
+- [x] `WORKLOG.md` 已追加本轮任务交付记录。
+- [x] `LATER_PLANS.md` 已追加 live smoke 完成记录,并保留 installed daemon 更新与 debug daemon 清理两个后续事项。
+- [x] `EPIPHANY_LOG.md` 判断为不需要追加,因为本轮没有新增架构级灾难点。
+
+### 状态
+
+**目前在完成** - 文件上下文收尾完成,下一步只做格式 / diff check。
+
+## [2026-06-28 00:04:56] [Session ID: codex-20260628-goal-window-resize] [目标启动]: @window-resize 可执行实现
+
+### 目标
+
+按 active goal 把 `specs/rdog-window-control-plan.md` 中已经收敛的 `@window-resize` 规格接到 rdog 的实际控制面: parser / command model / executor / macOS AX backend / focused tests。现有 `@window-find`、`@window-activate`、`@window-close` 行为保持兼容。
+
+### 阶段
+
+- [ ] 阶段1: 刷新相关源码、规格和当前工作区 diff,确认不覆盖非本轮改动。
+- [ ] 阶段2: 实现 `@window-resize` 请求模型、解析、control command 分发和默认 executor。
+- [ ] 阶段3: 实现 macOS AX resize 后端,包含默认恢复/激活、verify、guard 和错误分类。
+- [ ] 阶段4: 补充 parser / helper focused tests,覆盖规格里列出的 resize 边界。
+- [ ] 阶段5: 运行格式、focused tests、cargo check、diff check,并更新 notes / WORKLOG / LATER_PLANS / EPIPHANY 判断。
+
+### 做出的决定
+
+- resize 请求只接受 `target:{...}` canonical 形态,不新增顶层 `window_id`。
+- `@window-resize` 默认负责恢复/激活目标窗口,请求里不暴露 `activate:true`。
+- UI script `WindowSize mode:"resize"` 不在本阶段假装可用,等真实 control frame 验证稳定后再升级。
+
+### 状态
+
+**目前在阶段2** - 已完成源码刷新,正在实现 `@window-resize` parser / command / executor / backend。
+
+## [2026-06-28 00:18:00] [Session ID: codex-20260628-goal-window-resize] [阶段进展]: parser 与 executor 分发接入
+
+### 已完成
+
+- [x] 刷新 `src/control_window.rs`、`src/control_protocol.rs`、`src/control_actions.rs`、`src/control_window/macos.rs` 和现有 tests。
+- [x] 新增 `WindowResizeRequest`、`WindowResizeSize`、`WindowResizeOrigin`、`WindowResizeVerify` 和 resize report 字段。
+- [x] 新增 `parse_window_resize_payload`,并注册到 `ControlCommand::WindowResize`。
+- [x] 新增默认 executor 分支 `execute_window_resize`。
+
+### 当前正在做
+
+- [x] 实现 macOS AX resize 后端,复用现有 window resolver 和 activate recipe。
+- [x] 补充 parser / pure verify focused tests。
+- [ ] 运行完整 window / protocol focused tests。
+
+### 状态
+
+**目前在阶段4** - focused tests 初跑通过,准备扩大到 window/protocol 测试组。
+
+## [2026-06-28 00:39:00] [Session ID: codex-20260628-goal-window-resize] [验证进展]: 测试通过与一次检查命令 quoting 错误
+
+### 已完成验证
+
+- [x] `rtk cargo test --package rustdog --bin rdog -- control_window::tests`: 12 passed。
+- [x] `rtk cargo test --package rustdog --bin rdog -- control_protocol::tests`: 29 passed。
+- [x] `rtk cargo test --package rustdog --bin rdog -- shell::tests`: 14 passed。
+- [x] `rtk cargo test --package rustdog --bin rdog`: 405 passed。
+- [x] `rtk cargo test --package rustdog --bin rdog -- ui_script`: 7 passed。
+- [x] `rtk cargo check --package rustdog --bin rdog --quiet`: 通过。
+- [x] `rtk cargo fmt -- --check`: 通过。
+- [x] `rtk git diff --check`: 通过。
+- [x] `beautiful-mermaid-rs --ascii`: `specs/rdog-window-control-plan.md` 和 `specs/rdog-ui-script-control-plan.md` 共 6 个 Mermaid 块通过。
+
+### 遇到错误
+
+- 旧口径残留检查第一次把包含反引号的 rg 正则放进双引号,zsh 触发 command substitution,报 `command not found: @window-resize`。这只是检查命令 quoting 错误,不是代码或文档错误。下一步用单引号正则重跑。
+
+### 状态
+
+**目前在阶段5** - 准备重跑旧口径残留检查,然后写 notes / WORKLOG / LATER_PLANS 收口。
+
+## [2026-06-28 00:54:00] [Session ID: codex-20260628-goal-window-resize] [完成]: @window-resize 可执行实现
+
+### 最终状态
+
+- [x] 阶段1: 刷新相关源码、规格和当前工作区 diff,确认不覆盖非本轮改动。
+- [x] 阶段2: 实现 `@window-resize` 请求模型、解析、control command 分发和默认 executor。
+- [x] 阶段3: 实现 macOS AX resize 后端,包含默认恢复/激活、verify、guard 和错误分类。
+- [x] 阶段4: 补充 parser / helper focused tests,覆盖规格里列出的 resize 边界。
+- [x] 阶段5: 运行格式、focused tests、cargo check、diff check,并更新 notes / WORKLOG / LATER_PLANS / EPIPHANY 判断。
+
+### 最终验证
+
+- `rtk cargo test --package rustdog --bin rdog -- control_window::tests`: 12 passed。
+- `rtk cargo test --package rustdog --bin rdog -- control_protocol::tests`: 29 passed。
+- `rtk cargo test --package rustdog --bin rdog -- shell::tests`: 14 passed。
+- `rtk cargo test --package rustdog --bin rdog`: 405 passed。
+- `rtk cargo test --package rustdog --bin rdog -- ui_script`: 7 passed。
+- `rtk cargo check --package rustdog --bin rdog --quiet`: 通过。
+- `rtk cargo fmt -- --check`: 通过。
+- `rtk git diff --check`: 通过。
+- `beautiful-mermaid-rs --ascii`: 6 个 Mermaid 块通过。
+- 六文件行数均未超过 1000 行,不需要续档。
+
+### 未执行项
+
+- 没有跑 live `@window-resize` smoke。原因是该命令会真实恢复/激活并移动/缩放用户窗口,没有明确目标窗口时不适合擅自执行。
+
+### EPIPHANY 判断
+
+- 本轮没有新增架构级灾难点或重大未来风险。`WindowSize mode:"resize"` 的后续接入已记录到 `LATER_PLANS.md`,不需要追加 `EPIPHANY_LOG.md`。
+
+### 状态
+
+**目前在完成** - 所有本轮待办已勾选,准备标记 goal complete。
+
+## [2026-06-28 12:49:46] [Session ID: codex-20260628-ui-script-window-size-resize] [目标启动]: UI script WindowSize resize 编译接入
+
+### 目标
+
+把 UI script 的 `WindowSize mode:"resize"` 从 rejected future syntax 升级为 dry-run 可编译 step,输出 canonical `@window-resize` control line。保持 `mode:"precondition"` 旧行为兼容,不新增真实 CLI runner 或 transport。
+
+### 阶段
+
+- [ ] 阶段1: 读取 `src/ui_script.rs`、fixtures、UI script 规格和当前后续事项。
+- [ ] 阶段2: 实现 `WindowSize mode:"resize"` parser / compiler,只生成 `@window-resize`。
+- [ ] 阶段3: 新增 fixture tests,覆盖 resize target、origin、guard、verify 和旧 precondition。
+- [ ] 阶段4: 同步 `specs/rdog-ui-script-control-plan.md` 与 LATER_PLANS / notes / WORKLOG。
+- [ ] 阶段5: 运行 `ui_script` tests、bin tests、cargo check、fmt、diff check 和 Mermaid 验证。
+
+### 做出的决定
+
+- `WindowSize mode:"resize"` 需要显式 `target`,因为 `@window-resize` 的 canonical payload 必须有 `target:{...}`。
+- `WindowSize` 仍不直接调用平台 API,只编译到 `@window-resize`。
+- `@window-resize` 默认恢复/激活目标窗口,所以 UI script 不生成 `activate:true`,也不自动插入 `window-activate` action。
+
+### 状态
+
+**目前在阶段1** - 准备读取 dry-run parser / compiler 和 fixture 结构。
+
+## [2026-06-28 13:05:00] [Session ID: codex-20260628-ui-script-window-size-resize] [阶段进展]: WindowSize resize dry-run 编译通过
+
+### 已完成
+
+- [x] 读取 `src/ui_script.rs`、fixtures、UI script 规格和 LATER_PLANS。
+- [x] 扩展 `WindowSizeStep`,支持 `mode:"resize"` 的 `target`、`origin`、`guard`、`box`、`verify`。
+- [x] `WindowSize mode:"resize"` 编译为 canonical `@window-resize` control line。
+- [x] 新增 `tests/fixtures/ui_script/window_size_resize.json`。
+- [x] 新增测试确认生成的 control line 可被真实 `parse_control_line` 解析为 `ControlCommand::WindowResize`。
+
+### 当前验证
+
+- `rtk cargo test --package rustdog --bin rdog -- ui_script`: 9 passed。
+
+### 状态
+
+**目前在阶段4** - 准备同步规格和后续事项记录,然后跑完整验证。
+
+## [2026-06-28 13:26:00] [Session ID: codex-20260628-ui-script-window-size-resize] [完成]: WindowSize resize dry-run 编译接入
+
+### 最终状态
+
+- [x] 阶段1: 读取 `src/ui_script.rs`、fixtures、UI script 规格和当前后续事项。
+- [x] 阶段2: 实现 `WindowSize mode:"resize"` parser / compiler,只生成 `@window-resize`。
+- [x] 阶段3: 新增 fixture tests,覆盖 resize target、origin、guard、verify 和旧 precondition。
+- [x] 阶段4: 同步 `specs/rdog-ui-script-control-plan.md` 与 LATER_PLANS / notes / WORKLOG。
+- [x] 阶段5: 运行 `ui_script` tests、bin tests、cargo check、fmt、diff check 和 Mermaid 验证。
+
+### 最终验证
+
+- `rtk cargo test --package rustdog --bin rdog -- ui_script`: 9 passed。
+- `rtk cargo test --package rustdog --bin rdog`: 407 passed。
+- `rtk cargo check --package rustdog --bin rdog --quiet`: 通过。
+- `rtk cargo fmt -- --check`: 通过。
+- `rtk git diff --check`: 通过。
+- `beautiful-mermaid-rs --ascii`: `specs/rdog-ui-script-control-plan.md` 2 个 Mermaid 块通过。
+- 六文件行数均未超过 1000 行,不需要续档。
+
+### EPIPHANY 判断
+
+- 本轮是已规划能力的 dry-run compiler 接入,没有新增架构级灾难点或重大未来风险。
+- 正式 UI script CLI / transport 和 live resize smoke 已保留在 `LATER_PLANS.md`,不追加 `EPIPHANY_LOG.md`。
+
+### 状态
+
+**目前在完成** - 所有本轮待办已勾选。
+
+## [2026-06-27 20:05:18] [Session ID: codex-20260627-window-resize-edge-decisions] [目标启动]: @window-resize 边界决策补齐
+
+### 目标
+
+按用户确认,把 `@window-resize` 的 5 个实现前边界写进 `specs/rdog-window-control-plan.md`: verify 容差、clamped 状态、AX 不可写错误、多显示器 guard、query 多命中严格失败。
+
+### 阶段
+
+- [x] 阶段1: 读取当前六文件上下文、相关记忆和 humanizer-zh 写作要求。
+- [x] 阶段2: 阅读 `specs/rdog-window-control-plan.md` 的 resize 小节,确定插入位置。
+- [x] 阶段3: 更新规格文本,保持默认恢复/激活和统一 `target:{...}` 口径不变。
+- [x] 阶段4: 验证 Markdown / Mermaid / diff check,并记录 WORKLOG / LATER_PLANS / EPIPHANY 判断。
+
+### 做出的决定
+
+- 默认 verify 容差采用 `2` logical px。
+- app / system clamp 不混入普通 verify failed,单独用 `WINDOW_RESIZE_CLAMPED`。
+- AX 可读不可写单独用 `WINDOW_RESIZE_NOT_SETTABLE`。
+- display guard 默认不强制;只有请求显式带 `guard:{display:{...}}` 才检查 `after_rect`。
+- `target:{query:{...}}` 多命中默认 `WINDOW_AMBIGUOUS`,不自动选第一个。
+
+### 状态
+
+**目前在完成** - 规格、记录和验证已完成。
+
+## [2026-06-27 20:10:53] [Session ID: codex-20260627-window-resize-edge-decisions] [完成]: @window-resize 边界决策补齐
+
+### 已完成
+
+- [x] 默认 verify 容差写为 `2` logical px。
+- [x] 容差内偏差写为 `verify.status:"ok_with_delta"`。
+- [x] app / system clamp 独立为 `WINDOW_RESIZE_CLAMPED`。
+- [x] AX / 平台后端可读不可写独立为 `WINDOW_RESIZE_NOT_SETTABLE`。
+- [x] 显式 display guard 不满足独立为 `WINDOW_RESIZE_GUARD_FAILED`。
+- [x] `target.query` 多命中严格失败为 `WINDOW_AMBIGUOUS`。
+- [x] resize 增量测试清单已补齐这些 cases。
+
+### 验证
+
+- `beautiful-mermaid-rs --ascii`: `specs/rdog-window-control-plan.md` 4 个 Mermaid 块通过。
+- `rtk git diff --check`: 通过。
+- 行尾空白检查: 通过。
+
+### EPIPHANY 判断
+
+- 本轮是已确认协议边界的规格补齐,没有新增架构级灾难点或重大未来风险,不追加 `EPIPHANY_LOG.md`。
+
+### 状态
+
+**目前在完成** - 所有本轮待办已勾选。

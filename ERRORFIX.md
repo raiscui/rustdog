@@ -511,3 +511,38 @@
 - `cargo test --package rustdog --test zenoh_router_client --no-run`: 通过。
 - `cargo test --package rustdog --test control_lanes --no-run`: 通过。
 - `cargo test --package rustdog --test control_websocket --no-run`: 通过。
+
+## [2026-06-25 15:45:55] [Session ID: 019efd3b-9edc-7e11-9168-461c6e467d1d] 错误修复: 本机多个 unixpipe FIFO 候选导致空 target 无法选择 daemon
+
+### 问题
+- 用户运行 `rdog control @screenshot` 时,CLI 在进入 screenshot 控制链路之前失败。
+- 错误为"本机发现多个 unixpipe daemon",实际列出的是 `$TMPDIR` 中多个 `*.pipe_uplink` FIFO 候选。
+- 这不是 `@screenshot` 后端错误,而是 `ControlInvocation::ZenohLocal` 解析空 target 时无法从多个本地 FIFO 中选出默认 daemon。
+
+### 原因
+- 旧 `find_local_daemon_name()` 只扫描 `$TMPDIR/rdog-*.pipe_uplink`。
+- 0/1/>1 个候选分别对应 NotFound / Ok / AlreadyExists。
+- 这个规则把"本机默认 daemon"隐式绑定到 FIFO 数量,无法区分真实默认 daemon、测试 daemon 和历史残留 FIFO。
+
+### 修复
+- 新增 local-default registry / PID guard。
+- daemon 配置 `[zenoh.unixpipe] local_default = true` 时,启动阶段注册 `(namespace, daemon_name, pid, unixpipe_base)`。
+- client 空 target / self target 先读取并验证 registry,再 fallback 到旧的唯一 FIFO 扫描。
+- stale registry 会按 schema、namespace、PID 和 `<base>_uplink` 清理。
+- 保留短启动宽限,避免 daemon 刚写 registry、FIFO 还没创建时被 client 误删。
+- 多 FIFO fallback 错误信息改为"多个 unixpipe FIFO 候选,且没有可用 local-default registry"。
+
+### 验证
+- `rtk cargo fmt -- --check`: 通过。
+- `rtk cargo build --tests`: 通过,无 warning。
+- `rtk cargo test --package rustdog --bin rdog -- zenoh_runtime::tests`: 29 passed。
+- `rtk cargo test --package rustdog --bin rdog -- config::tests`: 33 passed。
+- `rtk cargo test --package rustdog --bin rdog`: 389 passed。
+- `rtk cargo test --test zenoh_unixpipe_fast_path`: 9 passed。
+- `rtk cargo test --package rustdog --test zenoh_router_client -- --test-threads=4`: 26 passed, 2 ignored。
+- live smoke: 隔离 namespace 下 `rdog control @ping` 返回 `@response "pong"`,`rdog control @screenshot` 返回 screenshot bundle,日志显示命中 local-default unixpipe fast path。
+
+### 以后避免
+- 空 target 不能靠 `$TMPDIR` FIFO 数量推断默认 daemon。
+- 新增本机 shortcut 时,必须有显式 registry / guard 或等价的单一真相源。
+- 不要用 `localhost` 当真实 `daemon_name`;它最多是未来 alias,不能替代 `(namespace, daemon_name)` 身份。

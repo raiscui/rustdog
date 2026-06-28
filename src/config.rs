@@ -15,12 +15,12 @@ use crate::control_transport::ControlTransportKind;
 
 const DEFAULT_CONFIG_FILE_NAME: &str = "rdog.toml";
 
-/// unixpipe socket 路径总长上限(单位:字节)。
+/// unixpipe FIFO base 路径总长上限(单位:字节)。
 ///
 /// macOS 的 `sun_path` 限制是 104 字节。
-/// 我们留 4 字节给末尾 NUL + 拼装容差,把所有"自动推导"和"显式覆盖"路径都卡在 100 字节以内。
-/// 超过时 daemon 启动 fail-fast,避免运行时 bind 报 ENAMETOOLONG。
-pub(crate) const UNIXPIPE_SOCKET_PATH_MAX_BYTES: usize = 100;
+/// Zenoh 1.8.0 会从 base 路径派生 `<base>_downlink`,后缀 9 字节。
+/// 因此 base 必须卡在 95 字节以内,避免运行时 FIFO 创建失败。
+pub(crate) const UNIXPIPE_SOCKET_PATH_MAX_BYTES: usize = 95;
 
 const LEGACY_CONFIG_FILE_NAME: &str = "rcat.toml";
 const WINDOWS_CONFIG_FILE_NAME: &str = "rdog_win.toml";
@@ -118,7 +118,7 @@ pub struct ZenohConfig {
     pub key_input_events: KeyInputEventsConfig,
     /// 本机 fast path 的 unixpipe 配置。
     /// macOS / Linux 默认 `enabled = true`,Windows 编译期强制 `false`。
-    /// 客户端可以借此走 Unix domain socket,避免 UDP loopback 的协议开销。
+    /// 客户端可以借此走本机 FIFO link,避免 UDP loopback 的协议开销。
     pub unixpipe: UnixpipeConfig,
 }
 
@@ -133,8 +133,8 @@ pub struct KeyInputEventsConfig {
 
 /// 本机 fast path 的 unixpipe 配置。
 ///
-/// `enabled = true` 时,daemon 会按 (namespace, daemon_name) 推导一条 Unix domain socket
-/// 路径,加入 zenoh listen_endpoints。客户端优先尝试 unixpipe connect,失败再回退 UDP scout。
+/// `enabled = true` 时,daemon 会按 (namespace, daemon_name) 推导一条 FIFO base 路径,
+/// 加入 zenoh listen_endpoints。客户端优先尝试 unixpipe connect,失败再回退 UDP scout。
 ///
 /// 注意:Windows 上 `enabled` 在编译期被强制为 `false`,运行时不可改。
 /// 不用 `#[derive(Default)]` 是因为 unix / windows 平台 `enabled` 默认值不同,
@@ -145,8 +145,17 @@ pub struct UnixpipeConfig {
     /// 是否启用 unixpipe endpoint。
     /// macOS / Linux 默认 `true`,Windows 默认 `false`(编译期强制)。
     pub enabled: bool,
-    /// 显式覆盖 socket 路径。None = 按 (namespace, daemon_name) 自动推导 `$TMPDIR/rdog-{ns}-{name}.sock`。
-    /// 显式给的路径在配置校验时必须满足 `sun_path` 长度上限(<= 100 字节)。
+    /// 是否把当前 daemon 声明为本 namespace 的本机默认 daemon。
+    /// 默认关闭,避免测试 daemon 或临时 daemon 自动抢占 `rdog control @<line>`。
+    pub local_default: bool,
+    /// 预留的本机别名字段。第一阶段只解析和校验,不把别名当成真实 daemon_name。
+    pub local_alias: Option<String>,
+    /// 显式覆盖 unixpipe base 路径。
+    ///
+    /// 字段名沿用历史 `socket_path`,但 Zenoh 1.8.0 实际创建的是 FIFO:
+    /// `<base>_uplink` / `<base>_downlink`。
+    /// None = 按 (namespace, daemon_name) 自动推导 `$TMPDIR/rdog-{ns}-{name}.pipe`。
+    /// 显式给的路径在配置校验时必须满足 base 长度上限(<= 95 字节)。
     pub socket_path: Option<PathBuf>,
 }
 
@@ -227,6 +236,8 @@ impl Default for UnixpipeConfig {
     fn default() -> Self {
         Self {
             enabled: true,
+            local_default: false,
+            local_alias: None,
             socket_path: None,
         }
     }
@@ -237,6 +248,8 @@ impl Default for UnixpipeConfig {
     fn default() -> Self {
         Self {
             enabled: false,
+            local_default: false,
+            local_alias: None,
             socket_path: None,
         }
     }
@@ -588,6 +601,17 @@ fn validate_zenoh_config(config: &ZenohConfig, tcp_endpoints_enabled: bool) -> i
 }
 
 fn validate_unixpipe_config(config: &UnixpipeConfig) -> io::Result<()> {
+    if config.local_default && !config.enabled {
+        return Err(io::Error::new(
+            ErrorKind::InvalidInput,
+            "zenoh.unixpipe.local_default = true 需要同时启用 zenoh.unixpipe.enabled = true",
+        ));
+    }
+
+    if let Some(alias) = config.local_alias.as_deref() {
+        validate_unixpipe_alias(alias)?;
+    }
+
     let Some(path) = config.socket_path.as_ref() else {
         return Ok(());
     };
@@ -608,6 +632,24 @@ fn validate_unixpipe_config(config: &UnixpipeConfig) -> io::Result<()> {
                 path_str.len(),
                 UNIXPIPE_SOCKET_PATH_MAX_BYTES
             ),
+        ));
+    }
+
+    Ok(())
+}
+
+fn validate_unixpipe_alias(alias: &str) -> io::Result<()> {
+    if alias.is_empty() {
+        return Err(io::Error::new(
+            ErrorKind::InvalidInput,
+            "zenoh.unixpipe.local_alias 不能为空字符串; 省略该字段表示不启用别名",
+        ));
+    }
+
+    if alias.contains('/') || alias.contains(char::is_whitespace) {
+        return Err(io::Error::new(
+            ErrorKind::InvalidInput,
+            format!("zenoh.unixpipe.local_alias 不能包含 `/` 或空白字符(实际: {alias:?})"),
         ));
     }
 
@@ -1205,6 +1247,8 @@ shell = "/bin/bash"
             {
                 let cfg = UnixpipeConfig::default();
                 assert!(cfg.enabled, "unix 平台 default 应该启用 unixpipe fast path");
+                assert!(!cfg.local_default, "默认不能让任意 daemon 抢占本机默认身份");
+                assert!(cfg.local_alias.is_none(), "默认不启用本机别名");
                 assert!(
                     cfg.socket_path.is_none(),
                     "未显式给路径时 socket_path 必须为 None"
@@ -1214,6 +1258,8 @@ shell = "/bin/bash"
             {
                 let cfg = UnixpipeConfig::default();
                 assert!(!cfg.enabled, "Windows 平台 default 必须禁用 unixpipe");
+                assert!(!cfg.local_default);
+                assert!(cfg.local_alias.is_none());
                 assert!(cfg.socket_path.is_none());
             }
         }
@@ -1223,6 +1269,11 @@ shell = "/bin/bash"
             // 防止新增字段后忘记在 ZenohConfig::default() 初始化,造成 toml 反序列化缺字段
             // 时静默走错默认值。
             let cfg = ZenohConfig::default();
+            assert!(
+                !cfg.unixpipe.local_default,
+                "default 不能声明本机默认 daemon"
+            );
+            assert!(cfg.unixpipe.local_alias.is_none());
             // socket_path 在 default 下必然 None。
             assert!(cfg.unixpipe.socket_path.is_none());
             // enabled 跟平台走(已由 unixpipe_default_should_match_platform_expectation 锁住)。
@@ -1234,30 +1285,53 @@ shell = "/bin/bash"
 
         #[test]
         fn validate_unixpipe_config_should_reject_oversized_socket_path() {
-            // 101 字节的 path 必须被拒绝(> 100 字节上限)。
-            let oversized: String = std::iter::repeat('a').take(101).collect();
+            // 96 字节的 path 必须被拒绝(> 95 字节上限)。
+            let oversized: String = std::iter::repeat('a').take(96).collect();
             let mut cfg = UnixpipeConfig::default();
             cfg.socket_path = Some(PathBuf::from(oversized));
 
             let err = validate_unixpipe_config(&cfg).unwrap_err();
             assert_eq!(err.kind(), ErrorKind::InvalidInput);
             assert!(err.to_string().contains("zenoh.unixpipe.socket_path 太长"));
-            assert!(err.to_string().contains("101 字节"));
+            assert!(err.to_string().contains("96 字节"));
         }
 
         #[test]
         fn validate_unixpipe_config_should_accept_under_limit_socket_path() {
-            // 100 字节正好踩上限,必须能通过(> 100 才会 fail)。
-            let at_limit: String = std::iter::repeat('a').take(100).collect();
+            // 95 字节正好踩上限,必须能通过(> 95 才会 fail)。
+            let at_limit: String = std::iter::repeat('a').take(95).collect();
             let mut cfg = UnixpipeConfig::default();
             cfg.socket_path = Some(PathBuf::from(at_limit));
 
-            validate_unixpipe_config(&cfg).expect("100 字节应该通过");
+            validate_unixpipe_config(&cfg).expect("95 字节应该通过");
+        }
+
+        #[test]
+        fn validate_unixpipe_config_should_reject_invalid_local_alias() {
+            let mut cfg = UnixpipeConfig::default();
+            cfg.local_alias = Some("bad alias".to_string());
+
+            let err = validate_unixpipe_config(&cfg).unwrap_err();
+
+            assert_eq!(err.kind(), ErrorKind::InvalidInput);
+            assert!(err.to_string().contains("local_alias"));
+        }
+
+        #[test]
+        fn validate_unixpipe_config_should_reject_local_default_when_unixpipe_disabled() {
+            let mut cfg = UnixpipeConfig::default();
+            cfg.enabled = false;
+            cfg.local_default = true;
+
+            let err = validate_unixpipe_config(&cfg).unwrap_err();
+
+            assert_eq!(err.kind(), ErrorKind::InvalidInput);
+            assert!(err.to_string().contains("local_default"));
         }
 
         #[test]
         fn validate_unixpipe_config_should_skip_when_socket_path_is_none() {
-            // socket_path == None 时,enabled 与否都应当直接通过(socket 路径由 daemon 端自动推导)。
+            // socket_path == None 时,FIFO base 路径由 daemon 端自动推导。
             let cfg = UnixpipeConfig::default();
             validate_unixpipe_config(&cfg).expect("socket_path=None 时必须通过");
         }

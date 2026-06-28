@@ -117,11 +117,18 @@ macOS / Linux 上同机 `rdog daemon` + `rdog control <target>` 必须自动走 
 4. **daemon 端**:启用 `unixpipe.enabled = true` 时自动把 `unixpipe/{base}` 注入 `listen_endpoints` 列表最前。
    启动时调用 `cleanup_stale_unixpipe_socket` unlink `<base>` / `<base>_uplink` / `<base>_downlink`
    三个残留文件。
-5. **远端 fallback**:Unix 平台用户显式 `unixpipe.enabled = false` 可以关掉;跨主机场景 daemon
+5. **空 target / self target**:`rdog control @<line>` 和 `rdog control self @<line>` 先读 local-default registry。
+   - daemon 只有在 `[zenoh.unixpipe] local_default = true` 时才声明自己是本 namespace 的本机默认 daemon。
+   - registry 记录 `namespace`、`daemon_name`、`pid` 和 FIFO base path。
+   - client 每次读取时检查 PID 存活和 `<base>_uplink` 是否存在;stale registry 会被清理。
+   - 没有有效 registry 时,才 fallback 到旧的唯一 FIFO 扫描。
+   - 这条规则避免 `$TMPDIR` 里存在多个测试 FIFO 时,空 target 直接失败。
+6. **远端 fallback**:Unix 平台用户显式 `unixpipe.enabled = false` 可以关掉;跨主机场景 daemon
    端 unixpipe 不在另一台机器的 `$TMPDIR` 里,client 端 `Path::exists` 自然返回 false,透明走 UDP scout。
-6. **CLI 不动**:`rdog control <target>` 仍然是无 flag 命令,fast path 对用户透明。
-7. **日志约定**(实施时的实际字符串):
+7. **CLI 不动**:`rdog control <target>` 仍然是无 flag 命令,fast path 对用户透明。
+8. **日志约定**(实施时的实际字符串):
    - daemon 启动: `info: zenoh unixpipe fast path 启用: base=<path>`
+   - daemon 声明默认: `info: zenoh unixpipe local-default 已注册: namespace=<ns>, daemon_name=<name>`
    - client fast path 触发: `info: unixpipe endpoint detected, taking fast path (path: <path>)`
    - client fallback: 走原 scout 日志(无 unixpipe 日志)。
 

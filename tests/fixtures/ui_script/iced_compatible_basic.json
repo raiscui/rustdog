@@ -1,0 +1,9 @@
+[
+  { "Dialect": { "source": "iced_emg", "coordinate_space": "os-logical" } },
+  { "SleepMs": 1200 },
+  { "Screenshot": { "label": "before" } },
+  { "Move": { "x": 350.0, "y": 40.0 } },
+  { "Click": { "x": 350.0, "y": 40.0, "button": "Left" } },
+  { "Screenshot": { "label": "after_click" } },
+  { "Exit": null }
+]

@@ -49,6 +49,8 @@ struct WebActResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     observation: Option<crate::control_observation::ObservationHeader>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    display_scope: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     window: Option<WebFindWindow>,
     #[serde(skip_serializing_if = "Option::is_none")]
     web_area: Option<WebFindArea>,
@@ -100,6 +102,7 @@ pub fn parse_web_act_payload(input: &str) -> io::Result<WebActRequest> {
 
     let mut target = None::<WebFindTarget>;
     let mut query = None::<WebFindQuery>;
+    let mut display_scope = None::<DisplayScope>;
     let mut roles = None::<Vec<String>>;
     let mut limit = None::<u16>;
     let mut depth = None::<u8>;
@@ -126,6 +129,17 @@ pub fn parse_web_act_payload(input: &str) -> io::Result<WebActRequest> {
                 "@web-act",
                 parse_web_find_match(raw_value)?,
             )?,
+            "scope" => assign_once(
+                &mut display_scope,
+                "scope",
+                "@web-act",
+                parse_display_scope(raw_value, "@web-act.scope")?,
+            )?,
+            "display_id" => {
+                return Err(invalid_data(
+                    "@web-act.display_id 不是请求字段;请使用 scope:{display:{id:\"...\"}}",
+                ))
+            }
             "roles" => assign_once(
                 &mut roles,
                 "roles",
@@ -185,6 +199,7 @@ pub fn parse_web_act_payload(input: &str) -> io::Result<WebActRequest> {
         find: WebFindRequest {
             target: target.unwrap_or_default(),
             query: required_field(query, "@web-act", "match")?,
+            display_scope,
             roles,
             limit: limit.unwrap_or(DEFAULT_WEB_FIND_LIMIT),
             depth: depth.unwrap_or(DEFAULT_WEB_FIND_DEPTH),
@@ -241,6 +256,7 @@ where
             verification: None,
             error_code: Some("AX_SNAPSHOT_UNAVAILABLE"),
             message: Some("AX snapshot 不可用,无法执行 @web-act".to_owned()),
+            display_scope: None,
             trace,
             match_count: 0,
             truncated: snapshot.truncated,
@@ -255,6 +271,7 @@ where
         mut matches,
         mut match_count,
         mut truncated,
+        display_scope,
     } = resolution
     else {
         return web_act_resolution_blocker(&snapshot, request, resolution, trace);
@@ -278,6 +295,7 @@ where
                 "AXWebArea 内没有找到文本匹配 `{}` 的 page-owned 控件",
                 request.find.query.text
             )),
+            display_scope: display_scope.clone(),
             trace,
             match_count,
             truncated,
@@ -301,6 +319,7 @@ where
             message: Some(format!(
                 "AXWebArea 内找到 {match_count} 个匹配目标,不自动执行副作用 action"
             )),
+            display_scope: display_scope.clone(),
             trace,
             match_count,
             truncated,
@@ -322,6 +341,7 @@ where
             verification: None,
             error_code: Some("WEB_MATCH_NOT_RETURNED"),
             message: Some("匹配目标存在,但受 limit 限制未返回可执行候选".to_owned()),
+            display_scope: display_scope.clone(),
             trace,
             match_count,
             truncated,
@@ -347,6 +367,7 @@ where
             verification: None,
             error_code: Some("WEB_ACTION_UNAVAILABLE"),
             message: Some("匹配目标没有暴露 AXPress,本阶段不做 mouse fallback".to_owned()),
+            display_scope: display_scope.clone(),
             trace,
             match_count,
             truncated,
@@ -386,6 +407,7 @@ where
                     verification: None,
                     error_code: Some("WEB_ACTION_FAILED"),
                     message: Some(err.to_string()),
+                    display_scope: display_scope.clone(),
                     trace,
                     match_count,
                     truncated,
@@ -414,6 +436,7 @@ where
                     verification: None,
                     error_code: Some("WEB_ACTION_RETRY_FAILED"),
                     message: Some(format!("action 失败且 re-find retry 未能恢复: {err}")),
+                    display_scope: display_scope.clone(),
                     trace,
                     match_count,
                     truncated,
@@ -482,6 +505,7 @@ where
         verification,
         error_code,
         message,
+        display_scope,
         trace,
         match_count,
         truncated,
@@ -771,6 +795,7 @@ struct WebActResponseInput<'a> {
     verification: Option<WebActVerification>,
     error_code: Option<&'static str>,
     message: Option<String>,
+    display_scope: Option<serde_json::Value>,
     trace: Vec<WebFindTraceStep>,
     match_count: usize,
     truncated: bool,
@@ -798,6 +823,7 @@ fn web_act_response(input: WebActResponseInput<'_>) -> io::Result<String> {
             window_title_contains: input.request.find.target.window_title_contains.clone(),
         },
         observation: input.snapshot.observation.clone(),
+        display_scope: input.display_scope,
         window: input.window.map(web_find_window),
         web_area: input.web_area.map(web_find_area),
         selected_match: input.selected_match,
@@ -836,6 +862,7 @@ fn web_act_resolution_blocker(
                 verification: None,
                 error_code: Some("BROWSER_WINDOW_NOT_FOUND"),
                 message: Some(message),
+                display_scope: None,
                 trace,
                 match_count: 0,
                 truncated: snapshot.truncated,
@@ -856,6 +883,7 @@ fn web_act_resolution_blocker(
                 verification: None,
                 error_code: Some("BROWSER_WINDOW_AMBIGUOUS"),
                 message: Some(message),
+                display_scope: None,
                 trace,
                 match_count: 0,
                 truncated: snapshot.truncated,
@@ -876,11 +904,31 @@ fn web_act_resolution_blocker(
                 verification: None,
                 error_code: Some("WINDOW_REF_INVALID"),
                 message: Some(message),
+                display_scope: None,
                 trace,
                 match_count: 0,
                 truncated: snapshot.truncated,
             })
         }
+        WebMatchResolution::DisplayScopeInvalid(message) => web_act_response(WebActResponseInput {
+            snapshot,
+            request,
+            status: "blocked",
+            performed: false,
+            verified: false,
+            window: None,
+            web_area: None,
+            selected_match: None,
+            matches: Vec::new(),
+            action_result: None,
+            verification: None,
+            error_code: Some("DISPLAY_SCOPE_INVALID"),
+            message: Some(message),
+            display_scope: None,
+            trace,
+            match_count: 0,
+            truncated: snapshot.truncated,
+        }),
         WebMatchResolution::WebAreaNotFound { selected_window } => {
             web_act_response(WebActResponseInput {
                 snapshot,
@@ -896,6 +944,7 @@ fn web_act_resolution_blocker(
                 verification: None,
                 error_code: Some("AX_WEB_AREA_NOT_FOUND"),
                 message: Some("目标浏览器窗口里没有找到 AXWebArea".to_owned()),
+                display_scope: None,
                 trace,
                 match_count: 0,
                 truncated: snapshot.truncated,

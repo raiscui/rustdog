@@ -99,23 +99,49 @@ pub fn run_zenoh_router(
         &daemon_name,
     )?;
 
-    // ------------------------------------------------------------
-    // 清理 stale FIFO 文件,避免 Zenoh listener `mkfifo` EEXIST 启动失败。
-    // unixpipe.enabled = false 时也跳过(本步已经没注入 endpoint)。
-    // ------------------------------------------------------------
-    if config.zenoh.unixpipe.enabled {
-        let base_path = match config.zenoh.unixpipe.socket_path.as_ref() {
+    #[cfg(unix)]
+    let unixpipe_base_path = if config.zenoh.unixpipe.enabled {
+        Some(match config.zenoh.unixpipe.socket_path.as_ref() {
             Some(explicit) => explicit.clone(),
             None => {
                 crate::zenoh_runtime::unixpipe_socket_path(&config.zenoh.namespace, &daemon_name)?
             }
-        };
-        crate::zenoh_runtime::cleanup_stale_unixpipe_socket(&base_path)?;
+        })
+    } else {
+        None
+    };
+
+    // ------------------------------------------------------------
+    // 清理 stale FIFO 文件,避免 Zenoh listener `mkfifo` EEXIST 启动失败。
+    // 如果当前 daemon 声明 local_default,同一个 base path 也会写入 registry,
+    // 作为 `rdog control @<line>` / `self @<line>` 的本机默认目标来源。
+    // ------------------------------------------------------------
+    #[cfg(unix)]
+    let _local_default_guard = if let Some(base_path) = unixpipe_base_path.as_ref() {
+        crate::zenoh_runtime::cleanup_stale_unixpipe_socket(base_path)?;
         log::info!(
             "zenoh unixpipe fast path 启用: base={}",
             base_path.display()
         );
-    }
+
+        if config.zenoh.unixpipe.local_default {
+            let guard = crate::zenoh_runtime::register_local_default_daemon(
+                &config.zenoh.namespace,
+                &daemon_name,
+                base_path,
+            )?;
+            log::info!(
+                "zenoh unixpipe local-default 已注册: namespace={}, daemon_name={}",
+                config.zenoh.namespace,
+                daemon_name
+            );
+            Some(guard)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
 
     let shell = default_control_shell();
     crate::zenoh_control::run_router_daemon(

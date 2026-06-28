@@ -8,6 +8,7 @@ pub fn parse_web_find_payload(input: &str) -> io::Result<WebFindRequest> {
 
     let mut target = None::<WebFindTarget>;
     let mut query = None::<WebFindQuery>;
+    let mut display_scope = None::<DisplayScope>;
     let mut roles = None::<Vec<String>>;
     let mut limit = None::<u16>;
     let mut depth = None::<u8>;
@@ -32,6 +33,17 @@ pub fn parse_web_find_payload(input: &str) -> io::Result<WebFindRequest> {
                 "@web-find",
                 parse_web_find_match(raw_value)?,
             )?,
+            "scope" => assign_once(
+                &mut display_scope,
+                "scope",
+                "@web-find",
+                parse_display_scope(raw_value, "@web-find.scope")?,
+            )?,
+            "display_id" => {
+                return Err(invalid_data(
+                    "@web-find.display_id 不是请求字段;请使用 scope:{display:{id:\"...\"}}",
+                ))
+            }
             "roles" => assign_once(
                 &mut roles,
                 "roles",
@@ -78,6 +90,7 @@ pub fn parse_web_find_payload(input: &str) -> io::Result<WebFindRequest> {
     Ok(WebFindRequest {
         target: target.unwrap_or_default(),
         query: required_field(query, "@web-find", "match")?,
+        display_scope,
         roles,
         limit: limit.unwrap_or(DEFAULT_WEB_FIND_LIMIT),
         depth: depth.unwrap_or(DEFAULT_WEB_FIND_DEPTH),

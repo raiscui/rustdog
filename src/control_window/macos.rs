@@ -1,7 +1,12 @@
 use super::*;
 use crate::{
     control_ax::AxRect,
+    control_display_scope::{
+        display_intersects_rect, display_scope_report, resolve_display_scope,
+        resolve_observation_window_ref, DisplayRect, DisplayScope, DisplaySelector,
+    },
     control_observation::{resolve_observation_ref, stale_observation_ref_error},
+    screenshot::current_display_summaries,
 };
 use std::{
     ffi::CString,
@@ -70,6 +75,11 @@ extern "C" {
     static kCGWindowOwnerPID: CFStringRef;
 
     fn AXIsProcessTrusted() -> Boolean;
+    fn AXUIElementIsAttributeSettable(
+        element: AXUIElementRef,
+        attribute: CFStringRef,
+        settable: *mut Boolean,
+    ) -> AXError;
     fn AXUIElementCreateApplication(pid: c_int) -> AXUIElementRef;
     fn AXUIElementCopyAttributeValue(
         element: AXUIElementRef,
@@ -82,6 +92,7 @@ extern "C" {
         attribute: CFStringRef,
         value: CFTypeRef,
     ) -> AXError;
+    fn AXValueCreate(value_type: u32, value_ptr: *const c_void) -> AXValueRef;
     fn AXValueGetTypeID() -> CFTypeID;
     fn AXValueGetValue(value: AXValueRef, value_type: u32, value_ptr: *mut c_void) -> Boolean;
     fn CFArrayGetCount(array: CFArrayRef) -> CFIndex;
@@ -173,8 +184,14 @@ pub(super) fn find(request: &WindowFindRequest) -> io::Result<WindowFindResponse
     ensure_trusted()?;
 
     let meta = WindowSnapshotMeta::now();
-    let mut candidates = enumerate_candidates(request.include_state, request.include_recipes)?;
+    let all_candidates = enumerate_candidates(request.include_state, request.include_recipes)?;
+    let mut candidates = all_candidates.clone();
     candidates.retain(|candidate| request.query.matches_candidate(candidate));
+    let display_scope = if let Some(scope) = request.display_scope.as_ref() {
+        apply_display_scope_filter(&mut candidates, &all_candidates, scope)?
+    } else {
+        None
+    };
     let match_count = candidates.len();
     candidates.truncate(usize::from(request.limit));
     let observation = Some(attach_window_observation(
@@ -190,6 +207,7 @@ pub(super) fn find(request: &WindowFindRequest) -> io::Result<WindowFindResponse
         status: "complete".to_owned(),
         capabilities: WindowCapabilities::complete(),
         observation,
+        display_scope,
         match_count,
         returned_count: candidates.len(),
         snapshot_id: meta.snapshot_id,
@@ -198,11 +216,62 @@ pub(super) fn find(request: &WindowFindRequest) -> io::Result<WindowFindResponse
     })
 }
 
+fn apply_display_scope_filter(
+    candidates: &mut Vec<WindowCandidate>,
+    all_candidates: &[WindowCandidate],
+    scope: &DisplayScope,
+) -> io::Result<Option<serde_json::Value>> {
+    let before = candidates.len();
+    let displays = current_display_summaries()?;
+    let resolution = resolve_display_scope(scope, &displays, |selector| {
+        window_rect_for_display_selector(all_candidates, selector)
+    })?;
+    candidates.retain(|candidate| {
+        candidate
+            .rect
+            .map(DisplayRect::from)
+            .map(|rect| display_intersects_rect(&resolution.resolved, rect))
+            .unwrap_or(false)
+    });
+    let after = candidates.len();
+    let mut report = display_scope_report(&resolution);
+    report["matched_before_filter"] = serde_json::json!(before);
+    report["matched_after_filter"] = serde_json::json!(after);
+    Ok(Some(report))
+}
+
+fn window_rect_for_display_selector(
+    candidates: &[WindowCandidate],
+    selector: &DisplaySelector,
+) -> io::Result<Option<DisplayRect>> {
+    let window_id = match selector {
+        DisplaySelector::WindowId(window_id) => window_id.as_str(),
+        DisplaySelector::WindowRef {
+            observation_id,
+            ref_id,
+        } => {
+            let resolved = resolve_observation_window_ref(observation_id, ref_id)?;
+            return Ok(candidates
+                .iter()
+                .find(|candidate| candidate.window_id == resolved.window_id)
+                .and_then(|candidate| candidate.rect)
+                .map(DisplayRect::from));
+        }
+        _ => return Ok(None),
+    };
+    Ok(candidates
+        .iter()
+        .find(|candidate| candidate.window_id == window_id)
+        .and_then(|candidate| candidate.rect)
+        .map(DisplayRect::from))
+}
+
 pub(super) fn activate(request: &WindowActivateRequest) -> io::Result<WindowActionReport> {
     ensure_trusted()?;
 
     let find_response = find(&WindowFindRequest {
         query: request.target.query.clone(),
+        display_scope: None,
         limit: DEFAULT_WINDOW_FIND_LIMIT,
         include_state: true,
         include_recipes: true,
@@ -256,6 +325,15 @@ pub(super) fn activate(request: &WindowActivateRequest) -> io::Result<WindowActi
                 process_scope: None,
                 termination_attempted: None,
                 failed_step: Some(failed_step),
+                error_code: None,
+                before_rect: None,
+                requested_size: None,
+                requested_rect: None,
+                after_rect: None,
+                delta: None,
+                verify: None,
+                guard: None,
+                clamp_reason: None,
                 steps,
             });
         }
@@ -282,6 +360,15 @@ pub(super) fn activate(request: &WindowActivateRequest) -> io::Result<WindowActi
             process_scope: None,
             termination_attempted: None,
             failed_step: None,
+            error_code: None,
+            before_rect: None,
+            requested_size: None,
+            requested_rect: None,
+            after_rect: None,
+            delta: None,
+            verify: None,
+            guard: None,
+            clamp_reason: None,
             steps,
         });
     }
@@ -300,6 +387,15 @@ pub(super) fn activate(request: &WindowActivateRequest) -> io::Result<WindowActi
         process_scope: None,
         termination_attempted: None,
         failed_step: None,
+        error_code: None,
+        before_rect: None,
+        requested_size: None,
+        requested_rect: None,
+        after_rect: None,
+        delta: None,
+        verify: None,
+        guard: None,
+        clamp_reason: None,
         steps,
     })
 }
@@ -309,6 +405,7 @@ pub(super) fn close(request: &WindowCloseRequest) -> io::Result<WindowActionRepo
 
     let find_response = find(&WindowFindRequest {
         query: request.target.query.clone(),
+        display_scope: None,
         limit: DEFAULT_WINDOW_FIND_LIMIT,
         include_state: true,
         include_recipes: true,
@@ -342,6 +439,15 @@ pub(super) fn close(request: &WindowCloseRequest) -> io::Result<WindowActionRepo
                 process_scope: None,
                 termination_attempted: Some(false),
                 failed_step: (status == "failed").then(|| step.step.clone()),
+                error_code: None,
+                before_rect: None,
+                requested_size: None,
+                requested_rect: None,
+                after_rect: None,
+                delta: None,
+                verify: None,
+                guard: None,
+                clamp_reason: None,
                 steps: vec![step],
             })
         }
@@ -406,6 +512,15 @@ pub(super) fn close(request: &WindowCloseRequest) -> io::Result<WindowActionRepo
                 process_scope: Some("single_resolved_process"),
                 termination_attempted: Some(true),
                 failed_step,
+                error_code: None,
+                before_rect: None,
+                requested_size: None,
+                requested_rect: None,
+                after_rect: None,
+                delta: None,
+                verify: None,
+                guard: None,
+                clamp_reason: None,
                 steps: vec![
                     WindowActionStepReport {
                         step: "resolve_window_id".to_owned(),
@@ -420,6 +535,203 @@ pub(super) fn close(request: &WindowCloseRequest) -> io::Result<WindowActionRepo
     }
 }
 
+pub(super) fn resize(request: &WindowResizeRequest) -> io::Result<WindowActionReport> {
+    ensure_trusted()?;
+
+    let find_response = find(&WindowFindRequest {
+        query: request.target.query.clone(),
+        display_scope: None,
+        limit: DEFAULT_WINDOW_FIND_LIMIT,
+        include_state: true,
+        include_recipes: true,
+    })?;
+    let (window, snapshot_id, observed_at_unix_ms) = resolve_single_window_for_action(
+        &find_response,
+        &request.target,
+        false,
+        None,
+        None,
+        "resize",
+    )?;
+    let resolved_window_id = window_id(window.app.pid, window.window_index);
+    let mut report = resize_action_report(
+        resolved_window_id.clone(),
+        snapshot_id,
+        observed_at_unix_ms,
+        "ok",
+    );
+
+    let app_element = create_app_ax_element(window.app.pid)?;
+    let window_ref = resolve_window_ref(window.app.pid, window.window_index)?;
+
+    let recovery_request = WindowActivateRequest {
+        target: request.target.clone(),
+        recipe: None,
+        steps: Vec::new(),
+        allow_ambiguous: false,
+        select: None,
+    };
+    for step in resolve_activation_steps(&recovery_request, &window) {
+        let step_report = perform_resize_recovery_step(step, &window, window_ref.as_ptr());
+        let blocked = step_report.status == "failed" || step_report.status == "limited";
+        if blocked {
+            report.status = step_report.status.clone();
+            report.error_code = Some("WINDOW_RESIZE_RECOVERY_FAILED");
+            report.failed_step = Some(step_report.step.clone());
+            report.steps.push(step_report);
+            return Ok(report);
+        }
+        report.steps.push(step_report);
+    }
+
+    let hidden = copy_bool_attr(app_element.as_ptr(), "AXHidden")?.unwrap_or(window.app.hidden);
+    let minimized = copy_bool_attr(window_ref.as_ptr(), "AXMinimized")?.unwrap_or(false);
+    if hidden || minimized {
+        report.status = "limited".to_owned();
+        report.error_code = Some("WINDOW_RESIZE_RECOVERY_FAILED");
+        report.steps.push(WindowActionStepReport {
+            step: "verify_recovery_state".to_owned(),
+            status: "limited".to_owned(),
+            reason: Some("window_still_hidden_or_minimized".to_owned()),
+            error: None,
+        });
+        return Ok(report);
+    }
+
+    let Some(before_rect) = copy_ax_rect(window_ref.as_ptr())? else {
+        report.status = "failed".to_owned();
+        report.error_code = Some("WINDOW_RESIZE_VERIFY_FAILED");
+        report.failed_step = Some("read_before_rect".to_owned());
+        report.steps.push(WindowActionStepReport {
+            step: "read_before_rect".to_owned(),
+            status: "failed".to_owned(),
+            reason: None,
+            error: Some("目标窗口 AXPosition/AXSize 不可读".to_owned()),
+        });
+        return Ok(report);
+    };
+    let requested_rect = requested_resize_rect(before_rect, request.size, request.origin);
+    report.before_rect = Some(before_rect);
+    report.requested_size = Some(request.size);
+    report.requested_rect = Some(requested_rect);
+
+    if let Err(err) = ensure_ax_attribute_settable(window_ref.as_ptr(), "AXSize") {
+        return Ok(resize_not_settable_report(
+            report,
+            "check_size_settable",
+            err,
+        ));
+    }
+    report.steps.push(WindowActionStepReport {
+        step: "check_size_settable".to_owned(),
+        status: "ok".to_owned(),
+        reason: None,
+        error: None,
+    });
+
+    if matches!(request.origin, WindowResizeOrigin::Point { .. }) {
+        if let Err(err) = ensure_ax_attribute_settable(window_ref.as_ptr(), "AXPosition") {
+            return Ok(resize_not_settable_report(
+                report,
+                "check_position_settable",
+                err,
+            ));
+        }
+        report.steps.push(WindowActionStepReport {
+            step: "check_position_settable".to_owned(),
+            status: "ok".to_owned(),
+            reason: None,
+            error: None,
+        });
+    }
+
+    if let Err(err) = set_ax_window_size(window_ref.as_ptr(), request.size) {
+        return Ok(resize_not_settable_report(report, "set_size", err));
+    }
+    report.steps.push(WindowActionStepReport {
+        step: "set_size".to_owned(),
+        status: "ok".to_owned(),
+        reason: None,
+        error: None,
+    });
+
+    if let WindowResizeOrigin::Point { x, y } = request.origin {
+        if let Err(err) = set_ax_window_position(window_ref.as_ptr(), x, y) {
+            return Ok(resize_not_settable_report(report, "set_position", err));
+        }
+        report.steps.push(WindowActionStepReport {
+            step: "set_position".to_owned(),
+            status: "ok".to_owned(),
+            reason: None,
+            error: None,
+        });
+    }
+
+    let Some(after_rect) = copy_ax_rect(window_ref.as_ptr())? else {
+        report.status = "failed".to_owned();
+        report.error_code = Some("WINDOW_RESIZE_VERIFY_FAILED");
+        report.failed_step = Some("read_after_rect".to_owned());
+        report.steps.push(WindowActionStepReport {
+            step: "read_after_rect".to_owned(),
+            status: "failed".to_owned(),
+            reason: None,
+            error: Some("目标窗口 resize 后 AXPosition/AXSize 不可读".to_owned()),
+        });
+        return Ok(report);
+    };
+    report.after_rect = Some(after_rect);
+
+    let verify_origin = matches!(request.origin, WindowResizeOrigin::Point { .. });
+    let evaluation = evaluate_window_resize_verification(
+        before_rect,
+        requested_rect,
+        after_rect,
+        verify_origin,
+        request.verify.tolerance_px,
+    );
+    report.status = evaluation.action_status;
+    report.error_code = evaluation.error_code;
+    report.clamp_reason = evaluation.clamp_reason;
+    report.delta = Some(evaluation.delta);
+    report.verify = Some(WindowResizeVerifyReport {
+        status: evaluation.report_status,
+        tolerance_px: request.verify.tolerance_px,
+    });
+    report.steps.push(WindowActionStepReport {
+        step: "verify_rect".to_owned(),
+        status: if report.error_code.is_none() {
+            "ok".to_owned()
+        } else {
+            "failed".to_owned()
+        },
+        reason: report.error_code.map(str::to_owned),
+        error: None,
+    });
+
+    if let Some(scope) = request.guard.as_ref() {
+        let (guard, intersects) = resize_guard_report(
+            scope,
+            &resolved_window_id,
+            after_rect,
+            &find_response.matches,
+        )?;
+        report.guard = Some(guard);
+        report.steps.push(WindowActionStepReport {
+            step: "guard_display".to_owned(),
+            status: if intersects { "ok" } else { "failed" }.to_owned(),
+            reason: (!intersects).then(|| "after_rect_outside_display_guard".to_owned()),
+            error: None,
+        });
+        if !intersects {
+            report.status = "failed".to_owned();
+            report.error_code = Some("WINDOW_RESIZE_GUARD_FAILED");
+            report.failed_step = Some("guard_display".to_owned());
+        }
+    }
+
+    Ok(report)
+}
+
 pub(super) fn resolve_target_rect(
     target: &WindowCommandTarget,
 ) -> io::Result<WindowResolvedTargetRect> {
@@ -427,6 +739,7 @@ pub(super) fn resolve_target_rect(
 
     let find_response = find(&WindowFindRequest {
         query: target.query.clone(),
+        display_scope: None,
         limit: DEFAULT_WINDOW_FIND_LIMIT,
         include_state: false,
         include_recipes: false,
@@ -489,12 +802,51 @@ fn resolve_single_window(
     )
 }
 
+fn resolve_single_window_for_action(
+    find_response: &WindowFindResponse,
+    target: &WindowCommandTarget,
+    allow_ambiguous: bool,
+    select: Option<WindowSelectPolicy>,
+    strategy: Option<WindowCloseStrategy>,
+    ambiguous_action: &'static str,
+) -> io::Result<(ResolvedWindow, String, u64)> {
+    resolve_single_window_with_resolver_for_action(
+        find_response,
+        target,
+        allow_ambiguous,
+        select,
+        strategy,
+        ambiguous_action,
+        resolve_window_id_direct,
+    )
+}
+
 fn resolve_single_window_with_resolver(
     find_response: &WindowFindResponse,
     target: &WindowCommandTarget,
     allow_ambiguous: bool,
     select: Option<WindowSelectPolicy>,
     strategy: Option<WindowCloseStrategy>,
+    mut resolve_window_id: impl FnMut(&str) -> io::Result<ResolvedWindow>,
+) -> io::Result<(ResolvedWindow, String, u64)> {
+    resolve_single_window_with_resolver_for_action(
+        find_response,
+        target,
+        allow_ambiguous,
+        select,
+        strategy,
+        "activate",
+        &mut resolve_window_id,
+    )
+}
+
+fn resolve_single_window_with_resolver_for_action(
+    find_response: &WindowFindResponse,
+    target: &WindowCommandTarget,
+    allow_ambiguous: bool,
+    select: Option<WindowSelectPolicy>,
+    strategy: Option<WindowCloseStrategy>,
+    ambiguous_action: &'static str,
     mut resolve_window_id: impl FnMut(&str) -> io::Result<ResolvedWindow>,
 ) -> io::Result<(ResolvedWindow, String, u64)> {
     if let (Some(observation_id), Some(ref_id)) =
@@ -543,7 +895,7 @@ fn resolve_single_window_with_resolver(
                 }
             }
             if !allow_ambiguous {
-                return Err(ambiguous_error("activate", many, strategy));
+                return Err(ambiguous_error(ambiguous_action, many, strategy));
             }
             select_candidate(many, select)?
         }
@@ -656,6 +1008,81 @@ fn resolve_activation_steps(
     }
 
     vec!["activate_app".to_owned(), "raise_window".to_owned()]
+}
+
+fn resize_action_report(
+    window_id: String,
+    snapshot_id: String,
+    observed_at_unix_ms: u64,
+    status: &str,
+) -> WindowActionReport {
+    WindowActionReport {
+        kind: "window-action",
+        schema: WINDOW_SCHEMA,
+        platform: "macos".to_owned(),
+        action: "resize",
+        status: status.to_owned(),
+        window_id: Some(window_id),
+        snapshot_id: Some(snapshot_id),
+        observed_at_unix_ms: Some(observed_at_unix_ms),
+        strategy: None,
+        target_pid: None,
+        process_scope: None,
+        termination_attempted: None,
+        failed_step: None,
+        error_code: None,
+        before_rect: None,
+        requested_size: None,
+        requested_rect: None,
+        after_rect: None,
+        delta: None,
+        verify: None,
+        guard: None,
+        clamp_reason: None,
+        steps: Vec::new(),
+    }
+}
+
+fn perform_resize_recovery_step(
+    step: String,
+    window: &ResolvedWindow,
+    window_ref: CFTypeRef,
+) -> WindowActionStepReport {
+    match step.as_str() {
+        "unhide_app" => perform_unhide_app(window),
+        "unminimize_window" => perform_unminimize_window(window_ref, window),
+        "activate_app" => perform_activate_app(window),
+        "raise_window" => perform_raise_window(window_ref),
+        "switch_to_window_space" => WindowActionStepReport {
+            step,
+            status: "limited".to_owned(),
+            reason: Some("Phase 1 仅提供 recipe,不保证自动切换 Space".to_owned()),
+            error: None,
+        },
+        unknown => WindowActionStepReport {
+            step: unknown.to_owned(),
+            status: "failed".to_owned(),
+            reason: None,
+            error: Some(format!("未知 resize recovery step: {unknown}")),
+        },
+    }
+}
+
+fn resize_not_settable_report(
+    mut report: WindowActionReport,
+    step: &str,
+    err: io::Error,
+) -> WindowActionReport {
+    report.status = "failed".to_owned();
+    report.error_code = Some("WINDOW_RESIZE_NOT_SETTABLE");
+    report.failed_step = Some(step.to_owned());
+    report.steps.push(WindowActionStepReport {
+        step: step.to_owned(),
+        status: "failed".to_owned(),
+        reason: None,
+        error: Some(err.to_string()),
+    });
+    report
 }
 
 fn build_resolved_window(
@@ -909,6 +1336,104 @@ fn perform_graceful_close(window_ref: CFTypeRef) -> io::Result<WindowActionStepR
         reason: None,
         error: Some("目标窗口没有可用的 AXCloseButton".to_owned()),
     })
+}
+
+fn ensure_ax_attribute_settable(element: AXUIElementRef, attr: &str) -> io::Result<()> {
+    with_cf_string(attr, |attribute| {
+        let mut settable = 0;
+        let error = unsafe { AXUIElementIsAttributeSettable(element, attribute, &mut settable) };
+        match error {
+            AX_SUCCESS if settable != 0 => Ok(()),
+            AX_SUCCESS | AX_ERROR_ATTRIBUTE_UNSUPPORTED => Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                format!("目标窗口的 {attr} 不可写"),
+            )),
+            AX_ERROR_API_DISABLED => Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "macOS Accessibility API 当前不可用或未授权",
+            )),
+            AX_ERROR_INVALID_UI_ELEMENT | AX_ERROR_NO_VALUE => Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "目标窗口 locator 已失效",
+            )),
+            code => Err(io::Error::other(format!(
+                "检查 AX attribute `{attr}` 是否可写失败: AXError {code}"
+            ))),
+        }
+    })
+}
+
+fn set_ax_window_size(element: AXUIElementRef, size: WindowResizeSize) -> io::Result<()> {
+    let cg_size = CGSize {
+        width: f64::from(size.width),
+        height: f64::from(size.height),
+    };
+    let value = unsafe {
+        CfOwned::new(AXValueCreate(
+            AX_VALUE_CG_SIZE,
+            (&cg_size as *const CGSize).cast(),
+        ))
+    }
+    .ok_or_else(|| io::Error::other("创建 AXSize value 失败"))?;
+    with_cf_string("AXSize", |attribute| unsafe {
+        map_ax_write_error(AXUIElementSetAttributeValue(
+            element,
+            attribute,
+            value.as_ptr(),
+        ))
+    })
+}
+
+fn set_ax_window_position(element: AXUIElementRef, x: i32, y: i32) -> io::Result<()> {
+    let point = CGPoint {
+        x: f64::from(x),
+        y: f64::from(y),
+    };
+    let value = unsafe {
+        CfOwned::new(AXValueCreate(
+            AX_VALUE_CG_POINT,
+            (&point as *const CGPoint).cast(),
+        ))
+    }
+    .ok_or_else(|| io::Error::other("创建 AXPosition value 失败"))?;
+    with_cf_string("AXPosition", |attribute| unsafe {
+        map_ax_write_error(AXUIElementSetAttributeValue(
+            element,
+            attribute,
+            value.as_ptr(),
+        ))
+    })
+}
+
+fn resize_guard_report(
+    scope: &DisplayScope,
+    target_window_id: &str,
+    after_rect: AxRect,
+    candidates: &[WindowCandidate],
+) -> io::Result<(serde_json::Value, bool)> {
+    let displays = current_display_summaries()?;
+    let resolution = resolve_display_scope(scope, &displays, |selector| match selector {
+        DisplaySelector::WindowId(window_id) if window_id == target_window_id => {
+            Ok(Some(DisplayRect::from(after_rect)))
+        }
+        DisplaySelector::WindowRef {
+            observation_id,
+            ref_id,
+        } => {
+            let resolved = resolve_observation_window_ref(observation_id, ref_id)?;
+            if resolved.window_id == target_window_id {
+                Ok(Some(DisplayRect::from(after_rect)))
+            } else {
+                window_rect_for_display_selector(candidates, selector)
+            }
+        }
+        _ => window_rect_for_display_selector(candidates, selector),
+    })?;
+    let intersects = display_intersects_rect(&resolution.resolved, DisplayRect::from(after_rect));
+    let mut report = display_scope_report(&resolution);
+    report["after_rect"] = serde_json::json!(after_rect);
+    report["after_rect_intersects"] = serde_json::json!(intersects);
+    Ok((report, intersects))
 }
 
 fn create_app_ax_element(pid: i32) -> io::Result<CfOwned> {
@@ -1537,6 +2062,7 @@ mod tests {
             returned_count: 20,
             snapshot_id: "window-snapshot-42".to_owned(),
             observed_at_unix_ms: 42,
+            display_scope: None,
             matches: Vec::new(),
         };
         let target = WindowCommandTarget {
@@ -1610,6 +2136,7 @@ mod tests {
             returned_count: 1,
             snapshot_id: "window-snapshot-99".to_owned(),
             observed_at_unix_ms: 99,
+            display_scope: None,
             matches,
         };
         let target = WindowCommandTarget {

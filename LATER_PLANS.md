@@ -344,7 +344,7 @@
 - [x] `rdog_linux.toml` 模板加同样的 `[zenoh.unixpipe]` 注释段
 - [x] 把 plan 文件 `.omx/plans/zenoh-unixpipe-fast-path.md` 同步成"实际采用 exists-check"
 - [x] **`rdog control self @<line>` / 空 target 入口**:2026-06-21 已实现
-- [ ] `.codex/skills/rdog-control/SKILL.md` 补 troubleshooting 段
+- [x] `.codex/skills/rdog-control/SKILL.md` 补 troubleshooting 段
 - [ ] 启动独立 plan:方向 B(直接 UDS 控制面,10~50x 提速),作为 unixpipe 体验确认后的 follow-up
 
 ### 已有 flake 待处理
@@ -353,3 +353,187 @@
   - 已记录到 EPIPHANY_LOG。
   - 排查方向: 给 `resolve_target` 的 liveliness get 加 retry,或 test helper 给每个 test 独立 namespace。
   - 不属于本轮范围,留作 follow-up。
+
+## [2026-06-21 16:30:00] [Session ID: omx-1781788115552-szl2hn] 完成记录: 2026-06-21 本机 fast path 全链路收尾
+
+### 对应旧计划
+- 对应 `2026-06-20 23:55:00` "rdog control macOS 本地 fast path 收尾"。
+
+### 完成结果
+- `rdog control self @<line>` / 空 target 入口已实现(`d3fdc9b`)
+- `.codex/skills/rdog-control/SKILL.md` 的 "Local Fast Path Troubleshooting" 段已补(`ffa169d`)
+- `references/control-workflow.md` 的本机 fast path 章节已加
+- `EXPERIENCE.md` 沉淀 6 条本轮经验(self/empty 入口 3 条 + unixpipe 实现细节 3 条)
+- `EPIPHANY_LOG.md` 沉淀 3 条本轮 EPIPHANY(FIFO 不是 socket、pre-existing flake、init_logger stdout)
+- 7 个 e2e 全过(4 个 self/empty + 3 个原 unixpipe);369 unit + 26 zenoh_router_client 全过
+
+### 后续事项
+- [ ] 启动独立 plan:方向 B(直接 UDS 控制面,10~50x 提速),作为 unixpipe 体验确认后的 follow-up
+- [ ] `zenoh_router_client` 测试集 ~4% 多测试并发 flake 排查(已记 EPIPHANY_LOG,不在本轮范围)
+- [ ] 路径上限 100 vs 95 字节口径同步:`src/zenoh_runtime.rs` 注释写 ≤ 95 字节(macOS sun_path 104 - `_downlink` 9),但 `src/config.rs::UNIXPIPE_SOCKET_PATH_MAX_BYTES` 实际常量是 100,`specs/zenoh-unixpipe-fast-path-plan.md` 也写 100。两种都通过测试但口径不一致,需要后续对齐
+
+## [2026-06-21 17:35:00] [Session ID: omx-1781788115552-szl2hn] 完成记录: zenoh_router_client flake 排查(本轮诊断收敛,不实施修复)
+
+### 对应旧计划
+- 对应 `2026-06-20 23:55:00` 后续建议里的"`zenoh_router_client` 测试集 ~4% 多测试并发 flake 排查"。
+
+### 完成结果
+- 跑了对照实验(串行/2/4/8 threads × 5~30 次):4 threads 以下稳定 0 fail,8 threads 偶发失败。
+- 捕获 2 次真实失败,锁定 2 个候选根因:
+  - PTY polling timeout 紧张(900ms 窗口)
+  - Zenoh 端口 race(`next_port()` drop → OS 状态窗口期)
+- 50 次 8 threads 0 fail 决定本轮不实施 surgical 修复。
+- 诊断结论 + 4 个候选修复方向 + 推荐顺序沉淀到 `EPIPHANY_LOG.md` 2026-06-21 17:30:00 条目。
+- 用户决策(2026-06-21 17:35):维持现状,因为之前问题可能是用户操作干扰和权限问题。
+
+### 后续事项
+- [ ] 等待 flake 再次自然复现时(根据本机负载 / 后台进程 / macOS 状态变化大概率会再现)
+- [ ] 复现后照 `EPIPHANY_LOG.md` 2026-06-21 17:30:00 的"推荐顺序"推进
+- [ ] port guard surgical 修复(只动 `start_zenoh_daemon_with_combined_output` helper)作为首选,只改 1 处
+## [2026-06-24 19:48:00] [Session ID: native-hook-20260624-193730] 后续建议: 多显示器 display scope 控制
+
+### 背景
+- 用户指出 `rdog` 当前缺少约束和指定 display 的控制。
+- 现有规格已有 `@screenshot display:"all" / "primary"` 和 `os-logical` manifest 坐标契约,但缺少贯穿 `@observe`、AX/window/web find、mouse ref target 的 display scope。
+
+### 建议后续动作
+- 新增或扩展规格: 把 display 约束建模为 `ObservationScope` 的一部分。
+- 在 `@bootstrap` / `@observe` response 中返回 displays summary 和稳定 `display_ref`。
+- 让 `@observe`、`@window-find`、`@ax-find`、`@web-find` 支持 `scope.display` 或 `display` filter。
+- 让 mouse 坐标 fallback 支持 display guard,避免坐标落到其他屏或 gap。
+- 同步更新 `.codex/skills/rdog-control/SKILL.md`,让 agent 默认先选 display scope 再操作 GUI。
+
+### 推荐优先级
+1. 先做只读能力: displays summary + scoped observe。
+2. 再做查询过滤: window/AX/web find 继承 display scope。
+3. 最后做执行 guard: mouse/action 验证 target 是否仍在同一 display scope。
+
+## [2026-06-25 14:07:20] [Session ID: native-hook-20260625-135331] 后续建议: local-default unixpipe daemon 实现收口
+
+### 背景
+- 已生成计划 `.omx/plans/rdog-local-default-unixpipe-daemon-plan.md`。
+- 当前问题是 `rdog control @screenshot` 在本机多个 `$TMPDIR/rdog-*.pipe_uplink` 候选存在时无法选择默认 daemon。
+
+### 后续事项
+- [ ] 按计划实现 local-default registry + guard。
+- [ ] 同步修正 `specs/zenoh-unixpipe-fast-path-plan.md` 与 `src/config.rs` 注释里残留的 "socket" / 100 字节旧口径。
+- [ ] 清理或修正 `AGENTS.md` 中当前磁盘不存在的 `.codex/skills/self-learning.zenoh-duplicate-name-local-guard/SKILL.md` 索引。
+- [ ] 执行计划中的 unit / e2e / live smoke 验证,确认 `rdog control @ping` 和 `rdog control @screenshot` 不再卡在 target 选择层。
+
+## [2026-06-25 15:45:55] [Session ID: 019efd3b-9edc-7e11-9168-461c6e467d1d] 完成记录: local-default unixpipe daemon 实现已落地
+
+### 对应旧计划
+- 对应 `2026-06-25 14:07:20` 的"local-default unixpipe daemon 实现收口"。
+
+### 完成结果
+- 已实现 local-default registry + PID guard。
+- 已同步 `src/config.rs` / `src/daemon.rs` / `src/zenoh_runtime.rs` / `src/main.rs`。
+- 已修正 FIFO / 95 字节口径,同步模板、spec 和 `rdog-control` skill。
+- 已完成 unit / e2e / live smoke,确认 `rdog control @ping` 和 `rdog control @screenshot` 不再卡在 target 选择层。
+
+### 后续事项
+- [ ] `AGENTS.md` 中 `.codex/skills/self-learning.zenoh-duplicate-name-local-guard/SKILL.md` 路径仍需单独核对。当前本轮未处理,避免和业务修复混合。
+- [ ] 方向 B(直接 UDS 控制面,10~50x 提速)仍是独立 plan,不属于本轮 local-default 修复。
+
+## [2026-06-26 13:18:00] [Session ID: 019f023a-e4c3-7f73-9d7b-9393ef3d38ff] 后续建议: rdog UI script 正式规格化
+
+### 背景
+
+- 本轮只做设计讨论,参考了 iced_emg 的 UI Script JSON DSL、`docs/ui_script_command.md` 和 rdog 当前 control 协议。
+- 当前推荐方向是先做 CLI-side runner,复用现有 line-control frames,不要直接新增第二套 UI 协议。
+
+### 后续事项
+
+- [ ] 如果用户确认方向,将设计整理为 `specs/rdog-ui-script-control-plan.md`。
+- [ ] 同步 `AGENTS.md` 长期知识索引,说明修改 UI script runner、control script、GUI 自动化 DSL 前应阅读该规格。
+- [ ] 实现前先补 parser/runner 的 fixture tests,至少覆盖 iced-compatible `SleepMs/Move/Click/Screenshot/Exit` 和 rdog-specific `Observe/Scope/Expect`。
+- [ ] 设计命名时避开 `@script`,因为它已经是 shell 执行语义。
+
+## [2026-06-26 16:02:51] [Session ID: codex-20260626-ui-script-spec] 完成记录: rdog UI script 规格化已落地
+
+### 对应旧计划
+
+- 对应 `2026-06-26 13:18:00` 的"rdog UI script 正式规格化"。
+
+### 完成结果
+
+- 已创建 `specs/rdog-ui-script-control-plan.md`。
+- 已同步 `AGENTS.md` 长期知识索引。
+- 已在规格中明确 `@script` / `@cmd` 仍是 shell 执行语义,UI flow 后续应使用 CLI-side runner 或独立 `@ui-flow` 命名。
+
+### 后续事项
+
+- [ ] 实现前仍需补 parser/runner fixture tests,覆盖 iced-compatible `SleepMs/Move/Click/Screenshot/Exit` 和 rdog-specific `Target/Scope/Observe/Expect`。
+- [ ] 如果后续要让 `WindowSize` 真正 resize 窗口,应先设计 window resize control 协议,不要借 UI script 偷渡。
+
+## [2026-06-26 16:31:44] [Session ID: codex-20260626-ui-script-fixtures] 完成记录与后续建议: UI script fixture tests / window resize
+
+### 对应旧计划
+
+- 对应 `2026-06-26 16:02:51` 的"实现前仍需补 parser/runner fixture tests"。
+- 对应 `2026-06-26 16:02:51` 的"`WindowSize` 真正 resize 窗口应先设计 window resize control 协议"。
+
+### 完成结果
+
+- parser / dry-run runner fixture tests 已落地到 `src/ui_script.rs` 和 `tests/fixtures/ui_script/`。
+- window resize control 协议已规划到 `specs/rdog-window-control-plan.md` 的 `@window-resize` 节。
+- UI script 规格已说明 `WindowSize mode:"resize"` 未来应编译到 `@window-resize`,当前 dry-run 仍只接受 `mode:"precondition"`。
+
+### 后续事项
+
+- [ ] 接入正式 CLI,例如 `rdog ui-script run [TARGET] <file.json>` 或 `rdog control TARGET --ui-script <file.json>`。
+- [ ] 将 dry-run compiler 接到真实 control transport,生成 trace.jsonl、artifacts 和 step report。
+- [ ] 实现 `@window-resize` parser / executor / macOS AX backend / focused tests。默认行为必须恢复/激活目标窗口,请求里不需要 `activate:true`。同时覆盖 `verify.tolerance_px = 2`、`ok_with_delta`、`WINDOW_RESIZE_CLAMPED`、`WINDOW_RESIZE_NOT_SETTABLE`、`WINDOW_RESIZE_GUARD_FAILED` 和 `WINDOW_AMBIGUOUS`。
+- [ ] `@window-resize` 落地后,把 UI script `WindowSize mode:"resize"` 从未来语义升级为可编译 step。该 step 直接编译到默认恢复/激活的 `@window-resize`。
+
+## [2026-06-28 00:50:00] [Session ID: codex-20260628-goal-window-resize] 完成记录与后续建议: @window-resize 已落地,UI script 接入仍待做
+
+### 对应旧计划
+
+- 对应 `2026-06-26 16:31:44` 的"`@window-resize` parser / executor / macOS AX backend / focused tests"。
+
+### 完成结果
+
+- `@window-resize` parser / command model / executor / macOS AX backend / focused tests 已落地。
+- 默认恢复/激活、canonical `target:{...}`、`target.query` 唯一命中、`verify.tolerance_px = 2`、`ok_with_delta`、`WINDOW_RESIZE_CLAMPED`、`WINDOW_RESIZE_NOT_SETTABLE`、`WINDOW_RESIZE_GUARD_FAILED` 和 resize ambiguity 边界已覆盖。
+
+### 后续事项
+
+- [ ] 接入正式 UI script CLI 或 `rdog control --ui-script` 时,把 `WindowSize mode:"resize"` 编译到 `@window-resize`。
+- [ ] UI script runner 接真实 transport 后,为 resize step 记录 trace.jsonl、artifacts 和 per-step report。
+- [ ] 有明确目标窗口时,再跑 live `@window-resize` smoke,避免在没有用户确认的情况下移动/缩放当前桌面窗口。
+
+## [2026-06-28 13:16:00] [Session ID: codex-20260628-ui-script-window-size-resize] 完成记录与后续建议: WindowSize resize dry-run 编译已落地
+
+### 对应旧计划
+
+- 对应 `2026-06-28 00:50:00` 的"接入正式 UI script CLI 或 `rdog control --ui-script` 时,把 `WindowSize mode:\"resize\"` 编译到 `@window-resize`"中的 dry-run compiler 部分。
+
+### 完成结果
+
+- `src/ui_script.rs` 已支持 `WindowSize mode:"resize"` dry-run 编译到 `@window-resize`。
+- 新增 `window_size_resize.json` fixture。
+- 新测试确认生成的 line-control 文本可被真实 `parse_control_line` 解析为 `ControlCommand::WindowResize`。
+
+### 后续事项
+
+- [ ] 正式 `rdog ui-script run` / `rdog control --ui-script` 仍未接入,后续 runner 应复用当前 dry-run compiler。
+- [ ] 真实 transport 接入后,把 `WindowSize mode:"resize"` 的 step report、`@window-resize` response 和 artifacts 写入 trace。
+- [ ] 有明确目标窗口时,再跑 live `@window-resize` smoke。
+
+## [2026-06-28 13:30:07] [Session ID: codex-20260628-finder-window-resize-live] 完成记录与后续建议: Finder live @window-resize smoke 已完成
+
+### 对应旧计划
+
+- 对应 `2026-06-28 13:16:00` 的"有明确目标窗口时,再跑 live `@window-resize` smoke"。
+
+### 完成结果
+
+- 已对 Finder `docs` 窗口执行 live `@window-resize`。
+- 请求尺寸为 `1000x700`,最终 Finder/macOS clamp 到 `{x:271,y:247,width:1000,height:652}`。
+- 独立 `@window-find` 已验证最终 rect 和可交互状态。
+
+### 后续事项
+
+- [ ] installed `/Users/cuiluming/.cargo/bin/rdog` daemon 仍可能是旧二进制。若后续希望裸 `rdog control ...` 直接支持 `@window-resize`,需要安装当前 workspace 版本并重启 daemon。
+- [ ] 当前 debug daemon 运行在 tmux session `rdog-debug-daemon`。后续如果切回 release daemon,需要先停掉这个 session,避免 local-default 指向调试进程。

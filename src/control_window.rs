@@ -1,5 +1,6 @@
 use crate::{
     control_ax::AxRect,
+    control_display_scope::{parse_display_scope, DisplayScope},
     control_observation::selector::{
         AppSelector, DurableSelectorDraft, SelectorEnvelope, SelectorKind, SelectorRect,
         SelectorRedaction, WindowSelector,
@@ -23,10 +24,12 @@ use std::{
 pub const WINDOW_SCHEMA: &str = "rdog.window.v1";
 pub const WINDOW_COORDINATE_SPACE: &str = "os-logical";
 const DEFAULT_WINDOW_FIND_LIMIT: u16 = 20;
+pub const DEFAULT_WINDOW_RESIZE_TOLERANCE_PX: u32 = 2;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WindowFindRequest {
     pub query: WindowQuery,
+    pub display_scope: Option<DisplayScope>,
     pub limit: u16,
     pub include_state: bool,
     pub include_recipes: bool,
@@ -47,6 +50,15 @@ pub struct WindowCloseRequest {
     pub strategy: WindowCloseStrategy,
     pub allow_ambiguous: bool,
     pub select: Option<WindowSelectPolicy>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WindowResizeRequest {
+    pub target: WindowCommandTarget,
+    pub size: WindowResizeSize,
+    pub origin: WindowResizeOrigin,
+    pub guard: Option<DisplayScope>,
+    pub verify: WindowResizeVerify,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -80,6 +92,61 @@ pub enum WindowSelectPolicy {
     First,
 }
 
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Serialize)]
+pub struct WindowResizeSize {
+    pub width: u32,
+    pub height: u32,
+    pub unit: WindowResizeUnit,
+    #[serde(rename = "box")]
+    pub box_model: WindowResizeBox,
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum WindowResizeUnit {
+    OsLogical,
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WindowResizeBox {
+    Outer,
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum WindowResizeOrigin {
+    Keep,
+    Point { x: i32, y: i32 },
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub struct WindowResizeVerify {
+    pub tolerance_px: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct WindowResizeDelta {
+    pub x: i64,
+    pub y: i64,
+    pub width: i64,
+    pub height: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct WindowResizeVerifyReport {
+    pub status: String,
+    pub tolerance_px: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WindowResizeEvaluation {
+    pub report_status: String,
+    pub action_status: String,
+    pub error_code: Option<&'static str>,
+    pub clamp_reason: Option<String>,
+    pub delta: WindowResizeDelta,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct WindowFindResponse {
     pub kind: &'static str,
@@ -89,6 +156,8 @@ pub struct WindowFindResponse {
     pub capabilities: WindowCapabilities,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub observation: Option<ObservationHeader>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub display_scope: Option<serde_json::Value>,
     pub match_count: usize,
     pub returned_count: usize,
     pub snapshot_id: String,
@@ -119,6 +188,24 @@ pub struct WindowActionReport {
     pub termination_attempted: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub failed_step: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_code: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub before_rect: Option<AxRect>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub requested_size: Option<WindowResizeSize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub requested_rect: Option<AxRect>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub after_rect: Option<AxRect>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub delta: Option<WindowResizeDelta>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub verify: Option<WindowResizeVerifyReport>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub guard: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub clamp_reason: Option<String>,
     pub steps: Vec<WindowActionStepReport>,
 }
 
@@ -319,6 +406,30 @@ impl WindowSelectPolicy {
     }
 }
 
+impl WindowResizeUnit {
+    fn from_literal(input: &str) -> io::Result<Self> {
+        let value = parse_quoted_payload(input)?;
+        match value.as_str() {
+            "os-logical" => Ok(Self::OsLogical),
+            _ => Err(invalid_data(format!(
+                "@window-resize.size.unit 第一版只支持 \"os-logical\": {value}"
+            ))),
+        }
+    }
+}
+
+impl WindowResizeBox {
+    fn from_literal(input: &str) -> io::Result<Self> {
+        let value = parse_quoted_payload(input)?;
+        match value.as_str() {
+            "outer" => Ok(Self::Outer),
+            _ => Err(invalid_data(format!(
+                "@window-resize.size.box 第一版只支持 \"outer\": {value}"
+            ))),
+        }
+    }
+}
+
 impl WindowCapabilities {
     pub fn complete() -> Self {
         Self {
@@ -340,6 +451,98 @@ impl WindowCapabilities {
     }
 }
 
+pub(crate) fn requested_resize_rect(
+    before_rect: AxRect,
+    size: WindowResizeSize,
+    origin: WindowResizeOrigin,
+) -> AxRect {
+    let (x, y) = match origin {
+        WindowResizeOrigin::Keep => (before_rect.x, before_rect.y),
+        WindowResizeOrigin::Point { x, y } => (x, y),
+    };
+    AxRect {
+        x,
+        y,
+        width: size.width,
+        height: size.height,
+    }
+}
+
+pub(crate) fn evaluate_window_resize_verification(
+    before_rect: AxRect,
+    requested_rect: AxRect,
+    after_rect: AxRect,
+    verify_origin: bool,
+    tolerance_px: u32,
+) -> WindowResizeEvaluation {
+    let delta = window_resize_delta(requested_rect, after_rect);
+    let tolerance = i64::from(tolerance_px);
+    let size_within = delta.width.unsigned_abs() <= tolerance as u64
+        && delta.height.unsigned_abs() <= tolerance as u64;
+    let origin_within = !verify_origin
+        || (delta.x.unsigned_abs() <= tolerance as u64
+            && delta.y.unsigned_abs() <= tolerance as u64);
+
+    if size_within && origin_within {
+        let report_status = if delta.x == 0 && delta.y == 0 && delta.width == 0 && delta.height == 0
+        {
+            "ok"
+        } else {
+            "ok_with_delta"
+        };
+        return WindowResizeEvaluation {
+            report_status: report_status.to_owned(),
+            action_status: "ok".to_owned(),
+            error_code: None,
+            clamp_reason: None,
+            delta,
+        };
+    }
+
+    if resize_moved_toward_requested(before_rect.width, after_rect.width, requested_rect.width)
+        || resize_moved_toward_requested(
+            before_rect.height,
+            after_rect.height,
+            requested_rect.height,
+        )
+    {
+        return WindowResizeEvaluation {
+            report_status: "clamped".to_owned(),
+            action_status: "clamped".to_owned(),
+            error_code: Some("WINDOW_RESIZE_CLAMPED"),
+            clamp_reason: Some(
+                "after_rect_moved_toward_requested_but_stopped_outside_tolerance".to_owned(),
+            ),
+            delta,
+        };
+    }
+
+    WindowResizeEvaluation {
+        report_status: "failed".to_owned(),
+        action_status: "failed".to_owned(),
+        error_code: Some("WINDOW_RESIZE_VERIFY_FAILED"),
+        clamp_reason: None,
+        delta,
+    }
+}
+
+fn window_resize_delta(requested_rect: AxRect, after_rect: AxRect) -> WindowResizeDelta {
+    WindowResizeDelta {
+        x: i64::from(after_rect.x) - i64::from(requested_rect.x),
+        y: i64::from(after_rect.y) - i64::from(requested_rect.y),
+        width: i64::from(after_rect.width) - i64::from(requested_rect.width),
+        height: i64::from(after_rect.height) - i64::from(requested_rect.height),
+    }
+}
+
+fn resize_moved_toward_requested(before: u32, after: u32, requested: u32) -> bool {
+    match requested.cmp(&before) {
+        std::cmp::Ordering::Greater => after > before && after < requested,
+        std::cmp::Ordering::Less => after < before && after > requested,
+        std::cmp::Ordering::Equal => false,
+    }
+}
+
 impl WindowFindResponse {
     #[cfg(not(target_os = "macos"))]
     pub fn unsupported(platform: impl Into<String>) -> Self {
@@ -351,6 +554,7 @@ impl WindowFindResponse {
             status: "unsupported".to_owned(),
             capabilities: WindowCapabilities::unsupported(),
             observation: None,
+            display_scope: None,
             match_count: 0,
             returned_count: 0,
             snapshot_id: meta.snapshot_id,
@@ -382,6 +586,19 @@ impl WindowActionReport {
             process_scope: None,
             termination_attempted: None,
             failed_step: None,
+            error_code: Some(if action == "resize" {
+                "WINDOW_RESIZE_UNSUPPORTED"
+            } else {
+                "WINDOW_ACTION_UNSUPPORTED"
+            }),
+            before_rect: None,
+            requested_size: None,
+            requested_rect: None,
+            after_rect: None,
+            delta: None,
+            verify: None,
+            guard: None,
+            clamp_reason: None,
             steps: Vec::new(),
         }
     }
@@ -396,6 +613,7 @@ pub trait WindowBackend {
     fn find(&self, request: &WindowFindRequest) -> io::Result<WindowFindResponse>;
     fn activate(&self, request: &WindowActivateRequest) -> io::Result<WindowActionReport>;
     fn close(&self, request: &WindowCloseRequest) -> io::Result<WindowActionReport>;
+    fn resize(&self, request: &WindowResizeRequest) -> io::Result<WindowActionReport>;
 }
 
 #[derive(Debug, Copy, Clone, Default)]
@@ -412,6 +630,10 @@ impl WindowBackend for SystemWindowBackend {
 
     fn close(&self, request: &WindowCloseRequest) -> io::Result<WindowActionReport> {
         platform_close(request)
+    }
+
+    fn resize(&self, request: &WindowResizeRequest) -> io::Result<WindowActionReport> {
+        platform_resize(request)
     }
 }
 
@@ -431,6 +653,12 @@ pub fn execute_default_window_close(
     SystemWindowBackend.close(request)
 }
 
+pub fn execute_default_window_resize(
+    request: &WindowResizeRequest,
+) -> io::Result<WindowActionReport> {
+    SystemWindowBackend.resize(request)
+}
+
 pub fn resolve_default_window_target_rect(
     target: &WindowCommandTarget,
 ) -> io::Result<WindowResolvedTargetRect> {
@@ -447,6 +675,7 @@ pub fn parse_window_find_payload(input: &str) -> io::Result<WindowFindRequest> {
     let mut limit = None::<u16>;
     let mut include_state = None::<bool>;
     let mut include_recipes = None::<bool>;
+    let mut display_scope = None::<DisplayScope>;
     let mut query = WindowQuery::default();
 
     for field in split_object_fields(inner)? {
@@ -468,6 +697,17 @@ pub fn parse_window_find_payload(input: &str) -> io::Result<WindowFindRequest> {
                 "@window-find",
                 parse_bool(raw_value, "@window-find", "include_recipes")?,
             )?,
+            "scope" => assign_once(
+                &mut display_scope,
+                "scope",
+                "@window-find",
+                parse_display_scope(raw_value, "@window-find.scope")?,
+            )?,
+            "display_id" => {
+                return Err(invalid_data(
+                    "@window-find.display_id 不是请求字段;请使用 scope:{display:{id:\"...\"}}",
+                ))
+            }
             _ => parse_window_query_field(
                 "@window-find",
                 field_name.as_str(),
@@ -477,9 +717,12 @@ pub fn parse_window_find_payload(input: &str) -> io::Result<WindowFindRequest> {
         }
     }
 
-    query.validate_for_find()?;
+    if query.is_empty() && display_scope.is_none() {
+        query.validate_for_find()?;
+    }
     Ok(WindowFindRequest {
         query,
+        display_scope,
         limit: limit.unwrap_or(DEFAULT_WINDOW_FIND_LIMIT),
         include_state: include_state.unwrap_or(true),
         include_recipes: include_recipes.unwrap_or(true),
@@ -646,6 +889,80 @@ pub fn parse_window_close_payload(input: &str) -> io::Result<WindowCloseRequest>
     })
 }
 
+pub fn parse_window_resize_payload(input: &str) -> io::Result<WindowResizeRequest> {
+    let inner = object_inner(input, "@window-resize")?;
+    if inner.is_empty() {
+        return Err(invalid_data("@window-resize 对象 payload 不能为空"));
+    }
+
+    let mut target = None::<WindowCommandTarget>;
+    let mut size = None::<WindowResizeSize>;
+    let mut origin = None::<WindowResizeOrigin>;
+    let mut guard = None::<DisplayScope>;
+    let mut verify = None::<WindowResizeVerify>;
+
+    for field in split_object_fields(inner)? {
+        let (field_name, raw_value) = split_object_field(field)?;
+        let field_name = normalize_object_field_name(field_name)?;
+        let raw_value = raw_value.trim();
+
+        match field_name.as_str() {
+            "target" => assign_once(
+                &mut target,
+                "target",
+                "@window-resize",
+                parse_window_target_payload(raw_value, "@window-resize")?,
+            )?,
+            "size" => assign_once(
+                &mut size,
+                "size",
+                "@window-resize",
+                parse_window_resize_size(raw_value)?,
+            )?,
+            "origin" => assign_once(
+                &mut origin,
+                "origin",
+                "@window-resize",
+                parse_window_resize_origin(raw_value)?,
+            )?,
+            "guard" => assign_once(
+                &mut guard,
+                "guard",
+                "@window-resize",
+                parse_display_scope(raw_value, "@window-resize.guard")?,
+            )?,
+            "verify" => assign_once(
+                &mut verify,
+                "verify",
+                "@window-resize",
+                parse_window_resize_verify(raw_value)?,
+            )?,
+            "window_id" => {
+                return Err(invalid_data(
+                    "@window-resize.window_id 不是 canonical 请求字段;请使用 target:{window_id:\"...\"}",
+                ))
+            }
+            _ => {
+                return Err(invalid_data(format!(
+                    "@window-resize 对象 payload 包含未知字段: {field_name}"
+                )))
+            }
+        }
+    }
+
+    let target = required_field(target, "@window-resize", "target")?;
+    target.validate_for_execute("@window-resize")?;
+    Ok(WindowResizeRequest {
+        target,
+        size: required_field(size, "@window-resize", "size")?,
+        origin: origin.unwrap_or(WindowResizeOrigin::Keep),
+        guard,
+        verify: verify.unwrap_or(WindowResizeVerify {
+            tolerance_px: DEFAULT_WINDOW_RESIZE_TOLERANCE_PX,
+        }),
+    })
+}
+
 pub fn invalid_json_error(kind: &'static str, code: i32, error: impl Into<String>) -> io::Error {
     let json = json!({
         "kind": kind,
@@ -805,8 +1122,31 @@ fn parse_window_target_field(
             kind,
             parse_non_empty_string(&format!("{kind}.target.observation_id"), raw_value)?,
         ),
+        "query" => {
+            if !target.query.is_empty() {
+                return Err(invalid_data(format!("{kind}.target.query 不能重复定义")));
+            }
+            target.query = parse_window_query_payload(raw_value, &format!("{kind}.target.query"))?;
+            Ok(())
+        }
         _ => parse_window_query_field(kind, field_name, raw_value, &mut target.query),
     }
+}
+
+fn parse_window_query_payload(input: &str, kind: &str) -> io::Result<WindowQuery> {
+    let inner = object_inner(input, kind)?;
+    if inner.is_empty() {
+        return Err(invalid_data(format!("{kind} 不能为空对象")));
+    }
+
+    let mut query = WindowQuery::default();
+    for field in split_object_fields(inner)? {
+        let (field_name, raw_value) = split_object_field(field)?;
+        let field_name = normalize_object_field_name(field_name)?;
+        parse_window_query_field(kind, field_name.as_str(), raw_value.trim(), &mut query)?;
+    }
+    query.validate_for_execute(kind)?;
+    Ok(query)
 }
 
 fn parse_window_query_field(
@@ -853,6 +1193,153 @@ fn parse_window_query_field(
     }
 }
 
+fn parse_window_resize_size(input: &str) -> io::Result<WindowResizeSize> {
+    let inner = object_inner(input, "@window-resize.size")?;
+    if inner.is_empty() {
+        return Err(invalid_data("@window-resize.size 不能为空对象"));
+    }
+
+    let mut width = None::<u32>;
+    let mut height = None::<u32>;
+    let mut unit = None::<WindowResizeUnit>;
+    let mut box_model = None::<WindowResizeBox>;
+
+    for field in split_object_fields(inner)? {
+        let (field_name, raw_value) = split_object_field(field)?;
+        let field_name = normalize_object_field_name(field_name)?;
+        let raw_value = raw_value.trim();
+        match field_name.as_str() {
+            "width" => assign_once(
+                &mut width,
+                "width",
+                "@window-resize.size",
+                parse_positive_u32("@window-resize.size.width", raw_value)?,
+            )?,
+            "height" => assign_once(
+                &mut height,
+                "height",
+                "@window-resize.size",
+                parse_positive_u32("@window-resize.size.height", raw_value)?,
+            )?,
+            "unit" => assign_once(
+                &mut unit,
+                "unit",
+                "@window-resize.size",
+                WindowResizeUnit::from_literal(raw_value)?,
+            )?,
+            "box" => assign_once(
+                &mut box_model,
+                "box",
+                "@window-resize.size",
+                WindowResizeBox::from_literal(raw_value)?,
+            )?,
+            _ => {
+                return Err(invalid_data(format!(
+                    "@window-resize.size 不支持字段: {field_name}"
+                )))
+            }
+        }
+    }
+
+    Ok(WindowResizeSize {
+        width: required_field(width, "@window-resize.size", "width")?,
+        height: required_field(height, "@window-resize.size", "height")?,
+        unit: unit.unwrap_or(WindowResizeUnit::OsLogical),
+        box_model: box_model.unwrap_or(WindowResizeBox::Outer),
+    })
+}
+
+fn parse_window_resize_origin(input: &str) -> io::Result<WindowResizeOrigin> {
+    let trimmed = input.trim();
+    if trimmed.starts_with('"') {
+        let value = parse_quoted_payload(trimmed)?;
+        return match value.as_str() {
+            "keep" => Ok(WindowResizeOrigin::Keep),
+            _ => Err(invalid_data(format!(
+                "@window-resize.origin 只支持 \"keep\" 或 {{x,y}}: {value}"
+            ))),
+        };
+    }
+
+    let inner = object_inner(trimmed, "@window-resize.origin")?;
+    if inner.is_empty() {
+        return Err(invalid_data("@window-resize.origin 不能为空对象"));
+    }
+    let mut x = None::<i32>;
+    let mut y = None::<i32>;
+    for field in split_object_fields(inner)? {
+        let (field_name, raw_value) = split_object_field(field)?;
+        let field_name = normalize_object_field_name(field_name)?;
+        let raw_value = raw_value.trim();
+        match field_name.as_str() {
+            "x" => assign_once(
+                &mut x,
+                "x",
+                "@window-resize.origin",
+                parse_i32("@window-resize.origin.x", raw_value)?,
+            )?,
+            "y" => assign_once(
+                &mut y,
+                "y",
+                "@window-resize.origin",
+                parse_i32("@window-resize.origin.y", raw_value)?,
+            )?,
+            _ => {
+                return Err(invalid_data(format!(
+                    "@window-resize.origin 不支持字段: {field_name}"
+                )))
+            }
+        }
+    }
+    Ok(WindowResizeOrigin::Point {
+        x: required_field(x, "@window-resize.origin", "x")?,
+        y: required_field(y, "@window-resize.origin", "y")?,
+    })
+}
+
+fn parse_window_resize_verify(input: &str) -> io::Result<WindowResizeVerify> {
+    let trimmed = input.trim();
+    match trimmed.to_ascii_lowercase().as_str() {
+        "true" => {
+            return Ok(WindowResizeVerify {
+                tolerance_px: DEFAULT_WINDOW_RESIZE_TOLERANCE_PX,
+            })
+        }
+        "false" => {
+            return Err(invalid_data(
+                "@window-resize.verify:false 暂不支持;resize 必须执行后验验证",
+            ))
+        }
+        _ => {}
+    }
+
+    let inner = object_inner(trimmed, "@window-resize.verify")?;
+    if inner.is_empty() {
+        return Err(invalid_data("@window-resize.verify 不能为空对象"));
+    }
+    let mut tolerance_px = None::<u32>;
+    for field in split_object_fields(inner)? {
+        let (field_name, raw_value) = split_object_field(field)?;
+        let field_name = normalize_object_field_name(field_name)?;
+        match field_name.as_str() {
+            "tolerance_px" => assign_once(
+                &mut tolerance_px,
+                "tolerance_px",
+                "@window-resize.verify",
+                parse_u32("@window-resize.verify.tolerance_px", raw_value.trim())?,
+            )?,
+            _ => {
+                return Err(invalid_data(format!(
+                    "@window-resize.verify 不支持字段: {field_name}"
+                )))
+            }
+        }
+    }
+    Ok(WindowResizeVerify {
+        tolerance_px: tolerance_px.unwrap_or(DEFAULT_WINDOW_RESIZE_TOLERANCE_PX),
+    })
+}
+
 fn parse_non_empty_string(kind: &str, input: &str) -> io::Result<String> {
     let value = parse_quoted_payload(input)?;
     if value.is_empty() {
@@ -897,6 +1384,26 @@ fn parse_limit(input: &str) -> io::Result<u16> {
     Ok(value)
 }
 
+fn parse_u32(kind: &str, input: &str) -> io::Result<u32> {
+    input
+        .parse::<u32>()
+        .map_err(|_| invalid_data(format!("{kind} 必须是无符号整数: {input}")))
+}
+
+fn parse_positive_u32(kind: &str, input: &str) -> io::Result<u32> {
+    let value = parse_u32(kind, input)?;
+    if value == 0 {
+        return Err(invalid_data(format!("{kind} 必须大于 0")));
+    }
+    Ok(value)
+}
+
+fn parse_i32(kind: &str, input: &str) -> io::Result<i32> {
+    input
+        .parse::<i32>()
+        .map_err(|_| invalid_data(format!("{kind} 必须是 32 位整数: {input}")))
+}
+
 fn parse_pid(input: &str, kind: &str) -> io::Result<i32> {
     input
         .parse::<i32>()
@@ -911,6 +1418,10 @@ fn assign_once<T>(slot: &mut Option<T>, field_name: &str, kind: &str, value: T) 
     }
     *slot = Some(value);
     Ok(())
+}
+
+fn required_field<T>(value: Option<T>, kind: &str, field_name: &str) -> io::Result<T> {
+    value.ok_or_else(|| invalid_data(format!("{kind} 缺少 `{field_name}` 字段")))
 }
 
 fn invalid_data(message: impl Into<String>) -> io::Error {
@@ -972,6 +1483,16 @@ fn platform_close(request: &WindowCloseRequest) -> io::Result<WindowActionReport
 #[cfg(not(target_os = "macos"))]
 fn platform_close(_request: &WindowCloseRequest) -> io::Result<WindowActionReport> {
     Ok(WindowActionReport::unsupported("close", "unsupported"))
+}
+
+#[cfg(target_os = "macos")]
+fn platform_resize(request: &WindowResizeRequest) -> io::Result<WindowActionReport> {
+    macos::resize(request)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn platform_resize(_request: &WindowResizeRequest) -> io::Result<WindowActionReport> {
+    Ok(WindowActionReport::unsupported("resize", "unsupported"))
 }
 
 #[cfg(target_os = "macos")]
@@ -1042,6 +1563,144 @@ mod tests {
     }
 
     #[test]
+    fn parse_window_resize_should_accept_guard_and_verify_tolerance() {
+        let request = parse_window_resize_payload(
+            r#"{target:{query:{app_contains:"Chrome",title_contains:"Docs"}},size:{width:1200,height:800,unit:"os-logical",box:"outer"},origin:{x:100,y:120},guard:{display:{id:"d2"}},verify:{tolerance_px:3}}"#,
+        )
+        .unwrap();
+        assert_eq!(request.target.query.app_contains.as_deref(), Some("Chrome"));
+        assert_eq!(request.target.query.title_contains.as_deref(), Some("Docs"));
+        assert_eq!(request.size.width, 1200);
+        assert_eq!(request.size.height, 800);
+        assert_eq!(request.size.unit, WindowResizeUnit::OsLogical);
+        assert_eq!(request.size.box_model, WindowResizeBox::Outer);
+        assert_eq!(request.origin, WindowResizeOrigin::Point { x: 100, y: 120 });
+        assert_eq!(request.verify.tolerance_px, 3);
+        assert!(request.guard.is_some());
+    }
+
+    #[test]
+    fn parse_window_resize_should_default_origin_and_verify() {
+        let request = parse_window_resize_payload(
+            r#"{target:{window_id:"pid:1/window:0"},size:{width:900,height:700}}"#,
+        )
+        .unwrap();
+        assert_eq!(request.target.window_id.as_deref(), Some("pid:1/window:0"));
+        assert_eq!(request.origin, WindowResizeOrigin::Keep);
+        assert_eq!(request.size.unit, WindowResizeUnit::OsLogical);
+        assert_eq!(request.size.box_model, WindowResizeBox::Outer);
+        assert_eq!(
+            request.verify.tolerance_px,
+            DEFAULT_WINDOW_RESIZE_TOLERANCE_PX
+        );
+    }
+
+    #[test]
+    fn parse_window_resize_should_reject_non_canonical_or_unsafe_payloads() {
+        assert!(parse_window_resize_payload(
+            r#"{window_id:"pid:1/window:0",size:{width:900,height:700}}"#
+        )
+        .is_err());
+        assert!(parse_window_resize_payload(
+            r#"{target:{window_id:"pid:1/window:0"},size:{width:0,height:700}}"#
+        )
+        .is_err());
+        assert!(parse_window_resize_payload(
+            r#"{target:{window_id:"pid:1/window:0"},size:{width:900,height:700,unit:"device-pixel"}}"#
+        )
+        .is_err());
+        assert!(parse_window_resize_payload(
+            r#"{target:{window_id:"pid:1/window:0"},size:{width:900,height:700,box:"inner"}}"#
+        )
+        .is_err());
+        assert!(parse_window_resize_payload(
+            r#"{target:{window_id:"pid:1/window:0"},size:{width:900,height:700},verify:false}"#
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn window_resize_verify_should_accept_ok_with_delta() {
+        let before = AxRect {
+            x: 10,
+            y: 20,
+            width: 1000,
+            height: 700,
+        };
+        let requested = AxRect {
+            x: 10,
+            y: 20,
+            width: 1200,
+            height: 800,
+        };
+        let after = AxRect {
+            x: 10,
+            y: 20,
+            width: 1199,
+            height: 802,
+        };
+
+        let evaluation = evaluate_window_resize_verification(before, requested, after, false, 2);
+
+        assert_eq!(evaluation.report_status, "ok_with_delta");
+        assert_eq!(evaluation.action_status, "ok");
+        assert_eq!(evaluation.error_code, None);
+        assert_eq!(evaluation.delta.width, -1);
+        assert_eq!(evaluation.delta.height, 2);
+    }
+
+    #[test]
+    fn window_resize_verify_should_classify_clamped_when_size_moves_toward_request() {
+        let before = AxRect {
+            x: 10,
+            y: 20,
+            width: 1000,
+            height: 700,
+        };
+        let requested = AxRect {
+            x: 10,
+            y: 20,
+            width: 1200,
+            height: 900,
+        };
+        let after = AxRect {
+            x: 10,
+            y: 20,
+            width: 1120,
+            height: 850,
+        };
+
+        let evaluation = evaluate_window_resize_verification(before, requested, after, false, 2);
+
+        assert_eq!(evaluation.report_status, "clamped");
+        assert_eq!(evaluation.action_status, "clamped");
+        assert_eq!(evaluation.error_code, Some("WINDOW_RESIZE_CLAMPED"));
+        assert!(evaluation.clamp_reason.is_some());
+    }
+
+    #[test]
+    fn window_resize_verify_should_fail_when_size_does_not_change() {
+        let before = AxRect {
+            x: 10,
+            y: 20,
+            width: 1000,
+            height: 700,
+        };
+        let requested = AxRect {
+            x: 10,
+            y: 20,
+            width: 1200,
+            height: 900,
+        };
+
+        let evaluation = evaluate_window_resize_verification(before, requested, before, false, 2);
+
+        assert_eq!(evaluation.report_status, "failed");
+        assert_eq!(evaluation.action_status, "failed");
+        assert_eq!(evaluation.error_code, Some("WINDOW_RESIZE_VERIFY_FAILED"));
+    }
+
+    #[test]
     fn parse_window_payloads_should_reject_unknown_or_duplicate_fields() {
         assert!(parse_window_find_payload(r#"{app:"Terminal",app:"Finder"}"#).is_err());
         assert!(parse_window_activate_payload(r#"{window_id:"x",unknown:"field"}"#).is_err());
@@ -1108,6 +1767,7 @@ mod tests {
             returned_count: 1,
             snapshot_id: "window-snapshot-1".to_owned(),
             observed_at_unix_ms: 1,
+            display_scope: None,
             matches,
         };
         let json = response.to_value_json().unwrap();

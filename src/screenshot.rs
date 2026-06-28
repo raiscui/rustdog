@@ -13,6 +13,7 @@ use std::{
 
 use crate::{
     control_ax::{capture_default_ax_snapshot, current_ax_platform, AxSnapshot, AxTreeRequest},
+    control_display_scope::{DisplayRect, DisplaySummary, DISPLAY_ID_STABILITY_SESSION},
     control_frames::{ControlExecutionOutcome, ControlFrame, SaveFileFrame},
     control_protocol::{
         ScreenshotCoordinateSpace, ScreenshotDisplaySelector, ScreenshotLayout, ScreenshotRequest,
@@ -489,8 +490,13 @@ struct ScreenshotTransforms {
 #[derive(Serialize)]
 struct DisplayManifest {
     id: String,
+    display_id: String,
+    display_id_stability: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stable_key: Option<String>,
     name: String,
     is_primary: bool,
+    primary: bool,
     backend: &'static str,
     os_rect: LogicalRect,
     image_rect: LogicalRect,
@@ -572,9 +578,17 @@ fn build_screenshot_bundle_with_ax(
             || display.image.height() != image_rect.height;
 
         display_manifests.push(DisplayManifest {
-            id: display.metadata.id,
+            id: display.metadata.id.clone(),
+            display_id: display.metadata.id.clone(),
+            display_id_stability: DISPLAY_ID_STABILITY_SESSION,
+            stable_key: Some(format!(
+                "{}:{}",
+                display.metadata.backend.as_str(),
+                display.metadata.id
+            )),
             name: display.metadata.name,
             is_primary: display.metadata.is_primary,
+            primary: display.metadata.is_primary,
             backend: display.metadata.backend.as_str(),
             os_rect: display.metadata.os_rect,
             image_rect,
@@ -618,6 +632,47 @@ fn build_screenshot_bundle_with_ax(
     })
 }
 
+pub fn current_display_summaries() -> io::Result<Vec<DisplaySummary>> {
+    let displays = capture_all_display_images()?;
+    validate_captured_displays(&displays)?;
+    let virtual_bounds =
+        build_virtual_bounds(displays.iter().map(|display| display.metadata.os_rect))?;
+    displays
+        .into_iter()
+        .map(|display| {
+            let image_rect = os_rect_to_image_rect(display.metadata.os_rect, virtual_bounds)?;
+            Ok(display_summary_from_metadata(&display.metadata, image_rect))
+        })
+        .collect()
+}
+
+fn display_summary_from_metadata(
+    metadata: &CapturedDisplayMetadata,
+    image_rect: LogicalRect,
+) -> DisplaySummary {
+    DisplaySummary {
+        display_id: metadata.id.clone(),
+        stable_key: Some(format!("{}:{}", metadata.backend.as_str(), metadata.id)),
+        primary: metadata.is_primary,
+        name: metadata.name.clone(),
+        os_rect: DisplayRect {
+            x: metadata.os_rect.x,
+            y: metadata.os_rect.y,
+            width: metadata.os_rect.width,
+            height: metadata.os_rect.height,
+        },
+        image_rect: DisplayRect {
+            x: image_rect.x,
+            y: image_rect.y,
+            width: image_rect.width,
+            height: image_rect.height,
+        },
+        scale_factor: metadata.scale_factor,
+        rotation: metadata.rotation,
+        display_id_stability: DISPLAY_ID_STABILITY_SESSION,
+    }
+}
+
 fn reject_stale_composite_capture(displays: &[CapturedDisplay]) -> io::Result<()> {
     let fingerprint = composite_capture_fingerprint(displays);
     let cache = LAST_COMPOSITE_FINGERPRINT.get_or_init(|| Mutex::new(None));
@@ -657,16 +712,13 @@ fn reject_stale_composite_fingerprint(
         }
 
         // 短间隔 + 不同 hash → 屏确实变了,放行
-        if prev.display_fingerprints
-            != last.as_ref().expect("just set above").display_fingerprints
+        if prev.display_fingerprints != last.as_ref().expect("just set above").display_fingerprints
         {
             return Ok(());
         }
 
         // 短间隔 + 同 hash → 才是真正可疑的 stale
-        let payload = stale_screenshot_error_payload(
-            last.as_ref().expect("just set above"),
-        )?;
+        let payload = stale_screenshot_error_payload(last.as_ref().expect("just set above"))?;
         return Err(io::Error::other(payload));
     }
 

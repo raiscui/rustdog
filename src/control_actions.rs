@@ -21,6 +21,7 @@ use crate::{
     control_web::{build_default_web_act_response_json, build_default_web_find_response_json},
     control_window::{
         execute_default_window_activate, execute_default_window_close, execute_default_window_find,
+        execute_default_window_resize,
     },
 };
 use enigo::{Direction, Enigo, Key, Keyboard, Settings};
@@ -148,6 +149,7 @@ impl ControlActionExecutor for SystemControlActionExecutor {
             ControlCommand::WindowFind(request) => execute_window_find(request),
             ControlCommand::WindowActivate(request) => execute_window_activate(request),
             ControlCommand::WindowClose(request) => execute_window_close(request),
+            ControlCommand::WindowResize(request) => execute_window_resize(request),
             ControlCommand::WebFind(request) => execute_web_find(request),
             ControlCommand::WebAct(request) => execute_web_act(request),
             ControlCommand::GuiBench(request) => execute_gui_bench(request),
@@ -638,6 +640,18 @@ fn execute_window_close(
     request: &crate::control_window::WindowCloseRequest,
 ) -> io::Result<ActionExecutionResult> {
     let response = execute_default_window_close(request)?;
+    Ok(ActionExecutionResult {
+        exit_code: 0,
+        stdout: Vec::new(),
+        stderr: Vec::new(),
+        response_value_json: Some(response.to_value_json()?),
+    })
+}
+
+fn execute_window_resize(
+    request: &crate::control_window::WindowResizeRequest,
+) -> io::Result<ActionExecutionResult> {
+    let response = execute_default_window_resize(request)?;
     Ok(ActionExecutionResult {
         exit_code: 0,
         stdout: Vec::new(),

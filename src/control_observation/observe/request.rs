@@ -3,6 +3,7 @@ use crate::{
         parse_ax_depth, parse_ax_max_elements, parse_ax_mode_payload, parse_bool_literal, AxMode,
         AxWindow,
     },
+    control_display_scope::{parse_display_scope, DisplayScope},
     control_protocol::{
         normalize_object_field_name, object_inner, parse_quoted_payload, split_object_field,
         split_object_fields,
@@ -79,6 +80,7 @@ impl ObserveTarget {
 pub struct ObserveRequest {
     pub mode: ObserveMode,
     pub target: Option<ObserveTarget>,
+    pub display_scope: Option<DisplayScope>,
     pub include_screenshot: bool,
     pub include_ax: bool,
     pub ax_required: bool,
@@ -99,6 +101,7 @@ impl ObserveRequest {
         Self {
             mode,
             target: None,
+            display_scope: None,
             include_screenshot: matches!(mode, ObserveMode::Hybrid | ObserveMode::Visual),
             include_ax: matches!(mode, ObserveMode::Hybrid | ObserveMode::Ax),
             ax_required: false,
@@ -133,6 +136,7 @@ pub fn parse_observe_payload(input: &str) -> io::Result<ObserveRequest> {
 
     let mut mode = None::<ObserveMode>;
     let mut target = None::<ObserveTarget>;
+    let mut display_scope = None::<DisplayScope>;
     let mut include_screenshot = None::<bool>;
     let mut include_ax = None::<bool>;
     let mut ax_required = None::<bool>;
@@ -163,6 +167,17 @@ pub fn parse_observe_payload(input: &str) -> io::Result<ObserveRequest> {
                 "@observe",
                 parse_observe_target(raw_value)?,
             )?,
+            "scope" => assign_once(
+                &mut display_scope,
+                "scope",
+                "@observe",
+                parse_display_scope(raw_value, "@observe.scope")?,
+            )?,
+            "display_id" => {
+                return Err(invalid_data(
+                    "@observe.display_id 不是请求字段;请使用 scope:{display:{id:\"...\"}}",
+                ))
+            }
             "include_screenshot" => assign_once(
                 &mut include_screenshot,
                 "include_screenshot",
@@ -241,6 +256,7 @@ pub fn parse_observe_payload(input: &str) -> io::Result<ObserveRequest> {
     let mode = mode.unwrap_or(ObserveMode::Hybrid);
     let mut request = ObserveRequest::for_mode(mode);
     request.target = target;
+    request.display_scope = display_scope;
     if let Some(ax_mode) = ax_mode {
         let preset = ax_mode.preset();
         request.ax_mode = ax_mode;

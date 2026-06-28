@@ -37,7 +37,8 @@ use crate::control_web::{
 };
 use crate::control_window::{
     parse_window_activate_payload, parse_window_close_payload, parse_window_find_payload,
-    WindowActivateRequest, WindowCloseRequest, WindowFindRequest,
+    parse_window_resize_payload, WindowActivateRequest, WindowCloseRequest, WindowFindRequest,
+    WindowResizeRequest,
 };
 
 /// 行级控制协议的解析结果。
@@ -81,6 +82,7 @@ pub enum ControlCommand {
     WindowFind(WindowFindRequest),
     WindowActivate(WindowActivateRequest),
     WindowClose(WindowCloseRequest),
+    WindowResize(WindowResizeRequest),
     WebFind(WebFindRequest),
     WebAct(WebActRequest),
     GuiBench(GuiBenchRequest),
@@ -397,6 +399,7 @@ pub fn parse_control_line(line: &str) -> io::Result<ControlParseResult> {
             ControlCommand::WindowActivate(parse_window_activate_payload(payload)?)
         }
         "window-close" => ControlCommand::WindowClose(parse_window_close_payload(payload)?),
+        "window-resize" => ControlCommand::WindowResize(parse_window_resize_payload(payload)?),
         "web-find" => ControlCommand::WebFind(parse_web_find_payload(payload)?),
         "web-act" => ControlCommand::WebAct(parse_web_act_payload(payload)?),
         "gui-bench" => ControlCommand::GuiBench(parse_gui_bench_payload(payload)?),

@@ -3,11 +3,16 @@ use crate::{
         capture_current_ax_subtree, capture_default_ax_snapshot, AxCapturedSubtree, AxElement,
         AxRect, AxSnapshot, AxTreeRequest, AxWindow,
     },
+    control_display_scope::{
+        display_intersects_rect, display_scope_report, parse_display_scope, resolve_display_scope,
+        resolve_observation_window_ref, DisplayRect, DisplayScope, DisplaySelector,
+    },
     control_observation::resolve_observation_ref,
     control_protocol::{
         normalize_object_field_name, object_inner, parse_quoted_payload, split_object_field,
         split_object_fields,
     },
+    screenshot::current_display_summaries,
 };
 use serde::Serialize;
 use std::{borrow::Cow, collections::HashSet, io};
@@ -41,6 +46,7 @@ const BROWSER_PROCESS_NAMES: &[&str] = &[
 pub struct WebFindRequest {
     pub target: WebFindTarget,
     pub query: WebFindQuery,
+    pub display_scope: Option<DisplayScope>,
     pub roles: Vec<String>,
     pub limit: u16,
     pub depth: u8,
@@ -123,6 +129,8 @@ struct WebFindResponse {
     target: WebFindTargetReport,
     #[serde(skip_serializing_if = "Option::is_none")]
     observation: Option<crate::control_observation::ObservationHeader>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    display_scope: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     window: Option<WebFindWindow>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -262,6 +270,7 @@ where
             Some("AX snapshot 不可用,无法执行 @web-find".to_owned()),
             None,
             None,
+            None,
             Vec::new(),
             trace,
             0,
@@ -276,6 +285,7 @@ where
         matches,
         match_count,
         truncated,
+        display_scope,
     } = resolution
     else {
         match resolution {
@@ -286,6 +296,7 @@ where
                     "not_found",
                     Some("BROWSER_WINDOW_NOT_FOUND"),
                     Some(message),
+                    None,
                     None,
                     None,
                     Vec::new(),
@@ -303,6 +314,7 @@ where
                     Some(message),
                     None,
                     None,
+                    None,
                     Vec::new(),
                     trace,
                     0,
@@ -318,6 +330,23 @@ where
                     Some(message),
                     None,
                     None,
+                    None,
+                    Vec::new(),
+                    trace,
+                    0,
+                    snapshot.truncated,
+                )
+            }
+            WebMatchResolution::DisplayScopeInvalid(message) => {
+                return response_with_status(
+                    &snapshot,
+                    request,
+                    "blocked",
+                    Some("DISPLAY_SCOPE_INVALID"),
+                    Some(message),
+                    None,
+                    None,
+                    None,
                     Vec::new(),
                     trace,
                     0,
@@ -331,6 +360,7 @@ where
                     "not_found",
                     Some("AX_WEB_AREA_NOT_FOUND"),
                     Some("目标浏览器窗口里没有找到 AXWebArea".to_owned()),
+                    None,
                     Some(selected_window),
                     None,
                     Vec::new(),
@@ -368,6 +398,7 @@ where
         status,
         error_code,
         message,
+        display_scope,
         Some(selected_window),
         Some(web_area.as_ref()),
         matches,
@@ -384,10 +415,12 @@ enum WebMatchResolution<'a> {
         matches: Vec<WebFindMatch>,
         match_count: usize,
         truncated: bool,
+        display_scope: Option<serde_json::Value>,
     },
     BrowserWindowNotFound(String),
     BrowserWindowAmbiguous(String),
     BrowserWindowRefInvalid(String),
+    DisplayScopeInvalid(String),
     WebAreaNotFound {
         selected_window: &'a AxWindow,
     },
@@ -402,8 +435,11 @@ fn resolve_web_matches<'a, F>(
 where
     F: FnMut(&str, &AxTreeRequest) -> io::Result<Option<AxCapturedSubtree>>,
 {
-    let selected_window = match select_target_window(snapshot, request, trace) {
-        WindowSelection::Selected(window) => window,
+    let (selected_window, display_scope) = match select_target_window(snapshot, request, trace) {
+        WindowSelection::Selected {
+            window,
+            display_scope,
+        } => (window, display_scope),
         WindowSelection::NotFound(message) => {
             return WebMatchResolution::BrowserWindowNotFound(message);
         }
@@ -412,6 +448,9 @@ where
         }
         WindowSelection::InvalidRef(message) => {
             return WebMatchResolution::BrowserWindowRefInvalid(message);
+        }
+        WindowSelection::DisplayScopeInvalid(message) => {
+            return WebMatchResolution::DisplayScopeInvalid(message);
         }
     };
 
@@ -455,6 +494,7 @@ where
                     || refreshed_count > refreshed_matches.len(),
                 matches: refreshed_matches,
                 match_count: refreshed_count,
+                display_scope,
             };
         }
     }
@@ -465,6 +505,7 @@ where
         truncated: snapshot.truncated || match_count > matches.len(),
         matches,
         match_count,
+        display_scope,
     }
 }
 
@@ -528,6 +569,7 @@ fn response_with_status(
     status: &'static str,
     error_code: Option<&'static str>,
     message: Option<String>,
+    display_scope: Option<serde_json::Value>,
     window: Option<&AxWindow>,
     web_area: Option<&AxElement>,
     matches: Vec<WebFindMatch>,
@@ -554,6 +596,7 @@ fn response_with_status(
             window_title_contains: request.target.window_title_contains.clone(),
         },
         observation: snapshot.observation.clone(),
+        display_scope,
         window: window.map(web_find_window),
         web_area: web_area.map(web_find_area),
         error_code,
@@ -580,10 +623,14 @@ fn trace_step(
 }
 
 enum WindowSelection<'a> {
-    Selected(&'a AxWindow),
+    Selected {
+        window: &'a AxWindow,
+        display_scope: Option<serde_json::Value>,
+    },
     NotFound(String),
     Ambiguous(String),
     InvalidRef(String),
+    DisplayScopeInvalid(String),
 }
 
 fn select_target_window<'a>(
@@ -595,11 +642,46 @@ fn select_target_window<'a>(
         Ok(window_id) => window_id,
         Err(message) => return WindowSelection::InvalidRef(message),
     };
-    let candidates = snapshot
+    let mut candidates = snapshot
         .windows
         .iter()
         .filter(|window| matches_web_target(window, &request.target, explicit_window_id.as_deref()))
         .collect::<Vec<_>>();
+    let before_display_scope = candidates.len();
+    let mut display_scope = None;
+    if let Some(scope) = request.display_scope.as_ref() {
+        let displays = match current_display_summaries() {
+            Ok(displays) => displays,
+            Err(err) => return WindowSelection::DisplayScopeInvalid(err.to_string()),
+        };
+        let resolution = match resolve_display_scope(scope, &displays, |selector| {
+            web_window_rect_for_display_selector(snapshot, selector)
+        }) {
+            Ok(resolution) => resolution,
+            Err(err) => return WindowSelection::DisplayScopeInvalid(err.to_string()),
+        };
+        candidates.retain(|window| {
+            window
+                .rect
+                .map(DisplayRect::from)
+                .map(|rect| display_intersects_rect(&resolution.resolved, rect))
+                .unwrap_or(false)
+        });
+        trace.push(trace_step(
+            "display-scope",
+            "applied",
+            Some(format!(
+                "resolved_display_id={},matched_before_filter={},matched_after_filter={}",
+                resolution.resolved.display_id,
+                before_display_scope,
+                candidates.len()
+            )),
+        ));
+        let mut report = display_scope_report(&resolution);
+        report["matched_before_filter"] = serde_json::json!(before_display_scope);
+        report["matched_after_filter"] = serde_json::json!(candidates.len());
+        display_scope = Some(report);
+    }
 
     if candidates.is_empty() {
         if let Some(window_id) = explicit_window_id.as_deref() {
@@ -634,7 +716,10 @@ fn select_target_window<'a>(
                 )),
             ));
         }
-        return WindowSelection::Selected(window);
+        return WindowSelection::Selected {
+            window,
+            display_scope,
+        };
     }
 
     let focused = candidates
@@ -649,7 +734,10 @@ fn select_target_window<'a>(
                 "ok",
                 Some(window.id.clone()),
             ));
-            WindowSelection::Selected(window)
+            WindowSelection::Selected {
+                window,
+                display_scope,
+            }
         }
         [] if candidates.len() == 1 => {
             let window = candidates[0];
@@ -658,7 +746,10 @@ fn select_target_window<'a>(
                 "ok",
                 Some(window.id.clone()),
             ));
-            WindowSelection::Selected(window)
+            WindowSelection::Selected {
+                window,
+                display_scope,
+            }
         }
         [] => {
             trace.push(trace_step(
@@ -680,6 +771,32 @@ fn select_target_window<'a>(
             WindowSelection::Ambiguous(format!("找到 {} 个 focused browser 窗口", focused.len()))
         }
     }
+}
+
+fn web_window_rect_for_display_selector(
+    snapshot: &AxSnapshot,
+    selector: &DisplaySelector,
+) -> io::Result<Option<DisplayRect>> {
+    web_window_rect_for_display_selector_from_windows(&snapshot.windows, selector)
+}
+
+fn web_window_rect_for_display_selector_from_windows(
+    windows: &[AxWindow],
+    selector: &DisplaySelector,
+) -> io::Result<Option<DisplayRect>> {
+    let window_id = match selector {
+        DisplaySelector::WindowId(window_id) => window_id.clone(),
+        DisplaySelector::WindowRef {
+            observation_id,
+            ref_id,
+        } => resolve_observation_window_ref(observation_id, ref_id)?.window_id,
+        _ => return Ok(None),
+    };
+    Ok(windows
+        .iter()
+        .find(|window| window.id == window_id)
+        .and_then(|window| window.rect)
+        .map(DisplayRect::from))
 }
 
 fn matches_web_target(

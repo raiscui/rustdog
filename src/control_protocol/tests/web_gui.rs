@@ -31,6 +31,7 @@ fn parse_should_support_web_find_command() {
                 query: WebFindQuery {
                     text: "首页".to_owned(),
                 },
+                display_scope: None,
                 roles: vec!["AXLink".to_owned(), "AXButton".to_owned()],
                 limit: 10,
                 depth: 8,
@@ -121,6 +122,7 @@ fn parse_should_support_web_act_command() {
             query: WebFindQuery {
                 text: "首页".to_owned(),
             },
+            display_scope: None,
             roles: vec!["AXLink".to_owned()],
             limit: 1,
             depth: 8,

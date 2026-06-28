@@ -1,10 +1,11 @@
 use super::request::{
     validate_mouse_move_shape, validate_wheel_shape, ClickRequest, DragRequest, MouseAnchor,
-    MouseButtonMode, MouseButtonName, MouseButtonRequest, MouseCoordinateSpace, MouseEndpoint,
-    MouseMoveRequest, MousePoint, MouseRefTarget, MouseSelectorTarget, WheelRequest,
+    MouseButtonMode, MouseButtonName, MouseButtonRequest, MouseCoordinateSpace, MouseDisplayGuard,
+    MouseEndpoint, MouseMoveRequest, MousePoint, MouseRefTarget, MouseSelectorTarget, WheelRequest,
     DEFAULT_MOUSE_CLICK_HOLD_MS, DEFAULT_MOUSE_CLICK_INTERVAL_MS, DEFAULT_MOUSE_DRAG_DURATION_MS,
     DEFAULT_MOUSE_DRAG_STEPS, MAX_MOUSE_CLICK_COUNT, MAX_MOUSE_DRAG_STEPS,
 };
+use crate::control_display_scope::parse_display_scope;
 use crate::control_observation::SelectorRefindPolicy;
 use crate::control_protocol::{
     normalize_object_field_name, object_inner, parse_quoted_payload, split_object_field,
@@ -23,6 +24,7 @@ pub fn parse_mouse_move_payload(input: &str) -> io::Result<MouseMoveRequest> {
     let mut dx = None::<i32>;
     let mut dy = None::<i32>;
     let mut target = None::<MouseEndpoint>;
+    let mut guard = None::<MouseDisplayGuard>;
     let mut coordinate_space = None::<MouseCoordinateSpace>;
 
     for field in split_object_fields(inner)? {
@@ -51,6 +53,12 @@ pub fn parse_mouse_move_payload(input: &str) -> io::Result<MouseMoveRequest> {
                 "@mouse-move",
                 parse_mouse_endpoint(raw_value, "@mouse-move.target")?,
             )?,
+            "guard" => assign_once(
+                &mut guard,
+                "guard",
+                "@mouse-move",
+                parse_mouse_display_guard(raw_value, "@mouse-move.guard")?,
+            )?,
             "coordinate_space" => assign_once(
                 &mut coordinate_space,
                 "coordinate_space",
@@ -71,6 +79,7 @@ pub fn parse_mouse_move_payload(input: &str) -> io::Result<MouseMoveRequest> {
         dx,
         dy,
         target,
+        guard,
         coordinate_space: coordinate_space.unwrap_or(MouseCoordinateSpace::OsLogical),
     };
     validate_mouse_move_shape(&request, io::ErrorKind::InvalidData)?;
@@ -111,6 +120,11 @@ pub fn parse_mouse_button_payload(input: &str) -> io::Result<MouseButtonRequest>
                 "@mouse-button",
                 parse_u64_field("hold_ms", raw_value)?,
             )?,
+            "guard" => {
+                return Err(invalid_data(
+                    "@mouse-button 不支持 guard:{display:{...}},因为它没有坐标 target",
+                ))
+            }
             _ => {
                 return Err(invalid_data(format!(
                     "@mouse-button 对象 payload 包含未知字段: {field_name}"
@@ -135,6 +149,7 @@ pub fn parse_click_payload(input: &str) -> io::Result<ClickRequest> {
     let mut x = None::<i32>;
     let mut y = None::<i32>;
     let mut target = None::<MouseEndpoint>;
+    let mut guard = None::<MouseDisplayGuard>;
     let mut button = None::<MouseButtonName>;
     let mut count = None::<u8>;
     let mut hold_ms = None::<u64>;
@@ -154,6 +169,12 @@ pub fn parse_click_payload(input: &str) -> io::Result<ClickRequest> {
                 "target",
                 "@click",
                 parse_mouse_endpoint(raw_value, "@click.target")?,
+            )?,
+            "guard" => assign_once(
+                &mut guard,
+                "guard",
+                "@click",
+                parse_mouse_display_guard(raw_value, "@click.guard")?,
             )?,
             "button" => assign_once(
                 &mut button,
@@ -193,6 +214,7 @@ pub fn parse_click_payload(input: &str) -> io::Result<ClickRequest> {
         x,
         y,
         target,
+        guard,
         button: button.unwrap_or(MouseButtonName::Left),
         count: count.unwrap_or(1),
         hold_ms: hold_ms.unwrap_or(DEFAULT_MOUSE_CLICK_HOLD_MS),
@@ -209,6 +231,7 @@ pub fn parse_drag_payload(input: &str) -> io::Result<DragRequest> {
 
     let mut from = None::<MouseEndpoint>;
     let mut to = None::<MouseEndpoint>;
+    let mut guard = None::<MouseDisplayGuard>;
     let mut button = None::<MouseButtonName>;
     let mut duration_ms = None::<u64>;
     let mut steps = None::<u16>;
@@ -231,6 +254,12 @@ pub fn parse_drag_payload(input: &str) -> io::Result<DragRequest> {
                 "to",
                 "@drag",
                 parse_mouse_endpoint(raw_value, "@drag.to")?,
+            )?,
+            "guard" => assign_once(
+                &mut guard,
+                "guard",
+                "@drag",
+                parse_mouse_display_guard(raw_value, "@drag.guard")?,
             )?,
             "button" => assign_once(
                 &mut button,
@@ -262,6 +291,7 @@ pub fn parse_drag_payload(input: &str) -> io::Result<DragRequest> {
     Ok(DragRequest {
         from: required_field(from, "@drag", "from")?,
         to: required_field(to, "@drag", "to")?,
+        guard,
         button: button.unwrap_or(MouseButtonName::Left),
         duration_ms: duration_ms.unwrap_or(DEFAULT_MOUSE_DRAG_DURATION_MS),
         steps: steps.unwrap_or(DEFAULT_MOUSE_DRAG_STEPS),
@@ -278,6 +308,7 @@ pub fn parse_wheel_payload(input: &str) -> io::Result<WheelRequest> {
     let mut x = None::<i32>;
     let mut y = None::<i32>;
     let mut target = None::<MouseEndpoint>;
+    let mut guard = None::<MouseDisplayGuard>;
     let mut delta_x = None::<i32>;
     let mut delta_y = None::<i32>;
     let mut coordinate_space = None::<MouseCoordinateSpace>;
@@ -295,6 +326,12 @@ pub fn parse_wheel_payload(input: &str) -> io::Result<WheelRequest> {
                 "target",
                 "@wheel",
                 parse_mouse_endpoint(raw_value, "@wheel.target")?,
+            )?,
+            "guard" => assign_once(
+                &mut guard,
+                "guard",
+                "@wheel",
+                parse_mouse_display_guard(raw_value, "@wheel.guard")?,
             )?,
             "delta_x" => assign_once(
                 &mut delta_x,
@@ -326,12 +363,20 @@ pub fn parse_wheel_payload(input: &str) -> io::Result<WheelRequest> {
         x,
         y,
         target,
+        guard,
         delta_x: delta_x.unwrap_or(0),
         delta_y: delta_y.unwrap_or(0),
         coordinate_space: coordinate_space.unwrap_or(MouseCoordinateSpace::OsLogical),
     };
     validate_wheel_shape(&request, io::ErrorKind::InvalidData)?;
     Ok(request)
+}
+
+fn parse_mouse_display_guard(input: &str, kind: &str) -> io::Result<MouseDisplayGuard> {
+    let scope = parse_display_scope(input, kind)?;
+    Ok(MouseDisplayGuard {
+        display: scope.display,
+    })
 }
 
 fn parse_mouse_endpoint(input: &str, kind: &str) -> io::Result<MouseEndpoint> {

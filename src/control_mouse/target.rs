@@ -1,15 +1,20 @@
 use super::request::{
-    ClickRequest, DragRequest, MouseAnchor, MouseCoordinateSpace, MouseEndpoint, MouseMoveRequest,
-    MousePoint, MouseRefTarget, MouseSelectorTarget, WheelRequest,
+    ClickRequest, DragRequest, MouseAnchor, MouseCoordinateSpace, MouseDisplayGuard, MouseEndpoint,
+    MouseMoveRequest, MousePoint, MouseRefTarget, MouseSelectorTarget, WheelRequest,
 };
 use crate::{
     control_ax::{resolve_current_ax_target_rect, AxRect, AxTarget},
+    control_display_scope::{
+        display_contains_point, display_scope_report, resolve_display_scope,
+        resolve_observation_window_ref, DisplayRect, DisplaySelector,
+    },
     control_observation::{
         build_selector_refind_decision, resolve_observation_ref_with_header,
         stale_observation_ref_error, ObservationHeader, ObservationRefEntry, SelectorRefindRequest,
         SelectorRefindSource, DEFAULT_REFIND_LIMIT,
     },
     control_window::{resolve_default_window_target_rect, WindowCommandTarget},
+    screenshot::current_display_summaries,
 };
 use serde_json::{json, Value};
 use std::io;
@@ -44,8 +49,19 @@ pub fn prepare_mouse_move_request(
             request
                 .x
                 .zip(request.y)
-                .map(|(x, y)| coordinate_resolution(MousePoint { x, y }, "coordinate_fallback"))
+                .map(|(x, y)| {
+                    let point = MousePoint { x, y };
+                    let mut resolution = coordinate_resolution(point, "coordinate_fallback");
+                    if let Some(guard) = request.guard.as_ref() {
+                        attach_display_guard(&mut resolution, point, guard)?;
+                    }
+                    Ok::<Value, io::Error>(resolution)
+                })
+                .transpose()?
         } else {
+            if request.guard.is_some() {
+                return Err(display_guard_without_point_error("move"));
+            }
             None
         };
         return Ok(PreparedMouseRequest::Ready {
@@ -58,6 +74,10 @@ pub fn prepare_mouse_move_request(
     let PreparedEndpoint::Point { point, resolution } = prepared else {
         return Ok(no_action_from_endpoint(prepared));
     };
+    let mut resolution = resolution;
+    if let Some(guard) = request.guard.as_ref() {
+        attach_display_guard(&mut resolution, point, guard)?;
+    }
     Ok(PreparedMouseRequest::Ready {
         request: MouseMoveRequest {
             x: Some(point.x),
@@ -65,6 +85,7 @@ pub fn prepare_mouse_move_request(
             dx: None,
             dy: None,
             target: None,
+            guard: None,
             coordinate_space: MouseCoordinateSpace::OsLogical,
         },
         target_resolution: Some(resolution),
@@ -91,11 +112,16 @@ pub fn prepare_click_request(
     let PreparedEndpoint::Point { point, resolution } = prepared else {
         return Ok(no_action_from_endpoint(prepared));
     };
+    let mut resolution = resolution;
+    if let Some(guard) = request.guard.as_ref() {
+        attach_display_guard(&mut resolution, point, guard)?;
+    }
     Ok(PreparedMouseRequest::Ready {
         request: ClickRequest {
             x: Some(point.x),
             y: Some(point.y),
             target: None,
+            guard: None,
             button: request.button,
             count: request.count,
             hold_ms: request.hold_ms,
@@ -126,11 +152,20 @@ pub fn prepare_drag_request(
     else {
         return Ok(no_action_from_endpoint(to));
     };
+    let mut from_resolution = from_resolution;
+    let mut to_resolution = to_resolution;
+    if let Some(guard) = request.guard.as_ref() {
+        let guard_report = resolve_display_guard_for_point(from_point, guard)?;
+        ensure_point_inside_guard(to_point, guard, &guard_report)?;
+        from_resolution["display_guard"] = guard_report.clone();
+        to_resolution["display_guard"] = guard_report;
+    }
 
     Ok(PreparedMouseRequest::Ready {
         request: DragRequest {
             from: MouseEndpoint::Coordinate(from_point),
             to: MouseEndpoint::Coordinate(to_point),
+            guard: None,
             button: request.button,
             duration_ms: request.duration_ms,
             steps: request.steps,
@@ -150,7 +185,18 @@ pub fn prepare_wheel_request(
         let target_resolution = request
             .x
             .zip(request.y)
-            .map(|(x, y)| coordinate_resolution(MousePoint { x, y }, "coordinate_fallback"));
+            .map(|(x, y)| {
+                let point = MousePoint { x, y };
+                let mut resolution = coordinate_resolution(point, "coordinate_fallback");
+                if let Some(guard) = request.guard.as_ref() {
+                    attach_display_guard(&mut resolution, point, guard)?;
+                }
+                Ok::<Value, io::Error>(resolution)
+            })
+            .transpose()?;
+        if request.guard.is_some() && target_resolution.is_none() {
+            return Err(display_guard_without_point_error("wheel"));
+        }
         return Ok(PreparedMouseRequest::Ready {
             request: request.clone(),
             target_resolution,
@@ -161,17 +207,166 @@ pub fn prepare_wheel_request(
     let PreparedEndpoint::Point { point, resolution } = prepared else {
         return Ok(no_action_from_endpoint(prepared));
     };
+    let mut resolution = resolution;
+    if let Some(guard) = request.guard.as_ref() {
+        attach_display_guard(&mut resolution, point, guard)?;
+    }
     Ok(PreparedMouseRequest::Ready {
         request: WheelRequest {
             x: Some(point.x),
             y: Some(point.y),
             target: None,
+            guard: None,
             delta_x: request.delta_x,
             delta_y: request.delta_y,
             coordinate_space: request.coordinate_space,
         },
         target_resolution: Some(resolution),
     })
+}
+
+fn attach_display_guard(
+    resolution: &mut Value,
+    point: MousePoint,
+    guard: &MouseDisplayGuard,
+) -> io::Result<()> {
+    resolution["display_guard"] = resolve_display_guard_for_point(point, guard)?;
+    Ok(())
+}
+
+fn resolve_display_guard_for_point(
+    point: MousePoint,
+    guard: &MouseDisplayGuard,
+) -> io::Result<Value> {
+    let displays = current_display_summaries()?;
+    let scope = guard.as_scope();
+    let resolution = resolve_display_scope(&scope, &displays, |selector| {
+        mouse_window_rect_for_display_selector(selector)
+    })?;
+    if !display_contains_point(&resolution.resolved, point.x, point.y) {
+        return Err(display_scope_mismatch_error(point, &resolution));
+    }
+    Ok(display_scope_report(&resolution))
+}
+
+fn ensure_point_inside_guard(
+    point: MousePoint,
+    guard: &MouseDisplayGuard,
+    guard_report: &Value,
+) -> io::Result<()> {
+    let Some(resolved_display_id) = guard_report
+        .get("resolved")
+        .and_then(|resolved| resolved.get("display_id"))
+        .and_then(Value::as_str)
+    else {
+        return Err(io::Error::other(
+            "display guard report 缺少 resolved.display_id",
+        ));
+    };
+    let displays = current_display_summaries()?;
+    let Some(display) = displays
+        .iter()
+        .find(|display| display.display_id == resolved_display_id)
+    else {
+        return Err(display_guard_catalog_error(format!(
+            "display catalog 中找不到已解析 display_id: {resolved_display_id}"
+        )));
+    };
+    if !display_contains_point(display, point.x, point.y) {
+        return Err(display_scope_mismatch_error_from_report(
+            point,
+            guard_report,
+        ));
+    }
+    let _ = guard;
+    Ok(())
+}
+
+fn mouse_window_rect_for_display_selector(
+    selector: &DisplaySelector,
+) -> io::Result<Option<DisplayRect>> {
+    let window_id = match selector {
+        DisplaySelector::WindowId(window_id) => window_id.clone(),
+        DisplaySelector::WindowRef {
+            observation_id,
+            ref_id,
+        } => resolve_observation_window_ref(observation_id, ref_id)?.window_id,
+        _ => return Ok(None),
+    };
+    let resolved = resolve_default_window_target_rect(&WindowCommandTarget {
+        window_id: Some(window_id),
+        ..WindowCommandTarget::default()
+    })?;
+    Ok(resolved.rect.map(DisplayRect::from))
+}
+
+fn display_scope_mismatch_error(
+    point: MousePoint,
+    resolution: &crate::control_display_scope::DisplayScopeResolution,
+) -> io::Error {
+    display_scope_mismatch_error_value(
+        point,
+        resolution.resolved.display_id.as_str(),
+        resolution.selector.clone(),
+    )
+}
+
+fn display_scope_mismatch_error_from_report(point: MousePoint, guard_report: &Value) -> io::Error {
+    let requested_display_id = guard_report
+        .get("resolved")
+        .and_then(|resolved| resolved.get("display_id"))
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let selector = guard_report.get("selector").cloned().unwrap_or(Value::Null);
+    display_scope_mismatch_error_value(point, requested_display_id, selector)
+}
+
+fn display_scope_mismatch_error_value(
+    point: MousePoint,
+    requested_display_id: &str,
+    selector: Value,
+) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::InvalidInput,
+        json!({
+            "kind": "mouse",
+            "error_code": "DISPLAY_SCOPE_MISMATCH",
+            "performed": false,
+            "requested_display_id": requested_display_id,
+            "selector": selector,
+            "point": point_value(point),
+            "coordinate_space": "os-logical",
+            "message": "mouse target point 不在 guard.display 解析出的显示器内",
+        })
+        .to_string(),
+    )
+}
+
+fn display_guard_without_point_error(action: &'static str) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::InvalidInput,
+        json!({
+            "kind": "mouse",
+            "action": action,
+            "error_code": "DISPLAY_GUARD_REQUIRES_OS_LOGICAL_POINT",
+            "performed": false,
+            "message": "display guard 需要 os-logical 坐标点或可解析为坐标点的 target",
+        })
+        .to_string(),
+    )
+}
+
+fn display_guard_catalog_error(message: impl Into<String>) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::InvalidInput,
+        json!({
+            "kind": "mouse",
+            "error_code": "DISPLAY_GUARD_NEEDS_DISPLAY_CATALOG",
+            "performed": false,
+            "message": message.into(),
+        })
+        .to_string(),
+    )
 }
 
 fn prepare_endpoint(

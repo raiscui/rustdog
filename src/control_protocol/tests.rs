@@ -8,6 +8,7 @@ use crate::{
         AxActionName, AxActionRequest, AxMode, AxSetValueRequest, AxTarget, AxTreeScope,
         AxValueSetMode, TypeTextMode, TypeTextRequest,
     },
+    control_display_scope::{DisplayScope, DisplaySelector},
     control_mouse::{
         MouseAnchor, MouseButtonMode, MouseButtonName, MouseCoordinateSpace, MouseEndpoint,
         MousePoint, MouseRefTarget, MouseSelectorTarget, DEFAULT_MOUSE_CLICK_HOLD_MS,
@@ -17,7 +18,11 @@ use crate::{
         observe::{ObserveMode, ObserveTarget},
         ObserveRequest, SelectorRefindPolicy,
     },
-    control_window::{WindowCloseStrategy, WindowCommandTarget, WindowQuery, WindowSelectPolicy},
+    control_window::{
+        WindowCloseStrategy, WindowCommandTarget, WindowQuery, WindowResizeBox, WindowResizeOrigin,
+        WindowResizeRequest, WindowResizeSize, WindowResizeUnit, WindowResizeVerify,
+        WindowSelectPolicy,
+    },
 };
 
 #[test]
@@ -179,6 +184,7 @@ fn parse_should_support_mouse_requests() {
                 dx: None,
                 dy: None,
                 target: None,
+                guard: None,
                 coordinate_space: MouseCoordinateSpace::OsLogical,
             }),
         })
@@ -193,6 +199,7 @@ fn parse_should_support_mouse_requests() {
                 dx: Some(1),
                 dy: Some(-2),
                 target: None,
+                guard: None,
                 coordinate_space: MouseCoordinateSpace::Relative,
             }),
         })
@@ -216,6 +223,7 @@ fn parse_should_support_mouse_requests() {
                 x: Some(1),
                 y: Some(2),
                 target: None,
+                guard: None,
                 button: MouseButtonName::Left,
                 count: 1,
                 hold_ms: DEFAULT_MOUSE_CLICK_HOLD_MS,
@@ -231,6 +239,7 @@ fn parse_should_support_mouse_requests() {
             command: ControlCommand::Drag(DragRequest {
                 from: MouseEndpoint::Coordinate(MousePoint { x: 1, y: 2 }),
                 to: MouseEndpoint::Coordinate(MousePoint { x: 3, y: 4 }),
+                guard: None,
                 button: MouseButtonName::Left,
                 duration_ms: crate::control_mouse::DEFAULT_MOUSE_DRAG_DURATION_MS,
                 steps: crate::control_mouse::DEFAULT_MOUSE_DRAG_STEPS,
@@ -246,6 +255,7 @@ fn parse_should_support_mouse_requests() {
                 x: None,
                 y: None,
                 target: None,
+                guard: None,
                 delta_x: 0,
                 delta_y: -3,
                 coordinate_space: MouseCoordinateSpace::OsLogical,
@@ -269,6 +279,7 @@ fn parse_should_support_mouse_ref_and_selector_targets() {
                     ref_id: "@e1".to_owned(),
                     anchor: MouseAnchor::Center,
                 })),
+                guard: None,
                 button: MouseButtonName::Left,
                 count: 1,
                 hold_ms: DEFAULT_MOUSE_CLICK_HOLD_MS,
@@ -287,6 +298,7 @@ fn parse_should_support_mouse_ref_and_selector_targets() {
                 y: None,
                 dx: None,
                 dy: None,
+                guard: None,
                 target: Some(MouseEndpoint::ObservationRef(MouseRefTarget {
                     observation_id: "obs-1".to_owned(),
                     ref_id: "@e2".to_owned(),
@@ -311,12 +323,48 @@ fn parse_should_support_mouse_ref_and_selector_targets() {
                     min_confidence_milli: 900,
                     anchor: MouseAnchor::Center,
                 })),
+                guard: None,
                 delta_x: 0,
                 delta_y: -3,
                 coordinate_space: MouseCoordinateSpace::OsLogical,
             }),
         })
     );
+}
+
+#[test]
+fn parse_should_support_mouse_display_guard_on_targeted_commands() {
+    for line in [
+        r#"@mouse-move:{x:1,y:2,guard:{display:{id:"d2"}}}"#,
+        r#"@click:{x:1,y:2,guard:{display:{name_contains:"DELL"}}}"#,
+        r#"@drag:{from:{x:1,y:2},to:{x:3,y:4},guard:{display:{contains_point:{x:1,y:2}}}}"#,
+        r#"@wheel:{x:1,y:2,delta_y:-3,guard:{display:{window_id:"pid:1/window:0"}}}"#,
+    ] {
+        let parsed = parse_control_line(line).unwrap();
+        match parsed {
+            ControlParseResult::Control(ControlRequest {
+                command: ControlCommand::MouseMove(request),
+                ..
+            }) => assert!(request.guard.is_some()),
+            ControlParseResult::Control(ControlRequest {
+                command: ControlCommand::Click(request),
+                ..
+            }) => assert!(request.guard.is_some()),
+            ControlParseResult::Control(ControlRequest {
+                command: ControlCommand::Drag(request),
+                ..
+            }) => assert!(request.guard.is_some()),
+            ControlParseResult::Control(ControlRequest {
+                command: ControlCommand::Wheel(request),
+                ..
+            }) => assert!(request.guard.is_some()),
+            other => panic!("expected guarded mouse command, got {other:?}"),
+        }
+    }
+
+    let err = parse_control_line(r#"@mouse-button:{button:"left",guard:{display:{id:"d2"}}}"#)
+        .unwrap_err();
+    assert!(err.to_string().contains("@mouse-button 不支持 guard"));
 }
 
 #[test]
@@ -558,6 +606,7 @@ fn parse_should_support_window_commands() {
                     title_contains: Some("rdog".to_owned()),
                     ..WindowQuery::default()
                 },
+                display_scope: None,
                 limit: 5,
                 include_state: true,
                 include_recipes: true,
@@ -598,6 +647,37 @@ fn parse_should_support_window_commands() {
                 strategy: WindowCloseStrategy::Terminate,
                 allow_ambiguous: false,
                 select: None,
+            }),
+        })
+    );
+
+    assert_eq!(
+        parse_control_line(
+            r#"@window-resize#202:{target:{query:{app_contains:"Chrome",title_contains:"Docs"}},size:{width:1200,height:800,unit:"os-logical",box:"outer"},origin:"keep",guard:{display:{id:"d2"}},verify:true}"#
+        )
+        .unwrap(),
+        ControlParseResult::Control(ControlRequest {
+            request_id: Some(202),
+            command: ControlCommand::WindowResize(WindowResizeRequest {
+                target: WindowCommandTarget {
+                    query: WindowQuery {
+                        app_contains: Some("Chrome".to_owned()),
+                        title_contains: Some("Docs".to_owned()),
+                        ..WindowQuery::default()
+                    },
+                    ..WindowCommandTarget::default()
+                },
+                size: WindowResizeSize {
+                    width: 1200,
+                    height: 800,
+                    unit: WindowResizeUnit::OsLogical,
+                    box_model: WindowResizeBox::Outer,
+                },
+                origin: WindowResizeOrigin::Keep,
+                guard: Some(DisplayScope {
+                    display: DisplaySelector::Id("d2".to_owned()),
+                }),
+                verify: WindowResizeVerify { tolerance_px: 2 },
             }),
         })
     );

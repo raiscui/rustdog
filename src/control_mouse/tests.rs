@@ -42,6 +42,7 @@ fn click_plan_should_move_press_hold_release() {
         x: Some(10),
         y: Some(20),
         target: None,
+        guard: None,
         button: MouseButtonName::Left,
         count: 1,
         hold_ms: 80,
@@ -96,6 +97,7 @@ fn drag_plan_should_sample_from_to_and_release() {
     let plan = build_drag_plan(&DragRequest {
         from: MouseEndpoint::Coordinate(MousePoint { x: 0, y: 0 }),
         to: MouseEndpoint::Coordinate(MousePoint { x: 10, y: 10 }),
+        guard: None,
         button: MouseButtonName::Left,
         duration_ms: 4,
         steps: 2,
@@ -162,6 +164,7 @@ fn drag_failure_after_press_should_attempt_release() {
     let plan = build_drag_plan(&DragRequest {
         from: MouseEndpoint::Coordinate(MousePoint { x: 0, y: 0 }),
         to: MouseEndpoint::Coordinate(MousePoint { x: 10, y: 10 }),
+        guard: None,
         button: MouseButtonName::Left,
         duration_ms: 4,
         steps: 2,
@@ -191,6 +194,7 @@ fn drag_failure_should_report_release_failure() {
     let plan = build_drag_plan(&DragRequest {
         from: MouseEndpoint::Coordinate(MousePoint { x: 0, y: 0 }),
         to: MouseEndpoint::Coordinate(MousePoint { x: 10, y: 10 }),
+        guard: None,
         button: MouseButtonName::Left,
         duration_ms: 4,
         steps: 2,
@@ -214,6 +218,7 @@ fn wheel_plan_should_use_vertical_then_horizontal_order() {
         x: Some(10),
         y: Some(20),
         target: None,
+        guard: None,
         delta_x: 2,
         delta_y: -3,
         coordinate_space: MouseCoordinateSpace::OsLogical,
@@ -249,6 +254,7 @@ fn report_should_render_structured_mouse_json() {
         dx: None,
         dy: None,
         target: None,
+        guard: None,
         coordinate_space: MouseCoordinateSpace::OsLogical,
     })
     .unwrap();

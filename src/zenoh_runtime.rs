@@ -1,12 +1,17 @@
 use std::{
-    fs, io,
+    fs,
+    fs::OpenOptions,
+    io::{self, Write},
     net::{IpAddr, SocketAddr},
     path::{Path, PathBuf},
+    process::{Command, Stdio},
     str::FromStr,
     sync::mpsc,
     thread,
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
+
+use serde::{Deserialize, Serialize};
 
 use zenoh::{config::WhatAmI, scouting::Hello, Config, Session, Wait};
 
@@ -274,6 +279,10 @@ fn looks_like_windows_listen_access_denied(message: &str) -> bool {
 
 /// Zenoh 1.8.0 unixpipe 用的 locator 前缀。
 pub(crate) const UNIXPIPE_LOCATOR_PREFIX: &str = "unixpipe";
+#[cfg(unix)]
+const LOCAL_DEFAULT_SCHEMA: &str = "rdog.local-default.v1";
+#[cfg(unix)]
+const LOCAL_DEFAULT_STARTUP_GRACE_MS: u128 = 10_000;
 
 /// 根据 (namespace, daemon_name) 推导 base 路径,daemon 和 control 端用同一份规则。
 ///
@@ -400,6 +409,360 @@ pub fn cleanup_stale_unixpipe_socket(base: &Path) -> io::Result<()> {
     Ok(())
 }
 
+#[cfg(unix)]
+#[derive(Debug)]
+pub struct LocalDefaultDaemonGuard {
+    daemon_name: String,
+    record_path: PathBuf,
+    guard_path: PathBuf,
+}
+
+#[cfg(unix)]
+impl Drop for LocalDefaultDaemonGuard {
+    fn drop(&mut self) {
+        let _ = cleanup_local_default_daemon_paths(
+            &self.record_path,
+            &self.guard_path,
+            &self.daemon_name,
+        );
+    }
+}
+
+#[cfg(unix)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
+struct LocalDefaultDaemonRecord {
+    schema: String,
+    namespace: String,
+    daemon_name: String,
+    pid: u32,
+    unixpipe_base: PathBuf,
+    created_at_unix_ms: u128,
+}
+
+#[cfg(unix)]
+pub fn register_local_default_daemon(
+    namespace: &str,
+    daemon_name: &str,
+    unixpipe_base: &Path,
+) -> io::Result<LocalDefaultDaemonGuard> {
+    validate_unixpipe_component("namespace", namespace)?;
+    validate_unixpipe_component("daemon_name", daemon_name)?;
+
+    let dir = local_default_daemon_dir()?;
+    fs::create_dir_all(&dir)?;
+    let record_path = local_default_daemon_record_path(namespace)?;
+    let guard_path = local_default_daemon_guard_path(namespace)?;
+    let pid = std::process::id();
+
+    loop {
+        match OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&guard_path)
+        {
+            Ok(mut file) => {
+                file.write_all(pid.to_string().as_bytes())?;
+                break;
+            }
+            Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {
+                let existing = fs::read_to_string(&guard_path).unwrap_or_default();
+                let existing_pid = existing.trim().parse::<u32>().ok();
+                if existing_pid.is_some_and(process_exists) {
+                    return Err(io::Error::new(
+                        io::ErrorKind::AlreadyExists,
+                        format!(
+                            "本机默认 daemon 已存在: namespace={namespace}, local_default_guard={}",
+                            guard_path.display()
+                        ),
+                    ));
+                }
+                remove_local_default_file_if_present(&guard_path)?;
+                remove_local_default_file_if_present(&record_path)?;
+            }
+            Err(err) => return Err(err),
+        }
+    }
+
+    let record = LocalDefaultDaemonRecord {
+        schema: LOCAL_DEFAULT_SCHEMA.to_string(),
+        namespace: namespace.to_string(),
+        daemon_name: daemon_name.to_string(),
+        pid,
+        unixpipe_base: unixpipe_base.to_path_buf(),
+        created_at_unix_ms: unix_timestamp_ms(),
+    };
+    write_local_default_daemon_record(&record_path, &record)?;
+
+    Ok(LocalDefaultDaemonGuard {
+        daemon_name: daemon_name.to_string(),
+        record_path,
+        guard_path,
+    })
+}
+
+#[cfg(unix)]
+fn cleanup_local_default_daemon_paths(
+    record_path: &Path,
+    guard_path: &Path,
+    daemon_name: &str,
+) -> io::Result<()> {
+    if let Ok(record) = read_local_default_daemon_record(&record_path) {
+        if record.daemon_name != daemon_name {
+            return Ok(());
+        }
+    }
+
+    remove_local_default_file_if_present(&record_path)?;
+    remove_local_default_file_if_present(&guard_path)?;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn find_valid_local_default_daemons(
+    namespace_filter: Option<&str>,
+) -> io::Result<Vec<LocalDefaultDaemonRecord>> {
+    let dir = local_default_daemon_dir()?;
+    let mut records = Vec::new();
+    if let Some(namespace) = namespace_filter {
+        let record_path = local_default_daemon_record_path(namespace)?;
+        if let Some(record) = load_valid_local_default_record(&record_path, namespace_filter)? {
+            records.push(record);
+        }
+        return Ok(records);
+    }
+
+    let entries = match fs::read_dir(&dir) {
+        Ok(entries) => entries,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(records),
+        Err(err) => {
+            return Err(io::Error::new(
+                err.kind(),
+                format!(
+                    "扫描本机默认 daemon registry 目录 {} 失败: {err}",
+                    dir.display()
+                ),
+            ))
+        }
+    };
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|value| value.to_str()) != Some("json") {
+            continue;
+        }
+        if let Some(record) = load_valid_local_default_record(&path, None)? {
+            records.push(record);
+        }
+    }
+    records.sort_by(|left, right| {
+        left.namespace
+            .cmp(&right.namespace)
+            .then(left.daemon_name.cmp(&right.daemon_name))
+    });
+    records.dedup_by(|left, right| {
+        left.namespace == right.namespace && left.daemon_name == right.daemon_name
+    });
+    Ok(records)
+}
+
+#[cfg(unix)]
+fn load_valid_local_default_record(
+    record_path: &Path,
+    namespace_filter: Option<&str>,
+) -> io::Result<Option<LocalDefaultDaemonRecord>> {
+    let record = match read_local_default_daemon_record(record_path) {
+        Ok(record) => record,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(_) => {
+            remove_local_default_file_if_present(record_path)?;
+            return Ok(None);
+        }
+    };
+
+    if record.is_valid_for(namespace_filter) {
+        return Ok(Some(record));
+    }
+
+    if record.should_keep_during_startup(namespace_filter) {
+        return Ok(None);
+    }
+
+    remove_stale_local_default(&record, Some(record_path))?;
+    Ok(None)
+}
+
+#[cfg(unix)]
+impl LocalDefaultDaemonRecord {
+    fn is_valid_for(&self, namespace_filter: Option<&str>) -> bool {
+        if self.schema != LOCAL_DEFAULT_SCHEMA {
+            return false;
+        }
+        if namespace_filter.is_some_and(|namespace| namespace != self.namespace) {
+            return false;
+        }
+        if validate_unixpipe_component("namespace", &self.namespace).is_err()
+            || validate_unixpipe_component("daemon_name", &self.daemon_name).is_err()
+        {
+            return false;
+        }
+        if !process_exists(self.pid) {
+            return false;
+        }
+        unixpipe_base_path_alive(&self.unixpipe_base)
+    }
+
+    fn should_keep_during_startup(&self, namespace_filter: Option<&str>) -> bool {
+        if self.schema != LOCAL_DEFAULT_SCHEMA {
+            return false;
+        }
+        if namespace_filter.is_some_and(|namespace| namespace != self.namespace) {
+            return false;
+        }
+        if validate_unixpipe_component("namespace", &self.namespace).is_err()
+            || validate_unixpipe_component("daemon_name", &self.daemon_name).is_err()
+        {
+            return false;
+        }
+        if !process_exists(self.pid) {
+            return false;
+        }
+        if unixpipe_base_path_alive(&self.unixpipe_base) {
+            return false;
+        }
+
+        unix_timestamp_ms().saturating_sub(self.created_at_unix_ms)
+            <= LOCAL_DEFAULT_STARTUP_GRACE_MS
+    }
+}
+
+#[cfg(unix)]
+fn read_local_default_daemon_record(path: &Path) -> io::Result<LocalDefaultDaemonRecord> {
+    let text = fs::read_to_string(path)?;
+    serde_json::from_str(&text).map_err(|err| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "解析本机默认 daemon registry {} 失败: {err}",
+                path.display()
+            ),
+        )
+    })
+}
+
+#[cfg(unix)]
+fn write_local_default_daemon_record(
+    path: &Path,
+    record: &LocalDefaultDaemonRecord,
+) -> io::Result<()> {
+    let text = serde_json::to_string_pretty(record).map_err(to_io_error)?;
+    fs::write(path, text)
+}
+
+#[cfg(unix)]
+fn local_default_daemon_dir() -> io::Result<PathBuf> {
+    #[cfg(test)]
+    if let Some(dir) = local_default_daemon_test_dir() {
+        return Ok(dir);
+    }
+
+    if let Some(state_home) = std::env::var_os("XDG_STATE_HOME") {
+        return Ok(PathBuf::from(state_home)
+            .join("rustdog")
+            .join("local-default"));
+    }
+    if let Some(home) = std::env::var_os("HOME") {
+        return Ok(PathBuf::from(home)
+            .join(".local")
+            .join("state")
+            .join("rustdog")
+            .join("local-default"));
+    }
+
+    Ok(std::env::temp_dir().join("rustdog").join("local-default"))
+}
+
+#[cfg(all(test, unix))]
+thread_local! {
+    static LOCAL_DEFAULT_DAEMON_TEST_DIR: std::cell::RefCell<Option<PathBuf>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(all(test, unix))]
+fn set_local_default_daemon_test_dir(path: Option<PathBuf>) {
+    LOCAL_DEFAULT_DAEMON_TEST_DIR.with(|slot| {
+        *slot.borrow_mut() = path;
+    });
+}
+
+#[cfg(all(test, unix))]
+fn local_default_daemon_test_dir() -> Option<PathBuf> {
+    LOCAL_DEFAULT_DAEMON_TEST_DIR.with(|slot| slot.borrow().clone())
+}
+
+#[cfg(unix)]
+fn local_default_daemon_record_path(namespace: &str) -> io::Result<PathBuf> {
+    validate_unixpipe_component("namespace", namespace)?;
+    Ok(local_default_daemon_dir()?.join(format!("{namespace}.json")))
+}
+
+#[cfg(unix)]
+fn local_default_daemon_guard_path(namespace: &str) -> io::Result<PathBuf> {
+    validate_unixpipe_component("namespace", namespace)?;
+    Ok(local_default_daemon_dir()?.join(format!("{namespace}.pid")))
+}
+
+#[cfg(unix)]
+fn remove_stale_local_default(
+    record: &LocalDefaultDaemonRecord,
+    record_path: Option<&Path>,
+) -> io::Result<()> {
+    let record_path = match record_path {
+        Some(path) => path.to_path_buf(),
+        None => local_default_daemon_record_path(&record.namespace)?,
+    };
+    let guard_path = local_default_daemon_guard_path(&record.namespace).ok();
+    remove_local_default_file_if_present(&record_path)?;
+    if let Some(guard_path) = guard_path {
+        remove_local_default_file_if_present(&guard_path)?;
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn remove_local_default_file_if_present(path: &Path) -> io::Result<()> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(io::Error::new(
+            err.kind(),
+            format!("删除本机默认 daemon 文件 {} 失败: {err}", path.display()),
+        )),
+    }
+}
+
+#[cfg(unix)]
+fn unix_timestamp_ms() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or_default()
+}
+
+#[cfg(unix)]
+fn process_exists(pid: u32) -> bool {
+    if pid == 0 {
+        return false;
+    }
+
+    Command::new("kill")
+        .args(["-0", &pid.to_string()])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .ok()
+        .is_some_and(|status| status.success())
+}
+
 /// 客户端探测:base 路径对应的 FIFO 是否有一个 reader 在监听。
 ///
 /// 用 mpsc + 后台线程 + 超时模拟"短超时 connect",避免依赖 `libc` 拿到 `O_NONBLOCK`。
@@ -504,6 +867,15 @@ pub fn compose_listen_endpoints(
     Ok(composed)
 }
 
+#[cfg(not(unix))]
+pub fn compose_listen_endpoints(
+    config: &crate::config::ZenohConfig,
+    _namespace: &str,
+    _daemon_name: &str,
+) -> io::Result<Vec<String>> {
+    Ok(config.listen_endpoints.clone())
+}
+
 /// 在 $TMPDIR(或 /tmp fallback)下扫描所有 unixpipe FIFO,
 /// 找一条唯一可用的本地 daemon,返回它的 daemon_name。
 ///
@@ -516,7 +888,32 @@ pub fn compose_listen_endpoints(
 ///   也存在,但只看 `_uplink` 就足够,避免双倍计数。
 /// - 候选 base 路径必须以 `rdog-` 开头,中间段 `{ns}-{name}` 用第一个 `-` 切分。
 /// - 0/1/>1 个候选分别返回 Ok(1) / NotFound(0) / AlreadyExists(>1)。
+#[cfg(unix)]
 pub fn find_local_daemon_name(namespace_filter: Option<&str>) -> io::Result<String> {
+    let local_defaults = find_valid_local_default_daemons(namespace_filter)?;
+    match local_defaults.len() {
+        0 => {}
+        1 => return Ok(local_defaults[0].daemon_name.clone()),
+        _ => {
+            let instances = local_defaults
+                .iter()
+                .map(|record| {
+                    format!(
+                        "`{}`/`{}`(pid={})",
+                        record.namespace, record.daemon_name, record.pid
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                format!(
+                    "本机发现多个 local-default daemon registry: [{instances}];请使用 `--namespace` 或显式 target name"
+                ),
+            ));
+        }
+    }
+
     let tmpdir = std::env::var_os("TMPDIR")
         .map(PathBuf::from)
         .filter(|p| !p.as_os_str().is_empty())
@@ -585,7 +982,7 @@ pub fn find_local_daemon_name(namespace_filter: Option<&str>) -> io::Result<Stri
         _ => Err(io::Error::new(
             io::ErrorKind::AlreadyExists,
             format!(
-                "本机发现多个 unixpipe daemon: [{}];请显式指定 target name(例如 `rdog control <name> @<line>`)",
+                "本机发现多个 unixpipe FIFO 候选,且没有可用 local-default registry: [{}];请显式指定 target name(例如 `rdog control <name> @<line>`),或在 daemon 配置中设置 `[zenoh.unixpipe] local_default = true`",
                 candidates
                     .iter()
                     .map(|name| format!("`{name}`"))
@@ -596,6 +993,17 @@ pub fn find_local_daemon_name(namespace_filter: Option<&str>) -> io::Result<Stri
     }
 }
 
+#[cfg(not(unix))]
+pub fn find_local_daemon_name(namespace_filter: Option<&str>) -> io::Result<String> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        format!(
+            "当前平台不支持 unixpipe 本机 fast path;请显式指定 target name。namespace={namespace_filter:?}"
+        ),
+    ))
+}
+
+#[cfg(unix)]
 fn no_local_daemon_error(namespace_filter: Option<&str>) -> io::Error {
     let detail = match namespace_filter {
         Some(ns) => format!("namespace={ns} 的本地 daemon"),
@@ -612,14 +1020,25 @@ fn no_local_daemon_error(namespace_filter: Option<&str>) -> io::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::env;
+    use std::{
+        env,
+        sync::{Mutex, MutexGuard, OnceLock},
+    };
 
     // -----------------------------------------------------------------
     // unixpipe path derivation / cleanup / probe / compose_listen
     // -----------------------------------------------------------------
 
+    fn env_test_guard() -> MutexGuard<'static, ()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
     #[test]
     fn unixpipe_socket_path_should_respect_tmpdir_env() {
+        let _guard = env_test_guard();
         // 临时覆盖 TMPDIR,确认派生路径使用它。
         let prev = env::var_os("TMPDIR");
         // SAFETY: 在测试里改环境变量是常见模式,后续立即恢复。
@@ -638,6 +1057,7 @@ mod tests {
 
     #[test]
     fn unixpipe_socket_path_should_fallback_to_slash_tmp_when_tmpdir_unset() {
+        let _guard = env_test_guard();
         let prev = env::var_os("TMPDIR");
         unsafe { env::remove_var("TMPDIR") };
         let result = unixpipe_socket_path("lab", "mac.lab");
@@ -659,6 +1079,7 @@ mod tests {
 
     #[test]
     fn unixpipe_socket_path_should_reject_oversized_combination() {
+        let _guard = env_test_guard();
         // 92 字节的 namespace + "mac.lab" 组合会让最终路径超过 95 字节上限。
         let big_ns: String = std::iter::repeat('a').take(92).collect();
         let err = unixpipe_socket_path(&big_ns, "mac.lab").unwrap_err();
@@ -752,75 +1173,326 @@ mod tests {
         let _ = fs::remove_file(&uplink);
     }
 
+    fn unique_test_dir(prefix: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "rdog-{prefix}-{}-{}",
+            std::process::id(),
+            unix_timestamp_ms()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("测试临时目录应该能创建");
+        dir
+    }
+
+    fn with_local_default_test_dir<R>(prefix: &str, f: impl FnOnce(&Path) -> R) -> R {
+        let dir = unique_test_dir(prefix);
+        set_local_default_daemon_test_dir(Some(dir.clone()));
+        let result = f(&dir);
+        set_local_default_daemon_test_dir(None);
+        let _ = fs::remove_dir_all(&dir);
+        result
+    }
+
+    fn with_tmpdir_test_dir<R>(prefix: &str, f: impl FnOnce(&Path) -> R) -> R {
+        let dir = unique_test_dir(prefix);
+        let prev = env::var_os("TMPDIR");
+        unsafe { env::set_var("TMPDIR", &dir) };
+        let result = f(&dir);
+        match prev {
+            Some(value) => unsafe { env::set_var("TMPDIR", value) },
+            None => unsafe { env::remove_var("TMPDIR") },
+        }
+        let _ = fs::remove_dir_all(&dir);
+        result
+    }
+
+    fn mock_unixpipe_base_in(dir: &Path, namespace: &str, daemon_name: &str) -> PathBuf {
+        let base = dir.join(format!("rdog-{namespace}-{daemon_name}.pipe"));
+        let uplink = base.with_file_name(format!(
+            "{}_uplink",
+            base.file_name().unwrap().to_str().unwrap()
+        ));
+        let status = std::process::Command::new("mkfifo")
+            .arg(&uplink)
+            .status()
+            .expect("mkfifo 调用应该成功");
+        assert!(status.success(), "mkfifo 应该成功: {}", uplink.display());
+        base
+    }
+
+    fn write_local_default_record_for_test(
+        namespace: &str,
+        daemon_name: &str,
+        pid: u32,
+        unixpipe_base: PathBuf,
+        created_at_unix_ms: u128,
+    ) {
+        let record_path =
+            local_default_daemon_record_path(namespace).expect("registry path 应该可推导");
+        fs::create_dir_all(record_path.parent().expect("registry path 应该有 parent"))
+            .expect("registry dir 应该能创建");
+        let record = LocalDefaultDaemonRecord {
+            schema: LOCAL_DEFAULT_SCHEMA.to_string(),
+            namespace: namespace.to_string(),
+            daemon_name: daemon_name.to_string(),
+            pid,
+            unixpipe_base,
+            created_at_unix_ms,
+        };
+        write_local_default_daemon_record(&record_path, &record)
+            .expect("registry record 应该能写入");
+    }
+
+    #[test]
+    fn find_local_daemon_name_should_prefer_valid_local_default_registry_over_fifo_candidates() {
+        let _guard = env_test_guard();
+        with_local_default_test_dir("local-default-prefer", |registry_dir| {
+            with_tmpdir_test_dir("local-default-prefer-fifo", |fifo_dir| {
+                let ns = "ldprefer";
+                let default_base = mock_unixpipe_base_in(fifo_dir, ns, "default.ldprefer");
+                let extra_base = make_mock_unixpipe(ns, "other.ldprefer");
+                write_local_default_record_for_test(
+                    ns,
+                    "default.ldprefer",
+                    std::process::id(),
+                    default_base.clone(),
+                    unix_timestamp_ms(),
+                );
+
+                let result = find_local_daemon_name(Some(ns));
+
+                cleanup_mock_unixpipe(&extra_base);
+                let _ = fs::remove_dir_all(registry_dir);
+
+                assert_eq!(
+                    result.expect("有效 local-default registry 必须优先"),
+                    "default.ldprefer"
+                );
+            });
+        });
+    }
+
+    #[test]
+    fn find_local_daemon_name_should_ignore_and_remove_stale_local_default_pid() {
+        let _guard = env_test_guard();
+        with_local_default_test_dir("local-default-stale-pid", |registry_dir| {
+            with_tmpdir_test_dir("local-default-stale-pid-fifo", |fifo_dir| {
+                let ns = "ldstalepid";
+                let stale_base = fifo_dir.join(format!("rdog-{ns}-stale.ldstalepid.pipe"));
+                let fallback_base = make_mock_unixpipe(ns, "fallback.ldstalepid");
+                write_local_default_record_for_test(
+                    ns,
+                    "stale.ldstalepid",
+                    u32::MAX,
+                    stale_base,
+                    unix_timestamp_ms().saturating_sub(LOCAL_DEFAULT_STARTUP_GRACE_MS + 1),
+                );
+                let record_path = local_default_daemon_record_path(ns).expect("path");
+
+                let result = find_local_daemon_name(Some(ns));
+
+                cleanup_mock_unixpipe(&fallback_base);
+                assert!(!record_path.exists(), "stale registry 应该被清理");
+                let _ = fs::remove_dir_all(registry_dir);
+                assert_eq!(
+                    result.expect("stale registry 后应 fallback"),
+                    "fallback.ldstalepid"
+                );
+            });
+        });
+    }
+
+    #[test]
+    fn find_local_daemon_name_should_ignore_registry_when_uplink_missing() {
+        let _guard = env_test_guard();
+        with_local_default_test_dir("local-default-missing-uplink", |registry_dir| {
+            with_tmpdir_test_dir("local-default-missing-uplink-fifo", |fifo_dir| {
+                let ns = "ldmissup";
+                let missing_base = fifo_dir.join(format!("rdog-{ns}-missing.ldmissup.pipe"));
+                let fallback_base = make_mock_unixpipe(ns, "fallback.ldmissup");
+                write_local_default_record_for_test(
+                    ns,
+                    "missing.ldmissup",
+                    std::process::id(),
+                    missing_base,
+                    unix_timestamp_ms().saturating_sub(LOCAL_DEFAULT_STARTUP_GRACE_MS + 1),
+                );
+                let record_path = local_default_daemon_record_path(ns).expect("path");
+
+                let result = find_local_daemon_name(Some(ns));
+
+                cleanup_mock_unixpipe(&fallback_base);
+                assert!(
+                    !record_path.exists(),
+                    "缺失 uplink 且超过启动宽限的 registry 应该被清理"
+                );
+                let _ = fs::remove_dir_all(registry_dir);
+                assert_eq!(
+                    result.expect("缺失 uplink 后应 fallback"),
+                    "fallback.ldmissup"
+                );
+            });
+        });
+    }
+
+    #[test]
+    fn find_local_daemon_name_should_keep_starting_registry_when_uplink_missing_briefly() {
+        let _guard = env_test_guard();
+        with_local_default_test_dir("local-default-starting", |registry_dir| {
+            with_tmpdir_test_dir("local-default-starting-fifo", |fifo_dir| {
+                let ns = "ldstarting";
+                let missing_base = fifo_dir.join(format!("rdog-{ns}-starting.ldstarting.pipe"));
+                write_local_default_record_for_test(
+                    ns,
+                    "starting.ldstarting",
+                    std::process::id(),
+                    missing_base,
+                    unix_timestamp_ms(),
+                );
+                let record_path = local_default_daemon_record_path(ns).expect("path");
+
+                let result = find_local_daemon_name(Some(ns));
+
+                assert!(record_path.exists(), "启动宽限期内 registry 不应被清理");
+                let _ = fs::remove_dir_all(registry_dir);
+                assert_eq!(result.unwrap_err().kind(), io::ErrorKind::NotFound);
+            });
+        });
+    }
+
+    #[test]
+    fn find_local_daemon_name_should_error_when_multiple_valid_local_defaults_without_namespace() {
+        let _guard = env_test_guard();
+        with_local_default_test_dir("local-default-multiple", |registry_dir| {
+            with_tmpdir_test_dir("local-default-multiple-fifo", |fifo_dir| {
+                let base_a = mock_unixpipe_base_in(fifo_dir, "ldmulti1", "one.ldmulti1");
+                let base_b = mock_unixpipe_base_in(fifo_dir, "ldmulti2", "two.ldmulti2");
+                write_local_default_record_for_test(
+                    "ldmulti1",
+                    "one.ldmulti1",
+                    std::process::id(),
+                    base_a,
+                    unix_timestamp_ms(),
+                );
+                write_local_default_record_for_test(
+                    "ldmulti2",
+                    "two.ldmulti2",
+                    std::process::id(),
+                    base_b,
+                    unix_timestamp_ms(),
+                );
+
+                let err = find_local_daemon_name(None).unwrap_err();
+
+                let _ = fs::remove_dir_all(registry_dir);
+                let msg = err.to_string();
+                assert_eq!(err.kind(), io::ErrorKind::AlreadyExists);
+                assert!(msg.contains("local-default"), "应说明 registry 冲突: {msg}");
+                assert!(msg.contains("one.ldmulti1"), "应列出第一个默认: {msg}");
+                assert!(msg.contains("two.ldmulti2"), "应列出第二个默认: {msg}");
+            });
+        });
+    }
+
+    #[test]
+    fn register_local_default_daemon_should_fail_when_same_namespace_guard_is_alive() {
+        let _guard = env_test_guard();
+        with_local_default_test_dir("local-default-guard", |registry_dir| {
+            with_tmpdir_test_dir("local-default-guard-fifo", |fifo_dir| {
+                let ns = "ldguard";
+                let base = mock_unixpipe_base_in(fifo_dir, ns, "first.ldguard");
+                let _guard =
+                    register_local_default_daemon(ns, "first.ldguard", &base).expect("first guard");
+
+                let err = register_local_default_daemon(ns, "second.ldguard", &base).unwrap_err();
+
+                let _ = fs::remove_dir_all(registry_dir);
+                assert_eq!(err.kind(), io::ErrorKind::AlreadyExists);
+                assert!(err.to_string().contains("本机默认 daemon 已存在"));
+            });
+        });
+    }
+
     #[test]
     fn find_local_daemon_name_should_resolve_unique_match_in_namespace() {
-        let base = make_mock_unixpipe("rdogfindunique", "findme.findunique");
+        let _guard = env_test_guard();
+        with_tmpdir_test_dir("find-unique", |_| {
+            let base = make_mock_unixpipe("rdogfindunique", "findme.findunique");
 
-        let result = find_local_daemon_name(Some("rdogfindunique"));
-        cleanup_mock_unixpipe(&base);
+            let result = find_local_daemon_name(Some("rdogfindunique"));
+            cleanup_mock_unixpipe(&base);
 
-        result.expect("唯一候选必须能找到");
+            result.expect("唯一候选必须能找到");
+        });
     }
 
     #[test]
     fn find_local_daemon_name_should_filter_by_namespace() {
-        let base_keep = make_mock_unixpipe("rdogkeepns", "keep.keepns");
-        let base_skip = make_mock_unixpipe("rdogotherns", "skip.otherns");
+        let _guard = env_test_guard();
+        with_tmpdir_test_dir("find-filter", |_| {
+            let base_keep = make_mock_unixpipe("rdogkeepns", "keep.keepns");
+            let base_skip = make_mock_unixpipe("rdogotherns", "skip.otherns");
 
-        let result = find_local_daemon_name(Some("rdogkeepns"));
-        cleanup_mock_unixpipe(&base_keep);
-        cleanup_mock_unixpipe(&base_skip);
+            let result = find_local_daemon_name(Some("rdogkeepns"));
+            cleanup_mock_unixpipe(&base_keep);
+            cleanup_mock_unixpipe(&base_skip);
 
-        assert_eq!(
-            result.expect("keepns namespace 必须找到 keep"),
-            "keep.keepns"
-        );
+            assert_eq!(
+                result.expect("keepns namespace 必须找到 keep"),
+                "keep.keepns"
+            );
+        });
     }
 
     #[test]
     fn find_local_daemon_name_should_error_when_no_match() {
-        let result = find_local_daemon_name(Some("rdog-nonexistent-ns-for-test-12345"));
-        let err = result.unwrap_err();
-        assert_eq!(err.kind(), io::ErrorKind::NotFound);
-        assert!(err.to_string().contains("未找到"));
+        let _guard = env_test_guard();
+        with_tmpdir_test_dir("find-no-match", |_| {
+            let result = find_local_daemon_name(Some("rdog-nonexistent-ns-for-test-12345"));
+            let err = result.unwrap_err();
+            assert_eq!(err.kind(), io::ErrorKind::NotFound);
+            assert!(err.to_string().contains("未找到"));
+        });
     }
 
     #[test]
     fn find_local_daemon_name_should_error_when_multiple_match() {
-        // 在一个不跟其他测试冲突的 namespace 放两个 daemon,触发多候选
-        let base1 = make_mock_unixpipe("rdogmulti", "first.multi");
-        let base2 = make_mock_unixpipe("rdogmulti", "second.multi");
+        let _guard = env_test_guard();
+        with_tmpdir_test_dir("find-multiple", |_| {
+            // 在一个不跟其他测试冲突的 namespace 放两个 daemon,触发多候选
+            let base1 = make_mock_unixpipe("rdogmulti", "first.multi");
+            let base2 = make_mock_unixpipe("rdogmulti", "second.multi");
 
-        let result = find_local_daemon_name(Some("rdogmulti"));
-        cleanup_mock_unixpipe(&base1);
-        cleanup_mock_unixpipe(&base2);
+            let result = find_local_daemon_name(Some("rdogmulti"));
+            cleanup_mock_unixpipe(&base1);
+            cleanup_mock_unixpipe(&base2);
 
-        let err = result.unwrap_err();
-        assert_eq!(err.kind(), io::ErrorKind::AlreadyExists);
-        let msg = err.to_string();
-        assert!(msg.contains("多个"), "错误信息应提示多个: {msg}");
-        assert!(msg.contains("first.multi"), "应列出 first.multi: {msg}");
-        assert!(msg.contains("second.multi"), "应列出 second.multi: {msg}");
+            let err = result.unwrap_err();
+            assert_eq!(err.kind(), io::ErrorKind::AlreadyExists);
+            let msg = err.to_string();
+            assert!(msg.contains("多个"), "错误信息应提示多个: {msg}");
+            assert!(msg.contains("first.multi"), "应列出 first.multi: {msg}");
+            assert!(msg.contains("second.multi"), "应列出 second.multi: {msg}");
+        });
     }
 
     #[test]
     fn find_local_daemon_name_should_skip_files_without_uplink_sibling() {
-        // 创建一个文件,名字像 rdog-lab-fake.pipe 但没有 _uplink 兄弟
-        // find_local_daemon_name 必须跳过它
-        let tmpdir = std::env::var_os("TMPDIR")
-            .map(PathBuf::from)
-            .filter(|p| !p.as_os_str().is_empty())
-            .unwrap_or_else(|| PathBuf::from("/tmp"));
-        let base = tmpdir.join("rdog-rdogfakens-fake.pipe");
-        let _ = fs::remove_file(&base);
-        fs::write(&base, b"not a fifo").expect("写入 fake 文件");
+        let _guard = env_test_guard();
+        with_tmpdir_test_dir("find-skip-no-uplink", |tmpdir| {
+            // 创建一个文件,名字像 rdog-lab-fake.pipe 但没有 _uplink 兄弟
+            // find_local_daemon_name 必须跳过它
+            let base = tmpdir.join("rdog-rdogfakens-fake.pipe");
+            let _ = fs::remove_file(&base);
+            fs::write(&base, b"not a fifo").expect("写入 fake 文件");
 
-        let result = find_local_daemon_name(Some("rdogfakens"));
-        let _ = fs::remove_file(&base);
+            let result = find_local_daemon_name(Some("rdogfakens"));
+            let _ = fs::remove_file(&base);
 
-        // 没有 _uplink 兄弟,不能算 daemon
-        let err = result.unwrap_err();
-        assert_eq!(err.kind(), io::ErrorKind::NotFound);
+            // 没有 _uplink 兄弟,不能算 daemon
+            let err = result.unwrap_err();
+            assert_eq!(err.kind(), io::ErrorKind::NotFound);
+        });
     }
 
     #[test]
@@ -893,6 +1565,7 @@ mod tests {
 
     #[test]
     fn compose_listen_endpoints_should_inject_unixpipe_when_enabled_and_not_present() {
+        let _guard = env_test_guard();
         use crate::config::ZenohConfig;
         let mut cfg = ZenohConfig::default();
         cfg.unixpipe.enabled = true;

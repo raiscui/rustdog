@@ -147,6 +147,7 @@ fn selector_mouse_target_without_auto_refind_should_return_no_action_before_back
                     min_confidence_milli: 900,
                     anchor: MouseAnchor::Center,
                 })),
+                guard: None,
                 button: MouseButtonName::Left,
                 count: 1,
                 hold_ms: DEFAULT_MOUSE_CLICK_HOLD_MS,

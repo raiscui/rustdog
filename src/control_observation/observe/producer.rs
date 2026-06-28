@@ -4,11 +4,18 @@ use crate::{
         capture_default_ax_snapshot, current_ax_platform, AxElement, AxSnapshot, AxTreeRequest,
         AxWindow,
     },
+    control_display_scope::{
+        display_intersects_rect, resolve_display_scope, resolve_observation_window_ref,
+        DisplayRect, DisplayScopeResolution, DisplaySelector,
+    },
     control_frames::ControlFrame,
     control_observation::{record_observation_with_selectors, ObservationHeader, ObservationRoot},
     control_protocol::ScreenshotRequest,
-    control_window::{execute_default_window_find, WindowFindRequest},
-    screenshot::execute_screenshot_bundle_request,
+    control_window::{
+        execute_default_window_find, resolve_default_window_target_rect, WindowCommandTarget,
+        WindowFindRequest,
+    },
+    screenshot::{current_display_summaries, execute_screenshot_bundle_request},
 };
 use serde_json::{json, Value};
 use std::io;
@@ -20,6 +27,7 @@ pub(super) struct ProducedSections {
     pub(super) windows: Option<Value>,
     pub(super) window_observation: Option<ObservationHeader>,
     pub(super) primary_observation: Option<ObservationHeader>,
+    pub(super) display_scope_resolution: Option<DisplayScopeResolution>,
 }
 
 pub(super) fn produce_observe_sections(
@@ -31,9 +39,15 @@ pub(super) fn produce_observe_sections(
     let mut accessibility = None;
     let mut windows = None;
     let mut window_observation = None;
+    let display_scope_resolution = request
+        .display_scope
+        .as_ref()
+        .map(resolve_observe_display_scope)
+        .transpose()?;
 
     if request.include_windows {
-        let (section, observation) = collect_window_section(request)?;
+        let (section, observation) =
+            collect_window_section(request, display_scope_resolution.as_ref())?;
         windows = Some(section);
         window_observation = observation;
     }
@@ -56,6 +70,7 @@ pub(super) fn produce_observe_sections(
             });
         }
         savefile_frames.extend(frames);
+        let visual_scope_applied = display_scope_resolution.is_some() && false;
         visual = Some(json!({
             "status": "complete",
             "target_applied": false,
@@ -66,6 +81,13 @@ pub(super) fn produce_observe_sections(
             "manifest": request.include_manifest.then_some(summary.manifest),
             "manifest_included": request.include_manifest,
             "display_count": summary.display_count,
+            "scope_applied": visual_scope_applied,
+            "scope_reason": display_scope_resolution
+                .is_some()
+                .then_some("metadata_only"),
+            "resolved_display_id": display_scope_resolution
+                .as_ref()
+                .map(|resolution| resolution.resolved.display_id.as_str()),
         }));
     }
 
@@ -79,11 +101,13 @@ pub(super) fn produce_observe_sections(
         windows,
         window_observation,
         primary_observation,
+        display_scope_resolution,
     })
 }
 
 fn collect_window_section(
     request: &ObserveRequest,
+    display_scope_resolution: Option<&DisplayScopeResolution>,
 ) -> io::Result<(Value, Option<ObservationHeader>)> {
     let Some(target) = request.target.as_ref() else {
         return Ok((target_required_section(), None));
@@ -94,6 +118,7 @@ fn collect_window_section(
 
     let response = execute_default_window_find(&WindowFindRequest {
         query: target.to_window_query(),
+        display_scope: request.display_scope.clone(),
         limit: request.limit,
         include_state: true,
         include_recipes: false,
@@ -107,6 +132,7 @@ fn collect_window_section(
         "observed_at_unix_ms": response.observed_at_unix_ms,
         "match_count": response.match_count,
         "returned_count": response.returned_count,
+        "display_scope": display_scope_resolution.map(crate::control_display_scope::display_scope_report),
         "items": response.matches,
     });
     Ok((value, observation))
@@ -150,9 +176,45 @@ fn filter_ax_snapshot(mut snapshot: AxSnapshot, request: &ObserveRequest) -> AxS
     snapshot
         .windows
         .retain(|window| target.matches_ax_window(window));
+    if let Some(display_scope) = request.display_scope.as_ref() {
+        if let Ok(resolution) = resolve_observe_display_scope(display_scope) {
+            snapshot.windows.retain(|window| {
+                window
+                    .rect
+                    .map(DisplayRect::from)
+                    .map(|rect| display_intersects_rect(&resolution.resolved, rect))
+                    .unwrap_or(false)
+            });
+        }
+    }
     snapshot.window_count = snapshot.windows.len();
     snapshot.element_count = snapshot.windows.iter().map(ax_window_element_count).sum();
     snapshot
+}
+
+fn resolve_observe_display_scope(
+    scope: &crate::control_display_scope::DisplayScope,
+) -> io::Result<DisplayScopeResolution> {
+    let displays = current_display_summaries()?;
+    resolve_display_scope(scope, &displays, |selector| {
+        resolve_window_selector_rect(selector)
+    })
+}
+
+fn resolve_window_selector_rect(selector: &DisplaySelector) -> io::Result<Option<DisplayRect>> {
+    let window_id = match selector {
+        DisplaySelector::WindowId(window_id) => window_id.clone(),
+        DisplaySelector::WindowRef {
+            observation_id,
+            ref_id,
+        } => resolve_observation_window_ref(observation_id, ref_id)?.window_id,
+        _ => return Ok(None),
+    };
+    let resolved = resolve_default_window_target_rect(&WindowCommandTarget {
+        window_id: Some(window_id),
+        ..WindowCommandTarget::default()
+    })?;
+    Ok(resolved.rect.map(DisplayRect::from))
 }
 
 fn record_visual_observation(request: &ObserveRequest) -> io::Result<ObservationHeader> {

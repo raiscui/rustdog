@@ -3,6 +3,22 @@ use serde_json::Value;
 use std::cell::{Cell, RefCell};
 
 #[test]
+fn web_act_should_inherit_display_scope_from_find_request() {
+    let request = parse_web_act_payload(
+        r#"{match:{text:"首页"},scope:{display:{id:"d2"}},action:"press",verify:true}"#,
+    )
+    .unwrap();
+
+    assert!(request.find.display_scope.is_some());
+    assert!(
+        parse_web_act_payload(r#"{match:{text:"首页"},display_id:"d2",action:"press"}"#)
+            .unwrap_err()
+            .to_string()
+            .contains("scope")
+    );
+}
+
+#[test]
 fn web_act_should_press_unique_page_target_and_verify_with_fresh_ax() {
     let request = parse_web_act_payload(
         r#"{target:{browser:"active"},match:{text:"首页"},action:"press",verify:true,limit:5}"#,

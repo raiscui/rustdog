@@ -517,3 +517,51 @@
 ### 后续讨论入口
 - 后续 plan: 方向 B(直接 Unix domain socket 控制面)10~50x 提速,把 Zenoh 完全跳过。
 - 同步更新: `.omx/plans/zenoh-unixpipe-fast-path.md` 的"风险"和"ADR"两节,把"unixpipe = Unix domain socket"措辞改成"unixpipe = named pipe (FIFO)";`specs/zenoh-unixpipe-fast-path-plan.md` 同步修正。
+
+## [2026-06-21 17:30:00] [Session ID: omx-1781788115552-szl2hn] 主题: zenoh_router_client flake 排查诊断收敛(2026-06-21)
+
+### 背景
+- 2026-06-20 22:00 记录 "~4% 多测试并发 flake",本轮(2026-06-21)用户显式要求排查,做最小可证伪实验。
+- 本轮结论:**当前样本 50 次 8 threads 0 fail,无法稳定复现**。但之前 10 次跑出过 3 次 fail,捕获到的根因仍然有效,作为下次 flake 出现时的快速参考。
+
+### 已收集证据(2026-06-21 多轮验证)
+| 阶段 | 样本 | 失败 | 失败率 | 备注 |
+|------|------|------|--------|------|
+| 第一次 8 threads | 10 次 | 3 | 30% | 失败信息已捕获 |
+| 串行 --test-threads=1 | 5 次 | 0 | 0% | 串行稳定 |
+| --test-threads=2 | 5 次 | 0 | 0% | 低并发稳定 |
+| --test-threads=4 | 5 次 | 0 | 0% | 低并发稳定 |
+| 8 threads 重跑(本轮) | 30 次 | 0 | 0% | 不复现 |
+| 8 threads 重跑(本轮) | 20 次 | 0 | 0% | 不复现 |
+
+### 之前 3 次失败的根因诊断(已锁定)
+- **失败用例 1+2** (`control_should_repaint_tui_input_while_zenoh_pty_output_is_busy` + `control_should_forward_tty_input_after_zenoh_pty_output_goes_idle`):PTY polling timeout 紧张,默认 900ms 窗口在 8 并发下被拉爆,需要 PTY 内部时序更宽。
+- **失败用例 3** (`control_should_accept_pty_string_shorthand_in_zenoh_profile`):daemon 启 Zenoh 时报 `Can not create a new TCP listener bound to tcp/127.0.0.1:54178: Address already in use (os error 48)`。
+  - 真因:`next_port()` 拿端口后 TcpListener 立即 drop,daemon spawn 后 Zenoh 启 listener 时,OS 内部 socket 状态(CLOSING / TIME_WAIT)没完全释放,`bind` 失败。
+  - **确认 Zenoh 1.8.0 listener 用 `set_reuseaddr(true)`**(查 `zenoh-link-commons-1.8.0/src/tcp.rs:52`),所以正常情况下能复用 TIME_WAIT 端口。失败发生在还没进 TIME_WAIT 也没完全释放的窗口期。
+  - **未完全确认**:`Address already in use` 是 `bind()` 报的(`tcp.rs:52` 是 `socket.bind(*addr)?`),不是 `listen()` 报。说明端口**正在被占用**,不是 TIME_WAIT。
+
+### 候选修复方向(评估,本轮未实施)
+1. **port guard**:`start_zenoh_daemon_with_combined_output` 内部加 `TcpListener::bind(listen_port)`,**不** listen,持有到 daemon 输出 "zenoh router daemon ready" 后再 drop。这样:
+   - helper 持有 fd 占住端口,daemon 启 Zenoh 时 Zenoh 启 listener 因为 SO_REUSEADDR=1 能 bind+listen 同端口
+   - helper drop 时,fd 关闭,Zenoh 已经 listen 成功,继续工作
+   - **surgical,只动 helper 函数,不影响 28 个 test caller**
+2. **PTY polling 窗口加大**:900ms → 2000ms,15s → 30s。逃避问题,没解决根因。
+3. **`--test-threads=4`**:改 `.cargo/config.toml`。影响所有 test,不是 surgical。
+4. **`serial_test` crate 强制 PTY tests 串行**:surgical,但引入新依赖。
+
+### 推荐顺序(下次 flake 再现时按此推)
+1. 复现一次拿到具体 panic 路径(地址 already in use vs PTY timeout)
+2. 如果是 port race,实施方案 1 (port guard)
+3. 如果是 PTY timeout,实施方案 2 (polling 窗口)
+4. 实施后跑 30+ 次 8 threads 验证 0 fail
+
+### 为什么本轮不写 test code
+- 用户偏好"做最正确的修复"而非"最小修复":写 test code 之前必须有可复现的失败证据
+- 50 次 0 fail 意味着当前环境 flake 不可复现,写 surgical 修复无法验证效果
+- 沉淀诊断结论 + 候选修复方案,作为下次 flake 自然复现时的 quickstart
+
+### 状态
+- EPIPHANY_LOG 沉淀完成
+- LATER_PLANS.md 已有 `zenoh_router_client ~4% flake 排查` follow-up,保留 [ ] 待办,等 flake 再次稳定复现
+- WORKLOG.md 收尾待追加(等用户决定)

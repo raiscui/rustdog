@@ -1,4 +1,7 @@
-use crate::control_observation::SelectorRefindPolicy;
+use crate::{
+    control_display_scope::{DisplayScope, DisplaySelector},
+    control_observation::SelectorRefindPolicy,
+};
 use std::io;
 
 pub const DEFAULT_MOUSE_CLICK_HOLD_MS: u64 = 80;
@@ -101,12 +104,26 @@ pub enum MouseEndpoint {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MouseDisplayGuard {
+    pub display: DisplaySelector,
+}
+
+impl MouseDisplayGuard {
+    pub fn as_scope(&self) -> DisplayScope {
+        DisplayScope {
+            display: self.display.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MouseMoveRequest {
     pub x: Option<i32>,
     pub y: Option<i32>,
     pub dx: Option<i32>,
     pub dy: Option<i32>,
     pub target: Option<MouseEndpoint>,
+    pub guard: Option<MouseDisplayGuard>,
     pub coordinate_space: MouseCoordinateSpace,
 }
 
@@ -122,6 +139,7 @@ pub struct ClickRequest {
     pub x: Option<i32>,
     pub y: Option<i32>,
     pub target: Option<MouseEndpoint>,
+    pub guard: Option<MouseDisplayGuard>,
     pub button: MouseButtonName,
     pub count: u8,
     pub hold_ms: u64,
@@ -133,6 +151,7 @@ pub struct ClickRequest {
 pub struct DragRequest {
     pub from: MouseEndpoint,
     pub to: MouseEndpoint,
+    pub guard: Option<MouseDisplayGuard>,
     pub button: MouseButtonName,
     pub duration_ms: u64,
     pub steps: u16,
@@ -144,6 +163,7 @@ pub struct WheelRequest {
     pub x: Option<i32>,
     pub y: Option<i32>,
     pub target: Option<MouseEndpoint>,
+    pub guard: Option<MouseDisplayGuard>,
     pub delta_x: i32,
     pub delta_y: i32,
     pub coordinate_space: MouseCoordinateSpace,

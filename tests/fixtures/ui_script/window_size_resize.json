@@ -1,0 +1,21 @@
+[
+  { "Scope": { "display": { "id": "d2" } } },
+  {
+    "WindowSize": {
+      "target": {
+        "query": {
+          "app_contains": "Chrome",
+          "title_contains": "Docs"
+        }
+      },
+      "width": 1200.0,
+      "height": 800.0,
+      "mode": "resize",
+      "origin": { "x": 100.0, "y": 120.0 },
+      "box": "outer",
+      "verify": { "tolerance_px": 2 }
+    }
+  },
+  { "Expect": { "kind": "response_status", "status": "ok" } },
+  { "Exit": null }
+]

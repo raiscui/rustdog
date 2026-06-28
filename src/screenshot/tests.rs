@@ -79,6 +79,19 @@ fn build_screenshot_bundle_should_map_os_rect_to_image_rect_and_preserve_gaps() 
 
     assert_eq!(manifest["displays"][0]["image_rect"]["x"], 0);
     assert_eq!(manifest["displays"][0]["image_rect"]["y"], 0);
+    assert_eq!(manifest["displays"][0]["display_id"], "left");
+    assert_eq!(
+        manifest["displays"][0]["id"],
+        manifest["displays"][0]["display_id"]
+    );
+    assert_eq!(
+        manifest["displays"][0]["display_id_stability"],
+        DISPLAY_ID_STABILITY_SESSION
+    );
+    assert_eq!(
+        manifest["displays"][0]["primary"],
+        manifest["displays"][0]["is_primary"]
+    );
     assert_eq!(manifest["displays"][1]["image_rect"]["x"], 100);
     assert_eq!(manifest["displays"][1]["image_rect"]["y"], 20);
     assert_eq!(manifest["gaps"].as_array().unwrap().len(), 1);
@@ -643,8 +656,7 @@ fn stale_freshness_guard_should_still_reject_within_ttl() {
         display_fingerprints: fp1.display_fingerprints.clone(),
     };
 
-    reject_stale_composite_fingerprint(fp1, &mut last)
-        .expect("first frame should be accepted");
+    reject_stale_composite_fingerprint(fp1, &mut last).expect("first frame should be accepted");
     reject_stale_composite_fingerprint(fp2, &mut last)
         .expect_err("5s 内的同 hash 请求仍应被拒,保留 stale detection");
 }
@@ -689,10 +701,8 @@ fn stale_freshness_guard_should_allow_changed_frame_within_ttl() {
         display_fingerprints: vec![display_capture_fingerprint(&changed[0])],
     };
 
-    reject_stale_composite_fingerprint(fp1, &mut last)
-        .expect("first frame should be accepted");
-    reject_stale_composite_fingerprint(fp2, &mut last)
-        .expect("2s 后不同 hash 应该放行");
+    reject_stale_composite_fingerprint(fp1, &mut last).expect("first frame should be accepted");
+    reject_stale_composite_fingerprint(fp2, &mut last).expect("2s 后不同 hash 应该放行");
 }
 
 #[test]
@@ -873,6 +883,13 @@ fn real_capture_smoke_should_capture_or_report_permission_denied() {
         }
         Err(err) if err.kind() == io::ErrorKind::PermissionDenied => {
             eprintln!("real screenshot smoke hit permission boundary: {err}");
+        }
+        Err(err)
+            if err.kind() == io::ErrorKind::NotFound
+                && (err.to_string().contains("没有可截图的显示器")
+                    || err.to_string().contains("未找到可截图显示器")) =>
+        {
+            eprintln!("real screenshot smoke hit no-display boundary: {err}");
         }
         Err(err) => panic!("real screenshot smoke failed unexpectedly: {err}"),
     }

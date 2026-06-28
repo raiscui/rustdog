@@ -10,6 +10,7 @@ rustdog 首先被LLM agent 智能体使用，其次被人类使用。要以agent
 - 修改 `src/control_protocol.rs`、`src/shell.rs`、`tests/control_lanes.rs`、`tests/control_mode.rs` 前,先看 line-control 协议规格。
 - 修改 `src/pty_control.rs`、`src/control_transport.rs`、`src/zenoh_control.rs` 或 `rdog control --pty` 行为前,先看 PTY control 规划。
 - 需要理解当前协议为什么会同时保留显式协议请求和裸 shell 行时,先看项目经验沉淀。
+- 修改 UI script runner、GUI 自动化 JSON DSL、control-flow 脚本编译或后续 `@ui-flow` 前,先看 UI script 控制计划。
 
 ## 长期文件索引
 
@@ -97,10 +98,15 @@ rustdog 首先被LLM agent 智能体使用，其次被人类使用。要以agent
   - 用途: 说明 23 个旧支线组、90 个支线六文件归档到 `archive/branch_contexts/<suffix>/` 的映射和摘要
   - 何时阅读: 需要追溯 `agent_desktop_review`、`observation_refmap_*`、`computer_use_density`、`xhs_*`、`rdog_*` 等旧支线上下文,或确认根目录为什么只保留默认六文件入口时
 
+- `archive/manifests/ARCHIVE_MANIFEST__2026-06-25_task_plan_rollover_local_default_unixpipe.md`
+  - 主题: 2026-06-25 默认 `task_plan.md` 超过 1000 行后的续档说明
+  - 用途: 说明 `$oh-my-codex:plan` local-default unixpipe daemon 方案前旧 `task_plan.md` 的归档位置和续档原因
+  - 何时阅读: 需要追溯 2026-06-25 local-default unixpipe 规划前的默认任务计划,或确认为何当前默认 `task_plan.md` 重新变短时
+
 - `specs/zenoh-unixpipe-fast-path-plan.md`
   - 主题: rdog control macOS / Linux 本机 fast path(Zenoh `transport_unixpipe`)规划
-  - 用途: 固定"同机 daemon + control 自动走 Unix domain socket,失败透明 fallback 到 UDP/TCP"的契约,以及 socket 路径推导规则、daemon/client 行为边界、错误处理、验收标准;包含 2026-06-21 加的 `self` / 空 target 入口设计
-  - 何时阅读: 修改 `src/zenoh_runtime.rs` / `src/zenoh_control.rs` / `src/config.rs` / `src/main.rs` 的 unixpipe 相关逻辑、`Cargo.toml` 的 `transport_unixpipe` feature、`rdog_macos.toml` / `rdog_linux.toml` 模板,或排查"同机 ping 慢" / "socket bind 失败" / "远端 fallback 是否生效" / "`rdog control self` 找不到 daemon"前
+  - 用途: 固定"同机 daemon + control 自动走 Zenoh unixpipe FIFO,失败透明 fallback 到 UDP/TCP"的契约,以及 FIFO base 路径推导、local-default registry、daemon/client 行为边界、错误处理、验收标准;包含 2026-06-21 加的 `self` / 空 target 入口设计和 2026-06-25 加的 local-default 默认 daemon 规则
+  - 何时阅读: 修改 `src/zenoh_runtime.rs` / `src/zenoh_control.rs` / `src/config.rs` / `src/main.rs` 的 unixpipe 相关逻辑、`Cargo.toml` 的 `transport_unixpipe` feature、`rdog_macos.toml` / `rdog_linux.toml` 模板,或排查"同机 ping 慢" / "FIFO 创建失败" / "远端 fallback 是否生效" / "`rdog control self` 找不到 daemon"前
 
 - `specs/zenoh-control-plane-plan.md`
   - 主题: `rustdog` 的 canonical Zenoh router/serial control-plane 规划
@@ -127,6 +133,11 @@ rustdog 首先被LLM agent 智能体使用，其次被人类使用。要以agent
   - 用途: 固定 `@gui-probe`、`@web-find`、`@web-act`、`@gui-act`、`@gui-bench` 的演进方向,以及用 `backend_request_count` / `agent_decision_points` 等指标衡量任务密度
   - 何时阅读: 准备减少 agent 手动串联 `@ping` / `@capabilities` / `@window-find` / `@ax-get` 等低级请求,实现 Web/GUI 高密度任务 primitive 或 bench baseline 前
 
+- `specs/rdog-ui-script-control-plan.md`
+  - 主题: UI script / control-flow JSON DSL 规划
+  - 用途: 定义 iced_emg-compatible JSON DSL 如何适配 rdog control frames,包括 CLI-side runner、step 映射、trace/artifacts、安全策略和后续 daemon-side `@ui-flow` 边界
+  - 何时阅读: 修改 UI script runner、control script、GUI 自动化 DSL、`@ui-flow`、脚本验证、坐标回放或语义动作编排前
+
 - `specs/zenoh-sdk-agent-prompts.md`
   - 主题: 给编程智能体直接使用的 Rust / Unity Zenoh 对接实现提示模板
   - 用途: 提供可复制 prompt,指导智能体用 Zenoh Rust SDK 或 `mhama/zenoh-unity-plugin` 对接 `rdog` daemon
@@ -146,6 +157,11 @@ rustdog 首先被LLM agent 智能体使用，其次被人类使用。要以agent
   - 主题: 多显示器 `@screenshot` bundle 和截图坐标/OS 鼠标坐标契约
   - 用途: 固定 `display:"all"`、`layout:"composite"`、`coordinate_space:"os-logical"`、virtual desktop JPEG、manifest JSON、`display:"primary"` 兼容入口、gap/rotation 和 Screen Recording 权限边界
   - 何时阅读: 准备实现或评审多显示器截图、manifest schema、后续 `@click` / `@drag` 坐标换算、或排查 screenshot 坐标偏移前
+
+- `specs/rdog-display-scope-control-plan.md`
+  - 主题: 多显示器 display scope resolver 与 action guard 控制方案
+  - 用途: 固定请求侧唯一使用 `scope:{display:{...}}` / `guard:{display:{...}}`,支持 `id`、`name_contains`、`contains_point`、`window_id`、`window_ref + observation_id` resolver,并明确 `display_id` 只作为 resolved identity 返回
+  - 何时阅读: 修改 `src/control_display_scope.rs`、`@observe`、`@window-find`、`@ax-find`、`@web-find`、mouse display guard、`@bootstrap` nested observe scope,或排查多显示器目标过滤和误点保护前
 
 - `specs/rdog-mouse-control-coordinate-plan.md`
   - 主题: `@mouse-move` / `@mouse-button` / `@click` / `@drag` / `@wheel` 鼠标控制方案
@@ -168,9 +184,9 @@ rustdog 首先被LLM agent 智能体使用，其次被人类使用。要以agent
   - 何时阅读: 准备实现或评审非鼠标 GUI 控制、更新 `rdog-control` skill,或判断某个交互是否该先走 AX/value 而不是鼠标前
 
 - `specs/rdog-window-control-plan.md`
-  - 主题: `@window-find` / `@window-activate` / `@window-close` 的窗口状态与窗口生命周期控制方案
-  - 用途: 固定截图不可见窗口的 agent 工作流、window state schema、graceful/terminate/kill 关闭边界、以及 hidden/minimized/occluded/cross-space 的诚实状态语义
-  - 何时阅读: 准备实现或评审窗口发现、窗口激活、窗口关闭、被遮挡窗口交互,或更新 `rdog-control` skill 的窗口控制指引前
+  - 主题: `@window-find` / `@window-activate` / `@window-close` / `@window-resize` 的窗口状态、生命周期和窗口尺寸控制方案
+  - 用途: 固定截图不可见窗口的 agent 工作流、window state schema、graceful/terminate/kill 关闭边界、hidden/minimized/occluded/cross-space 的诚实状态语义,以及 `WindowSize` 应如何通过默认恢复/激活目标窗口的 `@window-resize` 进入 control plane
+  - 何时阅读: 准备实现或评审窗口发现、窗口激活、窗口关闭、窗口 resize、被遮挡窗口交互,或更新 `rdog-control` skill / UI script 的窗口控制指引前
 
 - `specs/bidirectional-control-plane-plan.md`
   - 主题: 控制面从单向 request/reply 升级为真正双向 control peer 的规划

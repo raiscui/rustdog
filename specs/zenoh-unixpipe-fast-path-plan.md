@@ -16,7 +16,7 @@ agent 高频跑 `@web-find` / `@screenshot` / `@click` 时,这段延迟会肉眼
 
 ## 2. 目标
 
-让同机 daemon + control 把 Zenoh link 层从 UDP 换成 Unix domain socket,目标 round-trip 提速 2~5x。远端 / 跨主机行为完全不变,client 自动 fallback 到原 scout 路径。
+让同机 daemon + control 把 Zenoh link 层从 UDP 换成 Zenoh unixpipe(FIFO),目标 round-trip 提速 2~5x。远端 / 跨主机行为完全不变,client 自动 fallback 到原 scout 路径。
 
 **不在本轮范围**:
 - 不实现"绕过 Zenoh 的独立 UDS 控制面"(那是后续方向 B)
@@ -27,22 +27,24 @@ agent 高频跑 `@web-find` / `@screenshot` / `@click` 时,这段延迟会肉眼
 
 ### 3.1 路径推导
 
-- socket 路径: `{tmpdir}/rdog-{namespace}-{daemon_name}.sock`
+- FIFO base 路径: `{tmpdir}/rdog-{namespace}-{daemon_name}.pipe`
   - `tmpdir` 解析优先级: `$TMPDIR` 环境变量 > `/tmp`
   - macOS 上 `$TMPDIR` 是 per-user(例如 `/var/folders/xx/yy/T/`),自然提供权限隔离
-  - Linux 上 `$TMPDIR` 不一定存在,直接 `/tmp` 兜底,启动后 chmod 0600
-- 路径总长必须 ≤ 100 字节(macOS `sun_path` 限制 104,留 4 字节给 `\0` + 容差),超过时 daemon 启动 fail-fast。
-- `(namespace, daemon_name)` 在 daemon 端和 client 端都已知,推导稳定,不需要额外 control-plane "发现 socket 路径"。
+  - Linux 上 `$TMPDIR` 不一定存在,直接 `/tmp` 兜底
+- 路径总长必须 ≤ 95 字节(macOS `sun_path` 限制 104,Zenoh 派生 `_downlink` 需要 9 字节),超过时 daemon 启动 fail-fast。
+- `(namespace, daemon_name)` 在 daemon 端和 client 端都已知,推导稳定,不需要额外 control-plane "发现 FIFO 路径"。
 
 ### 3.2 daemon 端行为
 
 - `Cargo.toml` 启用 `transport_unixpipe` feature。
 - `ZenohConfig` 新增 `unixpipe: UnixpipeConfig` 子结构,默认 unix 平台 `enabled = true`,Windows `enabled = false`。
+- `UnixpipeConfig` 包含 `local_default`。默认 false,模板可显式打开。
 - daemon 启动时:
   1. 校验 `unixpipe.socket_path`(如果显式给了)长度合法
   2. 如果 unixpipe enabled 且用户没在 `listen_endpoints` 显式声明 `unixpipe/...`,自动把 `unixpipe/{推导路径}` 注入到 `listen_endpoints` 最前
-  3. `unlink` 旧 socket 文件(stale cleanup)
-  4. 把最终 socket 路径通过启动日志打出来,便于排错
+  3. `unlink` 旧 FIFO 文件(stale cleanup)
+  4. 如果 `local_default = true`,写入本机 local-default registry 并持有 PID guard
+  5. 把最终 FIFO base 路径通过启动日志打出来,便于排错
 
 ### 3.3 client 端行为
 
@@ -60,18 +62,21 @@ agent 高频跑 `@web-find` / `@screenshot` / `@click` 时,这段延迟会肉眼
 - **`self` / 空 target 入口**(2026-06-21 加):
   - `rdog control self @<line>` = 显式本机 fast path,可加可不加 `--namespace`
   - `rdog control --namespace <ns> @<line>`(空 target)= 隐式本机 fast path
-  - 客户端通过 `find_local_daemon_name(namespace)` 扫描 `$TMPDIR/rdog-{ns}-*.pipe_uplink` 找唯一 daemon
-  - 0 个 → NotFound 错误,提示启动 daemon 或显式指定 target
-  - 1 个 → 用它,namespace 必要时从 daemon_name 后缀推断
-  - >1 个 → AlreadyExists 错误,列出所有候选,提示显式指定 target
+  - 客户端通过 `find_local_daemon_name(namespace)` 先读取 local-default registry
+  - registry 有且只有一个有效 daemon → 使用 registry 中的 daemon_name
+  - registry stale(pid 不存在、schema 不对、FIFO 超过启动宽限仍不存在) → 清理后继续 fallback
+  - 没有有效 registry → 扫描 `$TMPDIR/rdog-{ns}-*.pipe_uplink` 找唯一 daemon
+  - fallback 0 个 → NotFound 错误,提示启动 daemon 或显式指定 target
+  - fallback 1 个 → 用它,namespace 必要时从 daemon_name 后缀推断
+  - fallback >1 个 → AlreadyExists 错误,列出所有候选,提示显式指定 target 或设置 `[zenoh.unixpipe] local_default = true`
   - PTY 不支持,one-shot 多 line 支持(复用单 session 串行发)
   - 关键实现: Zenoh 1.8.0 实际只创建 `<base>_uplink` 和 `<base>_downlink` 两个 FIFO,
     `<base>` 本身不一定存在,所以扫描必须按 `*.pipe_uplink` 而不是 `*.pipe`
 
 ### 3.4 错误处理契约
 
-- socket 路径超过 100 字节: daemon 启动 fail-fast,明确报错让用户改短 namespace / daemon_name。
-- stale socket 文件存在: daemon 启动时 unlink 掉,不报 `Address already in use`。
+- FIFO base 路径超过 95 字节: daemon 启动 fail-fast,明确报错让用户改短 namespace / daemon_name。
+- stale FIFO 文件存在: daemon 启动时 unlink 掉,不报 `Address already in use`。
 - 同机 unixpipe 不可达: client 自动 fallback 到 UDP scout,行为完全透明,远端场景不受影响。
 - 显式 `--entry-point` 给 `unixpipe/<path>` 但路径不存在: 当前实现应 fail-fast,不 fallback(避免静默走错路径)。
 
@@ -82,7 +87,7 @@ agent 高频跑 `@web-find` / `@screenshot` / `@click` 时,这段延迟会肉眼
 - `cargo check` 在 macOS / Linux 上通过。
 - `cargo build` 通过,无新增 warning。
 - `cargo test --lib` 所有新增单测通过。
-- `cargo test --test zenoh_unixpipe_fast_path` 三个 e2e 集成测试通过(同机成功、远端 fallback、stale 清理)。
+- `cargo test --test zenoh_unixpipe_fast_path` e2e 集成测试通过(同机成功、self/空 target、local-default、多 FIFO、stale 清理)。
 - 已有的 `cargo test --test zenoh_router_client` 不回归。
 
 ### 性能(目标)
@@ -93,14 +98,14 @@ agent 高频跑 `@web-find` / `@screenshot` / `@click` 时,这段延迟会肉眼
 
 ### 错误处理
 
-- socket 路径超过 100 字节时,daemon 启动 fail-fast,错误信息明确。
-- stale socket 文件存在时,daemon 启动时 unlink 掉,不报 `Address already in use`。
+- FIFO base 路径超过 95 字节时,daemon 启动 fail-fast,错误信息明确。
+- stale FIFO 文件存在时,daemon 启动时 unlink 掉,不报 `Address already in use`。
 - 同机 unixpipe 不可达,client 自动 fallback 到 UDP scout,行为完全透明。
 
 ## 5. 范围外 / 留给后续 plan
 
 - **方向 B(直接 UDS 控制面)**:绕过 Zenoh 的 UDS 控制面,理论 10~50x 提速,代码量 200~300 行,作为本轮的潜在 follow-up。
-- **Windows 平台 native pipe**:Windows 走 `\\.\pipe\<name>` 与 Unix domain socket 完全不同,不在本轮范围。
+- **Windows 平台 native pipe**:Windows 走 `\\.\pipe\<name>` 与 Unix FIFO 完全不同,不在本轮范围。
 - **共享内存 IPC**:完全 in-memory,但要自己实现 query/reply/序列化,工作量大,作为远期选项。
 - **Zenoh 1.9+ 升级**:新版本 zenoh 在 unixpipe 上有更稳定的行为,等上游稳定再统一升级。
 
@@ -110,13 +115,14 @@ agent 高频跑 `@web-find` / `@screenshot` / `@click` 时,这段延迟会肉眼
 - `specs/zenoh-control-plane-plan.md`:在"Canonical control-plane behavior"之后增加"Local fast path: unixpipe"节,固定本机 fast path + 远端 fallback 的契约。
 - `AGENTS.md`:`specs/` 索引里加本文件条目。
 - `EXPERIENCE.md`:沉淀 2 条经验
-  - "Zenoh 本机 fast path 优先用 unixpipe transport 而不是新增独立 UDS 控制面:保留 Zenoh 协议层语义,只是 link 层换 unix domain socket"
-  - "同机 IPC 路径用 `$TMPDIR/rdog-{ns}-{name}.sock` 而不是 `/var/run/...`:macOS 的 $TMPDIR 已经 per-user,自然有权限隔离,不需要额外 chmod"
+- "Zenoh 本机 fast path 优先用 unixpipe transport 而不是新增独立 UDS 控制面:保留 Zenoh 协议层语义,只是 link 层换本机 FIFO"
+- "同机 IPC 路径用 `$TMPDIR/rdog-{ns}-{name}.pipe` 而不是 `/var/run/...`:macOS 的 $TMPDIR 已经 per-user,自然有权限隔离"
+- "空 target / self target 先读 local-default registry,再 fallback 到唯一 FIFO 扫描;不要把 `$TMPDIR` 里的多个测试 FIFO 当成真实默认目标"
 - `.codex/skills/rdog-control/SKILL.md`:troubleshooting 段加入"同机 ping 慢? 确认 unixpipe 是否 enabled"的诊断路径。
 
 ## 7. ADR(摘要)
 
-- **Decision**: 启用 Zenoh `transport_unixpipe` transport,本机 daemon + control 自动走 Unix domain socket,失败透明 fallback。
+- **Decision**: 启用 Zenoh `transport_unixpipe` transport,本机 daemon + control 自动走 FIFO fast path,失败透明 fallback。
 - **Why chosen**: 2~5x 提速 + 不引入新 IPC 抽象 + Zenoh 官方 feature 风险最低;后续升级到方向 B(直接 UDS 控制面)可以叠加而不是替换。
 - **Alternatives rejected**:
   - 方向 B(直接 UDS 控制面): 工作量 3~5x,引入两套控制面长期维护负担。

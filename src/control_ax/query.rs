@@ -4,11 +4,16 @@ use super::{
     resolve_target_id_in_snapshot, AxElement, AxMode, AxRect, AxSnapshot, AxTarget, AxTreeRequest,
     AxWindow, AX_SCHEMA,
 };
+use crate::control_display_scope::{
+    display_intersects_rect, display_scope_report, parse_display_scope, resolve_display_scope,
+    resolve_observation_window_ref, DisplayRect, DisplayScope, DisplaySelector,
+};
 use crate::control_observation::ObservationHeader;
 use crate::control_protocol::{
     normalize_object_field_name, object_inner, parse_quoted_payload, split_object_field,
     split_object_fields,
 };
+use crate::screenshot::current_display_summaries;
 use serde::Serialize;
 use std::io;
 
@@ -20,6 +25,7 @@ const DEFAULT_AX_GET_MODE: AxMode = AxMode::Interactive;
 pub struct AxFindRequest {
     pub tree: AxTreeRequest,
     pub query: AxFindQuery,
+    pub display_scope: Option<DisplayScope>,
     pub limit: u16,
 }
 
@@ -112,6 +118,8 @@ struct AxFindResponse {
     coordinate_space: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     observation: Option<ObservationHeader>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    display_scope: Option<serde_json::Value>,
     match_count: usize,
     returned_count: usize,
     truncated: bool,
@@ -199,6 +207,7 @@ pub fn parse_ax_find_payload(input: &str) -> io::Result<AxFindRequest> {
     let mut max_elements = None::<u16>;
     let mut include_values = None::<bool>;
     let mut limit = None::<u16>;
+    let mut display_scope = None::<DisplayScope>;
     let mut query = AxFindQuery::default();
 
     for field in split_object_fields(inner)? {
@@ -227,6 +236,17 @@ pub fn parse_ax_find_payload(input: &str) -> io::Result<AxFindRequest> {
                 parse_bool_literal("@ax-find", "include_values", raw_value)?,
             )?,
             "limit" => assign_once(&mut limit, "limit", "@ax-find", parse_limit(raw_value)?)?,
+            "scope" => assign_once(
+                &mut display_scope,
+                "scope",
+                "@ax-find",
+                parse_display_scope(raw_value, "@ax-find.scope")?,
+            )?,
+            "display_id" => {
+                return Err(invalid_data(
+                    "@ax-find.display_id 不是请求字段;请使用 scope:{display:{id:\"...\"}}",
+                ))
+            }
             "process" | "process_name" => assign_once(
                 &mut query.process,
                 "process",
@@ -323,6 +343,7 @@ pub fn parse_ax_find_payload(input: &str) -> io::Result<AxFindRequest> {
             ..AxTreeRequest::default()
         },
         query,
+        display_scope,
         limit: limit.unwrap_or(DEFAULT_AX_FIND_LIMIT),
     })
 }
@@ -392,10 +413,11 @@ pub fn build_ax_find_response_json(
     request: &AxFindRequest,
 ) -> io::Result<String> {
     let snapshot = snapshot.clone().with_observation("@ax-find")?;
+    let (windows, display_scope) = ax_windows_for_display_scope(&snapshot.windows, request)?;
     let mut matches = Vec::new();
     let mut match_count = 0usize;
 
-    for window in &snapshot.windows {
+    for window in windows {
         collect_matches(
             window,
             &request.query,
@@ -413,12 +435,61 @@ pub fn build_ax_find_response_json(
         permission_status: snapshot.permission_status.clone(),
         coordinate_space: snapshot.coordinate_space,
         observation: snapshot.observation.clone(),
+        display_scope,
         match_count,
         returned_count: matches.len(),
         truncated: snapshot.truncated || match_count > matches.len(),
         matches,
     };
     response.to_value_json()
+}
+
+fn ax_windows_for_display_scope<'a>(
+    windows: &'a [AxWindow],
+    request: &AxFindRequest,
+) -> io::Result<(Vec<&'a AxWindow>, Option<serde_json::Value>)> {
+    let Some(scope) = request.display_scope.as_ref() else {
+        return Ok((windows.iter().collect(), None));
+    };
+
+    let displays = current_display_summaries()?;
+    let resolution = resolve_display_scope(scope, &displays, |selector| {
+        ax_window_rect_for_display_selector(windows, selector)
+    })?;
+    let before = windows.len();
+    let filtered = windows
+        .iter()
+        .filter(|window| {
+            window
+                .rect
+                .map(DisplayRect::from)
+                .map(|rect| display_intersects_rect(&resolution.resolved, rect))
+                .unwrap_or(false)
+        })
+        .collect::<Vec<_>>();
+    let mut report = display_scope_report(&resolution);
+    report["matched_before_filter"] = serde_json::json!(before);
+    report["matched_after_filter"] = serde_json::json!(filtered.len());
+    Ok((filtered, Some(report)))
+}
+
+fn ax_window_rect_for_display_selector(
+    windows: &[AxWindow],
+    selector: &DisplaySelector,
+) -> io::Result<Option<DisplayRect>> {
+    let window_id = match selector {
+        DisplaySelector::WindowId(window_id) => window_id.clone(),
+        DisplaySelector::WindowRef {
+            observation_id,
+            ref_id,
+        } => resolve_observation_window_ref(observation_id, ref_id)?.window_id,
+        _ => return Ok(None),
+    };
+    Ok(windows
+        .iter()
+        .find(|window| window.id == window_id)
+        .and_then(|window| window.rect)
+        .map(DisplayRect::from))
 }
 
 pub fn build_ax_get_response_json(
@@ -668,6 +739,19 @@ mod tests {
         assert!(!request.tree.include_values);
         assert_eq!(request.limit, DEFAULT_AX_FIND_LIMIT);
         assert_eq!(request.query.name_contains.as_deref(), Some("can"));
+    }
+
+    #[test]
+    fn parse_ax_find_payload_should_accept_display_scope_and_reject_display_id() {
+        let request =
+            parse_ax_find_payload(r#"{role:"AXButton",scope:{display:{id:"d2"}}}"#).unwrap();
+        assert!(request.display_scope.is_some());
+        assert!(
+            parse_ax_find_payload(r#"{role:"AXButton",display_id:"d2"}"#)
+                .unwrap_err()
+                .to_string()
+                .contains("scope")
+        );
     }
 
     #[test]

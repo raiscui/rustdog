@@ -141,6 +141,16 @@ pub(crate) fn parse_bootstrap_payload(input: &str) -> io::Result<BootstrapReques
                 "include_trace",
                 parse_bool_literal("@bootstrap", "include_trace", raw_value)?,
             )?,
+            "scope" => {
+                return Err(invalid_data(
+                    "@bootstrap 顶层不接受 scope;请使用 observe:{scope:{display:{...}}}",
+                ))
+            }
+            "display_id" => {
+                return Err(invalid_data(
+                    "@bootstrap.display_id 不是请求字段;请使用 observe:{scope:{display:{id:\"...\"}}}",
+                ))
+            }
             "action" | "click" | "press" | "type" | "key" | "allow_side_effects" => {
                 return Err(invalid_data(format!(
                     "@bootstrap 是 read-only preflight,不接受可能产生 GUI side effect 的字段: {field_name}"

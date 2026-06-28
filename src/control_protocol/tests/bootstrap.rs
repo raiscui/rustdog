@@ -64,6 +64,25 @@ fn parse_should_support_gui_bootstrap_observe_override() {
 }
 
 #[test]
+fn parse_should_support_gui_bootstrap_nested_observe_display_scope() {
+    let parsed = parse_control_line(
+        r#"@bootstrap#3:{mode:"gui",observe:{mode:"hybrid",scope:{display:{id:"d2"}}}}"#,
+    )
+    .unwrap();
+    let ControlParseResult::Control(ControlRequest {
+        request_id: Some(3),
+        command: ControlCommand::Bootstrap(request),
+    }) = parsed
+    else {
+        panic!("expected @bootstrap control request");
+    };
+
+    let observe = request.observe.expect("nested observe should parse");
+    assert_eq!(request.mode, BootstrapMode::Gui);
+    assert!(observe.display_scope.is_some());
+}
+
+#[test]
 fn parse_should_support_bootstrap_policy_and_trace_fields() {
     assert_eq!(
         parse_control_line(
@@ -107,6 +126,11 @@ fn parse_should_reject_basic_bootstrap_with_observe() {
 fn parse_should_reject_bootstrap_unknown_duplicate_and_side_effect_fields() {
     assert_error_contains(r#"@bootstrap:{unknown:true}"#, "未知字段");
     assert_error_contains(r#"@bootstrap:{mode:"gui",mode:"basic"}"#, "字段重复");
+    assert_error_contains(
+        r#"@bootstrap:{scope:{display:{id:"d2"}}}"#,
+        "顶层不接受 scope",
+    );
+    assert_error_contains(r#"@bootstrap:{display_id:"d2"}"#, "display_id 不是请求字段");
     assert_error_contains(r#"@bootstrap:{click:true}"#, "read-only preflight");
     assert_error_contains(
         r#"@bootstrap:{allow_side_effects:true}"#,

@@ -15,6 +15,7 @@ mod control_capabilities;
 mod control_client_input;
 mod control_core;
 mod control_display;
+mod control_display_scope;
 mod control_frames;
 mod control_gui_bench;
 mod control_mouse;
@@ -31,6 +32,10 @@ mod listener;
 mod pty_control;
 mod screenshot;
 mod shell;
+// UI script 目前只落 parser/runner fixture tests。
+// 等 `rdog ui-script run` CLI 接入真实 control transport 后,再进入生产编译路径。
+#[cfg(test)]
+mod ui_script;
 mod zenoh_control;
 mod zenoh_identity;
 mod zenoh_runtime;
@@ -96,7 +101,7 @@ enum ControlInvocation {
         entry_point: Vec<String>,
     },
     /// 本机 fast path:用 `rdog control self @<line>` 或空 target 触发,
-    /// 通过扫描 $TMPDIR/rdog-*.pipe_uplink 找唯一 unixpipe daemon。
+    /// 优先读 local-default registry,没有 registry 时再扫描唯一 unixpipe FIFO。
     ZenohLocal {
         namespace: Option<String>,
     },
@@ -596,7 +601,8 @@ fn run(opts: input::Opts) -> Result<(), String> {
                         );
                     }
 
-                    // 扫描 $TMPDIR/rdog-{ns}-*.pipe_uplink 找唯一 daemon。
+                    // 本机默认选择由 runtime 层统一处理:
+                    // 先读 local-default registry,再 fallback 到唯一 FIFO 扫描。
                     let target_name = zenoh_runtime::find_local_daemon_name(namespace.as_deref())
                         .map_err(|err| err.to_string())?;
 

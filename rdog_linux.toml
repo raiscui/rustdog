@@ -113,4 +113,9 @@ keyexpr = "rdog/default/daemon/mini-a.lab/member/mini-a.lab/keyinput"
 #
 # 默认:macOS / Linux = true,Windows = false。
 # 想关闭显式写: `enabled = false`。
+[zenoh.unixpipe]
+enabled = true
+# 让 `rdog control @ping` / `rdog control @screenshot` 优先选择本配置里的 daemon。
+# 没有这个显式默认身份时,空 target 只能退回到 `$TMPDIR` 里唯一 FIFO 候选扫描。
+local_default = true
 # ----------------------------------------------------------------------------

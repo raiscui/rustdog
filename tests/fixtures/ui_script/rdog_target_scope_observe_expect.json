@@ -1,0 +1,16 @@
+[
+  { "Target": { "name": "self", "namespace": "lab" } },
+  {
+    "Policy": {
+      "semantic_first": true,
+      "coordinate_fallback": "explicit",
+      "default_coordinate_space": "os-logical",
+      "require_verification_after_action": true
+    }
+  },
+  { "Scope": { "display": { "id": "d2" } } },
+  { "Observe": { "mode": "hybrid", "include_screenshot": true, "include_ax": true } },
+  { "Click": { "x": 350.0, "y": 40.0, "button": "Left" } },
+  { "Expect": { "kind": "response_status", "status": "ok" } },
+  { "Exit": null }
+]
