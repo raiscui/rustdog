@@ -30,9 +30,9 @@ rustdog 首先被LLM agent 智能体使用，其次被人类使用。要以agent
   - 何时阅读: 做协议演进、回顾历史判断口径、沉淀经验时;改 daemon 启动日志 / log target 路径 / e2e polling 假设前
 
 - `.codex/skills/rdog-control/SKILL.md`
-  - 主题: rdog-control skill,覆盖 Zenoh target-name、line-control、PTY、AX、鼠标和硬件桥接,以及 `rdog ax-diff` 结构化 AX JSON diff
-  - 用途: agent-agnostic skill 入口,同时服务 Codex / Claude / GPT / openai-compatible / MCP / 人类。让 `rdog control` 使用约定和协议文档一起版本化
-  - 何时阅读: 改 rdog control 相关协议、示例、README、PTY、GUI 控制、ax-diff 子命令,或调整 agent 适用范围前
+  - 主题: rdog-control skill,覆盖 Zenoh target-name、line-control、PTY、daemon-side `@flow`、AX/window/web/鼠标、硬件桥接,以及 `rdog ax-diff` 结构化 AX JSON diff
+  - 用途: agent-agnostic 且 token-lean 的执行入口,同时服务 Codex / Claude / GPT / openai-compatible / MCP / 人类。让 `rdog control` 高频路径、硬边界和验证规则与协议文档一起版本化
+  - 何时阅读: 改 rdog control 相关协议、示例、README、PTY、GUI 控制、`@flow`、ax-diff 子命令,或调整 agent 适用范围 / skill 文案组织前
 
 - `.codex/skills/rdog-control/references/cookbook-web-content.md`
   - 主题: 浏览器当前激活页面内的 Web 内容 AX 操作 cookbook,evidence 模式从"截图前后 diff"切到"AX JSON 结构化 diff"
@@ -42,16 +42,6 @@ rustdog 首先被LLM agent 智能体使用，其次被人类使用。要以agent
   - 主题: rdog ax-diff 的小红书首页 before/after AX snapshot fixture
   - 用途: 给 cookbook 的 AX JSON diff 章节和 CI smoke 脚本一个可直接复用的最小例子
   - 何时阅读: 需要给 agent / 测试脚本演示 `rdog ax-diff` 输入/输出格式时
-
-- `.codex/skills/self-learning.zenoh-duplicate-name-local-guard/SKILL.md`
-  - 主题: Zenoh 同机重复 `daemon_name` / `service_name` 只靠 liveliness 检查会漏掉启动竞争窗口
-  - 用途: 固定“本地 PID/lock guard + 网络 liveliness 双层约束”的修复模式
-  - 何时阅读: 遇到 Zenoh 同机重复实例偶发并存、duplicate-name 测试偶发通过,或准备实现逻辑身份唯一性保护之前
-
-- `.codex/skills/self-learning.zenoh-fifo-recv-timeout-timeout-not-closed/SKILL.md`
-  - 主题: Zenoh FIFO `recv_timeout()` 的 `Ok(None)` 是 timeout,不是 subscriber closed
-  - 用途: 固定 active PTY / session bridge 短轮询时如何区分 timeout、idle 回收和 terminal lifecycle frame
-  - 何时阅读: 遇到 Zenoh PTY output 已产生但 client 报 subscriber closed / transport lost,或修改 `src/zenoh_control.rs` 里的 `recv_timeout()` loop 前
 
 - `archive/manifests/ARCHIVE_MANIFEST__2026-04-06_continuous-learning.md`
   - 主题: 2026-04-06 持续学习批次的支线上下文归档说明
@@ -103,6 +93,16 @@ rustdog 首先被LLM agent 智能体使用，其次被人类使用。要以agent
   - 用途: 说明 `$oh-my-codex:plan` local-default unixpipe daemon 方案前旧 `task_plan.md` 的归档位置和续档原因
   - 何时阅读: 需要追溯 2026-06-25 local-default unixpipe 规划前的默认任务计划,或确认为何当前默认 `task_plan.md` 重新变短时
 
+- `archive/manifests/ARCHIVE_MANIFEST__2026-06-28_task_plan_rollover_daemon_flow.md`
+  - 主题: 2026-06-28 默认 `task_plan.md` 达到 1000 行后的续档说明
+  - 用途: 说明 daemon-side full script `@flow` 计划前旧 `task_plan.md` 的归档位置和续档原因
+  - 何时阅读: 需要追溯 `@flow` 规划前的默认任务计划,或确认为何当前默认 `task_plan.md` 重新变短时
+
+- `archive/manifests/ARCHIVE_MANIFEST__2026-06-29_rdog_control_skill_compaction.md`
+  - 主题: 2026-06-29 `rdog-control` skill 文案瘦身触发默认 `WORKLOG.md` 续档说明
+  - 用途: 说明旧 `WORKLOG.md` 归档位置,以及本轮 skill token 压缩、agent-facing 叙述边界和 continuous-learning 沉淀范围
+  - 何时阅读: 需要追溯 `.codex/skills/rdog-control/SKILL.md` 1.5 为什么改成执行路径组织,或确认为何当前默认 `WORKLOG.md` 重新变短时
+
 - `specs/zenoh-unixpipe-fast-path-plan.md`
   - 主题: rdog control macOS / Linux 本机 fast path(Zenoh `transport_unixpipe`)规划
   - 用途: 固定"同机 daemon + control 自动走 Zenoh unixpipe FIFO,失败透明 fallback 到 UDP/TCP"的契约,以及 FIFO base 路径推导、local-default registry、daemon/client 行为边界、错误处理、验收标准;包含 2026-06-21 加的 `self` / 空 target 入口设计和 2026-06-25 加的 local-default 默认 daemon 规则
@@ -137,6 +137,11 @@ rustdog 首先被LLM agent 智能体使用，其次被人类使用。要以agent
   - 主题: UI script / control-flow JSON DSL 规划
   - 用途: 定义 iced_emg-compatible JSON DSL 如何适配 rdog control frames,包括 CLI-side runner、step 映射、trace/artifacts、安全策略和后续 daemon-side `@ui-flow` 边界
   - 何时阅读: 修改 UI script runner、control script、GUI 自动化 DSL、`@ui-flow`、脚本验证、坐标回放或语义动作编排前
+
+- `specs/rdog-flow-control-plan.md`
+  - 主题: daemon-side full script `@flow` 控制规格
+  - 用途: 固定 `@flow` 与 GUI-only `@ui-flow` 的边界,以及 `Cmd` / `Script` / `ControlLine` / `Expect` / `SaveArtifact` / trace 的 daemon-local 执行语义
+  - 何时阅读: 修改 `src/control_flow.rs`、`ControlCommand::Flow`、daemon-side script runtime、`@flow` parser/runtime、flow trace/artifact 或 shell/control 混合脚本能力前
 
 - `specs/zenoh-sdk-agent-prompts.md`
   - 主题: 给编程智能体直接使用的 Rust / Unity Zenoh 对接实现提示模板

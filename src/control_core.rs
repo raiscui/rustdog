@@ -4,6 +4,7 @@ use crate::{
     control_actions::{build_shell_command, ControlActionExecutor},
     control_bootstrap::build_bootstrap_outcome,
     control_capabilities::current_capabilities_report_json,
+    control_flow::execute_flow_request,
     control_frames::ControlExecutionOutcome,
     control_observation::{
         build_observe_outcome, build_selector_get_response_json,
@@ -94,6 +95,11 @@ pub fn execute_explicit_control_request<E: ControlActionExecutor>(
                     render_control_action_error_response(request.request_id, &err),
                 ),
             }
+        }
+        ControlCommand::Flow(flow_request) => {
+            execute_flow_request(request.request_id, flow_request, shell, |line| {
+                parse_and_execute_control_line(line, shell, executor)
+            })
         }
         ControlCommand::SelectorGet(selector_request) => {
             match build_selector_get_response_json(selector_request) {
@@ -358,14 +364,20 @@ fn escape_json_string(input: &str) -> String {
 mod tests {
     use super::*;
     use crate::{
-        control_actions::ActionExecutionResult,
+        control_actions::{ActionExecutionResult, SystemControlActionExecutor},
+        control_frames::ControlFrame,
         control_protocol::{
             parse_control_line, ControlCommand, ControlParseResult, KeyMode, KeyRequest,
             PasteRequest,
         },
     };
+    use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
     use serde_json::Value;
-    use std::sync::{Arc, Mutex};
+    use std::{
+        fs,
+        sync::{Arc, Mutex},
+        time::{SystemTime, UNIX_EPOCH},
+    };
 
     #[derive(Clone, Default)]
     struct FakeExecutor {
@@ -406,6 +418,30 @@ mod tests {
                 "blocked by UIPI",
             ))
         }
+    }
+
+    fn parse_response_payload(response: &str) -> Value {
+        serde_json::from_str(
+            response
+                .strip_prefix("@response ")
+                .expect("response should be wrapped as @response"),
+        )
+        .expect("response should be valid json")
+    }
+
+    fn temp_flow_dir(name: &str) -> std::path::PathBuf {
+        let millis = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time should be after unix epoch")
+            .as_millis();
+        std::env::temp_dir().join(format!(
+            "rdog-flow-core-{name}-{millis}-{}",
+            std::process::id()
+        ))
+    }
+
+    fn escape_json(input: &str) -> String {
+        input.replace('\\', "\\\\").replace('"', "\\\"")
     }
 
     #[test]
@@ -818,6 +854,115 @@ mod tests {
             parsed["value"]["capabilities"]["line_control"]["status"],
             "available"
         );
+    }
+
+    #[test]
+    fn explicit_request_should_execute_minimal_flow_shell_lane() {
+        let response = parse_and_execute_control_line(
+            r#"@flow#44:{"schema":"rdog.flow.v1","policy":{"allow_shell":true},"steps":[{"Cmd":{"run":"printf flow-ok","capture":"cmd1"}},{"Expect":{"kind":"cmd_stdout_contains","capture":"cmd1","contains":"flow-ok"}},{"Exit":null}]}"#,
+            "/bin/sh",
+            &SystemControlActionExecutor::default(),
+        )
+        .into_single_response_line();
+        let parsed: Value = serde_json::from_str(
+            response
+                .strip_prefix("@response ")
+                .expect("@flow response should be wrapped as @response"),
+        )
+        .expect("@flow response should be valid json");
+
+        assert_eq!(parsed["id"], 44);
+        assert_eq!(parsed["value"]["schema"], "rdog.flow.v1");
+        assert_eq!(parsed["value"]["status"], "ok");
+        assert_eq!(parsed["value"]["captures"]["cmd1"]["stdout"], "flow-ok");
+    }
+
+    #[test]
+    fn explicit_request_should_consume_flow_control_line_response() {
+        let response = parse_and_execute_control_line(
+            r#"@flow#45:{"schema":"rdog.flow.v1","steps":[{"ControlLine":"@ping"},{"Expect":{"kind":"response_contains","contains":"pong"}}]}"#,
+            "/bin/sh",
+            &SystemControlActionExecutor::default(),
+        )
+        .into_single_response_line();
+        let parsed = parse_response_payload(&response);
+
+        assert_eq!(parsed["id"], 45);
+        assert_eq!(parsed["value"]["status"], "ok");
+        assert_eq!(parsed["value"]["response_count"], 1);
+        assert_eq!(parsed["value"]["completed_steps"], 2);
+    }
+
+    #[test]
+    fn explicit_request_should_lift_flow_save_artifact_before_final_response() {
+        let dir = temp_flow_dir("save-artifact");
+        fs::create_dir_all(&dir).expect("temp dir should create");
+        let artifact_path = dir.join("report.txt");
+        fs::write(&artifact_path, "artifact-ok").expect("artifact should write");
+        let line = format!(
+            r#"@flow#46:{{"schema":"rdog.flow.v1","policy":{{"allow_file_read":true}},"steps":[{{"SaveArtifact":{{"path":"{}","mime":"text/plain","filename":"report.txt"}}}},{{"Expect":{{"kind":"artifact_exists","artifact":"report.txt"}}}}]}}"#,
+            escape_json(
+                artifact_path
+                    .to_str()
+                    .expect("artifact path should be utf8")
+            ),
+        );
+
+        let outcome = parse_and_execute_control_line(
+            &line,
+            "/bin/sh",
+            &SystemControlActionExecutor::default(),
+        );
+        assert_eq!(outcome.outbound_frames.len(), 2);
+        let ControlFrame::SaveFile(savefile) = &outcome.outbound_frames[0] else {
+            panic!("first frame should be @savefile");
+        };
+        assert_eq!(savefile.request_id, Some(46));
+        assert_eq!(savefile.filename, "report.txt");
+        assert_eq!(savefile.mime, "text/plain");
+        assert_eq!(
+            BASE64_STANDARD
+                .decode(savefile.data.as_bytes())
+                .expect("savefile data should decode"),
+            b"artifact-ok"
+        );
+
+        let ControlFrame::ResponseLine(response) = &outcome.outbound_frames[1] else {
+            panic!("last frame should be final @response");
+        };
+        let parsed = parse_response_payload(response);
+        assert_eq!(parsed["value"]["status"], "ok");
+        assert_eq!(parsed["value"]["artifacts"][0], "report.txt");
+    }
+
+    #[test]
+    fn explicit_request_should_emit_flow_trace_savefile_before_final_response() {
+        let outcome = parse_and_execute_control_line(
+            r#"@flow#47:{"schema":"rdog.flow.v1","options":{"trace":"savefile"},"steps":[{"ControlLine":"@ping"},{"Expect":{"kind":"response_contains","contains":"pong"}}]}"#,
+            "/bin/sh",
+            &SystemControlActionExecutor::default(),
+        );
+        assert_eq!(outcome.outbound_frames.len(), 2);
+        let ControlFrame::SaveFile(trace) = &outcome.outbound_frames[0] else {
+            panic!("first frame should be trace @savefile");
+        };
+        assert_eq!(trace.request_id, Some(47));
+        assert_eq!(trace.filename, "flow-trace-47.jsonl");
+        assert_eq!(trace.mime, "application/jsonl");
+        let trace_jsonl = String::from_utf8(
+            BASE64_STANDARD
+                .decode(trace.data.as_bytes())
+                .expect("trace data should decode"),
+        )
+        .expect("trace should be utf8");
+        assert!(trace_jsonl.contains(r#""kind":"ControlLine""#));
+        assert!(trace_jsonl.contains(r#""kind":"Expect""#));
+
+        let ControlFrame::ResponseLine(response) = &outcome.outbound_frames[1] else {
+            panic!("last frame should be final @response");
+        };
+        let parsed = parse_response_payload(response);
+        assert_eq!(parsed["value"]["trace_record_count"], 2);
     }
 
     #[test]

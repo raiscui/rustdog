@@ -21,6 +21,7 @@ use crate::control_ax::{
     TypeTextRequest, DEFAULT_AX_DEPTH, DEFAULT_AX_INCLUDE_VALUES, DEFAULT_AX_MAX_ELEMENTS,
 };
 use crate::control_bootstrap::{parse_bootstrap_payload, BootstrapRequest};
+use crate::control_flow::{parse_flow_payload, FlowRequest};
 use crate::control_frames::SaveFileFrame;
 use crate::control_gui_bench::{parse_gui_bench_payload, GuiBenchRequest};
 use crate::control_mouse::{
@@ -87,6 +88,7 @@ pub enum ControlCommand {
     WebAct(WebActRequest),
     GuiBench(GuiBenchRequest),
     Bootstrap(BootstrapRequest),
+    Flow(FlowRequest),
     Capabilities,
     Observe(ObserveRequest),
     SelectorGet(SelectorGetRequest),
@@ -404,6 +406,7 @@ pub fn parse_control_line(line: &str) -> io::Result<ControlParseResult> {
         "web-act" => ControlCommand::WebAct(parse_web_act_payload(payload)?),
         "gui-bench" => ControlCommand::GuiBench(parse_gui_bench_payload(payload)?),
         "bootstrap" => ControlCommand::Bootstrap(parse_bootstrap_payload(payload)?),
+        "flow" => ControlCommand::Flow(parse_flow_payload(payload)?),
         "observe" => ControlCommand::Observe(parse_observe_payload(payload)?),
         "selector-get" => ControlCommand::SelectorGet(parse_selector_get_payload(payload)?),
         "selector-resolve" => {

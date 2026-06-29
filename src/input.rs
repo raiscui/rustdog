@@ -145,6 +145,12 @@ pub enum Command {
         pty_command: Vec<String>,
     },
 
+    /// Run a UI script JSON file through the existing control plane
+    UiScript {
+        #[clap(subcommand)]
+        command: UiScriptCommand,
+    },
+
     /// Start config-driven daemon mode
     #[clap(alias = "d")]
     Daemon {
@@ -217,6 +223,50 @@ pub enum Command {
         /// Maximum recursion depth for nested element field comparisons.
         #[clap(long, default_value = "4")]
         max_depth: usize,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum UiScriptCommand {
+    /// Compile and run a UI script JSON file
+    Run {
+        /// Only parse and compile the script, then print the generated control lines.
+        #[clap(long)]
+        dry_run: bool,
+
+        /// WebSocket URL for the remote control endpoint, for example `ws://127.0.0.1:5555/control`
+        #[clap(long)]
+        url: Option<String>,
+
+        /// Explicit transport to use for the control lane.
+        #[clap(long, value_enum)]
+        transport: Option<Transport>,
+
+        /// Namespace used by the Zenoh router/client control profile.
+        #[clap(long)]
+        namespace: Option<String>,
+
+        /// Human-facing daemon target name in the Zenoh router/client control profile.
+        #[clap(long = "target-name")]
+        target_name: Option<String>,
+
+        /// Optional router entry point fallback when autodiscovery is unavailable.
+        #[clap(long = "entry-point")]
+        entry_point: Vec<String>,
+
+        /// Directory used for trace.jsonl, summary.json, and script artifacts.
+        #[clap(long = "trace-dir")]
+        trace_dir: Option<PathBuf>,
+
+        /// Optional control target followed by the script path.
+        ///
+        /// Shapes:
+        /// - `rdog ui-script run script.json` uses the local-default daemon.
+        /// - `rdog ui-script run self script.json` uses the local fast path explicitly.
+        /// - `rdog ui-script run mac.lab script.json` uses a named Zenoh target.
+        /// - `rdog ui-script run 127.0.0.1 5555 script.json` uses TCP host/port.
+        #[clap(value_name = "TARGET_OR_SCRIPT", num_args = 1..=3)]
+        positional: Vec<String>,
     },
 }
 

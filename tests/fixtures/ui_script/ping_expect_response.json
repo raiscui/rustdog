@@ -1,0 +1,6 @@
+[
+  { "ControlLine": "@ping" },
+  { "Expect": { "kind": "response_contains", "contains": "pong" } },
+  { "Expect": { "kind": "response_status", "status": "ok" } },
+  { "Exit": null }
+]

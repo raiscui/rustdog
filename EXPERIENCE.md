@@ -305,3 +305,25 @@
 - **踩坑**: 已有测试用 `lab` namespace,新测试也用 `lab`,并发跑时会跨测试污染,`find_local_daemon_name` 报"多候选"错。
 - **结论**: e2e test 必须用独立 namespace(如 `selfexp`/`selfinf`/`selfmulti`),保证并发安全;或用 `--test-threads=1` 串行。
 - **为什么这一点关键**: unixpipe 路径是文件,跨测试隔离比 Zenoh scout 这种内存协议更难;不留心容易出 nondeterministic 失败。
+
+## [2026-06-29 14:18:00] rdog-control skill 文案瘦身与 token 纪律
+
+- `rdog-control` 这种 agent-facing skill 不应把所有协议细节都塞进主文件。
+  - 主文件负责高频执行路径、硬边界、lane 选择和验证规则。
+  - 完整协议、低频示例和历史背景放到 `references/` 与 `specs/`。
+  - 这样能减少 prompt token,也能降低 agent 被长篇背景带偏的概率。
+
+- 文案瘦身不能牺牲语义边界。
+  - 本轮必须保留 agent-agnostic 表述,不能退回 Codex-only。
+  - 必须保留 `@flow`、`@window-resize`、display scope、AX diff、PTY、permission 和 destructive-action safety。
+  - `@flow` 要写清 daemon-local、`policy.allow_shell:true`、inner response 被消费、outer final summary、v1 拒绝嵌套 `@flow` / `@pty` / `ControlLine:"@cmd..."`。
+
+- 避免 prompt stuffing。
+  - 之前已经验证过,单纯往 `SKILL.md` 或 profile prompt 增加更多示例,不一定改善模型行为。
+  - 更稳的做法是保持 skill 短而可执行,并用真实命令输出、fixture、AX JSON diff 或测试结果验证行为。
+
+- 这类改写的最小验证矩阵:
+  - 对比行数 / 词数,确认 token 目标真的改善。
+  - 检查 Markdown fence 成对。
+  - `git diff --check`。
+  - grep 关键协议词和反例词,确认没有删掉不可丢失的边界。

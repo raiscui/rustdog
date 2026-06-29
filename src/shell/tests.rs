@@ -178,6 +178,9 @@ impl ControlActionExecutor for FakeExecutor {
                 };
                 format!("BOOTSTRAP:{mode}:{}\n", request.include_trace).into_bytes()
             }
+            ControlCommand::Flow(request) => {
+                format!("FLOW:{}:{}\n", request.schema, request.steps.len()).into_bytes()
+            }
             ControlCommand::Capabilities => b"CAPABILITIES\n".to_vec(),
             ControlCommand::SelectorGet(request) => {
                 format!("SELECTOR_GET:{}\n", request.selector_id).into_bytes()

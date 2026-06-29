@@ -1,7 +1,13 @@
 use clap::Parser;
 use fern::colors::{Color, ColoredLevelConfig};
 use fern::Dispatch;
-use std::{io::stderr, path::PathBuf, process::exit};
+use std::{
+    fs::{self, OpenOptions},
+    io::{stderr, Write as _},
+    path::{Path, PathBuf},
+    process::exit,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 use crate::input::{Command, ConfigCommand, Transport};
 use crate::listener::{listen, Mode, Opts};
@@ -16,6 +22,7 @@ mod control_client_input;
 mod control_core;
 mod control_display;
 mod control_display_scope;
+mod control_flow;
 mod control_frames;
 mod control_gui_bench;
 mod control_mouse;
@@ -32,9 +39,8 @@ mod listener;
 mod pty_control;
 mod screenshot;
 mod shell;
-// UI script 目前只落 parser/runner fixture tests。
-// 等 `rdog ui-script run` CLI 接入真实 control transport 后,再进入生产编译路径。
-#[cfg(test)]
+// UI script runner 复用现有 line-control transport。
+// 这里保持 CLI-side orchestration,不新增 daemon-side UI 协议。
 mod ui_script;
 mod zenoh_control;
 mod zenoh_identity;
@@ -105,6 +111,172 @@ enum ControlInvocation {
     ZenohLocal {
         namespace: Option<String>,
     },
+}
+
+struct UiScriptRunOptions {
+    dry_run: bool,
+    url: Option<String>,
+    transport: Option<Transport>,
+    namespace: Option<String>,
+    target_name: Option<String>,
+    entry_point: Vec<String>,
+    trace_dir: Option<PathBuf>,
+    positional: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+struct UiScriptArtifactRecord {
+    filename: String,
+    mime: String,
+    path: PathBuf,
+    width: Option<u32>,
+    height: Option<u32>,
+}
+
+#[derive(Debug, Clone)]
+struct ControlLineExchange {
+    line: String,
+    frames: Vec<control_frames::ControlFrame>,
+    response_line: Option<String>,
+    artifacts: Vec<UiScriptArtifactRecord>,
+}
+
+#[derive(Debug, Clone)]
+struct PendingUiScriptControlLine {
+    step_index: usize,
+    step_kind: &'static str,
+    line: String,
+}
+
+struct UiScriptRunState {
+    run_id: String,
+    run_dir: PathBuf,
+    artifacts_dir: PathBuf,
+    trace_path: PathBuf,
+    trace_file: fs::File,
+    completed_step_count: usize,
+    failed_step_index: Option<usize>,
+    last_response_line: Option<String>,
+    last_response_value: Option<serde_json::Value>,
+    last_artifacts: Vec<UiScriptArtifactRecord>,
+}
+
+impl UiScriptRunState {
+    fn create(
+        script_path: &Path,
+        dry_run: &ui_script::UiScriptDryRun,
+        trace_dir: Option<PathBuf>,
+    ) -> Result<Self, String> {
+        let run_id = build_ui_script_run_id();
+        let run_dir = trace_dir.unwrap_or_else(|| PathBuf::from("rdog_script_runs").join(&run_id));
+        let artifacts_dir = run_dir.join("artifacts");
+        fs::create_dir_all(&artifacts_dir).map_err(|err| {
+            format!(
+                "创建 UI script artifacts 目录失败: {}: {err}",
+                artifacts_dir.display()
+            )
+        })?;
+        let trace_path = run_dir.join("trace.jsonl");
+        let trace_file = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(&trace_path)
+            .map_err(|err| format!("创建 UI script trace 失败: {}: {err}", trace_path.display()))?;
+
+        write_ui_script_normalized_plan(&run_dir, script_path, dry_run, &run_id)?;
+        write_ui_script_summary(&run_dir, dry_run, &run_id, "running", 0, None, None)?;
+
+        Ok(Self {
+            run_id,
+            run_dir,
+            artifacts_dir,
+            trace_path,
+            trace_file,
+            completed_step_count: 0,
+            failed_step_index: None,
+            last_response_line: None,
+            last_response_value: None,
+            last_artifacts: Vec::new(),
+        })
+    }
+
+    fn record_step(&mut self, record: serde_json::Value) -> Result<(), String> {
+        serde_json::to_writer(&mut self.trace_file, &record)
+            .map_err(|err| format!("写入 UI script trace JSON 失败: {err}"))?;
+        writeln!(self.trace_file).map_err(|err| format!("写入 UI script trace 换行失败: {err}"))?;
+        self.trace_file
+            .flush()
+            .map_err(|err| format!("刷新 UI script trace 失败: {err}"))
+    }
+}
+
+fn split_ui_script_run_positionals(
+    mut positional: Vec<String>,
+) -> Result<(Vec<String>, PathBuf), String> {
+    let Some(script_path) = positional.pop() else {
+        return Err("`rdog ui-script run` 需要脚本文件路径".to_string());
+    };
+    if positional.iter().any(|item| item.starts_with('@')) {
+        return Err(
+            "`rdog ui-script run` 的 target 位置参数不能是 `@<line>`;脚本内容应写在 JSON 文件里"
+                .to_string(),
+        );
+    }
+    Ok((positional, PathBuf::from(script_path)))
+}
+
+fn apply_ui_script_target(
+    program: &ui_script::UiScriptProgram,
+    control_positionals: &mut Vec<String>,
+    namespace: &mut Option<String>,
+    target_name: &mut Option<String>,
+) -> Result<(), String> {
+    let mut targets = program.steps.iter().filter_map(|step| match step {
+        ui_script::UiScriptStep::Target(payload) => Some(payload),
+        _ => None,
+    });
+    let Some(target) = targets.next() else {
+        return Ok(());
+    };
+    if targets.next().is_some() {
+        return Err("UI script 只能声明一个 Target step".to_string());
+    }
+
+    if let Some(script_namespace) = target.get("namespace").and_then(serde_json::Value::as_str) {
+        match namespace {
+            Some(cli_namespace) if cli_namespace != script_namespace => {
+                return Err(format!(
+                    "CLI --namespace={cli_namespace} 与脚本 Target.namespace={script_namespace} 不一致"
+                ));
+            }
+            Some(_) => {}
+            None => *namespace = Some(script_namespace.to_owned()),
+        }
+    }
+
+    let Some(script_target_name) = target.get("name").and_then(serde_json::Value::as_str) else {
+        return Ok(());
+    };
+    if let Some(cli_target_name) = target_name.as_deref() {
+        if cli_target_name != script_target_name {
+            return Err(format!(
+                "CLI --target-name={cli_target_name} 与脚本 Target.name={script_target_name} 不一致"
+            ));
+        }
+        return Ok(());
+    }
+    if control_positionals.is_empty() {
+        control_positionals.push(script_target_name.to_owned());
+        return Ok(());
+    }
+    if control_positionals.len() == 1 && control_positionals[0] == script_target_name {
+        return Ok(());
+    }
+    Err(format!(
+        "CLI target {:?} 与脚本 Target.name={script_target_name} 不一致",
+        control_positionals
+    ))
 }
 
 fn resolve_control_invocation(
@@ -477,13 +649,18 @@ fn run(opts: input::Opts) -> Result<(), String> {
                 host,
             )?;
 
+            if !one_shot_lines.is_empty() {
+                send_control_lines_for_invocation(
+                    &invocation,
+                    &one_shot_lines,
+                    Path::new("rdog_downloads"),
+                )?;
+                return Ok(());
+            }
+
             match invocation {
                 ControlInvocation::Tcp { host, port } => {
                     let port = parse_port(&port)?;
-                    if !one_shot_lines.is_empty() {
-                        send_control_lines_tcp(&host, port, &one_shot_lines)?;
-                        return Ok(());
-                    }
                     if pty {
                         shell::control_remote_pty(&host, port, &pty_command)
                             .map_err(|err| err.to_string())?;
@@ -510,10 +687,6 @@ fn run(opts: input::Opts) -> Result<(), String> {
                     }
                 }
                 ControlInvocation::WebSocket { url } => {
-                    if !one_shot_lines.is_empty() {
-                        send_control_lines_websocket(&url, &one_shot_lines)?;
-                        return Ok(());
-                    }
                     if pty {
                         shell::control_remote_url_pty(&url, &pty_command)
                             .map_err(|err| err.to_string())?;
@@ -542,15 +715,6 @@ fn run(opts: input::Opts) -> Result<(), String> {
                     target_name,
                     entry_point,
                 } => {
-                    if !one_shot_lines.is_empty() {
-                        send_control_lines_zenoh(
-                            namespace,
-                            target_name,
-                            entry_point,
-                            &one_shot_lines,
-                        )?;
-                        return Ok(());
-                    }
                     if pty {
                         shell::control_remote_zenoh_pty(
                             namespace,
@@ -624,17 +788,8 @@ fn run(opts: input::Opts) -> Result<(), String> {
                         }
                     };
 
-                    // one-shot 走 send_control_lines_zenoh(单 session 串行);
-                    // 否则走 control_remote_zenoh(交互式 stdin/stdout)。
-                    if !one_shot_lines.is_empty() {
-                        send_control_lines_zenoh(
-                            Some(resolved_namespace),
-                            Some(target_name),
-                            vec![],
-                            &one_shot_lines,
-                        )?;
-                        return Ok(());
-                    }
+                    // one-shot 已在进入 match 前统一处理。
+                    // 这里仅保留本机默认 daemon 的交互式 stdin/stdout 路径。
                     shell::control_remote_zenoh(
                         Some(resolved_namespace),
                         Some(target_name),
@@ -643,6 +798,30 @@ fn run(opts: input::Opts) -> Result<(), String> {
                     .map_err(|err| err.to_string())?;
                 }
             }
+        }
+        Command::UiScript {
+            command:
+                input::UiScriptCommand::Run {
+                    dry_run,
+                    url,
+                    transport,
+                    namespace,
+                    target_name,
+                    entry_point,
+                    trace_dir,
+                    positional,
+                },
+        } => {
+            run_ui_script(UiScriptRunOptions {
+                dry_run,
+                url,
+                transport,
+                namespace,
+                target_name,
+                entry_point,
+                trace_dir,
+                positional,
+            })?;
         }
         Command::Daemon {
             config,
@@ -850,23 +1029,886 @@ fn send_single_control_line_zenoh(
         .map_err(|err| err.to_string())
 }
 
+fn run_ui_script(options: UiScriptRunOptions) -> Result<(), String> {
+    let mut options = options;
+    let (mut control_positionals, script_path) =
+        split_ui_script_run_positionals(options.positional)?;
+    let program = ui_script::parse_script_file(&script_path).map_err(|err| err.to_string())?;
+    apply_ui_script_target(
+        &program,
+        &mut control_positionals,
+        &mut options.namespace,
+        &mut options.target_name,
+    )?;
+    let dry_run = ui_script::compile_dry_run(&program).map_err(|err| err.to_string())?;
+
+    if options.dry_run {
+        emit_ui_script_dry_run(&script_path, &dry_run);
+        return Ok(());
+    }
+
+    let invocation = resolve_control_invocation(
+        options.transport,
+        options.url,
+        options.namespace,
+        options.target_name,
+        options.entry_point,
+        control_positionals,
+    )?;
+    let mut state = UiScriptRunState::create(&script_path, &dry_run, options.trace_dir)?;
+    let result = execute_ui_script_plan(&invocation, &dry_run, &mut state);
+    let (status, error) = match &result {
+        Ok(()) => ("complete", None),
+        Err(err) => ("failed", Some(err.as_str())),
+    };
+    write_ui_script_summary(
+        &state.run_dir,
+        &dry_run,
+        &state.run_id,
+        status,
+        state.completed_step_count,
+        state.failed_step_index,
+        error,
+    )?;
+    println!("ui-script trace: {}", state.trace_path.display());
+    result
+}
+
+fn emit_ui_script_dry_run(script_path: &PathBuf, dry_run: &ui_script::UiScriptDryRun) {
+    println!("ui-script dry-run: {}", script_path.display());
+    println!(
+        "summary: steps={}, backend_requests={}, semantic_actions={}, mouse_fallbacks={}",
+        dry_run.summary.step_count,
+        dry_run.summary.backend_request_count,
+        dry_run.summary.semantic_action_count,
+        dry_run.summary.mouse_fallback_count
+    );
+    for step in &dry_run.steps {
+        match &step.effect {
+            ui_script::UiScriptDryRunEffect::Context(label) => {
+                println!("step {} {} local context:{label}", step.index, step.kind);
+            }
+            ui_script::UiScriptDryRunEffect::Local(label) => {
+                println!("step {} {} local {label}", step.index, step.kind);
+            }
+            ui_script::UiScriptDryRunEffect::Expect(payload) => {
+                let kind = payload
+                    .get("kind")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("unknown");
+                println!("step {} {} expect {kind}", step.index, step.kind);
+            }
+            ui_script::UiScriptDryRunEffect::ControlLine(line) => {
+                println!("step {} {} control {line}", step.index, step.kind);
+            }
+            ui_script::UiScriptDryRunEffect::Exit => {
+                println!("step {} {} exit", step.index, step.kind);
+            }
+        }
+    }
+}
+
+fn execute_ui_script_plan(
+    invocation: &ControlInvocation,
+    dry_run: &ui_script::UiScriptDryRun,
+    state: &mut UiScriptRunState,
+) -> Result<(), String> {
+    let mut pending_lines = Vec::new();
+    for step in &dry_run.steps {
+        match &step.effect {
+            ui_script::UiScriptDryRunEffect::ControlLine(line) => {
+                pending_lines.push(PendingUiScriptControlLine {
+                    step_index: step.index,
+                    step_kind: step.kind,
+                    line: line.clone(),
+                });
+            }
+            ui_script::UiScriptDryRunEffect::Context(label) => {
+                flush_ui_script_pending_lines(invocation, &mut pending_lines, state)?;
+                record_ui_script_local_step(state, step.index, step.kind, "context", label, None)?;
+            }
+            ui_script::UiScriptDryRunEffect::Local(label) => {
+                flush_ui_script_pending_lines(invocation, &mut pending_lines, state)?;
+                match execute_ui_script_local_effect(label) {
+                    Ok(()) => {
+                        record_ui_script_local_step(
+                            state, step.index, step.kind, "local", label, None,
+                        )?;
+                    }
+                    Err(err) => {
+                        record_ui_script_local_step(
+                            state,
+                            step.index,
+                            step.kind,
+                            "local",
+                            label,
+                            Some(err.as_str()),
+                        )?;
+                        state.failed_step_index = Some(step.index);
+                        return Err(err);
+                    }
+                }
+            }
+            ui_script::UiScriptDryRunEffect::Expect(payload) => {
+                flush_ui_script_pending_lines(invocation, &mut pending_lines, state)?;
+                match evaluate_ui_script_expect(payload, state) {
+                    Ok(()) => {
+                        record_ui_script_expect_step(state, step.index, step.kind, payload, None)?;
+                    }
+                    Err(err) => {
+                        record_ui_script_expect_step(
+                            state,
+                            step.index,
+                            step.kind,
+                            payload,
+                            Some(err.as_str()),
+                        )?;
+                        state.failed_step_index = Some(step.index);
+                        return Err(err);
+                    }
+                }
+            }
+            ui_script::UiScriptDryRunEffect::Exit => {
+                flush_ui_script_pending_lines(invocation, &mut pending_lines, state)?;
+                record_ui_script_exit_step(state, step.index, step.kind)?;
+                return Ok(());
+            }
+        }
+    }
+    flush_ui_script_pending_lines(invocation, &mut pending_lines, state)
+}
+
+fn flush_ui_script_pending_lines(
+    invocation: &ControlInvocation,
+    pending_lines: &mut Vec<PendingUiScriptControlLine>,
+    state: &mut UiScriptRunState,
+) -> Result<(), String> {
+    if pending_lines.is_empty() {
+        return Ok(());
+    }
+    let lines = pending_lines
+        .iter()
+        .map(|pending| pending.line.clone())
+        .collect::<Vec<_>>();
+    let exchanges = send_control_lines_for_invocation(invocation, &lines, &state.artifacts_dir)?;
+    for (pending, exchange) in pending_lines.iter().zip(exchanges.iter()) {
+        apply_control_line_exchange_to_state(state, exchange);
+        record_ui_script_control_step(state, pending, exchange)?;
+    }
+    pending_lines.clear();
+    Ok(())
+}
+
+fn execute_ui_script_local_effect(label: &str) -> Result<(), String> {
+    if let Some(ms) = label.strip_prefix("sleep_ms:") {
+        let ms = ms
+            .parse::<u64>()
+            .map_err(|err| format!("UI script SleepMs 编译结果非法: {ms}, error={err}"))?;
+        std::thread::sleep(std::time::Duration::from_millis(ms));
+        return Ok(());
+    }
+    if label.starts_with("expect:") {
+        return Err("UI script real runner 暂不支持 Expect 验证;请先用显式 control step 验证,或使用 --dry-run 检查编译结果".to_string());
+    }
+    if label == "barrier:observe" {
+        return Err(
+            "UI script real runner 暂不支持 Barrier observe;请先显式插入 Observe step".to_string(),
+        );
+    }
+    Ok(())
+}
+
+fn record_ui_script_local_step(
+    state: &mut UiScriptRunState,
+    step_index: usize,
+    step_kind: &str,
+    effect: &str,
+    label: &str,
+    error: Option<&str>,
+) -> Result<(), String> {
+    let status = if error.is_some() {
+        "failed"
+    } else {
+        "complete"
+    };
+    if error.is_none() {
+        state.completed_step_count += 1;
+    }
+    state.record_step(serde_json::json!({
+        "schema": "rdog.ui-script.trace-step.v1",
+        "run_id": state.run_id,
+        "step_index": step_index,
+        "step_kind": step_kind,
+        "effect": effect,
+        "label": label,
+        "status": status,
+        "error": error,
+        "finished_at_unix_ms": unix_time_ms(),
+    }))
+}
+
+fn record_ui_script_expect_step(
+    state: &mut UiScriptRunState,
+    step_index: usize,
+    step_kind: &str,
+    payload: &serde_json::Map<String, serde_json::Value>,
+    error: Option<&str>,
+) -> Result<(), String> {
+    let status = if error.is_some() {
+        "failed"
+    } else {
+        "complete"
+    };
+    if error.is_none() {
+        state.completed_step_count += 1;
+    }
+    state.record_step(serde_json::json!({
+        "schema": "rdog.ui-script.trace-step.v1",
+        "run_id": state.run_id,
+        "step_index": step_index,
+        "step_kind": step_kind,
+        "effect": "expect",
+        "expect": payload,
+        "status": status,
+        "error": error,
+        "last_response": state.last_response_line,
+        "finished_at_unix_ms": unix_time_ms(),
+    }))
+}
+
+fn record_ui_script_exit_step(
+    state: &mut UiScriptRunState,
+    step_index: usize,
+    step_kind: &str,
+) -> Result<(), String> {
+    state.completed_step_count += 1;
+    state.record_step(serde_json::json!({
+        "schema": "rdog.ui-script.trace-step.v1",
+        "run_id": state.run_id,
+        "step_index": step_index,
+        "step_kind": step_kind,
+        "effect": "exit",
+        "status": "complete",
+        "finished_at_unix_ms": unix_time_ms(),
+    }))
+}
+
+fn record_ui_script_control_step(
+    state: &mut UiScriptRunState,
+    pending: &PendingUiScriptControlLine,
+    exchange: &ControlLineExchange,
+) -> Result<(), String> {
+    let error_message = if last_response_is_error(state) {
+        Some(ui_script_control_response_error_message(state, exchange))
+    } else {
+        None
+    };
+    let status = if error_message.is_some() {
+        "failed"
+    } else {
+        "complete"
+    };
+    if error_message.is_none() {
+        state.completed_step_count += 1;
+    } else {
+        state.failed_step_index = Some(pending.step_index);
+    }
+
+    state.record_step(serde_json::json!({
+        "schema": "rdog.ui-script.trace-step.v1",
+        "run_id": state.run_id,
+        "step_index": pending.step_index,
+        "step_kind": pending.step_kind,
+        "effect": "control",
+        "control_lines": [exchange.line],
+        "status": status,
+        "error": error_message.as_deref(),
+        "response": exchange.response_line,
+        "frames": summarize_control_frames(&exchange.frames),
+        "artifacts": summarize_artifacts(&exchange.artifacts),
+        "finished_at_unix_ms": unix_time_ms(),
+    }))?;
+
+    match error_message {
+        Some(message) => Err(message),
+        None => Ok(()),
+    }
+}
+
+fn apply_control_line_exchange_to_state(
+    state: &mut UiScriptRunState,
+    exchange: &ControlLineExchange,
+) {
+    state.last_response_line = exchange.response_line.clone();
+    state.last_response_value = exchange
+        .response_line
+        .as_deref()
+        .and_then(parse_response_payload_value);
+    state.last_artifacts = exchange.artifacts.clone();
+}
+
+fn evaluate_ui_script_expect(
+    payload: &serde_json::Map<String, serde_json::Value>,
+    state: &UiScriptRunState,
+) -> Result<(), String> {
+    let kind = payload
+        .get("kind")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| "Expect 缺少 kind 字段".to_string())?;
+    match kind {
+        "response_status" => expect_response_status(payload, state),
+        "response_contains" => expect_response_contains(payload, state),
+        "control_status" => expect_control_status(payload, state),
+        "window_rect" => expect_window_rect(payload, state),
+        "screenshot_exists" => expect_screenshot_exists(payload, state),
+        other => Err(format!(
+            "UI script real runner 暂不支持 Expect kind: {other}"
+        )),
+    }
+}
+
+fn expect_response_status(
+    payload: &serde_json::Map<String, serde_json::Value>,
+    state: &UiScriptRunState,
+) -> Result<(), String> {
+    let expected = payload
+        .get("status")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("ok");
+    let is_error = last_response_is_error(state);
+    match expected {
+        "ok" if !is_error => Ok(()),
+        "error" if is_error => Ok(()),
+        "ok" | "error" => Err(format!(
+            "Expect response_status={expected} 不满足, last_response={:?}",
+            state.last_response_line
+        )),
+        other => {
+            let actual = find_json_string_field(state.last_response_value.as_ref(), "status");
+            if actual.as_deref() == Some(other) {
+                Ok(())
+            } else {
+                Err(format!(
+                    "Expect response_status={other} 不满足, actual={actual:?}"
+                ))
+            }
+        }
+    }
+}
+
+fn expect_response_contains(
+    payload: &serde_json::Map<String, serde_json::Value>,
+    state: &UiScriptRunState,
+) -> Result<(), String> {
+    let needle = payload
+        .get("contains")
+        .or_else(|| payload.get("text"))
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| "Expect response_contains 需要 contains 或 text 字段".to_string())?;
+    let response = state
+        .last_response_line
+        .as_deref()
+        .ok_or_else(|| "Expect response_contains 没有上一条 @response".to_string())?;
+    if response.contains(needle) {
+        Ok(())
+    } else {
+        Err(format!("Expect response_contains 未命中: needle={needle}"))
+    }
+}
+
+fn expect_control_status(
+    payload: &serde_json::Map<String, serde_json::Value>,
+    state: &UiScriptRunState,
+) -> Result<(), String> {
+    if let Some(expected_ok) = payload.get("ok").and_then(serde_json::Value::as_bool) {
+        let actual_ok = !last_response_is_error(state);
+        return if actual_ok == expected_ok {
+            Ok(())
+        } else {
+            Err(format!(
+                "Expect control_status ok={expected_ok} 不满足, actual={actual_ok}"
+            ))
+        };
+    }
+
+    let expected_code = payload
+        .get("code")
+        .and_then(serde_json::Value::as_i64)
+        .unwrap_or(0);
+    let actual_code = response_error_code(state.last_response_value.as_ref()).unwrap_or(0);
+    if actual_code == expected_code {
+        Ok(())
+    } else {
+        Err(format!(
+            "Expect control_status code={expected_code} 不满足, actual={actual_code}"
+        ))
+    }
+}
+
+fn expect_window_rect(
+    payload: &serde_json::Map<String, serde_json::Value>,
+    state: &UiScriptRunState,
+) -> Result<(), String> {
+    let rect = find_rect_value(state.last_response_value.as_ref())
+        .ok_or_else(|| "Expect window_rect 没有在上一条响应里找到 rect/after_rect".to_string())?;
+    let tolerance = payload
+        .get("tolerance_px")
+        .and_then(serde_json::Value::as_i64)
+        .unwrap_or(0);
+
+    for field in ["x", "y", "width", "height"] {
+        let Some(expected) = payload.get(field).and_then(serde_json::Value::as_i64) else {
+            continue;
+        };
+        let actual = rect
+            .get(field)
+            .and_then(serde_json::Value::as_i64)
+            .ok_or_else(|| format!("Expect window_rect 响应 rect 缺少 {field}"))?;
+        if (actual - expected).abs() > tolerance {
+            return Err(format!(
+                "Expect window_rect {field}={expected} 不满足, actual={actual}, tolerance={tolerance}"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn expect_screenshot_exists(
+    payload: &serde_json::Map<String, serde_json::Value>,
+    state: &UiScriptRunState,
+) -> Result<(), String> {
+    let label = payload.get("label").and_then(serde_json::Value::as_str);
+    let matched = state.last_artifacts.iter().any(|artifact| {
+        artifact.path.exists()
+            && label
+                .map(|label| artifact.filename.contains(label))
+                .unwrap_or(true)
+    });
+    if matched {
+        Ok(())
+    } else {
+        Err(format!(
+            "Expect screenshot_exists 不满足, label={label:?}, artifacts={}",
+            state.last_artifacts.len()
+        ))
+    }
+}
+
+fn parse_response_payload_value(line: &str) -> Option<serde_json::Value> {
+    let payload = line.trim_start().strip_prefix("@response ")?;
+    serde_json::from_str(payload.trim()).ok()
+}
+
+fn last_response_is_error(state: &UiScriptRunState) -> bool {
+    response_error_code(state.last_response_value.as_ref())
+        .map(|code| code != 0)
+        .unwrap_or(false)
+        || matches!(
+            response_status_value(state.last_response_value.as_ref()),
+            Some("error" | "failed")
+        )
+}
+
+fn response_error_code(value: Option<&serde_json::Value>) -> Option<i64> {
+    let value = value?;
+    if let Some(code) = value.get("code").and_then(serde_json::Value::as_i64) {
+        return Some(code);
+    }
+    value
+        .get("value")
+        .and_then(|inner| inner.get("code"))
+        .and_then(serde_json::Value::as_i64)
+}
+
+fn response_status_value(value: Option<&serde_json::Value>) -> Option<&str> {
+    let value = value?;
+    value
+        .get("status")
+        .and_then(serde_json::Value::as_str)
+        .or_else(|| {
+            value
+                .get("value")
+                .and_then(|inner| inner.get("status"))
+                .and_then(serde_json::Value::as_str)
+        })
+}
+
+fn ui_script_control_response_error_message(
+    state: &UiScriptRunState,
+    exchange: &ControlLineExchange,
+) -> String {
+    let detail = find_json_string_field(state.last_response_value.as_ref(), "error")
+        .or_else(|| response_status_value(state.last_response_value.as_ref()).map(str::to_owned))
+        .or_else(|| state.last_response_line.clone())
+        .unwrap_or_else(|| "unknown control error".to_owned());
+    format!(
+        "UI script control step `{}` failed: {detail}",
+        exchange.line
+    )
+}
+
+fn find_json_string_field(value: Option<&serde_json::Value>, field: &str) -> Option<String> {
+    let value = value?;
+    match value {
+        serde_json::Value::Object(map) => {
+            if let Some(found) = map.get(field).and_then(serde_json::Value::as_str) {
+                return Some(found.to_owned());
+            }
+            map.values()
+                .find_map(|child| find_json_string_field(Some(child), field))
+        }
+        serde_json::Value::Array(items) => items
+            .iter()
+            .find_map(|child| find_json_string_field(Some(child), field)),
+        _ => None,
+    }
+}
+
+fn find_rect_value(
+    value: Option<&serde_json::Value>,
+) -> Option<&serde_json::Map<String, serde_json::Value>> {
+    let value = value?;
+    match value {
+        serde_json::Value::Object(map) => {
+            if let Some(rect) = map
+                .get("after_rect")
+                .or_else(|| map.get("rect"))
+                .and_then(serde_json::Value::as_object)
+            {
+                return Some(rect);
+            }
+            map.values().find_map(|child| find_rect_value(Some(child)))
+        }
+        serde_json::Value::Array(items) => {
+            items.iter().find_map(|child| find_rect_value(Some(child)))
+        }
+        _ => None,
+    }
+}
+
+fn collect_control_lines_from_transport(
+    transport: &mut control_transport::ControlTransport,
+    lines: &[String],
+    artifacts_dir: &Path,
+) -> std::io::Result<Vec<ControlLineExchange>> {
+    let mut exchanges = Vec::with_capacity(lines.len());
+    for line in lines {
+        transport.write_message(line)?;
+        let mut frames = Vec::new();
+        loop {
+            let Some(message) = transport.read_message()? else {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "control connection 在收到 UI script 结果前就关闭了",
+                ));
+            };
+            let frame = control_frames::ControlFrame::parse_inbound_result_message(&message)?;
+            let is_response = matches!(frame, control_frames::ControlFrame::ResponseLine(_));
+            frames.push(frame);
+            if is_response {
+                break;
+            }
+        }
+        let exchange = collect_control_exchange_from_frames(line, frames, artifacts_dir)?;
+        print_control_line_exchange(&exchange)?;
+        exchanges.push(exchange);
+    }
+    Ok(exchanges)
+}
+
+fn collect_control_exchanges_from_frames(
+    lines: &[String],
+    line_frames: Vec<Vec<control_frames::ControlFrame>>,
+    artifacts_dir: &Path,
+) -> std::io::Result<Vec<ControlLineExchange>> {
+    if lines.len() != line_frames.len() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "UI script control line 数量和返回 frame 组数量不一致: lines={}, frames={}",
+                lines.len(),
+                line_frames.len()
+            ),
+        ));
+    }
+
+    let mut exchanges = Vec::with_capacity(lines.len());
+    for (line, frames) in lines.iter().zip(line_frames.into_iter()) {
+        let exchange = collect_control_exchange_from_frames(line, frames, artifacts_dir)?;
+        print_control_line_exchange(&exchange)?;
+        exchanges.push(exchange);
+    }
+    Ok(exchanges)
+}
+
+fn collect_control_exchange_from_frames(
+    line: &str,
+    frames: Vec<control_frames::ControlFrame>,
+    artifacts_dir: &Path,
+) -> std::io::Result<ControlLineExchange> {
+    let mut response_line = None::<String>;
+    let mut artifacts = Vec::new();
+
+    for frame in &frames {
+        match frame {
+            control_frames::ControlFrame::ResponseLine(line) => {
+                response_line = Some(line.clone());
+            }
+            control_frames::ControlFrame::SaveFile(savefile) => {
+                let path = savefile.save_to_directory(artifacts_dir)?;
+                artifacts.push(UiScriptArtifactRecord {
+                    filename: savefile.filename.clone(),
+                    mime: savefile.mime.clone(),
+                    path,
+                    width: savefile.width,
+                    height: savefile.height,
+                });
+            }
+            control_frames::ControlFrame::PtyReady(_)
+            | control_frames::ControlFrame::PtyOutput(_)
+            | control_frames::ControlFrame::PtyExit(_)
+            | control_frames::ControlFrame::PtyClosed(_)
+            | control_frames::ControlFrame::PtyDetached(_)
+            | control_frames::ControlFrame::PtyAttached(_) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "UI script line-control response 收到了意外 PTY frame",
+                ));
+            }
+        }
+    }
+
+    if response_line.is_none() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("UI script control line 没有收到 @response: {line}"),
+        ));
+    }
+
+    Ok(ControlLineExchange {
+        line: line.to_owned(),
+        frames,
+        response_line,
+        artifacts,
+    })
+}
+
+fn print_control_line_exchange(exchange: &ControlLineExchange) -> std::io::Result<()> {
+    for artifact in &exchange.artifacts {
+        println!("saved file: {}", artifact.path.display());
+    }
+    if let Some(response) = &exchange.response_line {
+        println!("{response}");
+    }
+    Ok(())
+}
+
+fn summarize_control_frames(frames: &[control_frames::ControlFrame]) -> Vec<serde_json::Value> {
+    frames
+        .iter()
+        .map(|frame| match frame {
+            control_frames::ControlFrame::ResponseLine(line) => serde_json::json!({
+                "kind": "response",
+                "line": line,
+            }),
+            control_frames::ControlFrame::SaveFile(frame) => serde_json::json!({
+                "kind": "savefile",
+                "filename": frame.filename,
+                "mime": frame.mime,
+                "width": frame.width,
+                "height": frame.height,
+            }),
+            control_frames::ControlFrame::PtyReady(_) => serde_json::json!({"kind": "pty-ready"}),
+            control_frames::ControlFrame::PtyOutput(_) => serde_json::json!({"kind": "pty-output"}),
+            control_frames::ControlFrame::PtyExit(_) => serde_json::json!({"kind": "pty-exit"}),
+            control_frames::ControlFrame::PtyClosed(_) => serde_json::json!({"kind": "pty-closed"}),
+            control_frames::ControlFrame::PtyDetached(_) => {
+                serde_json::json!({"kind": "pty-detached"})
+            }
+            control_frames::ControlFrame::PtyAttached(_) => {
+                serde_json::json!({"kind": "pty-attached"})
+            }
+        })
+        .collect()
+}
+
+fn summarize_artifacts(artifacts: &[UiScriptArtifactRecord]) -> Vec<serde_json::Value> {
+    artifacts
+        .iter()
+        .map(|artifact| {
+            serde_json::json!({
+                "filename": artifact.filename,
+                "mime": artifact.mime,
+                "path": artifact.path,
+                "width": artifact.width,
+                "height": artifact.height,
+            })
+        })
+        .collect()
+}
+
+fn write_ui_script_normalized_plan(
+    run_dir: &Path,
+    script_path: &Path,
+    dry_run: &ui_script::UiScriptDryRun,
+    run_id: &str,
+) -> Result<(), String> {
+    let steps = dry_run
+        .steps
+        .iter()
+        .map(|step| {
+            serde_json::json!({
+                "index": step.index,
+                "kind": step.kind,
+                "effect": ui_script_effect_summary(&step.effect),
+            })
+        })
+        .collect::<Vec<_>>();
+    let value = serde_json::json!({
+        "schema": "rdog.ui-script.normalized.v1",
+        "run_id": run_id,
+        "source_path": script_path,
+        "steps": steps,
+        "control_lines": dry_run.control_lines,
+    });
+    write_json_file(&run_dir.join("script.normalized.json"), &value)
+}
+
+fn write_ui_script_summary(
+    run_dir: &Path,
+    dry_run: &ui_script::UiScriptDryRun,
+    run_id: &str,
+    status: &str,
+    completed_step_count: usize,
+    failed_step_index: Option<usize>,
+    error: Option<&str>,
+) -> Result<(), String> {
+    let value = serde_json::json!({
+        "schema": "rdog.ui-script.run.v1",
+        "run_id": run_id,
+        "status": status,
+        "step_count": dry_run.summary.step_count,
+        "completed_step_count": completed_step_count,
+        "failed_step_index": failed_step_index,
+        "backend_request_count": dry_run.summary.backend_request_count,
+        "semantic_action_count": dry_run.summary.semantic_action_count,
+        "mouse_fallback_count": dry_run.summary.mouse_fallback_count,
+        "verification_passed": status == "complete",
+        "error": error,
+        "updated_at_unix_ms": unix_time_ms(),
+    });
+    write_json_file(&run_dir.join("summary.json"), &value)
+}
+
+fn ui_script_effect_summary(effect: &ui_script::UiScriptDryRunEffect) -> serde_json::Value {
+    match effect {
+        ui_script::UiScriptDryRunEffect::Context(label) => {
+            serde_json::json!({"kind": "context", "label": label})
+        }
+        ui_script::UiScriptDryRunEffect::Local(label) => {
+            serde_json::json!({"kind": "local", "label": label})
+        }
+        ui_script::UiScriptDryRunEffect::Expect(payload) => {
+            serde_json::json!({"kind": "expect", "payload": payload})
+        }
+        ui_script::UiScriptDryRunEffect::ControlLine(line) => {
+            serde_json::json!({"kind": "control", "line": line})
+        }
+        ui_script::UiScriptDryRunEffect::Exit => serde_json::json!({"kind": "exit"}),
+    }
+}
+
+fn write_json_file(path: &Path, value: &serde_json::Value) -> Result<(), String> {
+    let content = serde_json::to_string_pretty(value)
+        .map_err(|err| format!("序列化 JSON 文件失败: {}: {err}", path.display()))?;
+    fs::write(path, format!("{content}\n"))
+        .map_err(|err| format!("写入 JSON 文件失败: {}: {err}", path.display()))
+}
+
+fn build_ui_script_run_id() -> String {
+    format!("uiscript-{}", unix_time_ms())
+}
+
+fn unix_time_ms() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or(0)
+}
+
+fn send_control_lines_for_invocation(
+    invocation: &ControlInvocation,
+    lines: &[String],
+    artifacts_dir: &Path,
+) -> Result<Vec<ControlLineExchange>, String> {
+    match invocation {
+        ControlInvocation::Tcp { host, port } => {
+            send_control_lines_tcp(host, parse_port(port)?, lines, artifacts_dir)
+        }
+        ControlInvocation::WebSocket { url } => {
+            send_control_lines_websocket(url, lines, artifacts_dir)
+        }
+        ControlInvocation::Zenoh {
+            namespace,
+            target_name,
+            entry_point,
+        } => send_control_lines_zenoh(
+            namespace.clone(),
+            target_name.clone(),
+            entry_point.clone(),
+            lines,
+            artifacts_dir,
+        ),
+        ControlInvocation::ZenohLocal { namespace } => {
+            let target_name = zenoh_runtime::find_local_daemon_name(namespace.as_deref())
+                .map_err(|err| err.to_string())?;
+            let resolved_namespace = namespace
+                .clone()
+                .or_else(|| crate::zenoh_identity::infer_namespace_from_daemon_name(&target_name));
+            let Some(resolved_namespace) = resolved_namespace else {
+                return Err(format!(
+                    "`rdog control self` 找不到 namespace;请传 `--namespace`(例如 `--namespace lab`)。daemon_name={target_name:?} 没有可推断的 namespace 后缀"
+                ));
+            };
+            send_control_lines_zenoh(
+                Some(resolved_namespace),
+                Some(target_name),
+                Vec::new(),
+                lines,
+                artifacts_dir,
+            )
+        }
+    }
+}
+
 /// TCP 多 line one-shot 入口:一次性发一组 `@<line>`,共享同一条 TCP 连接。
 ///
 /// 与 `send_single_control_line_tcp` 的区别:
 /// - 走完整 frame 收口循环,能正确处理 `@screenshot` 这种 `@savefile` 多 frame 场景
 /// - 一次 connect,不再每条重连
 /// - 任一行失败整组退出
-fn send_control_lines_tcp(host: &str, port: u16, lines: &[String]) -> Result<(), String> {
+fn send_control_lines_tcp(
+    host: &str,
+    port: u16,
+    lines: &[String],
+    artifacts_dir: &Path,
+) -> Result<Vec<ControlLineExchange>, String> {
     let mut transport = control_transport::ControlTransport::connect_tcp(host, port)
         .map_err(|err| err.to_string())?;
-    shell::run_line_control_lines(&mut transport, lines).map_err(|err| err.to_string())
+    collect_control_lines_from_transport(&mut transport, lines, artifacts_dir)
+        .map_err(|err| err.to_string())
 }
 
 /// WebSocket 多 line one-shot 入口,语义同 `send_control_lines_tcp`。
-fn send_control_lines_websocket(url: &str, lines: &[String]) -> Result<(), String> {
+fn send_control_lines_websocket(
+    url: &str,
+    lines: &[String],
+    artifacts_dir: &Path,
+) -> Result<Vec<ControlLineExchange>, String> {
     let mut transport = control_transport::ControlTransport::connect_websocket(url)
         .map_err(|err| err.to_string())?;
-    shell::run_line_control_lines(&mut transport, lines).map_err(|err| err.to_string())
+    collect_control_lines_from_transport(&mut transport, lines, artifacts_dir)
+        .map_err(|err| err.to_string())
 }
 
 /// Zenoh 多 line one-shot 入口:复用一条 session bridge 串行执行一组 `@<line>`。
@@ -877,21 +1919,77 @@ fn send_control_lines_zenoh(
     target_name: Option<String>,
     entry_point: Vec<String>,
     lines: &[String],
-) -> Result<(), String> {
-    zenoh_control::send_control_lines(namespace, target_name, entry_point, 3_000, lines)
+    artifacts_dir: &Path,
+) -> Result<Vec<ControlLineExchange>, String> {
+    let line_frames = zenoh_control::send_control_lines_collect_frames(
+        namespace,
+        target_name,
+        entry_point,
+        3_000,
+        lines,
+    )
+    .map_err(|err| err.to_string())?;
+    collect_control_exchanges_from_frames(lines, line_frames, artifacts_dir)
         .map_err(|err| err.to_string())
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        extract_one_shot_lines, parse_port, resolve_control_invocation, resolve_daemon_transport,
-        ControlInvocation,
+        apply_control_line_exchange_to_state, apply_ui_script_target, evaluate_ui_script_expect,
+        extract_one_shot_lines, parse_port, parse_response_payload_value,
+        record_ui_script_control_step, resolve_control_invocation, resolve_daemon_transport,
+        split_ui_script_run_positionals, ControlInvocation, ControlLineExchange,
+        PendingUiScriptControlLine, UiScriptArtifactRecord, UiScriptRunState,
     };
     use crate::{
         config::{DaemonConfig, ZenohConfig},
-        input::Transport,
+        control_frames::ControlFrame,
+        input::{Command, Opts as InputOpts, Transport, UiScriptCommand},
     };
+    use clap::Parser as _;
+    use std::{
+        fs::{self, OpenOptions},
+        path::PathBuf,
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
+    fn temp_ui_script_dir(name: &str) -> PathBuf {
+        let millis = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time should be after unix epoch")
+            .as_millis();
+        std::env::temp_dir().join(format!(
+            "rdog-ui-script-{name}-{millis}-{}",
+            std::process::id()
+        ))
+    }
+
+    fn fake_ui_script_state(name: &str) -> UiScriptRunState {
+        let run_dir = temp_ui_script_dir(name);
+        let artifacts_dir = run_dir.join("artifacts");
+        fs::create_dir_all(&artifacts_dir).expect("test artifacts dir should create");
+        let trace_path = run_dir.join("trace.jsonl");
+        let trace_file = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(&trace_path)
+            .expect("test trace file should create");
+
+        UiScriptRunState {
+            run_id: format!("test-{name}"),
+            run_dir,
+            artifacts_dir,
+            trace_path,
+            trace_file,
+            completed_step_count: 0,
+            failed_step_index: None,
+            last_response_line: None,
+            last_response_value: None,
+            last_artifacts: Vec::new(),
+        }
+    }
 
     #[test]
     fn control_invocation_should_treat_single_name_as_zenoh_target() {
@@ -1178,5 +2276,267 @@ mod tests {
             extract_one_shot_lines(vec!["mac.lab".to_string(), payload.to_string()]);
         assert_eq!(host, vec!["mac.lab".to_string()]);
         assert_eq!(lines, vec![payload.to_string()]);
+    }
+
+    #[test]
+    fn ui_script_run_positionals_should_use_single_arg_as_script_path() {
+        let (target, script_path) = split_ui_script_run_positionals(vec![
+            "tests/fixtures/ui_script/ping_control_line.json".to_string(),
+        ])
+        .unwrap();
+
+        assert!(target.is_empty());
+        assert_eq!(
+            script_path,
+            PathBuf::from("tests/fixtures/ui_script/ping_control_line.json")
+        );
+    }
+
+    #[test]
+    fn ui_script_run_positionals_should_keep_target_before_script_path() {
+        let (target, script_path) = split_ui_script_run_positionals(vec![
+            "mac.lab".to_string(),
+            "tests/fixtures/ui_script/ping_control_line.json".to_string(),
+        ])
+        .unwrap();
+
+        assert_eq!(target, vec!["mac.lab".to_string()]);
+        assert_eq!(
+            script_path,
+            PathBuf::from("tests/fixtures/ui_script/ping_control_line.json")
+        );
+    }
+
+    #[test]
+    fn ui_script_run_positionals_should_reject_control_line_as_target() {
+        let err = split_ui_script_run_positionals(vec![
+            "@ping".to_string(),
+            "tests/fixtures/ui_script/ping_control_line.json".to_string(),
+        ])
+        .unwrap_err();
+
+        assert!(err.contains("target 位置参数不能是 `@<line>`"));
+    }
+
+    #[test]
+    fn ui_script_run_cli_should_parse_target_and_script_path() {
+        let opts = InputOpts::try_parse_from([
+            "rdog",
+            "ui-script",
+            "run",
+            "self",
+            "tests/fixtures/ui_script/ping_control_line.json",
+        ])
+        .unwrap();
+
+        let Command::UiScript {
+            command:
+                UiScriptCommand::Run {
+                    dry_run,
+                    positional,
+                    trace_dir,
+                    ..
+                },
+        } = opts.command
+        else {
+            panic!("expected ui-script run command");
+        };
+        assert!(!dry_run);
+        assert!(trace_dir.is_none());
+        assert_eq!(
+            positional,
+            vec![
+                "self".to_string(),
+                "tests/fixtures/ui_script/ping_control_line.json".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn ui_script_run_cli_should_parse_trace_dir() {
+        let opts = InputOpts::try_parse_from([
+            "rdog",
+            "ui-script",
+            "run",
+            "--trace-dir",
+            "rdog_script_runs/demo",
+            "tests/fixtures/ui_script/ping_control_line.json",
+        ])
+        .unwrap();
+
+        let Command::UiScript {
+            command:
+                UiScriptCommand::Run {
+                    trace_dir,
+                    positional,
+                    ..
+                },
+        } = opts.command
+        else {
+            panic!("expected ui-script run command");
+        };
+        assert_eq!(trace_dir, Some(PathBuf::from("rdog_script_runs/demo")));
+        assert_eq!(
+            positional,
+            vec!["tests/fixtures/ui_script/ping_control_line.json".to_string()]
+        );
+    }
+
+    #[test]
+    fn ui_script_expect_should_validate_response_and_window_rect() {
+        let mut state = fake_ui_script_state("expect-response");
+        state.last_response_line =
+            Some(r#"@response {"value":{"status":"ok","after_rect":{"x":10,"y":20,"width":300,"height":200}}}"#.to_string());
+        state.last_response_value = state
+            .last_response_line
+            .as_deref()
+            .and_then(parse_response_payload_value);
+
+        let response_contains = serde_json::json!({
+            "kind": "response_contains",
+            "contains": "after_rect"
+        });
+        evaluate_ui_script_expect(response_contains.as_object().unwrap(), &state).unwrap();
+
+        let response_status = serde_json::json!({
+            "kind": "response_status",
+            "status": "ok"
+        });
+        evaluate_ui_script_expect(response_status.as_object().unwrap(), &state).unwrap();
+
+        let window_rect = serde_json::json!({
+            "kind": "window_rect",
+            "x": 10,
+            "y": 21,
+            "width": 300,
+            "height": 200,
+            "tolerance_px": 1
+        });
+        evaluate_ui_script_expect(window_rect.as_object().unwrap(), &state).unwrap();
+    }
+
+    #[test]
+    fn ui_script_expect_should_validate_control_status_and_screenshot_artifact() {
+        let mut state = fake_ui_script_state("expect-artifact");
+        state.last_response_line =
+            Some(r#"@response {"code":64,"error":"bad request"}"#.to_string());
+        state.last_response_value = state
+            .last_response_line
+            .as_deref()
+            .and_then(parse_response_payload_value);
+        let control_status = serde_json::json!({
+            "kind": "control_status",
+            "code": 64
+        });
+        evaluate_ui_script_expect(control_status.as_object().unwrap(), &state).unwrap();
+
+        let artifact_path = state.artifacts_dir.join("before.jpg");
+        fs::write(&artifact_path, b"fake image").expect("fake artifact should write");
+        state.last_artifacts.push(UiScriptArtifactRecord {
+            filename: "before.jpg".to_string(),
+            mime: "image/jpeg".to_string(),
+            path: artifact_path,
+            width: Some(1),
+            height: Some(1),
+        });
+        let screenshot_exists = serde_json::json!({
+            "kind": "screenshot_exists",
+            "label": "before"
+        });
+        evaluate_ui_script_expect(screenshot_exists.as_object().unwrap(), &state).unwrap();
+    }
+
+    #[test]
+    fn ui_script_trace_should_write_control_step_record() {
+        let mut state = fake_ui_script_state("trace-control");
+        let pending = PendingUiScriptControlLine {
+            step_index: 0,
+            step_kind: "ControlLine",
+            line: "@ping".to_string(),
+        };
+        let exchange = ControlLineExchange {
+            line: "@ping".to_string(),
+            frames: vec![ControlFrame::ResponseLine(
+                r#"@response "pong""#.to_string(),
+            )],
+            response_line: Some(r#"@response "pong""#.to_string()),
+            artifacts: Vec::new(),
+        };
+
+        record_ui_script_control_step(&mut state, &pending, &exchange).unwrap();
+        let trace = fs::read_to_string(&state.trace_path).unwrap();
+        assert!(trace.contains(r#""step_kind":"ControlLine""#));
+        assert!(trace.contains(r#"@response \"pong\""#));
+    }
+
+    #[test]
+    fn ui_script_control_step_should_fail_on_error_response() {
+        let mut state = fake_ui_script_state("trace-control-error");
+        let pending = PendingUiScriptControlLine {
+            step_index: 7,
+            step_kind: "ControlLine",
+            line: "@window-resize#1:{}".to_string(),
+        };
+        let exchange = ControlLineExchange {
+            line: pending.line.clone(),
+            frames: vec![ControlFrame::ResponseLine(
+                r#"@response {"code":64,"error":"permission denied"}"#.to_string(),
+            )],
+            response_line: Some(r#"@response {"code":64,"error":"permission denied"}"#.to_string()),
+            artifacts: Vec::new(),
+        };
+
+        apply_control_line_exchange_to_state(&mut state, &exchange);
+        let err = record_ui_script_control_step(&mut state, &pending, &exchange)
+            .expect_err("error response should fail the script step");
+        let trace = fs::read_to_string(&state.trace_path).unwrap();
+
+        assert_eq!(state.completed_step_count, 0);
+        assert_eq!(state.failed_step_index, Some(7));
+        assert!(err.contains("permission denied"));
+        assert!(trace.contains(r#""status":"failed""#));
+    }
+
+    #[test]
+    fn ui_script_target_should_fill_empty_cli_target_and_namespace() {
+        let program = crate::ui_script::parse_script_json(
+            r#"[{"Target":{"name":"self","namespace":"lab"}},{"ControlLine":"@ping"}]"#,
+        )
+        .unwrap();
+        let mut control_positionals = Vec::new();
+        let mut namespace = None;
+        let mut target_name = None;
+
+        apply_ui_script_target(
+            &program,
+            &mut control_positionals,
+            &mut namespace,
+            &mut target_name,
+        )
+        .unwrap();
+
+        assert_eq!(control_positionals, vec!["self".to_string()]);
+        assert_eq!(namespace.as_deref(), Some("lab"));
+        assert!(target_name.is_none());
+    }
+
+    #[test]
+    fn ui_script_target_should_reject_cli_target_mismatch() {
+        let program = crate::ui_script::parse_script_json(
+            r#"[{"Target":{"name":"self"}},{"ControlLine":"@ping"}]"#,
+        )
+        .unwrap();
+        let mut control_positionals = vec!["mac.lab".to_string()];
+        let mut namespace = None;
+        let mut target_name = None;
+        let err = apply_ui_script_target(
+            &program,
+            &mut control_positionals,
+            &mut namespace,
+            &mut target_name,
+        )
+        .unwrap_err();
+
+        assert!(err.contains("不一致"));
     }
 }

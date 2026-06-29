@@ -256,48 +256,6 @@ fn receive_single_raw_control_message<W: Write>(
     Ok(())
 }
 
-/// 复用一条已建好的 ControlTransport 串行执行一组 line-control 请求。
-///
-/// 这是 `rdog control <target> @<line> [@<line> ...]` 多 line 入口的核心:
-/// 一次性发一组 `@<line>`,每条都走完整的 frame 收口循环
-/// (能正确处理 `@savefile` 多 frame 场景,如 `@screenshot`),
-/// 共享同一条 TCP / WebSocket 连接,任一行失败整组退出。
-///
-/// 不适用 `--pty-close` / `--pty-detach` 这种简单 PTY 帧——那种场景
-/// 继续走 `send_single_control_line_*` 单帧 exchange 路径。
-pub fn run_line_control_lines(
-    transport: &mut ControlTransport,
-    lines: &[String],
-) -> io::Result<()> {
-    if lines.is_empty() {
-        return Ok(());
-    }
-    let display = ControlResponseDisplay::from_stdio();
-    let mut output = stdout().lock();
-    let save_dir = default_savefile_directory()?;
-
-    for (idx, line) in lines.iter().enumerate() {
-        transport.write_message(line)?;
-        // 当前 one-shot 入口都只发 line-control 帧,不走 JSON agent。
-        // 但保持 `control_transport_stream` 同源逻辑,避免出现新行为漂移。
-        if line.trim_start().starts_with('{') {
-            receive_single_raw_control_message(transport, &mut output)?;
-        } else {
-            match receive_control_result_frames(transport, &mut output, &save_dir, display) {
-                Ok(()) => {}
-                Err(err) => {
-                    log::warn!(
-                        "control multi-line request failed at line index {idx} (line={line}): {err}"
-                    );
-                    return Err(err);
-                }
-            }
-        }
-    }
-
-    Ok(())
-}
-
 fn run_interactive_shell_over_stream(stream: TcpStream, shell: &str) -> io::Result<()> {
     #[cfg(unix)]
     {

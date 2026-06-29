@@ -77,6 +77,7 @@ pub struct UiScriptDryRunStep {
 pub enum UiScriptDryRunEffect {
     Context(String),
     Local(String),
+    Expect(Map<String, Value>),
     ControlLine(String),
     Exit,
 }
@@ -172,13 +173,7 @@ pub fn compile_dry_run(program: &UiScriptProgram) -> io::Result<UiScriptDryRun> 
                 };
                 UiScriptDryRunEffect::Local(label.to_owned())
             }
-            UiScriptStep::Expect(payload) => {
-                let kind = payload
-                    .get("kind")
-                    .and_then(Value::as_str)
-                    .unwrap_or("unknown");
-                UiScriptDryRunEffect::Local(format!("expect:{kind}"))
-            }
+            UiScriptStep::Expect(payload) => UiScriptDryRunEffect::Expect(payload.clone()),
             UiScriptStep::WindowSize(size) => match size.mode {
                 WindowSizeMode::Precondition => UiScriptDryRunEffect::Local(format!(
                     "window_size_precondition:{}x{}",
@@ -959,6 +954,24 @@ mod tests {
         );
         assert!(request.guard.is_some());
         assert_eq!(request.verify.tolerance_px, 2);
+    }
+
+    #[test]
+    fn runner_should_keep_expect_payload_for_real_runner() {
+        let program = parse_fixture("ping_expect_response.json").unwrap();
+        let dry_run = compile_dry_run(&program).unwrap();
+
+        assert_eq!(dry_run.summary.backend_request_count, 1);
+        assert!(matches!(
+            &dry_run.steps[1].effect,
+            UiScriptDryRunEffect::Expect(payload)
+                if payload.get("kind").and_then(Value::as_str) == Some("response_contains")
+        ));
+        assert!(matches!(
+            &dry_run.steps[2].effect,
+            UiScriptDryRunEffect::Expect(payload)
+                if payload.get("kind").and_then(Value::as_str) == Some("response_status")
+        ));
     }
 
     #[test]
