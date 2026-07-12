@@ -13,7 +13,8 @@ use std::{
     io,
     os::raw::{c_char, c_int, c_void},
     process::Command,
-    ptr,
+    ptr, thread,
+    time::{Duration, Instant},
 };
 
 type Boolean = u8;
@@ -69,6 +70,7 @@ struct CGRect {
 #[link(name = "ApplicationServices", kind = "framework")]
 extern "C" {
     static kCFBooleanFalse: CFBooleanRef;
+    static kCFBooleanTrue: CFBooleanRef;
     static kCGWindowBounds: CFStringRef;
     static kCGWindowLayer: CFStringRef;
     static kCGWindowName: CFStringRef;
@@ -100,6 +102,7 @@ extern "C" {
     fn CFBooleanGetTypeID() -> CFTypeID;
     fn CFBooleanGetValue(boolean: CFBooleanRef) -> Boolean;
     fn CFDictionaryGetValue(dict: CFDictionaryRef, key: CFTypeRef) -> CFTypeRef;
+    fn CFEqual(value1: CFTypeRef, value2: CFTypeRef) -> Boolean;
     fn CFGetTypeID(value: CFTypeRef) -> CFTypeID;
     fn CFNumberGetTypeID() -> CFTypeID;
     fn CFNumberGetValue(number: CFNumberRef, number_type: i32, value_ptr: *mut c_void) -> Boolean;
@@ -244,6 +247,16 @@ fn window_rect_for_display_selector(
     candidates: &[WindowCandidate],
     selector: &DisplaySelector,
 ) -> io::Result<Option<DisplayRect>> {
+    window_rect_for_display_selector_with_resolver(candidates, selector, |window_id| {
+        resolve_window_id_direct(window_id).map(|window| window.rect.map(DisplayRect::from))
+    })
+}
+
+fn window_rect_for_display_selector_with_resolver(
+    candidates: &[WindowCandidate],
+    selector: &DisplaySelector,
+    mut resolve_window_rect: impl FnMut(&str) -> io::Result<Option<DisplayRect>>,
+) -> io::Result<Option<DisplayRect>> {
     let window_id = match selector {
         DisplaySelector::WindowId(window_id) => window_id.as_str(),
         DisplaySelector::WindowRef {
@@ -251,46 +264,82 @@ fn window_rect_for_display_selector(
             ref_id,
         } => {
             let resolved = resolve_observation_window_ref(observation_id, ref_id)?;
-            return Ok(candidates
-                .iter()
-                .find(|candidate| candidate.window_id == resolved.window_id)
-                .and_then(|candidate| candidate.rect)
-                .map(DisplayRect::from));
+            if let Some(rect) = candidate_display_rect(candidates, &resolved.window_id) {
+                return Ok(Some(rect));
+            }
+            return resolve_window_rect(&resolved.window_id);
         }
         _ => return Ok(None),
     };
-    Ok(candidates
+    if let Some(rect) = candidate_display_rect(candidates, window_id) {
+        return Ok(Some(rect));
+    }
+    resolve_window_rect(window_id)
+}
+
+fn candidate_display_rect(candidates: &[WindowCandidate], window_id: &str) -> Option<DisplayRect> {
+    candidates
         .iter()
         .find(|candidate| candidate.window_id == window_id)
         .and_then(|candidate| candidate.rect)
-        .map(DisplayRect::from))
+        .map(DisplayRect::from)
 }
 
 pub(super) fn activate(request: &WindowActivateRequest) -> io::Result<WindowActionReport> {
     ensure_trusted()?;
 
-    let find_response = find(&WindowFindRequest {
-        query: request.target.query.clone(),
-        display_scope: None,
-        limit: DEFAULT_WINDOW_FIND_LIMIT,
-        include_state: true,
-        include_recipes: true,
-    })?;
-    let (window, snapshot_id, observed_at_unix_ms) = resolve_single_window(
-        &find_response,
-        &request.target,
-        request.allow_ambiguous,
-        request.select,
-        None,
-    )?;
+    let (window, snapshot_id, observed_at_unix_ms, guard_candidates) =
+        resolve_window_for_activate(request)?;
 
-    let mut steps = Vec::<WindowActionStepReport>::new();
+    let resolved_window_id = window_id(window.app.pid, window.window_index);
+    let mut report =
+        activate_action_report(resolved_window_id.clone(), snapshot_id, observed_at_unix_ms);
     let recipe_steps = resolve_activation_steps(request, &window);
     let app_element = create_app_ax_element(window.app.pid)?;
     let window_ref = resolve_window_ref(window.app.pid, window.window_index)?;
 
+    // ------------------------------------------------------------
+    // display guard 是动作前置条件。guard 不匹配时不能先激活再报告失败。
+    // ------------------------------------------------------------
+    if let Some(scope) = request.guard.as_ref() {
+        let Some(before_rect) = window.rect else {
+            report.status = "failed".to_owned();
+            report.error_code = Some("WINDOW_ACTIVATE_STATE_UNREADABLE");
+            report.failed_step = Some("guard_display".to_owned());
+            report.steps.push(WindowActionStepReport {
+                step: "guard_display".to_owned(),
+                status: "failed".to_owned(),
+                reason: Some("target_window_rect_unreadable".to_owned()),
+                error: None,
+            });
+            return Ok(report);
+        };
+        report.before_rect = Some(before_rect);
+        let (guard, intersects) = window_display_guard_report(
+            scope,
+            &resolved_window_id,
+            before_rect,
+            &guard_candidates,
+            "before_rect",
+            "before_rect_intersects",
+        )?;
+        report.guard = Some(guard);
+        report.steps.push(WindowActionStepReport {
+            step: "guard_display".to_owned(),
+            status: if intersects { "ok" } else { "failed" }.to_owned(),
+            reason: (!intersects).then(|| "target_window_outside_display_guard".to_owned()),
+            error: None,
+        });
+        if !intersects {
+            report.status = "failed".to_owned();
+            report.error_code = Some("WINDOW_ACTIVATE_GUARD_FAILED");
+            report.failed_step = Some("guard_display".to_owned());
+            return Ok(report);
+        }
+    }
+
     for step in recipe_steps {
-        let report = match step.as_str() {
+        let step_report = match step.as_str() {
             "unhide_app" => perform_unhide_app(&window),
             "unminimize_window" => perform_unminimize_window(window_ref.as_ptr(), &window),
             "activate_app" => perform_activate_app(&window),
@@ -308,96 +357,63 @@ pub(super) fn activate(request: &WindowActivateRequest) -> io::Result<WindowActi
                 error: Some(format!("未知 activate step: {unknown}")),
             },
         };
-        if report.status == "failed" {
-            let failed_step = report.step.clone();
-            steps.push(report);
-            return Ok(WindowActionReport {
-                kind: "window-action",
-                schema: WINDOW_SCHEMA,
-                platform: "macos".to_owned(),
-                action: "activate",
+        if step_report.status == "failed" {
+            let failed_step = step_report.step.clone();
+            report.steps.push(step_report);
+            report.status = "failed".to_owned();
+            report.failed_step = Some(failed_step);
+            return Ok(report);
+        }
+        report.steps.push(step_report);
+    }
+
+    // ------------------------------------------------------------
+    // 轮询 fresh focus state。backend accepted 不是完整成功。
+    // ------------------------------------------------------------
+    let verify_result = poll_window_activation_state(
+        window.app.pid,
+        app_element.as_ptr(),
+        window_ref.as_ptr(),
+        request.verify,
+    );
+    apply_window_activation_verification(&mut report, verify_result);
+    Ok(report)
+}
+
+fn apply_window_activation_verification(
+    report: &mut WindowActionReport,
+    verify_result: io::Result<WindowActivateVerifyReport>,
+) {
+    match verify_result {
+        Ok(verify) => {
+            let passed = verify.status == "passed";
+            report.verify = Some(WindowActionVerifyReport::Activate(verify));
+            report.steps.push(WindowActionStepReport {
+                step: "verify_focus".to_owned(),
+                status: if passed { "ok" } else { "failed" }.to_owned(),
+                reason: (!passed).then(|| "focus_not_acquired_before_timeout".to_owned()),
+                error: None,
+            });
+            if passed {
+                report.status = "ok".to_owned();
+            } else {
+                report.status = "failed".to_owned();
+                report.error_code = Some("WINDOW_FOCUS_NOT_ACQUIRED");
+                report.failed_step = Some("verify_focus".to_owned());
+            }
+        }
+        Err(err) => {
+            report.status = "failed".to_owned();
+            report.error_code = Some("WINDOW_ACTIVATE_STATE_UNREADABLE");
+            report.failed_step = Some("verify_focus".to_owned());
+            report.steps.push(WindowActionStepReport {
+                step: "verify_focus".to_owned(),
                 status: "failed".to_owned(),
-                window_id: Some(window_id(window.app.pid, window.window_index)),
-                snapshot_id: Some(snapshot_id),
-                observed_at_unix_ms: Some(observed_at_unix_ms),
-                strategy: None,
-                target_pid: None,
-                process_scope: None,
-                termination_attempted: None,
-                failed_step: Some(failed_step),
-                error_code: None,
-                before_rect: None,
-                requested_size: None,
-                requested_rect: None,
-                after_rect: None,
-                delta: None,
-                verify: None,
-                guard: None,
-                clamp_reason: None,
-                steps,
+                reason: Some("activation_state_unreadable".to_owned()),
+                error: Some(err.to_string()),
             });
         }
-        steps.push(report);
     }
-
-    // ------------------------------------------------------------
-    // 再做一轮轻量探测,给调用方一个“是否已经可交互”的新鲜结果。
-    // ------------------------------------------------------------
-    let hidden = copy_bool_attr(app_element.as_ptr(), "AXHidden")?.unwrap_or(window.app.hidden);
-    let minimized = copy_bool_attr(window_ref.as_ptr(), "AXMinimized")?.unwrap_or(false);
-    if hidden || minimized {
-        return Ok(WindowActionReport {
-            kind: "window-action",
-            schema: WINDOW_SCHEMA,
-            platform: "macos".to_owned(),
-            action: "activate",
-            status: "limited".to_owned(),
-            window_id: Some(window_id(window.app.pid, window.window_index)),
-            snapshot_id: Some(snapshot_id),
-            observed_at_unix_ms: Some(observed_at_unix_ms),
-            strategy: None,
-            target_pid: None,
-            process_scope: None,
-            termination_attempted: None,
-            failed_step: None,
-            error_code: None,
-            before_rect: None,
-            requested_size: None,
-            requested_rect: None,
-            after_rect: None,
-            delta: None,
-            verify: None,
-            guard: None,
-            clamp_reason: None,
-            steps,
-        });
-    }
-
-    Ok(WindowActionReport {
-        kind: "window-action",
-        schema: WINDOW_SCHEMA,
-        platform: "macos".to_owned(),
-        action: "activate",
-        status: "ok".to_owned(),
-        window_id: Some(window_id(window.app.pid, window.window_index)),
-        snapshot_id: Some(snapshot_id),
-        observed_at_unix_ms: Some(observed_at_unix_ms),
-        strategy: None,
-        target_pid: None,
-        process_scope: None,
-        termination_attempted: None,
-        failed_step: None,
-        error_code: None,
-        before_rect: None,
-        requested_size: None,
-        requested_rect: None,
-        after_rect: None,
-        delta: None,
-        verify: None,
-        guard: None,
-        clamp_reason: None,
-        steps,
-    })
 }
 
 pub(super) fn close(request: &WindowCloseRequest) -> io::Result<WindowActionReport> {
@@ -570,6 +586,8 @@ pub(super) fn resize(request: &WindowResizeRequest) -> io::Result<WindowActionRe
         steps: Vec::new(),
         allow_ambiguous: false,
         select: None,
+        guard: None,
+        verify: WindowActivateVerify::default(),
     };
     for step in resolve_activation_steps(&recovery_request, &window) {
         let step_report = perform_resize_recovery_step(step, &window, window_ref.as_ptr());
@@ -693,10 +711,10 @@ pub(super) fn resize(request: &WindowResizeRequest) -> io::Result<WindowActionRe
     report.error_code = evaluation.error_code;
     report.clamp_reason = evaluation.clamp_reason;
     report.delta = Some(evaluation.delta);
-    report.verify = Some(WindowResizeVerifyReport {
+    report.verify = Some(WindowActionVerifyReport::Resize(WindowResizeVerifyReport {
         status: evaluation.report_status,
         tolerance_px: request.verify.tolerance_px,
-    });
+    }));
     report.steps.push(WindowActionStepReport {
         step: "verify_rect".to_owned(),
         status: if report.error_code.is_none() {
@@ -709,11 +727,13 @@ pub(super) fn resize(request: &WindowResizeRequest) -> io::Result<WindowActionRe
     });
 
     if let Some(scope) = request.guard.as_ref() {
-        let (guard, intersects) = resize_guard_report(
+        let (guard, intersects) = window_display_guard_report(
             scope,
             &resolved_window_id,
             after_rect,
             &find_response.matches,
+            "after_rect",
+            "after_rect_intersects",
         )?;
         report.guard = Some(guard);
         report.steps.push(WindowActionStepReport {
@@ -774,6 +794,7 @@ fn enumerate_candidates(
             }
             let resolved = build_resolved_window(
                 app.clone(),
+                app_element.as_ptr(),
                 window_index as usize,
                 window_ref,
                 &visible_windows,
@@ -783,6 +804,77 @@ fn enumerate_candidates(
     }
 
     Ok(candidates)
+}
+
+fn resolve_window_for_activate(
+    request: &WindowActivateRequest,
+) -> io::Result<(ResolvedWindow, String, u64, Vec<WindowCandidate>)> {
+    resolve_window_for_activate_with_resolvers(
+        request,
+        resolve_window_id_direct,
+        resolve_observation_window_id,
+        find,
+    )
+}
+
+fn resolve_window_for_activate_with_resolvers(
+    request: &WindowActivateRequest,
+    mut resolve_window_id: impl FnMut(&str) -> io::Result<ResolvedWindow>,
+    mut resolve_observation: impl FnMut(&str, &str) -> io::Result<String>,
+    mut find_windows: impl FnMut(&WindowFindRequest) -> io::Result<WindowFindResponse>,
+) -> io::Result<(ResolvedWindow, String, u64, Vec<WindowCandidate>)> {
+    let meta = WindowSnapshotMeta::now();
+    if let Some(window_id) = request.target.window_id.as_deref() {
+        return Ok((
+            resolve_window_id(window_id)?,
+            meta.snapshot_id,
+            meta.observed_at_unix_ms,
+            Vec::new(),
+        ));
+    }
+
+    if let (Some(observation_id), Some(ref_id)) = (
+        request.target.observation_id.as_deref(),
+        request.target.ref_id.as_deref(),
+    ) {
+        let window_id = resolve_observation(observation_id, ref_id)?;
+        return Ok((
+            resolve_window_id(&window_id)?,
+            meta.snapshot_id,
+            meta.observed_at_unix_ms,
+            Vec::new(),
+        ));
+    }
+
+    let find_response = find_windows(&WindowFindRequest {
+        query: request.target.query.clone(),
+        display_scope: None,
+        limit: DEFAULT_WINDOW_FIND_LIMIT,
+        include_state: true,
+        include_recipes: true,
+    })?;
+    let guard_candidates = find_response.matches.clone();
+    let (window, snapshot_id, observed_at_unix_ms) = resolve_single_window_with_resolver(
+        &find_response,
+        &request.target,
+        request.allow_ambiguous,
+        request.select,
+        None,
+        &mut resolve_window_id,
+    )?;
+    Ok((window, snapshot_id, observed_at_unix_ms, guard_candidates))
+}
+
+fn resolve_observation_window_id(observation_id: &str, ref_id: &str) -> io::Result<String> {
+    let entry = resolve_observation_ref(observation_id, ref_id)?;
+    if entry.kind != "window" {
+        return Err(stale_observation_ref_error(
+            observation_id,
+            ref_id,
+            format!("ref kind 不是 window: {}", entry.kind),
+        ));
+    }
+    Ok(entry.backend_id)
 }
 
 fn resolve_single_window(
@@ -962,11 +1054,7 @@ fn resolve_candidate_again(candidate: &WindowCandidate) -> io::Result<ResolvedWi
 
 fn resolve_window_id_direct(window_id: &str) -> io::Result<ResolvedWindow> {
     let parsed = parse_window_id(window_id)?;
-    let apps = list_running_apps()?;
-    let app = apps
-        .into_iter()
-        .find(|app| app.pid == parsed.pid)
-        .ok_or_else(|| stale_error(window_id))?;
+    let app = running_app_for_pid(parsed.pid)?.ok_or_else(|| stale_error(window_id))?;
     let visible = visible_windows()?;
     let app_element = create_app_ax_element(app.pid)?;
     let windows =
@@ -980,7 +1068,13 @@ fn resolve_window_id_direct(window_id: &str) -> io::Result<ResolvedWindow> {
     if window_ref.is_null() {
         return Err(stale_error(window_id));
     }
-    build_resolved_window(app, parsed.window_index, window_ref, &visible)
+    build_resolved_window(
+        app,
+        app_element.as_ptr(),
+        parsed.window_index,
+        window_ref,
+        &visible,
+    )
 }
 
 fn resolve_activation_steps(
@@ -1008,6 +1102,124 @@ fn resolve_activation_steps(
     }
 
     vec!["activate_app".to_owned(), "raise_window".to_owned()]
+}
+
+fn activate_action_report(
+    window_id: String,
+    snapshot_id: String,
+    observed_at_unix_ms: u64,
+) -> WindowActionReport {
+    WindowActionReport {
+        kind: "window-action",
+        schema: WINDOW_SCHEMA,
+        platform: "macos".to_owned(),
+        action: "activate",
+        status: "pending".to_owned(),
+        window_id: Some(window_id),
+        snapshot_id: Some(snapshot_id),
+        observed_at_unix_ms: Some(observed_at_unix_ms),
+        strategy: None,
+        target_pid: None,
+        process_scope: None,
+        termination_attempted: None,
+        failed_step: None,
+        error_code: None,
+        before_rect: None,
+        requested_size: None,
+        requested_rect: None,
+        after_rect: None,
+        delta: None,
+        verify: None,
+        guard: None,
+        clamp_reason: None,
+        steps: Vec::new(),
+    }
+}
+
+fn poll_window_activation_state(
+    pid: i32,
+    app_element: AXUIElementRef,
+    window_ref: AXUIElementRef,
+    verify: WindowActivateVerify,
+) -> io::Result<WindowActivateVerifyReport> {
+    let started = Instant::now();
+    poll_window_activation_state_with(
+        verify,
+        || read_window_activation_state(pid, app_element, window_ref),
+        || started.elapsed(),
+        thread::sleep,
+    )
+}
+
+fn poll_window_activation_state_with(
+    verify: WindowActivateVerify,
+    mut read_state: impl FnMut() -> io::Result<WindowActivationState>,
+    mut elapsed: impl FnMut() -> Duration,
+    mut sleep: impl FnMut(Duration),
+) -> io::Result<WindowActivateVerifyReport> {
+    let timeout = Duration::from_millis(u64::from(verify.timeout_ms));
+    let poll_interval = Duration::from_millis(u64::from(verify.poll_interval_ms));
+    let mut last_report = None;
+    let mut last_error = None;
+
+    loop {
+        match read_state() {
+            Ok(state) => {
+                let report = evaluate_window_activate_verification(
+                    state,
+                    verify,
+                    elapsed().as_millis() as u64,
+                );
+                if report.status == "passed" {
+                    return Ok(report);
+                }
+                last_report = Some(report);
+            }
+            Err(err) => last_error = Some(err),
+        }
+
+        let elapsed_now = elapsed();
+        if elapsed_now >= timeout {
+            if let Some(mut report) = last_report {
+                report.elapsed_ms = elapsed_now.as_millis() as u64;
+                return Ok(report);
+            }
+            return Err(last_error
+                .unwrap_or_else(|| io::Error::other("activation state在timeout内始终不可读")));
+        }
+        sleep(poll_interval.min(timeout.saturating_sub(elapsed_now)));
+    }
+}
+
+fn read_window_activation_state(
+    pid: i32,
+    app_element: AXUIElementRef,
+    window_ref: AXUIElementRef,
+) -> io::Result<WindowActivationState> {
+    let focused = focused_window_matches(app_element, window_ref)?.ok_or_else(|| {
+        io::Error::other(format!(
+            "目标应用不暴露 AXFocusedWindow,无法验证 activate: pid={pid}"
+        ))
+    })?;
+    let hidden = copy_bool_attr(app_element, "AXHidden")?.unwrap_or(false);
+    let minimized = copy_bool_attr(window_ref, "AXMinimized")?.unwrap_or(false);
+    Ok(WindowActivationState {
+        frontmost: frontmost_pid()? == pid,
+        focused,
+        hidden,
+        minimized,
+    })
+}
+
+fn frontmost_pid() -> io::Result<i32> {
+    let output = run_jxa_script(
+        "ObjC.import('AppKit');\
+         var app = $.NSWorkspace.sharedWorkspace.frontmostApplication;\
+         app ? Number(app.processIdentifier) : -1;",
+    )?;
+    output
+        .parse::<i32>()
+        .map_err(|err| io::Error::other(format!("解析 frontmost pid 失败: {err}; raw={output}")))
 }
 
 fn resize_action_report(
@@ -1087,6 +1299,7 @@ fn resize_not_settable_report(
 
 fn build_resolved_window(
     app: RunningApp,
+    app_element: AXUIElementRef,
     window_index: usize,
     window_ref: AXUIElementRef,
     visible_windows: &[VisibleWindowInfo],
@@ -1095,7 +1308,7 @@ fn build_resolved_window(
     let rect = copy_ax_rect(window_ref)?;
     let minimized = copy_bool_attr(window_ref, "AXMinimized")?.unwrap_or(false);
     let fullscreen_space = copy_bool_attr(window_ref, "AXFullScreen")?.unwrap_or(false);
-    let focused = copy_bool_attr(window_ref, "AXFocused")?.unwrap_or(false);
+    let focused = focused_window_matches(app_element, window_ref)?.unwrap_or(false);
     let visible_match = match_visible_window(visible_windows, app.pid, title.as_deref(), rect);
     let current_space = visible_match.is_some();
     let occluded = current_space && !focused && !app.frontmost;
@@ -1111,6 +1324,18 @@ fn build_resolved_window(
         current_space,
         occluded,
     })
+}
+
+fn focused_window_matches(
+    app_element: AXUIElementRef,
+    window_ref: AXUIElementRef,
+) -> io::Result<Option<bool>> {
+    let Some(focused_window) = copy_attribute(app_element, "AXFocusedWindow")? else {
+        return Ok(None);
+    };
+    Ok(Some(unsafe {
+        CFEqual(focused_window.as_ptr(), window_ref) != 0
+    }))
 }
 
 fn to_candidate(
@@ -1230,15 +1455,21 @@ fn perform_unhide_app(window: &ResolvedWindow) -> WindowActionStepReport {
 }
 
 fn perform_activate_app(window: &ResolvedWindow) -> WindowActionStepReport {
-    let script = if let Some(bundle_id) = window.app.bundle_id.as_deref() {
-        format!("Application.currentApplication(); Application('{bundle_id}').activate();")
-    } else {
-        format!(
-            "var se = Application('System Events'); se.applicationProcesses.byUnixId({}).frontmost = true;",
-            window.app.pid
-        )
-    };
-    match run_jxa_script(&script) {
+    // -------------------------------------------------------------------------
+    // 应用激活必须使用已经解析出的 PID 作为 identity。
+    // raw AppKit 程序可能没有 bundle id,System Events 也未必能用 byUnixId 获取对象。
+    // AX application 与后续 AXRaise / AXFocused 验证共享同一条可证实的状态链。
+    // -------------------------------------------------------------------------
+    let result = create_app_ax_element(window.app.pid).and_then(|app_element| {
+        with_cf_string("AXFrontmost", |attribute| unsafe {
+            map_ax_write_error(AXUIElementSetAttributeValue(
+                app_element.as_ptr(),
+                attribute,
+                kCFBooleanTrue,
+            ))
+        })
+    });
+    match result {
         Ok(_) => WindowActionStepReport {
             step: "activate_app".to_owned(),
             status: "ok".to_owned(),
@@ -1405,16 +1636,18 @@ fn set_ax_window_position(element: AXUIElementRef, x: i32, y: i32) -> io::Result
     })
 }
 
-fn resize_guard_report(
+fn window_display_guard_report(
     scope: &DisplayScope,
     target_window_id: &str,
-    after_rect: AxRect,
+    rect: AxRect,
     candidates: &[WindowCandidate],
+    rect_field: &str,
+    intersects_field: &str,
 ) -> io::Result<(serde_json::Value, bool)> {
     let displays = current_display_summaries()?;
     let resolution = resolve_display_scope(scope, &displays, |selector| match selector {
         DisplaySelector::WindowId(window_id) if window_id == target_window_id => {
-            Ok(Some(DisplayRect::from(after_rect)))
+            Ok(Some(DisplayRect::from(rect)))
         }
         DisplaySelector::WindowRef {
             observation_id,
@@ -1422,17 +1655,17 @@ fn resize_guard_report(
         } => {
             let resolved = resolve_observation_window_ref(observation_id, ref_id)?;
             if resolved.window_id == target_window_id {
-                Ok(Some(DisplayRect::from(after_rect)))
+                Ok(Some(DisplayRect::from(rect)))
             } else {
                 window_rect_for_display_selector(candidates, selector)
             }
         }
         _ => window_rect_for_display_selector(candidates, selector),
     })?;
-    let intersects = display_intersects_rect(&resolution.resolved, DisplayRect::from(after_rect));
+    let intersects = display_intersects_rect(&resolution.resolved, DisplayRect::from(rect));
     let mut report = display_scope_report(&resolution);
-    report["after_rect"] = serde_json::json!(after_rect);
-    report["after_rect_intersects"] = serde_json::json!(intersects);
+    report[rect_field] = serde_json::json!(rect);
+    report[intersects_field] = serde_json::json!(intersects);
     Ok((report, intersects))
 }
 
@@ -1466,34 +1699,55 @@ fn list_running_apps() -> io::Result<Vec<RunningApp>> {
             "解析 macOS app process JSON 失败: {err}; raw={output}"
         ))
     })?;
-    let mut apps = Vec::new();
-    for value in values {
-        let pid = value
-            .get("pid")
-            .and_then(serde_json::Value::as_i64)
-            .ok_or_else(|| io::Error::other("JXA process 缺少 pid"))? as i32;
-        let name = value
+    values
+        .into_iter()
+        .map(|value| running_app_from_value(&value, "macOS app process list"))
+        .collect()
+}
+
+fn running_app_for_pid(pid: i32) -> io::Result<Option<RunningApp>> {
+    let script = format!(
+        "var se = Application('System Events');\
+         var matches = se.applicationProcesses.whose({{unixId:{pid}}})();\
+         if (matches.length === 0) {{ '' }} else {{\
+           var p = matches[0];\
+           JSON.stringify({{pid:p.unixId(),name:p.name(),hidden:!p.visible(),frontmost:p.frontmost()}});\
+         }}"
+    );
+    let output = run_jxa_script(&script)?;
+    if output.is_empty() {
+        return Ok(None);
+    }
+    let value = serde_json::from_str::<serde_json::Value>(&output).map_err(|err| {
+        io::Error::other(format!(
+            "解析 pid={pid} 的 macOS app JSON 失败: {err}; raw={output}"
+        ))
+    })?;
+    running_app_from_value(&value, "macOS app process").map(Some)
+}
+
+fn running_app_from_value(value: &serde_json::Value, context: &str) -> io::Result<RunningApp> {
+    let pid = value
+        .get("pid")
+        .and_then(serde_json::Value::as_i64)
+        .ok_or_else(|| io::Error::other(format!("{context} 缺少 pid")))? as i32;
+    Ok(RunningApp {
+        pid,
+        name: value
             .get("name")
             .and_then(serde_json::Value::as_str)
             .unwrap_or_default()
-            .to_owned();
-        let hidden = value
+            .to_owned(),
+        bundle_id: bundle_id_for_pid(pid),
+        hidden: value
             .get("hidden")
             .and_then(serde_json::Value::as_bool)
-            .unwrap_or(false);
-        let frontmost = value
+            .unwrap_or(false),
+        frontmost: value
             .get("frontmost")
             .and_then(serde_json::Value::as_bool)
-            .unwrap_or(false);
-        apps.push(RunningApp {
-            pid,
-            name,
-            bundle_id: bundle_id_for_pid(pid),
-            hidden,
-            frontmost,
-        });
-    }
-    Ok(apps)
+            .unwrap_or(false),
+    })
 }
 
 fn bundle_id_for_pid(pid: i32) -> Option<String> {
@@ -1871,6 +2125,56 @@ unsafe fn map_ax_write_error(error: AXError) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::Cell;
+
+    fn sample_resolved_window(pid: i32, window_index: usize) -> ResolvedWindow {
+        ResolvedWindow {
+            app: RunningApp {
+                pid,
+                name: "Fixture".to_owned(),
+                bundle_id: None,
+                hidden: false,
+                frontmost: false,
+            },
+            window_index,
+            title: Some(format!("Fixture {window_index}")),
+            rect: None,
+            minimized: false,
+            fullscreen_space: false,
+            focused: false,
+            current_space: true,
+            occluded: false,
+        }
+    }
+
+    fn sample_activate_request(target: WindowCommandTarget) -> WindowActivateRequest {
+        WindowActivateRequest {
+            target,
+            recipe: None,
+            steps: Vec::new(),
+            allow_ambiguous: false,
+            select: None,
+            guard: None,
+            verify: WindowActivateVerify::default(),
+        }
+    }
+
+    fn sample_find_response(matches: Vec<WindowCandidate>) -> WindowFindResponse {
+        WindowFindResponse {
+            kind: "window-find",
+            schema: WINDOW_SCHEMA,
+            platform: "macos".to_owned(),
+            status: "complete".to_owned(),
+            capabilities: WindowCapabilities::complete(),
+            observation: None,
+            match_count: matches.len(),
+            returned_count: matches.len(),
+            snapshot_id: "window-snapshot-test".to_owned(),
+            observed_at_unix_ms: 42,
+            display_scope: None,
+            matches,
+        }
+    }
 
     #[test]
     fn parse_window_id_should_accept_expected_shape() {
@@ -1909,6 +2213,8 @@ mod tests {
             steps: Vec::new(),
             allow_ambiguous: false,
             select: None,
+            guard: None,
+            verify: WindowActivateVerify::default(),
         };
         let steps = resolve_activation_steps(&request, &window);
         assert_eq!(
@@ -2177,5 +2483,232 @@ mod tests {
         assert_eq!(resolved.0.window_index, 2);
         assert_eq!(resolved.1, "window-snapshot-99");
         assert_eq!(resolved.2, 99);
+    }
+
+    #[test]
+    fn activate_direct_window_id_should_not_call_global_find() {
+        let direct_calls = Cell::new(0);
+        let find_calls = Cell::new(0);
+        let request = sample_activate_request(WindowCommandTarget {
+            window_id: Some("pid:77/window:3".to_owned()),
+            ..WindowCommandTarget::default()
+        });
+
+        let (resolved, _, _, guard_candidates) = resolve_window_for_activate_with_resolvers(
+            &request,
+            |window_id| {
+                direct_calls.set(direct_calls.get() + 1);
+                assert_eq!(window_id, "pid:77/window:3");
+                Ok(sample_resolved_window(77, 3))
+            },
+            |_, _| panic!("direct window id 不应解析 observation ref"),
+            |_| {
+                find_calls.set(find_calls.get() + 1);
+                Ok(sample_find_response(Vec::new()))
+            },
+        )
+        .unwrap();
+
+        assert_eq!(resolved.window_index, 3);
+        assert!(guard_candidates.is_empty());
+        assert_eq!(direct_calls.get(), 1);
+        assert_eq!(find_calls.get(), 0);
+    }
+
+    #[test]
+    fn activate_observation_ref_should_not_call_global_find() {
+        let direct_calls = Cell::new(0);
+        let observation_calls = Cell::new(0);
+        let find_calls = Cell::new(0);
+        let request = sample_activate_request(WindowCommandTarget {
+            observation_id: Some("obs-test".to_owned()),
+            ref_id: Some("@e2".to_owned()),
+            ..WindowCommandTarget::default()
+        });
+
+        let (resolved, _, _, guard_candidates) = resolve_window_for_activate_with_resolvers(
+            &request,
+            |window_id| {
+                direct_calls.set(direct_calls.get() + 1);
+                assert_eq!(window_id, "pid:88/window:2");
+                Ok(sample_resolved_window(88, 2))
+            },
+            |observation_id, ref_id| {
+                observation_calls.set(observation_calls.get() + 1);
+                assert_eq!(observation_id, "obs-test");
+                assert_eq!(ref_id, "@e2");
+                Ok("pid:88/window:2".to_owned())
+            },
+            |_| {
+                find_calls.set(find_calls.get() + 1);
+                Ok(sample_find_response(Vec::new()))
+            },
+        )
+        .unwrap();
+
+        assert_eq!(resolved.window_index, 2);
+        assert!(guard_candidates.is_empty());
+        assert_eq!(direct_calls.get(), 1);
+        assert_eq!(observation_calls.get(), 1);
+        assert_eq!(find_calls.get(), 0);
+    }
+
+    #[test]
+    fn activate_query_target_should_call_global_find() {
+        let direct_calls = Cell::new(0);
+        let find_calls = Cell::new(0);
+        let candidate = to_candidate(sample_resolved_window(99, 1), true, true);
+        let request = sample_activate_request(WindowCommandTarget::default());
+
+        let (resolved, snapshot_id, observed_at_unix_ms, guard_candidates) =
+            resolve_window_for_activate_with_resolvers(
+                &request,
+                |window_id| {
+                    direct_calls.set(direct_calls.get() + 1);
+                    assert_eq!(window_id, "pid:99/window:1");
+                    Ok(sample_resolved_window(99, 1))
+                },
+                |_, _| panic!("query target 不应解析 observation ref"),
+                |_| {
+                    find_calls.set(find_calls.get() + 1);
+                    Ok(sample_find_response(vec![candidate.clone()]))
+                },
+            )
+            .unwrap();
+
+        assert_eq!(resolved.window_index, 1);
+        assert_eq!(snapshot_id, "window-snapshot-test");
+        assert_eq!(observed_at_unix_ms, 42);
+        assert_eq!(guard_candidates.len(), 1);
+        assert_eq!(direct_calls.get(), 1);
+        assert_eq!(find_calls.get(), 1);
+    }
+
+    #[test]
+    fn activate_verify_timeout_should_map_to_focus_not_acquired() {
+        let mut report = activate_action_report(
+            "pid:7/window:1".to_owned(),
+            "window-snapshot-test".to_owned(),
+            42,
+        );
+        apply_window_activation_verification(
+            &mut report,
+            Ok(WindowActivateVerifyReport {
+                status: "failed".to_owned(),
+                focused: false,
+                frontmost: true,
+                hidden: false,
+                minimized: false,
+                timeout_ms: 2_000,
+                elapsed_ms: 2_001,
+            }),
+        );
+
+        assert_eq!(report.status, "failed");
+        assert_eq!(report.error_code, Some("WINDOW_FOCUS_NOT_ACQUIRED"));
+        assert_eq!(report.failed_step.as_deref(), Some("verify_focus"));
+        assert_eq!(report.steps.last().unwrap().status, "failed");
+    }
+
+    #[test]
+    fn activate_verify_read_error_should_map_to_state_unreadable() {
+        let mut report = activate_action_report(
+            "pid:7/window:1".to_owned(),
+            "window-snapshot-test".to_owned(),
+            42,
+        );
+        apply_window_activation_verification(
+            &mut report,
+            Err(io::Error::other("AXFocusedWindow unreadable")),
+        );
+
+        assert_eq!(report.status, "failed");
+        assert_eq!(report.error_code, Some("WINDOW_ACTIVATE_STATE_UNREADABLE"));
+        assert_eq!(report.failed_step.as_deref(), Some("verify_focus"));
+        let step = report.steps.last().unwrap();
+        assert_eq!(step.reason.as_deref(), Some("activation_state_unreadable"));
+        assert!(step.error.as_deref().unwrap().contains("AXFocusedWindow"));
+    }
+
+    #[test]
+    fn display_selector_should_resolve_window_outside_fast_path_candidates() {
+        let expected = DisplayRect {
+            x: 1_400,
+            y: 80,
+            width: 500,
+            height: 320,
+        };
+        let mut resolved_id = None;
+        let actual = window_rect_for_display_selector_with_resolver(
+            &[],
+            &DisplaySelector::WindowId("pid:9/window:2".to_owned()),
+            |window_id| {
+                resolved_id = Some(window_id.to_owned());
+                Ok(Some(expected.clone()))
+            },
+        )
+        .unwrap();
+
+        assert_eq!(resolved_id.as_deref(), Some("pid:9/window:2"));
+        assert_eq!(actual, Some(expected));
+    }
+
+    #[test]
+    fn activation_poll_should_retry_transient_state_read_error() {
+        let calls = Cell::new(0);
+        let elapsed_ms = Cell::new(0u64);
+        let report = poll_window_activation_state_with(
+            WindowActivateVerify {
+                timeout_ms: 100,
+                poll_interval_ms: 10,
+                ..WindowActivateVerify::default()
+            },
+            || {
+                let call = calls.get();
+                calls.set(call + 1);
+                if call == 0 {
+                    Err(io::Error::other("AXFocusedWindow暂不可读"))
+                } else {
+                    Ok(WindowActivationState {
+                        frontmost: true,
+                        focused: true,
+                        hidden: false,
+                        minimized: false,
+                    })
+                }
+            },
+            || {
+                let current = elapsed_ms.get();
+                elapsed_ms.set(current + 10);
+                Duration::from_millis(current)
+            },
+            |_| {},
+        )
+        .unwrap();
+
+        assert_eq!(calls.get(), 2);
+        assert_eq!(report.status, "passed");
+    }
+
+    #[test]
+    fn activation_poll_should_report_unreadable_after_timeout() {
+        let elapsed_ms = Cell::new(0u64);
+        let error = poll_window_activation_state_with(
+            WindowActivateVerify {
+                timeout_ms: 20,
+                poll_interval_ms: 10,
+                ..WindowActivateVerify::default()
+            },
+            || Err(io::Error::other("AXFocusedWindow不可读")),
+            || {
+                let current = elapsed_ms.get();
+                elapsed_ms.set(current + 10);
+                Duration::from_millis(current)
+            },
+            |_| {},
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("AXFocusedWindow不可读"));
     }
 }

@@ -163,6 +163,11 @@ rustdog 首先被LLM agent 智能体使用，其次被人类使用。要以agent
   - 用途: 固定请求侧唯一使用 `scope:{display:{...}}` / `guard:{display:{...}}`,支持 `id`、`name_contains`、`contains_point`、`window_id`、`window_ref + observation_id` resolver,并明确 `display_id` 只作为 resolved identity 返回
   - 何时阅读: 修改 `src/control_display_scope.rs`、`@observe`、`@window-find`、`@ax-find`、`@web-find`、mouse display guard、`@bootstrap` nested observe scope,或排查多显示器目标过滤和误点保护前
 
+- `specs/rdog-display-aware-control-chain-plan.md`
+  - 主题: display scope、window identity、focus verification、targeted AX/scoped visual与post-action evidence的完整控制链
+  - 用途: 固定 `@window-activate guard/verify`、`@ax-find.window`、single-display observe artifact和fresh reobserve验收口径
+  - 何时阅读: 实现或评审多显示器GUI动作链、目标窗口定向采集、动作后验证,或排查双屏误控/错误成功报告前
+
 - `specs/rdog-mouse-control-coordinate-plan.md`
   - 主题: `@mouse-move` / `@mouse-button` / `@click` / `@drag` / `@wheel` 鼠标控制方案
   - 用途: 固定鼠标控制必须复用 screenshot manifest 的 `os-logical` 坐标语义,以及 press/release、click、drag、wheel 的协议字段、错误边界和验证矩阵

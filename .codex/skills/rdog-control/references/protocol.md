@@ -274,8 +274,9 @@ Response rules:
   Image and manifest data still arrive as `@savefile` frames before the final `@response`.
 - `target` filters window and AX summaries.
   `scope.display` filters window and AX summaries through the shared display resolver.
-- Visual screenshots remain virtual-desktop screenshots in the metadata-only display-scope path.
-  Scoped visual sections must report `scope_applied:false` and `scope_reason:"metadata_only"` unless the image was actually cropped to the display.
+- With `scope.display`, the visual lane selects the resolved display from the same capture and emits a `single-display` JPEG/manifest.
+  The scoped manifest keeps the display's global `os_rect`, starts `image_rect` at `{x:0,y:0}`, and reports `scope_applied:true`.
+- Without `scope.display`, visual screenshots remain the all-display `composite` bundle.
 - `hybrid` does not create a merged observation namespace.
   The top-level `observation` points at one primary section, and `refs.sample[]` items carry both `section` and `observation_id`.
 - `refs.sample[]` is intentionally compact.
@@ -295,7 +296,7 @@ Request examples:
 ```text
 @observe#30:{mode:"hybrid",scope:{display:{id:"d2"}}}
 @window-find#31:{title_contains:"Chrome",scope:{display:{name_contains:"DELL"}}}
-@ax-find#32:{role:"AXButton",name_contains:"Publish",scope:{display:{contains_point:{x:1800,y:500}}}}
+@ax-find#32:{window:{window_id:"pid:123/window:0"},role:"AXButton",name_contains:"Publish",scope:{display:{contains_point:{x:1800,y:500}}}}
 @web-find#33:{text_contains:"Submit",scope:{display:{window_id:"pid:123/window:0"}}}
 @web-find#34:{text_contains:"Submit",scope:{display:{window_ref:"@e4",observation_id:"obs-..."}}}
 @click#35:{target:{ref:"@e12",observation_id:"obs-..."},guard:{display:{id:"d2"}}}
@@ -326,7 +327,7 @@ Common requests:
 ```text
 @window-find#11:{app:"TextEdit",title_contains:"release-notes",limit:5,include_state:true,include_recipes:true}
 @window-find#16:{title_contains:"Chrome",scope:{display:{id:"d2"}},limit:5}
-@window-activate#12:{window_id:"pid:123/window:0"}
+@window-activate#12:{target:{window_id:"pid:123/window:0"},guard:{display:{id:"d2"}},verify:{focused:true,timeout_ms:2000,poll_interval_ms:50}}
 @window-resize#17:{target:{window_id:"pid:123/window:0"},size:{width:1200,height:800,unit:"os-logical",box:"outer"},origin:"keep",verify:true}
 @window-resize#18:{target:{ref:"@e1",observation_id:"obs-..."},size:{width:1200,height:800,unit:"os-logical",box:"outer"},origin:"keep",verify:true}
 @window-close#13:{window_id:"pid:123/window:0"}
@@ -407,6 +408,8 @@ Find first, then drill into one target:
 @ax-find#301:{role:"AXButton",name_contains:"Cancel",limit:20}
 @ax-find#302:{action:"AXPress",mode:"interactive",limit:30}
 @ax-find#305:{role:"AXButton",name_contains:"Cancel",scope:{display:{id:"d2"}},limit:20}
+@ax-find#306:{window:{window_id:"pid:123/window:0"},role:"AXButton",name_contains:"Cancel",limit:20}
+@ax-find#307:{window:{ref:"@e1",observation_id:"obs-123"},role:"AXButton",name_contains:"Cancel",limit:20}
 @ax-get#303:{target:{ref:"@e2",observation_id:"obs-123"},depth:2,include_values:false}
 @ax-press#304:{target:{ref:"@e2",observation_id:"obs-123"}}
 ```
@@ -419,6 +422,9 @@ Find first, then drill into one target:
 Use `ax_mode` on `@screenshot`.
 Use `mode` on AX-only commands such as `@ax-tree`, `@ax-find`, and `@ax-get`.
 All AX rectangles use `coordinate_space:"os-logical"`, same as the screenshot manifest.
+`@ax-find.window` is optional. When present, it accepts either `window_id` or `ref + observation_id` and captures only that AXWindow subtree before applying display scope and query filters.
+
+For `@ax-focus` with `activate:true`, inspect the nested `activation` report. AX focus is not performed unless `activation.verify.status` is `passed`; activation failure returns `performed:false` and preserves the `WINDOW_*` error code.
 
 AX permission failure uses the same first-class error style:
 

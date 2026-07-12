@@ -630,6 +630,8 @@ fn parse_should_support_window_commands() {
                     steps: Vec::new(),
                     allow_ambiguous: false,
                     select: Some(WindowSelectPolicy::Frontmost),
+                    guard: None,
+                    verify: crate::control_window::WindowActivateVerify::default(),
                 }),
             })
         );

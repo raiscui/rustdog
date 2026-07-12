@@ -1,9 +1,10 @@
 use crate::{
     control_ax::{
-        build_ax_find_response_json, build_ax_get_response_json, capture_default_ax_snapshot,
-        perform_default_ax_action, perform_default_ax_focus, perform_default_ax_press,
-        perform_default_ax_scroll, perform_default_ax_set_value, perform_default_key_delivery,
-        perform_default_type_text,
+        build_ax_find_response_json, build_ax_get_response_json, capture_ax_find_snapshot,
+        capture_default_ax_snapshot, perform_default_ax_action, perform_default_ax_focus,
+        perform_default_ax_press, perform_default_ax_scroll, perform_default_ax_set_value,
+        perform_default_key_delivery, perform_default_type_text, window_activation_verified,
+        AxFocusReport,
     },
     control_frames::{default_savefile_directory, SaveFileFrame},
     control_gui_bench::build_gui_bench_response_json,
@@ -476,7 +477,7 @@ fn execute_ax_tree(
 fn execute_ax_find(
     request: &crate::control_ax::AxFindRequest,
 ) -> io::Result<ActionExecutionResult> {
-    let snapshot = capture_default_ax_snapshot(&request.tree)?;
+    let snapshot = capture_ax_find_snapshot(request)?;
     Ok(ActionExecutionResult {
         exit_code: 0,
         stdout: Vec::new(),
@@ -534,6 +535,21 @@ fn execute_ax_set_value(
 fn execute_ax_focus(
     request: &crate::control_ax::AxFocusRequest,
 ) -> io::Result<ActionExecutionResult> {
+    execute_ax_focus_with(
+        request,
+        execute_default_window_activate,
+        perform_default_ax_focus,
+    )
+}
+
+fn execute_ax_focus_with(
+    request: &crate::control_ax::AxFocusRequest,
+    activate_window: impl FnOnce(
+        &crate::control_window::WindowActivateRequest,
+    ) -> io::Result<crate::control_window::WindowActionReport>,
+    focus_ax: impl FnOnce(&crate::control_ax::AxFocusRequest) -> io::Result<AxFocusReport>,
+) -> io::Result<ActionExecutionResult> {
+    let mut activation = None;
     if request.activate {
         let window_id = match &request.window_id {
             Some(window_id) => Some(window_id.clone()),
@@ -554,11 +570,26 @@ fn execute_ax_focus(
             steps: Vec::new(),
             allow_ambiguous: false,
             select: None,
+            guard: None,
+            verify: crate::control_window::WindowActivateVerify::default(),
         };
-        execute_default_window_activate(&activation_request)?;
+        let activation_report = activate_window(&activation_request)?;
+        if !window_activation_verified(&activation_report) {
+            let report = AxFocusReport::activation_failed(activation_report);
+            return Ok(ActionExecutionResult {
+                exit_code: 0,
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+                response_value_json: Some(report.to_value_json()?),
+            });
+        }
+        activation = Some(activation_report);
     }
 
-    let report = perform_default_ax_focus(request)?;
+    let mut report = focus_ax(request)?;
+    if let Some(activation) = activation {
+        report = report.with_activation(activation);
+    }
     Ok(ActionExecutionResult {
         exit_code: 0,
         stdout: Vec::new(),

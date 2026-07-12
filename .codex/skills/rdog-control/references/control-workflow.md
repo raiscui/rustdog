@@ -276,7 +276,9 @@ rdog control mac.lab \
 ```
 
 Use the same `scope:{display:{...}}` shape on `@observe`, `@window-find`, `@ax-find`, and `@web-find`.
-Use `guard:{display:{...}}` on `@mouse-move`, `@click`, `@drag`, and `@wheel` when falling back to pointer control.
+Use `guard:{display:{...}}` on `@window-activate`, `@mouse-move`, `@click`, `@drag`, and `@wheel`.
+After `@window-find`, pass the window id/ref to `@window-activate`, then use the same identity in `@ax-find.window` so AX capture is target-window-first.
+With display scope, visual `@observe` returns a `single-display` artifact; mouse coordinates still use the manifest's global `os-logical` mapping.
 Supported selectors are `id`, `name_contains`, `contains_point`, `window_id`, and `window_ref + observation_id`.
 Do not use top-level `display_id:"d2"` in requests, and do not invent display refs such as `ref:"@d2"`.
 
@@ -344,7 +346,7 @@ Discover and recover a non-visible window before clicking only when no resize is
 ```bash
 rdog control mac.lab \
   '@window-find#20:{app:"TextEdit",title_contains:"release-notes",limit:5,include_state:true,include_recipes:true}' \
-  '@window-activate#21:{window_id:"pid:123/window:0"}' \
+  '@window-activate#21:{target:{window_id:"pid:123/window:0"},guard:{display:{id:"d2"}},verify:{focused:true,timeout_ms:2000,poll_interval_ms:50}}' \
   '@click#22:{x:1200,y:540,button:"left",count:1}'
 ```
 

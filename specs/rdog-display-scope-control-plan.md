@@ -2,14 +2,15 @@
 
 ## Implementation Status
 
-2026-06-25 第一版已落地:
+2026-06-25 第一版已落地,2026-07-12 visual scope 与完整控制链已补齐:
 
 - 共享 resolver: `src/control_display_scope.rs`。
 - 请求侧 canonical 形态: `scope:{display:{...}}`;mouse action guard 使用 `guard:{display:{...}}`。
 - 已接入: `@observe`、`@window-find`、`@ax-find`、`@web-find`、`@web-act`、`@mouse-move`、`@click`、`@drag`、`@wheel`、`@bootstrap` nested observe。
 - 已拒绝: 顶层 `display_id`、`scope:{display:{ref:"@d2"}}`、缺少 `observation_id` 的 `window_ref` selector、`@mouse-button` display guard。
 - `@screenshot` manifest 已补 `display_id`、`display_id_stability`、`stable_key`、`primary`,并保留 `id` / `is_primary` 兼容 alias。
-- `@observe` visual lane 当前是 metadata-only display scope: 响应必须诚实返回 `scope_applied:false` 与 `scope_reason:"metadata_only"`,直到后续真正裁剪 scoped image。
+- `@observe` visual lane 已从同一次capture选择resolved display,输出 `single-display` JPEG/manifest并返回 `scope_applied:true`。
+- scoped manifest保留目标display的全局 `os_rect`,图像 `image_rect`从 `(0,0)` 开始;mouse仍使用全局 `os-logical`。
 
 ## Requirements Summary
 
@@ -336,7 +337,7 @@ producer 过滤规则:
 - screenshot: `@observe` 带 `scope.display` 且 `include_screenshot:true` 时,visual lane 必须返回目标 display 的 scoped image。
   - 实现上可以先捕获 all-display composite,再按 resolved display `image_rect` 裁出单 display image。
   - response 必须写 `visual.scope_applied:true`、`visual.resolved_display_id` 和 scoped image manifest。
-  - 如果第一阶段暂时无法裁剪 scoped image,不能伪装为 scoped screenshot;必须返回 `visual.scope_applied:false` 和 `visual.scope_reason:"metadata_only"`,并且 acceptance 不能标记视觉 scope 已完成。
+  - 历史第一阶段曾允许用 `metadata_only`诚实降级;该阶段已结束,当前实现和验收要求均为真实 `scope_applied:true` artifact。
 - windows: 过滤 window rect 与 display `os_rect` 相交的窗口。
 - AX: 过滤 window rect 与 display `os_rect` 相交的 AX window / elements。
 - refs: 只从过滤后的 sections 生成。
@@ -533,7 +534,7 @@ beautiful-mermaid-rs --ascii < specs/rdog-display-scope-control-plan.md
 - 第一版 manifest 中 `id == display_id` 必须恒成立。
 - 第一版 manifest 中 `primary == is_primary` 必须恒成立。
 - scoped observe 生成的 refs 只来自目标 display 相交窗口 / AX 元素。
-- scoped observe 带 `include_screenshot:true` 时,visual lane 必须返回 scoped display image;如果暂时只能 metadata filter,必须返回 `visual.scope_applied:false` 和 `visual.scope_reason:"metadata_only"`。
+- scoped observe 带 `include_screenshot:true` 时,visual lane必须返回真实scoped display image、`layout:"single-display"`与 `visual.scope_applied:true`。
 - `@window-find scope:{display:{id:"d2"}}` 返回的窗口全部与 `d2.os_rect` 相交。
 - `@ax-find scope:{display:{id:"d2"}}` 返回元素全部位于 `d2.os_rect` 内或属于与 `d2` 相交窗口。
 - `@click` / `@drag` / `@wheel` 的 guard 能阻止跨 display 执行。
@@ -604,7 +605,7 @@ beautiful-mermaid-rs --ascii < specs/rdog-display-scope-control-plan.md
 1. 先跑 parser 和纯函数单测,确认 `scope.display` resolver 和错误拒绝都符合协议。
 2. 跑 screenshot manifest 测试,确认旧字段和新增 display id 并存。
 3. 跑 observe response 测试,确认 display scope 出现在 response,并影响 refs/windows/accessibility。
-4. 跑 visual lane scoped screenshot 测试,确认 scoped image 真被裁剪,或明确返回 `metadata_only`。
+4. 跑 visual lane scoped screenshot 测试,确认单display image/manifest真实落盘,全局 `os_rect`和局部zero-origin `image_rect`正确。
 5. 跑 bootstrap parser / response 测试,确认 nested observe display scope 能转发,顶层 `scope` / `display_id` 会被拒绝。
 6. 跑 mouse target resolver 测试,确认 guard inside/outside/scope mismatch,并确认 `@mouse-button` 拒绝 guard。
 7. 跑 Zenoh screenshot bundle e2e,确认远程 control path 中 `scope.display` payload 和 resolved `display_id` 字段不会被传输层破坏。

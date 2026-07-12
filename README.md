@@ -271,6 +271,9 @@ Important behavior:
 - Default screenshot results are a bundle: one virtual-desktop JPEG `@savefile`, one manifest JSON `@savefile`, then a final `@response` whose value has `kind:"screenshot-bundle"`.
 - The manifest is the coordinate source of truth. For the default logical composite, `os_x = image_x + virtual_bounds.x` and `os_y = image_y + virtual_bounds.y`.
 - `@observe` is read-only. It returns a `rdog.observe.v1` bundle with `visual`, `accessibility`, `windows`, `refs`, `selectors`, and `recovery` sections.
+- `@observe` with `scope.display` emits a real `single-display` visual bundle. Its manifest keeps global `os_rect` coordinates and uses a zero-origin `image_rect`.
+- `@window-activate` accepts `guard.display` and verifies fresh `frontmost` / focused-window state before returning `status:"ok"`.
+- `@ax-find.window` accepts a direct window id or observation window ref and captures only that AXWindow subtree before querying.
 - `@observe mode:"hybrid"` does not merge all refs into one namespace. Use each `refs.sample[]` item with its own `section`, `observation_id`, and `ref`.
 - Short refs such as `@e4` are observation-scoped. A stale or expired ref must be recovered by re-observing or by `@selector-get -> @selector-refind -> verify_hint`; never treat the old short ref as revived.
 - Mouse is a fallback lane. Prefer semantic AX/window commands first, then observation refs such as `target:{ref:"@e4",observation_id:"obs-..."}`, then raw coordinates.
@@ -544,6 +547,7 @@ Important boundaries:
 - [`specs/zenoh-control-plane-plan.md`](./specs/zenoh-control-plane-plan.md): Zenoh router/client control-plane plan
 - [`specs/zenoh-screenshot-control-plan.md`](./specs/zenoh-screenshot-control-plan.md): screenshot control plan
 - [`specs/rdog-multi-display-screenshot-coordinate-plan.md`](./specs/rdog-multi-display-screenshot-coordinate-plan.md): multi-display screenshot bundle and coordinate manifest contract
+- [`specs/rdog-display-aware-control-chain-plan.md`](./specs/rdog-display-aware-control-chain-plan.md): verified display -> window -> focus -> targeted AX/visual -> action -> fresh evidence chain
 - [`specs/rdog-mouse-control-coordinate-plan.md`](./specs/rdog-mouse-control-coordinate-plan.md): mouse control commands and screenshot-coordinate reuse contract
 
 ## Disclaimer

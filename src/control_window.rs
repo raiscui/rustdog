@@ -25,6 +25,9 @@ pub const WINDOW_SCHEMA: &str = "rdog.window.v1";
 pub const WINDOW_COORDINATE_SPACE: &str = "os-logical";
 const DEFAULT_WINDOW_FIND_LIMIT: u16 = 20;
 pub const DEFAULT_WINDOW_RESIZE_TOLERANCE_PX: u32 = 2;
+pub const DEFAULT_WINDOW_ACTIVATE_TIMEOUT_MS: u32 = 2_000;
+pub const DEFAULT_WINDOW_ACTIVATE_POLL_INTERVAL_MS: u32 = 50;
+const MAX_WINDOW_ACTIVATE_TIMEOUT_MS: u32 = 30_000;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WindowFindRequest {
@@ -42,6 +45,8 @@ pub struct WindowActivateRequest {
     pub steps: Vec<String>,
     pub allow_ambiguous: bool,
     pub select: Option<WindowSelectPolicy>,
+    pub guard: Option<DisplayScope>,
+    pub verify: WindowActivateVerify,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -124,6 +129,42 @@ pub struct WindowResizeVerify {
     pub tolerance_px: u32,
 }
 
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub struct WindowActivateVerify {
+    pub focused: bool,
+    pub timeout_ms: u32,
+    pub poll_interval_ms: u32,
+}
+
+impl Default for WindowActivateVerify {
+    fn default() -> Self {
+        Self {
+            focused: true,
+            timeout_ms: DEFAULT_WINDOW_ACTIVATE_TIMEOUT_MS,
+            poll_interval_ms: DEFAULT_WINDOW_ACTIVATE_POLL_INTERVAL_MS,
+        }
+    }
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub struct WindowActivationState {
+    pub frontmost: bool,
+    pub focused: bool,
+    pub hidden: bool,
+    pub minimized: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct WindowActivateVerifyReport {
+    pub status: String,
+    pub focused: bool,
+    pub frontmost: bool,
+    pub hidden: bool,
+    pub minimized: bool,
+    pub timeout_ms: u32,
+    pub elapsed_ms: u64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct WindowResizeDelta {
     pub x: i64,
@@ -136,6 +177,13 @@ pub struct WindowResizeDelta {
 pub struct WindowResizeVerifyReport {
     pub status: String,
     pub tolerance_px: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(untagged)]
+pub enum WindowActionVerifyReport {
+    Activate(WindowActivateVerifyReport),
+    Resize(WindowResizeVerifyReport),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -201,7 +249,7 @@ pub struct WindowActionReport {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub delta: Option<WindowResizeDelta>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub verify: Option<WindowResizeVerifyReport>,
+    pub verify: Option<WindowActionVerifyReport>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub guard: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -296,6 +344,28 @@ impl WindowSnapshotMeta {
             snapshot_id: format!("window-snapshot-{observed_at_unix_ms}"),
             observed_at_unix_ms,
         }
+    }
+}
+
+/// 将一次 fresh window state 评估为 activate verification report。
+///
+/// 这里只做纯状态判断。macOS backend 负责轮询并传入最后一次状态,
+/// 这样 timeout、TCC 和 JXA/AX 读取可以独立测试与诊断。
+pub fn evaluate_window_activate_verification(
+    state: WindowActivationState,
+    verify: WindowActivateVerify,
+    elapsed_ms: u64,
+) -> WindowActivateVerifyReport {
+    let focus_satisfied = !verify.focused || (state.frontmost && state.focused);
+    let passed = focus_satisfied && !state.hidden && !state.minimized;
+    WindowActivateVerifyReport {
+        status: if passed { "passed" } else { "failed" }.to_owned(),
+        focused: state.focused,
+        frontmost: state.frontmost,
+        hidden: state.hidden,
+        minimized: state.minimized,
+        timeout_ms: verify.timeout_ms,
+        elapsed_ms,
     }
 }
 
@@ -741,6 +811,8 @@ pub fn parse_window_activate_payload(input: &str) -> io::Result<WindowActivateRe
     let mut steps = None::<Vec<String>>;
     let mut allow_ambiguous = None::<bool>;
     let mut select = None::<WindowSelectPolicy>;
+    let mut guard = None::<DisplayScope>;
+    let mut verify = None::<WindowActivateVerify>;
 
     for field in split_object_fields(inner)? {
         let (field_name, raw_value) = split_object_field(field)?;
@@ -787,6 +859,23 @@ pub fn parse_window_activate_payload(input: &str) -> io::Result<WindowActivateRe
                 "@window-activate",
                 WindowSelectPolicy::from_literal(raw_value)?,
             )?,
+            "guard" => assign_once(
+                &mut guard,
+                "guard",
+                "@window-activate",
+                parse_display_scope(raw_value, "@window-activate.guard")?,
+            )?,
+            "verify" => assign_once(
+                &mut verify,
+                "verify",
+                "@window-activate",
+                parse_window_activate_verify(raw_value)?,
+            )?,
+            "display_id" => {
+                return Err(invalid_data(
+                    "@window-activate.display_id 不是请求字段;请使用 guard:{display:{id:\"...\"}}",
+                ))
+            }
             _ => {
                 if target_object_seen {
                     return Err(invalid_data(
@@ -810,6 +899,8 @@ pub fn parse_window_activate_payload(input: &str) -> io::Result<WindowActivateRe
         steps: steps.unwrap_or_default(),
         allow_ambiguous: allow_ambiguous.unwrap_or(false),
         select,
+        guard,
+        verify: verify.unwrap_or_default(),
     })
 }
 
@@ -1297,6 +1388,80 @@ fn parse_window_resize_origin(input: &str) -> io::Result<WindowResizeOrigin> {
     })
 }
 
+fn parse_window_activate_verify(input: &str) -> io::Result<WindowActivateVerify> {
+    let trimmed = input.trim();
+    match trimmed.to_ascii_lowercase().as_str() {
+        "true" => return Ok(WindowActivateVerify::default()),
+        "false" => {
+            return Err(invalid_data(
+                "@window-activate.verify:false 不支持;activate 必须执行焦点后验验证",
+            ))
+        }
+        _ => {}
+    }
+
+    let inner = object_inner(trimmed, "@window-activate.verify")?;
+    if inner.is_empty() {
+        return Err(invalid_data("@window-activate.verify 不能为空对象"));
+    }
+
+    let mut focused = None::<bool>;
+    let mut timeout_ms = None::<u32>;
+    let mut poll_interval_ms = None::<u32>;
+    for field in split_object_fields(inner)? {
+        let (field_name, raw_value) = split_object_field(field)?;
+        let field_name = normalize_object_field_name(field_name)?;
+        let raw_value = raw_value.trim();
+        match field_name.as_str() {
+            "focused" => assign_once(
+                &mut focused,
+                "focused",
+                "@window-activate.verify",
+                parse_bool(raw_value, "@window-activate.verify", "focused")?,
+            )?,
+            "timeout_ms" => assign_once(
+                &mut timeout_ms,
+                "timeout_ms",
+                "@window-activate.verify",
+                parse_u32("@window-activate.verify.timeout_ms", raw_value)?,
+            )?,
+            "poll_interval_ms" => assign_once(
+                &mut poll_interval_ms,
+                "poll_interval_ms",
+                "@window-activate.verify",
+                parse_u32("@window-activate.verify.poll_interval_ms", raw_value)?,
+            )?,
+            _ => {
+                return Err(invalid_data(format!(
+                    "@window-activate.verify 不支持字段: {field_name}"
+                )))
+            }
+        }
+    }
+
+    let verify = WindowActivateVerify {
+        focused: focused.unwrap_or(true),
+        timeout_ms: timeout_ms.unwrap_or(DEFAULT_WINDOW_ACTIVATE_TIMEOUT_MS),
+        poll_interval_ms: poll_interval_ms.unwrap_or(DEFAULT_WINDOW_ACTIVATE_POLL_INTERVAL_MS),
+    };
+    if !verify.focused {
+        return Err(invalid_data(
+            "@window-activate.verify.focused:false 不支持;activate 必须验证目标窗口获得焦点",
+        ));
+    }
+    if verify.timeout_ms == 0 || verify.timeout_ms > MAX_WINDOW_ACTIVATE_TIMEOUT_MS {
+        return Err(invalid_data(format!(
+            "@window-activate.verify.timeout_ms 必须在 1..={MAX_WINDOW_ACTIVATE_TIMEOUT_MS}"
+        )));
+    }
+    if verify.poll_interval_ms == 0 || verify.poll_interval_ms > verify.timeout_ms {
+        return Err(invalid_data(
+            "@window-activate.verify.poll_interval_ms 必须大于 0 且不超过 timeout_ms",
+        ));
+    }
+    Ok(verify)
+}
+
 fn parse_window_resize_verify(input: &str) -> io::Result<WindowResizeVerify> {
     let trimmed = input.trim();
     match trimmed.to_ascii_lowercase().as_str() {
@@ -1553,6 +1718,60 @@ mod tests {
             r#"{target:{ref:"@e1",observation_id:"obs-1",app:"Terminal"}}"#
         )
         .is_err());
+    }
+
+    #[test]
+    fn parse_window_activate_should_accept_display_guard_and_focus_verification() {
+        let request = parse_window_activate_payload(
+            r#"{target:{window_id:"pid:1/window:0"},guard:{display:{id:"d2"}},verify:{focused:true,timeout_ms:2500,poll_interval_ms:75}}"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            request.guard.as_ref().map(|scope| scope.display.to_value()),
+            Some(serde_json::json!({"id": "d2"}))
+        );
+        assert!(request.verify.focused);
+        assert_eq!(request.verify.timeout_ms, 2500);
+        assert_eq!(request.verify.poll_interval_ms, 75);
+
+        assert!(
+            parse_window_activate_payload(r#"{window_id:"pid:1/window:0",display_id:"d2"}"#)
+                .is_err()
+        );
+        assert!(
+            parse_window_activate_payload(r#"{window_id:"pid:1/window:0",verify:false}"#).is_err()
+        );
+    }
+
+    #[test]
+    fn window_activate_verification_should_require_frontmost_and_ax_focused() {
+        let verify = WindowActivateVerify::default();
+        let passed = evaluate_window_activate_verification(
+            WindowActivationState {
+                frontmost: true,
+                focused: true,
+                hidden: false,
+                minimized: false,
+            },
+            verify,
+            80,
+        );
+        assert_eq!(passed.status, "passed");
+
+        let failed = evaluate_window_activate_verification(
+            WindowActivationState {
+                frontmost: true,
+                focused: false,
+                hidden: false,
+                minimized: false,
+            },
+            verify,
+            u64::from(verify.timeout_ms),
+        );
+        assert_eq!(failed.status, "failed");
+        assert!(failed.frontmost);
+        assert!(!failed.focused);
     }
 
     #[test]

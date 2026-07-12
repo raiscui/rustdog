@@ -130,6 +130,7 @@ extern "C" {
     fn CFBooleanGetTypeID() -> CFTypeID;
     fn CFBooleanGetValue(boolean: CFBooleanRef) -> Boolean;
     fn CFDictionaryGetValue(dict: CFDictionaryRef, key: CFTypeRef) -> CFTypeRef;
+    fn CFEqual(value1: CFTypeRef, value2: CFTypeRef) -> Boolean;
     fn CFGetTypeID(value: CFTypeRef) -> CFTypeID;
     fn CFNumberGetTypeID() -> CFTypeID;
     fn CFNumberGetValue(number: CFNumberRef, number_type: i32, value_ptr: *mut c_void) -> Boolean;
@@ -206,6 +207,13 @@ struct VisibleWindow {
     rect: Option<AxRect>,
 }
 
+struct WindowBuildSource<'a> {
+    pid: i32,
+    process_name: &'a str,
+    focused_window_ref: Option<AXUIElementRef>,
+    fallback: Option<&'a VisibleWindow>,
+}
+
 #[derive(Debug, Default)]
 struct BuildState {
     element_count: usize,
@@ -239,6 +247,7 @@ pub(super) fn snapshot(request: &AxTreeRequest) -> io::Result<AxSnapshot> {
             ));
             continue;
         };
+        let focused_window = copy_attribute(app.as_ptr(), "AXFocusedWindow")?;
 
         let count = unsafe { CFArrayGetCount(ax_windows.as_ptr()) };
         for window_index in 0..count {
@@ -250,11 +259,14 @@ pub(super) fn snapshot(request: &AxTreeRequest) -> io::Result<AxSnapshot> {
                 .get(&pid)
                 .and_then(|items| items.get(window_index as usize));
             windows.push(build_window(
-                pid,
-                &process_name,
+                WindowBuildSource {
+                    pid,
+                    process_name: &process_name,
+                    focused_window_ref: focused_window.as_ref().map(CfOwned::as_ptr),
+                    fallback,
+                },
                 window_index as usize,
                 window_ref,
-                fallback,
                 request,
                 &mut state,
             )?);
@@ -266,6 +278,60 @@ pub(super) fn snapshot(request: &AxTreeRequest) -> io::Result<AxSnapshot> {
     }
 
     Ok(AxSnapshot::complete("macos", windows, state.truncated))
+}
+
+pub(super) fn capture_window(target_id: &str, request: &AxTreeRequest) -> io::Result<AxSnapshot> {
+    ensure_trusted()?;
+
+    let parsed = parse_target_id(target_id)?;
+    if !parsed.path.is_empty() {
+        return Err(invalid_input(
+            "AX targeted window capture 只接受 window id,不能使用 element path",
+        ));
+    }
+
+    let visible_by_pid = visible_windows_by_pid();
+    let app = unsafe { CfOwned::new(AXUIElementCreateApplication(parsed.pid)) }
+        .ok_or_else(|| invalid_input("AX targeted window capture 无法创建目标应用"))?;
+    let windows = copy_attribute(app.as_ptr(), "AXWindows")?
+        .ok_or_else(|| invalid_input("AX targeted window capture 的目标应用没有 AXWindows"))?;
+    let count = unsafe { CFArrayGetCount(windows.as_ptr()) };
+    if parsed.window_index >= count as usize {
+        return Err(invalid_input(format!(
+            "AX targeted window index 已失效: {}",
+            parsed.window_index
+        )));
+    }
+
+    let window_ref =
+        unsafe { CFArrayGetValueAtIndex(windows.as_ptr(), parsed.window_index as CFIndex) };
+    if window_ref.is_null() {
+        return Err(invalid_input("AX targeted window 已失效"));
+    }
+    let process_name = visible_by_pid
+        .get(&parsed.pid)
+        .and_then(|items| items.first())
+        .map(|window| window.process_name.clone())
+        .unwrap_or_else(|| parsed.pid.to_string());
+    let fallback = visible_by_pid
+        .get(&parsed.pid)
+        .and_then(|items| items.get(parsed.window_index));
+    let focused_window = copy_attribute(app.as_ptr(), "AXFocusedWindow")?;
+    let mut state = BuildState::default();
+    let window = build_window(
+        WindowBuildSource {
+            pid: parsed.pid,
+            process_name: &process_name,
+            focused_window_ref: focused_window.as_ref().map(CfOwned::as_ptr),
+            fallback,
+        },
+        parsed.window_index,
+        window_ref,
+        request,
+        &mut state,
+    )?;
+
+    Ok(AxSnapshot::complete("macos", vec![window], state.truncated))
 }
 
 pub(super) fn capture_current_subtree(
@@ -579,20 +645,20 @@ fn fallback_visible_windows(
 }
 
 fn build_window(
-    pid: i32,
-    process_name: &str,
+    source: WindowBuildSource<'_>,
     window_index: usize,
     window_ref: AXUIElementRef,
-    fallback: Option<&VisibleWindow>,
     request: &AxTreeRequest,
     state: &mut BuildState,
 ) -> io::Result<AxWindow> {
-    let title =
-        copy_string_attr(window_ref, "AXTitle")?.or_else(|| fallback.and_then(|w| w.title.clone()));
+    let title = copy_string_attr(window_ref, "AXTitle")?
+        .or_else(|| source.fallback.and_then(|window| window.title.clone()));
     let role = copy_string_attr(window_ref, "AXRole")?.unwrap_or_else(|| "AXWindow".to_owned());
     let subrole = copy_string_attr(window_ref, "AXSubrole")?;
-    let rect = copy_ax_rect(window_ref)?.or_else(|| fallback.and_then(|w| w.rect));
-    let focused = copy_bool_attr(window_ref, "AXFocused")?;
+    let rect = copy_ax_rect(window_ref)?.or_else(|| source.fallback.and_then(|window| window.rect));
+    let focused = source
+        .focused_window_ref
+        .map(|focused_window| unsafe { CFEqual(focused_window, window_ref) != 0 });
     let mut elements = Vec::new();
 
     if request.depth > 0 {
@@ -610,7 +676,7 @@ fn build_window(
                 state.element_count += 1;
                 let path = vec![index as usize];
                 elements.push(build_element(
-                    pid,
+                    source.pid,
                     window_index,
                     child,
                     path,
@@ -623,10 +689,10 @@ fn build_window(
     }
 
     Ok(AxWindow {
-        id: format!("pid:{pid}/window:{window_index}"),
+        id: format!("pid:{}/window:{window_index}", source.pid),
         ref_id: None,
-        pid,
-        process_name: process_name.to_owned(),
+        pid: source.pid,
+        process_name: source.process_name.to_owned(),
         title,
         role,
         subrole,
@@ -712,19 +778,23 @@ fn build_element(
 }
 
 fn resolve_live_target_id(target: &AxTarget) -> io::Result<String> {
-    match &target.id {
-        Some(id) => Ok(id.clone()),
-        None => {
-            let lookup_request = AxTreeRequest {
-                depth: 8,
-                max_elements: 5000,
-                include_values: false,
-                ..AxTreeRequest::default()
-            };
-            let snapshot = snapshot(&lookup_request)?;
-            resolve_target_id_in_snapshot(&snapshot, target)
-        }
+    // -------------------------------------------------------------------------
+    // 显式 id 和 fresh observation ref 已经携带完整 backend path。
+    // 这两类 identity 必须直达目标,不能再依赖全桌面 snapshot 是否恰好包含该 path。
+    // 实际 path 的新鲜度由后续 retain_target_element 在 side effect 前验证。
+    // -------------------------------------------------------------------------
+    if let Some(target_id) = direct_ax_target_id(target)? {
+        return Ok(target_id);
     }
+
+    let lookup_request = AxTreeRequest {
+        depth: 8,
+        max_elements: 5000,
+        include_values: false,
+        ..AxTreeRequest::default()
+    };
+    let snapshot = snapshot(&lookup_request)?;
+    resolve_target_id_in_snapshot(&snapshot, target)
 }
 
 pub(super) fn resolve_current_target_rect(target_id: &str) -> io::Result<AxResolvedTargetRect> {
