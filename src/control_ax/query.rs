@@ -1,8 +1,8 @@
 use super::{
     assign_once, invalid_data, parse_ax_depth, parse_ax_max_elements, parse_ax_mode_payload,
-    parse_ax_target, parse_bool_literal, required_field, resolve_observation_ref,
-    resolve_target_id_in_snapshot, AxElement, AxMode, AxRect, AxSnapshot, AxTarget, AxTreeRequest,
-    AxWindow, AX_SCHEMA,
+    parse_ax_target, parse_bool_literal, required_field, resolve_current_ax_target_rect,
+    resolve_observation_ref, resolve_target_id_in_snapshot, AxElement, AxMode, AxRect, AxSnapshot,
+    AxTarget, AxTreeRequest, AxWindow, AX_SCHEMA,
 };
 use crate::control_display_scope::{
     display_intersects_rect, display_scope_report, parse_display_scope, resolve_display_scope,
@@ -25,8 +25,33 @@ const DEFAULT_AX_GET_MODE: AxMode = AxMode::Interactive;
 pub struct AxFindRequest {
     pub tree: AxTreeRequest,
     pub query: AxFindQuery,
+    pub window: Option<AxWindowIdentity>,
     pub display_scope: Option<DisplayScope>,
     pub limit: u16,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AxWindowIdentity {
+    pub window_id: Option<String>,
+    pub ref_id: Option<String>,
+    pub observation_id: Option<String>,
+}
+
+impl AxWindowIdentity {
+    pub fn resolve_window_id(&self) -> io::Result<String> {
+        if let Some(window_id) = self.window_id.as_ref() {
+            return Ok(window_id.clone());
+        }
+        let observation_id = self
+            .observation_id
+            .as_deref()
+            .ok_or_else(|| invalid_data("@ax-find.window.ref 必须和 observation_id 一起出现"))?;
+        let ref_id = self
+            .ref_id
+            .as_deref()
+            .ok_or_else(|| invalid_data("@ax-find.window.ref 必须和 observation_id 一起出现"))?;
+        Ok(resolve_observation_window_ref(observation_id, ref_id)?.window_id)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -207,6 +232,7 @@ pub fn parse_ax_find_payload(input: &str) -> io::Result<AxFindRequest> {
     let mut max_elements = None::<u16>;
     let mut include_values = None::<bool>;
     let mut limit = None::<u16>;
+    let mut window = None::<AxWindowIdentity>;
     let mut display_scope = None::<DisplayScope>;
     let mut query = AxFindQuery::default();
 
@@ -236,6 +262,12 @@ pub fn parse_ax_find_payload(input: &str) -> io::Result<AxFindRequest> {
                 parse_bool_literal("@ax-find", "include_values", raw_value)?,
             )?,
             "limit" => assign_once(&mut limit, "limit", "@ax-find", parse_limit(raw_value)?)?,
+            "window" => assign_once(
+                &mut window,
+                "window",
+                "@ax-find",
+                parse_ax_window_identity(raw_value)?,
+            )?,
             "scope" => assign_once(
                 &mut display_scope,
                 "scope",
@@ -343,8 +375,70 @@ pub fn parse_ax_find_payload(input: &str) -> io::Result<AxFindRequest> {
             ..AxTreeRequest::default()
         },
         query,
+        window,
         display_scope,
         limit: limit.unwrap_or(DEFAULT_AX_FIND_LIMIT),
+    })
+}
+
+fn parse_ax_window_identity(input: &str) -> io::Result<AxWindowIdentity> {
+    let inner = object_inner(input, "@ax-find.window")?;
+    if inner.is_empty() {
+        return Err(invalid_data("@ax-find.window 不能为空"));
+    }
+
+    let mut window_id = None::<String>;
+    let mut ref_id = None::<String>;
+    let mut observation_id = None::<String>;
+    for field in split_object_fields(inner)? {
+        let (field_name, raw_value) = split_object_field(field)?;
+        let field_name = normalize_object_field_name(field_name)?;
+        let raw_value = raw_value.trim();
+        match field_name.as_str() {
+            "window_id" => assign_once(
+                &mut window_id,
+                "window_id",
+                "@ax-find.window",
+                parse_non_empty_string("@ax-find.window.window_id", raw_value)?,
+            )?,
+            "ref" | "ref_id" => assign_once(
+                &mut ref_id,
+                "ref",
+                "@ax-find.window",
+                parse_non_empty_string("@ax-find.window.ref", raw_value)?,
+            )?,
+            "observation_id" => assign_once(
+                &mut observation_id,
+                "observation_id",
+                "@ax-find.window",
+                parse_non_empty_string("@ax-find.window.observation_id", raw_value)?,
+            )?,
+            _ => {
+                return Err(invalid_data(format!(
+                    "@ax-find.window 包含未知字段: {field_name}"
+                )))
+            }
+        }
+    }
+
+    let has_window_id = window_id.is_some();
+    let has_ref = ref_id.is_some();
+    let has_observation_id = observation_id.is_some();
+    if has_window_id && (has_ref || has_observation_id) {
+        return Err(invalid_data(
+            "@ax-find.window.window_id 不能与 ref / observation_id 混用",
+        ));
+    }
+    if !has_window_id && (!has_ref || !has_observation_id) {
+        return Err(invalid_data(
+            "@ax-find.window 需要 window_id 或 ref + observation_id",
+        ));
+    }
+
+    Ok(AxWindowIdentity {
+        window_id,
+        ref_id,
+        observation_id,
     })
 }
 
@@ -477,6 +571,20 @@ fn ax_window_rect_for_display_selector(
     windows: &[AxWindow],
     selector: &DisplaySelector,
 ) -> io::Result<Option<DisplayRect>> {
+    ax_window_rect_for_display_selector_with_resolver(windows, selector, |window_id| {
+        resolve_current_ax_target_rect(&AxTarget {
+            id: Some(window_id.to_owned()),
+            ..AxTarget::default()
+        })
+        .map(|resolved| resolved.rect.map(DisplayRect::from))
+    })
+}
+
+fn ax_window_rect_for_display_selector_with_resolver(
+    windows: &[AxWindow],
+    selector: &DisplaySelector,
+    mut resolve_window_rect: impl FnMut(&str) -> io::Result<Option<DisplayRect>>,
+) -> io::Result<Option<DisplayRect>> {
     let window_id = match selector {
         DisplaySelector::WindowId(window_id) => window_id.clone(),
         DisplaySelector::WindowRef {
@@ -485,11 +593,15 @@ fn ax_window_rect_for_display_selector(
         } => resolve_observation_window_ref(observation_id, ref_id)?.window_id,
         _ => return Ok(None),
     };
-    Ok(windows
+    let captured_rect = windows
         .iter()
         .find(|window| window.id == window_id)
         .and_then(|window| window.rect)
-        .map(DisplayRect::from))
+        .map(DisplayRect::from);
+    if let Some(rect) = captured_rect {
+        return Ok(Some(rect));
+    }
+    resolve_window_rect(&window_id)
 }
 
 pub fn build_ax_get_response_json(
@@ -752,6 +864,61 @@ mod tests {
                 .to_string()
                 .contains("scope")
         );
+    }
+
+    #[test]
+    fn parse_ax_find_payload_should_accept_direct_and_observation_window_identity() {
+        let direct =
+            parse_ax_find_payload(r#"{window:{window_id:"pid:7/window:1"},role:"AXButton"}"#)
+                .unwrap();
+        assert_eq!(
+            direct.window.as_ref().unwrap().window_id.as_deref(),
+            Some("pid:7/window:1")
+        );
+
+        let observed = parse_ax_find_payload(
+            r#"{window:{ref:"@e4",observation_id:"obs-42"},role:"AXButton"}"#,
+        )
+        .unwrap();
+        let window = observed.window.as_ref().unwrap();
+        assert_eq!(window.ref_id.as_deref(), Some("@e4"));
+        assert_eq!(window.observation_id.as_deref(), Some("obs-42"));
+    }
+
+    #[test]
+    fn parse_ax_find_payload_should_reject_invalid_window_identity() {
+        assert!(parse_ax_find_payload(r#"{window:{ref:"@e4"},role:"AXButton"}"#).is_err());
+        assert!(parse_ax_find_payload(
+            r#"{window:{window_id:"pid:7/window:1",ref:"@e4",observation_id:"obs-42"},role:"AXButton"}"#
+        )
+        .is_err());
+        assert!(parse_ax_find_payload(
+            r#"{window:{window_id:"pid:7/window:1",display_id:"2"},role:"AXButton"}"#
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn targeted_ax_scope_should_resolve_selector_window_outside_snapshot() {
+        let expected = DisplayRect {
+            x: -1_200,
+            y: 40,
+            width: 600,
+            height: 400,
+        };
+        let mut resolved_id = None;
+        let actual = ax_window_rect_for_display_selector_with_resolver(
+            &[],
+            &DisplaySelector::WindowId("pid:5/window:3".to_owned()),
+            |window_id| {
+                resolved_id = Some(window_id.to_owned());
+                Ok(Some(expected.clone()))
+            },
+        )
+        .unwrap();
+
+        assert_eq!(resolved_id.as_deref(), Some("pid:5/window:3"));
+        assert_eq!(actual, Some(expected));
     }
 
     #[test]

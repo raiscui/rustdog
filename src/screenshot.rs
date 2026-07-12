@@ -13,7 +13,10 @@ use std::{
 
 use crate::{
     control_ax::{capture_default_ax_snapshot, current_ax_platform, AxSnapshot, AxTreeRequest},
-    control_display_scope::{DisplayRect, DisplaySummary, DISPLAY_ID_STABILITY_SESSION},
+    control_display_scope::{
+        resolve_display_scope, DisplayRect, DisplayScope, DisplayScopeResolution, DisplaySelector,
+        DisplaySummary, DISPLAY_ID_STABILITY_SESSION,
+    },
     control_frames::{ControlExecutionOutcome, ControlFrame, SaveFileFrame},
     control_protocol::{
         ScreenshotCoordinateSpace, ScreenshotDisplaySelector, ScreenshotLayout, ScreenshotRequest,
@@ -46,41 +49,92 @@ pub fn execute_screenshot_request(
     }
 }
 
-/// 生成 composite screenshot 的文件 frame 和轻量摘要。
+/// 生成 screenshot bundle 的文件 frame 和轻量摘要。
 ///
 /// `@observe` 复用这个入口,避免反解析 `@screenshot` 的 response 文本。
+/// resolved display id 存在时,从同一次 capture 中选择单块 display。
 /// 这里只返回 `@savefile` frames,最终 `@response` 由调用方自己组织。
-pub fn execute_screenshot_bundle_request(
+pub struct ScreenshotBundleExecutionResult {
+    pub frames: Vec<ControlFrame>,
+    pub summary: ScreenshotBundleSummary,
+    pub display_scope_resolution: Option<DisplayScopeResolution>,
+}
+
+pub fn execute_screenshot_bundle_request<W>(
     request_id: Option<u64>,
     request: &ScreenshotRequest,
-) -> io::Result<(Vec<ControlFrame>, ScreenshotBundleSummary)> {
-    execute_screenshot_bundle_request_with_freshness(
-        request_id,
-        request,
+    display_scope: Option<&DisplayScope>,
+    window_rect_for_selector: W,
+) -> io::Result<ScreenshotBundleExecutionResult>
+where
+    W: FnMut(&DisplaySelector) -> io::Result<Option<DisplayRect>>,
+{
+    execute_screenshot_bundle_request_with(
+        ScreenshotBundleExecution {
+            request_id,
+            request,
+            display_scope,
+        },
+        capture_all_display_images,
+        window_rect_for_selector,
         reject_stale_composite_capture,
     )
 }
 
-fn execute_screenshot_bundle_request_with_freshness<F>(
+struct ScreenshotBundleExecution<'a> {
     request_id: Option<u64>,
-    request: &ScreenshotRequest,
-    freshness_check: F,
-) -> io::Result<(Vec<ControlFrame>, ScreenshotBundleSummary)>
+    request: &'a ScreenshotRequest,
+    display_scope: Option<&'a DisplayScope>,
+}
+
+fn execute_screenshot_bundle_request_with<C, W, S>(
+    execution: ScreenshotBundleExecution<'_>,
+    capture: C,
+    mut window_rect_for_selector: W,
+    freshness_check: S,
+) -> io::Result<ScreenshotBundleExecutionResult>
 where
-    F: FnOnce(&[CapturedDisplay]) -> io::Result<()>,
+    C: FnOnce() -> io::Result<Vec<CapturedDisplay>>,
+    W: FnMut(&DisplaySelector) -> io::Result<Option<DisplayRect>>,
+    S: FnOnce(&[CapturedDisplay]) -> io::Result<()>,
 {
-    validate_composite_request(request)?;
-    let displays = capture_all_display_images()?;
+    validate_composite_request(execution.request)?;
+    let displays = capture()?;
     freshness_check(&displays)?;
+    let display_scope_resolution = execution
+        .display_scope
+        .map(|scope| {
+            let summaries = display_summaries_from_captured(&displays)?;
+            resolve_display_scope(scope, &summaries, &mut window_rect_for_selector)
+        })
+        .transpose()?;
     let screenshot_id = current_unix_epoch_millis().to_string();
-    let accessibility = build_accessibility_manifest(request, capture_default_ax_snapshot)?;
-    build_composite_screenshot_parts_with_id_and_ax(
-        request_id,
-        request,
+    let accessibility =
+        build_accessibility_manifest(execution.request, capture_default_ax_snapshot)?;
+    let (displays, layout) = if let Some(resolution) = display_scope_resolution.as_ref() {
+        (
+            vec![select_captured_display(
+                displays,
+                &resolution.resolved.display_id,
+            )?],
+            ScreenshotBundleLayout::SingleDisplay,
+        )
+    } else {
+        (displays, ScreenshotBundleLayout::Composite)
+    };
+    let (frames, summary) = build_screenshot_parts_with_id_and_ax(
+        execution.request_id,
+        execution.request,
         displays,
         &screenshot_id,
         accessibility,
-    )
+        layout,
+    )?;
+    Ok(ScreenshotBundleExecutionResult {
+        frames,
+        summary,
+        display_scope_resolution,
+    })
 }
 
 fn execute_primary_screenshot_request_with_capture<F>(
@@ -244,8 +298,36 @@ fn build_composite_screenshot_parts_with_id_and_ax(
 ) -> io::Result<(Vec<ControlFrame>, ScreenshotBundleSummary)> {
     validate_composite_request(request)?;
 
-    let bundle = build_screenshot_bundle_with_ax(displays, screenshot_id, accessibility)?;
-    let image_filename = format!("screenshot-{screenshot_id}-virtual-desktop.jpg");
+    build_screenshot_parts_with_id_and_ax(
+        request_id,
+        request,
+        displays,
+        screenshot_id,
+        accessibility,
+        ScreenshotBundleLayout::Composite,
+    )
+}
+
+fn build_screenshot_parts_with_id_and_ax(
+    request_id: Option<u64>,
+    request: &ScreenshotRequest,
+    displays: Vec<CapturedDisplay>,
+    screenshot_id: &str,
+    accessibility: Option<AxSnapshot>,
+    layout: ScreenshotBundleLayout,
+) -> io::Result<(Vec<ControlFrame>, ScreenshotBundleSummary)> {
+    validate_coordinate_space(request)?;
+
+    let bundle =
+        build_screenshot_bundle_with_ax_and_layout(displays, screenshot_id, accessibility, layout)?;
+    let image_filename = match layout {
+        ScreenshotBundleLayout::Composite => {
+            format!("screenshot-{screenshot_id}-virtual-desktop.jpg")
+        }
+        ScreenshotBundleLayout::SingleDisplay => {
+            format!("screenshot-{screenshot_id}-display.jpg")
+        }
+    };
     let manifest_filename = format!("screenshot-{screenshot_id}-manifest.json");
     let jpeg_bytes = encode_jpeg(&bundle.composite, request.quality)?;
 
@@ -273,7 +355,7 @@ fn build_composite_screenshot_parts_with_id_and_ax(
 
     let summary = ScreenshotBundleSummary {
         kind: "screenshot-bundle",
-        layout: "composite",
+        layout: layout.as_str(),
         coordinate_space: "os-logical",
         image: image_filename,
         manifest: manifest_filename,
@@ -461,6 +543,28 @@ struct ScreenshotBundle {
     display_count: usize,
 }
 
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+enum ScreenshotBundleLayout {
+    Composite,
+    SingleDisplay,
+}
+
+impl ScreenshotBundleLayout {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Composite => "composite",
+            Self::SingleDisplay => "single-display",
+        }
+    }
+
+    fn image_coordinate_space(self) -> &'static str {
+        match self {
+            Self::Composite => "virtual-logical-pixels",
+            Self::SingleDisplay => "display-logical-pixels",
+        }
+    }
+}
+
 #[derive(Serialize)]
 struct ScreenshotManifest {
     schema: &'static str,
@@ -534,10 +638,40 @@ fn build_screenshot_bundle(
     build_screenshot_bundle_with_ax(displays, screenshot_id, None)
 }
 
+#[cfg(test)]
+fn build_scoped_screenshot_bundle(
+    displays: Vec<CapturedDisplay>,
+    display_id: &str,
+    screenshot_id: &str,
+) -> io::Result<ScreenshotBundle> {
+    let display = select_captured_display(displays, display_id)?;
+    build_screenshot_bundle_with_ax_and_layout(
+        vec![display],
+        screenshot_id,
+        None,
+        ScreenshotBundleLayout::SingleDisplay,
+    )
+}
+
+#[cfg(test)]
 fn build_screenshot_bundle_with_ax(
     displays: Vec<CapturedDisplay>,
     screenshot_id: &str,
     accessibility: Option<AxSnapshot>,
+) -> io::Result<ScreenshotBundle> {
+    build_screenshot_bundle_with_ax_and_layout(
+        displays,
+        screenshot_id,
+        accessibility,
+        ScreenshotBundleLayout::Composite,
+    )
+}
+
+fn build_screenshot_bundle_with_ax_and_layout(
+    displays: Vec<CapturedDisplay>,
+    screenshot_id: &str,
+    accessibility: Option<AxSnapshot>,
+    layout: ScreenshotBundleLayout,
 ) -> io::Result<ScreenshotBundle> {
     if displays.is_empty() {
         return Err(io::Error::new(
@@ -602,9 +736,9 @@ fn build_screenshot_bundle_with_ax(
     let manifest = ScreenshotManifest {
         schema: "rdog.screenshot.v1",
         screenshot_id: screenshot_id.to_owned(),
-        layout: "composite",
+        layout: layout.as_str(),
         coordinate_space: "os-logical",
-        image_coordinate_space: "virtual-logical-pixels",
+        image_coordinate_space: layout.image_coordinate_space(),
         capture_status: "complete",
         partial: false,
         backend_policy: backend_policy_for_current_platform(),
@@ -632,18 +766,98 @@ fn build_screenshot_bundle_with_ax(
     })
 }
 
-pub fn current_display_summaries() -> io::Result<Vec<DisplaySummary>> {
-    let displays = capture_all_display_images()?;
-    validate_captured_displays(&displays)?;
-    let virtual_bounds =
-        build_virtual_bounds(displays.iter().map(|display| display.metadata.os_rect))?;
+fn select_captured_display(
+    displays: Vec<CapturedDisplay>,
+    display_id: &str,
+) -> io::Result<CapturedDisplay> {
     displays
         .into_iter()
-        .map(|display| {
-            let image_rect = os_rect_to_image_rect(display.metadata.os_rect, virtual_bounds)?;
-            Ok(display_summary_from_metadata(&display.metadata, image_rect))
+        .find(|display| display.metadata.id == display_id)
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("截图结果中不存在 resolved display id: {display_id}"),
+            )
+        })
+}
+
+pub fn current_display_summaries() -> io::Result<Vec<DisplaySummary>> {
+    let displays = enumerate_display_metadata()?;
+    display_summaries_from_metadata(&displays)
+}
+
+fn display_summaries_from_captured(
+    displays: &[CapturedDisplay],
+) -> io::Result<Vec<DisplaySummary>> {
+    validate_captured_displays(displays)?;
+    let metadata = displays
+        .iter()
+        .map(|display| display.metadata.clone())
+        .collect::<Vec<_>>();
+    display_summaries_from_metadata(&metadata)
+}
+
+fn display_summaries_from_metadata(
+    displays: &[CapturedDisplayMetadata],
+) -> io::Result<Vec<DisplaySummary>> {
+    let virtual_bounds = build_virtual_bounds(displays.iter().map(|display| display.os_rect))?;
+    displays
+        .iter()
+        .map(|metadata| {
+            let image_rect = os_rect_to_image_rect(metadata.os_rect, virtual_bounds)?;
+            Ok(display_summary_from_metadata(metadata, image_rect))
         })
         .collect()
+}
+
+/// 枚举 display catalog,但不抓取任何屏幕像素。
+///
+/// display scope/guard 只需要 id、名称和全局 rect。它们不能隐式要求
+/// Screen Recording 权限,更不能为了校验一个坐标启动 ScreenCaptureKit。
+fn enumerate_display_metadata() -> io::Result<Vec<CapturedDisplayMetadata>> {
+    let monitors = xcap::Monitor::all().map_err(map_capture_error)?;
+    let mut displays = Vec::with_capacity(monitors.len());
+    for monitor in monitors {
+        let id = monitor.id().map_err(map_capture_error)?.to_string();
+        // macOS xcap 的 `name()` 可能只是 "Display #<model>"。
+        // selector需要用户可见名称,因此先取friendly name,失败后才回退generic name。
+        let name = monitor
+            .friendly_name()
+            .or_else(|_| monitor.name())
+            .unwrap_or_else(|_| format!("Display {id}"));
+        let width = monitor.width().map_err(map_capture_error)?;
+        let height = monitor.height().map_err(map_capture_error)?;
+        let rotation = monitor.rotation().map_err(map_capture_error)?;
+        if rotation.abs() > f32::EPSILON {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                format!("显示器 {id} rotation={rotation} 暂不支持"),
+            ));
+        }
+        displays.push(CapturedDisplayMetadata {
+            id,
+            name,
+            is_primary: monitor.is_primary().unwrap_or(false),
+            backend: ScreenshotBackend::Xcap,
+            os_rect: LogicalRect {
+                x: monitor.x().map_err(map_capture_error)?,
+                y: monitor.y().map_err(map_capture_error)?,
+                width,
+                height,
+            },
+            // catalog 不消费 native size。保留逻辑尺寸,避免为获得像素尺寸触发 capture。
+            native_capture_size: Size { width, height },
+            scale_factor: monitor.scale_factor().unwrap_or(1.0).max(1.0),
+            rotation,
+        });
+    }
+    if displays.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            "没有可用 display metadata",
+        ));
+    }
+    Ok(displays)
 }
 
 fn display_summary_from_metadata(
@@ -1081,13 +1295,21 @@ fn capture_primary_with_sck_rs() -> io::Result<RgbaImage> {
 #[cfg(target_os = "macos")]
 fn capture_all_with_sck_rs() -> io::Result<Vec<CapturedDisplay>> {
     let monitors = sck_rs::Monitor::all().map_err(map_capture_error)?;
+    // SCK 的 `name()` 在部分机器上只返回 "Display N"。
+    // 用相同display id关联metadata catalog的friendly name,保持scope与manifest一致。
+    let display_catalog = enumerate_display_metadata().unwrap_or_default();
     let mut displays = Vec::with_capacity(monitors.len());
 
     for monitor in monitors {
+        let id = monitor.id().to_string();
         let image = monitor.capture_image().map_err(map_capture_error)?;
         let metadata = CapturedDisplayMetadata {
-            id: monitor.id().to_string(),
-            name: monitor.name().to_owned(),
+            name: display_catalog
+                .iter()
+                .find(|display| display.id == id)
+                .map(|display| display.name.clone())
+                .unwrap_or_else(|| monitor.name().to_owned()),
+            id,
             is_primary: monitor.is_primary(),
             backend: ScreenshotBackend::SckRs,
             os_rect: LogicalRect {
@@ -1143,8 +1365,8 @@ fn capture_all_with_xcap() -> io::Result<Vec<CapturedDisplay>> {
     for monitor in monitors {
         let id = monitor.id().map_err(map_capture_error)?.to_string();
         let name = monitor
-            .name()
-            .or_else(|_| monitor.friendly_name())
+            .friendly_name()
+            .or_else(|_| monitor.name())
             .unwrap_or_else(|_| format!("Display {id}"));
         let rotation = monitor.rotation().map_err(map_capture_error)?;
         if rotation.abs() > f32::EPSILON {

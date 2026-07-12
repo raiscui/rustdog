@@ -102,6 +102,141 @@ fn build_screenshot_bundle_should_map_os_rect_to_image_rect_and_preserve_gaps() 
 }
 
 #[test]
+fn build_scoped_screenshot_bundle_should_keep_global_os_rect_and_local_image_rect() {
+    let displays = vec![
+        fake_display(
+            "left",
+            LogicalRect {
+                x: -100,
+                y: 0,
+                width: 100,
+                height: 80,
+            },
+            Size {
+                width: 100,
+                height: 80,
+            },
+            Rgba([255, 0, 0, 255]),
+        ),
+        fake_display(
+            "right",
+            LogicalRect {
+                x: 0,
+                y: 20,
+                width: 120,
+                height: 60,
+            },
+            Size {
+                width: 120,
+                height: 60,
+            },
+            Rgba([0, 255, 0, 255]),
+        ),
+    ];
+
+    let bundle = build_scoped_screenshot_bundle(displays, "right", "fixed").unwrap();
+    let manifest = manifest_value(&bundle);
+
+    assert_eq!(bundle.composite.width(), 120);
+    assert_eq!(bundle.composite.height(), 60);
+    assert_eq!(bundle.composite.get_pixel(0, 0), &Rgba([0, 255, 0, 255]));
+    assert_eq!(manifest["layout"], "single-display");
+    assert_eq!(manifest["display_count"], 1);
+    assert_eq!(manifest["virtual_bounds"]["x"], 0);
+    assert_eq!(manifest["virtual_bounds"]["y"], 20);
+    assert_eq!(manifest["displays"][0]["display_id"], "right");
+    assert_eq!(manifest["displays"][0]["os_rect"]["x"], 0);
+    assert_eq!(manifest["displays"][0]["os_rect"]["y"], 20);
+    assert_eq!(manifest["displays"][0]["image_rect"]["x"], 0);
+    assert_eq!(manifest["displays"][0]["image_rect"]["y"], 0);
+    assert!(manifest["gaps"].as_array().unwrap().is_empty());
+}
+
+#[test]
+fn build_scoped_screenshot_bundle_should_reject_unknown_display() {
+    let displays = vec![fake_display(
+        "left",
+        LogicalRect {
+            x: 0,
+            y: 0,
+            width: 10,
+            height: 10,
+        },
+        Size {
+            width: 10,
+            height: 10,
+        },
+        Rgba([255, 0, 0, 255]),
+    )];
+
+    let error = build_scoped_screenshot_bundle(displays, "missing", "fixed").unwrap_err();
+    assert_eq!(error.kind(), io::ErrorKind::NotFound);
+    assert!(error.to_string().contains("missing"));
+}
+
+#[test]
+fn scoped_bundle_execution_should_resolve_scope_from_captured_catalog() {
+    let request = ScreenshotRequest::default();
+    let scope = DisplayScope {
+        display: DisplaySelector::ContainsPoint { x: 25, y: 10 },
+    };
+    let displays = vec![
+        fake_display(
+            "left",
+            LogicalRect {
+                x: -20,
+                y: 0,
+                width: 20,
+                height: 20,
+            },
+            Size {
+                width: 20,
+                height: 20,
+            },
+            Rgba([255, 0, 0, 255]),
+        ),
+        fake_display(
+            "right",
+            LogicalRect {
+                x: 0,
+                y: 0,
+                width: 40,
+                height: 20,
+            },
+            Size {
+                width: 40,
+                height: 20,
+            },
+            Rgba([0, 255, 0, 255]),
+        ),
+    ];
+
+    let execution = execute_screenshot_bundle_request_with(
+        ScreenshotBundleExecution {
+            request_id: Some(7),
+            request: &request,
+            display_scope: Some(&scope),
+        },
+        || Ok(displays),
+        |_| Ok(None),
+        |_| Ok(()),
+    )
+    .unwrap();
+
+    assert_eq!(execution.summary.layout, "single-display");
+    assert_eq!(execution.summary.display_count, 1);
+    assert_eq!(
+        execution
+            .display_scope_resolution
+            .as_ref()
+            .unwrap()
+            .resolved
+            .display_id,
+        "right"
+    );
+}
+
+#[test]
 fn logical_composite_should_resize_native_capture_to_logical_rect() {
     let displays = vec![fake_display_with_native(
         "retina",
@@ -854,6 +989,7 @@ fn manifest_should_use_snake_case_schema_fields() {
 }
 
 #[test]
+#[ignore = "requires a live macOS screenshot backend and Screen Recording permission"]
 fn real_capture_smoke_should_capture_or_report_permission_denied() {
     reset_screenshot_freshness_cache_for_tests();
     let request = ScreenshotRequest::default();

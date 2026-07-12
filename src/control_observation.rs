@@ -713,6 +713,7 @@ fn ax_find_request_from_selector(
     crate::control_ax::AxFindRequest {
         tree: crate::control_ax::AxTreeRequest::default(),
         query,
+        window: None,
         display_scope: None,
         limit,
     }

@@ -162,7 +162,7 @@ Only use them with the matching `observation_id`, and re-observe after daemon re
 
 For dual-display or multi-display hosts, choose the display before acting.
 Use `scope:{display:{...}}` on `@bootstrap` nested observe, `@observe`, `@window-find`, `@ax-find`, and `@web-find`.
-Use `guard:{display:{...}}` on mouse fallback commands that have a target point.
+Use `guard:{display:{...}}` on window and mouse side-effect commands.
 
 ```bash
 rdog control TARGET '@bootstrap#1:{mode:"gui",observe:{mode:"hybrid",scope:{display:{id:"d2"}},include_screenshot:true,include_ax:true,include_windows:true,ax_required:false,ax_mode:"interactive"}}'
@@ -170,6 +170,18 @@ rdog control TARGET '@observe#2:{mode:"hybrid",scope:{display:{name_contains:"DE
 rdog control TARGET '@web-find#3:{text_contains:"Submit",scope:{display:{window_id:"pid:123/window:0"}}}'
 rdog control TARGET '@click#4:{target:{ref:"@e12",observation_id:"obs-..."},guard:{display:{id:"d2"}}}'
 ```
+
+For a window-bound task, keep display scope, window identity, focus, observation, and verification separate:
+
+```text
+@window-find#10:{title_contains:"Editor",scope:{display:{id:"d2"}},limit:5}
+@window-activate#11:{target:{ref:"@e1",observation_id:"obs-..."},guard:{display:{id:"d2"}},verify:{focused:true,timeout_ms:2000,poll_interval_ms:50}}
+@ax-find#12:{window:{ref:"@e1",observation_id:"obs-..."},role:"AXButton",name_contains:"Save",scope:{display:{id:"d2"}}}
+@ax-action#13:{target:{ref:"@e4",observation_id:"obs-..."},action:"AXPress"}
+@ax-find#14:{window:{window_id:"pid:123/window:0"},role:"AXStaticText",value_contains:"Saved",include_values:true}
+```
+
+The last read is fresh post-action evidence. `performed:true` alone is not verified success.
 
 Supported display selectors are `id`, `name_contains`, `contains_point`, `window_id`, and `window_ref + observation_id`.
 Do not generate top-level `display_id:"d2"` as a request field.
@@ -184,6 +196,9 @@ rdog control TARGET '@window-resize#5:{target:{ref:"@e1",observation_id:"obs-...
 `@window-resize` restores/activates the target window by default, then resizes and verifies it in one action report.
 Do not add an `activate:true` field.
 Use `@window-activate` only when the task is to restore/focus a window without changing its size, or as a manual recovery fallback after a resize report says recovery was limited.
+On multi-display hosts, include `guard.display`; require `verify.status:"passed"`, `focused:true`, and `frontmost:true` before acting.
+Use `@ax-find.window` when a window id/ref is already known so AX capture starts from that AXWindow instead of scanning the desktop.
+Scoped visual `@observe` emits a `single-display` JPEG/manifest while preserving global `os_rect` coordinates.
 
 ## Reference Loading
 
@@ -221,6 +236,7 @@ Mandatory rules in unattended mode:
 | `@ax-set-value` text input | re-`@ax-get` the same field, confirm the value matches what you wrote | re-fetched `value` field equals intended string |
 | `@ax-action` click | re-`@observe`, confirm UI state changed (new element, new ref, new content) | new observation_id shows the post-action UI |
 | `@window-find` | confirm `match_count >= 1` and the returned window is the intended one (by title / role) | response `matches[].title` matches expected |
+| `@window-activate` | require verified focus and frontmost state | response reports `verify.status:"passed"`, `focused:true`, and `frontmost:true` |
 | `@savefile` screenshot | check the returned `path` exists on disk and is a non-empty image file | `ls -la <path>` shows > 0 bytes |
 | `@pty` session | read the next frame, confirm it matches the command's expected output | `@pty-*` response has the expected text |
 

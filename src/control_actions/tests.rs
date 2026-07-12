@@ -8,6 +8,7 @@ use crate::{
         record_observation, ObservationRefEntry, ObservationRoot, SelectorRefindPolicy,
     },
 };
+use std::cell::Cell;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
@@ -130,6 +131,82 @@ fn target_window_id_from_ax_target_should_resolve_observation_ref() {
         .expect("resolved ref should carry a window id");
 
     assert_eq!(window_id, "pid:9/window:3");
+}
+
+#[test]
+fn ax_focus_should_not_run_when_window_activation_verification_failed() {
+    let request = crate::control_ax::AxFocusRequest {
+        target: None,
+        window_id: Some("pid:9/window:2".to_owned()),
+        activate: true,
+    };
+    let focus_called = Cell::new(false);
+    let result = execute_ax_focus_with(
+        &request,
+        |_| Ok(failed_window_activation_report()),
+        |_| {
+            focus_called.set(true);
+            Ok(crate::control_ax::AxFocusReport::success(
+                "test",
+                None,
+                Some("pid:9/window:2".to_owned()),
+                true,
+            ))
+        },
+    )
+    .unwrap();
+
+    assert!(!focus_called.get(), "activation失败后不能继续执行AX focus");
+    let response: serde_json::Value = serde_json::from_str(
+        result
+            .response_value_json
+            .as_deref()
+            .expect("ax-focus失败应该返回结构化响应"),
+    )
+    .unwrap();
+    assert_eq!(response["kind"], "ax-focus");
+    assert_eq!(response["status"], "failed");
+    assert_eq!(response["performed"], false);
+    assert_eq!(response["error_code"], "WINDOW_FOCUS_NOT_ACQUIRED");
+    assert_eq!(response["activation"]["verify"]["status"], "failed");
+}
+
+fn failed_window_activation_report() -> crate::control_window::WindowActionReport {
+    crate::control_window::WindowActionReport {
+        kind: "window-action",
+        schema: crate::control_window::WINDOW_SCHEMA,
+        platform: "macos".to_owned(),
+        action: "activate",
+        status: "failed".to_owned(),
+        window_id: Some("pid:9/window:2".to_owned()),
+        snapshot_id: Some("window-snapshot-test".to_owned()),
+        observed_at_unix_ms: Some(42),
+        strategy: None,
+        target_pid: None,
+        process_scope: None,
+        termination_attempted: None,
+        failed_step: Some("verify_focus".to_owned()),
+        error_code: Some("WINDOW_FOCUS_NOT_ACQUIRED"),
+        before_rect: None,
+        requested_size: None,
+        requested_rect: None,
+        after_rect: None,
+        delta: None,
+        verify: Some(crate::control_window::WindowActionVerifyReport::Activate(
+            crate::control_window::WindowActivateVerifyReport {
+                status: "failed".to_owned(),
+                focused: false,
+                frontmost: true,
+                hidden: false,
+                minimized: false,
+                timeout_ms: 2_000,
+                elapsed_ms: 2_000,
+            },
+        )),
+        guard: None,
+        clamp_reason: None,
+        steps: Vec::new(),
+    }
 }
 
 #[test]

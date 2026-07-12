@@ -11,6 +11,7 @@ use crate::{
         normalize_object_field_name, object_inner, parse_quoted_payload, split_object_field,
         split_object_fields, KeyDelivery, KeyMode, KeyRequest,
     },
+    control_window::{WindowActionReport, WindowActionVerifyReport},
 };
 use serde::Serialize;
 use serde_json::json;
@@ -909,6 +910,10 @@ pub struct AxFocusReport {
     pub activated: bool,
     pub performed: bool,
     pub status: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_code: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub activation: Option<WindowActionReport>,
 }
 
 impl AxFocusReport {
@@ -926,6 +931,30 @@ impl AxFocusReport {
             activated,
             performed: true,
             status: "ok",
+            error_code: None,
+            activation: None,
+        }
+    }
+
+    pub fn with_activation(mut self, activation: WindowActionReport) -> Self {
+        self.activation = Some(activation);
+        self
+    }
+
+    pub fn activation_failed(activation: WindowActionReport) -> Self {
+        let backend = activation.platform.clone();
+        let window_id = activation.window_id.clone();
+        let error_code = activation.error_code.map(str::to_owned);
+        Self {
+            kind: "ax-focus",
+            backend,
+            target_id: None,
+            window_id,
+            activated: false,
+            performed: false,
+            status: "failed",
+            error_code,
+            activation: Some(activation),
         }
     }
 
@@ -933,6 +962,21 @@ impl AxFocusReport {
         serde_json::to_string(self)
             .map_err(|err| io::Error::other(format!("AX focus response 序列化失败: {err}")))
     }
+}
+
+pub fn window_activation_verified(report: &WindowActionReport) -> bool {
+    if report.status != "ok" {
+        return false;
+    }
+    matches!(
+        report.verify.as_ref(),
+        Some(WindowActionVerifyReport::Activate(verify))
+            if verify.status == "passed"
+                && verify.focused
+                && verify.frontmost
+                && !verify.hidden
+                && !verify.minimized
+    )
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -1024,6 +1068,33 @@ impl AxBackend for SystemAxBackend {
 
 pub fn capture_default_ax_snapshot(request: &AxTreeRequest) -> io::Result<AxSnapshot> {
     SystemAxBackend.snapshot(request)
+}
+
+pub fn capture_ax_find_snapshot(request: &AxFindRequest) -> io::Result<AxSnapshot> {
+    capture_ax_find_snapshot_with(
+        request,
+        capture_default_ax_snapshot,
+        capture_current_ax_window_snapshot,
+    )
+}
+
+fn capture_ax_find_snapshot_with(
+    request: &AxFindRequest,
+    capture_global: impl FnOnce(&AxTreeRequest) -> io::Result<AxSnapshot>,
+    capture_window: impl FnOnce(&str, &AxTreeRequest) -> io::Result<AxSnapshot>,
+) -> io::Result<AxSnapshot> {
+    let Some(window) = request.window.as_ref() else {
+        return capture_global(&request.tree);
+    };
+    let window_id = window.resolve_window_id()?;
+    capture_window(&window_id, &request.tree)
+}
+
+fn capture_current_ax_window_snapshot(
+    window_id: &str,
+    request: &AxTreeRequest,
+) -> io::Result<AxSnapshot> {
+    platform_capture_current_window(window_id, request)
 }
 
 pub fn capture_current_ax_subtree(
@@ -1879,6 +1950,25 @@ fn platform_capture_current_subtree(
     macos::capture_current_subtree(target_id, request)
 }
 
+#[cfg(target_os = "macos")]
+fn platform_capture_current_window(
+    window_id: &str,
+    request: &AxTreeRequest,
+) -> io::Result<AxSnapshot> {
+    macos::capture_window(window_id, request)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn platform_capture_current_window(
+    _window_id: &str,
+    _request: &AxTreeRequest,
+) -> io::Result<AxSnapshot> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "AX targeted window capture 当前只支持 macOS",
+    ))
+}
+
 #[cfg(not(target_os = "macos"))]
 fn platform_capture_current_subtree(
     _target_id: &str,
@@ -2000,6 +2090,7 @@ mod macos;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::Cell;
 
     #[test]
     fn ax_snapshot_should_count_nested_elements_and_render_tree_response() {
@@ -2475,5 +2566,56 @@ mod tests {
             invalid.to_string().contains("type-text AXValue 路径失败"),
             "unexpected error: {invalid}"
         );
+    }
+
+    #[test]
+    fn ax_find_window_identity_should_route_only_to_targeted_capture() {
+        let global_calls = Cell::new(0);
+        let targeted_calls = Cell::new(0);
+        let request =
+            parse_ax_find_payload(r#"{window:{window_id:"pid:7/window:1"},role:"AXButton"}"#)
+                .unwrap();
+
+        let snapshot = capture_ax_find_snapshot_with(
+            &request,
+            |_| {
+                global_calls.set(global_calls.get() + 1);
+                Ok(AxSnapshot::complete("global", Vec::new(), false))
+            },
+            |window_id, _| {
+                targeted_calls.set(targeted_calls.get() + 1);
+                assert_eq!(window_id, "pid:7/window:1");
+                Ok(AxSnapshot::complete("targeted", Vec::new(), false))
+            },
+        )
+        .unwrap();
+
+        assert_eq!(snapshot.platform, "targeted");
+        assert_eq!(global_calls.get(), 0);
+        assert_eq!(targeted_calls.get(), 1);
+    }
+
+    #[test]
+    fn ax_find_without_window_identity_should_keep_global_capture() {
+        let global_calls = Cell::new(0);
+        let targeted_calls = Cell::new(0);
+        let request = parse_ax_find_payload(r#"{role:"AXButton"}"#).unwrap();
+
+        let snapshot = capture_ax_find_snapshot_with(
+            &request,
+            |_| {
+                global_calls.set(global_calls.get() + 1);
+                Ok(AxSnapshot::complete("global", Vec::new(), false))
+            },
+            |_, _| {
+                targeted_calls.set(targeted_calls.get() + 1);
+                Ok(AxSnapshot::complete("targeted", Vec::new(), false))
+            },
+        )
+        .unwrap();
+
+        assert_eq!(snapshot.platform, "global");
+        assert_eq!(global_calls.get(), 1);
+        assert_eq!(targeted_calls.get(), 0);
     }
 }

@@ -80,6 +80,14 @@ pid:<pid>/window:<index>
 当 agent 要固定窗口尺寸时,直接用 `@window-resize`。
 `@window-resize` 默认内置同一套恢复步骤,因为 resize 后通常马上要在该窗口内工作。
 
+多显示器canonical请求:
+
+```text
+@window-activate:{target:{window_id:"pid:123/window:0"},guard:{display:{id:"d2"}},verify:{focused:true,timeout_ms:2000,poll_interval_ms:50}}
+```
+
+`guard.display`在任何side effect前校验。成功不能只看step提交,还必须由fresh state确认app frontmost、目标window等于app `AXFocusedWindow`、且窗口未hidden/minimized。
+
 普通 `@click` / `@key` 仍然不允许隐式改变桌面状态。
 
 默认 recipe:
@@ -95,6 +103,13 @@ pid:<pid>/window:<index>
 - 实际执行了哪些步骤
 - 哪一步失败
 - 当前是 `ok` 还是 `limited`
+- `verify.status`、`focused`、`frontmost`、`hidden`、`minimized`与轮询耗时
+
+结构化失败码:
+
+- `WINDOW_ACTIVATE_GUARD_FAILED`
+- `WINDOW_FOCUS_NOT_ACQUIRED`
+- `WINDOW_ACTIVATE_STATE_UNREADABLE`
 
 ### `@window-close`
 
