@@ -44,6 +44,9 @@ impl ControlActionExecutor for FakeExecutor {
             ControlCommand::SaveFile(frame) => {
                 format!("SAVEFILE:{}\n", frame.filename).into_bytes()
             }
+            ControlCommand::Wait(request) => {
+                format!("WAIT:{}\n", request.duration_ms).into_bytes()
+            }
             ControlCommand::PtyOpen(request) => format!("PTY_OPEN:{}\n", request.cmd).into_bytes(),
             ControlCommand::PtyClose(request) => {
                 format!("PTY_CLOSE:{}\n", request.session_id).into_bytes()

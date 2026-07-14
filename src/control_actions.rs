@@ -16,6 +16,7 @@ use crate::{
     control_observation::resolve_observation_ref,
     control_protocol::{
         ControlCommand, KeyMode, KeyRequest, KeyResponseMode, PasteRequest, PasteRequestKind,
+    WaitRequest,
         DEFAULT_KEY_HOLD_MS,
     },
     control_web::{build_default_web_act_response_json, build_default_web_find_response_json},
@@ -187,8 +188,52 @@ impl ControlActionExecutor for SystemControlActionExecutor {
             ControlCommand::SaveFile(frame) => {
                 execute_save_file(frame, self.savefile_base_dir.as_deref())
             }
+            ControlCommand::Wait(request) => execute_wait(request),
         }
     }
+}
+
+fn execute_wait(request: &WaitRequest) -> io::Result<ActionExecutionResult> {
+    // `@wait` 让 dispatcher worker thread sleep 一段毫秒数,主要用于:
+    // - `@computer-act` action=`wait` 的底层原语 (ticket 01)
+    // - `@flow` 步骤间固定间隔
+    // - 调试 / 节流场景
+    //
+    // 返回值带实际 elapsed_ms (用于 client 端 verify budget 统计)。
+    let actual_ms = sleep_and_measure(request.duration_ms);
+    Ok(ActionExecutionResult {
+        exit_code: 0,
+        stdout: Vec::new(),
+        stderr: Vec::new(),
+        response_value_json: Some(build_default_wait_response_json(request, actual_ms)),
+    })
+}
+
+/// 让 dispatcher worker thread 真正 sleep 的辅助函数。
+///
+/// 拆出来是为了让 `build_default_wait_response_json` 保持纯函数形态,
+/// 方便后续在测试里独立验证 elapsed_ms 的换算语义 (u64 ms 截断)。
+fn sleep_and_measure(duration_ms: u64) -> u64 {
+    use std::time::Instant;
+    let start = Instant::now();
+    if duration_ms > 0 {
+        std::thread::sleep(std::time::Duration::from_millis(duration_ms));
+    }
+    start.elapsed().as_millis() as u64
+}
+
+/// `wait` 的默认 response JSON 形状。
+///
+/// 跟 `control_web::build_default_web_act_response_json` 的 `pub fn` 模式对齐,
+/// 后续 ticket 18 (density/trace) 扩展 envelope 时只改这里一处即可。
+pub(crate) fn build_default_wait_response_json(request: &WaitRequest, actual_ms: u64) -> String {
+    serde_json::json!({
+        "ok": true,
+        "dispatched_to": "@wait",
+        "requested_duration_ms": request.duration_ms,
+        "duration_ms": actual_ms,
+    })
+    .to_string()
 }
 
 fn execute_script(shell: &str, script_text: &str) -> io::Result<ActionExecutionResult> {

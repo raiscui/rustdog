@@ -8,7 +8,7 @@ pub(crate) use self::parsers::{
 };
 
 use self::parsers::{
-    parse_control_header, parse_key_payload, parse_pty_attach_payload, parse_pty_close_payload,
+    parse_control_header, parse_key_payload, parse_wait_payload, parse_pty_attach_payload, parse_pty_close_payload,
     parse_pty_detach_payload, parse_pty_payload, parse_screenshot_payload,
     require_non_empty_payload,
 };
@@ -95,10 +95,26 @@ pub enum ControlCommand {
     SelectorResolve(SelectorResolveRequest),
     SelectorRefind(SelectorRefindRequest),
     SaveFile(SaveFileFrame),
+    Wait(WaitRequest),
 }
 
 pub const DEFAULT_KEY_HOLD_MS: u64 = 200;
 pub const DEFAULT_SCREENSHOT_QUALITY: u8 = 75;
+
+
+/// `@wait` 的结构化请求。
+///
+/// 让 daemon 端 worker 线程 sleep 一段毫秒数,主要用于:
+/// - `@computer-act` action=`wait` 的底层原语 (ticket 01, ADR-0003)
+/// - `@flow` 步骤间的固定间隔 (LP 跟随项)
+/// - 调试 / 节流场景
+///
+/// 不接受负数 / 非整数,只接受对象 payload
+/// `@wait#N:{duration_ms:N}`。duration_ms==0 合法 (立即返回,无 sleep)。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WaitRequest {
+    pub duration_ms: u64,
+}
 
 /// `@paste` 的结构化请求。
 ///
@@ -422,6 +438,7 @@ pub fn parse_control_line(line: &str) -> io::Result<ControlParseResult> {
             ))
         }
         "savefile" => ControlCommand::SaveFile(SaveFileFrame::parse_object_payload(payload)?),
+        "wait" => ControlCommand::Wait(parse_wait_payload(payload)?),
         _ => {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,

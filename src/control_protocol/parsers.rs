@@ -3,12 +3,14 @@ use std::io;
 mod key;
 mod pty;
 mod screenshot;
+mod wait;
 
 pub(super) use self::key::parse_key_payload;
 pub(super) use self::pty::{
     parse_pty_attach_payload, parse_pty_close_payload, parse_pty_detach_payload, parse_pty_payload,
 };
 pub(super) use self::screenshot::parse_screenshot_payload;
+pub(super) use self::wait::parse_wait_payload;
 
 pub(crate) fn object_inner<'a>(input: &'a str, kind: &str) -> io::Result<&'a str> {
     let trimmed = input.trim();

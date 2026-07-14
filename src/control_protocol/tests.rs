@@ -3,6 +3,7 @@ use super::*;
 mod bootstrap;
 mod flow;
 mod web_gui;
+mod wait;
 
 use crate::{
     control_ax::{
