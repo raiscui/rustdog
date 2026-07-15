@@ -127,3 +127,55 @@
 ### 总结感悟
 - UI script runner 的安全边界不能为了 batching 牺牲 fail-fast。相邻 UI action 必须逐条确认上一条成功后再发送。
 - `Expect` 不能从 missing state 推导成功。没有上一条 `@response` 就应该显式失败。
+
+## [2026-07-15 16:30:00] [Session ID: omx-1783957580965-m4bn8e] 任务名称: rdog `@computer-act` implicit_observe plumbing (ticket 11)
+
+### 任务内容
+- 实现 ticket 11: `@computer-act` implicit_observe + freshness 三态 + 5s TTL (ADR-0005 L3)
+- 覆盖 ticket 11 acceptance criteria 全部 5 项:
+  - start_box 路径触发 implicit_observe,response 携带 observation_id + freshness
+  - target.ref + observation_id 在 TTL 内 → freshness="fresh",复用
+  - target.ref + observation_id 已过期 → stale_re_observed,新 id + previous_observation_id
+  - 5s TTL 严格生效 (clock 注入测试覆盖边界)
+  - 时钟注入 / fresh path / stale path / re-observe 路径均有单测
+
+### 完成过程
+- Phase 0: 读 ticket 11 spec + ADR-0005 + 当前 control_computer_act/mod.rs + 现有 ObservationStore API + MouseEndpoint 枚举 (Coordinate vs ObservationRef),理解 ticket 11 在 dispatcher 流水线里的位置
+- Phase 1: 新建 src/control_computer_act/implicit_observe.rs (610 行)
+  - `COMPUTER_ACT_OBSERVATION_TTL_MS = 5_000` 常量 (防止后续误改)
+  - `ComputerActObservationCache` (TTL + capacity + FIFO evict)
+  - `ImplicitObserveOutcome` 三态 (Fresh / StaleReObserved / StaleFallbackToCoords)
+  - 4 个分支的 `resolve_or_re_observe(args, now_ms)` 入口
+  - OnceLock<Mutex<...>> daemon-global cache (跟 ObservationStore 同模式)
+  - `render_observation_used` / `render_top_level_observation_id` response helpers
+  - `apply_implicit_observe_to_args` stub 给后续 ticket 18 / Phase I
+- Phase 2: src/control_computer_act/mod.rs 接线
+  - 注册子模块
+  - 在 execute_computer_act 入口 routing 之前调 `resolve_or_re_observe_with_wall_clock(&request.args)`
+  - response envelope 把 observation_id / observation_used 从 outcome 填充
+- Phase 3: 19 个单测 (inline 在 implicit_observe.rs 底部)
+  - cache 基础 CRUD / TTL 边界 / capacity evict
+  - 4 个 resolve_or_re_observe 分支 + 未知 obs_id 路径
+  - 3 个 render_observation_used 形状 (fresh / stale+previous / fallback None)
+  - top_level_observation_id 三态
+  - global cache wall clock helper 集成
+- Phase 4: scripts/smoke_computer_act_observe.sh (185 行, 4 段 e2e)
+  - start_box → freshness=fresh
+  - TTL 内复用
+  - TTL 外 stale_re_observed
+  - non-mouse wait → null 占位
+
+### 验证
+- `RUSTFLAGS="-Awarnings" cargo check --bin rdog --tests`: 0 warning
+- `RUSTFLAGS="-Awarnings" cargo test --bin rdog`: 536 passed, 0 failed (+19 vs ticket 05 baseline)
+- `bash scripts/smoke_computer_act_observe.sh`: 4/4 通过 (test 3 含 6s sleep 等 TTL 过期,~20s 总时长)
+- `bash scripts/smoke_computer_act.sh` (regression): 5/5 通过
+- `git push origin main`: `ec0f653..7e2ce62` 成功
+
+### 总结感悟
+- ticket 11 阶段的关键决策: 复用 `OnceLock<Mutex<...>>` 全局 cache 模式,跟现有 `ObservationStore` 对齐。这让 `resolve_or_re_observe` 在测试里既能 inject mock clock (单元测试),又能用 wall clock (production)。**关键边界**: 测试 helper 必须 `#[cfg(test)]` 或 `#[allow(dead_code)]`,否则会污染 warning。
+- **freshness 三态拆分 = 真实状态机**: ticket 11 只暴露 `fresh` + `stale_re_observed` 两种;`stale_fallback_to_coords` 留接口给后续 Phase I 真实 observe 集成 (那时如果 start_box 找不到 ref,可能降级回纯坐标)。这是 ADR-0005 L3 的前瞻性接口,但 ticket 11 不应该实现降级,因为它没有真实 observe,降级路径会变成 silent fallback。
+- **synthetic ref_id 占位**: `@e{seq}` 跟 Mano-CUA `@e1` 风格对齐。ticket 11 客户端可以拿到 ref 但底层 dispatch 仍用 start_box 像素,等真实 observe 接入才切 `MouseEndpoint::ObservationRef`。**关键边界**: 客户端如果在第二轮传 `target.ref`,daemon 仍认为有效(因为 ref_id 在 cache 里有,但底层 click 用的是 stale ref_id 字符串,跟真 AX ref 无关联)。这种"假 ref"只有 ticket 11 这种 plumbing stub 阶段允许;真 observe 接入后必须删 synthetic 路径,统一走真实 ref。
+- **避免重复造 json field extractor**: smoke script 用 python3 (stdlib only) 解析 `@response ...` 包裹的 JSON envelope,比 jq 依赖更轻,跟其它 smoke 脚本保持一致风格。
+- **mixed worktree scoped commit hygiene**: ticket 11 只动 4 个文件 (mod.rs / implicit_observe.rs / smoke_computer_act_observe.sh / task_plan.md),不要 `git add .`。
+- **ask-matt hygiene "clearing context between tickets"**: ticket 11 完整收口 (commit + push + 验证) 后停在新 session 启动位置,留给 ticket 13 (verify-best-effort) 在下一个 session 启动。

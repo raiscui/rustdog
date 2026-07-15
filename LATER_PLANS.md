@@ -476,3 +476,18 @@
 - ADR 主入口: `docs/adr/0001-add-computer-act-meta.md`
 - Grill session 主线: fast-infer 项目 `task_plan.md` (本轮 grill 收口记录会追加)
 - 实施节奏建议: LP3 先做 (验证 ADR 决策), LP1/LP2 在 LP3 之后按用户需求触发
+
+### LP-ticket-11-deferred: 真实 AX observe 集成 (Phase I ticket 21+)
+- 当前 ticket 11 用 synthetic `@e{seq}` ref_id 占位;真实 AX observe (从 `@observe` 拿到 backend ref) 集成留给 Phase I。
+- 集成路径:
+  1. `apply_implicit_observe_to_args` 从 stub 升级为真函数: 把 args.start_box 拆掉,换成 `target.ref + target.observation_id`,让 click/hover/drag 走真实 ref 路径 (`MouseEndpoint::ObservationRef`)
+  2. `ComputerActObservationCache.record_implicit` 调用真实 observe (screenshot + AX tree walk + coords→element mapping),而不是生成 synthetic ref
+  3. 启动时间会显著增加 (single observe ~100-300ms),density metrics 字段 (`ticket 17`) 需要把 `implicit_observe_ms` 暴露出来
+
+### LP-ticket-11-deferred-2: stale_fallback_to_coords 真实实现
+- 当前 `ImplicitObserveOutcome::StaleFallbackToCoords` 是预留 enum variant,ticket 11 不暴露 (real observe 还没接入)。
+- 真实实现路径: 当 real observe 失败 (e.g., screenshot capture 失败 / AX tree 为空),从 `StaleReObserved` 降级到 `StaleFallbackToCoords`,response 里给 `error_code: "observe_unavailable"` + `retry.strategy: "re_observe_then_retry"`。
+
+### LP-ticket-11-deferred-3: implicit_observe 并发安全
+- 当前 `OnceLock<Mutex<...>>` 走 Mutex 兜底,但 rdog dispatcher 单线程 (verified by control_computer_act/mod.rs 的 dispatch 路径),未来若 rdog 改成 async dispatcher / 多 worker,要审计 Mutex 是否变瓶颈。
+- 替代方案: rdog dispatcher 单线程 → 直接用 `RefCell` 替代 `Mutex`,省一次 lock 开销;但要 audit 整个 control_actions.rs 链路确认没有跨 await 持有 cache ref。
