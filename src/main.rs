@@ -18,6 +18,7 @@ mod control_ax;
 mod control_bootstrap;
 mod control_capabilities;
 mod control_client_input;
+mod control_computer_act;
 mod control_core;
 mod control_display;
 mod control_display_scope;

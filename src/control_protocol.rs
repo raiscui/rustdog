@@ -8,7 +8,7 @@ pub(crate) use self::parsers::{
 };
 
 use self::parsers::{
-    parse_cancel_payload, parse_control_header, parse_key_payload, parse_open_app_payload, parse_wait_payload, parse_pty_attach_payload, parse_pty_close_payload,
+    parse_cancel_payload, parse_computer_act_payload, parse_control_header, parse_key_payload, parse_open_app_payload, parse_wait_payload, parse_pty_attach_payload, parse_pty_close_payload,
     parse_pty_detach_payload, parse_pty_payload, parse_screenshot_payload,
     require_non_empty_payload,
 };
@@ -48,14 +48,14 @@ use crate::control_window::{
 /// - `@...` 进入控制协议
 /// - `@@...` 退回字面 shell 文本
 /// - 其他内容保持普通 shell 文本语义
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum ControlParseResult {
     LiteralShellLine(String),
     Control(ControlRequest),
 }
 
 /// 首版支持的控制命令。
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum ControlCommand {
     Ping,
     Key(KeyRequest),
@@ -98,6 +98,7 @@ pub enum ControlCommand {
     Wait(WaitRequest),
     OpenApp(OpenAppRequest),
     Cancel(CancelRequest),
+    ComputerAct(ComputerActRequest),
 }
 
 pub const DEFAULT_KEY_HOLD_MS: u64 = 200;
@@ -145,6 +146,26 @@ pub struct OpenAppRequest {
 pub struct CancelRequest {
     pub target_seq: u64,
 }
+
+
+/// `@computer-act` 的结构化请求 (rdog 适配 Mano-CUA 16 动作中的 13 个 daemon-side action)。
+///
+/// 顶层 envelope: `schema` / `action` / `args` 三必填 + `verify` /
+/// `observation_id` / `timeout_ms` / `trace` 四个可选 (后续 ticket 11/12/16/18 实际使用)。
+///
+/// `args` 是 `serde_json::Value` 形式的对象,内部字段取决于 `action`。
+/// 路由层 (`control_computer_act`) 把它转译成底层 `ControlCommand`。
+#[derive(Debug, Clone, PartialEq)]
+pub struct ComputerActRequest {
+    pub schema: String,
+    pub action: String,
+    pub args: serde_json::Value,
+    pub verify: Option<String>,
+    pub observation_id: Option<String>,
+    pub timeout_ms: Option<u64>,
+    pub trace: Option<String>,
+}
+
 
 
 
@@ -337,7 +358,7 @@ pub struct PtyAttachRequest {
 ///
 /// `request_id` 只作用于显式 `@...` 协议请求。
 /// 普通 shell 行仍然按顺序流处理,不强行附会 id。
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ControlRequest {
     pub request_id: Option<u64>,
     pub command: ControlCommand,
@@ -473,6 +494,7 @@ pub fn parse_control_line(line: &str) -> io::Result<ControlParseResult> {
         "wait" => ControlCommand::Wait(parse_wait_payload(payload)?),
         "open-app" => ControlCommand::OpenApp(parse_open_app_payload(payload)?),
         "cancel#seq" => ControlCommand::Cancel(parse_cancel_payload(payload)?),
+        "computer-act" => ControlCommand::ComputerAct(parse_computer_act_payload(payload)?),
         _ => {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,

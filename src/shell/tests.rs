@@ -53,6 +53,9 @@ impl ControlActionExecutor for FakeExecutor {
             ControlCommand::Cancel(request) => {
                 format!("CANCEL:target_seq={}\n", request.target_seq).into_bytes()
             }
+            ControlCommand::ComputerAct(request) => {
+                format!("COMPUTER_ACT:{}:{}\n", request.action, request.args).into_bytes()
+            }
             ControlCommand::PtyOpen(request) => format!("PTY_OPEN:{}\n", request.cmd).into_bytes(),
             ControlCommand::PtyClose(request) => {
                 format!("PTY_CLOSE:{}\n", request.session_id).into_bytes()

@@ -5,6 +5,7 @@ mod flow;
 mod web_gui;
 mod wait;
 mod cancel_seq;
+mod computer_act;
 mod open_app;
 
 use crate::{

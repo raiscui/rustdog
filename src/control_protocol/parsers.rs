@@ -1,6 +1,7 @@
 use std::io;
 
 mod cancel_seq;
+mod computer_act;
 mod key;
 mod open_app;
 mod pty;
@@ -13,6 +14,7 @@ pub(super) use self::pty::{
 };
 pub(super) use self::screenshot::parse_screenshot_payload;
 pub(super) use self::cancel_seq::parse_cancel_payload;
+pub(super) use self::computer_act::parse_computer_act_payload;
 pub(super) use self::open_app::parse_open_app_payload;
 pub(super) use self::wait::parse_wait_payload;
 

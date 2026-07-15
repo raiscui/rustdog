@@ -127,6 +127,7 @@ impl ControlActionExecutor for SystemControlActionExecutor {
                 execute_key(request, self.key_input_event_sink.as_deref())
             }
             ControlCommand::Cancel(request) => execute_cancel(request, &self.cancel_registry),
+            ControlCommand::ComputerAct(request) => crate::control_computer_act::execute_computer_act(request, cancel),
             ControlCommand::Paste(request) => execute_paste(request),
             ControlCommand::Ping => Ok(ActionExecutionResult {
                 exit_code: 0,
@@ -211,7 +212,7 @@ impl ControlActionExecutor for SystemControlActionExecutor {
     }
 }
 
-fn execute_wait(
+pub(crate) fn execute_wait(
     request: &WaitRequest,
     cancel: Option<&CancellationToken>,
 ) -> io::Result<ActionExecutionResult> {
@@ -274,7 +275,7 @@ pub(crate) fn build_default_wait_response_json(request: &WaitRequest, actual_ms:
 ///
 /// 命中 registry 时 signal 对应 token (后续 sleep check 会醒);
 /// 不命中时返回 `unknown_target_seq` 但 cancel 命令本身仍 OK。
-fn execute_cancel(
+pub(crate) fn execute_cancel(
     request: &CancelRequest,
     registry: &crate::cancellation::CancelRegistry,
 ) -> io::Result<ActionExecutionResult> {
@@ -334,7 +335,7 @@ pub(crate) fn build_cancelled_wait_response_json(request: &WaitRequest) -> Strin
 ///
 /// macOS 走 `open -a <app_name>`,等待 `wait_ms` 让 app 完成初次绘制。
 /// 其他平台返回 `platform_unsupported` 错误码 (LP1 跟进跨平台)。
-fn execute_open_app(request: &OpenAppRequest) -> io::Result<ActionExecutionResult> {
+pub(crate) fn execute_open_app(request: &OpenAppRequest) -> io::Result<ActionExecutionResult> {
     let payload = open_app_payload_for_current_platform(request);
 
     // platform_unsupported / permission_denied 用非零 exit_code 标记;
@@ -425,7 +426,7 @@ fn run_open_app_on_macos(request: &OpenAppRequest) -> serde_json::Value {
     }
 }
 
-fn execute_script(shell: &str, script_text: &str) -> io::Result<ActionExecutionResult> {
+pub(crate) fn execute_script(shell: &str, script_text: &str) -> io::Result<ActionExecutionResult> {
     let output = build_shell_command(shell, script_text).output()?;
     Ok(from_process_output(output))
 }
@@ -468,7 +469,7 @@ pub(crate) fn shell_program_name(shell: &str) -> Option<String> {
         .map(|name| name.to_ascii_lowercase())
 }
 
-fn execute_key(
+pub(crate) fn execute_key(
     request: &KeyRequest,
     key_input_event_sink: Option<&dyn KeyInputEventSink>,
 ) -> io::Result<ActionExecutionResult> {
@@ -572,7 +573,7 @@ impl PasteReport {
     }
 }
 
-fn execute_paste(request: &PasteRequest) -> io::Result<ActionExecutionResult> {
+pub(crate) fn execute_paste(request: &PasteRequest) -> io::Result<ActionExecutionResult> {
     execute_paste_with_dependencies(request, perform_paste_hotkey, perform_legacy_paste_text)
 }
 
@@ -647,7 +648,7 @@ fn platform_paste_delivered_via() -> &'static str {
     "ctrl-v"
 }
 
-fn execute_mouse_plan(plan: MouseExecutionPlan) -> io::Result<ActionExecutionResult> {
+pub(crate) fn execute_mouse_plan(plan: MouseExecutionPlan) -> io::Result<ActionExecutionResult> {
     let mut enigo = Enigo::new(&Settings::default()).map_err(to_io_error)?;
     let report = perform_mouse_plan(&mut enigo, &plan).map_err(to_io_error)?;
 
@@ -659,7 +660,7 @@ fn execute_mouse_plan(plan: MouseExecutionPlan) -> io::Result<ActionExecutionRes
     })
 }
 
-fn execute_prepared_mouse_request<T>(
+pub(crate) fn execute_prepared_mouse_request<T>(
     prepared: PreparedMouseRequest<T>,
     build_plan: impl FnOnce(&T) -> io::Result<MouseExecutionPlan>,
 ) -> io::Result<ActionExecutionResult> {
@@ -868,7 +869,7 @@ fn execute_ax_scroll(
     })
 }
 
-fn execute_type_text(
+pub(crate) fn execute_type_text(
     request: &crate::control_ax::TypeTextRequest,
 ) -> io::Result<ActionExecutionResult> {
     let report = perform_default_type_text(request)?;
