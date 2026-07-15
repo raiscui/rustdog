@@ -491,3 +491,28 @@
 ### LP-ticket-11-deferred-3: implicit_observe 并发安全
 - 当前 `OnceLock<Mutex<...>>` 走 Mutex 兜底,但 rdog dispatcher 单线程 (verified by control_computer_act/mod.rs 的 dispatch 路径),未来若 rdog 改成 async dispatcher / 多 worker,要审计 Mutex 是否变瓶颈。
 - 替代方案: rdog dispatcher 单线程 → 直接用 `RefCell` 替代 `Mutex`,省一次 lock 开销;但要 audit 整个 control_actions.rs 链路确认没有跨 await 持有 cache ref。
+
+### LP-ticket-13-deferred-1: ax_diff facade 抽取
+- 当前 `verify.rs` 直接调 `crate::ax_diff::diff::compute_diff`,跟 ax_diff 内部 API 紧耦合。
+- 后续重构期抽 facade: `ax_diff::run_between_snapshots(before: AxSnapshot, after: AxSnapshot) -> AxDiffSummary`,
+  verify 模块只调 facade,ax_diff 内部可以换实现 (e.g. 异步 / 增量 diff) 而不破坏 verify 契约。
+- 触发条件: ticket 14 (verify-always) 也需要 ax_diff,会有两个 caller;届时再抽 facade 避免重复。
+
+### LP-ticket-13-deferred-2: smoke 脚本版本化
+- ticket 12 把旧 smoke_computer_act.sh 期待 `verification: null` 改成 omit,旧契约被推翻。
+- 后续每个 ticket 改 response envelope 时,旧 smoke 直接挂,需要 update in place。
+- 长期方案: 拆 smoke_computer_act_v{N}.sh (N = 当前 acceptance 版本),主 smoke_computer_act.sh 指向最新版本。
+  旧版本留作 regression,跟 git history 对齐。
+- 短期方案: 维持现状,smoke 改动时手动同步。
+
+### LP-ticket-13-deferred-3: verify=always 真实实现 (Phase E ticket 14)
+- ticket 14 范围:
+  1. `render_verification(Always)` 返回 screenshot_id + ax_tree_id + windows + ax_diff + window_state
+  2. `run_always_verify` 走 control_observation::build_observe_outcome (完整 observe)
+  3. density 增加 `screenshot_ms` 段
+- ticket 13 已经预留 enum variant 和 render 函数骨架,ticket 14 只需在 `render_verification` 加 Always 分支 + 加 helper
+
+### LP-ticket-13-deferred-4: invalid_verify 错误的 retry strategy (ticket 15)
+- ticket 13 引入了 `error_code:"invalid_verify"`,但 ticket 15 E2 envelope 才补 `retry.strategy:"never"` (手动修复语法)
+- 当前 invalid_verify 错误响应里没有 retry 字段,跟 ticket 04 时代 (其他错误码也没 retry) 一致
+- ticket 15 统一处理

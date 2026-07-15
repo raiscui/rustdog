@@ -179,3 +179,45 @@
 - **避免重复造 json field extractor**: smoke script 用 python3 (stdlib only) 解析 `@response ...` 包裹的 JSON envelope,比 jq 依赖更轻,跟其它 smoke 脚本保持一致风格。
 - **mixed worktree scoped commit hygiene**: ticket 11 只动 4 个文件 (mod.rs / implicit_observe.rs / smoke_computer_act_observe.sh / task_plan.md),不要 `git add .`。
 - **ask-matt hygiene "clearing context between tickets"**: ticket 11 完整收口 (commit + push + 验证) 后停在新 session 启动位置,留给 ticket 13 (verify-best-effort) 在下一个 session 启动。
+
+## [2026-07-15 17:45:00] [Session ID: omx-1783957580965-m4bn8e] 任务名称: rdog `@computer-act` verify tier (ticket 12 + 13)
+
+### 任务内容
+- 实现 ticket 12 (`verify-none`): 默认 verify 字段缺省 = none,response 不带 `verification` key
+- 实现 ticket 13 (`verify-best-effort`): pre/post AX diff,response 带 `verification.method:"ax_diff"` + ax_diff 摘要
+- ticket 14 (`verify-always`) 留占位,本轮 `Always` policy 等同 `None` (omit verification)
+- 拆分 density 字段为 `{dispatch_ms, implicit_observe_ms, verify_ms?}` 三段耗时
+
+### 完成过程
+- Phase 0: 读 ticket 12 + 13 spec + ADR-0004 V3 + ADR-0006 density 字段规范
+- Phase 1: 新建 src/control_computer_act/verify.rs (347 行)
+  - `VerifyPolicy` 三态枚举 + `parse_verify_policy` 单一入口
+  - `AxDiffSummary` 结构 (dispatch_ms / verify_ms / full_report)
+  - `run_best_effort_verify` 完整流程: pre/post AX capture → compute_diff → summary
+  - `render_verification` / `render_density` response helpers
+  - 11 单测 (parse 5 cases + empty summary + render 4 cases + density 2 cases)
+- Phase 2: src/control_computer_act/mod.rs 接线
+  - 注册子模块
+  - 在 execute_computer_act 入口加 parse_verify_policy (invalid_verify 错误返回)
+  - 拆 dispatch_ms 与 start.elapsed (verify 块需要 dispatch 耗时)
+  - 拆 implicit_observe_ms (跟 dispatch_ms / verify_ms 三段对齐)
+  - response envelope 跟随新契约: omit verification when verify=none
+- Phase 3: src/ax_diff/mod.rs `mod diff` → pub(crate),让 verify.rs 拿 compute_diff
+- Phase 4: scripts/smoke_computer_act_verify.sh (193 行, 5 段 e2e)
+- Phase 5: 旧 smoke_computer_act.sh 跟随契约升级
+
+### 验证
+- `RUSTFLAGS="-Awarnings" cargo check --bin rdog --tests`: 0 warning
+- `RUSTFLAGS="-Awarnings" cargo test --bin rdog`: 547 passed, 0 failed (+11 vs ticket 11)
+- `bash scripts/smoke_computer_act_verify.sh`: 5/5 通过
+- `bash scripts/smoke_computer_act.sh` (regression): 5/5 通过
+- `bash scripts/smoke_computer_act_observe.sh` (regression): 4/4 通过
+- `git push origin main`: `afa7517..aeac227` 成功
+
+### 总结感悟
+- **omit vs null placeholder**: ticket 12 关键决策是 verify=none 时 omit `verification` key,而不是保留 `null` 占位。这让 client parser 不用判 null,直接用 `obj.get("verification")` 拿到 None 即代表 no verify,语义更清晰。但这把旧 smoke 契约推翻了,需要同步更新 (rdog 早期 acceptance 跟 V3 契约有出入,跟 ticket 11 那次一样,本质是 verify 从"占位"演进到"按需出现")。
+- **density 三段拆分 vs 端到端 duration_ms**: 端到端 `duration_ms` 保留 wall clock 概念 (跟 ETA 评估对齐),`density.{dispatch_ms, implicit_observe_ms, verify_ms}` 是分段耗时 (跟 ticket 17 density metrics 对齐)。两边互补,不能合并。
+- **verify=always 占位的两种选择**: 一是本轮就返回 partial verification (只有 ax_diff 没有 screenshot),二是显式 defer 等 ticket 14。我选了后者,因为 ticket 13 spec acceptance 明确 "No screenshot is captured" 是 best_effort 的特性,而不是 always 的 fallback。如果混了会让 ticket 14 没有清晰边界。
+- **ax_diff module 升级到 pub(crate)**: 这是个隐藏的 coupling。verify.rs 跟 ax_diff::compute_diff 之间应该有 facade (verify 模块包装),而不是直接调 compute_diff。当前为了 ticket 11/13 节奏先直接 import,后续重构期可以抽 ax_diff facade (`run_ax_diff_between_snapshots(before, after) -> AxDiffSummary`) 把 ax_diff 重新变成 opaque。
+- **smoke 脚本的"契约升级"模式**: smoke_computer_act.sh ticket 04 时代写死了 `verification: null` 占位,ticket 12 改成 omit 后旧 smoke 直接挂掉。这暴露了 smoke 脚本需要"按 ticket 版本分文件"或者"契约注释化"。当前简单粗暴: 旧 smoke 跟新契约对齐 (update in place)。后续可以拆 smoke_computer_act_v1.sh (旧契约) 和 smoke_computer_act.sh (当前契约),保留历史回归。
+- **mixed worktree scoped commit hygiene 继续生效**: 5 个文件 + 1 docs,跟 ticket 11 一样不 `git add .`。
