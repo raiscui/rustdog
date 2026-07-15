@@ -413,9 +413,7 @@
 ### 后续事项
 
 - [ ] 方向 B(直接 UDS 控制面,10~50x 提速)仍是独立性能路线,不属于当前 UI script runner 收口。
-- [ ] 接入 `rdog control --ui-script <file.json>` 兼容入口。
 - [ ] 增加 `--compat iced-emg` 和更细的 policy flags。
-- [ ] 做一个安全 GUI live smoke,例如 read-only observe 或明确 guard 的窗口 resize 脚本。
 
 ## [2026-06-28 23:04:11] [Session ID: codex-20260628-plan-daemon-flow] 后续计划: task_plan 续档后的完整 continuous-learning
 
@@ -430,14 +428,51 @@
 - [ ] 回读本轮归档的旧 `task_plan.md` 与当前六文件,提炼 UI script / @flow / window control 相关长期经验。
 - [ ] 判断是否需要同步 `EXPERIENCE.md`、`AGENTS.md`、`specs/rdog-ui-script-control-plan.md` 或新的长期索引。
 
-## [2026-06-29 12:05:37] [Session ID: 019f0356-e933-7e02-808d-12c495a89f09] 主题: 拆分 `src/main.rs` 中的 UI script runner 职责
+## [2026-06-30 00:56:17] [Session ID: codex-20260629-ultragoal-ui-script-123] 后续建议: UI script 非 TCP live smoke
 
 ### 背景
+- G004 final gate 已用 TCP control daemon 完成真实 live smoke。
+- code-reviewer 和 architect 都确认当前 gate 可通过。
+- architect 复审建议: 如果未来想继续压低 transport 覆盖风险,可以补 WebSocket 或 Zenoh 的 live smoke,但不要作为本轮 gate 阻塞项。
 
-- G005 final code-review 初审提醒 `src/main.rs` 仍然很大,里面承载了 UI script runner 相关状态、trace、artifact 和 Expect 逻辑。
-- 本轮 `@flow` final gate 没有继续扩大 `main.rs`,code-reviewer 复审确认这不是本次 blocker。
+### 后续事项
+- [ ] 后续新增一个 WebSocket live smoke 或 Zenoh local-default live smoke,复用同一份 `@ping + Expect` UI script。
+- [ ] smoke 仍应检查 `trace.jsonl`、`summary.json`、`script.normalized.json`、`artifacts/` 和端口 / session 清理。
 
-### 后续建议
+## [2026-07-14 11:05:00] [Session ID: omx-1783957580965-m4bn8e] 主题: rdog `@computer-act` 设计收口后续事项
 
-- 后续继续做 `rdog ui-script run` 或 `@ui-flow` 前,优先把 UI script runner 从 `src/main.rs` 拆到 `src/ui_script_runner.rs` 或同名子模块。
-- `src/main.rs` 只保留 CLI 分发和参数桥接,runner 状态、trace writer、artifact/Expect 逻辑放入专门模块。
+### 背景
+- 完成了 Mano-CUA 16 动作与 rdog 协议对齐的 15 题 grill session, 产出 6 个 ADR (`docs/adr/0001` 到 `0006`) + glossary (`docs/glossary.md`)。
+- 决策见 ADR-0001~0006, 本次只记本轮不落地但值得后续推进的事项。
+
+### 后续事项
+
+- **LP1: 跨平台 (`@open-app` / `@wait` / `@paste` / `@click` / `@key` 在 Windows + Linux)**。当前 `@open-app` 只规划了 macOS (`@cmd "open -a ..."`), Windows 的 `start` / Linux 的 `xdg-open` 需要分别适配。Windows 上 enigo 触发 `@click / @key` 还要过 UIPI, rdog 现有 `looks_like_windows_uipi_permission_denied` 已经踩过坑。第一版只交付 macOS 路径, 其他平台让 `@open-app` 返回 `platform_unsupported` 错误码 (走 E2 envelope)。
+
+- **LP2: Holo 3.1 / EvoCUA / GTA1 的协议适配**。`@computer-act` 当前 schema 是 Mano-CUA 闭集 (16 → 13 daemon 动作)。Holo 3.1 的 click / write / answer 3 动作理论可以直接复用 v1 schema; EvoCUA 的自由 JSON + `<think>` 段需要客户端先 parse 思路但 daemon 端不需要新 schema。GTA1 是 Qwen2.5-VL-7B base, 跟 Mano-CUA 训练目标不同, 可能需要单独的 v2 schema。建议先把 Holo 3.1 接进 `rdog.computer-act.v1` 验证 (3 动作是 v1 的真子集), 再考虑其他模型。
+
+- **LP3: density benchmark suite**。`specs/rdog-computer-use-density-plan.md` §3 定义了 metrics 但没有可跑 benchmark。建议:
+  - 准备 5-10 个 Mano-CUA 典型任务 (登录表单 / 浏览器搜索 / 文件操作 / 多步对话框)
+  - 写一个 stdlib-only benchmark 脚本, 跑 `@computer-act` 跟 baseline (手写 `@observe + @click + @observe` 多步) 对比
+  - 输出 `density` 字段报告, 验证 high-density 路线真实省了 round-trip
+  - 用结果佐证 ADR-0001 的 meta 决策
+
+- **LP4: Schema v2 evolution 路径**。`rdog.computer-act.v1` 当前只覆盖 GUI 动作。audio / multimodal 动作如果进来 (Mano-CUA 没, 但 Holo 3.1 audio 通道未来可能扩), schema v2 需要:
+  - 加 `modality` 字段 (默认 `"gui"`)
+  - 给 audio 通道单独 `verify` 语义 (screenshot 换 audio waveform diff)
+  - 保持 v1 client 兼容 (新字段默认 false, 旧字段语义不变)
+
+- **LP5: `@computer-act` 的 rate limit / quota**。第一版不加, 等 LP3 benchmark 跑出来看 hot loop 实际打几次 daemon。如果 agent loop 异常卡死时把 daemon 资源耗尽 (mouse 按住 / wait sleep / implicit_observe cache 累积), 需要:
+  - daemon 端 per-target-seq 资源占用上限
+  - client 端 rate limit (类似 OpenAI API 的 RPM 限制)
+  - 超限时返回 `rate_limited` 错误码 (E2 envelope)
+
+- **LP6: glossary 跟现有 rdog 术语对齐**。`docs/glossary.md` 当前只定义了 `@computer-act` 相关新术语。后续需要 cross-reference:
+  - `@observe` / `observation_id` / `@flow` / `AX ref` 等已有术语在 `.codex/skills/rdog-control/SKILL.md` 和 `specs/` 里有定义, glossary 不应重复, 只做 index 链接
+  - `density metrics` 字段的来源 (`rdog-computer-use-density-plan.md` §3) 需要在 glossary 里 cite
+  - 新增 `error_code` 时同步更新 glossary 的 "retry strategy" 节
+
+### 关联入口
+- ADR 主入口: `docs/adr/0001-add-computer-act-meta.md`
+- Grill session 主线: fast-infer 项目 `task_plan.md` (本轮 grill 收口记录会追加)
+- 实施节奏建议: LP3 先做 (验证 ADR 决策), LP1/LP2 在 LP3 之后按用户需求触发

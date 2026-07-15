@@ -327,3 +327,43 @@
   - 检查 Markdown fence 成对。
   - `git diff --check`。
   - grep 关键协议词和反例词,确认没有删掉不可丢失的边界。
+
+## [2026-07-14 23:57:10] [Session ID: omx-1784030029111-h2qsls] 坐标AX hit-test必须独立证明真实窗口归属
+
+### 触发场景
+
+- macOS应用的标准`AXChildren`树缺少内容节点,实现尝试通过`AXUIElementCopyElementAtPosition`或类似坐标hit-test发现补充AX root。
+- snapshot给结果写入了目标PID、window index或backend ID,后续`find`、`get`和stale拒绝也都能通过。
+- 这条内部自洽的控制链仍不能证明命中的树真正属于用户指定窗口。重叠窗口和z-order可能让hit-test返回浏览器或其它应用的foreign tree。
+
+### 已验证的失败模式
+
+- 一次WeChat兼容性实验把`发现`、`直播`、`发布`以及完整小红书WebArea包装成WeChat backend ID。
+- backend ID可重放只证明同一候选树可再次定位,不证明候选树的owner正确。
+- 当前复核中,两个WeChat窗口各9次application-scoped hit-test均返回`kAXErrorNotImplemented(-25208)`。system-wide hit落到前景VS Code,扫描24个WeChat相关PID也没有找到`文件传输助手`。
+- 因此先前"WeChat AX兼容已动态GREEN"的结论被撤回。具体是哪一个boundary条件曾放行foreign tree仍未复现,不能继续写成已确认根因。
+
+### owner证据门禁
+
+坐标发现路径至少要保存并交叉验证以下证据,不能只保留重写后的target metadata:
+
+1. hit元素的实际PID和角色。
+2. parent链到达的精确application/window identity,以及途中遇到的foreign boundary。
+3. 同一点的CGWindow owner与前后z-order。
+4. hit元素、目标窗口和display之间的几何关系。
+5. AX树业务语义是否与截图中可见内容一致。
+
+任何一项出现foreign归属或证据缺失时,都应fail closed。不要把"find成功 + get成功 + stale拒绝"当作owner验证的替代品。
+
+### WeChat当前边界
+
+- 对`com.tencent.xinWeChat`内容定位暂时不使用AX。运行时真相源在`.codex/skills/rdog-control/SKILL.md`的`WeChat Temporary No-AX Policy`。
+- 当前允许路径是window metadata、fresh screenshot、视觉坐标、`guard.display`、动作前window rect复核和动作后新截图。
+- 这是应用级暂定安全策略,不是"WeChat永久不支持macOS Accessibility"的结论。
+- 重新启用前必须通过受控重叠窗口owner回归、真实`文件传输助手`命中、focused/occluded多状态重复验证和全链路fail-closed。
+
+### 可复用结论
+
+- 请求目标和实际hit owner是两份不同状态,必须分别采集证据后再建立关联。
+- GUI自动化中,稳定操作错误目标比明确返回"不可定位"更危险。
+- 对坐标发现机制的测试必须包含foreign重叠窗口反例,不能只用单窗口正向fixture。

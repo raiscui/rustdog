@@ -1,7 +1,7 @@
 ---
 name: rdog-control
-version: "1.5"  # 2026-06-29: 精简叙述,重排高频路径,加入 daemon-side @flow 边界
-description: Use when controlling a local or named machine through `rdog control`: target selection, line-control frames, GUI/web/window actions, shell/PTY/@flow, validation, and safety.
+version: "1.6"  # 2026-07-14: WeChat内容定位暂时禁用AX,改走window+screenshot+guarded coordinates
+description: "Use when controlling a local or named machine through rdog control: target selection, line-control frames, GUI/web/window actions, shell/PTY/@flow, validation, and safety."
 ---
 
 # Rdog Control
@@ -78,7 +78,7 @@ Use the smallest lane that can prove the result:
 5. Finite daemon-side workflow -> `@flow`.
 6. Stateful terminal, TUI, Ctrl-C, Ctrl-D -> `rdog control TARGET --pty -- COMMAND`.
 7. Browser page content -> `@web-find` first, `@web-act` only when side effects are intended.
-8. GUI controls -> prefer semantic AX/window/web actions before mouse coordinates.
+8. GUI controls -> prefer semantic AX/window/web actions before mouse coordinates, except for the temporary WeChat policy below.
 9. Hardware or MCU work -> control the trusted bridge host, then run serial/flashing/device tools there.
 
 Read-only GUI bootstrap example:
@@ -86,6 +86,27 @@ Read-only GUI bootstrap example:
 ```bash
 rdog control TARGET '@bootstrap#1:{mode:"gui",capability_policy:"fresh",observe:{mode:"hybrid",include_screenshot:true,include_ax:true,include_windows:true,ax_required:false,ax_mode:"interactive"}}'
 ```
+
+## WeChat Temporary No-AX Policy
+
+When the target app is WeChat (`com.tencent.xinWeChat`) or the user names "WeChat" / "微信", do not use AX to locate or interact with content controls.
+This is a temporary fail-closed policy based on the 2026-07-14 ownership probe.
+
+- Do not call `@ax-find`, `@ax-get`, `@ax-action`, `@ax-set-value`, `@ax-scroll`, or `rdog ax-diff` for WeChat content.
+- Do not reuse AX-derived refs or labels such as `发现`, `直播`, or `发布`; a previous fallback attached a Xiaohongshu/Chrome AX tree to WeChat target metadata.
+- The restriction applies to WeChat content targeting. `@window-find`, `@window-activate`, screenshot capture, guarded mouse actions, `@paste`, and targeted `@key` remain allowed.
+- Use `@window-find` to resolve the current WeChat window, then capture a fresh visual observation with `include_screenshot:true`, `include_windows:true`, and `include_ax:false`.
+- Locate visible controls from screenshot pixels plus the resolved window/display geometry. Use `guard.display`, and confirm the point is still inside the fresh window rect before coordinate actions.
+- If the window is hidden, occluded, or stale, activate it and capture a new screenshot before deriving coordinates. Do not use AX hit-testing to bypass occlusion.
+- Verify every action with a fresh screenshot and window state. If visual ownership or coordinates are ambiguous, stop without clicking or typing.
+
+Do not re-enable WeChat AX targeting until a controlled overlap/z-order regression proves root ownership and a live query reliably finds `文件传输助手` without accepting foreign browser content.
+
+## CLI-Side UI Script
+
+Use `rdog ui-script run [TARGET] script.json` or `rdog control --ui-script script.json [TARGET]` for controller-side JSON UI automation.
+Both entries share the same runner, target resolver, trace writer, artifact handling, and `Expect` evaluator.
+`--compat iced-emg` and daemon-side GUI-only `@ui-flow` are not implemented.
 
 ## Daemon-Side Flow
 
@@ -109,6 +130,8 @@ Rules:
 - `@ui-flow`, if added later, is a GUI-only profile or alias. It is not the full script runtime.
 
 ## GUI Targeting
+
+The WeChat no-AX policy overrides this generic procedure for WeChat content.
 
 For GUI work:
 

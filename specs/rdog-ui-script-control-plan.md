@@ -9,10 +9,11 @@ Planning plus trace-capable minimum runner. 这份文档定义继续完善 `rdog
 UI script dry-run 已经能把 `WindowSize mode:"resize"` 编译到 `@window-resize`。
 仓库已经实现 `rdog ui-script run [TARGET] path/to/script.json` 的最小真实 runner。
 它复用现有 control transport,支持 `--dry-run`、CLI target、脚本内 `Target` 和本机 local-default daemon。
+仓库已经实现 `rdog control --ui-script path/to/script.json [TARGET]` 兼容入口,该入口复用同一套 runner / target resolver,不复制 runner 逻辑。
 runner 已经写入 run directory、`trace.jsonl`、`summary.json`、`script.normalized.json` 和 `artifacts/`。
 runner 已经实现最小真实 `Expect`: `response_status`、`response_contains`、`control_status`、`window_rect`、`screenshot_exists`。
 daemon-side full script `@flow` 已经作为独立协议入口落地,见 `specs/rdog-flow-control-plan.md`。
-`rdog control --ui-script`、`--compat iced-emg`、完整 web/AX `Expect` 验证和 GUI-only `@ui-flow` profile 仍是规格计划,不是已落地功能。
+`--compat iced-emg`、完整 web/AX `Expect` 验证和 GUI-only `@ui-flow` profile 仍是规格计划,不是已落地功能。
 
 ## Goal
 
@@ -639,6 +640,7 @@ run summary:
 ```bash
 rdog ui-script run self script.json
 rdog ui-script run self script.json --dry-run
+rdog control --ui-script script.json --dry-run self
 rdog ui-script run self script.json --compat iced-emg
 rdog ui-script run self script.json --allow-coordinate-fallback
 rdog ui-script run self script.json --allow-control-line
@@ -706,7 +708,7 @@ daemon-side `@ui-flow` 的价值是减少高延迟链路上的 request round-tri
 ### Phase 3: CLI runner and artifacts
 
 - `rdog ui-script run` 最小 runner 已落地。
-- `rdog control --ui-script` 仍未接入。
+- `rdog control --ui-script` 兼容入口已落地,复用 `ui_script_runner`。
 - 真实 control session 已可发送编译出的 line-control requests。
 - 已写 `trace.jsonl`、`summary.json`、`script.normalized.json` 和 `artifacts/`。
 - 已实现最小真实 `Expect`。

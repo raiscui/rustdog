@@ -653,3 +653,28 @@
 - `rtk cargo test --package rustdog --bin rdog control_flow::tests --quiet`: 5 passed。
 - 复审 code-reviewer: `APPROVE`。
 - 复审 architect: `WATCH`,无 BLOCK,允许当前 diff 提交。
+
+## [2026-06-30 00:56:17] [Session ID: codex-20260629-ultragoal-ui-script-123] 错误修复: UI script runner final gate blocker
+
+### 问题
+- `Expect response_status` / `Expect control_status` 在没有上一条 `@response` 时可能把 missing state 当成成功。
+- 相邻 `ControlLine` 被批量发送时,第一条失败 `@response` 可能在第二条 UI action 已经发送后才被 runner 发现。
+
+### 原因
+- 状态类 Expect 缺少 prior-response guard,默认 `response_status=ok` 和 `code=0` 会误过。
+- `flush_ui_script_pending_lines` 原来按相邻 control line 批量发送,错误检查发生在整批发送之后,不满足 GUI 自动化的 fail-fast 语义。
+
+### 修复
+- `expect_response_status` 和 `expect_control_status` 统一先调用 prior-response guard;没有上一条 `@response` 时返回显式错误。
+- `flush_ui_script_pending_lines` 改为逐条发送,逐条记录 trace;一旦当前 control step 返回失败,立即停止,不发送后续相邻 action。
+- control step trace 补齐 `started_at_unix_ms` 和结构化 `response.target_resolution`,避免 trace contract drift。
+
+### 验证
+- 回归测试先红后绿:
+  - 无上一条 `@response` 的 status Expect 必须失败。
+  - TCP fake server 证明第一条 `@response {"code":64}` 后第二条 `ControlLine` 没有被发送。
+  - trace 包含 `started_at_unix_ms` 和 `response.target_resolution.source`。
+- `rtk cargo test --package rustdog --bin rdog ui_script_runner::tests --quiet`: 14 passed。
+- `rtk cargo test --package rustdog --bin rdog --quiet`: 441 passed。
+- `rtk cargo test --package rustdog --test control_lanes --quiet`: 15 passed,1 ignored。
+- final TCP live smoke 通过,summary complete,trace 4 lines。

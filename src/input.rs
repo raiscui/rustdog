@@ -113,6 +113,22 @@ pub enum Command {
         #[clap(long = "pty-attach", conflicts_with_all = ["pty", "pty_close", "pty_detach"])]
         pty_attach: Option<String>,
 
+        /// Run a UI script JSON file through the control target selected by this command.
+        #[clap(
+            long = "ui-script",
+            value_name = "FILE",
+            conflicts_with_all = ["pty", "pty_close", "pty_detach", "pty_attach"]
+        )]
+        ui_script: Option<PathBuf>,
+
+        /// Only parse and compile `--ui-script`, then print the generated control lines.
+        #[clap(long = "dry-run", requires = "ui_script")]
+        dry_run: bool,
+
+        /// Directory used for `--ui-script` trace.jsonl, summary.json, and artifacts.
+        #[clap(long = "trace-dir", requires = "ui_script")]
+        trace_dir: Option<PathBuf>,
+
         /// TCP host/port, TCP port shorthand, Zenoh target-name shorthand,
         /// Zenoh 本机 fast path 入口(`self` 关键字或空 target),或
         /// `<target> @<one-shot-line> [@<one-shot-line> ...]` 多 line 形式。
@@ -412,6 +428,54 @@ mod tests {
             }
             command => panic!("unexpected command: {command:?}"),
         }
+    }
+
+    #[test]
+    fn control_should_parse_ui_script_compatibility_entry() {
+        let opts = Opts::parse_from([
+            "rdog",
+            "control",
+            "--ui-script",
+            "tests/fixtures/ui_script/ping_control_line.json",
+            "--dry-run",
+            "--trace-dir",
+            "rdog_script_runs/control-ui-script",
+            "self",
+        ]);
+
+        match opts.command {
+            Command::Control {
+                ui_script,
+                dry_run,
+                trace_dir,
+                host,
+                pty,
+                ..
+            } => {
+                assert_eq!(
+                    ui_script,
+                    Some(PathBuf::from(
+                        "tests/fixtures/ui_script/ping_control_line.json"
+                    ))
+                );
+                assert!(dry_run);
+                assert_eq!(
+                    trace_dir,
+                    Some(PathBuf::from("rdog_script_runs/control-ui-script"))
+                );
+                assert_eq!(host, vec!["self".to_string()]);
+                assert!(!pty);
+            }
+            command => panic!("unexpected command: {command:?}"),
+        }
+    }
+
+    #[test]
+    fn control_should_reject_dry_run_without_ui_script() {
+        let err = Opts::try_parse_from(["rdog", "control", "--dry-run"])
+            .expect_err("control --dry-run is only valid with --ui-script");
+
+        assert!(err.to_string().contains("--ui-script"));
     }
 
     #[test]

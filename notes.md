@@ -670,6 +670,25 @@
 - `cargo fmt -- --check`: passed。
 - `rtk git diff --check`: passed。
 
+## [2026-06-29 23:53:09] [Session ID: codex-20260629-ultragoal-ui-script-123] 笔记: G003 control --ui-script 入口
+
+## 实现
+
+- `src/input.rs` 的 `Control` 子命令新增 `--ui-script <FILE>`、仅在该模式可用的 `--dry-run` 和 `--trace-dir`。
+- `src/main.rs` 的 control 分支在 `--ui-script` 存在时直接桥接到 `ui_script_runner::run`,把原 control target/transport 参数和脚本路径转成同一套 runner options。
+- `specs/rdog-ui-script-control-plan.md` 与 `.codex/skills/rdog-control/SKILL.md` 已同步: `rdog control --ui-script` 已落地,`--compat iced_emg` 和 GUI-only `@ui-flow` 仍未实现。
+
+## 验证
+
+- `rtk cargo test --package rustdog --bin rdog input::tests --quiet`: 19 passed。
+- `rtk cargo test --package rustdog --bin rdog ui_script_runner::tests --quiet`: 11 passed。
+- `rtk cargo test --package rustdog --bin rdog --quiet`: 438 passed。
+- `rtk cargo test --package rustdog --test control_lanes --quiet`: 15 passed,1 ignored。
+- `rtk cargo check --package rustdog --bin rdog --quiet`: passed。
+- `cargo fmt -- --check`: passed。
+- `rtk git diff --check`: passed。
+- `./target/debug/rdog control --ui-script tests/fixtures/ui_script/ping_expect_response.json --dry-run self`: 输出 4 steps dry-run。
+
 ## [2026-06-29 12:01:26] [Session ID: 019f0356-e933-7e02-808d-12c495a89f09] 笔记: Ultragoal G005 review fix 和 final verification
 
 ## 来源
@@ -884,3 +903,67 @@
 - `src/ui_script.rs`: 1013 行。
 - `src/control_core.rs`: 1080 行。
 - 当前收口没有继续扩大成重构。下一步最值得先拆 `src/main.rs` 中 UI script runner 职责。
+
+## [2026-06-29 16:28:09] [Session ID: codex-20260629-next-worth-analysis] 笔记: 当前项目下一步价值判断
+
+## 来源
+
+### 来源1: 当前仓库状态
+
+- 最新提交: `1c7e424 Add daemon flow and UI script runner`。
+- 当前 `git status --short`: clean。
+- 当前核心文件体量:
+  - `src/main.rs`: 2542 行。
+  - `src/ui_script.rs`: 1013 行。
+  - `src/control_core.rs`: 1080 行。
+  - `src/control_flow.rs`: 1005 行。
+  - `src/zenoh_control.rs`: 1015 行。
+
+### 来源2: 最近 WORKLOG / task_plan
+
+- 当前大 diff 已 review + commit。
+- code-reviewer 初审发现的 UI script 错误响应误报成功、`@flow SaveArtifact` 文件读取授权缺口已经修复。
+- architect 复审仍保留 `WATCH`: `main.rs` 职责集中,UI script / control target resolver 语义可能漂移。
+
+### 来源3: LATER_PLANS / specs
+
+- `LATER_PLANS.md` 当前仍保留:
+  - 方向 B 直接 UDS 控制面。
+  - `rdog control --ui-script <file.json>` 兼容入口。
+  - `--compat iced-emg` 和更细 policy flags。
+  - 安全 GUI live smoke。
+  - 拆分 `src/main.rs` 中 UI script runner 职责。
+- `specs/rdog-ui-script-control-plan.md` 明确当前已落地最小 runner,但 `rdog control --ui-script`、`--compat iced-emg`、完整 web/AX `Expect` 和 GUI-only `@ui-flow` 仍未落地。
+- `specs/rdog-flow-control-plan.md` 已同步 `policy.allow_file_read:true` 规则。
+
+## 综合判断
+
+- 当前首要任务应是结构收敛,不是继续堆功能。
+- 最值得先做: 把 UI script runner 从 `src/main.rs` 拆到专门模块,并顺手收敛 UI script / control 共用 target resolver。
+- 第二优先级: 在结构拆完后接入 `rdog control --ui-script <file.json>` 兼容入口。这个功能有明确需求,但如果先做会继续扩大 `main.rs`。
+- 第三优先级: 做一个安全 live smoke,优先 read-only observe 或带 guard 的窗口 resize。它能把 runner 从 fixture confidence 推到真实控制 confidence。
+- 暂缓:
+  - `--compat iced-emg`: 等 runner 模块边界稳定后再做,否则兼容逻辑会增加拆分成本。
+  - 方向 B UDS: 性能价值高,但不是当前 correctness / maintainability 阻塞。
+  - Zenoh flake: 只有自然复现后才值得按 EPIPHANY 推荐顺序修。
+  - 更细 `allow_file_read` path policy: 是安全增强,但当前粗粒度 opt-in 已经解决提交 blocker。
+
+## [2026-06-29 23:45:36] [Session ID: codex-20260629-ultragoal-ui-script-123] 笔记: G002 runner / resolver 拆分
+
+## 结构调整
+
+- 新增 `src/control_invocation.rs`: 承接 control target / transport resolver、one-shot `@<line>` 拆分、多 line control exchange、`@savefile` artifact 收口和 single-line PTY 辅助发送。
+- 新增 `src/ui_script_runner.rs`: 承接 `UiScriptRunOptions`、runner state、trace / summary / normalized 写入、Expect evaluator、artifact trace summary 和 UI script target step 合并逻辑。
+- 新增 `src/ui_script_runner/tests.rs`: 把 runner 单测从 `main.rs` 移到 runner 子模块,避免新生产文件超过 1000 行。
+- `src/main.rs` 降到 625 行,现在只保留 CLI wiring、daemon transport 选择、hidden-daemon 入口和少量顶层分发逻辑。
+
+## 验证
+
+- `rtk cargo test --package rustdog --bin rdog control_invocation::tests --quiet`: 16 passed。
+- `rtk cargo test --package rustdog --bin rdog ui_script_runner::tests --quiet`: 11 passed。
+- `rtk cargo test --package rustdog --bin rdog ui_script --quiet`: 21 passed。
+- `rtk cargo test --package rustdog --bin rdog --quiet`: 436 passed。
+- `rtk cargo test --package rustdog --test control_lanes --quiet`: 15 passed,1 ignored。
+- `rtk cargo check --package rustdog --bin rdog --quiet`: passed。
+- `cargo fmt -- --check`: passed。
+- `rtk git diff --check`: passed。

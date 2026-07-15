@@ -25,14 +25,14 @@ rustdog 首先被LLM agent 智能体使用，其次被人类使用。要以agent
   - 何时阅读: 修改远程 PTY、control transport streaming、Zenoh session channel、`--pty-close` 或 TTY 交互行为前
 
 - `EXPERIENCE.md`
-  - 主题: 本项目已经验证过的协议设计经验与边界
-  - 用途: 帮助后续改协议时避免把 `@exit`、显式协议请求和裸 shell 行再次混淆;沉淀跨平台修复、Zenoh peer/peer、log 路径等隐性契约教训
-  - 何时阅读: 做协议演进、回顾历史判断口径、沉淀经验时;改 daemon 启动日志 / log target 路径 / e2e polling 假设前
+  - 主题: 本项目已经验证过的协议、运行时与GUI安全经验边界
+  - 用途: 帮助后续改协议时避免把 `@exit`、显式协议请求和裸 shell 行再次混淆;沉淀跨平台修复、Zenoh、log路径、AX hit-test窗口归属等隐性契约教训
+  - 何时阅读: 做协议演进、回顾历史判断口径、沉淀经验时;改daemon日志/e2e polling、坐标AX root discovery、backend locator或GUI目标归属门禁前
 
 - `.codex/skills/rdog-control/SKILL.md`
-  - 主题: rdog-control skill,覆盖 Zenoh target-name、line-control、PTY、daemon-side `@flow`、AX/window/web/鼠标、硬件桥接,以及 `rdog ax-diff` 结构化 AX JSON diff
+  - 主题: rdog-control skill,覆盖 Zenoh target-name、line-control、PTY、daemon-side `@flow`、AX/window/web/鼠标、硬件桥接、WeChat no-AX override,以及 `rdog ax-diff` 结构化 AX JSON diff
   - 用途: agent-agnostic 且 token-lean 的执行入口,同时服务 Codex / Claude / GPT / openai-compatible / MCP / 人类。让 `rdog control` 高频路径、硬边界和验证规则与协议文档一起版本化
-  - 何时阅读: 改 rdog control 相关协议、示例、README、PTY、GUI 控制、`@flow`、ax-diff 子命令,或调整 agent 适用范围 / skill 文案组织前
+  - 何时阅读: 改 rdog control 相关协议、示例、README、PTY、GUI 控制、`@flow`、ax-diff子命令、WeChat内容定位策略,或调整agent适用范围/skill文案组织前
 
 - `.codex/skills/rdog-control/references/cookbook-web-content.md`
   - 主题: 浏览器当前激活页面内的 Web 内容 AX 操作 cookbook,evidence 模式从"截图前后 diff"切到"AX JSON 结构化 diff"

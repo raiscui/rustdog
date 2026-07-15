@@ -463,3 +463,279 @@
 ### 遇到错误
 
 - 曾误用双引号执行 `rg -n "^```mermaid" ...`,zsh 将反引号当作命令替换并返回 `unmatched "\""`. 已改用单引号重新执行,没有修改文件。
+
+## [2026-06-29 16:28:09] [Session ID: codex-20260629-next-worth-analysis] [分析]: 当前项目下一步价值判断
+
+### 目标
+
+基于当前六文件、`LATER_PLANS.md`、`WORKLOG.md`、`EPIPHANY_LOG.md`、`specs/rdog-ui-script-control-plan.md`、`specs/rdog-flow-control-plan.md` 和当前 git 状态,只读分析现在最值得继续做的工作。
+
+### 阶段
+
+- [x] 阶段1: 刷新最近 task / worklog / later / epiphany 记录。
+- [x] 阶段2: 检查当前 git 状态、最新提交和核心文件体量。
+- [x] 阶段3: 对候选任务做优先级判断。
+
+### 状态
+
+**目前已完成分析** - 当前最值得做的是先拆 UI script runner / target resolver,再做 `rdog control --ui-script` 兼容入口和最小 live smoke。方向 B UDS、Zenoh flake 和更细 file-read policy 暂不应抢主线。
+
+## [2026-06-29 23:19:56] [Session ID: codex-20260629-ultragoal-ui-script-123] [执行]: Ultragoal 按顺序完成 1/2/3
+
+### 目标
+
+按上一轮分析的优先级执行 durable ultragoal:
+1. 拆 `src/main.rs` 中 UI script runner / target resolver 职责。
+2. 接入 `rdog control --ui-script <file.json>` 兼容入口。
+3. 做一个安全 live smoke,验证 runner 真实控制路径。
+
+### 阶段
+
+- [ ] 阶段1: 创建新的 `.omx/ultragoal` goals 并承接 Codex aggregate goal。
+- [ ] 阶段2: 完成 G001 runner / target resolver 拆分。
+- [ ] 阶段3: 完成 G002 `rdog control --ui-script` 兼容入口。
+- [ ] 阶段4: 完成 G003 安全 live smoke 与 final quality gate。
+- [ ] 阶段5: checkpoint / WORKLOG / 最终交付。
+
+### 状态
+
+**目前在阶段1** - 旧 Codex goal 已确认 `complete`;准备创建新的 ultragoal plan。
+
+## [2026-06-29 23:25:29] [Session ID: codex-20260629-ultragoal-ui-script-123] [状态]: 修正 Ultragoal 目标拆分
+
+### 当前观察
+
+- `.omx/ultragoal/goals.json` 当前只有一个 pending goal,把 1/2/3 合并到了同一个目标里。
+- 用户明确要求"按顺序 做 123",所以需要恢复成三个可 checkpoint 的顺序目标。
+
+### 即将执行
+
+- 使用 `omx ultragoal steer --directive-json` 的 `split_subgoal` 机制拆分 `G001-ui-script-runner-target-resolver-src`。
+- 不直接手改 `.omx/ultragoal/goals.json`,保留 ledger 审计轨迹。
+- 拆分完成后再执行 `omx ultragoal complete-goals`,承接新的 aggregate Codex goal。
+
+### 状态
+
+**目前在阶段1** - 正在修正 durable goal 结构,暂未开始代码编辑。
+
+## [2026-06-29 23:28:07] [Session ID: codex-20260629-ultragoal-ui-script-123] [执行]: G002 runner / resolver 拆分
+
+### 目标
+
+完成 Ultragoal story `G002-split-ui-script-runner-and-target-re`:把 UI script runner state、trace writer、artifact handling、Expect evaluation、control exchange 和共用 target / invocation resolution 从 `src/main.rs` 拆出。
+
+### 阶段
+
+- [x] 阶段1: 使用 steering 把错误合并的单目标拆成 G002 / G003 / G004 三个顺序目标。
+- [x] 阶段2: 用 CodeGraph 和源码阅读确认当前 runner / resolver 边界。
+- [x] 阶段3: 实施模块拆分,保持 `main.rs` 只做 CLI wiring。
+- [x] 阶段4: 跑 focused tests / fmt / check,checkpoint G002。
+
+### 状态
+
+**目前在完成 G002** - `src/main.rs` 已降到 625 行,`control_invocation` / `ui_script_runner` / runner tests 已拆出,验证通过;下一步 checkpoint G002 并进入 G003。
+
+### 验证
+
+- `rtk cargo test --package rustdog --bin rdog control_invocation::tests --quiet`: 16 passed。
+- `rtk cargo test --package rustdog --bin rdog ui_script_runner::tests --quiet`: 11 passed。
+- `rtk cargo test --package rustdog --bin rdog ui_script --quiet`: 21 passed。
+- `rtk cargo test --package rustdog --bin rdog --quiet`: 436 passed。
+- `rtk cargo test --package rustdog --test control_lanes --quiet`: 15 passed,1 ignored。
+- `rtk cargo check --package rustdog --bin rdog --quiet`: passed。
+- `cargo fmt -- --check`: passed。
+- `rtk git diff --check`: passed。
+
+## [2026-06-29 23:47:17] [Session ID: codex-20260629-ultragoal-ui-script-123] [执行]: G003 control --ui-script 入口
+
+### 目标
+
+完成 Ultragoal story `G003-add-rdog-control-ui-script-compatibi`:在 G002 拆出的共享 runner / target resolver 上实现 `rdog control --ui-script <file.json>` 兼容入口。
+
+### 阶段
+
+- [x] 阶段1: 阅读 `input.rs` control CLI shape 和当前 `run` 分支。
+- [x] 阶段2: 新增 `--ui-script <file.json>` 参数,桥接到 `ui_script_runner::run`。
+- [x] 阶段3: 补 CLI parse/unit tests 和 dry-run/fixture 验证。
+- [x] 阶段4: 跑 focused verification 并 checkpoint G003。
+
+### 约束
+
+- 不实现 `--compat iced-emg`。
+- 不把本任务扩大成 daemon-side `@ui-flow`。
+- 不复制 UI script runner 逻辑,只通过 `ui_script_runner::run` 调用。
+
+### 状态
+
+**目前在完成 G003** - `rdog control --ui-script <file.json> [TARGET]` 已接入共享 runner,验证通过;下一步 checkpoint G003 并进入 G004。
+
+### 验证
+
+- `rtk cargo test --package rustdog --bin rdog input::tests --quiet`: 19 passed。
+- `rtk cargo test --package rustdog --bin rdog ui_script_runner::tests --quiet`: 11 passed。
+- `rtk cargo test --package rustdog --bin rdog --quiet`: 438 passed。
+- `rtk cargo test --package rustdog --test control_lanes --quiet`: 15 passed,1 ignored。
+- `rtk cargo check --package rustdog --bin rdog --quiet`: passed。
+- `cargo fmt -- --check`: passed。
+- `rtk git diff --check`: passed。
+- `./target/debug/rdog control --ui-script tests/fixtures/ui_script/ping_expect_response.json --dry-run self`: passed。
+
+### 遇到错误
+
+- 首次 focused test 命令把 `--exact` 放在 cargo 参数位置,被 cargo 拒绝。已改为 `-- --exact` 后重跑通过。
+- 首次直接执行 `./target/debug/rdog control --ui-script ...` 时二进制尚未重建,旧 binary 报 `unexpected argument '--ui-script'`。已先 `cargo build --package rustdog --bin rdog --quiet` 后重跑通过。
+
+## [2026-06-29 23:54:59] [Session ID: codex-20260629-ultragoal-ui-script-123] [执行]: G004 live smoke 和 final gate
+
+### 目标
+
+完成 Ultragoal story `G004-safe-live-smoke-and-final-quality-ga`:跑安全 live smoke,证明 UI script runner 真实控制路径和产物路径,再完成 final quality gate。
+
+### 阶段
+
+- [ ] 阶段1: 选择安全 live smoke 脚本和临时 daemon 方案。
+- [ ] 阶段2: 执行 live smoke,检查 trace / summary / normalized / artifacts。
+- [ ] 阶段3: 跑 final verification、ai-slop-cleaner、post-cleaner verification。
+- [ ] 阶段4: 做 architecture invariant audit 和独立 code-review / architect review。
+- [ ] 阶段5: clean 后 `update_goal complete`,checkpoint G004。
+
+### 状态
+
+**目前在阶段1** - 准备使用临时本机 daemon 做只读 live smoke。
+
+## [2026-06-30 00:00:45] [Session ID: codex-20260629-ultragoal-ui-script-123] [接手]: G004 final gate 继续执行
+
+### 目标
+
+继续完成 Ultragoal story `G004-safe-live-smoke-and-final-quality-ga`,从已通过的 live smoke / pre-cleaner verification 之后推进到 cleaner、post-cleaner verification、独立 review、architecture invariant gate 和最终 checkpoint。
+
+### 阶段
+
+- [x] 阶段1: 刷新 `.omx/ultragoal/goals.json` 与 active Codex goal,确认当前只需要推进 G004。
+- [x] 阶段2: 对 changed files 做 scoped ai-slop-cleaner 审查,只在发现明确问题时编辑。
+- [x] 阶段3: cleaner 后重跑 verification matrix,包括 dry-run 和必要 live smoke。
+- [x] 阶段4: 启动独立 code-reviewer / architect 双 lane,生成 quality gate JSON。
+- [x] 阶段5: clean 后 `update_goal complete`,写 fresh goal snapshot,checkpoint G004。
+
+### 状态
+
+**目前在阶段4** - post-cleaner verification 已通过,接下来启动独立 code-reviewer / architect 双 lane。
+
+### 遇到错误
+
+- code-reviewer 返回 `REQUEST CHANGES`: `Expect response_status/control_status` 在没有上一条 `@response` 时会因为默认 `ok` / `code=0` 误判成功。
+- 当前根因假设: `expect_response_status` 与 `expect_control_status` 缺少共享的 prior-response guard,直接把 missing state 当成成功状态。
+- 验证计划: 先加 focused failing tests,再修 runner,最后重跑 focused/full verification 并重新 review。
+- architect 返回 `WATCH`: 主架构边界正确,但 trace contract 与计划示例存在轻微漂移,缺少 `started_at_unix_ms` 和结构化 `target_resolution.source` 证据。
+- 处理计划: 保持 lean trace,但补齐 control step 的 `started_at_unix_ms` 与 `target_resolution.source` 字段,并加测试锁定。
+- code-reviewer 复审再次返回 `REQUEST CHANGES`: 相邻 `ControlLine` 会被批量发送,第一个失败 `@response` 只是在发送完后才被 runner 发现,可能导致后续 UI action 已执行。
+- 新根因假设: runner 的 `pending_lines` flush 粒度太粗,把性能 batching 放在安全 fail-fast 之前。
+- 修复计划: `flush_ui_script_pending_lines` 改为逐条发送 / 逐条记录 / 第一条失败立即停止,并加测试证明第二条不会发送。
+
+### 状态更新
+
+**目前在阶段4 blocker 修复** - final checkpoint 暂停,先修复 code-reviewer 和 architect 指出的 final gate 问题。
+
+### 修复验证
+
+- `Expect` prior-response guard 已加,focused test 先红后绿。
+- trace contract 已补 `started_at_unix_ms` 和结构化 `response.target_resolution`,对应测试通过。
+- adjacent `ControlLine` fail-fast 已加,focused test 先红后绿,证明第一条返回 `code:64` 时第二条不会被发送。
+- `rtk cargo test --package rustdog --bin rdog ui_script_runner::tests --quiet`: 14 passed。
+- `cargo fmt -- --check`: passed。
+- `rtk git diff --check`: passed。
+- `rtk cargo check --package rustdog --bin rdog --quiet`: passed。
+- `rtk cargo test --package rustdog --bin rdog --quiet`: 441 passed。
+- `rtk cargo test --package rustdog --test control_lanes --quiet`: 15 passed,1 ignored。
+- latest `rdog control --ui-script ... --dry-run self`: emitted 4 compiled steps。
+- final TCP live smoke: summary `status:"complete"`, `verification_passed:true`, trace 4 lines, daemon port released。
+
+### 状态更新
+
+**目前在完成** - G004 已 checkpoint complete;`omx ultragoal complete-goals --json` 返回 `done:true`,artifactComplete 为 true。
+
+## [2026-06-30 00:56:17] [Session ID: codex-20260629-ultragoal-ui-script-123] [完成]: Ultragoal UI script 123 收口
+
+### 目标
+
+完成用户要求的 1/2/3 顺序任务:拆分 runner / resolver、接入 `rdog control --ui-script`、完成安全 live smoke 与 final quality gate。
+
+### 阶段
+
+- [x] 阶段1: G002 拆分 `src/main.rs` 中 UI script runner 和 control invocation resolver。
+- [x] 阶段2: G003 接入 `rdog control --ui-script <file.json> [TARGET]`,复用共享 runner。
+- [x] 阶段3: G004 跑安全 TCP live smoke,证明 trace / summary / normalized / artifacts 路径。
+- [x] 阶段4: 修复 code-reviewer 发现的两个真实 runner blocker。
+- [x] 阶段5: final verification、ai-slop-cleaner、code-reviewer APPROVE、architect CLEAR、quality gate JSON、Codex goal complete、Ultragoal checkpoint complete。
+
+### 状态
+
+**目前已完成** - `.omx/ultragoal/quality-gate-g004.json` 和 `.omx/tmp/g004-codex-goal.json` 已生成,G004 checkpoint 成功,`omx ultragoal complete-goals --json` 返回 `done:true`。
+
+## [2026-07-14 11:40:00] [Session ID: omx-1783957580965-m4bn8e] [实施 ticket 01]: rdog @wait primitive
+
+### 背景
+- 阶段 A 已完成: spec + 22 ticket 已落盘 (`specs/rdog-computer-act-spec.md` + `specs/rdog-computer-act-tickets/`)。
+- 用户用 `$implement` 启动实施, 默认从 ticket 01 (`@wait` primitive) 开始 — 这是 critical path 第一个, 无 blocker, 体量小, 是验证 TDD 节奏和 rdog parser/executor pattern 的最佳切片。
+
+### 范围 (ticket 01 acceptance criteria)
+- [ ] Line-protocol parser 接受 `@wait#N:{duration_ms:N}`, 拒绝负数 / 非数字 (parse error)
+- [ ] Runtime sleep 后返回 `{ok:true, dispatched_to:"@wait", duration_ms:<actual>}`, 在 macOS 上 50ms tolerance 内
+- [ ] 单元测试覆盖 valid / missing duration / negative / malformed JSON 四种情况
+- [ ] Smoke 脚本 `scripts/smoke_wait.sh` 跑通
+
+### 计划
+- Phase 1 (red): 写 `src/control_protocol/tests/wait.rs`, 跑测试确认红
+- Phase 2 (green): 实现 parser (parse_wait_payload) + ControlCommand::Wait variant + executor
+- Phase 3 (smoke): 跑真 daemon smoke, 记录 elapsed_ms
+- Phase 4 (review): 单测全过 + `cargo check --quiet` 无 warning
+
+### 状态
+**Phase 1 即将开始。**
+
+
+### Phase 1-4 完成 (2026-07-14 19:13)
+
+#### 实现细节
+- `src/control_protocol.rs`: 新增 `WaitRequest` struct + `ControlCommand::Wait` variant + dispatch arm
+- `src/control_protocol/parsers/wait.rs`: 新增 `parse_wait_payload` (对象 payload,拒绝字符串 / 缺字段 / 重复 / 负数 / 非数字)
+- `src/control_protocol/parsers.rs`: 注册 `mod wait` + re-export
+- `src/control_protocol/tests/wait.rs`: 7 个 parser 单测 (valid / zero / missing / negative / non-numeric / non-object / duplicate)
+- `src/control_actions.rs`: 新增 `execute_wait` 函数 + `ControlCommand::Wait` executor arm
+- `src/shell/tests.rs`: 补 `Wait` arm (match 必须 exhaustive)
+- `scripts/smoke_wait.sh`: 3 段 e2e smoke (200ms / 0ms / malformed)
+
+#### 验证证据
+- `cargo test --bin rdog`: **448 passed; 0 failed** (含 7 个新 wait 测试)
+- `cargo check --bin rdog`: 0 warning
+- `bash scripts/smoke_wait.sh`: 3/3 通过
+  - test 1: `@wait#1:{duration_ms:200}` → `{ok:true, dispatched_to:"@wait", duration_ms:204, requested_duration_ms:200}` (4ms tolerance)
+  - test 2: `@wait#2:{duration_ms:0}` → `{ok:true, dispatched_to:"@wait", duration_ms:0, requested_duration_ms:0}` (立即返回)
+  - test 3: `@wait#3:{}` → `{id:3, code:64, error:"@wait 对象 payload 不能为空,需要 duration_ms 字段"}` (parse error 干净返回)
+
+#### 状态
+**ticket 01 完成, 7/7 单测 + 3/3 smoke 通过。下一步候选 ticket 02 (`@open-app`) 或 03 (`@cancel#seq`), 都是无 blocker 可立即启动。**
+
+
+### Code review 修复 (2026-07-14 19:25)
+
+按 `/code-review` 两轴结果修复 #1-#4:
+
+- **#1 [Hard, Standards]**: WaitRequest doc-comment 删掉 "0" 误标 (`src/control_protocol.rs`)
+- **#2 [Spec]**: smoke 加 2 段 (negative / non-numeric), 从 3 段 → 5 段
+- **#3 [Judgement, Standards]**: 提取 `build_default_wait_response_json` helper, 镜像 `build_default_web_*` 模式 (`src/control_actions.rs`)
+- **#4 [Judgement, Standards]**: smoke 用 feature-specific liveness probe (`@wait:0`) 替代 `@ping`, 旧 daemon 不支持时自动 kill 重启, 落实 EXPERIENCE.md:216 教训
+
+### 最终验证
+
+- `cargo test --bin rdog`: **448 passed; 0 failed**
+- `RUSTFLAGS="-Awarnings" cargo check`: 0 warning
+- `bash scripts/smoke_wait.sh`: 5/5 通过
+  - test 1: 200ms → duration_ms:205 (5ms tolerance)
+  - test 2: 0ms → duration_ms:0 (immediate)
+  - test 3: negative → "@wait 的 `duration_ms` 不能为负数: -1"
+  - test 4: non-numeric → "@wait 的 `duration_ms` 必须是整数: \"abc\""
+  - test 5: missing field → "@wait 对象 payload 不能为空,需要 duration_ms 字段"
+
+### 状态
+**code-review 修复完成, 准备进 commit。**

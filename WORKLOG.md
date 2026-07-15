@@ -101,3 +101,29 @@
 - UI script runner 不能把 control response 当成纯输出;非零 code 是脚本级失败信号。
 - daemon-side `@flow` 的能力开关要按副作用类型拆开,文件读取不能隐式挂在 shell policy 之外。
 - `main.rs` 职责集中和 target resolver 分散仍是 WATCH 项,提交后下一步应优先拆 UI script runner / target resolver。
+
+## [2026-06-30 00:56:17] [Session ID: codex-20260629-ultragoal-ui-script-123] 任务名称: Ultragoal UI script 123 完成
+
+### 任务内容
+- 按用户要求顺序完成 1/2/3:拆分 UI script runner / target resolver,接入 `rdog control --ui-script`,完成安全 live smoke 和 final quality gate。
+- 生成 `.omx/ultragoal/ai-slop-cleaner-g004.md`、`.omx/ultragoal/quality-gate-g004.json`、`.omx/tmp/g004-codex-goal.json`。
+- 完成 G004 checkpoint,`omx ultragoal complete-goals --json` 返回 `done:true`。
+
+### 完成过程
+- 将 `src/main.rs` 保持为 CLI 分发,把 control invocation 与 UI script runner 收敛到 `src/control_invocation.rs` 和 `src/ui_script_runner.rs`。
+- `rdog control --ui-script <file.json> [TARGET]` 复用共享 runner,同步更新 specs 和 rdog-control skill。
+- code-reviewer 两次发现真实 runner blocker 后,分别修复 prior-response guard 和 adjacent ControlLine fail-fast。
+- architect WATCH 指出的 trace contract drift 已修复,control trace 现在包含 `started_at_unix_ms` 和结构化 `response.target_resolution`。
+
+### 验证
+- `rtk cargo test --package rustdog --bin rdog ui_script_runner::tests --quiet`: 14 passed。
+- `rtk cargo test --package rustdog --bin rdog --quiet`: 441 passed。
+- `rtk cargo test --package rustdog --test control_lanes --quiet`: 15 passed,1 ignored。
+- `cargo fmt -- --check`、`rtk git diff --check`、`rtk cargo check --package rustdog --bin rdog --quiet`、`cargo build --package rustdog --bin rdog --quiet`: passed。
+- 最新 `rdog control --ui-script ... --dry-run self`: emitted 4 compiled steps。
+- final TCP live smoke: `@response "pong"`,summary complete,trace 4 lines,normalized script 和 artifacts 目录存在,端口 45679 已释放。
+- 独立 code-reviewer: `APPROVE`;独立 architect: `CLEAR`。
+
+### 总结感悟
+- UI script runner 的安全边界不能为了 batching 牺牲 fail-fast。相邻 UI action 必须逐条确认上一条成功后再发送。
+- `Expect` 不能从 missing state 推导成功。没有上一条 `@response` 就应该显式失败。
