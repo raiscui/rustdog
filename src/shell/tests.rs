@@ -47,6 +47,9 @@ impl ControlActionExecutor for FakeExecutor {
             ControlCommand::Wait(request) => {
                 format!("WAIT:{}\n", request.duration_ms).into_bytes()
             }
+            ControlCommand::OpenApp(request) => {
+                format!("OPEN_APP:{}:{}\n", request.app_name, request.wait_ms).into_bytes()
+            }
             ControlCommand::PtyOpen(request) => format!("PTY_OPEN:{}\n", request.cmd).into_bytes(),
             ControlCommand::PtyClose(request) => {
                 format!("PTY_CLOSE:{}\n", request.session_id).into_bytes()

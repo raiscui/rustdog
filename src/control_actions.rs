@@ -16,7 +16,7 @@ use crate::{
     control_observation::resolve_observation_ref,
     control_protocol::{
         ControlCommand, KeyMode, KeyRequest, KeyResponseMode, PasteRequest, PasteRequestKind,
-    WaitRequest,
+    OpenAppRequest, WaitRequest,
         DEFAULT_KEY_HOLD_MS,
     },
     control_web::{build_default_web_act_response_json, build_default_web_find_response_json},
@@ -188,6 +188,7 @@ impl ControlActionExecutor for SystemControlActionExecutor {
             ControlCommand::SaveFile(frame) => {
                 execute_save_file(frame, self.savefile_base_dir.as_deref())
             }
+            ControlCommand::OpenApp(request) => execute_open_app(request),
             ControlCommand::Wait(request) => execute_wait(request),
         }
     }
@@ -234,6 +235,101 @@ pub(crate) fn build_default_wait_response_json(request: &WaitRequest, actual_ms:
         "duration_ms": actual_ms,
     })
     .to_string()
+}
+
+/// `@open-app` 的 executor。
+///
+/// macOS 走 `open -a <app_name>`,等待 `wait_ms` 让 app 完成初次绘制。
+/// 其他平台返回 `platform_unsupported` 错误码 (LP1 跟进跨平台)。
+fn execute_open_app(request: &OpenAppRequest) -> io::Result<ActionExecutionResult> {
+    let payload = open_app_payload_for_current_platform(request);
+
+    // platform_unsupported / permission_denied 用非零 exit_code 标记;
+    // 成功路径用 0。
+    let exit_code = if payload.get("ok").and_then(|v| v.as_bool()).unwrap_or(false) {
+        0
+    } else {
+        64 // 与现有 parse error 同 code
+    };
+
+    Ok(ActionExecutionResult {
+        exit_code,
+        stdout: Vec::new(),
+        stderr: Vec::new(),
+        response_value_json: Some(payload.to_string()),
+    })
+}
+
+/// 根据当前平台返回对应的 `@open-app` 响应 JSON。
+///
+/// 拆出来便于单测 (未来 ticket 02 的 smoke 已经在 daemon 跑过,这里纯函数
+/// 保证 macOS / 非 macOS 两个分支都被覆盖)。
+fn open_app_payload_for_current_platform(request: &OpenAppRequest) -> serde_json::Value {
+    #[cfg(target_os = "macos")]
+    {
+        return run_open_app_on_macos(request);
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        serde_json::json!({
+            "ok": false,
+            "error_code": "platform_unsupported",
+            "error_message": "@open-app 是 macOS-only 的本轮实现;Linux/Windows 见 LATER_PLANS LP1",
+            "evidence": {
+                "target_os": std::env::consts::OS,
+                "app_name": request.app_name,
+            }
+        })
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn run_open_app_on_macos(request: &OpenAppRequest) -> serde_json::Value {
+    use std::process::Command;
+
+    // `open -a <app_name>` 启动指定 app。wait_ms==0 跳过 sleep。
+    let output = Command::new("open").args(["-a", &request.app_name]).output();
+
+    match output {
+        Ok(out) if out.status.success() => {
+            if request.wait_ms > 0 {
+                std::thread::sleep(std::time::Duration::from_millis(request.wait_ms));
+            }
+            serde_json::json!({
+                "ok": true,
+                "dispatched_to": "@open-app",
+                "app_name": request.app_name,
+                "wait_ms": request.wait_ms,
+            })
+        }
+        Ok(out) => {
+            // `open` 自己退出非 0 (典型: app not found)
+            let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+            serde_json::json!({
+                "ok": false,
+                "error_code": "app_not_found",
+                "error_message": format!("`open -a {}` 退出码 {:?}", request.app_name, out.status.code()),
+                "evidence": {
+                    "app_name": request.app_name,
+                    "exit_code": out.status.code(),
+                    "stderr": stderr,
+                }
+            })
+        }
+        Err(e) => {
+            // 启动 `open` 命令本身失败 (PATH 缺失等)
+            serde_json::json!({
+                "ok": false,
+                "error_code": "permission_denied",
+                "error_message": format!("无法执行 `open` 命令: {e}"),
+                "evidence": {
+                    "app_name": request.app_name,
+                    "io_error": e.to_string(),
+                }
+            })
+        }
+    }
 }
 
 fn execute_script(shell: &str, script_text: &str) -> io::Result<ActionExecutionResult> {

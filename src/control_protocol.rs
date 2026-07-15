@@ -8,7 +8,7 @@ pub(crate) use self::parsers::{
 };
 
 use self::parsers::{
-    parse_control_header, parse_key_payload, parse_wait_payload, parse_pty_attach_payload, parse_pty_close_payload,
+    parse_control_header, parse_key_payload, parse_open_app_payload, parse_wait_payload, parse_pty_attach_payload, parse_pty_close_payload,
     parse_pty_detach_payload, parse_pty_payload, parse_screenshot_payload,
     require_non_empty_payload,
 };
@@ -96,6 +96,7 @@ pub enum ControlCommand {
     SelectorRefind(SelectorRefindRequest),
     SaveFile(SaveFileFrame),
     Wait(WaitRequest),
+    OpenApp(OpenAppRequest),
 }
 
 pub const DEFAULT_KEY_HOLD_MS: u64 = 200;
@@ -115,6 +116,21 @@ pub const DEFAULT_SCREENSHOT_QUALITY: u8 = 75;
 pub struct WaitRequest {
     pub duration_ms: u64,
 }
+
+
+/// `@open-app` 的结构化请求。
+///
+/// macOS 上由 daemon 走 `open -a <app_name>`;其他平台返回
+/// `error_code:"platform_unsupported"` (LP1 跟进 Linux/Windows)。
+///
+/// `wait_ms` 是让被启动 app 完成初次绘制/加载的等待时长 (默认 1500ms),
+/// 不是 timeout — `wait_ms==0` 合法 (立即返回,不等启动)。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OpenAppRequest {
+    pub app_name: String,
+    pub wait_ms: u64,
+}
+
 
 /// `@paste` 的结构化请求。
 ///
@@ -439,6 +455,7 @@ pub fn parse_control_line(line: &str) -> io::Result<ControlParseResult> {
         }
         "savefile" => ControlCommand::SaveFile(SaveFileFrame::parse_object_payload(payload)?),
         "wait" => ControlCommand::Wait(parse_wait_payload(payload)?),
+        "open-app" => ControlCommand::OpenApp(parse_open_app_payload(payload)?),
         _ => {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
