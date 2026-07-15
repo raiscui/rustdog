@@ -1,14 +1,20 @@
 use std::io;
 
+mod cancel_seq;
 mod key;
+mod open_app;
 mod pty;
 mod screenshot;
+mod wait;
 
 pub(super) use self::key::parse_key_payload;
 pub(super) use self::pty::{
     parse_pty_attach_payload, parse_pty_close_payload, parse_pty_detach_payload, parse_pty_payload,
 };
 pub(super) use self::screenshot::parse_screenshot_payload;
+pub(super) use self::cancel_seq::parse_cancel_payload;
+pub(super) use self::open_app::parse_open_app_payload;
+pub(super) use self::wait::parse_wait_payload;
 
 pub(crate) fn object_inner<'a>(input: &'a str, kind: &str) -> io::Result<&'a str> {
     let trimmed = input.trim();
@@ -187,6 +193,18 @@ pub(super) fn parse_control_header(command: &str) -> io::Result<(&str, Option<u6
         .map(|(header, _)| header)
         .unwrap_or(command)
         .trim();
+
+    // 特殊处理: `@cancel#seq#5:{target_seq:1}` 这种命令名本身含 `#`
+    // 的复合命令。常规 split_once('#') 会把 `cancel#seq` 拆成 kind=`cancel`
+    // request_id=`seq`,所以这里先尝试把 `cancel#seq` 整体识别出来。
+    if let Some(rest) = header.strip_prefix("cancel#seq") {
+        if let Some(request_id_str) = rest.strip_prefix('#') {
+            let request_id = parse_request_id(request_id_str.trim(), command)?;
+            return Ok(("cancel#seq", Some(request_id)));
+        }
+        // 没有 `#<request_id>` 后缀 — 这是 `@cancel#seq` 无 request_id 形式
+        return Ok(("cancel#seq", None));
+    }
 
     if let Some((kind, request_id)) = header.split_once('#') {
         let request_id = parse_request_id(request_id.trim(), command)?;

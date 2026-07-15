@@ -4,6 +4,7 @@ use crate::{
     control_actions::{build_shell_command, ControlActionExecutor},
     control_bootstrap::build_bootstrap_outcome,
     control_capabilities::current_capabilities_report_json,
+    control_flow::execute_flow_request,
     control_frames::ControlExecutionOutcome,
     control_observation::{
         build_observe_outcome, build_selector_get_response_json,
@@ -24,6 +25,7 @@ pub fn execute_explicit_control_request<E: ControlActionExecutor>(
     request: &ControlRequest,
     shell: &str,
     executor: &E,
+    cancel_registry: &crate::cancellation::CancelRegistry,
 ) -> ControlExecutionOutcome {
     match &request.command {
         ControlCommand::Ping => ControlExecutionOutcome::from_response_line(
@@ -95,6 +97,11 @@ pub fn execute_explicit_control_request<E: ControlActionExecutor>(
                 ),
             }
         }
+        ControlCommand::Flow(flow_request) => {
+            execute_flow_request(request.request_id, flow_request, shell, |line| {
+                parse_and_execute_control_line(line, shell, executor, &cancel_registry)
+            })
+        }
         ControlCommand::SelectorGet(selector_request) => {
             match build_selector_get_response_json(selector_request) {
                 Ok(value_json) => ControlExecutionOutcome::from_response_line(
@@ -125,25 +132,37 @@ pub fn execute_explicit_control_request<E: ControlActionExecutor>(
                 ),
             }
         }
-        command => match executor.execute(command, shell) {
-            Ok(result) => {
-                let response = match result.response_value_json {
-                    Some(value_json) => {
-                        render_structured_success_response(request.request_id, &value_json)
-                    }
-                    None => render_control_response_payload(
-                        request.request_id,
-                        result.exit_code,
-                        &result.stdout,
-                        &result.stderr,
-                    ),
-                };
-                ControlExecutionOutcome::from_response_line(response)
+        command => {
+            // ADR-0005 ticket 03: in-flight 命令走 cancel registry。
+            // 每次调用前 register,完成后 unregister;@cancel#seq 通过同一
+            // registry signal 对应 token。
+            let token = request
+                .request_id
+                .map(|seq| cancel_registry.register(seq));
+            let result = executor.execute(command, shell, token.as_ref());
+            if let Some(seq) = request.request_id {
+                cancel_registry.unregister(seq);
             }
-            Err(err) => ControlExecutionOutcome::from_response_line(
-                render_control_action_error_response(request.request_id, &err),
-            ),
-        },
+            match result {
+                Ok(result) => {
+                    let response = match result.response_value_json {
+                        Some(value_json) => {
+                            render_structured_success_response(request.request_id, &value_json)
+                        }
+                        None => render_control_response_payload(
+                            request.request_id,
+                            result.exit_code,
+                            &result.stdout,
+                            &result.stderr,
+                        ),
+                    };
+                    ControlExecutionOutcome::from_response_line(response)
+                }
+                Err(err) => ControlExecutionOutcome::from_response_line(
+                    render_control_action_error_response(request.request_id, &err),
+                ),
+            }
+        }
     }
 }
 
@@ -181,10 +200,11 @@ pub fn parse_and_execute_control_line<E: ControlActionExecutor>(
     line: &str,
     shell: &str,
     executor: &E,
+    cancel_registry: &crate::cancellation::CancelRegistry,
 ) -> ControlExecutionOutcome {
     match parse_control_line(line) {
         Ok(ControlParseResult::Control(request)) => {
-            execute_explicit_control_request(&request, shell, executor)
+            execute_explicit_control_request(&request, shell, executor, cancel_registry)
         }
         Ok(ControlParseResult::LiteralShellLine(command)) => {
             execute_literal_shell_line(&command, shell)
@@ -358,14 +378,20 @@ fn escape_json_string(input: &str) -> String {
 mod tests {
     use super::*;
     use crate::{
-        control_actions::ActionExecutionResult,
+        control_actions::{ActionExecutionResult, SystemControlActionExecutor},
+        control_frames::ControlFrame,
         control_protocol::{
             parse_control_line, ControlCommand, ControlParseResult, KeyMode, KeyRequest,
             PasteRequest,
         },
     };
+    use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
     use serde_json::Value;
-    use std::sync::{Arc, Mutex};
+    use std::{
+        fs,
+        sync::{Arc, Mutex},
+        time::{SystemTime, UNIX_EPOCH},
+    };
 
     #[derive(Clone, Default)]
     struct FakeExecutor {
@@ -377,6 +403,7 @@ mod tests {
             &self,
             command: &ControlCommand,
             _shell: &str,
+            _cancel: Option<&crate::cancellation::CancellationToken>,
         ) -> io::Result<ActionExecutionResult> {
             self.commands
                 .lock()
@@ -400,6 +427,7 @@ mod tests {
             &self,
             _command: &ControlCommand,
             _shell: &str,
+            _cancel: Option<&crate::cancellation::CancellationToken>,
         ) -> io::Result<ActionExecutionResult> {
             Err(io::Error::new(
                 io::ErrorKind::PermissionDenied,
@@ -408,8 +436,33 @@ mod tests {
         }
     }
 
+    fn parse_response_payload(response: &str) -> Value {
+        serde_json::from_str(
+            response
+                .strip_prefix("@response ")
+                .expect("response should be wrapped as @response"),
+        )
+        .expect("response should be valid json")
+    }
+
+    fn temp_flow_dir(name: &str) -> std::path::PathBuf {
+        let millis = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time should be after unix epoch")
+            .as_millis();
+        std::env::temp_dir().join(format!(
+            "rdog-flow-core-{name}-{millis}-{}",
+            std::process::id()
+        ))
+    }
+
+    fn escape_json(input: &str) -> String {
+        input.replace('\\', "\\\\").replace('"', "\\\"")
+    }
+
     #[test]
     fn explicit_request_should_wrap_ping_as_response_line() {
+        let cancel_registry = crate::cancellation::CancelRegistry::new();
         let response = execute_explicit_control_request(
             &ControlRequest {
                 request_id: Some(7),
@@ -417,6 +470,7 @@ mod tests {
             },
             "/bin/sh",
             &FakeExecutor::default(),
+            &cancel_registry,
         )
         .into_single_response_line();
 
@@ -425,6 +479,7 @@ mod tests {
 
     #[test]
     fn explicit_request_should_route_command_to_executor() {
+        let cancel_registry = crate::cancellation::CancelRegistry::new();
         let executor = FakeExecutor::default();
         let recorded = Arc::clone(&executor.commands);
 
@@ -435,6 +490,7 @@ mod tests {
             },
             "/bin/sh",
             &executor,
+            &cancel_registry,
         )
         .into_single_response_line();
 
@@ -467,10 +523,11 @@ mod tests {
 
     #[test]
     fn zenoh_profile_should_accept_key_requests() {
+        let cancel_registry = crate::cancellation::CancelRegistry::new();
         let executor = FakeExecutor::default();
         let recorded = Arc::clone(&executor.commands);
 
-        let response = parse_and_execute_control_line(r#"@key#9:"F11""#, "/bin/sh", &executor)
+        let response = parse_and_execute_control_line(r#"@key#9:"F11""#, "/bin/sh", &executor, &cancel_registry)
             .into_single_response_line();
 
         assert_eq!(response, r#"@response {"id":9,"value":"EXEC_OK"}"#);
@@ -489,10 +546,11 @@ mod tests {
 
     #[test]
     fn control_line_should_route_legacy_paste_requests_to_executor() {
+        let cancel_registry = crate::cancellation::CancelRegistry::new();
         let executor = FakeExecutor::default();
         let recorded = Arc::clone(&executor.commands);
 
-        let response = parse_and_execute_control_line(r#"@paste:"hello""#, "/bin/sh", &executor)
+        let response = parse_and_execute_control_line(r#"@paste:"hello""#, "/bin/sh", &executor, &cancel_registry)
             .into_single_response_line();
 
         assert_eq!(response, r#"@response "EXEC_OK""#);
@@ -507,10 +565,11 @@ mod tests {
 
     #[test]
     fn control_line_should_route_bare_paste_hotkey_requests_to_executor() {
+        let cancel_registry = crate::cancellation::CancelRegistry::new();
         let executor = FakeExecutor::default();
         let recorded = Arc::clone(&executor.commands);
 
-        let response = parse_and_execute_control_line(r#"@paste#12"#, "/bin/sh", &executor)
+        let response = parse_and_execute_control_line(r#"@paste#12"#, "/bin/sh", &executor, &cancel_registry)
             .into_single_response_line();
 
         assert_eq!(response, r#"@response {"id":12,"value":"EXEC_OK"}"#);
@@ -525,12 +584,13 @@ mod tests {
 
     #[test]
     fn control_line_should_execute_literal_shell_line() {
+        let cancel_registry = crate::cancellation::CancelRegistry::new();
         #[cfg(windows)]
         let (shell, command) = ("cmd.exe", "echo LITERAL_OK");
         #[cfg(not(windows))]
         let (shell, command) = ("/bin/sh", "printf LITERAL_OK");
 
-        let response = parse_and_execute_control_line(command, shell, &FakeExecutor::default())
+        let response = parse_and_execute_control_line(command, shell, &FakeExecutor::default(), &cancel_registry)
             .into_single_response_line();
 
         assert!(
@@ -541,11 +601,11 @@ mod tests {
 
     #[test]
     fn explicit_request_should_render_permission_denied_as_code_77() {
+        let cancel_registry = crate::cancellation::CancelRegistry::new();
         let response = parse_and_execute_control_line(
             r#"@key:"F11""#,
             "/bin/sh",
-            &FakePermissionDeniedExecutor,
-        )
+            &FakePermissionDeniedExecutor, &cancel_registry)
         .into_single_response_line();
 
         assert!(response.contains(r#""code":77"#));
@@ -554,6 +614,7 @@ mod tests {
 
     #[test]
     fn explicit_request_should_forward_structured_invalid_input_json() {
+        let cancel_registry = crate::cancellation::CancelRegistry::new();
         #[derive(Clone)]
         struct StructuredInvalidInputExecutor;
 
@@ -562,6 +623,7 @@ mod tests {
                 &self,
                 _command: &ControlCommand,
                 _shell: &str,
+                _cancel: Option<&crate::cancellation::CancellationToken>,
             ) -> io::Result<ActionExecutionResult> {
                 Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
@@ -573,8 +635,7 @@ mod tests {
         let response = parse_and_execute_control_line(
             r#"@window-close:{app:"Terminal",title_contains:"rdog"}"#,
             "/bin/sh",
-            &StructuredInvalidInputExecutor,
-        )
+            &StructuredInvalidInputExecutor, &cancel_registry)
         .into_single_response_line();
 
         assert_eq!(
@@ -585,6 +646,7 @@ mod tests {
 
     #[test]
     fn explicit_request_should_forward_structured_other_error_json() {
+        let cancel_registry = crate::cancellation::CancelRegistry::new();
         #[derive(Clone)]
         struct StructuredOtherExecutor;
 
@@ -593,6 +655,7 @@ mod tests {
                 &self,
                 _command: &ControlCommand,
                 _shell: &str,
+                _cancel: Option<&crate::cancellation::CancellationToken>,
             ) -> io::Result<ActionExecutionResult> {
                 Err(io::Error::other(
                     r#"{"kind":"screenshot-stale-frame","error_code":"SCREENSHOT_STALE_FRAME","error":"stale visual frame","display_count":2}"#,
@@ -601,7 +664,7 @@ mod tests {
         }
 
         let response =
-            parse_and_execute_control_line(r#"@key#17:"F11""#, "/bin/sh", &StructuredOtherExecutor)
+            parse_and_execute_control_line(r#"@key#17:"F11""#, "/bin/sh", &StructuredOtherExecutor, &cancel_registry)
                 .into_single_response_line();
 
         assert_eq!(
@@ -612,6 +675,7 @@ mod tests {
 
     #[test]
     fn explicit_request_should_render_structured_success_without_double_escaping() {
+        let cancel_registry = crate::cancellation::CancelRegistry::new();
         #[derive(Clone)]
         struct StructuredExecutor;
 
@@ -620,6 +684,7 @@ mod tests {
                 &self,
                 _command: &ControlCommand,
                 _shell: &str,
+                _cancel: Option<&crate::cancellation::CancellationToken>,
             ) -> io::Result<ActionExecutionResult> {
                 Ok(ActionExecutionResult {
                     exit_code: 0,
@@ -640,6 +705,7 @@ mod tests {
             },
             "/bin/sh",
             &StructuredExecutor,
+            &cancel_registry,
         )
         .into_single_response_line();
 
@@ -651,6 +717,7 @@ mod tests {
 
     #[test]
     fn explicit_request_should_route_ax_commands_to_executor() {
+        let cancel_registry = crate::cancellation::CancelRegistry::new();
         #[derive(Clone)]
         struct StructuredAxExecutor;
 
@@ -659,6 +726,7 @@ mod tests {
                 &self,
                 command: &ControlCommand,
                 _shell: &str,
+                _cancel: Option<&crate::cancellation::CancellationToken>,
             ) -> io::Result<ActionExecutionResult> {
                 match command {
                     ControlCommand::AxTree(_) => Ok(ActionExecutionResult {
@@ -734,32 +802,27 @@ mod tests {
         let tree_response = parse_and_execute_control_line(
             r#"@ax-tree#9:{scope:"windows"}"#,
             "/bin/sh",
-            &StructuredAxExecutor,
-        )
+            &StructuredAxExecutor, &cancel_registry)
         .into_single_response_line();
         let press_response = parse_and_execute_control_line(
             r#"@ax-press#10:{target:{id:"pid:1/window:0/path:0"}}"#,
             "/bin/sh",
-            &StructuredAxExecutor,
-        )
+            &StructuredAxExecutor, &cancel_registry)
         .into_single_response_line();
         let action_response = parse_and_execute_control_line(
             r#"@ax-action#11:{target:{id:"pid:1/window:0/path:0"},action:"AXShowMenu"}"#,
             "/bin/sh",
-            &StructuredAxExecutor,
-        )
+            &StructuredAxExecutor, &cancel_registry)
         .into_single_response_line();
         let set_value_response = parse_and_execute_control_line(
             r#"@ax-set-value#12:{target:{id:"pid:1/window:0/path:0"},value:"hello",mode:"append"}"#,
             "/bin/sh",
-            &StructuredAxExecutor,
-        )
+            &StructuredAxExecutor, &cancel_registry)
         .into_single_response_line();
         let type_text_response = parse_and_execute_control_line(
             r#"@type-text#13:{target:{id:"pid:1/window:0/path:0"},text:"hello",mode:"ax-value"}"#,
             "/bin/sh",
-            &StructuredAxExecutor,
-        )
+            &StructuredAxExecutor, &cancel_registry)
         .into_single_response_line();
 
         assert_eq!(
@@ -786,6 +849,7 @@ mod tests {
 
     #[test]
     fn explicit_request_should_return_outcome_with_single_response_frame() {
+        let cancel_registry = crate::cancellation::CancelRegistry::new();
         let outcome = execute_explicit_control_request(
             &ControlRequest {
                 request_id: Some(1),
@@ -793,6 +857,7 @@ mod tests {
             },
             "/bin/sh",
             &FakeExecutor::default(),
+            &cancel_registry,
         );
 
         assert_eq!(outcome.outbound_frames.len(), 1);
@@ -800,8 +865,9 @@ mod tests {
 
     #[test]
     fn explicit_request_should_render_capabilities_report() {
+        let cancel_registry = crate::cancellation::CancelRegistry::new();
         let response =
-            parse_and_execute_control_line("@capabilities#12", "/bin/sh", &FakeExecutor::default())
+            parse_and_execute_control_line("@capabilities#12", "/bin/sh", &FakeExecutor::default(), &cancel_registry)
                 .into_single_response_line();
         let parsed: Value = serde_json::from_str(
             response
@@ -821,10 +887,128 @@ mod tests {
     }
 
     #[test]
+    fn explicit_request_should_execute_minimal_flow_shell_lane() {
+        let cancel_registry = crate::cancellation::CancelRegistry::new();
+        let response = parse_and_execute_control_line(
+            r#"@flow#44:{"schema":"rdog.flow.v1","policy":{"allow_shell":true},"steps":[{"Cmd":{"run":"printf flow-ok","capture":"cmd1"}},{"Expect":{"kind":"cmd_stdout_contains","capture":"cmd1","contains":"flow-ok"}},{"Exit":null}]}"#,
+            "/bin/sh",
+            &SystemControlActionExecutor::default(),
+            &cancel_registry,
+        )
+        .into_single_response_line();
+        let parsed: Value = serde_json::from_str(
+            response
+                .strip_prefix("@response ")
+                .expect("@flow response should be wrapped as @response"),
+        )
+        .expect("@flow response should be valid json");
+
+        assert_eq!(parsed["id"], 44);
+        assert_eq!(parsed["value"]["schema"], "rdog.flow.v1");
+        assert_eq!(parsed["value"]["status"], "ok");
+        assert_eq!(parsed["value"]["captures"]["cmd1"]["stdout"], "flow-ok");
+    }
+
+    #[test]
+    fn explicit_request_should_consume_flow_control_line_response() {
+        let cancel_registry = crate::cancellation::CancelRegistry::new();
+        let response = parse_and_execute_control_line(
+            r#"@flow#45:{"schema":"rdog.flow.v1","steps":[{"ControlLine":"@ping"},{"Expect":{"kind":"response_contains","contains":"pong"}}]}"#,
+            "/bin/sh",
+            &SystemControlActionExecutor::default(),
+            &cancel_registry,
+        )
+        .into_single_response_line();
+        let parsed = parse_response_payload(&response);
+
+        assert_eq!(parsed["id"], 45);
+        assert_eq!(parsed["value"]["status"], "ok");
+        assert_eq!(parsed["value"]["response_count"], 1);
+        assert_eq!(parsed["value"]["completed_steps"], 2);
+    }
+
+    #[test]
+    fn explicit_request_should_lift_flow_save_artifact_before_final_response() {
+        let cancel_registry = crate::cancellation::CancelRegistry::new();
+        let dir = temp_flow_dir("save-artifact");
+        fs::create_dir_all(&dir).expect("temp dir should create");
+        let artifact_path = dir.join("report.txt");
+        fs::write(&artifact_path, "artifact-ok").expect("artifact should write");
+        let line = format!(
+            r#"@flow#46:{{"schema":"rdog.flow.v1","policy":{{"allow_file_read":true}},"steps":[{{"SaveArtifact":{{"path":"{}","mime":"text/plain","filename":"report.txt"}}}},{{"Expect":{{"kind":"artifact_exists","artifact":"report.txt"}}}}]}}"#,
+            escape_json(
+                artifact_path
+                    .to_str()
+                    .expect("artifact path should be utf8")
+            ),
+        );
+
+        let outcome = parse_and_execute_control_line(
+            &line,
+            "/bin/sh",
+            &SystemControlActionExecutor::default(),
+            &cancel_registry,
+        );
+        assert_eq!(outcome.outbound_frames.len(), 2);
+        let ControlFrame::SaveFile(savefile) = &outcome.outbound_frames[0] else {
+            panic!("first frame should be @savefile");
+        };
+        assert_eq!(savefile.request_id, Some(46));
+        assert_eq!(savefile.filename, "report.txt");
+        assert_eq!(savefile.mime, "text/plain");
+        assert_eq!(
+            BASE64_STANDARD
+                .decode(savefile.data.as_bytes())
+                .expect("savefile data should decode"),
+            b"artifact-ok"
+        );
+
+        let ControlFrame::ResponseLine(response) = &outcome.outbound_frames[1] else {
+            panic!("last frame should be final @response");
+        };
+        let parsed = parse_response_payload(response);
+        assert_eq!(parsed["value"]["status"], "ok");
+        assert_eq!(parsed["value"]["artifacts"][0], "report.txt");
+    }
+
+    #[test]
+    fn explicit_request_should_emit_flow_trace_savefile_before_final_response() {
+        let cancel_registry = crate::cancellation::CancelRegistry::new();
+        let outcome = parse_and_execute_control_line(
+            r#"@flow#47:{"schema":"rdog.flow.v1","options":{"trace":"savefile"},"steps":[{"ControlLine":"@ping"},{"Expect":{"kind":"response_contains","contains":"pong"}}]}"#,
+            "/bin/sh",
+            &SystemControlActionExecutor::default(),
+            &cancel_registry,
+        );
+        assert_eq!(outcome.outbound_frames.len(), 2);
+        let ControlFrame::SaveFile(trace) = &outcome.outbound_frames[0] else {
+            panic!("first frame should be trace @savefile");
+        };
+        assert_eq!(trace.request_id, Some(47));
+        assert_eq!(trace.filename, "flow-trace-47.jsonl");
+        assert_eq!(trace.mime, "application/jsonl");
+        let trace_jsonl = String::from_utf8(
+            BASE64_STANDARD
+                .decode(trace.data.as_bytes())
+                .expect("trace data should decode"),
+        )
+        .expect("trace should be utf8");
+        assert!(trace_jsonl.contains(r#""kind":"ControlLine""#));
+        assert!(trace_jsonl.contains(r#""kind":"Expect""#));
+
+        let ControlFrame::ResponseLine(response) = &outcome.outbound_frames[1] else {
+            panic!("last frame should be final @response");
+        };
+        let parsed = parse_response_payload(response);
+        assert_eq!(parsed["value"]["trace_record_count"], 2);
+    }
+
+    #[test]
     fn explicit_request_should_render_observe_without_action_executor() {
+        let cancel_registry = crate::cancellation::CancelRegistry::new();
         let executor = FakeExecutor::default();
         let response =
-            parse_and_execute_control_line(r#"@observe#77:{mode:"window"}"#, "/bin/sh", &executor)
+            parse_and_execute_control_line(r#"@observe#77:{mode:"window"}"#, "/bin/sh", &executor, &cancel_registry)
                 .into_single_response_line();
         let parsed: Value = serde_json::from_str(
             response
@@ -847,8 +1031,9 @@ mod tests {
 
     #[test]
     fn explicit_request_should_render_basic_bootstrap_without_action_executor() {
+        let cancel_registry = crate::cancellation::CancelRegistry::new();
         let executor = FakeExecutor::default();
-        let response = parse_and_execute_control_line("@bootstrap#21", "/bin/sh", &executor)
+        let response = parse_and_execute_control_line("@bootstrap#21", "/bin/sh", &executor, &cancel_registry)
             .into_single_response_line();
         let parsed: Value = serde_json::from_str(
             response
@@ -875,11 +1060,13 @@ mod tests {
 
     #[test]
     fn explicit_request_should_render_gui_bootstrap_with_observe_bundle() {
+        let cancel_registry = crate::cancellation::CancelRegistry::new();
         let executor = FakeExecutor::default();
         let response = parse_and_execute_control_line(
             r#"@bootstrap#22:{mode:"gui",observe:{mode:"window"},include_trace:false}"#,
             "/bin/sh",
             &executor,
+            &cancel_registry,
         )
         .into_single_response_line();
         let parsed: Value = serde_json::from_str(
@@ -909,10 +1096,12 @@ mod tests {
 
     #[test]
     fn parse_error_should_preserve_bootstrap_cached_policy_structure() {
+        let cancel_registry = crate::cancellation::CancelRegistry::new();
         let response = parse_and_execute_control_line(
             r#"@bootstrap#42:{capability_policy:"cached"}"#,
             "/bin/sh",
             &FakeExecutor::default(),
+            &cancel_registry,
         )
         .into_single_response_line();
         let parsed: Value = serde_json::from_str(

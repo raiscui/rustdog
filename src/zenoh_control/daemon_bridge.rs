@@ -307,7 +307,7 @@ pub(super) fn open_daemon_session_bridge(
                         }
                     }
 
-                    let outcome = parse_and_execute_control_line(line.as_ref(), &shell, &executor);
+                    let outcome = parse_and_execute_control_line(line.as_ref(), &shell, &executor, &crate::cancellation::CancelRegistry::new());
                     let session_core = ControlPeerSession::new(session_id.as_str());
                     let dispatch_result = publisher
                         .lock()

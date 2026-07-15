@@ -956,13 +956,14 @@ fn control_one_shot_should_send_ping_with_request_id() {
 }
 
 #[test]
-fn control_one_shot_should_reject_at_line_without_target() {
-    // 没有 target 但给了 one-shot line,应该报错并退出非 0。
-    // 注: rdog 的错误日志当前默认走 stdout,所以既要检查 exit code
-    // 也要在 stdout 里确认错误文案,不要假设错误一定在 stderr。
+fn control_one_shot_without_target_should_report_missing_local_daemon_for_unknown_namespace() {
+    // 空 target + one-shot 现在是本机 local-default fast path。
+    // 为了让测试不依赖开发机上是否已经启动了默认 daemon,这里使用唯一 namespace,
+    // 验证它找不到本机 daemon 时返回清晰错误。
     let binary = rdog_binary_path();
+    let namespace = format!("missing-one-shot-{}", std::process::id());
     let output = Command::new(&binary)
-        .args(["control", "@ping"])
+        .args(["control", "--namespace", &namespace, "@ping"])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -977,18 +978,18 @@ fn control_one_shot_should_reject_at_line_without_target() {
 
     assert!(
         !output.status.success(),
-        "control one-shot without target should fail"
+        "control one-shot without local daemon should fail"
     );
     assert!(
-        combined.contains("one-shot line 需要 control 目标"),
-        "stdout+stderr should explain missing target, got: {combined}"
+        combined.contains("本地 daemon"),
+        "stdout+stderr should explain missing local daemon, got: {combined}"
     );
 }
 
 #[test]
 fn control_one_shot_should_accept_two_at_lines_and_run_in_order_for_tcp_lane() {
     // 2 个 `@` line 必须被 clap `num_args = 0..=32` 接受,
-    // 走和 N=1 / N>1 一样的 `send_control_lines_tcp` → `run_line_control_lines` 路径,
+    // 走和 N=1 / N>1 一样的 collect frames 路径,
     // 共享同一条 TCP 连接,顺序串行执行。这条用例锁住 one-shot N=1 / N>1 已经统一
     // 走 `send_control_lines_*` 这条契约,不让 spec / test 再退回老设计。
     let port = next_free_port();

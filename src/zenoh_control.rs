@@ -237,7 +237,7 @@ fn handle_daemon_control_query(
             .map_err(to_io_error)?;
         return Ok(());
     }
-    let outcome = parse_and_execute_control_line(request.line.as_str(), shell, executor);
+    let outcome = parse_and_execute_control_line(request.line.as_str(), shell, executor, &crate::cancellation::CancelRegistry::new());
 
     if let Some(session_id) = request.session_id.as_deref() {
         publish_outcome_to_session_channel(session, keyexpr_root, namespace, session_id, &outcome)?;
@@ -524,25 +524,20 @@ pub fn run_client_pty_attach(
     run_client_pty_attach_over_session_bridge_owned(session_bridge, attach_line, true)
 }
 
-/// 一组 line-control 请求复用同一条 Zenoh session bridge 串行执行。
+/// 一次性发送多条 line-control,并把每条 line 的结果 frames 原样返回给调用方。
 ///
-/// 用法: `send_control_lines(namespace, target_name, router_entrypoints, timeout, &lines)`
-/// 一次性发一组 line,共享同一条 session,任一行失败整组退出。
-/// 这是 `rdog control <target> @<line> [@<line> ...]` one-shot 入口的主路径;
-/// N=1 也走这条,N=1 / N>1 完全等价,不再有 N=1 / N>1 的分叉。
-///
-/// `send_single_control_line` 是**独立**的单帧入口,只给 `--pty-close` / `--pty-detach` 用,
-/// 保留 retry-on-timeout 旧契约。两条管线不能合并:retry 在多 line 批量里会导致
-/// 前面已成功的 line 被重复执行,产生半成功半失败状态对 agent 不友好。
-pub fn send_control_lines(
+/// `rdog control <target> @<line>` 和 `rdog ui-script run` 都需要拿到
+/// `@response` / `@savefile` 等 frames。调用方再决定打印到 stdout、
+/// 保存到 `rdog_downloads` 还是写入 UI script run 目录。
+pub fn send_control_lines_collect_frames(
     namespace: Option<String>,
     target_name: Option<String>,
     router_entrypoints: Vec<String>,
     request_timeout_ms: u64,
     lines: &[String],
-) -> io::Result<()> {
+) -> io::Result<Vec<Vec<ControlFrame>>> {
     if lines.is_empty() {
-        return Ok(());
+        return Ok(Vec::new());
     }
     let namespace =
         crate::zenoh_identity::resolve_namespace(namespace.as_deref(), target_name.as_deref())?;
@@ -565,11 +560,10 @@ pub fn send_control_lines(
         &current_target.control_key,
         Duration::from_millis(request_timeout_ms),
     )?;
-    let save_dir = default_savefile_directory()?;
-    let display = ControlResponseDisplay::from_stdio();
     let timeout = Duration::from_millis(request_timeout_ms);
+    let mut line_frames = Vec::with_capacity(lines.len());
 
-    let mut result: io::Result<()> = Ok(());
+    let mut result: io::Result<Vec<Vec<ControlFrame>>> = Ok(Vec::new());
     for (idx, line) in lines.iter().enumerate() {
         match execute_remote_request(
             &session,
@@ -578,12 +572,13 @@ pub fn send_control_lines(
             timeout,
             &mut session_bridge,
         ) {
-            Ok(response) => {
-                if let Err(err) = handle_reply_payload(response.as_str(), &save_dir, display) {
+            Ok(response) => match ControlFrame::parse_inbound_result_payload(response.as_str()) {
+                Ok(frames) => line_frames.push(frames),
+                Err(err) => {
                     result = Err(err);
                     break;
                 }
-            }
+            },
             Err(err) => {
                 log::warn!(
                     "zenoh control multi-line request failed at line index {idx} (line={line}): {err}"
@@ -597,12 +592,15 @@ pub fn send_control_lines(
     // best-effort close: 上面 `result` 已经是请求侧结果,关闭失败不掩盖它
     let _ = close_client_session_bridge(&mut session_bridge);
 
-    result
+    match result {
+        Ok(_) => Ok(line_frames),
+        Err(err) => Err(err),
+    }
 }
 
 /// 单行 line-control 入口,保留 retry-on-timeout 行为不变(用于 `--pty-close` 风格调用)。
 ///
-/// 内部委托给 `send_control_lines` + `[line.to_string()]`,但额外保留 `execute_remote_request_with_retry_on_timeout`
+/// 它故意不走多行 collect 路径,而是保留 `execute_remote_request_with_retry_on_timeout`
 /// 旧的 retry-on-timeout 行为,避免改动既有 PTY 关闭/分离的稳定契约。
 pub fn send_single_control_line(
     namespace: Option<String>,

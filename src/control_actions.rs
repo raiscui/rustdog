@@ -15,9 +15,10 @@ use crate::{
         PreparedMouseRequest,
     },
     control_observation::resolve_observation_ref,
+    cancellation::CancellationToken,
     control_protocol::{
-        ControlCommand, KeyMode, KeyRequest, KeyResponseMode, PasteRequest, PasteRequestKind,
-        DEFAULT_KEY_HOLD_MS,
+        CancelRequest, ControlCommand, KeyMode, KeyRequest, KeyResponseMode, OpenAppRequest,
+        PasteRequest, PasteRequestKind, WaitRequest, DEFAULT_KEY_HOLD_MS,
     },
     control_web::{build_default_web_act_response_json, build_default_web_find_response_json},
     control_window::{
@@ -48,7 +49,12 @@ pub struct ActionExecutionResult {
 }
 
 pub trait ControlActionExecutor {
-    fn execute(&self, command: &ControlCommand, shell: &str) -> io::Result<ActionExecutionResult>;
+    fn execute(
+        &self,
+        command: &ControlCommand,
+        shell: &str,
+        cancel: Option<&CancellationToken>,
+    ) -> io::Result<ActionExecutionResult>;
 }
 
 /// `@key` 成功执行后,可选地向外部系统发布一条键盘事件。
@@ -63,6 +69,7 @@ pub trait KeyInputEventSink: Send + Sync {
 pub struct SystemControlActionExecutor {
     key_input_event_sink: Option<Arc<dyn KeyInputEventSink>>,
     savefile_base_dir: Option<PathBuf>,
+    cancel_registry: Arc<crate::cancellation::CancelRegistry>,
 }
 
 impl Default for SystemControlActionExecutor {
@@ -70,6 +77,7 @@ impl Default for SystemControlActionExecutor {
         Self {
             key_input_event_sink: None,
             savefile_base_dir: None,
+            cancel_registry: Arc::new(crate::cancellation::CancelRegistry::new()),
         }
     }
 }
@@ -80,6 +88,7 @@ impl SystemControlActionExecutor {
         Self {
             key_input_event_sink: Some(key_input_event_sink),
             savefile_base_dir: None,
+            cancel_registry: Arc::new(crate::cancellation::CancelRegistry::new()),
         }
     }
 
@@ -91,6 +100,7 @@ impl SystemControlActionExecutor {
         Self {
             key_input_event_sink: None,
             savefile_base_dir: Some(savefile_base_dir),
+            cancel_registry: Arc::new(crate::cancellation::CancelRegistry::new()),
         }
     }
 }
@@ -98,6 +108,7 @@ impl SystemControlActionExecutor {
 impl Clone for SystemControlActionExecutor {
     fn clone(&self) -> Self {
         Self {
+            cancel_registry: self.cancel_registry.clone(),
             key_input_event_sink: self.key_input_event_sink.as_ref().map(Arc::clone),
             savefile_base_dir: self.savefile_base_dir.clone(),
         }
@@ -105,11 +116,17 @@ impl Clone for SystemControlActionExecutor {
 }
 
 impl ControlActionExecutor for SystemControlActionExecutor {
-    fn execute(&self, command: &ControlCommand, shell: &str) -> io::Result<ActionExecutionResult> {
+    fn execute(
+        &self,
+        command: &ControlCommand,
+        shell: &str,
+        cancel: Option<&CancellationToken>,
+    ) -> io::Result<ActionExecutionResult> {
         match command {
             ControlCommand::Key(request) => {
                 execute_key(request, self.key_input_event_sink.as_deref())
             }
+            ControlCommand::Cancel(request) => execute_cancel(request, &self.cancel_registry),
             ControlCommand::Paste(request) => execute_paste(request),
             ControlCommand::Ping => Ok(ActionExecutionResult {
                 exit_code: 0,
@@ -158,6 +175,10 @@ impl ControlActionExecutor for SystemControlActionExecutor {
                 io::ErrorKind::Unsupported,
                 "@bootstrap 是只读 preflight facade,由 control_core 直接组合 capabilities / observe,不应进入默认 executor 分支",
             )),
+            ControlCommand::Flow(_) => Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "@flow 由 control_core 直接返回多 frame outcome,不应进入默认 executor 分支",
+            )),
             ControlCommand::Capabilities => Err(io::Error::new(
                 io::ErrorKind::Unsupported,
                 "@capabilities 由 control_core 直接生成能力报告,不应进入默认 executor 分支",
@@ -184,6 +205,222 @@ impl ControlActionExecutor for SystemControlActionExecutor {
             ControlCommand::SaveFile(frame) => {
                 execute_save_file(frame, self.savefile_base_dir.as_deref())
             }
+            ControlCommand::OpenApp(request) => execute_open_app(request),
+            ControlCommand::Wait(request) => execute_wait(request, cancel),
+        }
+    }
+}
+
+fn execute_wait(
+    request: &WaitRequest,
+    cancel: Option<&CancellationToken>,
+) -> io::Result<ActionExecutionResult> {
+    // `@wait` 让 dispatcher worker thread sleep 一段毫秒数,主要用于:
+    // - `@computer-act` action=`wait` 的底层原语 (ticket 01)
+    // - `@flow` 步骤间固定间隔
+    // - 调试 / 节流场景
+    //
+    // 返回值带实际 elapsed_ms (用于 client 端 verify budget 统计)。
+    // 当收到 cancellation token 时 sleep 立即返回并报 cancelled。
+    let result = match cancel {
+        Some(token) => crate::cancellation::sleep_cancellable(request.duration_ms, token),
+        None => Ok(sleep_and_measure(request.duration_ms)),
+    };
+
+    match result {
+        Ok(actual_ms) => Ok(ActionExecutionResult {
+            exit_code: 0,
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+            response_value_json: Some(build_default_wait_response_json(request, actual_ms)),
+        }),
+        Err(()) => Ok(ActionExecutionResult {
+            exit_code: 64, // 与 parse error / platform_unsupported 一致
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+            response_value_json: Some(build_cancelled_wait_response_json(request)),
+        }),
+    }
+}
+
+/// 让 dispatcher worker thread 真正 sleep 的辅助函数。
+///
+/// 拆出来是为了让 `build_default_wait_response_json` 保持纯函数形态,
+/// 方便后续在测试里独立验证 elapsed_ms 的换算语义 (u64 ms 截断)。
+fn sleep_and_measure(duration_ms: u64) -> u64 {
+    use std::time::Instant;
+    let start = Instant::now();
+    if duration_ms > 0 {
+        std::thread::sleep(std::time::Duration::from_millis(duration_ms));
+    }
+    start.elapsed().as_millis() as u64
+}
+
+/// `wait` 的默认 response JSON 形状。
+///
+/// 跟 `control_web::build_default_web_act_response_json` 的 `pub fn` 模式对齐,
+/// 后续 ticket 18 (density/trace) 扩展 envelope 时只改这里一处即可。
+pub(crate) fn build_default_wait_response_json(request: &WaitRequest, actual_ms: u64) -> String {
+    serde_json::json!({
+        "ok": true,
+        "dispatched_to": "@wait",
+        "requested_duration_ms": request.duration_ms,
+        "duration_ms": actual_ms,
+    })
+    .to_string()
+}
+
+/// `@cancel#seq` 的 executor。
+///
+/// 命中 registry 时 signal 对应 token (后续 sleep check 会醒);
+/// 不命中时返回 `unknown_target_seq` 但 cancel 命令本身仍 OK。
+fn execute_cancel(
+    request: &CancelRequest,
+    registry: &crate::cancellation::CancelRegistry,
+) -> io::Result<ActionExecutionResult> {
+    let signaled = registry.signal(request.target_seq);
+    let payload = if signaled {
+        serde_json::json!({
+            "ok": true,
+            "dispatched_to": "@cancel#seq",
+            "target_seq": request.target_seq,
+            "signaled": true,
+        })
+    } else {
+        serde_json::json!({
+            "ok": false,
+            "dispatched_to": "@cancel#seq",
+            "target_seq": request.target_seq,
+            "error_code": "unknown_target_seq",
+            "error_message": format!(
+                "没有 in-flight 命令的 seq={},可能已完成或从未存在",
+                request.target_seq
+            ),
+            "evidence": {
+                "target_seq": request.target_seq,
+                "registry_state": "empty_or_completed",
+            }
+        })
+    };
+    Ok(ActionExecutionResult {
+        exit_code: if signaled { 0 } else { 64 },
+        stdout: Vec::new(),
+        stderr: Vec::new(),
+        response_value_json: Some(payload.to_string()),
+    })
+}
+
+/// `execute_wait` 被取消时返回的 response JSON (走 ADR-0004 E2 envelope)。
+///
+/// 含 `evidence.cancelled_at_step = "sleep_cancellable"` 标明取消点,
+/// 后续 client 或 agent loop 可基于此判断是否重试。
+pub(crate) fn build_cancelled_wait_response_json(request: &WaitRequest) -> String {
+    serde_json::json!({
+        "ok": false,
+        "error_code": "cancelled",
+        "error_message": format!(
+            "@wait 被 @cancel#seq 取消 (requested_duration_ms={})",
+            request.duration_ms
+        ),
+        "evidence": {
+            "cancelled_at_step": "sleep_cancellable",
+            "requested_duration_ms": request.duration_ms,
+        }
+    })
+    .to_string()
+}
+
+/// `@open-app` 的 executor。
+///
+/// macOS 走 `open -a <app_name>`,等待 `wait_ms` 让 app 完成初次绘制。
+/// 其他平台返回 `platform_unsupported` 错误码 (LP1 跟进跨平台)。
+fn execute_open_app(request: &OpenAppRequest) -> io::Result<ActionExecutionResult> {
+    let payload = open_app_payload_for_current_platform(request);
+
+    // platform_unsupported / permission_denied 用非零 exit_code 标记;
+    // 成功路径用 0。
+    let exit_code = if payload.get("ok").and_then(|v| v.as_bool()).unwrap_or(false) {
+        0
+    } else {
+        64 // 与现有 parse error 同 code
+    };
+
+    Ok(ActionExecutionResult {
+        exit_code,
+        stdout: Vec::new(),
+        stderr: Vec::new(),
+        response_value_json: Some(payload.to_string()),
+    })
+}
+
+/// 根据当前平台返回对应的 `@open-app` 响应 JSON。
+///
+/// 拆出来便于单测 (未来 ticket 02 的 smoke 已经在 daemon 跑过,这里纯函数
+/// 保证 macOS / 非 macOS 两个分支都被覆盖)。
+fn open_app_payload_for_current_platform(request: &OpenAppRequest) -> serde_json::Value {
+    #[cfg(target_os = "macos")]
+    {
+        return run_open_app_on_macos(request);
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        serde_json::json!({
+            "ok": false,
+            "error_code": "platform_unsupported",
+            "error_message": "@open-app 是 macOS-only 的本轮实现;Linux/Windows 见 LATER_PLANS LP1",
+            "evidence": {
+                "target_os": std::env::consts::OS,
+                "app_name": request.app_name,
+            }
+        })
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn run_open_app_on_macos(request: &OpenAppRequest) -> serde_json::Value {
+    use std::process::Command;
+
+    // `open -a <app_name>` 启动指定 app。wait_ms==0 跳过 sleep。
+    let output = Command::new("open").args(["-a", &request.app_name]).output();
+
+    match output {
+        Ok(out) if out.status.success() => {
+            if request.wait_ms > 0 {
+                std::thread::sleep(std::time::Duration::from_millis(request.wait_ms));
+            }
+            serde_json::json!({
+                "ok": true,
+                "dispatched_to": "@open-app",
+                "app_name": request.app_name,
+                "wait_ms": request.wait_ms,
+            })
+        }
+        Ok(out) => {
+            // `open` 自己退出非 0 (典型: app not found)
+            let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+            serde_json::json!({
+                "ok": false,
+                "error_code": "app_not_found",
+                "error_message": format!("`open -a {}` 退出码 {:?}", request.app_name, out.status.code()),
+                "evidence": {
+                    "app_name": request.app_name,
+                    "exit_code": out.status.code(),
+                    "stderr": stderr,
+                }
+            })
+        }
+        Err(e) => {
+            // 启动 `open` 命令本身失败 (PATH 缺失等)
+            serde_json::json!({
+                "ok": false,
+                "error_code": "permission_denied",
+                "error_message": format!("无法执行 `open` 命令: {e}"),
+                "evidence": {
+                    "app_name": request.app_name,
+                    "io_error": e.to_string(),
+                }
+            })
         }
     }
 }

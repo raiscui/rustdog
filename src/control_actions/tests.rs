@@ -20,7 +20,7 @@ struct FakeExecutor {
 }
 
 impl ControlActionExecutor for FakeExecutor {
-    fn execute(&self, command: &ControlCommand, _shell: &str) -> io::Result<ActionExecutionResult> {
+    fn execute(&self, command: &ControlCommand, _shell: &str, _cancel: Option<&crate::cancellation::CancellationToken>) -> io::Result<ActionExecutionResult> {
         self.calls
             .lock()
             .expect("fake executor lock should work")
@@ -64,6 +64,7 @@ fn execute_control_command_should_delegate_builtins_to_executor() {
         .execute(
             &ControlCommand::Key(KeyRequest::legacy("F11", 200, KeyMode::PressRelease)),
             "/bin/sh",
+            None,
         )
         .unwrap();
 
@@ -88,7 +89,7 @@ fn execute_control_command_should_run_script_via_shell() {
     let executor = SystemControlActionExecutor::default();
     let (shell, script, expected_stdout) = script_test_case();
     let output = executor
-        .execute(&ControlCommand::Script(script.to_owned()), shell)
+        .execute(&ControlCommand::Script(script.to_owned()),shell, None)
         .unwrap();
 
     assert_eq!(output.exit_code, 0);
@@ -232,6 +233,7 @@ fn selector_mouse_target_without_auto_refind_should_return_no_action_before_back
                 coordinate_space: MouseCoordinateSpace::OsLogical,
             }),
             "/bin/sh",
+            None,
         )
         .expect("selector handoff should not require mouse backend");
 

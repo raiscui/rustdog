@@ -2,13 +2,18 @@
 
 ## Implementation Status
 
-Planning plus dry-run fixture tests. 这份文档定义后续实现 `rdog` UI script runner 时应遵守的协议和验证边界。
+Planning plus trace-capable minimum runner. 这份文档定义继续完善 `rdog` UI script runner 时应遵守的协议和验证边界。
 
-截至 2026-06-28,仓库已经有 `src/ui_script.rs` 的 parser/compiler dry-run fixture tests。
+截至 2026-06-29,仓库已经有 `src/ui_script.rs` 的 parser/compiler dry-run fixture tests。
 `@window-resize` control frame 已经接入 parser / executor / macOS AX backend。
 UI script dry-run 已经能把 `WindowSize mode:"resize"` 编译到 `@window-resize`。
-仓库还没有实现 `rdog ui-script run` 或 `rdog control --ui-script`。
-本文中的 CLI、trace schema 和 `@ui-flow` 仍是规格计划,不是已落地功能。
+仓库已经实现 `rdog ui-script run [TARGET] path/to/script.json` 的最小真实 runner。
+它复用现有 control transport,支持 `--dry-run`、CLI target、脚本内 `Target` 和本机 local-default daemon。
+仓库已经实现 `rdog control --ui-script path/to/script.json [TARGET]` 兼容入口,该入口复用同一套 runner / target resolver,不复制 runner 逻辑。
+runner 已经写入 run directory、`trace.jsonl`、`summary.json`、`script.normalized.json` 和 `artifacts/`。
+runner 已经实现最小真实 `Expect`: `response_status`、`response_contains`、`control_status`、`window_rect`、`screenshot_exists`。
+daemon-side full script `@flow` 已经作为独立协议入口落地,见 `specs/rdog-flow-control-plan.md`。
+`--compat iced-emg`、完整 web/AX `Expect` 验证和 GUI-only `@ui-flow` profile 仍是规格计划,不是已落地功能。
 
 ## Goal
 
@@ -115,8 +120,9 @@ rdog control TARGET --ui-script path/to/script.json
 
 入口语义:
 
-- `TARGET` 和脚本内 `Target` 至少有一个存在。
-- CLI `TARGET` 和脚本内 `Target` 同时存在时,必须一致或显式允许 override。
+- `TARGET` 可以省略;省略时走本机 local-default daemon。
+- 脚本内 `Target` 可以提供 `name` 和 `namespace`。
+- CLI `TARGET` 和脚本内 `Target` 同时存在时,必须一致;最小 runner 暂不支持 override。
 - runner 在本机读取 JSON,解析为 IR,打开一条 `rdog control` session。
 - 每个 step 编译为 0 条、1 条或多条 line-control requests。
 - `SleepMs` / `DelayMs` / `Barrier` 这类 step 在 runner 本地执行。
@@ -466,14 +472,20 @@ rdog-specific generic semantic action。
 { "Expect": { "kind": "screenshot_changed", "from": "before", "to": "after_click" } }
 ```
 
-v1 最少支持:
+当前最小 runner 已支持:
 
 - `response_status`
+- `response_contains`
+- `control_status`
+- `window_rect`
+- `screenshot_exists`
+
+仍待完整化:
+
 - `response_field`
 - `web-find`
 - `ax-find`
 - `window-find`
-- `screenshot_exists`
 
 视觉 diff 可以作为后续能力。第一版不要在没有图像比较实现时声称支持 `screenshot_changed`。
 
@@ -616,7 +628,8 @@ run summary:
 - 坐标 fallback 必须显式。
 - `coordinate_space` 必须明确为 `os-logical`,或由 `Dialect` / `Policy` 提供默认。
 - 如果存在 display scope,mouse action 自动继承 `guard:{display:{...}}`。
-- `WindowSize` 不执行 resize。
+- `WindowSize mode:"precondition"` 不执行 resize。
+- `WindowSize mode:"resize"` 编译到 `@window-resize`,由 control plane 执行真实 resize。
 - `Text` 不默认全局逐字输入。
 - `ControlLine` 不允许 shell 请求。
 - 权限错误是 hard blocker。
@@ -627,6 +640,7 @@ run summary:
 ```bash
 rdog ui-script run self script.json
 rdog ui-script run self script.json --dry-run
+rdog control --ui-script script.json --dry-run self
 rdog ui-script run self script.json --compat iced-emg
 rdog ui-script run self script.json --allow-coordinate-fallback
 rdog ui-script run self script.json --allow-control-line
@@ -635,9 +649,20 @@ rdog ui-script run self script.json --trace-dir rdog_script_runs/demo
 
 `--dry-run` 必须输出 normalized IR 和将要发送的 control lines,不连接 daemon,不执行动作。
 
+## Relation to daemon-side `@flow`
+
+daemon-side full script runtime 已经使用 `@flow` 作为主入口,见 `specs/rdog-flow-control-plan.md`。
+
+`@flow` 可以包含 shell、control、expect、artifact 和 trace。
+它运行在 daemon 所在机器。
+它的 cwd、env 和文件路径都是 daemon-local。
+
+UI script runner 仍然是 controller-side orchestration。
+它读取 controller 本机 JSON 文件,再通过 rdog control transport 驱动 target daemon。
+
 ## Future daemon-side `@ui-flow`
 
-后续可以新增 daemon-side flow:
+后续可以新增 daemon-side GUI-only profile:
 
 ```text
 @ui-flow#9:{schema:"rdog.ui-flow.v1",steps:[...]}
@@ -649,10 +674,11 @@ rdog ui-script run self script.json --trace-dir rdog_script_runs/demo
 - 不复用 `@script` / `@cmd` 命名。
 - 不绕过 line-control response 和 `@savefile` frame。
 - 不把 shell 执行能力混入 UI flow。
+- 不替代 `@flow` 的 full script runtime 语义。
 - v1 CLI runner 已经用 fixture tests 和 live smoke 证明模型稳定后再做。
 
 daemon-side `@ui-flow` 的价值是减少高延迟链路上的 request round-trip。
-它不是第一版的必要条件。
+它不是 full script runtime 的主入口。
 
 ## Implementation Phases
 
@@ -681,10 +707,14 @@ daemon-side `@ui-flow` 的价值是减少高延迟链路上的 request round-tri
 
 ### Phase 3: CLI runner and artifacts
 
-- 新增 `rdog ui-script run` 或 `rdog control --ui-script`。
-- 连接真实 control session。
-- 写 `trace.jsonl` 和 artifacts。
-- 支持 `--dry-run`、`--trace-dir`、`--compat iced-emg`。
+- `rdog ui-script run` 最小 runner 已落地。
+- `rdog control --ui-script` 兼容入口已落地,复用 `ui_script_runner`。
+- 真实 control session 已可发送编译出的 line-control requests。
+- 已写 `trace.jsonl`、`summary.json`、`script.normalized.json` 和 `artifacts/`。
+- 已实现最小真实 `Expect`。
+- 已支持 `--dry-run`。
+- 已支持 `--trace-dir`。
+- `--compat iced-emg` 仍待实现。
 
 ### Phase 4: focused live smoke
 
@@ -713,7 +743,7 @@ daemon-side `@ui-flow` 的价值是减少高延迟链路上的 request round-tri
 - `Scope.display` 能自动注入 `@observe` payload 和 mouse guard。
 - `Screenshot.label` 能稳定映射到 artifact 文件。
 - action step 能记录 `backend_request_count`、`semantic_action_count`、`mouse_fallback_count`。
-- verification 失败时脚本整体失败。
+- 最小 `Expect` 验证失败时脚本整体失败。
 - `--dry-run` 不连接 daemon,但能输出 normalized IR 和 control lines。
 - Mermaid 图通过 `beautiful-mermaid-rs` 验证。
 
@@ -814,5 +844,5 @@ git diff --check
 
 ### Follow-ups
 
-- 正式 UI script CLI / transport 接入后,`WindowSize mode:"resize"` 应复用当前 dry-run 编译出的 `@window-resize` control line,并把 step report 写入 trace。
+- 后续补完整 web/AX/window find `Expect`,并让验证失败报告包含更细的候选恢复建议。
 - 将 UI script runner 的 trace metrics 和 `@gui-bench` density metrics 对齐,方便后续 benchmark。

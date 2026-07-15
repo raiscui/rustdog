@@ -8,7 +8,7 @@ pub(crate) use self::parsers::{
 };
 
 use self::parsers::{
-    parse_control_header, parse_key_payload, parse_pty_attach_payload, parse_pty_close_payload,
+    parse_cancel_payload, parse_control_header, parse_key_payload, parse_open_app_payload, parse_wait_payload, parse_pty_attach_payload, parse_pty_close_payload,
     parse_pty_detach_payload, parse_pty_payload, parse_screenshot_payload,
     require_non_empty_payload,
 };
@@ -21,6 +21,7 @@ use crate::control_ax::{
     TypeTextRequest, DEFAULT_AX_DEPTH, DEFAULT_AX_INCLUDE_VALUES, DEFAULT_AX_MAX_ELEMENTS,
 };
 use crate::control_bootstrap::{parse_bootstrap_payload, BootstrapRequest};
+use crate::control_flow::{parse_flow_payload, FlowRequest};
 use crate::control_frames::SaveFileFrame;
 use crate::control_gui_bench::{parse_gui_bench_payload, GuiBenchRequest};
 use crate::control_mouse::{
@@ -87,16 +88,65 @@ pub enum ControlCommand {
     WebAct(WebActRequest),
     GuiBench(GuiBenchRequest),
     Bootstrap(BootstrapRequest),
+    Flow(FlowRequest),
     Capabilities,
     Observe(ObserveRequest),
     SelectorGet(SelectorGetRequest),
     SelectorResolve(SelectorResolveRequest),
     SelectorRefind(SelectorRefindRequest),
     SaveFile(SaveFileFrame),
+    Wait(WaitRequest),
+    OpenApp(OpenAppRequest),
+    Cancel(CancelRequest),
 }
 
 pub const DEFAULT_KEY_HOLD_MS: u64 = 200;
 pub const DEFAULT_SCREENSHOT_QUALITY: u8 = 75;
+
+
+/// `@wait` 的结构化请求。
+///
+/// 让 daemon 端 worker 线程 sleep 一段毫秒数,主要用于:
+/// - `@computer-act` action=`wait` 的底层原语 (ticket 01, ADR-0003)
+/// - `@flow` 步骤间的固定间隔 (LP 跟随项)
+/// - 调试 / 节流场景
+///
+/// 不接受负数 / 非整数,只接受对象 payload
+/// `@wait#N:{duration_ms:N}`。duration_ms==0 合法 (立即返回,无 sleep)。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WaitRequest {
+    pub duration_ms: u64,
+}
+
+
+/// `@open-app` 的结构化请求。
+///
+/// macOS 上由 daemon 走 `open -a <app_name>`;其他平台返回
+/// `error_code:"platform_unsupported"` (LP1 跟进 Linux/Windows)。
+///
+/// `wait_ms` 是让被启动 app 完成初次绘制/加载的等待时长 (默认 1500ms),
+/// 不是 timeout — `wait_ms==0` 合法 (立即返回,不等启动)。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OpenAppRequest {
+    pub app_name: String,
+    pub wait_ms: u64,
+}
+
+
+/// `@cancel#seq` 的结构化请求。
+///
+/// 让 in-flight 命令 `target_seq` 被取消。被取消命令的 response
+/// 携带 `error_code:"cancelled"`, `evidence.cancelled_at_step` 标明
+/// 取消发生在哪个 await 点。
+///
+/// 若 `target_seq` 不在 cancel registry (已完成 / 从未存在),
+/// 取消命令本身仍 OK,只是登记无 op — 返回 `unknown_target_seq`。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CancelRequest {
+    pub target_seq: u64,
+}
+
+
 
 /// `@paste` 的结构化请求。
 ///
@@ -404,6 +454,7 @@ pub fn parse_control_line(line: &str) -> io::Result<ControlParseResult> {
         "web-act" => ControlCommand::WebAct(parse_web_act_payload(payload)?),
         "gui-bench" => ControlCommand::GuiBench(parse_gui_bench_payload(payload)?),
         "bootstrap" => ControlCommand::Bootstrap(parse_bootstrap_payload(payload)?),
+        "flow" => ControlCommand::Flow(parse_flow_payload(payload)?),
         "observe" => ControlCommand::Observe(parse_observe_payload(payload)?),
         "selector-get" => ControlCommand::SelectorGet(parse_selector_get_payload(payload)?),
         "selector-resolve" => {
@@ -419,6 +470,9 @@ pub fn parse_control_line(line: &str) -> io::Result<ControlParseResult> {
             ))
         }
         "savefile" => ControlCommand::SaveFile(SaveFileFrame::parse_object_payload(payload)?),
+        "wait" => ControlCommand::Wait(parse_wait_payload(payload)?),
+        "open-app" => ControlCommand::OpenApp(parse_open_app_payload(payload)?),
+        "cancel#seq" => ControlCommand::Cancel(parse_cancel_payload(payload)?),
         _ => {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,

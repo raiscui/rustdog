@@ -546,3 +546,135 @@
 - 空 target 不能靠 `$TMPDIR` FIFO 数量推断默认 daemon。
 - 新增本机 shortcut 时,必须有显式 registry / guard 或等价的单一真相源。
 - 不要用 `localhost` 当真实 `daemon_name`;它最多是未来 alias,不能替代 `(namespace, daemon_name)` 身份。
+
+## [2026-06-28 18:20:00] [Session ID: codex-20260628-installed-ui-runner] 错误修复: installed daemon 旧版本导致 live control 能力不一致
+
+### 问题
+
+- Finder live resize 验证时,裸 `rdog control '@window-resize...'` 曾返回 `不支持的控制指令类型: window-resize`。
+- 当前 workspace debug daemon 支持该命令,但 installed `/Users/cuiluming/.cargo/bin/rdog` 和 live daemon 进程一度不是同一版。
+
+### 原因
+
+- live daemon 进程曾来自 `./target/debug/rdog` 或旧 installed binary。
+- 后续如果继续使用裸 `rdog`,client / daemon 很容易落到旧进程或旧二进制,造成假失败。
+
+### 修复
+
+- 运行 `cargo install --path . --bin rdog`,替换 `/Users/cuiluming/.cargo/bin/rdog`。
+- 停止 `rdog-debug-daemon`。
+- 启动 `rdog-installed-daemon`,命令为 `rdog daemon -c ./rdog_macos.toml`。
+
+### 验证
+
+- `rdog control @ping`: 返回 `@response "pong"`。
+- `rdog control '@window-resize#901:{}'`: 返回 `@window-resize 对象 payload 不能为空`,说明 daemon 已识别命令。
+- 新增 runner 后再次 `cargo install --path . --bin rdog`,并重启 `rdog-installed-daemon`。
+- `rdog ui-script run tests/fixtures/ui_script/ping_control_line.json`: 返回 `@response "pong"`。
+
+### 以后避免
+
+- live smoke 前先确认 daemon session 名称和启动命令。
+- 修改 CLI/client 能力后,如果要用裸 `rdog` 验证,需要重新 `cargo install --path . --bin rdog`。
+- 如果 daemon 代码也有变化,安装后要重启 daemon,不要只替换磁盘上的二进制。
+
+## [2026-06-28 19:48:19] [Session ID: codex-20260628-goal-ui-script-runner-1234] 错误修复: UI script runner 改造后出现 dead_code warning
+
+### 问题
+
+- `rtk cargo check --package rustdog --bin rdog --quiet` 一度报告两个 warning:
+  - `shell::run_line_control_lines` 未使用。
+  - `zenoh_control::send_control_lines` 未使用。
+
+### 原因
+
+- UI script runner 为了记录 trace/artifacts,改为收集真实 `ControlFrame` 后再打印和保存 artifact。
+- 旧 wrapper 仍留在源码里,但生产路径已经不再调用它们。
+
+### 修复
+
+- 删除 `shell::run_line_control_lines`。
+- 删除 `zenoh_control::send_control_lines` wrapper,保留新的 `send_control_lines_collect_frames` 作为单一收口点。
+- 同步更新测试和注释里的旧路径描述。
+
+### 验证
+
+- `rtk cargo check --package rustdog --bin rdog --quiet`: 通过,无代码 warning。
+- `rtk cargo test --test control_lanes control_one_shot_should_accept_two_at_lines_and_run_in_order_for_tcp_lane -- --exact`: 通过。
+
+### 以后避免
+
+- 当 runner 需要 trace 时,不要先调用会直接打印/落盘的旧 wrapper。
+- 优先让底层返回 frames,由入口层决定 stdout、`rdog_downloads` 或 UI script run directory。
+## [2026-06-29 15:02:00] [Session ID: codex-20260629-big-diff-closeout] 错误修复: control_lanes 旧 one-shot target 语义
+
+### 现象
+- `rtk cargo test --package rustdog --test control_lanes --quiet` 失败。
+- 失败用例: `control_one_shot_should_reject_at_line_without_target`。
+- 失败信息: `control one-shot without target should fail`。
+
+### 原因
+- 测试仍按旧语义认为 `rdog control @ping` 没有 target 时必须报错。
+- 当前产品语义已经把空 target one-shot 定义为本机 local-default fast path。
+- 开发机上已有本机 daemon,所以 `target/debug/rdog control @ping` 能通过 unixpipe fast path 返回 `@response "pong"`。
+
+### 修复
+- 将测试改为 `control_one_shot_without_target_should_report_missing_local_daemon_for_unknown_namespace`。
+- 测试使用唯一不存在 namespace,不依赖开发机默认 daemon 状态。
+- 新断言验证没有本地 daemon 时返回清晰错误,而不是旧的"one-shot line 需要 control 目标"。
+
+### 验证
+- `rtk cargo test --package rustdog --test control_lanes control_one_shot_without_target_should_report_missing_local_daemon_for_unknown_namespace -- --exact --quiet`: 1 passed。
+- `rtk cargo test --package rustdog --test control_lanes --quiet`: 15 passed,1 ignored。
+- `rtk cargo test --package rustdog --bin rdog --quiet`: 434 passed。
+
+## [2026-06-29 16:07:12] [Session ID: codex-20260629-review-and-commit] 错误修复: review gate 发现 UI script 错误响应误报成功和 @flow 文件读取授权缺口
+
+### 现象
+- code-reviewer 在提交前 review 中指出: UI script runner 执行 `ControlLine` 后,即使收到 `@response {"code":64,...}` 这类失败响应,也会把 control step 记录为 `complete`,脚本可能最终写出成功 summary。
+- code-reviewer 还指出: `@flow SaveArtifact` 会读取 daemon-local 文件并通过 `@savefile` 返回,但原 `FlowPolicy` 只有 `allow_shell`,没有显式文件读取授权。
+
+### 原因
+- `record_ui_script_control_step` 只负责写 trace 和递增完成数,没有复用 `last_response_is_error` 判定 control response 是否失败。
+- `validate_flow_request` 只统计 `Cmd` / `Script` 是否需要 `policy.allow_shell:true`,没有把 `SaveArtifact` 归入需要显式授权的副作用能力。
+
+### 修复
+- `src/main.rs` 中 `record_ui_script_control_step` 改为先判断 `last_response_is_error`,失败时写入 failed trace,设置 `failed_step_index`,并返回 `Err`。
+- `last_response_is_error` 同时识别非零 `code` 和 `status:"error" / "failed"`。
+- `src/control_flow.rs` 新增 `policy.allow_file_read`,默认 `false`;`SaveArtifact` 必须显式声明 `policy.allow_file_read:true` 才能通过 parser validation。
+- 同步更新 `specs/rdog-flow-control-plan.md` 和 `.codex/skills/rdog-control/SKILL.md` 的 policy 说明。
+
+### 验证
+- 新增 UI script 错误响应测试先红后绿。
+- 新增 `SaveArtifact` 无授权拒绝测试先红后绿。
+- `rtk cargo test --package rustdog --bin rdog control_protocol::tests::flow --quiet`: 8 passed。
+- `rtk cargo test --package rustdog --bin rdog control_core::tests --quiet`: 22 passed。
+- `rtk cargo test --package rustdog --bin rdog ui_script_run --quiet`: 5 passed。
+- `rtk cargo test --package rustdog --bin rdog control_flow::tests --quiet`: 5 passed。
+- 复审 code-reviewer: `APPROVE`。
+- 复审 architect: `WATCH`,无 BLOCK,允许当前 diff 提交。
+
+## [2026-06-30 00:56:17] [Session ID: codex-20260629-ultragoal-ui-script-123] 错误修复: UI script runner final gate blocker
+
+### 问题
+- `Expect response_status` / `Expect control_status` 在没有上一条 `@response` 时可能把 missing state 当成成功。
+- 相邻 `ControlLine` 被批量发送时,第一条失败 `@response` 可能在第二条 UI action 已经发送后才被 runner 发现。
+
+### 原因
+- 状态类 Expect 缺少 prior-response guard,默认 `response_status=ok` 和 `code=0` 会误过。
+- `flush_ui_script_pending_lines` 原来按相邻 control line 批量发送,错误检查发生在整批发送之后,不满足 GUI 自动化的 fail-fast 语义。
+
+### 修复
+- `expect_response_status` 和 `expect_control_status` 统一先调用 prior-response guard;没有上一条 `@response` 时返回显式错误。
+- `flush_ui_script_pending_lines` 改为逐条发送,逐条记录 trace;一旦当前 control step 返回失败,立即停止,不发送后续相邻 action。
+- control step trace 补齐 `started_at_unix_ms` 和结构化 `response.target_resolution`,避免 trace contract drift。
+
+### 验证
+- 回归测试先红后绿:
+  - 无上一条 `@response` 的 status Expect 必须失败。
+  - TCP fake server 证明第一条 `@response {"code":64}` 后第二条 `ControlLine` 没有被发送。
+  - trace 包含 `started_at_unix_ms` 和 `response.target_resolution.source`。
+- `rtk cargo test --package rustdog --bin rdog ui_script_runner::tests --quiet`: 14 passed。
+- `rtk cargo test --package rustdog --bin rdog --quiet`: 441 passed。
+- `rtk cargo test --package rustdog --test control_lanes --quiet`: 15 passed,1 ignored。
+- final TCP live smoke 通过,summary complete,trace 4 lines。

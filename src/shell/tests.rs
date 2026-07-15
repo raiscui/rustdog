@@ -19,7 +19,7 @@ struct FakeExecutor {
 }
 
 impl ControlActionExecutor for FakeExecutor {
-    fn execute(&self, command: &ControlCommand, _shell: &str) -> io::Result<ActionExecutionResult> {
+    fn execute(&self, command: &ControlCommand, _shell: &str, _cancel: Option<&crate::cancellation::CancellationToken>) -> io::Result<ActionExecutionResult> {
         self.commands
             .lock()
             .expect("commands lock should work")
@@ -43,6 +43,15 @@ impl ControlActionExecutor for FakeExecutor {
             }
             ControlCommand::SaveFile(frame) => {
                 format!("SAVEFILE:{}\n", frame.filename).into_bytes()
+            }
+            ControlCommand::Wait(request) => {
+                format!("WAIT:{}\n", request.duration_ms).into_bytes()
+            }
+            ControlCommand::OpenApp(request) => {
+                format!("OPEN_APP:{}:{}\n", request.app_name, request.wait_ms).into_bytes()
+            }
+            ControlCommand::Cancel(request) => {
+                format!("CANCEL:target_seq={}\n", request.target_seq).into_bytes()
             }
             ControlCommand::PtyOpen(request) => format!("PTY_OPEN:{}\n", request.cmd).into_bytes(),
             ControlCommand::PtyClose(request) => {
@@ -177,6 +186,9 @@ impl ControlActionExecutor for FakeExecutor {
                     BootstrapMode::Gui => "gui",
                 };
                 format!("BOOTSTRAP:{mode}:{}\n", request.include_trace).into_bytes()
+            }
+            ControlCommand::Flow(request) => {
+                format!("FLOW:{}:{}\n", request.schema, request.steps.len()).into_bytes()
             }
             ControlCommand::Capabilities => b"CAPABILITIES\n".to_vec(),
             ControlCommand::SelectorGet(request) => {
@@ -856,6 +868,7 @@ fn control_receiver_should_report_executor_failure_with_return_object() {
             &self,
             _command: &ControlCommand,
             _shell: &str,
+            _cancel: Option<&crate::cancellation::CancellationToken>,
         ) -> io::Result<ActionExecutionResult> {
             Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -902,6 +915,7 @@ fn control_receiver_should_wrap_executor_failure_with_request_id() {
             &self,
             _command: &ControlCommand,
             _shell: &str,
+            _cancel: Option<&crate::cancellation::CancellationToken>,
         ) -> io::Result<ActionExecutionResult> {
             Err(io::Error::new(
                 io::ErrorKind::InvalidInput,

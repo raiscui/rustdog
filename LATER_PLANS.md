@@ -345,14 +345,9 @@
 - [x] 把 plan 文件 `.omx/plans/zenoh-unixpipe-fast-path.md` 同步成"实际采用 exists-check"
 - [x] **`rdog control self @<line>` / 空 target 入口**:2026-06-21 已实现
 - [x] `.codex/skills/rdog-control/SKILL.md` 补 troubleshooting 段
-- [ ] 启动独立 plan:方向 B(直接 UDS 控制面,10~50x 提速),作为 unixpipe 体验确认后的 follow-up
-
 ### 已有 flake 待处理
 
-- [ ] `zenoh_router_client` 测试集多测试并发 ~4% flake,失败用例不固定。
-  - 已记录到 EPIPHANY_LOG。
-  - 排查方向: 给 `resolve_target` 的 liveliness get 加 retry,或 test helper 给每个 test 独立 namespace。
-  - 不属于本轮范围,留作 follow-up。
+- 已由 2026-06-21 17:35:00 的诊断记录收敛,本条不再重复挂 unchecked 项。
 
 ## [2026-06-21 16:30:00] [Session ID: omx-1781788115552-szl2hn] 完成记录: 2026-06-21 本机 fast path 全链路收尾
 
@@ -368,9 +363,9 @@
 - 7 个 e2e 全过(4 个 self/empty + 3 个原 unixpipe);369 unit + 26 zenoh_router_client 全过
 
 ### 后续事项
-- [ ] 启动独立 plan:方向 B(直接 UDS 控制面,10~50x 提速),作为 unixpipe 体验确认后的 follow-up
-- [ ] `zenoh_router_client` 测试集 ~4% 多测试并发 flake 排查(已记 EPIPHANY_LOG,不在本轮范围)
-- [ ] 路径上限 100 vs 95 字节口径同步:`src/zenoh_runtime.rs` 注释写 ≤ 95 字节(macOS sun_path 104 - `_downlink` 9),但 `src/config.rs::UNIXPIPE_SOCKET_PATH_MAX_BYTES` 实际常量是 100,`specs/zenoh-unixpipe-fast-path-plan.md` 也写 100。两种都通过测试但口径不一致,需要后续对齐
+- 方向 B 已统一保留在当前未完成事项清单。
+- `zenoh_router_client` flake 已由 2026-06-21 17:35:00 的诊断记录继续跟踪。
+- 路径上限 100 vs 95 字节口径已经完成同步,当前源码和规格都使用 95 字节。
 
 ## [2026-06-21 17:35:00] [Session ID: omx-1781788115552-szl2hn] 完成记录: zenoh_router_client flake 排查(本轮诊断收敛,不实施修复)
 
@@ -408,132 +403,76 @@
 2. 再做查询过滤: window/AX/web find 继承 display scope。
 3. 最后做执行 guard: mouse/action 验证 target 是否仍在同一 display scope。
 
-## [2026-06-25 14:07:20] [Session ID: native-hook-20260625-135331] 后续建议: local-default unixpipe daemon 实现收口
-
-### 背景
-- 已生成计划 `.omx/plans/rdog-local-default-unixpipe-daemon-plan.md`。
-- 当前问题是 `rdog control @screenshot` 在本机多个 `$TMPDIR/rdog-*.pipe_uplink` 候选存在时无法选择默认 daemon。
-
-### 后续事项
-- [ ] 按计划实现 local-default registry + guard。
-- [ ] 同步修正 `specs/zenoh-unixpipe-fast-path-plan.md` 与 `src/config.rs` 注释里残留的 "socket" / 100 字节旧口径。
-- [ ] 清理或修正 `AGENTS.md` 中当前磁盘不存在的 `.codex/skills/self-learning.zenoh-duplicate-name-local-guard/SKILL.md` 索引。
-- [ ] 执行计划中的 unit / e2e / live smoke 验证,确认 `rdog control @ping` 和 `rdog control @screenshot` 不再卡在 target 选择层。
-
-## [2026-06-25 15:45:55] [Session ID: 019efd3b-9edc-7e11-9168-461c6e467d1d] 完成记录: local-default unixpipe daemon 实现已落地
-
-### 对应旧计划
-- 对应 `2026-06-25 14:07:20` 的"local-default unixpipe daemon 实现收口"。
-
-### 完成结果
-- 已实现 local-default registry + PID guard。
-- 已同步 `src/config.rs` / `src/daemon.rs` / `src/zenoh_runtime.rs` / `src/main.rs`。
-- 已修正 FIFO / 95 字节口径,同步模板、spec 和 `rdog-control` skill。
-- 已完成 unit / e2e / live smoke,确认 `rdog control @ping` 和 `rdog control @screenshot` 不再卡在 target 选择层。
-
-### 后续事项
-- [ ] `AGENTS.md` 中 `.codex/skills/self-learning.zenoh-duplicate-name-local-guard/SKILL.md` 路径仍需单独核对。当前本轮未处理,避免和业务修复混合。
-- [ ] 方向 B(直接 UDS 控制面,10~50x 提速)仍是独立 plan,不属于本轮 local-default 修复。
-
-## [2026-06-26 13:18:00] [Session ID: 019f023a-e4c3-7f73-9d7b-9393ef3d38ff] 后续建议: rdog UI script 正式规格化
+## [2026-06-28 19:44:30] [Session ID: codex-20260628-goal-ui-script-runner-1234] 后续建议: 当前保留的未完成事项
 
 ### 背景
 
-- 本轮只做设计讨论,参考了 iced_emg 的 UI Script JSON DSL、`docs/ui_script_command.md` 和 rdog 当前 control 协议。
-- 当前推荐方向是先做 CLI-side runner,复用现有 line-control frames,不要直接新增第二套 UI 协议。
+- 2026-06-25 到 2026-06-28 的 local-default、`@window-resize`、UI script fixture、`WindowSize mode:"resize"`、installed daemon、最小 `rdog ui-script run`、trace/artifacts 和最小真实 `Expect` 已陆续落地。
+- 这些完成事实已记录在 `WORKLOG.md` / `notes.md` / `task_plan.md`,不再继续作为 `LATER_PLANS.md` 的 unchecked future items。
 
 ### 后续事项
 
-- [ ] 如果用户确认方向,将设计整理为 `specs/rdog-ui-script-control-plan.md`。
-- [ ] 同步 `AGENTS.md` 长期知识索引,说明修改 UI script runner、control script、GUI 自动化 DSL 前应阅读该规格。
-- [ ] 实现前先补 parser/runner 的 fixture tests,至少覆盖 iced-compatible `SleepMs/Move/Click/Screenshot/Exit` 和 rdog-specific `Observe/Scope/Expect`。
-- [ ] 设计命名时避开 `@script`,因为它已经是 shell 执行语义。
+- [ ] 方向 B(直接 UDS 控制面,10~50x 提速)仍是独立性能路线,不属于当前 UI script runner 收口。
+- [ ] 增加 `--compat iced-emg` 和更细的 policy flags。
 
-## [2026-06-26 16:02:51] [Session ID: codex-20260626-ui-script-spec] 完成记录: rdog UI script 规格化已落地
+## [2026-06-28 23:04:11] [Session ID: codex-20260628-plan-daemon-flow] 后续计划: task_plan 续档后的完整 continuous-learning
 
-### 对应旧计划
+### 背景
 
-- 对应 `2026-06-26 13:18:00` 的"rdog UI script 正式规格化"。
-
-### 完成结果
-
-- 已创建 `specs/rdog-ui-script-control-plan.md`。
-- 已同步 `AGENTS.md` 长期知识索引。
-- 已在规格中明确 `@script` / `@cmd` 仍是 shell 执行语义,UI flow 后续应使用 CLI-side runner 或独立 `@ui-flow` 命名。
+- `task_plan.md` 已达到 1000 行,本轮为继续建立 `@flow` plan 已做最小安全续档。
+- 旧文件已归档到 `archive/default_history/task_plan_2026-06-28_205227_before_flow_plan.md`。
 
 ### 后续事项
 
-- [ ] 实现前仍需补 parser/runner fixture tests,覆盖 iced-compatible `SleepMs/Move/Click/Screenshot/Exit` 和 rdog-specific `Target/Scope/Observe/Expect`。
-- [ ] 如果后续要让 `WindowSize` 真正 resize 窗口,应先设计 window resize control 协议,不要借 UI script 偷渡。
+- [ ] 在当前 `@flow` plan 主线完成后的安全点,单独执行一次完整 continuous-learning。
+- [ ] 回读本轮归档的旧 `task_plan.md` 与当前六文件,提炼 UI script / @flow / window control 相关长期经验。
+- [ ] 判断是否需要同步 `EXPERIENCE.md`、`AGENTS.md`、`specs/rdog-ui-script-control-plan.md` 或新的长期索引。
 
-## [2026-06-26 16:31:44] [Session ID: codex-20260626-ui-script-fixtures] 完成记录与后续建议: UI script fixture tests / window resize
+## [2026-06-30 00:56:17] [Session ID: codex-20260629-ultragoal-ui-script-123] 后续建议: UI script 非 TCP live smoke
 
-### 对应旧计划
+### 背景
+- G004 final gate 已用 TCP control daemon 完成真实 live smoke。
+- code-reviewer 和 architect 都确认当前 gate 可通过。
+- architect 复审建议: 如果未来想继续压低 transport 覆盖风险,可以补 WebSocket 或 Zenoh 的 live smoke,但不要作为本轮 gate 阻塞项。
 
-- 对应 `2026-06-26 16:02:51` 的"实现前仍需补 parser/runner fixture tests"。
-- 对应 `2026-06-26 16:02:51` 的"`WindowSize` 真正 resize 窗口应先设计 window resize control 协议"。
+### 后续事项
+- [ ] 后续新增一个 WebSocket live smoke 或 Zenoh local-default live smoke,复用同一份 `@ping + Expect` UI script。
+- [ ] smoke 仍应检查 `trace.jsonl`、`summary.json`、`script.normalized.json`、`artifacts/` 和端口 / session 清理。
 
-### 完成结果
+## [2026-07-14 11:05:00] [Session ID: omx-1783957580965-m4bn8e] 主题: rdog `@computer-act` 设计收口后续事项
 
-- parser / dry-run runner fixture tests 已落地到 `src/ui_script.rs` 和 `tests/fixtures/ui_script/`。
-- window resize control 协议已规划到 `specs/rdog-window-control-plan.md` 的 `@window-resize` 节。
-- UI script 规格已说明 `WindowSize mode:"resize"` 未来应编译到 `@window-resize`,当前 dry-run 仍只接受 `mode:"precondition"`。
+### 背景
+- 完成了 Mano-CUA 16 动作与 rdog 协议对齐的 15 题 grill session, 产出 6 个 ADR (`docs/adr/0001` 到 `0006`) + glossary (`docs/glossary.md`)。
+- 决策见 ADR-0001~0006, 本次只记本轮不落地但值得后续推进的事项。
 
 ### 后续事项
 
-- [ ] 接入正式 CLI,例如 `rdog ui-script run [TARGET] <file.json>` 或 `rdog control TARGET --ui-script <file.json>`。
-- [ ] 将 dry-run compiler 接到真实 control transport,生成 trace.jsonl、artifacts 和 step report。
-- [ ] 实现 `@window-resize` parser / executor / macOS AX backend / focused tests。默认行为必须恢复/激活目标窗口,请求里不需要 `activate:true`。同时覆盖 `verify.tolerance_px = 2`、`ok_with_delta`、`WINDOW_RESIZE_CLAMPED`、`WINDOW_RESIZE_NOT_SETTABLE`、`WINDOW_RESIZE_GUARD_FAILED` 和 `WINDOW_AMBIGUOUS`。
-- [ ] `@window-resize` 落地后,把 UI script `WindowSize mode:"resize"` 从未来语义升级为可编译 step。该 step 直接编译到默认恢复/激活的 `@window-resize`。
+- **LP1: 跨平台 (`@open-app` / `@wait` / `@paste` / `@click` / `@key` 在 Windows + Linux)**。当前 `@open-app` 只规划了 macOS (`@cmd "open -a ..."`), Windows 的 `start` / Linux 的 `xdg-open` 需要分别适配。Windows 上 enigo 触发 `@click / @key` 还要过 UIPI, rdog 现有 `looks_like_windows_uipi_permission_denied` 已经踩过坑。第一版只交付 macOS 路径, 其他平台让 `@open-app` 返回 `platform_unsupported` 错误码 (走 E2 envelope)。
 
-## [2026-06-28 00:50:00] [Session ID: codex-20260628-goal-window-resize] 完成记录与后续建议: @window-resize 已落地,UI script 接入仍待做
+- **LP2: Holo 3.1 / EvoCUA / GTA1 的协议适配**。`@computer-act` 当前 schema 是 Mano-CUA 闭集 (16 → 13 daemon 动作)。Holo 3.1 的 click / write / answer 3 动作理论可以直接复用 v1 schema; EvoCUA 的自由 JSON + `<think>` 段需要客户端先 parse 思路但 daemon 端不需要新 schema。GTA1 是 Qwen2.5-VL-7B base, 跟 Mano-CUA 训练目标不同, 可能需要单独的 v2 schema。建议先把 Holo 3.1 接进 `rdog.computer-act.v1` 验证 (3 动作是 v1 的真子集), 再考虑其他模型。
 
-### 对应旧计划
+- **LP3: density benchmark suite**。`specs/rdog-computer-use-density-plan.md` §3 定义了 metrics 但没有可跑 benchmark。建议:
+  - 准备 5-10 个 Mano-CUA 典型任务 (登录表单 / 浏览器搜索 / 文件操作 / 多步对话框)
+  - 写一个 stdlib-only benchmark 脚本, 跑 `@computer-act` 跟 baseline (手写 `@observe + @click + @observe` 多步) 对比
+  - 输出 `density` 字段报告, 验证 high-density 路线真实省了 round-trip
+  - 用结果佐证 ADR-0001 的 meta 决策
 
-- 对应 `2026-06-26 16:31:44` 的"`@window-resize` parser / executor / macOS AX backend / focused tests"。
+- **LP4: Schema v2 evolution 路径**。`rdog.computer-act.v1` 当前只覆盖 GUI 动作。audio / multimodal 动作如果进来 (Mano-CUA 没, 但 Holo 3.1 audio 通道未来可能扩), schema v2 需要:
+  - 加 `modality` 字段 (默认 `"gui"`)
+  - 给 audio 通道单独 `verify` 语义 (screenshot 换 audio waveform diff)
+  - 保持 v1 client 兼容 (新字段默认 false, 旧字段语义不变)
 
-### 完成结果
+- **LP5: `@computer-act` 的 rate limit / quota**。第一版不加, 等 LP3 benchmark 跑出来看 hot loop 实际打几次 daemon。如果 agent loop 异常卡死时把 daemon 资源耗尽 (mouse 按住 / wait sleep / implicit_observe cache 累积), 需要:
+  - daemon 端 per-target-seq 资源占用上限
+  - client 端 rate limit (类似 OpenAI API 的 RPM 限制)
+  - 超限时返回 `rate_limited` 错误码 (E2 envelope)
 
-- `@window-resize` parser / command model / executor / macOS AX backend / focused tests 已落地。
-- 默认恢复/激活、canonical `target:{...}`、`target.query` 唯一命中、`verify.tolerance_px = 2`、`ok_with_delta`、`WINDOW_RESIZE_CLAMPED`、`WINDOW_RESIZE_NOT_SETTABLE`、`WINDOW_RESIZE_GUARD_FAILED` 和 resize ambiguity 边界已覆盖。
+- **LP6: glossary 跟现有 rdog 术语对齐**。`docs/glossary.md` 当前只定义了 `@computer-act` 相关新术语。后续需要 cross-reference:
+  - `@observe` / `observation_id` / `@flow` / `AX ref` 等已有术语在 `.codex/skills/rdog-control/SKILL.md` 和 `specs/` 里有定义, glossary 不应重复, 只做 index 链接
+  - `density metrics` 字段的来源 (`rdog-computer-use-density-plan.md` §3) 需要在 glossary 里 cite
+  - 新增 `error_code` 时同步更新 glossary 的 "retry strategy" 节
 
-### 后续事项
-
-- [ ] 接入正式 UI script CLI 或 `rdog control --ui-script` 时,把 `WindowSize mode:"resize"` 编译到 `@window-resize`。
-- [ ] UI script runner 接真实 transport 后,为 resize step 记录 trace.jsonl、artifacts 和 per-step report。
-- [ ] 有明确目标窗口时,再跑 live `@window-resize` smoke,避免在没有用户确认的情况下移动/缩放当前桌面窗口。
-
-## [2026-06-28 13:16:00] [Session ID: codex-20260628-ui-script-window-size-resize] 完成记录与后续建议: WindowSize resize dry-run 编译已落地
-
-### 对应旧计划
-
-- 对应 `2026-06-28 00:50:00` 的"接入正式 UI script CLI 或 `rdog control --ui-script` 时,把 `WindowSize mode:\"resize\"` 编译到 `@window-resize`"中的 dry-run compiler 部分。
-
-### 完成结果
-
-- `src/ui_script.rs` 已支持 `WindowSize mode:"resize"` dry-run 编译到 `@window-resize`。
-- 新增 `window_size_resize.json` fixture。
-- 新测试确认生成的 line-control 文本可被真实 `parse_control_line` 解析为 `ControlCommand::WindowResize`。
-
-### 后续事项
-
-- [ ] 正式 `rdog ui-script run` / `rdog control --ui-script` 仍未接入,后续 runner 应复用当前 dry-run compiler。
-- [ ] 真实 transport 接入后,把 `WindowSize mode:"resize"` 的 step report、`@window-resize` response 和 artifacts 写入 trace。
-- [ ] 有明确目标窗口时,再跑 live `@window-resize` smoke。
-
-## [2026-06-28 13:30:07] [Session ID: codex-20260628-finder-window-resize-live] 完成记录与后续建议: Finder live @window-resize smoke 已完成
-
-### 对应旧计划
-
-- 对应 `2026-06-28 13:16:00` 的"有明确目标窗口时,再跑 live `@window-resize` smoke"。
-
-### 完成结果
-
-- 已对 Finder `docs` 窗口执行 live `@window-resize`。
-- 请求尺寸为 `1000x700`,最终 Finder/macOS clamp 到 `{x:271,y:247,width:1000,height:652}`。
-- 独立 `@window-find` 已验证最终 rect 和可交互状态。
-
-### 后续事项
-
-- [ ] installed `/Users/cuiluming/.cargo/bin/rdog` daemon 仍可能是旧二进制。若后续希望裸 `rdog control ...` 直接支持 `@window-resize`,需要安装当前 workspace 版本并重启 daemon。
-- [ ] 当前 debug daemon 运行在 tmux session `rdog-debug-daemon`。后续如果切回 release daemon,需要先停掉这个 session,避免 local-default 指向调试进程。
+### 关联入口
+- ADR 主入口: `docs/adr/0001-add-computer-act-meta.md`
+- Grill session 主线: fast-infer 项目 `task_plan.md` (本轮 grill 收口记录会追加)
+- 实施节奏建议: LP3 先做 (验证 ADR 决策), LP1/LP2 在 LP3 之后按用户需求触发
