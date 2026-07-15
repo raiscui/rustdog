@@ -109,8 +109,20 @@ echo "  wall_clock_ms: $ELAPSED"
 echo "$out" | grep -q '"ok"[[:space:]]*:[[:space:]]*true' || fail "test 1: ok != true (output: $out)"
 echo "$out" | grep -q '"dispatched_to"[[:space:]]*:[[:space:]]*"@wait"' || fail "test 1: dispatched_to != @wait (output: $out)"
 echo "$out" | grep -qE '"action"[[:space:]]*:[[:space:]]*"wait"' || fail "test 1: action != wait (output: $out)"
-# response envelope 6 个 placeholder 字段
-for f in observation_id verification observation_used density trace_summary trace_savefile; do
+# response envelope 校验 (ticket 11/12/13 后的契约):
+# - observation_id / observation_used: ticket 11 填充,null 或 object 都可能
+# - verification: verify=none 时 omit 整个字段 (ticket 12 acceptance); grep 反向匹配
+# - density: 现在是 object {dispatch_ms, implicit_observe_ms}; ticket 13 加 verify_ms
+# - trace_summary / trace_savefile: 仍 null (ticket 17/18 占位)
+echo "$out" | grep -q '"density"[[:space:]]*:[[:space:]]*{' || fail "test 1: density not object (output: $out)"
+echo "$out" | grep -qE '"dispatch_ms"[[:space:]]*:[[:space:]]*[0-9]+' || fail "test 1: density.dispatch_ms missing (output: $out)"
+echo "$out" | grep -qE '"implicit_observe_ms"[[:space:]]*:[[:space:]]*[0-9]+' || fail "test 1: density.implicit_observe_ms missing (output: $out)"
+# verify=none 时 omit verification key (ticket 12 acceptance)
+if echo "$out" | grep -q '"verification"'; then
+    fail "test 1: verification key should be omitted when verify=none (output: $out)"
+fi
+# trace_summary / trace_savefile 仍是 null 占位 (ticket 17/18 待做)
+for f in trace_summary trace_savefile; do
     echo "$out" | grep -q "\"${f}\"[[:space:]]*:[[:space:]]*null" || fail "test 1: ${f} not null placeholder (output: $out)"
 done
 [[ $ELAPSED -ge 100 && $ELAPSED -lt 500 ]] || fail "test 1: wall clock $ELAPSED ms not in [100, 500]"

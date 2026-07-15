@@ -772,3 +772,36 @@
 
 ### 状态
 **Phase 0 完成 (读 spec + ADR + 当前 dispatcher 代码 + 现有 ObservationStore API)。即将开 Phase 1 (red tests)。**
+
+## [2026-07-15 17:30:00] [Session ID: omx-1783957580965-m4bn8e] [ticket 12 + 13 实施]: rdog `@computer-act` verify 三档 (none / best_effort)
+
+### 触发
+- 用户 "继续" → 接 ticket 11 已 push 的 `afa7517` 之后,按 critical path 推进 ticket 13 (`verify-best-effort`)。
+- ticket 13 依赖 ticket 12 (`verify-none`),所以本轮 ticket 12 + ticket 13 一起做。
+
+### 范围 (ticket 12 + 13 acceptance criteria)
+- [x] ticket 12: 无 `verify` 字段 → 默认 `verify:"none"`,response 不带 `verification` key
+- [x] ticket 12: `verify:"none"` 显式 → 同上
+- [x] ticket 13: `verify:"best_effort"` → 内部 post-action AX diff,返回 `verification.method:"ax_diff"` + `verification.ax_diff.{added, removed, changed}`
+- [x] ticket 13: 不带 screenshot,只跑 AX diff
+- [x] ticket 13: `density.verify_ms` 与 `density.dispatch_ms` 拆分
+- [x] 测试: synthetic AX-tree diff fixture + verify response shape
+
+### 实施决策 (本轮)
+1. **新增 `src/control_computer_act/verify.rs` (~340 行)**: VerifyPolicy 三态枚举 + parse_verify_policy 单一入口 + AxDiffSummary 结构 + run_best_effort_verify 执行流 + render_verification / render_density helpers + 11 个单测
+2. **ticket 12 vs 13 一并实现**: ticket 12 是 ticket 13 的基础 (None 不写 verification 字段),不强求两个独立 commit
+3. **verify=always 占位**: 留作 ticket 14 (本轮 `render_verification` 对 Always 政策返回 None,等同 None)
+4. **density 字段结构**: `{dispatch_ms, implicit_observe_ms, verify_ms?}`,verify_ms 仅 verify=best_effort 时存在 (omit vs null placeholder,跟 ticket 12 一致)
+5. **invalid_verify 错误码**: `error_code:"invalid_verify"` + `error_message` 含不支持的值 (e.g. `"@computer-act.verify 不支持: bogus; 必须是 none / best_effort / always"`)
+6. **ax_diff::diff 模块从 private → pub(crate)**: verify.rs 需要 `compute_diff` 入口,ax_diff 之前只 expose `run(opts)`,没 expose compute_diff 本体
+7. **smoke_computer_act.sh 跟随契约升级**: 旧 smoke 期待 `verification: null` 占位,ticket 12 后 omit 整个字段;旧 smoke 改成反向匹配 (verify=none 不应包含 verification key) + 校验 density 是 object {dispatch_ms, implicit_observe_ms}
+
+### 文件变更
+- 新增 `src/control_computer_act/verify.rs` (~340 行): VerifyPolicy + AxDiffSummary + helpers + 11 单测
+- `src/control_computer_act/mod.rs`: 加 `mod verify;` + 在 execute_computer_act 入口加 verify policy parse + dispatch_ms 拆分 + verify 块渲染
+- `src/ax_diff/mod.rs`: `mod diff` 从 private → pub(crate) (verify.rs 需要 compute_diff 入口)
+- `scripts/smoke_computer_act.sh`: 更新成新契约 (omit verification, density 是 object)
+- 新增 `scripts/smoke_computer_act_verify.sh` (193 行, 5 段 e2e): 默认无 verify / verify=none / verify=best_effort / verify=always (占位) / verify=bogus (invalid_verify)
+
+### 状态
+**ticket 12 + ticket 13 实施完成,准备 commit + smoke + push。**

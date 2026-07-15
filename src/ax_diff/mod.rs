@@ -26,7 +26,7 @@ use serde_json::Value;
 use std::io;
 use std::path::PathBuf;
 
-mod diff;
+pub(crate) mod diff;
 mod normalize;
 mod output;
 mod types;

@@ -39,6 +39,14 @@ pub(crate) use implicit_observe::{
     resolve_or_re_observe_with_wall_clock,
 };
 
+// ticket 12 + ticket 13 verify 三档 (ADR-0004 V3)
+#[path = "verify.rs"]
+mod verify;
+pub(crate) use verify::{
+    parse_verify_policy, render_density, render_verification, run_best_effort_verify,
+    VerifyPolicy,
+};
+
 /// `control_computer_act` 把 action + args 翻译成的中间结果。
 ///
 /// `dispatched_to` 是底层 primitive 的人类可读标签 (`@click` / `@key` 等),
@@ -349,7 +357,29 @@ pub(crate) fn execute_computer_act(
     // ticket 11 implicit_observe: 在 routing 之前解析 args.target / start_box,
     // 校验 observation_id TTL,过期自动 re-observe,outcome 写到 response 顶层。
     // ticket 11 阶段不动 args 结构 (real observe 接入后才替换 start_box → target.ref)。
+    let implicit_observe_start = Instant::now();
     let implicit_outcome = resolve_or_re_observe_with_wall_clock(&request.args);
+    let implicit_observe_ms = implicit_observe_start.elapsed().as_millis() as u64;
+
+    // ticket 12/13: parse verify policy (None 时不写 verification 字段,best_effort 时跑 AX diff)。
+    let verify_policy = match parse_verify_policy(request.verify.as_deref()) {
+        Ok(p) => p,
+        Err(err) => {
+            return Ok(ActionExecutionResult {
+                exit_code: 64,
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+                response_value_json: Some(json!({
+                    "ok": false,
+                    "action": request.action,
+                    "error_code": "invalid_verify",
+                    "error_message": err.to_string(),
+                    "evidence": { "verify": request.verify },
+                    "duration_ms": start.elapsed().as_millis() as u64,
+                }).to_string()),
+            });
+        }
+    };
 
     let routed = match route_computer_act_action(&request.action, &request.args) {
         Ok(r) => r,
@@ -385,9 +415,18 @@ pub(crate) fn execute_computer_act(
         }
     };
 
-    // 调度到底层 primitive
+    // 调度到底层 primitive (ticket 13: 拆出 dispatch_ms,verify 用)
+    let dispatch_start = Instant::now();
     let underlying_result = dispatch_underlying(routed.command, cancel)?;
+    let dispatch_ms = dispatch_start.elapsed().as_millis() as u64;
     let duration_ms = start.elapsed().as_millis() as u64;
+
+    // ticket 13: verify=best_effort → 跑 pre/post AX diff
+    let verify_summary = match verify_policy {
+        VerifyPolicy::BestEffort => Some(run_best_effort_verify(dispatch_ms)),
+        _ => None,
+    };
+    let verify_ms = verify_summary.as_ref().map(|s| s.verify_ms);
 
     // 包成 computer-act envelope
     let underlying_json_str = underlying_result
@@ -404,17 +443,24 @@ pub(crate) fn execute_computer_act(
         "dispatched_to": routed.dispatched_to,
         "duration_ms": duration_ms,
         // ticket 11 填充 observation_id / observation_used;
-        // ticket 12/16/18 后续填充 verification / density / trace_summary / trace_savefile
+        // ticket 12/13 填充 verification / density;
+        // ticket 17/18 后续填充 trace_summary / trace_savefile
         "observation_id": render_top_level_observation_id(&implicit_outcome)
             .map(Value::String)
             .unwrap_or(Value::Null),
-        "verification": Value::Null,
         "observation_used": render_observation_used(&implicit_outcome)
             .unwrap_or(Value::Null),
-        "density": Value::Null,
-        "trace_summary": Value::Null,
-        "trace_savefile": Value::Null,
+        "density": render_density(dispatch_ms, verify_ms, implicit_observe_ms),
     });
+
+    // ticket 12: verify=none 时不写 verification 字段;best_effort 时写 ax_diff 摘要
+    if let Some(v) = render_verification(verify_policy, verify_summary.as_ref()) {
+        payload["verification"] = v;
+    }
+
+    // 占位字段:ticket 17/18 填充
+    payload["trace_summary"] = Value::Null;
+    payload["trace_savefile"] = Value::Null;
     if !ok {
         // 底层错误透传 — ticket 15 把 error_code / retry 包装到 E2 envelope。
         if let Some(err_code) = underlying_value.get("error_code") {
