@@ -739,3 +739,36 @@
 
 ### 状态
 **code-review 修复完成, 准备进 commit。**
+
+## [2026-07-15 16:00:00] [Session ID: omx-1783957580965-m4bn8e] [ticket 11 实施]: rdog `@computer-act` implicit_observe plumbing + freshness + TTL
+
+### 触发
+- 用户回应 "3" → 按 critical path 推进 Phase B 收口。Phase B skeleton (04) + minimum slice (05) 都收口在 `ec0f653`,ticket 11 是 critical path 下一步 (`05 ✓ → 11 → 13 → 14 → 18 → 21 → 22`)。
+- ticket 11 不依赖 ticket 04 之外的实现,但 ticket 04 留下的 `observation_id` / `observation_used` 等 null placeholder 是它要填的字段。
+
+### 范围 (ticket 11 acceptance criteria, 来自 `specs/rdog-computer-act-tickets/11-implicit-observe-and-freshness.md`)
+- [ ] `start_box` + 无 `target.ref` → 触发 implicit_observe;response 携带 `observation_id` 和 `observation_used.freshness`
+- [ ] `target.ref + observation_id` 仍在 TTL 内 → `freshness:"fresh"`,不重新 observe
+- [ ] `target.ref + observation_id` 已过期 → daemon 自动 re-observe,response 携带 `observation_used.re_observe_id`,`freshness:"stale_re_observed"`
+- [ ] TTL 5 秒严格生效 (ADR-0005 L3): 超过 5000ms 即视为过期
+- [ ] 测试覆盖: 时钟注入做 TTL 边界 / fresh path / stale path / re-observe 路径
+
+### 实施决策 (本轮)
+1. **轻量级 cache,不复用全局 `ObservationStore`**: ticket 11 阶段不需要真实的 AX/screenshot observe,只需要 `observation_id → ref_id` 映射 + TTL 生命周期。新建 `ComputerActObservationCache`,独立维护 TTL 5s,跟全局 `ObservationStore` (300s TTL) 解耦,避免语义混淆。
+2. **Synthetic ref_id 占位**: `ref_id = format!("@e{seq}")` 作为 ticket 11 占位。后续 ticket (Phase I real observe 集成) 才把 start_box 真实映射到 AX ref。当前底层 dispatch 仍用 `MouseEndpoint::Coordinate`(start_box 像素),等真实 observe 接入后再切 `MouseEndpoint::ObservationRef`。这是 ticket 11 acceptance criteria 不反对的简化。
+3. **clock 注入 via `now_ms: u64` 参数** (跟 `ObservationStore` 同模式): 单元测试用 mock clock,real path 在 daemon 启动时初始化为 `SystemTime::now() - UNIX_EPOCH`。
+4. **缓存作用域 = daemon 进程内全局**: 用 `OnceLock<Mutex<ComputerActObservationCache>>`,跟现有 `ObservationStore` 用法对齐 (rdog dispatcher 单线程,但 Mutex 兜底兼容未来并发)。
+5. **freshness 三态严格按 ADR-0005**:
+   - `fresh`: target.observation_id 命中且未过期 (5s TTL 内)
+   - `stale_re_observed`: target.observation_id 过期或不存在,daemon 自动 re-observe
+   - `stale_fallback_to_coords`: 留给后续 real observe 阶段 (start_box 不可 observe 时降级); ticket 11 暂不暴露 (real observe 还没接入)
+
+### 文件变更
+- 新增 `src/control_computer_act/implicit_observe.rs` (~150 行): cache struct + outcome enum + now_ms 注入
+- `src/control_computer_act/mod.rs`: 加 `mod implicit_observe;` + 在 `execute_computer_act` 入口加 implicit_observe 包装
+- `src/control_computer_act/tests.rs`: 加 ~12 个单测 (fresh / stale / re-observe / TTL boundary / clock 注入 / routing 集成)
+- 新增 `scripts/smoke_computer_act_observe.sh`: 端到端 smoke,2 段 (fresh reuse + stale re-observe)
+- `docs/adr/0005-lifecycle.md`: 不动,本轮实现跟 L3 决策一致
+
+### 状态
+**Phase 0 完成 (读 spec + ADR + 当前 dispatcher 代码 + 现有 ObservationStore API)。即将开 Phase 1 (red tests)。**

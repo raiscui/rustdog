@@ -31,6 +31,14 @@ use crate::control_protocol::{
     ComputerActRequest, ControlCommand, OpenAppRequest, WaitRequest,
 };
 
+// ticket 11 implicit_observe plumbing (TTL 5s, ADR-0005 L3)
+#[path = "implicit_observe.rs"]
+mod implicit_observe;
+pub(crate) use implicit_observe::{
+    render_observation_used, render_top_level_observation_id,
+    resolve_or_re_observe_with_wall_clock,
+};
+
 /// `control_computer_act` 把 action + args 翻译成的中间结果。
 ///
 /// `dispatched_to` 是底层 primitive 的人类可读标签 (`@click` / `@key` 等),
@@ -338,6 +346,11 @@ pub(crate) fn execute_computer_act(
     let start = Instant::now();
     let _ = default_timeout_ms_for_action(&request.action); // ticket 16 替换
 
+    // ticket 11 implicit_observe: 在 routing 之前解析 args.target / start_box,
+    // 校验 observation_id TTL,过期自动 re-observe,outcome 写到 response 顶层。
+    // ticket 11 阶段不动 args 结构 (real observe 接入后才替换 start_box → target.ref)。
+    let implicit_outcome = resolve_or_re_observe_with_wall_clock(&request.args);
+
     let routed = match route_computer_act_action(&request.action, &request.args) {
         Ok(r) => r,
         Err(ComputerActRouteError::UnknownAction(action)) => {
@@ -390,10 +403,14 @@ pub(crate) fn execute_computer_act(
         "action": request.action,
         "dispatched_to": routed.dispatched_to,
         "duration_ms": duration_ms,
-        // 后续 ticket 11/12/16/18 填充, 04 skeleton 全部 null
-        "observation_id": Value::Null,
+        // ticket 11 填充 observation_id / observation_used;
+        // ticket 12/16/18 后续填充 verification / density / trace_summary / trace_savefile
+        "observation_id": render_top_level_observation_id(&implicit_outcome)
+            .map(Value::String)
+            .unwrap_or(Value::Null),
         "verification": Value::Null,
-        "observation_used": Value::Null,
+        "observation_used": render_observation_used(&implicit_outcome)
+            .unwrap_or(Value::Null),
         "density": Value::Null,
         "trace_summary": Value::Null,
         "trace_savefile": Value::Null,
