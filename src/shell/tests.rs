@@ -19,7 +19,7 @@ struct FakeExecutor {
 }
 
 impl ControlActionExecutor for FakeExecutor {
-    fn execute(&self, command: &ControlCommand, _shell: &str) -> io::Result<ActionExecutionResult> {
+    fn execute(&self, command: &ControlCommand, _shell: &str, _cancel: Option<&crate::cancellation::CancellationToken>) -> io::Result<ActionExecutionResult> {
         self.commands
             .lock()
             .expect("commands lock should work")
@@ -49,6 +49,9 @@ impl ControlActionExecutor for FakeExecutor {
             }
             ControlCommand::OpenApp(request) => {
                 format!("OPEN_APP:{}:{}\n", request.app_name, request.wait_ms).into_bytes()
+            }
+            ControlCommand::Cancel(request) => {
+                format!("CANCEL:target_seq={}\n", request.target_seq).into_bytes()
             }
             ControlCommand::PtyOpen(request) => format!("PTY_OPEN:{}\n", request.cmd).into_bytes(),
             ControlCommand::PtyClose(request) => {
@@ -865,6 +868,7 @@ fn control_receiver_should_report_executor_failure_with_return_object() {
             &self,
             _command: &ControlCommand,
             _shell: &str,
+            _cancel: Option<&crate::cancellation::CancellationToken>,
         ) -> io::Result<ActionExecutionResult> {
             Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -911,6 +915,7 @@ fn control_receiver_should_wrap_executor_failure_with_request_id() {
             &self,
             _command: &ControlCommand,
             _shell: &str,
+            _cancel: Option<&crate::cancellation::CancellationToken>,
         ) -> io::Result<ActionExecutionResult> {
             Err(io::Error::new(
                 io::ErrorKind::InvalidInput,

@@ -237,7 +237,7 @@ fn handle_daemon_control_query(
             .map_err(to_io_error)?;
         return Ok(());
     }
-    let outcome = parse_and_execute_control_line(request.line.as_str(), shell, executor);
+    let outcome = parse_and_execute_control_line(request.line.as_str(), shell, executor, &crate::cancellation::CancelRegistry::new());
 
     if let Some(session_id) = request.session_id.as_deref() {
         publish_outcome_to_session_channel(session, keyexpr_root, namespace, session_id, &outcome)?;

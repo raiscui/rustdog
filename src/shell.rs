@@ -383,7 +383,7 @@ fn run_control_receiver_with_executor<E: ControlActionExecutor>(
     let mut writer = stream;
 
     while let Some(line) = read_control_request_line(&mut reader)? {
-        let outcome = parse_and_execute_control_line(&line, shell, executor);
+        let outcome = parse_and_execute_control_line(&line, shell, executor, &crate::cancellation::CancelRegistry::new());
         if outcome.outbound_frames.is_empty() {
             continue;
         }
@@ -454,7 +454,7 @@ fn run_control_receiver_messages<E: ControlActionExecutor>(
             continue;
         }
 
-        let outcome = parse_and_execute_control_line(&line, shell, executor);
+        let outcome = parse_and_execute_control_line(&line, shell, executor, &crate::cancellation::CancelRegistry::new());
         if outcome.outbound_frames.is_empty() {
             continue;
         }

@@ -4,6 +4,7 @@ mod bootstrap;
 mod flow;
 mod web_gui;
 mod wait;
+mod cancel_seq;
 mod open_app;
 
 use crate::{

@@ -8,7 +8,7 @@ pub(crate) use self::parsers::{
 };
 
 use self::parsers::{
-    parse_control_header, parse_key_payload, parse_open_app_payload, parse_wait_payload, parse_pty_attach_payload, parse_pty_close_payload,
+    parse_cancel_payload, parse_control_header, parse_key_payload, parse_open_app_payload, parse_wait_payload, parse_pty_attach_payload, parse_pty_close_payload,
     parse_pty_detach_payload, parse_pty_payload, parse_screenshot_payload,
     require_non_empty_payload,
 };
@@ -97,6 +97,7 @@ pub enum ControlCommand {
     SaveFile(SaveFileFrame),
     Wait(WaitRequest),
     OpenApp(OpenAppRequest),
+    Cancel(CancelRequest),
 }
 
 pub const DEFAULT_KEY_HOLD_MS: u64 = 200;
@@ -130,6 +131,21 @@ pub struct OpenAppRequest {
     pub app_name: String,
     pub wait_ms: u64,
 }
+
+
+/// `@cancel#seq` 的结构化请求。
+///
+/// 让 in-flight 命令 `target_seq` 被取消。被取消命令的 response
+/// 携带 `error_code:"cancelled"`, `evidence.cancelled_at_step` 标明
+/// 取消发生在哪个 await 点。
+///
+/// 若 `target_seq` 不在 cancel registry (已完成 / 从未存在),
+/// 取消命令本身仍 OK,只是登记无 op — 返回 `unknown_target_seq`。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CancelRequest {
+    pub target_seq: u64,
+}
+
 
 
 /// `@paste` 的结构化请求。
@@ -456,6 +472,7 @@ pub fn parse_control_line(line: &str) -> io::Result<ControlParseResult> {
         "savefile" => ControlCommand::SaveFile(SaveFileFrame::parse_object_payload(payload)?),
         "wait" => ControlCommand::Wait(parse_wait_payload(payload)?),
         "open-app" => ControlCommand::OpenApp(parse_open_app_payload(payload)?),
+        "cancel#seq" => ControlCommand::Cancel(parse_cancel_payload(payload)?),
         _ => {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
