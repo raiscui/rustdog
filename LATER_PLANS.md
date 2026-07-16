@@ -593,3 +593,22 @@
   for hotkey_click"。当前实现 1 entry (整 Composite 算一个 dispatch step)。
 - 后续: 真正的 sub-step trace 需要扩 TraceSummary 概念 (e.g., 嵌套 step 数组)。
 - 触发条件: ticket 18 trace 进一步细化时 (现在 hotkey_click 单 step 已经够用)。
+
+### LP-ticket-22-deferred-1: 真实 GUI benchmark (e2e + density 同步测)
+- 当前 benchmark 用 @wait/@key/@ping 等 fast 命令, 跨环境稳定但没真实 GUI 执行时间。
+- 后续: 加 "real_gui" 模式 (用真实 Calculator / 浏览器 / 文件管理器), 把 wall-clock
+  对比也包进 report。当前 benchmark 只比 round-trip COUNT, 真实 GUI benchmark 比
+  wall-clock 才是 client 关心的最终指标。
+- 触发条件: 真实使用场景需要 GUI benchmark 报告时 (e.g., 客户要求 SLA 证明)。
+
+### LP-ticket-22-deferred-2: per-action breakdown
+- 当前 benchmark 是 10 任务综合 win rate。
+- 后续: 拆出 per-action benchmark (click_only / wait_only / hotkey_only 等),
+  单独看每个动作的 density overhead。click 等简单动作可能 overhead 较小, 
+  hotkey_click (Composite 3 步) overhead 较大。
+- 触发条件: 客户端调优时需要 per-action 数据。
+
+### LP-ticket-22-deferred-3: 历史对比
+- 当前 benchmark 只输出当次结果, 没有历史对比。
+- 后续: 每次跑 benchmark append 到历史文件, 跟历史 win rate 做对比, 退化时报警。
+- 触发条件: CI 接入定期跑 benchmark 时。
