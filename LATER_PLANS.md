@@ -516,3 +516,23 @@
 - ticket 13 引入了 `error_code:"invalid_verify"`,但 ticket 15 E2 envelope 才补 `retry.strategy:"never"` (手动修复语法)
 - 当前 invalid_verify 错误响应里没有 retry 字段,跟 ticket 04 时代 (其他错误码也没 retry) 一致
 - ticket 15 统一处理
+
+### LP-ticket-14-deferred-1: observation_block 字段接入 trace
+- 当前 `AlwaysVerifySummary.observation_block` 字段保留但 `#[allow(dead_code)]`,ticket 14 不渲染。
+- ticket 18 trace 实现时,可以把这个 full observe bundle 直接落盘 (不再重做 observe)。
+- 触发条件: ticket 18 trace_savefile 实现时。
+
+### LP-ticket-14-deferred-2: screenshot_id 提取逻辑优化
+- 当前 fallback chain: visual.id → observation.observation_id。
+- 后续 observe bundle 应该给 visual 段加独立 id 字段 (跟 ax_tree_id / window_observation 区分),让 screenshot_id 不再退化成 observation_id。
+- 触发条件: rdog 上游 observe API 加 visual.id 后。
+
+### LP-ticket-14-deferred-3: full observe 的并行化
+- 当前 `run_always_verify` 是串行 (pre-AX → dispatch → post-observe → diff)。
+- full observe ~1.3s,如果跟 dispatch 并行 (在 dispatch 启动期间就启动 observe),可以省掉一个 round-trip。
+- 触发条件: dispatcher 改成 async 后 (rdog 后续 phase)。
+
+### LP-ticket-14-deferred-4: verification.observation.windows 类型
+- 当前 `windows` 字段直接从 observe bundle 的 windows 段复制 (结构为 `{status, reason, target_applied, ...}` 在 target_required 时)。
+- 后续 verify=always 应该明确 windows 是数组 (`[{id, title, role, ...}]`),跟 best_effort 的 ax_diff.elements 一致。
+- 触发条件: ticket 21 (e2e smoke) 验证真实 GUI 场景时,确认 windows 字段语义。

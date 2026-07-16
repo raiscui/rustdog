@@ -221,3 +221,43 @@
 - **ax_diff module 升级到 pub(crate)**: 这是个隐藏的 coupling。verify.rs 跟 ax_diff::compute_diff 之间应该有 facade (verify 模块包装),而不是直接调 compute_diff。当前为了 ticket 11/13 节奏先直接 import,后续重构期可以抽 ax_diff facade (`run_ax_diff_between_snapshots(before, after) -> AxDiffSummary`) 把 ax_diff 重新变成 opaque。
 - **smoke 脚本的"契约升级"模式**: smoke_computer_act.sh ticket 04 时代写死了 `verification: null` 占位,ticket 12 改成 omit 后旧 smoke 直接挂掉。这暴露了 smoke 脚本需要"按 ticket 版本分文件"或者"契约注释化"。当前简单粗暴: 旧 smoke 跟新契约对齐 (update in place)。后续可以拆 smoke_computer_act_v1.sh (旧契约) 和 smoke_computer_act.sh (当前契约),保留历史回归。
 - **mixed worktree scoped commit hygiene 继续生效**: 5 个文件 + 1 docs,跟 ticket 11 一样不 `git add .`。
+
+## [2026-07-16 10:45:00] [Session ID: omx-1783957580965-m4bn8e] 任务名称: rdog `@computer-act` verify-always (ticket 14)
+
+### 任务内容
+- 实现 ticket 14 (`verify-always`): post-action full observe (screenshot + AX + windows) + AX diff
+- response 增加 `verification.method:"full"` + `verification.observation.{screenshot_id, ax_tree_id, windows, screenshot_truncated}`
+- screenshot > 2MB 标 `screenshot_truncated:true` (不截断,只标记)
+- density.verify_ms 覆盖 full observe 耗时
+
+### 完成过程
+- Phase 0: 读 ticket 14 spec + ADR-0004 V3 + ADR-0006 density 字段规范
+- Phase 1: 扩 src/control_computer_act/verify.rs (+63 行)
+  - `AlwaysVerifySummary` struct (observation_block / screenshot_id / ax_tree_id / windows / screenshot_truncated / ax_diff)
+  - `run_always_verify` 流程: pre-AX → dispatch → post-observe bundle → diff
+  - `render_always_verification` 输出 {method, observation, ax_diff}
+  - `ALWAYS_VERIFY_SCREENSHOT_LIMIT_BYTES = 2 MB`
+  - `render_verification` 签名改 3 参数 (policy + diff_summary + always_summary),让 Always 走不同 summary 类型
+  - +6 单测 (screenshot 阈值 / render shape / truncated / dispatch / empty)
+- Phase 2: src/control_computer_act/mod.rs dispatch
+  - 加 `run_always_verify` re-export
+  - 拆 `verify_summary` (best_effort) / `always_summary` (always) / verify_ms 三档
+- Phase 3: src/control_observation.rs `pub use observe::build_observe_bundle`
+- Phase 4: smoke_computer_act_verify.sh test 4 改成验证 ticket 14 acceptance
+
+### 验证
+- `RUSTFLAGS="-Awarnings" cargo check --bin rdog --tests`: 0 warning
+- `RUSTFLAGS="-Awarnings" cargo test --bin rdog`: 553 passed, 0 failed (+6 verify tests)
+- `bash scripts/smoke_computer_act_verify.sh`: 5/5 通过
+- `bash scripts/smoke_computer_act.sh` (regression): 5/5 通过
+- `bash scripts/smoke_computer_act_observe.sh` (regression): 4/4 通过
+- `git push origin main`: `ece056d..746df94` 成功
+
+### 总结感悟
+- **render_verification 签名从 2 参数改 3 参数**: 这是 ticket 14 的核心 API 演化。BestEffort 走 `AxDiffSummary`,Always 走 `AlwaysVerifySummary`,两种 summary 类型不同,必须显式 dispatch。代码上比 `Option<Box<dyn VerifySummary>>` 更直白,代价是 caller (mod.rs) 要写两次 match。这跟 "单一真相源 + 显式 dispatch" 的哲学一致: summary type 不能因为 verify policy 不同而用 trait object 抹平,显式区分让 caller 看到 "Always 多走了一条路"。
+- **observation_block 字段保留但不渲染**: ticket 14 acceptance 只要求 observation.{screenshot_id, ax_tree_id, windows} 三个子字段,不要求 full observe bundle。但 AlwaysVerifySummary 跑完整 observe,丢掉 full bundle 是浪费。`#[allow(dead_code)]` 标注,等 ticket 18 trace 时复用 (full observe 一次性出,trace 直接落盘不重做 observe)。这是 "不为 ticket 14 而 ticket 14,顺手留接口" 的设计。
+- **screenshot_truncated 不截断**: ticket 14 明确 "server reports `screenshot_truncated:true` rather than dropping it"。这是个关键设计: server 不擅自决定丢图 (可能 client 要 OCR),只标 false 警示 client 自己处理。这跟 rdog 整体的 "control bridge, 不擅自做决策" 哲学一致。
+- **full observe 复用 client `@observe` 路径**: `build_observe_bundle(ObserveRequest::default())` 跟 client 调 `@observe` 走完全相同的 capture (Hybrid mode = screenshot + AX + windows)。这保证 ticket 14 看到的 GUI 状态跟 client 自己 observe 时一致,避免 "server-side observe 跟 client-side observe 不一致" 的诡异 bug。
+- **pre-AX 用轻量 capture_default_ax_snapshot**: full observe 已经包含 AX (post),pre 只为 diff 用,不需要重复走 heavy scope / depth / max_elements 配置。`AxTreeRequest::default()` 是 AX 全树无 scope,够 diff 用。
+- **screenshot_id 走 fallback chain**: 当前 `observe.visual` 段没有独立 id 字段 (screenshot summary 只有 `kind`, `image`, `manifest`),所以先查 `visual.id` (有就用),fallback 到 `observation.observation_id` (一定有)。这个 fallback 是因为 Hybrid observe 的 visual + accessibility + windows 都共享一个 observation_id,等后续 observe 加 visual.id 后可以简化。
+
