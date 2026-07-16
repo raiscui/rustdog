@@ -67,6 +67,13 @@ pub(crate) use error_envelope::{
     error_envelope, ComputerActErrorCode, RetryStrategy,
 };
 
+// ticket 16 per-action timeout table (ADR-0005 §3)
+#[path = "timeout.rs"]
+mod timeout;
+pub(crate) use timeout::{
+    resolve_timeout, TimeoutWatcher,
+};
+
 /// `control_computer_act` 把 action + args 翻译成的中间结果。
 ///
 /// `dispatched_to` 是底层 primitive 的人类可读标签 (`@click` / `@key` 等),
@@ -437,11 +444,56 @@ pub(crate) fn execute_computer_act(
         }
     };
 
+    // ticket 16: timeout watcher (spawn background thread, 命中后 signal cancel_token)。
+    // 跟 ticket 03 cancellation 整合: dispatch_underlying 拿 cancel, 命中后由
+    // 底层 primitive 决定怎么处理 (e.g., @wait sleep_cancellable 返回 Err)。
+    let effective_timeout_ms = resolve_timeout(
+        &request.action,
+        &request.args,
+        request.timeout_ms,
+    );
+    let timeout_token = CancellationToken::new();
+    let _timeout_watcher = TimeoutWatcher::start(effective_timeout_ms, timeout_token.clone());
+    let effective_cancel: Option<&CancellationToken> = Some(&timeout_token);
+
     // 调度到底层 primitive (ticket 13: 拆出 dispatch_ms,verify 用)
     let dispatch_start = Instant::now();
-    let underlying_result = dispatch_underlying(routed.command, cancel)?;
+    let underlying_result = dispatch_underlying(routed.command, effective_cancel)?;
     let dispatch_ms = dispatch_start.elapsed().as_millis() as u64;
     let duration_ms = start.elapsed().as_millis() as u64;
+
+    // ticket 16: timeout 检查。如果 timeout_token fired 且 dispatch 仍 ok → 算 timeout。
+    // 注意: 即使 dispatch 出错, 也可能是因为 cancel 触发了底层 primitive 早退;
+    // 这种情况下 exit_code != 0, 底层 primitive 已经返回错误, 我们也归类为 timeout。
+    let timeout_fired = timeout_token.is_cancelled();
+    if timeout_fired {
+        let mut evidence = serde_json::Map::new();
+        evidence.insert(
+            "last_step".into(),
+            Value::String("dispatch".to_string()),
+        );
+        evidence.insert(
+            "timeout_ms".into(),
+            Value::Number(effective_timeout_ms.into()),
+        );
+        evidence.insert(
+            "elapsed_ms".into(),
+            Value::Number(dispatch_ms.into()),
+        );
+        return Ok(ActionExecutionResult {
+            exit_code: 64,
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+            response_value_json: Some(error_envelope(
+                ComputerActErrorCode::Timeout,
+                format!(
+                    "action {} exceeded timeout ({}ms after dispatch)",
+                    request.action, effective_timeout_ms
+                ),
+                Some(Value::Object(evidence)),
+            ).to_string()),
+        });
+    }
 
     // ticket 13/14: verify 三档分别跑不同 verify 流程
     // - BestEffort: AX diff only (轻量)
