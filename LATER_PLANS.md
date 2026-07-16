@@ -536,3 +536,31 @@
 - 当前 `windows` 字段直接从 observe bundle 的 windows 段复制 (结构为 `{status, reason, target_applied, ...}` 在 target_required 时)。
 - 后续 verify=always 应该明确 windows 是数组 (`[{id, title, role, ...}]`),跟 best_effort 的 ax_diff.elements 一致。
 - 触发条件: ticket 21 (e2e smoke) 验证真实 GUI 场景时,确认 windows 字段语义。
+
+### LP-ticket-17-deferred-1: payload_bytes 实测
+- 当前 `ComputerActDensity::payload_bytes` 字段占 0。
+- 真实值应该在 response_value_json 序列化后算 (`response.to_string().len()` 或 `serde_json::to_vec(&payload).len()`)。
+- 触发条件: ticket 21 e2e smoke 阶段补真实值,避免 response size 漂移无监控。
+
+### LP-ticket-17-deferred-2: mouse_fallback_count / stale_ref_recovery_count / false_success_count 实测
+- 当前都占 0。
+- mouse_fallback_count: ticket 04 阶段 start_box → coordinate fallback 计数;等真实 ref 集成后才有意义
+- stale_ref_recovery_count: ticket 11 implicit_observe stale_re_observed 路径每次 +1
+- false_success_count: ok:true 但 GUI 没变化的次数 (跟 verification_passed 互补)
+- 触发条件: ticket 21 e2e smoke 真实 GUI 场景补真实值。
+
+### LP-ticket-18-deferred-1: request_id thread 到 execute_computer_act
+- 当前 savefile name 用 ts_ms (无 request_id),trace-1784195533512-1784195533512.json (id 部分跟 ts 重复)。
+- 后续 control_actions.rs 重构时,把 request_id 从 ControlRequest 传到 execute_computer_act,让 savefile name 含真实 request_id (跟 log / debug 工具对齐)。
+- 触发条件: control_actions.rs::execute 签名重构时。
+
+### LP-ticket-18-deferred-2: trace_savefile 自动清理
+- 当前 rdog_downloads/trace-*.json 不断累积,没清理策略。
+- 后续加 savefile TTL (e.g., 7 天) 或 size 上限 (e.g., 100MB),跟 @savefile 机制统一治理。
+- 触发条件: rdog 上游 savefile 模块加全局 TTL/size 管理时。
+
+### LP-ticket-18-deferred-3: implicit_observe sub-step 实测
+- 当前 ax_tree_scan: ok (轻量 capture), screenshot_capture: skipped, ref_resolution: skipped。
+- 等 ticket 11 LP-ticket-11-deferred-1 真实 observe 集成时, screenshot_capture 改 ok。
+- 等 LP-ticket-11-deferred 真实 start_box → ref 解析集成时, ref_resolution 改 ok。
+- 触发条件: Phase I ticket 21+ 集成时。

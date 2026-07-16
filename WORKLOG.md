@@ -261,3 +261,45 @@
 - **pre-AX 用轻量 capture_default_ax_snapshot**: full observe 已经包含 AX (post),pre 只为 diff 用,不需要重复走 heavy scope / depth / max_elements 配置。`AxTreeRequest::default()` 是 AX 全树无 scope,够 diff 用。
 - **screenshot_id 走 fallback chain**: 当前 `observe.visual` 段没有独立 id 字段 (screenshot summary 只有 `kind`, `image`, `manifest`),所以先查 `visual.id` (有就用),fallback 到 `observation.observation_id` (一定有)。这个 fallback 是因为 Hybrid observe 的 visual + accessibility + windows 都共享一个 observation_id,等后续 observe 加 visual.id 后可以简化。
 
+
+## [2026-07-16 13:50:00] [Session ID: omx-1783957580965-m4bn8e] 任务名称: rdog `@computer-act` density metrics + trace observability (tickets 17 + 18)
+
+### 任务内容
+- 实现 ticket 17 (density): ADR-0006 §Consequences 全字段集
+- 实现 ticket 18 (trace): 4 entry trace_summary inline + trace_savefile opt-in
+- response envelope 整体完整化: ok / action / dispatched_to / duration_ms / observation_id / observation_used / verification / density / trace_summary / trace_savefile
+
+### 完成过程
+- Phase 0: 读 ticket 17 + 18 spec + ADR-0006 §Consequences + 现有 savefile 机制
+- Phase 1: 新建 src/control_computer_act/density.rs (194 行)
+  - ComputerActDensity struct + render_density + compute_verification_passed
+  - 6 单测 (ADR-0006 全字段渲染 / verify_ms omit vs include / elapsed_ms_total / verification_passed 三态)
+- Phase 2: 新建 src/control_computer_act/trace.rs (339 行)
+  - TraceStepKind / TraceStatus / TraceStep / TraceSummary (严格 4 entry)
+  - FullTrace + SubStep + write_trace_savefile (走 default_savefile_directory)
+  - 7 单测 (4 entry / verify skipped / dispatch failed / implicit_observe skipped / render shape / sub_step factory)
+- Phase 3: verify.rs 删 render_density 函数 + 2 个旧测试 (搬到 density.rs)
+- Phase 4: mod.rs 重组
+  - 注册 density + trace 子模块
+  - density_metrics + trace_summary 必须在 json! macro 之前构造 (rust borrow checker)
+  - trace_savefile 仅在 request.trace == Some("savefile") 时存在 (omit when absent)
+- Phase 5: smoke_computer_act.sh 跟随新契约升级
+- Phase 6: smoke_computer_act_trace.sh 新增 199 行 (3 段 e2e)
+
+### 验证
+- `RUSTFLAGS="-Awarnings" cargo check --bin rdog --tests`: 0 warning
+- `RUSTFLAGS="-Awarnings" cargo test --bin rdog`: 564 passed, 0 failed (+13 - 2)
+- `bash scripts/smoke_computer_act_trace.sh`: 3/3 通过
+- `bash scripts/smoke_computer_act.sh` (regression): 5/5 通过
+- `bash scripts/smoke_computer_act_verify.sh` (regression): 5/5 通过
+- `bash scripts/smoke_computer_act_observe.sh` (regression): 4/4 通过
+- `git push origin main`: `41dd0bd..a38fed4` 成功
+
+### 总结感悟
+- **density + trace 拆两个模块**: ticket 17/18 都属于 observability,理论上可以合一个 `observability.rs` 模块。但它们生命周期不同: density 是每个 response 必有,trace 有 inline (必有) 和 savefile (opt-in) 两档。拆开让 verify.rs / density.rs / trace.rs 各自独立,后续 e2e smoke 加新 metric 不会互相影响。这是 "代码组织跟数据生命周期对齐" 的哲学,而不是简单按 ticket 顺序堆。
+- **trace_savefile 走 rdog 现有 savefile 机制**: ADR-0006 明确 "matches the existing `@savefile` mechanism",所以 savefile 路径走 default_savefile_directory() (rdog_downloads/),不引入新机制。这是 rdog 整体的 "reuse existing infrastructure" 哲学,新功能尽量复用而不是新建。
+- **omit vs null 占位的一致性**: ticket 12 verify=none 时 omit verification, ticket 18 trace_savefile 默认 omit (用 `if request.trace == "savefile"` 块控制)。这种 omit 风格比 null 占位更清晰 (client 不用判 null,直接 obj.get("xxx") 拿到 None 即代表 no field)。但 smoke 脚本要写反向匹配 (`if echo "$out" | grep -q '"trace_savefile"'; then fail`)。
+- **trace_step_count 在 density 和 trace_summary 都填 4**: 同步设计,client 可以从任一处读 step count。如果两处不一致就是 bug。后续 ticket 21 e2e smoke 可能改成动态 (实际跑的 step 数),那时候要保持同步更新。
+- **borrow checker 强制 reorder 构造顺序**: rust borrow checker 不允许 json! macro 用未声明的变量,所以 `ComputerActDensity` 必须在 json! macro 之前构造完。这是 rust 函数式编程的副作用之一,比其它语言 (JS/TS) 严格。但这个约束反而让代码更清晰: payload 构造顺序 = 数据依赖顺序。
+- **sub-step 现状占位**: implicit_observe 当前的 sub-step 是 ax_tree_scan:ok + screenshot_capture:skipped + ref_resolution:skipped,跟 ticket 11 阶段没真抓 screenshot/真解析 ref 一致。等 Phase I 真实 observe 集成时 (LP-ticket-11-deferred-1) 改 ok 即可。
+- **payload_bytes / mouse_fallback_count 等占 0**: 这些字段 ADR-0006 写了名字,但本轮 dispatcher 没有真实数据。占 0 是诚实选择 ("不知道就说不知道"),ticket 21 e2e 真实 GUI 场景才补真实值。
