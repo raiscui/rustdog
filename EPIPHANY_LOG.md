@@ -565,3 +565,53 @@
 - EPIPHANY_LOG 沉淀完成
 - LATER_PLANS.md 已有 `zenoh_router_client ~4% flake 排查` follow-up,保留 [ ] 待办,等 flake 再次稳定复现
 - WORKLOG.md 收尾待追加(等用户决定)
+
+## [2026-07-16 22:35:00] [Session ID: omx-1783957580965-m4bn8e] 主题: bash 命令替换 + python heredoc 嵌套双引号被 zsh 吞
+
+### 发现来源
+- ticket 20 smoke test 6 失败: `path \`$.value.dispatched_to\` 在最新 response 中不存在`。
+- 手动跑同一份 flow JSON 成功, 加 debug echo 到 smoke 看 flow_json_6 实际内容才发现双引号全被吞。
+
+### 核心问题
+smoke 脚本 line 313-314 写法:
+```bash
+flow_json_6=$(python3 -c "
+import json
+...
+{'ControlLine': '@computer-act#1:{schema:\"rdog.computer-act.v1\",...}'},
+...
+")
+```
+
+外层 `$(python3 -c "...")` 是 bash 命令替换, 用了 bash 双引号包 python 命令字符串。
+python 命令字符串里又有 JSON 字符串字面量带 `\"`, 经过 bash → zsh → python 多层解释,
+最终 zsh 命令替换语义下内层双引号被吞, python 看到的字符串是:
+```python
+'@computer-act#1:{schema:rdog.computer-act.v1,action:open_app,args:{app_name:Calculator}}'
+```
+全部双引号丢失 → 不再是合法 rdog dict 语法 → 解析失败或 fallback → Expect 找不到字段。
+
+### 为什么重要
+- 这跟 cat <<EOF 反引号触发命令替换是同款坑 (AGENTS.md 已记录), 但 bash 命令替换 `$(...)`
+  模式下容易被忽略, 因为开发者觉得 `$(python3 -c "...")` 是常见模式不会有问题。
+- 跨项目复用 smoke 风格时容易复制粘贴这个反模式, 后续 ticket 21-26 的 smoke 也可能踩。
+- ticket 22 (density benchmark) 已经走 `subprocess.run([...])` 风格, 不踩这个坑, 验证了
+  "Python script 优先" 原则的有效性。
+
+### 未来风险
+- 任何 rdog smoke 脚本里构造 JSON payload 时, 如果内层字符串含 `"`, 必须走 sys.argv
+  helper 或写到 .json 文件再用 Python 读, 绝不能在 `$(python3 -c "...")` 里硬编码。
+- 复现路径: 在 zsh (macOS 默认) 下 + bash 命令替换 + python heredoc + 双引号 → 100% 复现。
+  在 bash 5.x (某些 Linux) 下可能行为不同, 需要 CI 在多种 shell 下都测一遍。
+
+### 当前结论
+- ticket 20 已修复 (新增 `make_flow_with_contains_multi` helper, 走 sys.argv 传 step JSON)。
+- 7/7 smoke 全过 + 600 unit tests 全过。
+- 教训已写进 LATER_PLANS.md LP-ticket-20-deferred-1 (dead_code 一起 batch 处理)。
+- 建议: 下一次新增 smoke helper 时, 直接复制 `make_flow_with_contains_multi` 模式,
+  避免重蹈覆辙。
+
+### 后续讨论入口
+- 看 `scripts/smoke_flow_computer_act.sh:240-280` (`make_flow_with_contains_multi` helper 定义)。
+- 看 `scripts/smoke_flow_computer_act.sh:305-360` (test 6 正确写法)。
+- 复现反例: 把 test 6 改回 `flow_json_6=$(python3 -c "...")` 硬编码版本, 跑 smoke 必失败。

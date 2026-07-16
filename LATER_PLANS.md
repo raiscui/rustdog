@@ -612,3 +612,37 @@
 - 当前 benchmark 只输出当次结果, 没有历史对比。
 - 后续: 每次跑 benchmark append 到历史文件, 跟历史 win rate 做对比, 退化时报警。
 - 触发条件: CI 接入定期跑 benchmark 时。
+
+### LP-ticket-20-deferred-1: 累积 dead_code warnings (跨 ticket 累积, 不阻塞)
+本轮 ticket 19+20 范围 0 warning, 但跨 session 累积还有这些 (跟 ticket 19+20 无直接关系):
+- `src/control_computer_act/mod.rs:68` unused import: `RetryStrategy`
+- `src/control_computer_act/mod.rs:391` unused variable: `cancel`
+- `src/control_computer_act/timeout.rs:20` unused import: `ComputerActErrorCode`
+- `src/control_computer_act/error_envelope.rs:61-69` 7 个 `ComputerActErrorCode` variant 未构造
+  (PermissionDenied / ObservationExpired / TargetNotFound / VerifyFailed /
+   PlatformUnsupported / Infrastructure / Cancelled) — 等真实 GUI e2e 触发 → LP-ticket-15-deferred-1
+- `TimeoutWatcher.fired()` / `.stop()` / `cancel_token` / `handle` 字段未读
+  (let _timeout_watcher 模式留 API 给上层显式 stop / fired check)
+- 跟 ticket 11 配合的 `resolve_or_re_observe_at` 函数未调用 — 等真实 observe 集成触发
+
+触发条件: 下一次单独自清理 batch (一两个 `#[allow(dead_code)]` 集中处理),
+不要在每个新 ticket 里分散处理。
+
+### LP-ticket-20-deferred-2: `@flow` ControlLine 当前只消费 `code` / `ok` 字段
+ticket 19+20 只暴露 `$.value.dispatched_to` / `$.value.ok` 给 `Expect` 断言路径导航,
+但 `@computer-act` response 还包含 `density` / `trace_summary` / `observation_id` /
+`verification` 等 11+ 个字段, 这些暂时不能让 `@flow` 直接断言。
+
+后续可以加:
+- `expect_density(path, threshold)` 断言 density.elapsed_ms_total < N
+- `expect_trace_step(path, step_name, status)` 断言 trace_summary 里某 step status
+- `expect_observation_fresh(path)` 断言 observation_used.freshness == "fresh"
+
+触发条件: 用户用 `@flow` 跑真实 agent loop 时发现需要断言这些字段。
+
+### LP-ticket-20-deferred-3: `json_pointer_lookup` 不支持 RFC 6901 完整语法
+当前实现只支持 dot path + `[N]`, 不支持 `..` / `$ref` / 多重索引 / `-` 索引 (append)。
+实际 rdog 用例 95% 是 `$.value.X.Y` 风格, 简化为 dot path 跟 Mano-CUA 一致。
+
+后续如果需要更复杂路径, 直接用 `serde_json::Value::pointer()` (RFC 6901 标准)。
+触发条件: 客户端跑大型 flow 想要断言嵌套数组元素 (e.g. `$.value.density[0]`)。

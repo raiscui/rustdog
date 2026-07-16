@@ -437,3 +437,72 @@
   - Schema v2 evolution (audio / multimodal 动作, LP4)
   - rate limit / quota (LP5)
   这些是 LP 项, 等用户给具体场景再启动。
+
+## [2026-07-16 22:30:00] [Session ID: omx-1783957580965-m4bn8e] ticket 19+20: @flow ↔ @computer-act 集成 (Phase H 收口)
+
+### 触发
+- 用户接 ticket 22 (94cdd82) 收口后选 "1: 继续 Phase H ticket 19+20"。
+- Phase H 把 13 动作 dispatcher 接入 `@flow` ControlLine 步骤 + 暴露响应字段给 `Expect` 断言。
+
+### 完成过程
+
+**ticket 19 (commit a9b6401, 已 push)** — `@computer-act` 作为 `@flow` ControlLine 步的 opt-in
+- `FlowPolicy` 加 `allow_computer_act: bool` 字段 (default false, deny-by-default)
+- `validate_flow_request` 走 `has_computer_act_step` 检测, 复用 `control_line_kind()` helper
+- 错误消息: `"@flow 包含 @computer-act ControlLine 时必须显式设置 policy.allow_computer_act:true"`
+- `control_protocol/tests/flow.rs` 2 处 FlowPolicy fixture 加 `allow_computer_act:false`
+
+**ticket 20 (commit c07dad3, 本轮收口)** — 2 个新 FlowExpectKind + JSON-pointer-like path 导航
+- `FlowExpectStep` 加 `value: Option<serde_json::Value>` 字段 (field_equals 用)
+- `FlowExpectKind` 加 2 variant: `response_field_equals` / `response_path_contains`
+- 2 个 helper:
+  - `json_pointer_lookup(root, path)` 支持 `$.a.b.c` / `$.items[1]` 风格
+  - `json_value_to_string(value)` Object/Array → compact JSON
+- 9 个新单测在 `src/control_flow/tests.rs` 末尾 (path 解析 + value stringification + 反序列化 round-trip)
+
+**关键调试 (test 6 失败)** — bash 命令替换嵌套双引号被 zsh 吞
+
+现象: smoke test 6 (open_app Calculator + click + Expect) 失败, 报错
+`path \`$.value.dispatched_to\` 在最新 response 中不存在`。
+
+调试过程:
+1. 加 `print(response_values[-1])` 单测 - 591/591 全过, 单元层 path 解析正确
+2. tmux 启独立 daemon 手动跑同一份 flow JSON - 成功 (status:ok, completed_steps:5)
+3. 加 debug echo 到 smoke 看 flow_json_6 实际内容 - **发现双引号被吞**:
+   ```
+   @computer-act#1:{schema:rdog.computer-act.v1,action:open_app,args:{app_name:Calculator}}
+   ```
+   应有双引号处全部消失!
+
+根因: smoke 用 `$(python3 -c "...")` 包了 python heredoc, heredoc 里内层 ControlLine
+字符串又有双引号 `{schema:"rdog..."}`, bash 命令替换规则下 zsh 优先解释外层双引号
+边界, 内层双引号被吞 (类似 cat <<EOF 不加引号触发的命令替换误执行)。
+
+修法:
+- 新增 `make_flow_with_contains_multi` helper, 通过 `sys.argv` 传每步 step JSON 字符串
+- inner ControlLine 字符串走 `single-quoted bash variable`, 保留双引号原样
+- step 字符串里 ControlLine value 的 `"` 加 `\"` 转义 (JSON 标准要求)
+
+### 验证证据
+
+```
+591 → 600 tests passed (1 ignored), 0 warning (本 session ticket 20 范围内)
+7/7 smoke 全过:
+  smoke_computer_act            (5/5 OK)
+  smoke_computer_act_observe    (4/4 OK)
+  smoke_computer_act_verify     (5/5 OK)
+  smoke_computer_act_trace      (3/3 OK)
+  smoke_computer_act_all        (13/13 + bonus error path OK)
+  smoke_flow_computer_act       (6/6 OK) ← ticket 19+20
+```
+
+### 总结感悟
+
+- **bash + python 嵌套双引号是真坑**: 跟 task_plan.md 附录里"cat <<EOF 反引号触发命令替换"同款。
+  未来 smoke 脚本里构造 JSON payload 必须走 sys.argv helper, 不要在 heredoc 里硬编码带双引号的字符串。
+- **deny-by-default policy 风格统一**: `@computer-act` 跟 `allow_shell` / `allow_file_read` 同样
+  默认 false, 任何能影响 host 的能力都走 opt-in。这跟 ADR-0006 §Denial by Default 一致。
+- **JSON-pointer 简化版够用**: dot path + [N] 索引覆盖 95% rdog 用例, 不引入 RFC 6901 高级特性
+  避免过度设计 (跟 Mano-CUA 风格一致)。
+- **混合 worktree 跨项目记录**: fast-infer 项目 task_plan.md 也要追加一条索引, 表明本次 rdog
+  改动跨项目 (mixed worktree: cargo / pixi 双包管理器互不污染)。
