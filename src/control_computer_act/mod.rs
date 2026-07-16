@@ -60,6 +60,13 @@ pub(crate) use trace::{
     FullTraceImplicitObserve, SubStep, TraceStatus, TraceSummary,
 };
 
+// ticket 15 error envelope E2 (ADR-0004 §Considered Options E2)
+#[path = "error_envelope.rs"]
+mod error_envelope;
+pub(crate) use error_envelope::{
+    error_envelope, ComputerActErrorCode, RetryStrategy,
+};
+
 /// `control_computer_act` 把 action + args 翻译成的中间结果。
 ///
 /// `dispatched_to` 是底层 primitive 的人类可读标签 (`@click` / `@key` 等),
@@ -378,18 +385,20 @@ pub(crate) fn execute_computer_act(
     let verify_policy = match parse_verify_policy(request.verify.as_deref()) {
         Ok(p) => p,
         Err(err) => {
+            let mut evidence = serde_json::Map::new();
+            evidence.insert(
+                "verify".into(),
+                request.verify.clone().map(Value::String).unwrap_or(Value::Null),
+            );
             return Ok(ActionExecutionResult {
                 exit_code: 64,
                 stdout: Vec::new(),
                 stderr: Vec::new(),
-                response_value_json: Some(json!({
-                    "ok": false,
-                    "action": request.action,
-                    "error_code": "invalid_verify",
-                    "error_message": err.to_string(),
-                    "evidence": { "verify": request.verify },
-                    "duration_ms": start.elapsed().as_millis() as u64,
-                }).to_string()),
+                response_value_json: Some(error_envelope(
+                    ComputerActErrorCode::InvalidVerify,
+                    err.to_string(),
+                    Some(Value::Object(evidence)),
+                ).to_string()),
             });
         }
     };
