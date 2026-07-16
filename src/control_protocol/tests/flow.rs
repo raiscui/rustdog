@@ -28,6 +28,7 @@ fn parse_should_support_flow_request_with_request_id() {
         FlowPolicy {
             allow_shell: true,
             allow_file_read: true,
+            allow_computer_act: false, // ticket 19
             timeout_ms: 60_000,
             max_steps: 32,
             max_output_bytes: 4096,
@@ -100,6 +101,7 @@ fn parse_should_default_flow_policy_and_options_for_control_only_flow() {
                 policy: FlowPolicy {
                     allow_shell: false,
                     allow_file_read: false,
+                    allow_computer_act: false, // ticket 19
                     timeout_ms: DEFAULT_FLOW_TIMEOUT_MS,
                     max_steps: DEFAULT_FLOW_MAX_STEPS,
                     max_output_bytes: DEFAULT_FLOW_MAX_OUTPUT_BYTES,

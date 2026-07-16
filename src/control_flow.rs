@@ -45,6 +45,9 @@ pub(crate) struct FlowPolicy {
     pub(crate) allow_shell: bool,
     #[serde(default)]
     pub(crate) allow_file_read: bool,
+    /// ticket 19: allow @computer-act as ControlLine step (默认 false, deny-by-default)
+    #[serde(default)]
+    pub(crate) allow_computer_act: bool,
     #[serde(default = "default_flow_timeout_ms")]
     pub(crate) timeout_ms: u64,
     #[serde(default = "default_flow_max_steps")]
@@ -58,6 +61,8 @@ impl Default for FlowPolicy {
         Self {
             allow_shell: false,
             allow_file_read: false,
+            // ticket 19: deny-by-default, 必须显式 allow_computer_act:true
+            allow_computer_act: false,
             timeout_ms: DEFAULT_FLOW_TIMEOUT_MS,
             max_steps: DEFAULT_FLOW_MAX_STEPS,
             max_output_bytes: DEFAULT_FLOW_MAX_OUTPUT_BYTES,
@@ -401,6 +406,7 @@ fn validate_flow_request(request: FlowRequest) -> io::Result<FlowRequest> {
 
     let mut has_shell_step = false;
     let mut has_file_read_step = false;
+    let mut has_computer_act_step = false;
     for (index, step) in request.steps.iter().enumerate() {
         match step {
             FlowStep::Cmd(step) => {
@@ -411,7 +417,13 @@ fn validate_flow_request(request: FlowRequest) -> io::Result<FlowRequest> {
                 has_shell_step = true;
                 validate_script_step(index, step)?;
             }
-            FlowStep::ControlLine(line) => validate_control_line_step(index, line)?,
+            FlowStep::ControlLine(line) => {
+                validate_control_line_step(index, line)?;
+                // ticket 19: 标记 @computer-act ControlLine 让后续 policy 校验
+                if control_line_kind(line).as_deref() == Some("computer-act") {
+                    has_computer_act_step = true;
+                }
+            }
             FlowStep::SleepMs(ms) => validate_step_timeout(index, "SleepMs", Some(*ms))?,
             FlowStep::Expect(step) => validate_expect_step(index, step)?,
             FlowStep::SaveArtifact(step) => {
@@ -430,6 +442,12 @@ fn validate_flow_request(request: FlowRequest) -> io::Result<FlowRequest> {
     if has_file_read_step && !request.policy.allow_file_read {
         return Err(invalid_data(
             "@flow 包含 SaveArtifact 时必须显式设置 policy.allow_file_read:true",
+        ));
+    }
+    // ticket 19: @computer-act ControlLine opt-in gate (跟 allow_shell / allow_file_read 同款 deny-by-default)
+    if has_computer_act_step && !request.policy.allow_computer_act {
+        return Err(invalid_data(
+            "@flow 包含 @computer-act ControlLine 时必须显式设置 policy.allow_computer_act:true",
         ));
     }
 
