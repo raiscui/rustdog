@@ -303,3 +303,79 @@
 - **borrow checker 强制 reorder 构造顺序**: rust borrow checker 不允许 json! macro 用未声明的变量,所以 `ComputerActDensity` 必须在 json! macro 之前构造完。这是 rust 函数式编程的副作用之一,比其它语言 (JS/TS) 严格。但这个约束反而让代码更清晰: payload 构造顺序 = 数据依赖顺序。
 - **sub-step 现状占位**: implicit_observe 当前的 sub-step 是 ax_tree_scan:ok + screenshot_capture:skipped + ref_resolution:skipped,跟 ticket 11 阶段没真抓 screenshot/真解析 ref 一致。等 Phase I 真实 observe 集成时 (LP-ticket-11-deferred-1) 改 ok 即可。
 - **payload_bytes / mouse_fallback_count 等占 0**: 这些字段 ADR-0006 写了名字,但本轮 dispatcher 没有真实数据。占 0 是诚实选择 ("不知道就说不知道"),ticket 21 e2e 真实 GUI 场景才补真实值。
+
+## [2026-07-16 16:50:00] [Session ID: omx-1783957580965-m4bn8e] 任务名称: rdog `@computer-act` ticket 08 完成 + ticket 15/16/21 收口
+
+### 任务内容
+- 实现 ticket 08 (hotkey_click Composite 完成): 替代 ticket 04 shell script 占位
+- 实现 ticket 15 (error envelope E2) + ticket 16 (per-action timeout table) + ticket 21 (e2e smoke)
+- 13 动作全部 e2e 跑通 + invalid_args error path bonus
+
+### 完成过程
+- Phase 0: 读 ticket 08 / 15 / 16 / 21 spec + ADR-0004 E2 / ADR-0005 §3
+- Phase 1: ticket 15 错误 envelope
+  - src/control_computer_act/error_envelope.rs (~275 行): RetryStrategy 5+1 档 /
+    ComputerActErrorCode 11 个 / error_envelope() helper + 8 单测
+  - mod.rs: 3 个错误分支 (unknown_action / invalid_args / invalid_verify) 改用 error_envelope
+- Phase 2: ticket 16 timeout table
+  - src/control_computer_act/timeout.rs (~217 行): default_timeout_ms 表 /
+    wait_derived_timeout_ms (1.5x + 1s) / resolve_timeout / TimeoutWatcher (std::thread) + 10 单测
+  - mod.rs: 在 dispatch 之前 setup timeout watcher, dispatch 后 timeout_token.is_cancelled() → Timeout envelope
+- Phase 3: ticket 08 hotkey_click Composite
+  - control_protocol.rs: 加 ControlCommand::Composite(Vec<ControlCommand>) variant
+  - control_computer_act/mod.rs: route_hotkey_click 改返 Composite([Key(Press), Click, Key(Release)])
+  - dispatch_underlying: 加 Composite 分支 + failure rollback (modifier release guard)
+  - shell/tests.rs + control_actions.rs: 加 Composite arm 维持 match exhaustive
+- Phase 4: ticket 21 e2e smoke
+  - scripts/smoke_computer_act_all.sh (197 行, 14 段): 13 动作 + invalid_args bonus
+  - 13/13 跑通 + bonus error path 验证 E2 envelope
+- Phase 5: 杂项修复
+  - InvalidArgs handler 漏接 error_envelope (ticket 15 漏掉, 本轮补)
+  - TimeoutWatcher fields/fired/stop 加 #[allow(dead_code)] (caller 不直接读, 但 API 给上层)
+
+### 验证
+- `RUSTFLAGS="-Awarnings" cargo check --bin rdog --tests`: 0 warning
+- `RUSTFLAGS="-Awarnings" cargo test --bin rdog`: 582 passed, 0 failed
+  (+18 from error_envelope 8 + timeout 10; + hotkey_click_composite_3_steps 重写)
+- `bash scripts/smoke_computer_act_all.sh`: 13/13 e2e + bonus invalid_args 全过
+- `bash scripts/smoke_computer_act.sh` (regression): 5/5 通过
+- `bash scripts/smoke_computer_act_observe.sh` (regression): 4/4 通过
+- `bash scripts/smoke_computer_act_verify.sh` (regression): 5/5 通过
+- `bash scripts/smoke_computer_act_trace.sh` (regression): 3/3 通过
+- `git push origin main`: `739656e..2a3ca68` 成功
+
+### 总结感悟
+- **Composite (Vec<ControlCommand>) 是 control_protocol 的关键补强**: 之前只能用 shell script
+  串"key down X; click X Y; key up X", 但 shell 不识别 rdog CLI 是个真实 bug。
+  加 Composite variant 之后, dispatcher 可以顺序执行多个 ControlCommand, 任一失败
+  回滚 (modifier release), 这是 hotkey_click 的正确实现。后续如果需要更多复合动作
+  (e.g., drag-then-drop, multi-step window manipulation) 都用 Composite, 不再引入新 variant。
+- **failure rollback 不只是 nice-to-have**: ticket 08 spec 明确 "If the click step errors
+  after the modifier is pressed, the modifier is released before returning the error"。
+  没有这个回滚, click 失败时 shift 会被 stuck on, 后续 GUI 操作都会被 shift 修饰。
+  这是真实 client impact (用户会看到后续所有 click 都变成 right-click-like 行为),
+  必须做。
+- **error envelope E2 retry strategy = API contract**: 11 个 error_code + 6 档 strategy 是
+  client retry handler 的决策依据 (rdog-control skill 的 OBSERVATION_EXPIRED → 
+  re_observe_then_retry / permission denied → never / match_count:0 → change_locator
+  全部在这里实现)。strategy 错一个, client retry 行为就错。
+- **omit vs null 占位 一致化**: 之前 ticket 12 verification=none 用 omit (整个字段 omit),
+  ticket 17 density.verify_ms=none 也用 omit, ticket 18 trace_savefile 默认 omit。
+  ticket 15 error envelope evidence 也 follow 这套: 没默认 evidence key 的 error_code
+  (unknown_action / invalid_args) evidence 字段 omit; 有默认 key 但 caller 没填的
+  (permission_denied.missing_capability) 填 null 占位。client parser 用 `obj.get("evidence")`
+  拿 None 即代表 "no evidence section expected", 跟拿 null 不一样 (null 是 "expected but
+  unknown")。这个区分让 client 能精细处理。
+- **TimeoutWatcher thread leak**: 用了 std::thread::spawn + thread::sleep, dispatch 完成后
+  通过 JoinHandle::join 回收 thread。如果 thread 还在 sleep (5s), join 会等满 5s 才返回。
+  这是 wasted 时间但不会有副作用 (signal 是幂等的, 后续 dispatch 完成后再检查
+  is_cancelled 看到 false 就知道 timeout 没触发)。如果未来要优化, 可以用 Condvar
+  提前唤醒 thread, 但当前不重要。
+- **smoke 脚本 dispatched_to check 用 grep -F**: ticket 21 e2e 跑 hotkey_click 时
+  dispatched_to="@key+@click+@key", 用 grep -E 配 [[:space:]]* 会把 `+` 当 regex
+  元字符 (一个或多个 `@` / `k` / `e` / `y` 等), 匹配不上字面字符串。grep -F 走字面
+  匹配避免。这是 smoke 脚本常见踩坑, 跟 rdog dict 解析时的 `+` 问题同源。
+- **smoke "stale daemon pid" race**: ticket 16+ smoke 经常看到 "stale daemon" 警告,
+  因为前一个 smoke 脚本退出时 daemon 还在收尾, 下一个 smoke 启动时 feature probe 失败。
+  解决方法: smoke 启动前 `pkill -f "rdog.*daemon"`, 等 2s, 然后再跑。
+  这是 rdog daemon lifecycle 的现状问题, 不在本轮 scope。

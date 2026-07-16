@@ -564,3 +564,32 @@
 - 等 ticket 11 LP-ticket-11-deferred-1 真实 observe 集成时, screenshot_capture 改 ok。
 - 等 LP-ticket-11-deferred 真实 start_box → ref 解析集成时, ref_resolution 改 ok。
 - 触发条件: Phase I ticket 21+ 集成时。
+
+### LP-ticket-15-deferred-1: 剩余 error_code (observation_expired / target_not_found / verify_failed) 真实触发
+- 当前 error_envelope.rs 11 个 error_code 都定义了 strategy/hint/default_evidence_key,
+  但 mod.rs / dispatch_underlying 只有 unknown_action / invalid_args / invalid_verify /
+  timeout 4 个真正触发并返回 E2 envelope。
+- 待补:
+  - observation_expired: 当 implicit_observe stale + re-observe 也失败时返回
+    (tied to ticket 11 stale_fallback_to_coords LP, 真实 observe 集成时)
+  - target_not_found: 当 click / scroll / drag 命中坐标但 AX 找不到 element 时
+  - verify_failed: 当 verify=always/best_effort 且 ax_diff 显示 GUI 没变时
+- 触发条件: ticket 21+ e2e 真实 GUI 场景补真实错误路径。
+
+### LP-ticket-16-deferred-1: TimeoutWatcher 提早 stop
+- 当前 caller `let _timeout_watcher = TimeoutWatcher::start(...)` 不调 stop,
+  等 thread 跑满 timeout_ms 才被 join 回收 (block main thread 但 daemon 单线程可接受)。
+- 后续优化: dispatch 完成后显式 stop, 避免 wasted 时间。
+- 触发条件: rdog dispatcher 改成 async 后, 提早 stop 才能省 CPU。
+
+### LP-ticket-21-deferred-1: 13 动作 smoke 拆成 13 个独立脚本
+- 当前 smoke_computer_act_all.sh 把 13 个动作串成一个脚本 (~20s 总时长)。
+- 后续拆成 13 个独立 smoke (每动作 1 个脚本), CI 可以选择性跑 (e.g., 只跑跟代码改动
+  相关的几个)。
+- 触发条件: CI 接入后 (ticket 21 acceptance "Smoke script is wired into CI / smoke collection")。
+
+### LP-ticket-08-deferred-1: Composite sub-step trace_summary
+- ticket 08 spec 要求 "trace_summary shows three dispatch entries (one per sub-step)
+  for hotkey_click"。当前实现 1 entry (整 Composite 算一个 dispatch step)。
+- 后续: 真正的 sub-step trace 需要扩 TraceSummary 概念 (e.g., 嵌套 step 数组)。
+- 触发条件: ticket 18 trace 进一步细化时 (现在 hotkey_click 单 step 已经够用)。
