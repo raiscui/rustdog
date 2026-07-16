@@ -147,6 +147,9 @@ pub(crate) struct FlowExpectStep {
     pub(crate) contains: Option<String>,
     pub(crate) path: Option<String>,
     pub(crate) artifact: Option<String>,
+    /// ticket 20: response_field_equals 用, 期望 value (JSON 值, 跟 serde_json::Value 比较)
+    #[serde(default)]
+    pub(crate) value: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Deserialize)]
@@ -167,6 +170,12 @@ pub(crate) enum FlowExpectKind {
     FileExists,
     #[serde(rename = "artifact_exists")]
     ArtifactExists,
+    /// ticket 20: 断言 response_value 上 path 指向的字段 == value
+    #[serde(rename = "response_field_equals")]
+    ResponseFieldEquals,
+    /// ticket 20: 断言 response_value 上 path 指向的字段的 stringified 值 contains substring
+    #[serde(rename = "response_path_contains")]
+    ResponsePathContains,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -544,6 +553,19 @@ fn validate_expect_step(index: usize, step: &FlowExpectStep) -> io::Result<()> {
         FlowExpectKind::ArtifactExists => {
             require_expected_field(index, "Expect.artifact", step.artifact.as_deref())?
         }
+        FlowExpectKind::ResponseFieldEquals => {
+            require_expected_field(index, "Expect.path", step.path.as_deref())?;
+            // value 必填 (用 Option<Value>::is_none 判断, 因为 false / null / 0 / "" 都是合法)
+            if step.value.is_none() {
+                return Err(invalid_data(format!(
+                    "@flow.steps[{index}].Expect.value 对 response_field_equals 必填"
+                )));
+            }
+        }
+        FlowExpectKind::ResponsePathContains => {
+            require_expected_field(index, "Expect.path", step.path.as_deref())?;
+            require_expected_field(index, "Expect.contains", step.contains.as_deref())?;
+        }
     }
     Ok(())
 }
@@ -748,6 +770,55 @@ impl FlowRuntimeState {
                     Ok(())
                 } else {
                     Err(format!("artifact 不存在: {artifact}"))
+                }
+            }
+            // ticket 20: JSON-pointer-like path navigation
+            FlowExpectKind::ResponseFieldEquals => {
+                let path = step
+                    .path
+                    .as_deref()
+                    .ok_or_else(|| format!("@flow.steps[{index}].Expect.path 缺失"))?;
+                let expected = step
+                    .value
+                    .as_ref()
+                    .ok_or_else(|| format!("@flow.steps[{index}].Expect.value 缺失"))?;
+                let value = self
+                    .response_values
+                    .last()
+                    .ok_or_else(|| "还没有可用于 response_field_equals 的 ControlLine response".to_owned())?;
+                let actual = json_pointer_lookup(value, path).ok_or_else(|| {
+                    format!("path `{path}` 在最新 response 中不存在")
+                })?;
+                if &actual == expected {
+                    Ok(())
+                } else {
+                    Err(format!(
+                        "path `{path}` 期望 {expected}, 实际 {actual}"
+                    ))
+                }
+            }
+            FlowExpectKind::ResponsePathContains => {
+                let path = step
+                    .path
+                    .as_deref()
+                    .ok_or_else(|| format!("@flow.steps[{index}].Expect.path 缺失"))?;
+                let expected_substring = step
+                    .contains
+                    .as_deref()
+                    .ok_or_else(|| format!("@flow.steps[{index}].Expect.contains 缺失"))?;
+                let value = self
+                    .response_values
+                    .last()
+                    .ok_or_else(|| "还没有可用于 response_path_contains 的 ControlLine response".to_owned())?;
+                let actual = json_pointer_lookup(value, path)
+                    .ok_or_else(|| format!("path `{path}` 在最新 response 中不存在"))?;
+                let actual_str = json_value_to_string(&actual);
+                if actual_str.contains(expected_substring) {
+                    Ok(())
+                } else {
+                    Err(format!(
+                        "path `{path}` 实际值 `{actual_str}` 不包含期望子串 `{expected_substring}`"
+                    ))
                 }
             }
         }
@@ -982,6 +1053,59 @@ fn require_expect_contains<'a>(index: usize, step: &'a FlowExpectStep) -> Result
 fn parse_response_value(line: &str) -> Option<serde_json::Value> {
     let payload = line.trim_start().strip_prefix("@response ")?;
     serde_json::from_str::<serde_json::Value>(payload).ok()
+}
+
+/// ticket 20: JSON-pointer-like path navigation。 支持 `$.foo.bar` / `$.foo[0].bar`。
+///
+/// 语义:
+/// - `$` = root
+/// - `.key` / `[index]` = 走下层
+/// - 不支持 `..` / `$ref` / 其它 RFC 6901 高级特性 (rdog 简化为 dot path, 跟 Mano-CUA 风格一致)
+fn json_pointer_lookup(root: &serde_json::Value, path: &str) -> Option<serde_json::Value> {
+    let stripped = path.trim_start_matches('$').trim_start_matches('.');
+    if stripped.is_empty() {
+        return Some(root.clone());
+    }
+    let mut current = root.clone();
+    // 按 . 分割, 每段再处理可能的 [N] 索引
+    for segment in stripped.split('.') {
+        if segment.is_empty() {
+            continue;
+        }
+        // 处理 `name[0][1]` 这种混合
+        let mut name_part = segment;
+        while let Some(idx_start) = name_part.find('[') {
+            let name = &name_part[..idx_start];
+            let idx_end = name_part.find(']').unwrap_or(name_part.len());
+            let idx_str = &name_part[idx_start + 1..idx_end];
+            let idx: usize = idx_str.parse().ok()?;
+            if !name.is_empty() {
+                current = current.get(name)?.clone();
+            }
+            current = current.get(idx)?.clone();
+            name_part = &name_part[idx_end + 1..];
+            if name_part.is_empty() {
+                break;
+            }
+        }
+        if !name_part.is_empty() {
+            current = current.get(name_part)?.clone();
+        }
+    }
+    Some(current)
+}
+
+/// ticket 20: JSON value → 字符串, 用于 path_contains 子串匹配。
+/// Object/Array 序列化成 compact JSON, 其它原样。
+fn json_value_to_string(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::String(s) => s.clone(),
+        serde_json::Value::Null => "null".to_string(),
+        serde_json::Value::Bool(b) => b.to_string(),
+        serde_json::Value::Number(n) => n.to_string(),
+        // Object / Array → compact JSON 字符串 (跟 serialize 行为一致)
+        other => other.to_string(),
+    }
 }
 
 fn control_line_kind(line: &str) -> Option<String> {

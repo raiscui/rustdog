@@ -108,3 +108,84 @@ fn temp_flow_dir(name: &str) -> std::path::PathBuf {
 fn escape_json(input: &str) -> String {
     input.replace('\\', "\\\\").replace('"', "\\\"")
 }
+
+// ---------------------------------------------------------------------------
+// ticket 20: json_pointer_lookup + json_value_to_string 单测
+// ---------------------------------------------------------------------------
+
+#[test]
+fn json_pointer_lookup_root_returns_full_value() {
+    let v = serde_json::json!({"foo": 1});
+    let out = json_pointer_lookup(&v, "$").unwrap();
+    assert_eq!(out, v);
+}
+
+#[test]
+fn json_pointer_lookup_simple_path() {
+    let v = serde_json::json!({"a": {"b": {"c": 42}}});
+    assert_eq!(json_pointer_lookup(&v, "$.a.b.c").unwrap(), serde_json::json!(42));
+    assert_eq!(json_pointer_lookup(&v, "a.b.c").unwrap(), serde_json::json!(42));
+}
+
+#[test]
+fn json_pointer_lookup_array_index() {
+    let v = serde_json::json!({"items": [10, 20, 30]});
+    assert_eq!(json_pointer_lookup(&v, "$.items[1]").unwrap(), serde_json::json!(20));
+    assert_eq!(json_pointer_lookup(&v, "$.items[0]").unwrap(), serde_json::json!(10));
+}
+
+#[test]
+fn json_pointer_lookup_mixed_path_and_index() {
+    let v = serde_json::json!({"a": [{"b": 1}, {"b": 2}]});
+    assert_eq!(json_pointer_lookup(&v, "$.a[1].b").unwrap(), serde_json::json!(2));
+}
+
+#[test]
+fn json_pointer_lookup_missing_path_returns_none() {
+    let v = serde_json::json!({"a": 1});
+    assert!(json_pointer_lookup(&v, "$.b.c").is_none());
+    assert!(json_pointer_lookup(&v, "$.a[5]").is_none());
+}
+
+#[test]
+fn json_value_to_string_for_various_types() {
+    assert_eq!(json_value_to_string(&serde_json::json!("hello")), "hello");
+    assert_eq!(json_value_to_string(&serde_json::json!(42)), "42");
+    assert_eq!(json_value_to_string(&serde_json::json!(true)), "true");
+    assert_eq!(json_value_to_string(&serde_json::json!(null)), "null");
+    let obj_str = json_value_to_string(&serde_json::json!({"k": "v"}));
+    // 序列化成 compact JSON, 含 k 和 v 字段
+    assert!(obj_str.starts_with('{'));
+    assert!(obj_str.ends_with('}'));
+    assert!(obj_str.contains("\"k\""));
+    assert!(obj_str.contains("\"v\""));
+}
+
+#[test]
+fn flow_expect_step_deserializes_new_field() {
+    let step: FlowExpectStep = serde_json::from_str(
+        r#"{"kind": "response_field_equals", "path": "$.ok", "value": true}"#,
+    ).unwrap();
+    assert_eq!(step.kind, FlowExpectKind::ResponseFieldEquals);
+    assert_eq!(step.path.as_deref(), Some("$.ok"));
+    assert_eq!(step.value, Some(serde_json::json!(true)));
+}
+
+#[test]
+fn flow_expect_step_value_omitted_defaults_to_none() {
+    let step: FlowExpectStep = serde_json::from_str(
+        r#"{"kind": "cmd_exit_code", "capture": "c1", "code": 0}"#,
+    ).unwrap();
+    assert_eq!(step.kind, FlowExpectKind::CmdExitCode);
+    assert!(step.value.is_none());
+}
+
+#[test]
+fn flow_expect_step_response_path_contains_kind_deserializes() {
+    let step: FlowExpectStep = serde_json::from_str(
+        r#"{"kind": "response_path_contains", "path": "$.error.error_code", "contains": "invalid"}"#,
+    ).unwrap();
+    assert_eq!(step.kind, FlowExpectKind::ResponsePathContains);
+    assert_eq!(step.path.as_deref(), Some("$.error.error_code"));
+    assert_eq!(step.contains.as_deref(), Some("invalid"));
+}

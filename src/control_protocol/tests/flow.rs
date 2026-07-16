@@ -75,6 +75,7 @@ fn parse_should_support_flow_request_with_request_id() {
             contains: None,
             path: None,
             artifact: None,
+            value: None, // ticket 20
         })
     );
     assert_eq!(
