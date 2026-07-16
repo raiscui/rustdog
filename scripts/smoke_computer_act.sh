@@ -109,22 +109,33 @@ echo "  wall_clock_ms: $ELAPSED"
 echo "$out" | grep -q '"ok"[[:space:]]*:[[:space:]]*true' || fail "test 1: ok != true (output: $out)"
 echo "$out" | grep -q '"dispatched_to"[[:space:]]*:[[:space:]]*"@wait"' || fail "test 1: dispatched_to != @wait (output: $out)"
 echo "$out" | grep -qE '"action"[[:space:]]*:[[:space:]]*"wait"' || fail "test 1: action != wait (output: $out)"
-# response envelope 校验 (ticket 11/12/13 后的契约):
-# - observation_id / observation_used: ticket 11 填充,null 或 object 都可能
-# - verification: verify=none 时 omit 整个字段 (ticket 12 acceptance); grep 反向匹配
-# - density: 现在是 object {dispatch_ms, implicit_observe_ms}; ticket 13 加 verify_ms
-# - trace_summary / trace_savefile: 仍 null (ticket 17/18 占位)
+# response envelope 校验 (ticket 11/12/13/14/17/18 后的契约):
+# - observation_id / observation_used: ticket 11 填充
+# - verification: verify=none 时 omit (ticket 12)
+# - density: ADR-0006 全字段 (ticket 17): dispatch_ms / implicit_observe_ms /
+#   elapsed_ms_total / verification_passed / trace_step_count 等
+# - trace_summary: 4 entry 数组 (ticket 18): implicit_observe / ref_resolve /
+#   dispatch / verify
+# - trace_savefile: 默认 omit, 仅 request.trace=="savefile" 时存在
 echo "$out" | grep -q '"density"[[:space:]]*:[[:space:]]*{' || fail "test 1: density not object (output: $out)"
 echo "$out" | grep -qE '"dispatch_ms"[[:space:]]*:[[:space:]]*[0-9]+' || fail "test 1: density.dispatch_ms missing (output: $out)"
 echo "$out" | grep -qE '"implicit_observe_ms"[[:space:]]*:[[:space:]]*[0-9]+' || fail "test 1: density.implicit_observe_ms missing (output: $out)"
+echo "$out" | grep -qE '"elapsed_ms_total"[[:space:]]*:[[:space:]]*[0-9]+' || fail "test 1: density.elapsed_ms_total missing (output: $out)"
+echo "$out" | grep -qE '"verification_passed"[[:space:]]*:[[:space:]]*(true|false)' || fail "test 1: density.verification_passed missing (output: $out)"
 # verify=none 时 omit verification key (ticket 12 acceptance)
 if echo "$out" | grep -q '"verification"'; then
     fail "test 1: verification key should be omitted when verify=none (output: $out)"
 fi
-# trace_summary / trace_savefile 仍是 null 占位 (ticket 17/18 待做)
-for f in trace_summary trace_savefile; do
-    echo "$out" | grep -q "\"${f}\"[[:space:]]*:[[:space:]]*null" || fail "test 1: ${f} not null placeholder (output: $out)"
-done
+# trace_summary: 4 entry 数组 (ticket 18)
+echo "$out" | grep -qE '"trace_summary"[[:space:]]*:[[:space:]]*\[' || fail "test 1: trace_summary not array (output: $out)"
+echo "$out" | grep -qE '"step"[[:space:]]*:[[:space:]]*"implicit_observe"' || fail "test 1: trace_summary missing implicit_observe (output: $out)"
+echo "$out" | grep -qE '"step"[[:space:]]*:[[:space:]]*"ref_resolve"' || fail "test 1: trace_summary missing ref_resolve (output: $out)"
+echo "$out" | grep -qE '"step"[[:space:]]*:[[:space:]]*"dispatch"' || fail "test 1: trace_summary missing dispatch (output: $out)"
+echo "$out" | grep -qE '"step"[[:space:]]*:[[:space:]]*"verify"' || fail "test 1: trace_summary missing verify (output: $out)"
+# trace_savefile: 默认 omit (opt-in)
+if echo "$out" | grep -q '"trace_savefile"'; then
+    fail "test 1: trace_savefile should be omitted without trace:savefile (output: $out)"
+fi
 [[ $ELAPSED -ge 100 && $ELAPSED -lt 500 ]] || fail "test 1: wall clock $ELAPSED ms not in [100, 500]"
 log "test 1 OK"
 

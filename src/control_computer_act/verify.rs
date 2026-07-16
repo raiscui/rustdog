@@ -434,21 +434,6 @@ pub(crate) fn render_verification(
 /// 把 `density` 字段渲染成 JSON 值。
 ///
 /// ADR-0006 §3: `density` 包含 `dispatch_ms` / `verify_ms` / `implicit_observe_ms`,
-/// 跟顶层 `duration_ms` 互补。`duration_ms` 是端到端 wall clock,`density.*` 是分段耗时。
-pub(crate) fn render_density(
-    dispatch_ms: u64,
-    verify_ms: Option<u64>,
-    implicit_observe_ms: u64,
-) -> Value {
-    let mut obj = serde_json::json!({
-        "dispatch_ms": dispatch_ms,
-        "implicit_observe_ms": implicit_observe_ms,
-    });
-    if let Some(v) = verify_ms {
-        obj["verify_ms"] = serde_json::json!(v);
-    }
-    obj
-}
 
 #[cfg(test)]
 mod tests {
@@ -539,23 +524,6 @@ mod tests {
     fn render_verification_always_is_deferred_to_ticket_14() {
         // ticket 14 实现;本轮返回 None (等同 no verification block)
         assert!(render_verification(VerifyPolicy::Always, None, None).is_none());
-    }
-
-    // --- render_density ---
-
-    #[test]
-    fn render_density_omits_verify_ms_when_verify_was_not_run() {
-        let d = render_density(100, None, 5);
-        assert_eq!(d["dispatch_ms"], 100);
-        assert_eq!(d["implicit_observe_ms"], 5);
-        assert!(d.get("verify_ms").is_none(),
-            "verify_ms omitted when verify not run, vs null placeholder");
-    }
-
-    #[test]
-    fn render_density_includes_verify_ms_when_provided() {
-        let d = render_density(100, Some(45), 5);
-        assert_eq!(d["verify_ms"], 45);
     }
 
     // --- Always (ticket 14) ---

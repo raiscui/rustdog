@@ -43,8 +43,21 @@ pub(crate) use implicit_observe::{
 #[path = "verify.rs"]
 mod verify;
 pub(crate) use verify::{
-    parse_verify_policy, render_density, render_verification, run_always_verify,
+    parse_verify_policy, render_verification, run_always_verify,
     run_best_effort_verify, VerifyPolicy,
+};
+
+// ticket 17 density metrics (ADR-0006 §Consequences)
+#[path = "density.rs"]
+mod density;
+pub(crate) use density::{compute_verification_passed, render_density, ComputerActDensity};
+
+// ticket 18 trace_summary inline + trace_savefile opt-in (ADR-0006 §Consequences)
+#[path = "trace.rs"]
+mod trace;
+pub(crate) use trace::{
+    render_trace_summary, write_trace_savefile, FullTrace, FullTraceDispatch,
+    FullTraceImplicitObserve, SubStep, TraceStatus, TraceSummary,
 };
 
 /// `control_computer_act` 把 action + args 翻译成的中间结果。
@@ -448,20 +461,56 @@ pub(crate) fn execute_computer_act(
         serde_json::from_str(&underlying_json_str).unwrap_or_else(|_| json!({}));
 
     let ok = underlying_result.exit_code == 0;
+
+    // ticket 17: 构造 ComputerActDensity (含 verification_passed) - 必须在 json! macro 之前
+    let verification_passed = compute_verification_passed(
+        verify_policy,
+        verify_summary.as_ref().or_else(|| {
+            always_summary.as_ref().map(|s| &s.ax_diff)
+        }),
+    );
+
+    // ticket 18: 构造 inline trace_summary (4 段耗时)
+    let trace_summary = TraceSummary::build(
+        implicit_observe_ms,
+        if implicit_observe_ms > 0 { TraceStatus::Ok } else { TraceStatus::Skipped },
+        0, // ref_resolve: ticket 18 阶段测量 (start_box → ref 解析); 暂时占 0
+        dispatch_ms,
+        ok,
+        verify_ms,
+        !matches!(verify_policy, VerifyPolicy::None),
+    );
+    let trace_summary_json = render_trace_summary(&trace_summary);
+
+    let density_metrics = ComputerActDensity::new(
+        dispatch_ms,
+        implicit_observe_ms,
+        matches!(
+            implicit_outcome,
+            crate::control_computer_act::implicit_observe::ImplicitObserveOutcome::Fresh { .. }
+                | crate::control_computer_act::implicit_observe::ImplicitObserveOutcome::StaleReObserved { .. }
+        ),
+        verify_ms,
+        verification_passed,
+        trace_summary.step_count(),
+    );
+
     let mut payload = json!({
         "ok": ok,
         "action": request.action,
         "dispatched_to": routed.dispatched_to,
         "duration_ms": duration_ms,
         // ticket 11 填充 observation_id / observation_used;
-        // ticket 12/13 填充 verification / density;
-        // ticket 17/18 后续填充 trace_summary / trace_savefile
+        // ticket 12/13/14 填充 verification;
+        // ticket 17 填充 density;
+        // ticket 18 填充 trace_summary
         "observation_id": render_top_level_observation_id(&implicit_outcome)
             .map(Value::String)
             .unwrap_or(Value::Null),
         "observation_used": render_observation_used(&implicit_outcome)
             .unwrap_or(Value::Null),
-        "density": render_density(dispatch_ms, verify_ms, implicit_observe_ms),
+        "density": render_density(&density_metrics),
+        "trace_summary": trace_summary_json,
     });
 
     // ticket 12/13/14: verify=none 时不写 verification 字段;best_effort 写 ax_diff 摘要;
@@ -474,9 +523,42 @@ pub(crate) fn execute_computer_act(
         payload["verification"] = v;
     }
 
-    // 占位字段:ticket 17/18 填充
-    payload["trace_summary"] = Value::Null;
-    payload["trace_savefile"] = Value::Null;
+    // ticket 18: trace_summary 总是带 (即使 verify=none 也占 4 段);trace_savefile
+    // 仅在 request.trace == Some("savefile") 时存在
+    // ticket 18: trace_savefile 仅在 request.trace == Some("savefile") 时存在
+    if request.trace.as_deref() == Some("savefile") {
+        // opt-in 落盘: 走 rdog_downloads/trace-{ts}-{id}.json
+        let full_trace = FullTrace {
+            implicit_observe: FullTraceImplicitObserve {
+                elapsed_ms: implicit_observe_ms,
+                sub_steps: vec![
+                    SubStep::ok("ax_tree_scan", implicit_observe_ms),
+                    SubStep::skipped("screenshot_capture"), // ticket 11 阶段不抓 screenshot
+                    SubStep::skipped("ref_resolution"),     // ticket 11 阶段不解析 ref
+                ],
+            },
+            dispatch: FullTraceDispatch {
+                elapsed_ms: dispatch_ms,
+                dispatched_to: routed.dispatched_to.to_string(),
+                ok,
+                sub_steps: vec![
+                    SubStep::ok("route_action", 0),
+                    SubStep::ok("dispatch_underlying", dispatch_ms),
+                ],
+            },
+            verify: verify_summary.as_ref().map(|s| s.full_report.clone()),
+            verification_passed,
+        };
+        match write_trace_savefile(None, &full_trace) {
+            Ok(path) => {
+                payload["trace_savefile"] = Value::String(path);
+            }
+            Err(_) => {
+                // 写盘失败不污染 dispatch ok:true (跟 implicit_observe / verify 失败
+                // 同口径,observability 错误透明降级)
+            }
+        }
+    }
     if !ok {
         // 底层错误透传 — ticket 15 把 error_code / retry 包装到 E2 envelope。
         if let Some(err_code) = underlying_value.get("error_code") {

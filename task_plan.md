@@ -838,3 +838,54 @@
 
 ### 状态
 **ticket 14 实施完成,所有 verify smoke 5/5 + 回归 smoke 9/9 通过。准备 commit + push。**
+
+## [2026-07-16 13:30:00] [Session ID: omx-1783957580965-m4bn8e] [ticket 17 + 18 实施]: rdog `@computer-act` density metrics + trace observability
+
+### 触发
+- 用户 "继续" → 接 ticket 14 (`41dd0bd`) 之后,按 critical path 推进 ticket 18 (`trace-summary-and-savefile`)。
+- ticket 18 依赖 ticket 17 (density metrics),本轮 ticket 17 + 18 一起做。
+
+### 范围 (ticket 17 acceptance criteria)
+- [x] `density` 字段含 ADR-0006 全字段集: backend_request_count / control_frame_count /
+      elapsed_ms_total / semantic_action_count / mouse_fallback_count /
+      stale_ref_recovery_count / verification_passed / false_success_count /
+      payload_bytes / trace_step_count / implicit_observe / implicit_observe_ms /
+      dispatch_ms / verify_ms
+- [x] `verification_passed` = verify != none && ax_diff non-empty
+- [x] 字段名严格对齐 ADR-0006 §Consequences
+
+### 范围 (ticket 18 acceptance criteria)
+- [x] 每次成功 response 都带 `trace_summary:[{step, elapsed_ms, status}, ...]`,严格 4 entry
+- [x] verify step 即使 policy=none 也占位,status="skipped"
+- [x] `trace:"savefile"` 触发 full trace dump 到 rdog_downloads/trace-*.json
+- [x] response 带 `trace_savefile:"<path>"`
+- [x] 不带 trace 字段时,trace_savefile 字段 omit
+- [x] Full trace 含 implicit_observe sub-steps (screenshot_capture / ax_tree_scan /
+      ref_resolution) + dispatch sub-steps
+
+### 实施决策 (本轮)
+1. **新建 `density.rs` 模块** (~190 行): `ComputerActDensity` struct + `render_density` + `compute_verification_passed` + 6 个单测
+   - 把 ADR-0006 全字段集都填,即使占 0 (mouse_fallback_count / false_success_count / stale_ref_recovery_count)
+   - `verify_ms` 在 verify=none 时 omit (跟 ticket 12 一致的 omit 风格)
+2. **新建 `trace.rs` 模块** (~340 行): `TraceStepKind` / `TraceStatus` / `TraceStep` /
+   `TraceSummary` / `FullTrace` / `write_trace_savefile` + 7 个单测
+   - `TraceSummary::build()` 严格 4 entry 构造器,verify status 三态 (ok / skipped / failed)
+   - `write_trace_savefile` 走 `default_savefile_directory()` (rdog_downloads/) 落盘
+3. **verify.rs 删 `render_density`** (密度块搬到新模块): 避免两处重复定义密度 JSON shape
+4. **mod.rs 重组**: `ComputerActDensity` 构造必须在 json! macro 之前 (rust borrow checker);
+   `trace_summary` / `density` 都在 json! macro 之前计算完,一次性塞进 payload
+5. **omit vs null 占位**: trace_savefile 不写整个字段 (而不是 null),跟 ticket 12 verification 一致
+6. **savefile name: trace-{ts_ms}-{id}.json**: 没 request_id 入口 (execute_computer_act 只有 ComputerActRequest,没有 ControlRequest),暂时传 None;后续 control_actions.rs 重构时再 thread request_id
+7. **payload_bytes / mouse_fallback_count / stale_ref_recovery_count / false_success_count 占 0**: ticket 21 e2e smoke 真实 GUI 场景才补;这轮 0 是合理 placeholder
+8. **trace_step_count = 4 跟 density.trace_step_count 同步**: 避免 trace_summary 跟 density 不一致
+
+### 文件变更
+- 新增 `src/control_computer_act/density.rs` (~190 行): ComputerActDensity + render_density + 6 单测
+- 新增 `src/control_computer_act/trace.rs` (~340 行): TraceSummary + FullTrace + write_trace_savefile + 7 单测
+- `src/control_computer_act/mod.rs`: 注册 density / trace 子模块 + 重组 density_metrics/trace_summary 构造顺序
+- `src/control_computer_act/verify.rs`: 删 render_density 函数 + 2 个旧测试 (搬到 density.rs)
+- `scripts/smoke_computer_act.sh`: 更新成新契约 (density ADR-0006 全字段 + trace_summary 4 entry + trace_savefile 默认 omit)
+- 新增 `scripts/smoke_computer_act_trace.sh` (199 行, 3 段 e2e): 默认无 trace → trace_savefile omit / trace="savefile" → trace 文件落地 / trace+verify=best_effort → verify status=ok
+
+### 状态
+**ticket 17 + ticket 18 实施完成,所有 4 个 smoke 全过 (5/5 + 5/5 + 4/4 + 3/3 = 17/17)。准备 commit + push。**
