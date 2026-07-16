@@ -99,6 +99,9 @@ pub enum ControlCommand {
     OpenApp(OpenAppRequest),
     Cancel(CancelRequest),
     ComputerAct(ComputerActRequest),
+    /// ticket 08 + 21: composite 复合命令 (e.g., hotkey_click = key down + click + key up)
+    /// mod.rs dispatch_underlying 顺序执行每个 sub-command, 任一失败回滚已执行的 (modifier release)。
+    Composite(Vec<ControlCommand>),
 }
 
 pub const DEFAULT_KEY_HOLD_MS: u64 = 200;

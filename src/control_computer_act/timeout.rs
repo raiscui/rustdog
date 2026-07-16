@@ -81,7 +81,11 @@ pub(crate) fn resolve_timeout(
 /// 用 `Arc<JoinHandle>` 让 caller 在 dispatch 完成后调用 `stop()` 提早结束 timer (不必等满 timeout)。
 /// 如果 timer 已经触发, drop JoinHandle 会 detach thread (允许它清理)。
 pub(crate) struct TimeoutWatcher {
+    /// 保留字段: 给上层显式 stop() 用 (timer 提早结束)
+    #[allow(dead_code)]
     cancel_token: CancellationToken,
+    /// 保留字段: join / detach thread 时用
+    #[allow(dead_code)]
     handle: Arc<JoinHandle<()>>,
 }
 
@@ -100,6 +104,9 @@ impl TimeoutWatcher {
     }
 
     /// 检查是否已经触发 timeout。
+    /// 检查是否已经触发 timeout。给上层 caller 用 (e.g., dispatch 完成后
+    /// 想知道是 timeout 还是别的原因失败)。
+    #[allow(dead_code)]
     pub fn fired(&self) -> bool {
         self.cancel_token.is_cancelled()
     }
@@ -108,6 +115,7 @@ impl TimeoutWatcher {
     /// 实现: 用一个 atomic flag + Condvar 太重, 简化用 detach thread:
     /// 不 join, 让它跑完 timeout 也没事 (signal 是幂等的, 后续 dispatch 完成后再检查 is_cancelled 看到 false 就知道 timeout 没触发)。
     /// 这里通过 take JoinHandle 实现 "如果 thread 已经结束就回收, 否则 detach"。
+    #[allow(dead_code)]
     pub fn stop(self) -> bool {
         let fired = self.cancel_token.is_cancelled();
         match Arc::try_unwrap(self.handle) {

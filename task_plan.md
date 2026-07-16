@@ -889,3 +889,58 @@
 
 ### 状态
 **ticket 17 + ticket 18 实施完成,所有 4 个 smoke 全过 (5/5 + 5/5 + 4/4 + 3/3 = 17/17)。准备 commit + push。**
+
+## [2026-07-16 16:30:00] [Session ID: omx-1783957580965-m4bn8e] [ticket 08 completion + ticket 21 实施]: hotkey_click Composite + e2e smoke
+
+### 触发
+- 用户 "继续" → 接 ticket 16 (5717201) 之后, 按 critical path 推进 ticket 21 (e2e smoke)。
+- ticket 21 spec 要求 13 动作全部跑通。跑 smoke 时发现 hotkey_click 在 ticket 04 用 shell script 占位
+  (key down / key up) 失败 (shell 不识别 rdog CLI 命令)。
+- 本轮: ticket 08 完整实现 hotkey_click (Composite 复合命令, ticket 21 e2e smoke。
+
+### 范围 (ticket 08 completion)
+- [x] `hotkey_click` 改成 ControlCommand::Composite([Key(Press), Click, Key(Release)])
+      替代 ticket 04 的 shell script 占位
+- [x] Composite 顺序执行, 任一失败回滚已执行的 Key(Press) → Key(Release)
+      (modifier release guard, ticket 08 acceptance "If the click step errors
+       after the modifier is pressed, the modifier is released before returning the error")
+- [x] dispatch_underlying 加 Composite 分支
+
+### 范围 (ticket 21 acceptance)
+- [x] `scripts/smoke_computer_act_all.sh` 覆盖 13 动作 (open_app / open_url / click /
+      doubleclick / triple_click / right_single / hover / type / hotkey /
+      hotkey_click / scroll / drag / wait)
+- [x] 每个动作验证 ok:true + dispatched_to + trace_summary 4 entry
+- [x] bonus: invalid_args error path (scroll amount=-1) 验证 E2 envelope (retry.strategy)
+- [x] macOS 本地可跑, 无外部网络依赖
+
+### 实施决策 (本轮)
+1. **ControlCommand::Composite(Vec<ControlCommand>) 新 variant**: 单一真相源表达 "多步原子操作"
+   (不是用 shell script 串);dispatch_underlying 顺序执行,任一失败回滚 Key(Press) → Key(Release)
+2. **failure rollback**: 因为只有 key down 是 "带 modifier 状态" 的副作用 (click 没副作用, key up 是 release),
+   rollback 逻辑只针对已执行的 Key(Press)。click 失败时 shift 已经被按下但不释放 → 必须 rollback。
+3. **shell/tests.rs 加 Composite arm**: 维持 ControlCommand match exhaustive。
+4. **control_actions.rs 加 Composite 拒绝 arm**: Composite 不应进入默认 executor 分支
+   (由 @computer-act dispatch_underlying 单独处理), 加 explicit Unsupported 错误防止 leak。
+5. **timeout.rs fields/fired/stop 加 #[allow(dead_code)]**: 当前 caller (let _timeout_watcher) 
+   不直接读这些字段, 但 API 留出来给上层显式 stop / fired check (e.g., dispatch 完成后判断
+   timeout vs 其它原因失败)。
+6. **InvalidArgs 错误路径漏接**: ticket 15 commit 时, mod.rs InvalidArgs handler 没替换成
+   error_envelope (断言匹配没找到 text 实际格式)。本轮补接 (跟 ticket 15 一起算)。
+7. **smoke dispatched_to check 用 grep -F**: 之前用 grep -E 配 [[:space:]]*, 但 `@key+@click+@key`
+   的 + 被当 regex 元字符。grep -F 走字面匹配避免。
+
+### 文件变更
+- `src/control_protocol.rs`: 加 `Composite(Vec<ControlCommand>)` variant
+- `src/control_actions.rs`: 加 Composite 拒绝 arm
+- `src/shell/tests.rs`: 加 Composite arm (test fixture)
+- `src/control_computer_act/mod.rs`: 
+  - route_hotkey_click 改返 Composite([Key(Press), Click, Key(Release)])
+  - dispatch_underlying 加 Composite 分支 + failure rollback
+  - InvalidArgs handler 改用 error_envelope (补 ticket 15 漏接)
+- `src/control_computer_act/tests.rs`: hotkey_click_routes_to_composite_3_steps 替换旧 test
+- `src/control_computer_act/timeout.rs`: TimeoutWatcher fields/fired/stop 加 #[allow(dead_code)]
+- 新增 `scripts/smoke_computer_act_all.sh` (197 行, 14 段 e2e)
+
+### 状态
+**ticket 08 完成 + ticket 21 实施完成, 13/13 e2e + bonus error path 全过。准备 commit + push。**

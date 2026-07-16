@@ -208,6 +208,11 @@ impl ControlActionExecutor for SystemControlActionExecutor {
             }
             ControlCommand::OpenApp(request) => execute_open_app(request),
             ControlCommand::Wait(request) => execute_wait(request, cancel),
+            // Composite 不应进入默认 executor 分支 (由 @computer-act dispatch_underlying 处理)
+            ControlCommand::Composite(_) => Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "@computer-act Composite 由 dispatch_underlying 处理,不应进入默认 executor 分支",
+            )),
         }
     }
 }

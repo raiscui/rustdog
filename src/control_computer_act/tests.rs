@@ -195,14 +195,40 @@ fn hotkey_routes_to_key() {
 // --- hotkey_click (composite) ---
 
 #[test]
-fn hotkey_click_routes_to_script_composite() {
+fn hotkey_click_routes_to_composite_3_steps() {
+    // ticket 08 + 21: hotkey_click 实现为 ControlCommand::Composite([key down, click, key up])
     let r = route("hotkey_click", json!({"start_box": [10, 20], "key": "shift"}));
     assert_eq!(r.dispatched_to, "@key+@click+@key");
     match r.command {
-        ControlCommand::Script(text) => {
-            assert_eq!(text, "key down shift; click 10 20; key up shift");
+        ControlCommand::Composite(cmds) => {
+            assert_eq!(cmds.len(), 3, "composite 应有 3 步");
+            // step 1: key down (Press)
+            match &cmds[0] {
+                ControlCommand::Key(kr) => {
+                    assert_eq!(kr.key, "shift");
+                    assert!(matches!(kr.mode, KeyMode::Press));
+                }
+                c => panic!("step 0 expected Key(Press), got {c:?}"),
+            }
+            // step 2: click (10, 20)
+            match &cmds[1] {
+                ControlCommand::Click(req) => {
+                    assert_eq!(req.x, Some(10));
+                    assert_eq!(req.y, Some(20));
+                    assert_eq!(req.count, 1);
+                }
+                c => panic!("step 1 expected Click, got {c:?}"),
+            }
+            // step 3: key up (Release)
+            match &cmds[2] {
+                ControlCommand::Key(kr) => {
+                    assert_eq!(kr.key, "shift");
+                    assert!(matches!(kr.mode, KeyMode::Release));
+                }
+                c => panic!("step 2 expected Key(Release), got {c:?}"),
+            }
         }
-        c => panic!("expected Script, got {c:?}"),
+        c => panic!("expected Composite, got {c:?}"),
     }
 }
 

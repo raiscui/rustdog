@@ -53,6 +53,9 @@ impl ControlActionExecutor for FakeExecutor {
             ControlCommand::Cancel(request) => {
                 format!("CANCEL:target_seq={}\n", request.target_seq).into_bytes()
             }
+            ControlCommand::Composite(cmds) => {
+                format!("COMPOSITE:{} steps\n", cmds.len()).into_bytes()
+            }
             ControlCommand::ComputerAct(request) => {
                 format!("COMPUTER_ACT:{}:{}\n", request.action, request.args).into_bytes()
             }

@@ -28,7 +28,8 @@ use crate::control_mouse::MouseEndpoint;
 use crate::control_mouse::MouseRefTarget;
 use crate::cancellation::CancellationToken;
 use crate::control_protocol::{
-    ComputerActRequest, ControlCommand, OpenAppRequest, WaitRequest,
+    ComputerActRequest, ControlCommand, KeyMode, KeyRequest, OpenAppRequest,
+    WaitRequest,
 };
 
 // ticket 11 implicit_observe plumbing (TTL 5s, ADR-0005 L3)
@@ -287,13 +288,27 @@ fn route_hotkey(args: &Value) -> Result<ControlCommand, ComputerActRouteError> {
 
 fn route_hotkey_click(args: &Value) -> Result<ControlCommand, ComputerActRouteError> {
     // hotkey_click 是组合动作: 按下 modifier, click target, 释放 modifier。
-    // ticket 04 skeleton: 用 Script 串成 shell, 实际 modifier 状态机在 ticket 08 完善。
+    // ticket 08 + 21 实现: 3 个 sub-command 串成 Composite, dispatch_underlying
+    // 顺序执行, 任一失败回滚 (release modifier)。
     let key = args.get("key").and_then(|v| v.as_str()).ok_or_else(|| {
         ComputerActRouteError::InvalidArgs("hotkey_click 缺少 key".to_string())
     })?.to_string();
     let (x, y) = parse_start_box(args)?;
-    let script = format!("key down {key}; click {x} {y}; key up {key}");
-    Ok(ControlCommand::Script(script))
+
+    let key_down = ControlCommand::Key(KeyRequest::legacy(&key, 200, KeyMode::Press));
+    let click = ControlCommand::Click(crate::control_mouse::ClickRequest {
+        x: Some(x as i32),
+        y: Some(y as i32),
+        target: None,
+        guard: None,
+        button: crate::control_mouse::MouseButtonName::Left,
+        count: 1,
+        hold_ms: 80,
+        interval_ms: 120,
+        coordinate_space: crate::control_mouse::MouseCoordinateSpace::OsLogical,
+    });
+    let key_up = ControlCommand::Key(KeyRequest::legacy(&key, 200, KeyMode::Release));
+    Ok(ControlCommand::Composite(vec![key_down, click, key_up]))
 }
 
 fn route_scroll(args: &Value) -> Result<ControlCommand, ComputerActRouteError> {
@@ -428,18 +443,18 @@ pub(crate) fn execute_computer_act(
             });
         }
         Err(ComputerActRouteError::InvalidArgs(msg)) => {
+            let mut evidence = serde_json::Map::new();
+            evidence.insert("action".into(), Value::String(request.action.clone()));
+            evidence.insert("args".into(), request.args.clone());
             return Ok(ActionExecutionResult {
                 exit_code: 64,
                 stdout: Vec::new(),
                 stderr: Vec::new(),
-                response_value_json: Some(json!({
-                    "ok": false,
-                    "action": request.action,
-                    "error_code": "invalid_args",
-                    "error_message": msg,
-                    "evidence": { "action": request.action, "args": &request.args },
-                    "duration_ms": start.elapsed().as_millis() as u64,
-                }).to_string()),
+                response_value_json: Some(error_envelope(
+                    ComputerActErrorCode::InvalidArgs,
+                    msg,
+                    Some(Value::Object(evidence)),
+                ).to_string()),
             });
         }
     };
@@ -697,6 +712,42 @@ fn dispatch_underlying(
             // computer-act 内不允许 cancel 自身 (语义上无意义), 但 routing 可能
             // 错误地到达这里。ticket 15 完善。
             execute_cancel(&req, &crate::cancellation::CancelRegistry::new())
+        }
+        ControlCommand::Composite(cmds) => {
+            // ticket 08 + 21: composite 顺序执行 (e.g., hotkey_click =
+            // key down + click + key up)。任一失败: 已经执行的 key down 要
+            // 释放 (modifier release), 然后返回错误。
+            let mut executed: Vec<&ControlCommand> = Vec::new();
+            for cmd in cmds.iter() {
+                let result = dispatch_underlying(cmd.clone(), cancel)?;
+                executed.push(cmd);
+                if result.exit_code != 0 {
+                    // 回滚: 对所有已执行的 key down 发 key up
+                    for done_cmd in &executed {
+                        if let ControlCommand::Key(kr) = done_cmd {
+                            if matches!(kr.mode, KeyMode::Press) {
+                                let release = ControlCommand::Key(KeyRequest::legacy(
+                                    &kr.key, 200, KeyMode::Release,
+                                ));
+                                let _ = dispatch_underlying(release, cancel);
+                            }
+                        }
+                    }
+                    return Ok(result); // 返回第一个失败的 result
+                }
+            }
+            // 全部成功: 返回最后一条的 result (保留 exit_code 等)
+            if let Some(last) = cmds.last() {
+                dispatch_underlying(last.clone(), cancel)
+            } else {
+                // 空 Composite (理论不应到达, defensive)
+                Ok(ActionExecutionResult {
+                    exit_code: 0,
+                    stdout: Vec::new(),
+                    stderr: Vec::new(),
+                    response_value_json: Some("{}".to_string()),
+                })
+            }
         }
         // 不应到达的分支 (routing 应该只生成上面 9 类)
         other => Err(io::Error::new(
