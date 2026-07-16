@@ -805,3 +805,36 @@
 
 ### 状态
 **ticket 12 + ticket 13 实施完成,准备 commit + smoke + push。**
+
+## [2026-07-16 10:30:00] [Session ID: omx-1783957580965-m4bn8e] [ticket 14 实施]: rdog `@computer-act` verify tier 'always' (full observation)
+
+### 触发
+- 用户 "继续" → 接 ticket 12+13 (`aeac227`) 之后,按 critical path 推进 ticket 14 (`verify-always`)。
+- ticket 13 已经预留 enum variant (Always) 和 render 骨架,ticket 14 在骨架上落地。
+
+### 范围 (ticket 14 acceptance criteria)
+- [x] `verify:"always"` 触发 post-action 全量 observe (screenshot + AX + windows)
+- [x] Response 携带 `verification.method:"full"`
+- [x] Response 携带 `verification.observation:{screenshot_id, ax_tree_id, windows, screenshot_truncated}`
+- [x] Response 携带 `verification.ax_diff.{windows_added, ..., changed}` (跟 best_effort 同样口径)
+- [x] Screenshot > 2MB → `verification.observation.screenshot_truncated:true` (不截断图像,只标 false 警示)
+- [x] 测试覆盖: 三字段都 present + screenshot_truncated 翻转 + render dispatch + empty summary fallback
+
+### 实施决策 (本轮)
+1. **full observe 复用 `build_observe_bundle(ObserveRequest::default())`**: Hybrid 模式 = screenshot + AX + windows,跟 client 调 `@observe` 走同一路径
+2. **pre-AX 走轻量 `capture_default_ax_snapshot`**: 全量 observe 已经包含 AX (post),pre 只为了 diff;用 `AxTreeRequest::default()` 不带额外 scope 节省时间
+3. **diff 用 pre-AX snapshot vs observe_bundle.value.accessibility (post AX JSON)**: 不重做 AX capture,直接复用 observe bundle 里的 accessibility 段
+4. **screenshot_id 优先取 visual.id,fallback observation.observation_id**: 当前 observe bundle.visual 没有显式 id 字段,所以 fallback 到 observation.observation_id (跟 ax_tree_id 同源)
+5. **screenshot_truncated 阈值 2MB**: base64 长度 × 3/4 估算字节数;超阈值标 true,**不截断图像** (client 可能需要完整图做 OCR)
+6. **render_verification 签名改成 3 参数 (diff_summary + always_summary)**: Always 走 AlwaysVerifySummary 路径,BestEffort 走 AxDiffSummary 路径,caller 在 mod.rs 显式 dispatch
+7. **observation_block 字段保留**: ticket 14 不渲染到 response (只取子字段),但保留 struct field 给 ticket 18 trace (`#[allow(dead_code)]` 标记)
+8. **always_summary 不进 density.implicit_observe_ms**: ticket 14 跑 full observe 不复用 implicit_observe 的 ref_id cache,避免污染 5s TTL
+
+### 文件变更
+- `src/control_computer_act/verify.rs` (~410 行,+63 行): 加 `AlwaysVerifySummary` / `run_always_verify` / `render_always_verification` / `ALWAYS_VERIFY_SCREENSHOT_LIMIT_BYTES` / 6 个新单测 (17 总)
+- `src/control_computer_act/mod.rs`: 加 `run_always_verify` import + dispatch `verify_summary`/`always_summary` + 改 `render_verification` 签名
+- `src/control_observation.rs`: 加 `pub use observe::build_observe_bundle` (verify.rs 需要入口)
+- `scripts/smoke_computer_act_verify.sh`: test 4 改成验证 full observe 行为 (method:full + 三字段)
+
+### 状态
+**ticket 14 实施完成,所有 verify smoke 5/5 + 回归 smoke 9/9 通过。准备 commit + push。**

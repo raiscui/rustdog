@@ -15,7 +15,7 @@ pub mod observe;
 pub mod refind;
 pub mod selector;
 
-pub use observe::{build_observe_outcome, parse_observe_payload, ObserveRequest};
+pub use observe::{build_observe_bundle, build_observe_outcome, parse_observe_payload, ObserveRequest};
 pub use refind::{
     build_selector_refind_decision, build_selector_refind_response_json, SelectorRefindDecision,
     SelectorRefindPolicy, SelectorRefindRequest, SelectorRefindSource, DEFAULT_REFIND_LIMIT,

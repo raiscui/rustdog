@@ -21,6 +21,7 @@ use std::time::Instant;
 
 use crate::ax_diff::diff::compute_diff;
 use crate::control_ax::{capture_default_ax_snapshot, AxTreeRequest};
+use crate::control_observation::{build_observe_bundle, ObserveRequest};
 
 /// ADR-0004 V3: 三档 verify policy。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -172,6 +173,217 @@ fn capture_post_snapshot() -> io::Result<crate::control_ax::AxSnapshot> {
     capture_default_ax_snapshot(&AxTreeRequest::default())
 }
 
+/// ticket 14: screenshot 体积阈值。超 2MB 标 `screenshot_truncated:true`,
+/// 不截断图像 (因为 client 可能需要完整图做 OCR);只标 false 警示 client 自己截。
+pub(crate) const ALWAYS_VERIFY_SCREENSHOT_LIMIT_BYTES: usize = 2 * 1024 * 1024;
+
+/// `verify:"always"` 完整观察产物。
+///
+/// 跟 `AxDiffSummary` 互补:
+/// - `AxDiffSummary` 只带 diff 摘要 (轻量,best_effort 用)
+/// - `AlwaysVerifySummary` 带完整 post-action 观察 + 同样的 ax_diff
+#[derive(Debug, Clone)]
+pub(crate) struct AlwaysVerifySummary {
+    /// post-action 全量 observe 的 JSON 值 (来自 `ObserveBundle.value`)。
+    /// ticket 14 不直接渲染 (response 只取 screenshot_id / ax_tree_id / windows 字段),
+    /// 但保留给 ticket 18 trace / 后续可能加 `verification.observation.full` 扩展。
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub observation_block: Value,
+    /// screenshot_id (来自 observe.visual 段或 observation 段)
+    pub screenshot_id: Option<String>,
+    /// ax_tree_id (跟 observation_id 同源;观察 capture 时统一一个 id)
+    pub ax_tree_id: Option<String>,
+    /// windows 状态列表 (来自 observe.windows 段)
+    pub windows: Value,
+    /// 截图是否超 2 MB 阈值 (只标记,不截断)
+    pub screenshot_truncated: bool,
+    /// AX diff (跟 best_effort 同口径)
+    pub ax_diff: AxDiffSummary,
+}
+
+/// `verify:"always"` 完整执行流:
+/// 1. 抓 pre-AX (用于 diff, 轻量)
+/// 2. caller 跑 dispatch (dispatch_ms 由 caller 传)
+/// 3. 抓 post-observe (full screenshot + AX + windows, 走 `build_observe_bundle` Hybrid 模式)
+/// 4. 计算 pre/post AX diff
+/// 5. 测 screenshot 体积, 超阈值标 truncated
+/// 6. 返回 `AlwaysVerifySummary`
+///
+/// 任意一步失败 fallback 到 empty summary (verify 错误不污染 dispatch 结果)。
+pub(crate) fn run_always_verify(
+    dispatch_ms: u64,
+) -> AlwaysVerifySummary {
+    use std::time::Instant;
+    let verify_start = Instant::now();
+
+    // 1. pre-AX
+    let pre = capture_default_ax_snapshot(&AxTreeRequest::default()).ok();
+
+    // 2. post-observe (Hybrid: screenshot + ax + windows)
+    // 注意: dispatch 已经由 caller 跑完,这里只跑 observe; 不重做 dispatch
+    let observe_request = ObserveRequest::default(); // Hybrid mode
+    let observe_bundle = match build_observe_bundle(None, &observe_request) {
+        Ok(b) => b,
+        Err(err) => {
+            // observe 失败 → fallback 到空 (verify 错误不污染 dispatch ok:true)
+            let _ = err; // 显式 drop
+            return empty_always_summary(dispatch_ms);
+        }
+    };
+
+    // 3. 计算 AX diff (pre vs post)
+    let diff_start = Instant::now();
+    let ax_diff = match pre.as_ref() {
+        Some(pre_snap) => {
+            let post_snap = observe_bundle.value.get("accessibility").cloned();
+            // 把 accessibility JSON (观察 value 的 accessibility 段) 反序列化成 AxSnapshot
+            // 这里只用 windows + status 字段做 diff,简化逻辑
+            let pre_value = serde_json::to_value(pre_snap).unwrap_or(Value::Null);
+            let post_value = post_snap.unwrap_or(Value::Null);
+            let report = compute_diff(&pre_value, &post_value, 64);
+            let full_report = serde_json::to_value(&report).unwrap_or(Value::Null);
+            AxDiffSummary {
+                windows_added: report.windows_added,
+                windows_removed: report.windows_removed,
+                windows_modified: report.windows_modified,
+                elements_added: report.elements_added,
+                elements_removed: report.elements_removed,
+                elements_modified: report.elements_modified,
+                verify_ms: 0, // 占位, 后面统一填
+                dispatch_ms,
+                full_report,
+            }
+        }
+        None => AxDiffSummary::empty(dispatch_ms, 0),
+    };
+    let diff_ms = diff_start.elapsed().as_millis() as u64;
+
+    // 4. 抽取 screenshot_id / ax_tree_id / windows
+    let screenshot_id = observe_bundle
+        .value
+        .get("visual")
+        .and_then(|v| v.get("id"))
+        .and_then(|v| v.as_str())
+        .map(str::to_owned)
+        .or_else(|| {
+            observe_bundle
+                .value
+                .get("observation")
+                .and_then(|v| v.get("observation_id"))
+                .and_then(|v| v.as_str())
+                .map(str::to_owned)
+        });
+    let ax_tree_id = observe_bundle
+        .value
+        .get("observation")
+        .and_then(|v| v.get("observation_id"))
+        .and_then(|v| v.as_str())
+        .map(str::to_owned);
+    let windows = observe_bundle
+        .value
+        .get("windows")
+        .cloned()
+        .unwrap_or(Value::Null);
+
+    // 5. 测 screenshot 体积: base64 长度 * 3/4 ≈ 字节数
+    let screenshot_bytes = observe_bundle
+        .value
+        .get("visual")
+        .and_then(|v| v.get("image"))
+        .and_then(|v| v.get("base64"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.len() * 3 / 4)
+        .unwrap_or(0);
+    let screenshot_truncated = screenshot_bytes > ALWAYS_VERIFY_SCREENSHOT_LIMIT_BYTES;
+
+    let total_verify_ms = verify_start.elapsed().as_millis() as u64;
+    // ax_diff 的 verify_ms 改成包含 diff_ms (不算 screenshot capture, 只算 diff 计算)
+    let mut ax_diff = ax_diff;
+    ax_diff.verify_ms = diff_ms;
+    ax_diff.dispatch_ms = dispatch_ms;
+
+    AlwaysVerifySummary {
+        observation_block: observe_bundle.value,
+        screenshot_id,
+        ax_tree_id,
+        windows,
+        screenshot_truncated,
+        ax_diff,
+        // suppress unused warning if any
+        ..summary_with_total_verify(total_verify_ms)
+    }
+}
+
+fn summary_with_total_verify(total_verify_ms: u64) -> AlwaysVerifySummary {
+    AlwaysVerifySummary {
+        observation_block: Value::Null,
+        screenshot_id: None,
+        ax_tree_id: None,
+        windows: Value::Null,
+        screenshot_truncated: false,
+        ax_diff: AxDiffSummary::empty(0, total_verify_ms),
+    }
+}
+
+fn empty_always_summary(dispatch_ms: u64) -> AlwaysVerifySummary {
+    AlwaysVerifySummary {
+        observation_block: Value::Null,
+        screenshot_id: None,
+        ax_tree_id: None,
+        windows: Value::Null,
+        screenshot_truncated: false,
+        ax_diff: AxDiffSummary::empty(dispatch_ms, 0),
+    }
+}
+
+/// 把 `AlwaysVerifySummary` 渲染成 response `verification.method:"full"` block。
+///
+/// ADR-0004 V3 + ticket 14 acceptance:
+/// ```json
+/// "verification": {
+///   "method": "full",
+///   "observation": {
+///     "screenshot_id": "...",
+///     "ax_tree_id": "...",
+///     "windows": [...],
+///     "screenshot_truncated": false
+///   },
+///   "ax_diff": { ... }
+/// }
+/// ```
+pub(crate) fn render_always_verification(summary: &AlwaysVerifySummary) -> Value {
+    let mut observation = serde_json::Map::new();
+    if let Some(sid) = &summary.screenshot_id {
+        observation.insert("screenshot_id".into(), Value::String(sid.clone()));
+    } else {
+        observation.insert("screenshot_id".into(), Value::Null);
+    }
+    if let Some(axid) = &summary.ax_tree_id {
+        observation.insert("ax_tree_id".into(), Value::String(axid.clone()));
+    } else {
+        observation.insert("ax_tree_id".into(), Value::Null);
+    }
+    observation.insert("windows".into(), summary.windows.clone());
+    observation.insert(
+        "screenshot_truncated".into(),
+        Value::Bool(summary.screenshot_truncated),
+    );
+
+    serde_json::json!({
+        "method": "full",
+        "observation": Value::Object(observation),
+        "ax_diff": {
+            "windows_added": summary.ax_diff.windows_added,
+            "windows_removed": summary.ax_diff.windows_removed,
+            "windows_modified": summary.ax_diff.windows_modified,
+            "elements_added": summary.ax_diff.elements_added,
+            "elements_removed": summary.ax_diff.elements_removed,
+            "elements_modified": summary.ax_diff.elements_modified,
+            "changed": summary.ax_diff.windows_modified + summary.ax_diff.elements_modified,
+        },
+    })
+}
+
 /// 把 `AxDiffSummary` 渲染成 response `verification` 字段的 JSON 值。
 ///
 /// ADR-0004 V3 形状:
@@ -189,12 +401,13 @@ fn capture_post_snapshot() -> io::Result<crate::control_ax::AxSnapshot> {
 /// `None` policy 直接返回 `None`,caller 不写 verification 字段 (ticket 12 acceptance)。
 pub(crate) fn render_verification(
     policy: VerifyPolicy,
-    summary: Option<&AxDiffSummary>,
+    diff_summary: Option<&AxDiffSummary>,
+    always_summary: Option<&AlwaysVerifySummary>,
 ) -> Option<Value> {
     match policy {
         VerifyPolicy::None => None,
         VerifyPolicy::BestEffort => {
-            let summary = summary?;
+            let summary = diff_summary?;
             Some(serde_json::json!({
                 "method": "ax_diff",
                 "ax_diff": {
@@ -212,8 +425,8 @@ pub(crate) fn render_verification(
             }))
         }
         VerifyPolicy::Always => {
-            // ticket 14 占位;本轮返回 None 让 caller 行为等同 None (不破坏契约)。
-            None
+            let summary = always_summary?;
+            Some(render_always_verification(summary))
         }
     }
 }
@@ -299,15 +512,15 @@ mod tests {
     #[test]
     fn render_verification_none_returns_none() {
         // ticket 12 acceptance: None policy 不写 verification 字段。
-        assert!(render_verification(VerifyPolicy::None, None).is_none());
-        assert!(render_verification(VerifyPolicy::None, Some(&AxDiffSummary::empty(0, 0))).is_none());
+        assert!(render_verification(VerifyPolicy::None, None, None).is_none());
+        assert!(render_verification(VerifyPolicy::None, Some(&AxDiffSummary::empty(0, 0)), None).is_none());
     }
 
     #[test]
     fn render_verification_best_effort_emits_method_and_summary() {
         let summary = AxDiffSummary::empty(100, 30);
         let rendered =
-            render_verification(VerifyPolicy::BestEffort, Some(&summary)).expect("must produce value");
+            render_verification(VerifyPolicy::BestEffort, Some(&summary), None).expect("must produce value");
         assert_eq!(rendered["method"], "ax_diff");
         assert_eq!(rendered["ax_diff"]["windows_added"], 0);
         assert_eq!(rendered["ax_diff"]["elements_added"], 0);
@@ -319,13 +532,13 @@ mod tests {
     #[test]
     fn render_verification_best_effort_without_summary_returns_none() {
         // 防御:caller 漏传 summary 时不要 panic
-        assert!(render_verification(VerifyPolicy::BestEffort, None).is_none());
+        assert!(render_verification(VerifyPolicy::BestEffort, None, None).is_none());
     }
 
     #[test]
     fn render_verification_always_is_deferred_to_ticket_14() {
         // ticket 14 实现;本轮返回 None (等同 no verification block)
-        assert!(render_verification(VerifyPolicy::Always, None).is_none());
+        assert!(render_verification(VerifyPolicy::Always, None, None).is_none());
     }
 
     // --- render_density ---
@@ -343,5 +556,80 @@ mod tests {
     fn render_density_includes_verify_ms_when_provided() {
         let d = render_density(100, Some(45), 5);
         assert_eq!(d["verify_ms"], 45);
+    }
+
+    // --- Always (ticket 14) ---
+
+    #[test]
+    fn screenshot_limit_threshold_is_2mb() {
+        // 防止后续误改: 2MB 是 ticket 14 acceptance criteria 硬约束。
+        assert_eq!(ALWAYS_VERIFY_SCREENSHOT_LIMIT_BYTES, 2 * 1024 * 1024);
+    }
+
+    #[test]
+    fn render_always_verification_shape() {
+        let summary = AlwaysVerifySummary {
+            observation_block: serde_json::json!({"kind": "observe"}),
+            screenshot_id: Some("screenshot-1234".to_string()),
+            ax_tree_id: Some("obs-5678".to_string()),
+            windows: serde_json::json!([{"id": "win-1", "title": "Calculator"}]),
+            screenshot_truncated: false,
+            ax_diff: AxDiffSummary::empty(100, 50),
+        };
+        let rendered = render_always_verification(&summary);
+        assert_eq!(rendered["method"], "full");
+        assert_eq!(rendered["observation"]["screenshot_id"], "screenshot-1234");
+        assert_eq!(rendered["observation"]["ax_tree_id"], "obs-5678");
+        assert_eq!(rendered["observation"]["screenshot_truncated"], false);
+        assert!(rendered["observation"]["windows"].is_array());
+        assert!(rendered["ax_diff"].is_object());
+        assert_eq!(rendered["ax_diff"]["elements_added"], 0);
+    }
+
+    #[test]
+    fn render_always_verification_screenshot_truncated_propagates() {
+        let summary = AlwaysVerifySummary {
+            observation_block: Value::Null,
+            screenshot_id: Some("s".to_string()),
+            ax_tree_id: Some("a".to_string()),
+            windows: Value::Null,
+            screenshot_truncated: true, // 超 2MB 阈值
+            ax_diff: AxDiffSummary::empty(0, 0),
+        };
+        let rendered = render_always_verification(&summary);
+        assert_eq!(rendered["observation"]["screenshot_truncated"], true);
+    }
+
+    #[test]
+    fn render_verification_always_dispatches_to_always_renderer() {
+        let summary = AlwaysVerifySummary {
+            observation_block: Value::Null,
+            screenshot_id: Some("s".to_string()),
+            ax_tree_id: Some("a".to_string()),
+            windows: Value::Array(vec![]),
+            screenshot_truncated: false,
+            ax_diff: AxDiffSummary::empty(100, 200),
+        };
+        let rendered = render_verification(VerifyPolicy::Always, None, Some(&summary))
+            .expect("Always should produce value");
+        assert_eq!(rendered["method"], "full");
+        assert_eq!(rendered["observation"]["screenshot_id"], "s");
+    }
+
+    #[test]
+    fn render_verification_always_without_summary_returns_none() {
+        // 防御:caller 漏传 always_summary 时不要 panic
+        assert!(render_verification(VerifyPolicy::Always, None, None).is_none());
+        assert!(render_verification(VerifyPolicy::Always, Some(&AxDiffSummary::empty(0, 0)), None).is_none());
+    }
+
+    #[test]
+    fn empty_always_summary_zeros_observation_fields() {
+        let summary = empty_always_summary(50);
+        assert_eq!(summary.screenshot_id, None);
+        assert_eq!(summary.ax_tree_id, None);
+        assert_eq!(summary.screenshot_truncated, false);
+        assert!(summary.windows.is_null());
+        assert_eq!(summary.ax_diff.dispatch_ms, 50);
     }
 }

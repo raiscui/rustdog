@@ -170,15 +170,18 @@ verify_ms="$(printf '%s' "$out" | get_field t3 density.verify_ms)"
 log "  verify_ms=$verify_ms"
 log "test 3 OK"
 
-# --- Test 4: verify:"always" → ticket 14 占位,本轮等同 none (不带 verification) ---
-log "test 4: verify=\"always\" → ticket 14 占位"
+# --- Test 4: verify:"always" → ticket 14 完整 observe + ax_diff ---
+log "test 4: verify=\"always\" → full observe (ticket 14)"
 out="$(run_computer_act t4 '@computer-act#24:{schema:"rdog.computer-act.v1",action:"wait",verify:"always",args:{duration_ms:0}}')"
 echo "  response: $out"
 echo "$out" | grep -q '"ok"[[:space:]]*:[[:space:]]*true' || fail "test 4: ok != true (output: $out)"
-# ticket 14 未实现,本轮 verify=always 等同 none (omit verification)
-if echo "$out" | grep -q '"verification"'; then
-    fail "test 4: verification key should be omitted when verify=always (ticket 14 not implemented yet, output: $out)"
-fi
+# ticket 14 acceptance: method:"full" + observation.{screenshot_id, ax_tree_id, windows, screenshot_truncated} + ax_diff
+echo "$out" | grep -qE '"method"[[:space:]]*:[[:space:]]*"full"' || fail "test 4: verification.method != full (output: $out)"
+echo "$out" | grep -qE '"screenshot_id"' || fail "test 4: observation.screenshot_id missing (output: $out)"
+echo "$out" | grep -qE '"ax_tree_id"' || fail "test 4: observation.ax_tree_id missing (output: $out)"
+echo "$out" | grep -qE '"screenshot_truncated"[[:space:]]*:[[:space:]]*(true|false)' || fail "test 4: observation.screenshot_truncated missing (output: $out)"
+echo "$out" | grep -qE '"ax_diff"' || fail "test 4: verification.ax_diff missing (output: $out)"
+echo "$out" | grep -qE '"verify_ms"[[:space:]]*:[[:space:]]*[0-9]+' || fail "test 4: density.verify_ms missing (output: $out)"
 log "test 4 OK"
 
 # --- Test 5: verify:"bogus" → error_code:"invalid_verify" ---

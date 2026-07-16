@@ -43,8 +43,8 @@ pub(crate) use implicit_observe::{
 #[path = "verify.rs"]
 mod verify;
 pub(crate) use verify::{
-    parse_verify_policy, render_density, render_verification, run_best_effort_verify,
-    VerifyPolicy,
+    parse_verify_policy, render_density, render_verification, run_always_verify,
+    run_best_effort_verify, VerifyPolicy,
 };
 
 /// `control_computer_act` 把 action + args 翻译成的中间结果。
@@ -421,12 +421,23 @@ pub(crate) fn execute_computer_act(
     let dispatch_ms = dispatch_start.elapsed().as_millis() as u64;
     let duration_ms = start.elapsed().as_millis() as u64;
 
-    // ticket 13: verify=best_effort → 跑 pre/post AX diff
+    // ticket 13/14: verify 三档分别跑不同 verify 流程
+    // - BestEffort: AX diff only (轻量)
+    // - Always: full observe (screenshot + AX + windows + AX diff)
+    // - None: 不跑 verify
     let verify_summary = match verify_policy {
         VerifyPolicy::BestEffort => Some(run_best_effort_verify(dispatch_ms)),
         _ => None,
     };
-    let verify_ms = verify_summary.as_ref().map(|s| s.verify_ms);
+    let always_summary = match verify_policy {
+        VerifyPolicy::Always => Some(run_always_verify(dispatch_ms)),
+        _ => None,
+    };
+    let verify_ms = match verify_policy {
+        VerifyPolicy::BestEffort => verify_summary.as_ref().map(|s| s.verify_ms),
+        VerifyPolicy::Always => Some(always_summary.as_ref().map(|s| s.ax_diff.verify_ms).unwrap_or(0)),
+        VerifyPolicy::None => None,
+    };
 
     // 包成 computer-act envelope
     let underlying_json_str = underlying_result
@@ -453,8 +464,13 @@ pub(crate) fn execute_computer_act(
         "density": render_density(dispatch_ms, verify_ms, implicit_observe_ms),
     });
 
-    // ticket 12: verify=none 时不写 verification 字段;best_effort 时写 ax_diff 摘要
-    if let Some(v) = render_verification(verify_policy, verify_summary.as_ref()) {
+    // ticket 12/13/14: verify=none 时不写 verification 字段;best_effort 写 ax_diff 摘要;
+    // always 走 AlwaysVerifySummary 路径 (full observe + ax_diff)。
+    if let Some(v) = render_verification(
+        verify_policy,
+        verify_summary.as_ref(),
+        always_summary.as_ref(),
+    ) {
         payload["verification"] = v;
     }
 
