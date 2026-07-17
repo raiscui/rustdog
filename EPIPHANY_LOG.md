@@ -615,3 +615,46 @@ python 命令字符串里又有 JSON 字符串字面量带 `\"`, 经过 bash →
 - 看 `scripts/smoke_flow_computer_act.sh:240-280` (`make_flow_with_contains_multi` helper 定义)。
 - 看 `scripts/smoke_flow_computer_act.sh:305-360` (test 6 正确写法)。
 - 复现反例: 把 test 6 改回 `flow_json_6=$(python3 -c "...")` 硬编码版本, 跑 smoke 必失败。
+
+## [2026-07-17 14:35:00] [Session ID: omx-1783957580965-m4bn8e] 主题: smoke 退到 unit-test driven 不是妥协, 是诚实选择
+
+### 发现来源
+- Phase F-1 smoke 调试时, Cancelled / PermissionDenied / PlatformUnsupported 三个 live
+  trigger 路径都撞到 ticket 03 遗留 bug (zenoh_control.rs:240 每次新建 CancelRegistry)
+  或环境变量隔离问题 (client PATH 改不影响 daemon PATH)。
+
+### 核心问题
+烟雾测试常被当作 "e2e 真触发" 的代名词, 但 live trigger 路径在以下场景会失败:
+1. 上游有未修 bug (registry 跨实例, signal 找不到目标)
+2. live trigger 需要碰 daemon 内部 env (PATH / file descriptor / 子进程)
+3. 平台限制 (macOS 编译不包含 Linux-only 分支)
+
+强行 live trigger 会让 smoke 反复 fail, 然后错误归到 Phase F-1 改动上, 误导后续 debug。
+
+### 为什么重要
+- "形状正确" (envelope shape 100% 对齐 ADR-0004 E2) 不等于 "行为正确" (live 真触发),
+  但 envelope shape 是 Phase F-1 的本质工作 — 改 caller 走 helper 是改形状, 不是改触发路径。
+- 留 Phase F-3 给 live trigger, 让 ticket 03 修复 (registry 跨实例) 一起做, 是 single
+  source of truth 的正确做法 — bug 真实归属 ticket 03, 不应该被 Phase F-1 "顺手修"。
+- smoke 脚本里显式写注释 "ticket 03 遗留 bug / Phase F-3 范围", 比假装 live trigger 成功
+  更负责任。后续读者看到注释知道 live trigger 没做, 不会误以为已覆盖。
+
+### 未来风险
+- 任何 envelope 改 caller 的 PR 都要明确区分 "形状正确" 和 "行为正确"。
+- 撞 live trigger bug 时, 应该:
+  1. 在 smoke 注释里写清楚 bug 归属
+  2. 退到 unit-test driven 验形状
+  3. 在 LATER_PLANS 里登记 live trigger 待办
+  4. 不要为了 smoke 好看强行编造 live trigger 逻辑
+
+### 当前结论
+- Phase F-1 commit `8b21988` 收口: 3 个 error_code 走 envelope helper, 8/8 smoke 全过。
+- Phase F-3 / ticket 03 修复留作后续 batch。
+- 教训: smoke 设计要诚实, 不要为了覆盖率好看编造 e2e 路径。
+
+### 后续讨论入口
+- 看 `scripts/smoke_computer_act_error_envelope.sh` (test 1 + test 2 + test 3 都有
+  显式注释解释为什么退到 cargo test)。
+- 看 `src/zenoh_control.rs:240` (ticket 03 registry bug 位置)。
+- 复现 ticket 03 bug: 启 daemon, `@wait#1:{duration_ms:10000}` 后立刻
+  `@cancel#seq#99:{target_seq:1}`, 看 cancel response 是 "unknown_target_seq"。

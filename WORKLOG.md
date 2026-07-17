@@ -506,3 +506,76 @@
   避免过度设计 (跟 Mano-CUA 风格一致)。
 - **混合 worktree 跨项目记录**: fast-infer 项目 task_plan.md 也要追加一条索引, 表明本次 rdog
   改动跨项目 (mixed worktree: cargo / pixi 双包管理器互不污染)。
+
+## [2026-07-17 14:30:00] [Session ID: omx-1783957580965-m4bn8e] 任务名称: rdog `@computer-act` Phase F-1 (Cancelled / PlatformUnsupported / PermissionDenied envelope)
+
+### 任务内容
+- 实施 Phase F-1: 把 LP-ticket-15-deferred-1 标注的 7 个未触发 error_code 中 3 个手写 JSON
+  payload 的路径改走 `error_envelope()` helper, 跟其它 4 个已触发的 error_code 形状一致。
+- 不依赖 Phase I (真实 observe 集成), 单 session 收口。
+
+### 完成过程
+
+**Step 1-2: 加 helper + 单测 (src/control_computer_act/error_envelope.rs)**
+- 加 3 个 String-returning wrapper helper, 直接喂给 response_value_json:
+  - `cancelled_envelope_json(requested_duration_ms: u64) -> String`
+  - `platform_unsupported_envelope_json(target_os: &str, app_name: &str) -> String`
+  - `permission_denied_envelope_json(app_name: &str, io_error: &str) -> String`
+- 3 个单测验 envelope shape (error_code + retry.strategy + retry.hint + evidence):
+  - cancelled_envelope_json_matches_e2_shape
+  - platform_unsupported_envelope_json_matches_e2_shape
+  - permission_denied_envelope_json_matches_e2_shape
+
+**Step 3: control_actions.rs 改 caller 走 helper (避免手写 JSON)**
+- `build_cancelled_wait_response_json` 改走 `cancelled_envelope_json(request.duration_ms)`
+- `open_app_payload_for_current_platform` 的 `#[cfg(not(target_os = "macos"))]` 分支
+  改走 `platform_unsupported_envelope_json(target_os, app_name)`
+- `run_open_app_on_macos` 的 `open` PATH 缺失分支改走
+  `permission_denied_envelope_json(app_name, e.to_string())`
+- 加 import: `use crate::control_computer_act::error_envelope::{...}` (兄弟模块 use)
+
+**Step 4: error_envelope 改成 pub(crate) mod**
+- `src/control_computer_act/mod.rs:66`: `mod error_envelope;` → `pub(crate) mod error_envelope;`
+- 让 control_actions 兄弟模块能 use 内部 helper, 不破坏现有依赖图
+
+**Step 5: smoke (scripts/smoke_computer_act_error_envelope.sh, 129 行)**
+- 设计 3 段 e2e 测试: Cancelled / PermissionDenied / PlatformUnsupported
+- 关键调试 (跟 test 6 ticket 20 同款坑): live trigger 路径都撞到 ticket 03 遗留 bug
+  (zenoh_control.rs:240 每次新建 CancelRegistry, 跟 executor 内部 registry 不是同一实例)
+- 修法: smoke 退到 "unit-test driven", 跑 cargo test 单测验 envelope shape,
+  真实 live trigger 留 Phase F-3 (跟 ticket 03 修复一起做)
+
+**Step 6: 修 platform_unsupported_envelope_json dead_code warning**
+- macOS 编译时 cfg(not(target_os = "macos")) 分支被排除, helper 没有 live caller
+- 加 `#[allow(dead_code)]` 注释: 解释 macOS 编译时不调用, 但单测还在用, 不能删
+
+### 验证
+- `RUSTFLAGS="-Awarnings" cargo check --bin rdog --tests`: 0 warning
+- `RUSTFLAGS="-Awarnings" cargo test --bin rdog`: 594 passed (+3 from cancelled/permission_denied/platform_unsupported envelope shape), 0 failed
+- 8/8 smoke 全过:
+  - smoke_computer_act             5/5
+  - smoke_computer_act_observe     4/4
+  - smoke_computer_act_verify      5/5
+  - smoke_computer_act_trace       3/3
+  - smoke_computer_act_all         13/13 + bonus error path
+  - smoke_flow_computer_act        6/6 (ticket 19+20)
+  - smoke_computer_act_error_envelope 3/3 (Phase F-1)
+- `git push origin main`: 0150204..8b21988 成功
+
+### 总结感悟
+
+- **Phase F-1 跨 ticket 范围**: 跟 ticket 11 (implicit_observe), ticket 03 (cancel),
+  ticket 13/14 (verify) 都有交叉。最终决定聚焦 "改 caller 走 envelope helper" 这一个动作,
+  其它 live trigger 路径 (Cancelled 真触发 / PermissionDenied 真触发) 留后续 Phase F-3。
+- **pub(crate) mod 改法**: error_envelope 之前是 private module, 因为只在 control_computer_act
+  模块内用。Phase F-1 让 control_actions 兄弟模块 use → 必须 pub(crate) 提升可见性。
+  不破坏现有依赖图 (control_actions → control_computer_act 是单向调用, 不会反向循环)。
+- **"形状一致"比"行为覆盖"更重要**: 这次没真触发 Cancelled/PermissionDenied live 路径,
+  但 envelope shape (error_code + retry.strategy + retry.hint + evidence) 已经 100% 对齐
+  ADR-0004 E2。这是 Phase F-1 的本质: 把"形状正确"先做了, "触发正确"留后续 Phase F-3。
+- **dead_code 跟 #[cfg(target_os)] 互动**: helper 本身是 cross-platform, 但 caller 只在
+  非 macOS 平台编译进去。给 helper 加 `#[allow(dead_code)]` 比给 caller 加 cfg 更稳,
+  因为 helper 自身是 cross-platform 接口, cfg 限制应该放在 caller 不放在 helper。
+- **smoke 退到 unit-test driven 是诚实选择**: 不假装 e2e live trigger, 明确写注释说
+  "ticket 03 / Phase F-3 范围", 这样未来读者知道为何这里 smoke 跑 cargo test 而不是
+  live rdog control。
