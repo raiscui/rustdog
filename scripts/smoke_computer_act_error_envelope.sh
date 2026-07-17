@@ -91,19 +91,48 @@ if ! probe_feature_specific; then
     start_local_daemon
 fi
 
-# --- Test 1: Cancelled envelope shape (Phase F-1 helper) ---
-log "test 1: cancelled_envelope_json unit test (Phase F-1 helper)"
-# 备注: @wait + @cancel#seq 的 e2e live trigger 路径当前有 ticket 03 遗留 bug
-# (zenoh_control.rs 每次新建 CancelRegistry, executor 内部 registry 跟 dispatcher
-#  临时 registry 不是同一实例, cancel signal 找不到 in-flight seq)。这是 ticket 03
-# / Phase F-3 范围, 不在 Phase F-1 范围内。
-# Phase F-1 改的是 build_cancelled_wait_response_json 走 envelope helper —
-# 直接 cargo test cancelled_envelope_json_matches_e2_shape 验证 envelope shape。
-unit_out1="$(cd "$repo_root" && RUSTFLAGS="-Awarnings" cargo test --bin rdog cancelled_envelope_json_matches_e2_shape 2>&1 | tail -3)"
-echo "  cargo test: $unit_out1"
-echo "$unit_out1" | grep -q "test result: ok" || fail "test 1: cancelled_envelope_json_matches_e2_shape 单元测试失败"
-echo "$unit_out1" | grep -q "1 passed" || fail "test 1: cancelled_envelope_json_matches_e2_shape 应该 1 passed"
-log "test 1 OK (cancelled envelope shape ADR-0004 E2 compliant)"
+# --- Test 1: Cancelled envelope (Phase F-1 + F-3 live trigger) ---
+log "test 1: @wait + @cancel#seq -> cancelled envelope (live trigger)"
+# Phase F-3 修了 ticket 03 cancel registry 跨实例 bug (zenoh_control.rs:240 + daemon_bridge.rs:310),
+# @cancel#seq 现在能真命中 @wait 的 in-flight token, 返回 cancelled envelope。
+# background 子进程跑 wait (10s), 主进程发 cancel, wait 子进程提前 cancel 命中。
+rm -f /tmp/error_env_test1_wait.out
+"$binary" control mac.lab '@wait#1:{duration_ms:10000}' >/tmp/error_env_test1_wait.out 2>&1 &
+wait_pid=$!
+# 给 300ms 让 wait 真的进 sleep_cancellable
+sleep 0.3
+# 发 cancel#seq#99:{target_seq:1} - seq=99 是 cancel 命令自己的 seq, target_seq=1 是要取消的 wait
+"$binary" control mac.lab '@cancel#seq#99:{target_seq:1}' >/tmp/error_env_test1_cancel.out 2>&1
+echo "  cancel response: $(cat /tmp/error_env_test1_cancel.out)"
+# cancel response 必须是 ok:true (signaled:true)
+if ! grep -qE '"ok"[[:space:]]*:[[:space:]]*true' /tmp/error_env_test1_cancel.out; then
+    kill "$wait_pid" 2>/dev/null
+    fail "test 1: cancel response ok != true (output: $(cat /tmp/error_env_test1_cancel.out))"
+fi
+if ! grep -qE '"signaled"[[:space:]]*:[[:space:]]*true' /tmp/error_env_test1_cancel.out; then
+    kill "$wait_pid" 2>/dev/null
+    fail "test 1: cancel response signaled != true (output: $(cat /tmp/error_env_test1_cancel.out))"
+fi
+# 等 wait 子进程 (sleep_cancellable 50ms 内醒, 然后返 cancelled)
+wait "$wait_pid" 2>/dev/null || true
+out1="$(cat /tmp/error_env_test1_wait.out)"
+echo "  wait response: $out1"
+# envelope shape checks
+echo "$out1" | grep -qE '"ok"[[:space:]]*:[[:space:]]*false' || fail "test 1: ok != false (output: $out1)"
+echo "$out1" | grep -qE '"error_code"[[:space:]]*:[[:space:]]*"cancelled"' || fail "test 1: error_code != cancelled (output: $out1)"
+echo "$out1" | grep -qE '"strategy"[[:space:]]*:[[:space:]]*"never"' || fail "test 1: retry.strategy != never (output: $out1)"
+echo "$out1" | grep -qE '"hint"' || fail "test 1: retry.hint missing (output: $out1)"
+echo "$out1" | grep -qE '"cancelled_at_step"[[:space:]]*:[[:space:]]*"sleep_cancellable"' || fail "test 1: evidence.cancelled_at_step != sleep_cancellable (output: $out1)"
+echo "$out1" | grep -qE '"requested_duration_ms"[[:space:]]*:[[:space:]]*10000' || fail "test 1: evidence.requested_duration_ms != 10000 (output: $out1)"
+# 关键: cancelled envelope 应该有 cancelled_at_step, 没有 dispatch_ms (因为 sleep_cancellable 返 Err)
+# + ok:false + error_code:cancelled. 组合证明 cancel 真命中 (否则 sleep_and_measure 走 ok:true 路径)
+if echo "$out1" | grep -qE '"ok"[[:space:]]*:[[:space:]]*true'; then
+    fail "test 1: wait response ok=true, 应该是 ok:false (cancel 没命中)"
+fi
+if echo "$out1" | grep -qE '"dispatched_to"[[:space:]]*:[[:space:]]*"@wait"'; then
+    fail "test 1: wait response 含 dispatched_to=@wait, 应该是 cancelled 路径 (走 sleep_and_measure 没被 cancel)"
+fi
+log "test 1 OK (cancelled envelope live trigger, wait 真的被 cancel 命中)"
 
 # --- Test 2: PermissionDenied envelope shape (Phase F-1 helper) ---
 log "test 2: permission_denied_envelope_json unit test (Phase F-1 helper)"

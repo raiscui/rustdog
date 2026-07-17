@@ -307,7 +307,15 @@ pub(super) fn open_daemon_session_bridge(
                         }
                     }
 
-                    let outcome = parse_and_execute_control_line(line.as_ref(), &shell, &executor, &crate::cancellation::CancelRegistry::new());
+                    // Phase F-3 (ticket 03 fix): session bridge dispatcher 必须跟 executor 共享
+                    // 同一 CancelRegistry, 否则 `@cancel#seq` signal 找不到 in-flight seq。
+                    // 跟 zenoh_control.rs:240 一样的修法, 这是 ticket 03 跨实例 bug 的第二个 instance。
+                    let outcome = parse_and_execute_control_line(
+                        line.as_ref(),
+                        &shell,
+                        &executor,
+                        executor.cancel_registry(),
+                    );
                     let session_core = ControlPeerSession::new(session_id.as_str());
                     let dispatch_result = publisher
                         .lock()

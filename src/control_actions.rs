@@ -109,6 +109,17 @@ impl SystemControlActionExecutor {
             cancel_registry: Arc::new(crate::cancellation::CancelRegistry::new()),
         }
     }
+
+    /// 暴露内部 cancel_registry 引用, 让 dispatcher (zenoh_control / 控制平面)
+    /// 跟 executor 共享同一 registry 实例, 避免 ticket 03 跨实例 bug。
+    ///
+    /// ticket 03 修法 (Phase F-3): 之前 zenoh_control.rs:240 每次请求新建
+    /// `CancelRegistry::new()`, 跟 executor 内部的 cancel_registry 不是同一实例,
+    /// 导致 `@cancel#seq` 找不到 in-flight seq (返回 `unknown_target_seq`)。
+    /// 修法是 dispatcher 传引用, executor 暴露 accessor, 两边共享 Arc<CancelRegistry>。
+    pub(crate) fn cancel_registry(&self) -> &Arc<crate::cancellation::CancelRegistry> {
+        &self.cancel_registry
+    }
 }
 
 impl Clone for SystemControlActionExecutor {

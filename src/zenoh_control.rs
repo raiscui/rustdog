@@ -237,7 +237,16 @@ fn handle_daemon_control_query(
             .map_err(to_io_error)?;
         return Ok(());
     }
-    let outcome = parse_and_execute_control_line(request.line.as_str(), shell, executor, &crate::cancellation::CancelRegistry::new());
+    // Phase F-3 (ticket 03 fix): dispatcher 必须跟 executor 共享同一 CancelRegistry,
+    // 否则 `@cancel#seq` signal 找不到 in-flight seq 走 wait/computer-act 等命令。
+    // 之前这里 `&CancelRegistry::new()` 每次新建临时实例, 跟 executor.cancel_registry 跨实例,
+    // 导致 wait#1 register 到临时 registry 后函数返回就释放, cancel 信号收不到。
+    let outcome = parse_and_execute_control_line(
+        request.line.as_str(),
+        shell,
+        executor,
+        executor.cancel_registry(),
+    );
 
     if let Some(session_id) = request.session_id.as_deref() {
         publish_outcome_to_session_channel(session, keyexpr_root, namespace, session_id, &outcome)?;

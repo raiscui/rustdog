@@ -1121,4 +1121,90 @@ mod tests {
         );
         assert_eq!(parsed["code"], 64);
     }
+
+    // ====== Phase F-3 (ticket 03 fix): shared CancelRegistry ======
+
+    /// 模拟 zenoh_control.rs:240 修法: dispatcher 跟 executor 共享同一 Arc<CancelRegistry>。
+    /// 之前 dispatcher 临时新建 CancelRegistry, 跟 executor.cancel_registry 跨实例,
+    /// wait register 到临时 registry 后函数返回就释放, cancel 找不到 seq。
+    /// 修法: parse_and_execute_control_line 接收 &executor.cancel_registry() 共享同一 Arc。
+    #[test]
+    fn shared_cancel_registry_lets_cancel_signal_hit_wait_in_flight() {
+        use crate::control_actions::SystemControlActionExecutor;
+        use std::sync::Arc;
+        use std::thread;
+        use std::time::Duration;
+
+        let executor = SystemControlActionExecutor::default();
+        // 模拟 daemon 启动时共享同一 Arc<CancelRegistry>:
+        //   dispatcher 的 parse_and_execute_control_line 拿 executor.cancel_registry()
+        //   cancel 命令的 execute_cancel 也拿 executor.cancel_registry()
+        //   → 同一 Arc, 同一 registry, signal 命中 in-flight token
+        let registry: Arc<crate::cancellation::CancelRegistry> =
+            Arc::clone(executor.cancel_registry());
+
+        // background thread: dispatcher 跑 @wait#1:{duration_ms:5000}
+        let dispatcher_registry = Arc::clone(&registry);
+        let wait_handle = thread::spawn(move || {
+            let executor = SystemControlActionExecutor::default();
+            // 模拟 zenoh_control.rs 修法: 把 executor 替换成同一 registry
+            // (实际修法是 dispatcher 拿 executor.cancel_registry(), 这里直接传 Arc)
+            let outcome = parse_and_execute_control_line(
+                "@wait#1:{duration_ms:5000}",
+                "/bin/sh",
+                &executor,
+                &dispatcher_registry,
+            );
+            outcome.into_single_response_line()
+        });
+
+        // 给 wait 50ms 进 sleep_cancellable
+        thread::sleep(Duration::from_millis(100));
+
+        // 主线程调 executor.cancel_registry().signal(1) 模拟 `@cancel#seq#99:{target_seq:1}`
+        let signaled = registry.signal(1);
+        assert!(signaled, "registry.signal(1) should find in-flight token");
+
+        // 等 wait 线程退出
+        let response = wait_handle.join().expect("wait thread panic");
+        // 验 envelope shape (response 是 @response {"id":N,"value":{...}}, value 是 envelope)
+        let json_start = response
+            .strip_prefix("@response ")
+            .expect("response should have @response prefix");
+        let envelope: serde_json::Value =
+            serde_json::from_str(json_start).expect("envelope should be valid JSON");
+        let value = envelope.get("value").unwrap_or(&envelope);
+        assert_eq!(value["ok"], false, "expected ok:false");
+        assert_eq!(
+            value["error_code"], "cancelled",
+            "expected error_code:cancelled"
+        );
+        assert_eq!(
+            value["evidence"]["cancelled_at_step"], "sleep_cancellable",
+            "expected cancelled_at_step:sleep_cancellable"
+        );
+        // Phase F-1 envelope 形状对齐 ADR-0004 E2 (retry.strategy + retry.hint)
+        assert_eq!(value["retry"]["strategy"], "never");
+        assert!(value["retry"]["hint"].is_string());
+    }
+
+    /// 验证 executor.cancel_registry() 返回的 Arc 跟 executor 内部 Arc 是同一实例
+    /// (防止 future refactor 不小心创建新 registry, 重蹈 ticket 03 覆辙)。
+    #[test]
+    fn executor_cancel_registry_returns_internal_arc() {
+        use crate::control_actions::SystemControlActionExecutor;
+
+        let executor = SystemControlActionExecutor::default();
+        let registry_arc: Arc<crate::cancellation::CancelRegistry> =
+            Arc::clone(executor.cancel_registry());
+
+        // register 一个 token via registry_arc, 然后验证 executor.cancel_registry() 共享可见
+        let token = registry_arc.register(7);
+        assert!(!token.is_cancelled());
+
+        // 通过 executor.cancel_registry() 拿同一 Arc 再 signal
+        let signaled = executor.cancel_registry().signal(7);
+        assert!(signaled, "executor.cancel_registry() 必须跟 registry_arc 是同一实例");
+        assert!(token.is_cancelled());
+    }
 }

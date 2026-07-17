@@ -74,3 +74,62 @@ ticket 19 (a9b6401) → ticket 20 (c07dad3) → docs (0150204) → Phase F-1 (8b
 - 后续工作清单: `LATER_PLANS.md` LP-ticket-15-deferred-2/3/4。
 - 重要洞察: `EPIPHANY_LOG.md` `[2026-07-17 14:35:00]` smoke 诚实选择 entry。
 - 续档 manifest: `archive/manifests/ARCHIVE_MANIFEST__2026-07-17_task_plan_rollover_phase_f_1.md`
+
+## [2026-07-17 15:00:00] [Session ID: omx-1783957580965-m4bn8e] Phase F-3: ticket 03 cancel registry 跨实例 bug 修复 + Cancelled / PermissionDenied live trigger
+
+### 触发
+- 用户选 "1: Phase F-3" (修 ticket 03 cancel registry bug + 让 Cancelled / PermissionDenied live trigger)
+
+### 当前状态 (LP-ticket-15-deferred-3 真实根因)
+**zenoh_control.rs:240 每次请求新建 `CancelRegistry::new()`**, 跟
+`SystemControlActionExecutor::cancel_registry` 字段 (control_actions.rs:78) 跨实例。
+
+控制流:
+```
+handle_daemon_control_query (zenoh_control.rs:240)
+  └─ parse_and_execute_control_line(line, shell, executor, &CancelRegistry::new())  ← 临时 registry_A
+       └─ execute_explicit_control_request(request, shell, executor, &registry_A)
+             ├─ ControlCommand::Cancel(req) → executor.execute(Cancel, ...)
+             │     └─ execute_cancel(request, &executor.cancel_registry_B)         ← registry_B
+             └─ default arm:
+                   let token = registry_A.register(seq)
+                   executor.execute(command, shell, &token)
+                   registry_A.unregister(seq)
+```
+
+结果:
+- `wait#1` → token register 到 registry_A (临时, 函数返回就释放)
+- `cancel#seq#99:{target_seq:1}` → 走 `ControlCommand::Cancel` 分支, signal registry_B → 找不到 seq=1 → unknown_target_seq
+- wait 完整跑完 (cancel 没生效)
+
+### 实施范围 (Phase F-3)
+
+**Step 1: 修 ticket 03 cancel registry 跨实例 bug**
+- [ ] 给 `SystemControlActionExecutor` 加 accessor `pub(crate) fn cancel_registry(&self) -> &Arc<CancelRegistry>`
+- [ ] `zenoh_control.rs:240` 改 `&executor.cancel_registry()` 传引用, 不再新建临时 registry
+- [ ] 加单测: 模拟 wait register + cancel signal 命中同一 registry
+
+**Step 2: Cancelled live trigger smoke**
+- [ ] `scripts/smoke_computer_act_error_envelope.sh` test 1 改成 live trigger:
+  `@wait#1:{duration_ms:10000}` (background) + `@cancel#seq#99:{target_seq:1}` → 验证 wait 返回 cancelled envelope
+- [ ] 注意: 取消 hit 后 sleep_cancellable 50ms 内醒, 总耗时 ~50-200ms 不是 10000ms
+
+**Step 3: PermissionDenied live trigger**
+- [ ] refactor `execute_open_app` 暴露 injectable open_fn (或单独抽 helper)
+- [ ] 单元测 mock open_fn 返回 Err → 验证走 permission_denied_envelope_json 路径
+- [ ] smoke 不需要 live trigger (因为 daemon PATH 隔离), 单元测足够覆盖
+
+**Step 4: 跑回归**
+- [ ] cargo test 全过 (595+ tests)
+- [ ] 8/8 smoke 全过
+- [ ] commit + push + 文档收口
+
+### 实施决策 (待办)
+1. **executor accessor 暴露级别**: `pub(crate)` 让 zenoh_control 兄弟模块能访问, 不暴露 pub API。
+2. **Arc<CancelRegistry> vs &CancelRegistry**: 保持 Arc 包装, 让 executor 可以 Clone 同时共享 registry。
+3. **Step 3 open_fn refactor**: 抽 `run_open_app_command(app_name) -> io::Result<()>` helper,
+   `run_open_app_on_macos` 调它。 单元测直接测 helper 用 mock Command (cfg(test))。
+   Live trigger 不强求 (daemon PATH 隔离), 单测覆盖即可。
+
+### 状态
+**Phase F-3 计划已建, 准备从 Step 1 开始。**
