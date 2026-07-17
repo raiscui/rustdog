@@ -181,3 +181,66 @@ handle_daemon_control_query (zenoh_control.rs:240)
 
 ### 状态
 **Phase F-2 计划已建, 准备从 Step 1 开始。**
+
+## [2026-07-17 17:00:00] [Session ID: omx-1783957580965-m4bn8e] Phase F-3.5: PermissionDenied live trigger (refactor execute_open_app 暴露 injectable open_fn)
+
+### 触发
+- 用户选 "1: Phase F-3.5" (LP-ticket-15-deferred-5: PermissionDenied live trigger)
+- 收口 11 个 ComputerActErrorCode variant 中 3 个 live trigger (Cancelled/VerifyFailed/PermissionDenied)
+
+### 当前状态 (LP-ticket-15-deferred-5 真实根因)
+- error_envelope.rs::permission_denied_envelope_json() helper 已存在 (Phase F-1)
+- run_open_app_on_macos PermissionDenied 分支已走 envelope helper (Phase F-1)
+- **PermissionDenied 真触发路径难稳定**:
+  - daemon PATH 是 daemon 启动时 env 决定的, smoke 改 client shell PATH 不影响 daemon
+  - macOS 上 `open` 命令通常在 /usr/bin/open, 不会因 PATH 缺失
+  - 真实能触发的: chmod -x /usr/bin/open (sandbox 限制), spawn 失败 (OS 限制)
+  - 跟 Phase F-1 test 2 一样退到 unit-test driven 也行, 但单元测
+    覆盖的是 envelope shape, 缺少 dispatch + envelope 协同验证
+
+### 实施范围 (Phase F-3.5)
+
+**Step 1: refactor execute_open_app 暴露 injectable open_fn (cfg(test) trait)**
+- 抽 `trait OpenAppCommand { fn run(&self, app_name: &str) -> io::Result<std::process::Output>; }`
+- `SystemOpenAppCommand` 默认实现: 调 `Command::new("open")`
+- `execute_open_app` 接收 `&dyn OpenAppCommand` 参数, 默认参数是 `&SystemOpenAppCommand`
+- cfg(test) 测试用 `MockOpenAppCommand` 注入失败场景
+
+**Step 2: 单测 cfg(test) 覆盖 PermissionDenied live path**
+- 注入 MockOpenAppCommand 返 Err(IO error)
+- 调 execute_open_app + 验 response envelope shape
+- (跟 Phase F-1 test 2 风格一致, 但这次是 execute_open_app 完整路径)
+
+**Step 3: smoke_computer_act_error_envelope.sh test 2 升级为 cfg(test) 驱动 (不依赖 env)**
+- test 2 之前是 unit-test driven (跑 cargo test)
+- 升级: 同时跑 cargo test 验 envelope shape + 用 mock 跑 execute_open_app 验端到端
+
+**Step 4: 跑 7/7 smoke + 600+ tests 全过**
+
+### 实施决策 (待办)
+1. **injectable 设计**: 用 trait object (`&dyn OpenAppCommand`) 而不是 generic, 保持
+   execute_open_app 签名向后兼容 (tester 传 mock, production 走 system)
+2. **不在 macOS 上依赖 PATH 缺失**: daemon 启动时 PATH 固定, smoke 改不到
+3. **cfg(test) 单测覆盖 end-to-end**: 测 dispatch + envelope 协同 (Phase F-1
+   unit-test driven 只测 envelope shape)
+4. **OpenAppErrorCode 留 `app_not_found` 区别于 PermissionDenied**:
+   - `app_not_found`: `open -a <bad_app>` 返 exit 1 (e.g. app 不存在)
+   - `permission_denied`: spawn `open` 本身失败 (PATH 缺失 / 权限)
+   - 两者是不同 error_code, 都需要 envelope helper, 这次只补 PermissionDenied live
+
+### 状态
+**Phase F-3.5 计划已建, 准备从 Step 1 开始。**
+
+
+### 状态 (2026-07-17 17:30:00)
+**Phase F-3.5 收口 ✓**
+
+- Step 1 (OpenAppCommand trait refactor) 完成
+- Step 2 (3 mock + 3 unit tests + `fake_exit_status` helper) 完成, 3/3 passed
+- Step 3 (smoke_computer_act_error_envelope.sh test 2 升级 mock 注入) 完成
+  - 2a Phase F-1 envelope shape 单元测: 1 passed (原保留)
+  - 2b Phase F-3.5 execute_open_app live trigger via mock: 3 passed (新加)
+- Step 4 (worklog + LATER_PLANS LP-15-deferred-5 RESOLVED + EPIPHANY_LOG) 完成
+- cargo test 601 passed, 0 failed, 1 ignored
+- 8/9 smoke scripts 7+ 段端到端验证通过 (smoke_cancel_seq test 5 self-target
+  是 main 上 pre-existing bug, 不在 Phase F-3.5 范围内, 已在 EPIPHANY 记录)

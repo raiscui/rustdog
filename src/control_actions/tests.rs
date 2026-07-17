@@ -563,3 +563,199 @@ fn to_io_error_should_upgrade_macos_accessibility_failures_to_permission_denied(
     assert!(err.to_string().contains("辅助功能权限"));
     assert!(err.to_string().contains("重启该进程"));
 }
+
+
+// ============================================================================
+// Phase F-3.5: `@open-app` PermissionDenied / app_not_found / ok error envelope
+// 注入 mock (PermissionDenied live trigger 验证 trait 注入路径)
+// ============================================================================
+/// Helper 构造一个指定退出码的 ExitStatus (mock 测试帮手函数).
+///
+/// Unix `ExitStatus::from_raw` 接收的是 wait4() status word (而不是裸 exit code).
+/// 退出码 `c` 在 wait status 里编码为 `(c << 8)`, 低 7 位必须为 0 (signal=None).
+/// 直接 `from_raw(c)` 会让 `.code()` 返 None, 不是 Some(c).
+fn fake_exit_status(code: u8) -> std::process::ExitStatus {
+    use std::os::unix::process::ExitStatusExt;
+    std::process::ExitStatus::from_raw(i32::from(code) << 8)
+}
+
+
+
+/// Mock: 模拟 `Command::new("open")` 进程 spawn 失败 (PATH 缺失或不存在的 binary),
+/// 这是 daemon 真实环境触发 PermissionDenied 的路径。
+struct MockOpenAppPermissionDenied;
+
+impl OpenAppCommand for MockOpenAppPermissionDenied {
+    fn run(&self, app_name: &str) -> io::Result<std::process::Output> {
+        Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("`open` 命令不可用: PATH 隔离导致 spawn 失败 (app_name={app_name:?})"),
+        ))
+    }
+}
+
+/// Mock: 模拟 `open` 命令能 spawn 但 exit 1 (典型 app not found 场景)。
+/// 通过伪造 ExitStatus 来精确模拟 `status.code() == Some(1)` 路径。
+struct MockOpenAppAppNotFound;
+
+impl OpenAppCommand for MockOpenAppAppNotFound {
+    fn run(&self, _app_name: &str) -> io::Result<std::process::Output> {
+        let status = fake_exit_status(1);
+        Ok(std::process::Output {
+            status,
+            stdout: Vec::new(),
+            stderr: b"Unable to find application
+".to_vec(),
+        })
+    }
+}
+
+/// Mock: 模拟 `open` 命令成功 (exit 0), 走 happy path ok envelope。
+struct MockOpenAppSuccess;
+
+impl OpenAppCommand for MockOpenAppSuccess {
+    fn run(&self, _app_name: &str) -> io::Result<std::process::Output> {
+        let status = fake_exit_status(0);
+        Ok(std::process::Output {
+            status,
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+        })
+    }
+}
+
+#[test]
+fn execute_open_app_emits_permission_denied_envelope_when_spawn_fails() {
+    let request = OpenAppRequest {
+        app_name: "NonExistent.App".to_string(),
+        wait_ms: 0,
+    };
+
+    // 注入 mock: spawn 直接返 Err(NotFound)
+    let result = execute_open_app(&request, &MockOpenAppPermissionDenied)
+        .expect("executor itself should not error; envelope encodes the failure");
+
+    // exit_code != 0 表示上层要按失败处理 (64 与现有 parse error 同 code)
+    assert_ne!(result.exit_code, 0);
+
+    // payload 必须含 permission_denied envelope 关键字段
+    let payload: serde_json::Value = serde_json::from_str(
+        result
+            .response_value_json
+            .as_deref()
+            .expect("payload should be present"),
+    )
+    .expect("payload should be valid JSON");
+
+    assert_eq!(payload.get("ok"), Some(&serde_json::json!(false)));
+    assert_eq!(
+        payload.get("error_code"),
+        Some(&serde_json::json!("permission_denied"))
+    );
+    assert!(
+        payload.get("error_message").is_some(),
+        "permission_denied envelope must include error_message"
+    );
+
+    // Phase F-1/F-2 contract: retry.strategy="never" + retry.hint 必填
+    let retry = payload
+        .get("retry")
+        .expect("permission_denied envelope must include retry");
+    assert_eq!(
+        retry.get("strategy"),
+        Some(&serde_json::json!("never")),
+        "permission_denied retry.strategy must be 'never'"
+    );
+    assert!(
+        retry.get("hint").is_some(),
+        "permission_denied retry.hint must be present"
+    );
+}
+
+#[test]
+fn execute_open_app_emits_app_not_found_envelope_when_open_exits_nonzero() {
+    let request = OpenAppRequest {
+        app_name: "FakeApp".to_string(),
+        wait_ms: 0,
+    };
+
+    // 注入 mock: open 退出码 1 + stderr (app not found)
+    let result = execute_open_app(&request, &MockOpenAppAppNotFound)
+        .expect("executor itself should not error");
+
+    assert_ne!(result.exit_code, 0);
+
+    let payload: serde_json::Value = serde_json::from_str(
+        result
+            .response_value_json
+            .as_deref()
+            .expect("payload should be present"),
+    )
+    .expect("payload should be valid JSON");
+
+    // 注意: app_not_found 区别于 permission_denied,
+    // 不走 permission_denied_envelope_json (无 retry 字段, evidence 必填)
+    assert_eq!(payload.get("ok"), Some(&serde_json::json!(false)));
+    assert_eq!(
+        payload.get("error_code"),
+        Some(&serde_json::json!("app_not_found"))
+    );
+
+    let evidence = payload
+        .get("evidence")
+        .expect("app_not_found envelope must include evidence");
+    assert_eq!(
+        evidence.get("exit_code"),
+        Some(&serde_json::json!(1)),
+        "evidence.exit_code must mirror open process status"
+    );
+    assert_eq!(
+        evidence.get("app_name"),
+        Some(&serde_json::json!("FakeApp"))
+    );
+
+    // app_not_found 没有 retry 字段 (设计区别于 permission_denied)
+    assert!(
+        payload.get("retry").is_none(),
+        "app_not_found envelope must not include retry (区别于 permission_denied)"
+    );
+}
+
+#[test]
+fn execute_open_app_emits_ok_envelope_when_open_succeeds() {
+    let request = OpenAppRequest {
+        app_name: "TextEdit".to_string(),
+        wait_ms: 0,
+    };
+
+    // happy path: open 退出码 0
+    let result = execute_open_app(&request, &MockOpenAppSuccess)
+        .expect("executor itself should not error on success");
+
+    // 成功路径 exit_code == 0
+    assert_eq!(result.exit_code, 0);
+
+    let payload: serde_json::Value = serde_json::from_str(
+        result
+            .response_value_json
+            .as_deref()
+            .expect("payload should be present"),
+    )
+    .expect("payload should be valid JSON");
+
+    assert_eq!(payload.get("ok"), Some(&serde_json::json!(true)));
+    assert_eq!(
+        payload.get("dispatched_to"),
+        Some(&serde_json::json!("@open-app"))
+    );
+    assert_eq!(
+        payload.get("app_name"),
+        Some(&serde_json::json!("TextEdit"))
+    );
+    assert_eq!(payload.get("wait_ms"), Some(&serde_json::json!(0)));
+
+    // happy path 不应包含 error_code / retry / evidence
+    assert!(payload.get("error_code").is_none());
+    assert!(payload.get("retry").is_none());
+    assert!(payload.get("evidence").is_none());
+}

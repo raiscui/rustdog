@@ -705,15 +705,28 @@ Phase F-3 收口, 详见 commit dda4cc2 + WORKLOG `[2026-07-17 15:30:00]` entry.
 实操关键: ticket 03 bug 实际有**两个 instance** (queryable + session bridge path),
 必须两处都改. 第一版修完一处 wait 仍跑满 10s, 第二处 trace 后才发现.
 
-### LP-ticket-15-deferred-5: PermissionDenied live trigger (Phase F-3.5 候选)
-Phase F-3 没实现 PermissionDenied live trigger, 因为 daemon PATH 隔离
-(client 改 PATH 不影响 daemon 进程) + 需要 refactor execute_open_app 暴露
-injectable open_fn (cfg(test) mock Command path).
+### LP-ticket-15-deferred-5-RESOLVED: PermissionDenied live trigger (Phase F-3.5 收口)
+Phase F-3.5 收口, 详见 commit + WORKLOG `[2026-07-17 17:30:00]` entry.
 
-后续方案:
-- 抽 `run_open_app_command(app_name) -> io::Result<()>` helper 走 env::var("PATH") 控制
-- 单测直接用 mock (cfg(test) 注入测试), live trigger 留 Linux/Windows CI
-- Phase F-3.5 单独 ticket 跟进
+方案: refactor execute_open_app 暴露 `OpenAppCommand` trait (cfg(test) 注入 mock),
+不再走 daemon PATH 隔离实验 (在 macOS 上根本触达不到 spawn 失败).
+
+实操:
+- src/control_actions.rs:350-447: `OpenAppCommand` trait + `SystemOpenAppCommand` +
+  `execute_open_app(&req, &dyn OpenAppCommand)` + caller 自动传 `&SystemOpenAppCommand`
+- src/control_actions/tests.rs:567-753: 3 mock + 3 unit test (PermissionDenied /
+  app_not_found / ok) + `fake_exit_status(code)` helper 处理 Unix wait status word
+- scripts/smoke_computer_act_error_envelope.sh:137-159: test 2 升级为
+  dual-coverage (envelope shape + execute_open_app mock 注入)
+
+验收:
+- cargo test: **601 passed, 0 failed, 1 ignored** (+3 from baseline 598)
+- smoke_computer_act_error_envelope test 2b (execute_open_app mock): 3 passed
+- smoke_open_app / smoke_computer_act_min / smoke_computer_act_verify /
+  smoke_computer_act_trace / smoke_wait / smoke_computer_act_observe /
+  smoke_flow_computer_act 7 个 scripts 验证 production path 不退化
+- PermissionDenied live trigger 通过 cfg(test) mock 实现, 不再依赖沙盒 / OS 限制
+
 
 ### LP-ticket-15-deferred-6: ObservationExpired / TargetNotFound / VerifyFailed / Infrastructure
 剩 4 个 variant 完全没触发路径:

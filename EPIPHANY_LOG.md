@@ -761,3 +761,83 @@ verify tier (best_effort / always) 真实化的"最后一公里"不是"跑 diff"
 - 看 `src/control_computer_act/error_envelope.rs:228-265` (helper + 2 tests)
 - 复现验证: 跑 `@computer-act#N:{...,action:"wait",verify:"best_effort",args:{duration_ms:0}}` → 返 VerifyFailed
 - 边界: `verify:"none"` 不触发 VerifyFailed (compute_verification_passed 对 None 返 false 但 matches! 排除)
+
+## [2026-07-17 17:30:00] [Session ID: omx-1783957580965-m4bn8e] 主题: Phase F-3.5 收口 + Unix ExitStatus::from_raw wait status word 编码坑 + pre-existing @cancel#seq self-target bug
+
+### 发现来源
+- Phase F-3.5 收口, 在 `src/control_actions/tests.rs:567-753` 加 3 mock + 3 unit test
+- 第一版 `from_raw(1)` 让 `.code()` 返 None 而非 Some(1), test fail.
+  旁路验证: `rustc /tmp/exit_status_test.rs` 直接跑 `from_raw(1).code()` 输出
+  `code: None, success: false`. 改为 `from_raw(256)` (即 `1 << 8`) 才输出 `code: Some(1)`.
+- pre-existing bug: smoke_cancel_seq test 5 (self-target) 在 main (9e2b329)
+  跑也 fail, 不是本会话引入. 已用 `git stash` 验证 main 上同样 fail.
+
+### 核心问题
+**Unix `ExitStatus::from_raw(c: i32)` 接收的是 wait4() status word, 不是裸 exit code.**
+- wait status 编码: `(exit_code << 8) | signal_byte` (高 8 位是 exit code,
+  低 7 位是 signal number, 第 7 位是 `WIFEXITED` flag = 0 表示正常退出)
+- `from_raw(0)` ->  exit code 0, code=Some(0), success=true
+- `from_raw(256)` -> exit code 1, code=Some(1), success=false  ← 正确写法
+- `from_raw(1)` ->   code=None! 因为 wait status = 1 被解释成 signal=1 (SIGHUP)
+- `from_raw(127 << 8)` -> exit code 127, code=Some(127), success=false
+
+第一版直接 `from_raw(1)` 看似合理 (我们想要 exit code 1), 但 Unix 语义上
+这是把 wait status 当成 "进程被 signal 1 (SIGHUP) kill 掉", `.code()`
+按 wait status 规范应该返 `None` (只有正常 exit 才填 code)。
+
+这个坑值得沉淀:
+1. mock ExitStatus 时永远走 `(exit_code << 8)` 编码
+2. 抽 helper 函数 `fake_exit_status(code: u8)` 集中逻辑, 别让测试代码
+   各处自己传裸 exit code
+3. 单元测 vs e2e 区别: mock 只能跟 Unix 真实语义对齐, 不能假设
+
+### pre-existing bug (NOT introduced by Phase F-3.5)
+**`@cancel#seq#N:{target_seq:N}` self-target 应该返 error_code=unknown_target_seq**
+当前实现:
+```
+[output] {"dispatched_to":"@cancel#seq","ok":true,"signaled":true,"target_seq":205}
+```
+smoke_cancel_seq test 5 期望:
+```
+"error_code" : "unknown_target_seq"
+```
+
+根因: `execute_cancel` 没检查 target_seq 是否就是 cancel command 自己的 seq。
+- 验证 (2026-07-17 17:25:00): main (commit 9e2b329) 不带任何本会话改动 跑 smoke_cancel_seq,
+  test 5 同样 fail. 这是 Phase F-3 ticket 03 commit dda4cc2 留下的 follow-up,
+  不在 Phase F-3.5 范围.
+
+修复方向 (后续 ticket):
+- src/control_computer_act/mod.rs:execute_cancel 加 self_target_check
+- 返 existing error_code=unknown_target_seq envelope
+- unit test 覆盖: cancel#N:target_seq=N → envelope unknown_target_seq
+
+不是高优先级 (cancel self-target 实际场景少, 没有用户输入破坏性效果),
+但 smoke 期望跟现实行为不一致, 应该修复避免下次 regression mislead.
+
+### 为什么重要
+- mock ExitStatus 不是 Rust 独有, 是 Posix wait status 语义。所有需要 mock
+  process exit 状态的测试 (Rust/Python/Node.js binding 都有类似 API) 都会踩。
+- pre-existing bug 留 EPIPHANY 是因为: 它不在当前 ticket 范围, 但会被未来的
+  CMake-linter / CI gate / reviewer 抓, 抓时要能立刻定位. 不能默默僵在那里.
+
+### 未来风险
+- Phase F-4 还可能需要 mock 其它 process status signal (e.g. SIGTERM=15),
+  同样要走 (signal_byte) 编码 + WIFEXITED flag 处理.
+- 如果未来 Rust 改 `ExitStatus::from_raw` 语义 (e.g. 自动检测 wait status
+  VS exit code), mock 代码需要重写. 当时抽了 `fake_exit_status()` helper
+  集中, 重写只动一处.
+
+### 当前结论
+- 已验证 (2026-07-17 17:25:00): `fake_exit_status(1)` 走 `from_raw(1 << 8)`,
+  三个 mock 测试 3/3 passed.
+- 已验证 (2026-07-17 17:25:00): `cargo test --bin rdog` 601 passed,
+  0 failed, 1 ignored (新增 3 个 Phase F-3.5 test, 从 598 -> 601).
+- pre-existing bug @cancel#seq self-target 留 follow-up ticket,
+  优先级 low (实际场景少).
+
+### 后续讨论入口
+- 想弄清 daemon PATH 隔离机制: 看 src/daemon/main.rs daemon 启动是否 fork+exec,
+  还是直接用 client 进程的 env. 这决定哪些 env-sensitive 测试需要 mock 注入.
+- 想 fix self-target bug: 看 src/control_computer_act/mod.rs:execute_cancel,
+  target_seq == current_seq 时返 envelope 即可.

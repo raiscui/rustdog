@@ -784,7 +784,7 @@ fn dispatch_underlying(
         ControlCommand::Paste(req) => execute_paste(&req),
         ControlCommand::TypeText(req) => execute_type_text(&req),
         ControlCommand::Wait(req) => execute_wait(&req, cancel),
-        ControlCommand::OpenApp(req) => execute_open_app(&req),
+        ControlCommand::OpenApp(req) => execute_open_app(&req, &crate::control_actions::SystemOpenAppCommand),
         ControlCommand::Script(text) => {
             // `open_url` 路由生成 `@cmd "open <url>"` 形式, 走 shell。
             execute_script("/bin/sh", &text)

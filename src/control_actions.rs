@@ -223,7 +223,7 @@ impl ControlActionExecutor for SystemControlActionExecutor {
             ControlCommand::SaveFile(frame) => {
                 execute_save_file(frame, self.savefile_base_dir.as_deref())
             }
-            ControlCommand::OpenApp(request) => execute_open_app(request),
+            ControlCommand::OpenApp(request) => execute_open_app(request, &SystemOpenAppCommand),
             ControlCommand::Wait(request) => execute_wait(request, cancel),
             // Composite 不应进入默认 executor 分支 (由 @computer-act dispatch_underlying 处理)
             ControlCommand::Composite(_) => Err(io::Error::new(
@@ -347,10 +347,35 @@ pub(crate) fn build_cancelled_wait_response_json(request: &WaitRequest) -> Strin
 ///
 /// macOS 走 `open -a <app_name>`,等待 `wait_ms` 让 app 完成初次绘制。
 /// 其他平台返回 `platform_unsupported` 错误码 (LP1 跟进跨平台)。
-pub(crate) fn execute_open_app(request: &OpenAppRequest) -> io::Result<ActionExecutionResult> {
-    let payload = open_app_payload_for_current_platform(request);
+/// Phase F-3.5: `OpenAppCommand` trait 让 execute_open_app 可注入不同
+/// `open` 命令实现 (production 走 SystemOpenAppCommand, 单测可注入 mock)。
+///
+/// 这解决 daemon PATH 隔离问题: smoke 改 client shell PATH 不影响 daemon 进程的
+/// `Command::new("open")` 行为. 通过 trait 注入, 单测可模拟 spawn 失败场景
+/// (`Err(NotFound)` 等), 验证 PermissionDenied envelope 真实路径.
+pub(crate) trait OpenAppCommand: Send + Sync {
+    /// 调 `open -a <app_name>` (或 mock), 返 `Output` 或 IO 错误.
+    /// `Err` 走 permission_denied envelope, `Ok` 但 status != success 走 app_not_found.
+    fn run(&self, app_name: &str) -> io::Result<std::process::Output>;
+}
 
-    // platform_unsupported / permission_denied 用非零 exit_code 标记;
+/// Production `OpenAppCommand` 实现: 调真实 `Command::new("open")`.
+pub(crate) struct SystemOpenAppCommand;
+
+impl OpenAppCommand for SystemOpenAppCommand {
+    fn run(&self, app_name: &str) -> io::Result<std::process::Output> {
+        use std::process::Command;
+        Command::new("open").args(["-a", app_name]).output()
+    }
+}
+
+pub(crate) fn execute_open_app(
+    request: &OpenAppRequest,
+    open_cmd: &dyn OpenAppCommand,
+) -> io::Result<ActionExecutionResult> {
+    let payload = open_app_payload_for_current_platform(request, open_cmd);
+
+    // platform_unsupported / permission_denied / app_not_found 用非零 exit_code 标记;
     // 成功路径用 0。
     let exit_code = if payload.get("ok").and_then(|v| v.as_bool()).unwrap_or(false) {
         0
@@ -370,10 +395,13 @@ pub(crate) fn execute_open_app(request: &OpenAppRequest) -> io::Result<ActionExe
 ///
 /// 拆出来便于单测 (未来 ticket 02 的 smoke 已经在 daemon 跑过,这里纯函数
 /// 保证 macOS / 非 macOS 两个分支都被覆盖)。
-fn open_app_payload_for_current_platform(request: &OpenAppRequest) -> serde_json::Value {
+fn open_app_payload_for_current_platform(
+    request: &OpenAppRequest,
+    open_cmd: &dyn OpenAppCommand,
+) -> serde_json::Value {
     #[cfg(target_os = "macos")]
     {
-        return run_open_app_on_macos(request);
+        return run_open_app_on_macos(request, open_cmd);
     }
 
     #[cfg(not(target_os = "macos"))]
@@ -390,11 +418,14 @@ fn open_app_payload_for_current_platform(request: &OpenAppRequest) -> serde_json
 }
 
 #[cfg(target_os = "macos")]
-fn run_open_app_on_macos(request: &OpenAppRequest) -> serde_json::Value {
-    use std::process::Command;
-
+fn run_open_app_on_macos(
+    request: &OpenAppRequest,
+    open_cmd: &dyn OpenAppCommand,
+) -> serde_json::Value {
     // `open -a <app_name>` 启动指定 app。wait_ms==0 跳过 sleep。
-    let output = Command::new("open").args(["-a", &request.app_name]).output();
+    // Phase F-3.5: 通过 trait 注入的 open_cmd 调, 让单测可注入 mock
+    // 模拟 spawn 失败 (PATH 缺失等 PermissionDenied 场景)。
+    let output = open_cmd.run(&request.app_name);
 
     match output {
         Ok(out) if out.status.success() => {

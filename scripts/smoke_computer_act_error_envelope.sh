@@ -134,18 +134,32 @@ if echo "$out1" | grep -qE '"dispatched_to"[[:space:]]*:[[:space:]]*"@wait"'; th
 fi
 log "test 1 OK (cancelled envelope live trigger, wait 真的被 cancel 命中)"
 
-# --- Test 2: PermissionDenied envelope shape (Phase F-1 helper) ---
-log "test 2: permission_denied_envelope_json unit test (Phase F-1 helper)"
+# --- Test 2: PermissionDenied envelope shape (Phase F-1 helper + Phase F-3.5 live trigger via mock) ---
+log "test 2: permission_denied envelope shape + execute_open_app live trigger via injectable OpenAppCommand"
 # 备注: live trigger PermissionDenied 需要让 daemon 进程的 `open` Command 失败,
 # 但 PATH 是 daemon 启动时继承的 env, smoke 改 client shell 的 PATH 不会影响 daemon。
-# 真实 PermissionDenied live trigger 需要 cfg(test) mock Command 或 refactor execute_open_app
-# 暴露 injectable open_fn, 这是 Phase F-3 (Infrastructure + permission gate) 范围。
-# Phase F-1 验证 envelope shape 即可。
-unit_out2="$(cd "$repo_root" && RUSTFLAGS="-Awarnings" cargo test --bin rdog permission_denied_envelope_json_matches_e2_shape 2>&1 | tail -3)"
-echo "  cargo test: $unit_out2"
-echo "$unit_out2" | grep -q "test result: ok" || fail "test 2: permission_denied_envelope_json_matches_e2_shape 单元测试失败"
-echo "$unit_out2" | grep -q "1 passed" || fail "test 2: permission_denied_envelope_json_matches_e2_shape 应该 1 passed"
-log "test 2 OK (permission_denied envelope shape ADR-0004 E2 compliant)"
+# Phase F-3.5 通过 refactor execute_open_app 暴露 injectable `OpenAppCommand` trait,
+# cfg(test) 注入 MockOpenAppPermissionDenied / MockOpenAppAppNotFound / MockOpenAppSuccess
+# 三种 mock, 直接验证 dispatch + envelope 协同 (不只是 envelope shape).
+# 这解决了 daemon PATH 隔离 + macOS `open` 命令通常在 /usr/bin/open 不受 PATH 缺失影响
+# 两个根因, 不依赖沙盒 chmod / OS 限制等不稳定 live trigger.
+
+# 2a) Phase F-1 envelope shape 单元测: permission_denied_envelope_json_matches_e2_shape
+unit_out2a="$(cd "$repo_root" && RUSTFLAGS="-Awarnings" cargo test --bin rdog permission_denied_envelope_json_matches_e2_shape 2>&1 | tail -3)"
+echo "  cargo test 2a (envelope shape): $unit_out2a"
+echo "$unit_out2a" | grep -q "test result: ok" || fail "test 2a: permission_denied_envelope_json_matches_e2_shape 单元测试失败"
+echo "$unit_out2a" | grep -q "1 passed" || fail "test 2a: permission_denied_envelope_json_matches_e2_shape 应该 1 passed"
+
+# 2b) Phase F-3.5 execute_open_app live trigger (mock 注入):
+#     - execute_open_app_emits_permission_denied_envelope_when_spawn_fails (Err path)
+#     - execute_open_app_emits_app_not_found_envelope_when_open_exits_nonzero (Exit 1 path)
+#     - execute_open_app_emits_ok_envelope_when_open_succeeds (Exit 0 happy path)
+unit_out2b="$(cd "$repo_root" && RUSTFLAGS="-Awarnings" cargo test --bin rdog control_actions::tests::execute_open_app 2>&1 | tail -5)"
+echo "  cargo test 2b (execute_open_app mock): $unit_out2b"
+echo "$unit_out2b" | grep -q "test result: ok" || fail "test 2b: execute_open_app mock 单元测试失败 (output: $unit_out2b)"
+echo "$unit_out2b" | grep -q "3 passed" || fail "test 2b: execute_open_app 应该 3 passed (output: $unit_out2b)"
+
+log "test 2 OK (permission_denied envelope shape ADR-0004 E2 compliant + execute_open_app mock live trigger 3/3)"
 
 # --- Test 3: PlatformUnsupported envelope shape ---
 # macOS 不支持 live 触发 (cfg(not(target_os = "macos")) 不会编译进 macOS binary),

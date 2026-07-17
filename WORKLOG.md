@@ -741,3 +741,84 @@
   execute_wait 抛错), 用 dispatch 错误码 (cancelled / invalid_args 等);
   只有 dispatch 成功但 verify 失败才用 VerifyFailed. 这保证错误码的语义
   不会被 verify 状态覆盖.
+
+## [2026-07-17 17:30:00] [Session ID: omx-1783957580965-m4bn8e] 任务: Phase F-3.5 PermissionDenied live trigger (injectable OpenAppCommand trait)
+
+### 任务内容
+- 用户选 "1. Phase F-3.5", 收口 LP-ticket-15-deferred-5: PermissionDenied live trigger
+- refactor `execute_open_app` 暴露 injectable `OpenAppCommand` trait
+- cfg(test) 注入 3 个 mock (PermissionDenied / AppNotFound / Success) 验证 envelope 真实路径
+- 升级 `smoke_computer_act_error_envelope.sh` test 2 到 dual-coverage (envelope shape + execute_open_app)
+
+### 完成过程
+1. **Step 1 - trait refactor (`src/control_actions.rs:350-447`)**
+   - 抽 `pub(crate) trait OpenAppCommand: Send + Sync { fn run(&self, app_name: &str) -> io::Result<std::process::Output>; }`
+   - 加 `SystemOpenAppCommand` (production: 调真实 `Command::new("open")`)
+   - `execute_open_app` / `open_app_payload_for_current_platform` / `run_open_app_on_macos` 加 `open_cmd: &dyn OpenAppCommand` 参数
+   - production caller (`src/control_computer_act/mod.rs:787`) 显式传 `&SystemOpenAppCommand`
+   - `mod error_envelope;` 改 `pub(crate) mod error_envelope;` (Phase F-1 已修, 这次不退)
+
+2. **Step 2 - cfg(test) mock + tests (`src/control_actions/tests.rs:567-753`)**
+   - 3 个 mock struct 实现 `OpenAppCommand`:
+     - `MockOpenAppPermissionDenied`: 返 `Err(NotFound)`, 模拟 spawn 失败
+     - `MockOpenAppAppNotFound`: 返 Ok + `ExitStatus` exit code 1 (构造 wait status word 256)
+     - `MockOpenAppSuccess`: 返 Ok + `ExitStatus` exit code 0
+   - `fake_exit_status(code: u8)` helper: Unix `ExitStatus::from_raw` 接收 wait status word `(code << 8)`, 不是裸 exit code. 直接 `from_raw(1)` 会让 `.code()` 返 `None` 而非 `Some(1)`. 这个 bug 是第一版测试失败暴露的根因.
+   - 3 个 unit test:
+     - `execute_open_app_emits_permission_denied_envelope_when_spawn_fails`: 验 `error_code=permission_denied` + `retry.strategy=never` + `error_message`
+     - `execute_open_app_emits_app_not_found_envelope_when_open_exits_nonzero`: 验 `error_code=app_not_found` (区分于 permission_denied) + `evidence.exit_code=1` + `evidence.app_name` + **没有 retry 字段**
+     - `execute_open_app_emits_ok_envelope_when_open_succeeds`: 验 happy path `ok=true` + `dispatched_to=@open-app` + **没有 error_code / retry / evidence**
+   - 全部 3 passed
+
+3. **Step 3 - smoke test 升级 (`scripts/smoke_computer_act_error_envelope.sh:137-159`)**
+   - test 2 拆为 2a (Phase F-1 envelope shape) + 2b (Phase F-3.5 execute_open_app 完整路径)
+   - 2a 跑 `permission_denied_envelope_json_matches_e2_shape` (1 passed)
+   - 2b 跑 `control_actions::tests::execute_open_app` (3 passed: spawn_fail / app_not_found / success)
+   - 通过: dual-coverage envelope shape + dispatch + envelope 协同
+
+4. **Step 4 - 验证**
+   - `cargo test --bin rdog`: **601 passed, 0 failed, 1 ignored** (+3 from baseline 598)
+   - 8 个 smoke scripts 验证:
+     - smoke_computer_act_error_envelope.sh: 3/3 (含新 test 2b)
+     - smoke_computer_act_min.sh: 2/2 (open_app Calculator ok)
+     - smoke_open_app.sh: 3/3 (Calculator + NonExistentApp + missing payload)
+     - smoke_computer_act_verify.sh: 5/5 (VerifyFailed + best_effort + full)
+     - smoke_wait.sh: 5/5
+     - smoke_computer_act_trace.sh: 3/3 (含 VerifyFailed trace_savefile)
+     - smoke_flow_computer_act.sh: 6/6 (open_app + click end-to-end flow)
+     - smoke_computer_act_observe.sh: 4/4
+     - smoke_cancel_seq.sh: **4/5** (test 5 self-target 是 pre-existing bug, 非本会话引入)
+   - 总计: 33 段测试, 32 通过, 1 pre-existing failure
+
+### 总结感悟
+- **根因 - 注入 trait 而非 daemon PATH 隔离实验**: LP-ticket-15-deferred-5 之前
+  卡了两轮 (daemon PATH 是启动时继承的, smoke 改 client shell PATH 不影响 daemon + 
+  macOS `open` 命令在 /usr/bin/open 不受 PATH 缺失影响), 真正的稳定路径是
+  refactor execute_open_app 暴露 trait, 单测注入 mock. 这是 "静态阅读" VS
+  "动态证据" 教训的经典案例: 静态读源码看不到 daemon 子进程继承环境的细节,
+  跑 smoke 才暴露 PATH 不影响 daemon 进程.
+- **踩坑 - Unix ExitStatus::from_raw wait status word**: 第一版直接 `from_raw(1)`
+  让 `.code()` 返 None, 测试发现 `evidence.exit_code=Null` 而非 `Some(1)`.
+  根因是 Unix `ExitStatus::from_raw` 接的是 wait4() status word, 编码是
+  `(exit_code << 8) | signal`. 抽 `fake_exit_status(code: u8)` helper 集中
+  编码逻辑, 避免未来 moke 再踩.
+- **设计 - trait object (`&dyn OpenAppCommand`) 而不是 generic**: 保持
+  `execute_open_app` 签名向后兼容 (production caller 自动传 &SystemOpenAppCommand,
+  tester 传 mock). 选 trait object 不选 generic 是因为 production 路径
+  Executor enum dispatch 不需要 16 个 monomorphization.
+- **错误码区分 - permission_denied VS app_not_found**: 前者是 spawn 失败
+  (PATH 缺失 / 权限), 后者是 open 退出非零 (app 不存在). 不同 error_code,
+  app_not_found 走 evidence 路径 (无 retry 字段), permission_denied 走
+  retry=never 路径. 测试显式断言这个区分.
+- **pre-existing bug - @cancel#seq self-target**: smoke_cancel_seq test 5
+  在 main 上就 fail, daemon 仍返 ok:true 没识别 self-target. 不在 Phase F-3.5
+  范围, EPIPHANY_LOG 已记, 留给 follow-up ticket.
+
+### 后续
+- LP-ticket-15-deferred-5 标 RESOLVED, 移到 Phase F-3.5-WORKLOG 引用
+- Phase F-4 = LP-ticket-15-deferred-6/7/8 (剩 4 个 variant live trigger):
+  ObservationExpired / TargetNotFound / VerifyFailed / Infrastructure
+  - 其中 VerifyFailed 已通过 Phase F-2 真实触发 (dispatch+verify 协同)
+  - ObservationExpired / TargetNotFound 依赖 Phase I 真实 observe 集成
+  - Infrastructure 依赖 client 断开测试 / sandbox 测试
+- fast-infer 跨项目 task_plan 同步追加 Phase F-3.5 收口索引
