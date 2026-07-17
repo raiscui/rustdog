@@ -133,3 +133,51 @@ handle_daemon_control_query (zenoh_control.rs:240)
 
 ### 状态
 **Phase F-3 计划已建, 准备从 Step 1 开始。**
+
+## [2026-07-17 16:00:00] [Session ID: omx-1783957580965-m4bn8e] Phase F-2: VerifyFailed envelope 真实触发 (verify logic 真实化)
+
+### 触发
+- 用户选 "1: Phase F-2" (LP-ticket-15-deferred-2: VerifyFailed envelope 真实触发)
+
+### 当前状态 (LP-ticket-15-deferred-2 真实根因)
+- `run_best_effort_verify` / `run_always_verify` 已经真跑 AX diff (前后 snapshot + compute_diff)
+- `compute_verification_passed` 根据 diff 数量判断 verify 是否通过
+- **`verify` 失败时 envelope 仍 `ok:true`** — 关键 bug: dispatch ok + verify 失败,
+  client 看到 ok:true 以为动作成功, 但 GUI 实际没变 (动作点错地方了)
+
+### 实施范围 (Phase F-2)
+
+**Step 1: 在 mod.rs:execute_computer_act 末尾, dispatch ok 之后 + verify 完成后, 加 verify 失败分支**
+- if `verify_policy` 是 `BestEffort` 或 `Always`
+- if `verification_passed == false`
+- if dispatch ok 是 true (dispatch 错误优先)
+- 改 payload: `ok: false`, 加 `error_code: "verify_failed"`, `error_message: "..."`,
+  `retry: {strategy: "manual_only", hint: "..."}`, `evidence: {verification: ..., ax_diff: ...}`
+- exit_code 改为 64 (跟 parse error / platform_unsupported 一致)
+- 用 `error_envelope(ComputerActErrorCode::VerifyFailed, msg, Some(evidence))` helper
+
+**Step 2: 单测 envelope shape + dispatch+verify_failed 决策**
+- `verify_failed_envelope_json_matches_e2_shape` (跟 Phase F-1 风格一致)
+- `dispatch_ok_with_failed_verify_emits_verify_failed_envelope` (集成测, 模拟 dispatch 成功但 verify 失败)
+- `dispatch_failed_with_passed_verify_keeps_dispatch_error_code` (dispatch 错误优先)
+
+**Step 3: 跑 7 smoke + 600+ tests 全过**
+
+**Step 4: smoke_computer_act_error_envelope.sh 新加 test 4: VerifyFailed live trigger**
+- 跑个不太可能改变 GUI 的 action (e.g. click off-screen @wait 然后 verify=best_effort, 等待 GUI 不变)
+- 或者: 跑 click 在 fixed position (0,0) + verify=best_effort → 可能 GUI 不变
+- 验 envelope shape: ok:false + error_code:verify_failed + retry.strategy:manual_only
+
+### 实施决策 (待办)
+1. **VerifyFailed 优先级**: dispatch 错误 > verify 错误. 如果 dispatch 失败, 用
+   dispatch 错误码; 只有 dispatch 成功但 verify 失败才用 VerifyFailed
+2. **verify=none 不触发 VerifyFailed**: VerifyPolicy::None 永远不验 verify,
+   所以 verify_failed 不应该出现 (跟现有 compute_verification_passed 行为一致)
+3. **error_envelope helper 复用**: 直接调 `error_envelope(ComputerActErrorCode::VerifyFailed, msg, Some(evidence))`,
+   envelope shape 自动对齐 ADR-0004 E2 (error_code + retry.strategy + retry.hint + evidence)
+4. **live trigger 难点**: 跑真 GUI 动作很难保证 GUI 不变, 可能用 `click off-screen`
+   或者 `wait long` 之类; smoke live trigger 如果不稳, 退到 unit-test driven
+   + live trigger 双重覆盖 (Phase F-1 模式)
+
+### 状态
+**Phase F-2 计划已建, 准备从 Step 1 开始。**

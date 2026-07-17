@@ -153,23 +153,29 @@ if echo "$out" | grep -q '"verification"'; then
 fi
 log "test 2 OK"
 
-# --- Test 3: verify:"best_effort" → AX diff + density.verify_ms ---
-log "test 3: verify=\"best_effort\" → AX diff"
+# --- Test 3: verify:"best_effort" + wait (GUI 不变) -> VerifyFailed envelope (Phase F-2) ---
+log "test 3: verify=\"best_effort\" + wait -> VerifyFailed (Phase F-2 行为变化)"
+# Phase F-2 关键行为: dispatch 成功 + verify 失败 (AX diff 全 0) -> 改 envelope 为 VerifyFailed
+# 而不是以前 best_effort verify 失败仍然 ok:true (错误地让 client 以为动作成功)
 out="$(run_computer_act t3 '@computer-act#23:{schema:"rdog.computer-act.v1",action:"wait",verify:"best_effort",args:{duration_ms:0}}')"
 echo "  response: $out"
-echo "$out" | grep -q '"ok"[[:space:]]*:[[:space:]]*true' || fail "test 3: ok != true (output: $out)"
-# ticket 13 acceptance: verification.method=ax_diff + verification.ax_diff.{...}
+# Phase F-2: ok:false + error_code:verify_failed + retry.strategy:manual_only
+echo "$out" | grep -qE '"ok"[[:space:]]*:[[:space:]]*false' || fail "test 3: ok != false (Phase F-2 期望, output: $out)"
+echo "$out" | grep -qE '"error_code"[[:space:]]*:[[:space:]]*"verify_failed"' || fail "test 3: error_code != verify_failed (output: $out)"
+echo "$out" | grep -qE '"strategy"[[:space:]]*:[[:space:]]*"manual_only"' || fail "test 3: retry.strategy != manual_only (output: $out)"
+echo "$out" | grep -qE '"hint"' || fail "test 3: retry.hint missing (output: $out)"
+# 保留 dispatch metadata
+echo "$out" | grep -qE '"action"[[:space:]]*:[[:space:]]*"wait"' || fail "test 3: action metadata lost (output: $out)"
+echo "$out" | grep -qE '"dispatched_to"[[:space:]]*:[[:space:]]*"@wait"' || fail "test 3: dispatched_to metadata lost (output: $out)"
+# verification 段内部: method=ax_diff + ax_diff 全 0
 echo "$out" | grep -qE '"method"[[:space:]]*:[[:space:]]*"ax_diff"' || fail "test 3: verification.method != ax_diff (output: $out)"
-echo "$out" | grep -qE '"ax_diff"' || fail "test 3: verification.ax_diff missing (output: $out)"
-echo "$out" | grep -qE '"windows_added"[[:space:]]*:[[:space:]]*[0-9]+' || fail "test 3: ax_diff.windows_added missing (output: $out)"
-echo "$out" | grep -qE '"elements_added"[[:space:]]*:[[:space:]]*[0-9]+' || fail "test 3: ax_diff.elements_added missing (output: $out)"
-echo "$out" | grep -qE '"changed"[[:space:]]*:[[:space:]]*[0-9]+' || fail "test 3: ax_diff.changed missing (output: $out)"
+echo "$out" | grep -qE '"windows_added"[[:space:]]*:[[:space:]]*0' || fail "test 3: ax_diff.windows_added != 0 (output: $out)"
+echo "$out" | grep -qE '"elements_added"[[:space:]]*:[[:space:]]*0' || fail "test 3: ax_diff.elements_added != 0 (output: $out)"
+# density.verification_passed = false
+echo "$out" | grep -qE '"verification_passed"[[:space:]]*:[[:space:]]*false' || fail "test 3: density.verification_passed != false (output: $out)"
 # density.verify_ms 字段
 echo "$out" | grep -qE '"verify_ms"[[:space:]]*:[[:space:]]*[0-9]+' || fail "test 3: density.verify_ms missing (output: $out)"
-verify_ms="$(printf '%s' "$out" | get_field t3 density.verify_ms)"
-log "  verify_ms=$verify_ms"
 log "test 3 OK"
-
 # --- Test 4: verify:"always" → ticket 14 完整 observe + ax_diff ---
 log "test 4: verify=\"always\" → full observe (ticket 14)"
 out="$(run_computer_act t4 '@computer-act#24:{schema:"rdog.computer-act.v1",action:"wait",verify:"always",args:{duration_ms:0}}')"

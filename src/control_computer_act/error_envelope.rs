@@ -233,6 +233,38 @@ pub(crate) fn permission_denied_envelope_json(app_name: &str, io_error: &str) ->
     .to_string()
 }
 
+/// Phase F-2: VerifyFailed wrapper helper (dispatch 成功 + verify 失败)。
+///
+/// `action` 是执行的 action 名 (e.g. "click"/"open_app"), `verify_method` 是
+/// "ax_diff" (best_effort) 或 "full_observe" (always), `ax_diff_summary` 是 diff 摘要
+/// (windows_added/removed/modified + elements_added/removed/modified)。
+pub(crate) fn verify_failed_envelope_json(
+    action: &str,
+    verify_method: &str,
+    ax_diff_summary: Option<&crate::control_computer_act::verify::AxDiffSummary>,
+) -> String {
+    let mut evidence = serde_json::Map::new();
+    evidence.insert("action".into(), Value::String(action.to_owned()));
+    evidence.insert("verify_method".into(), Value::String(verify_method.to_owned()));
+    if let Some(summary) = ax_diff_summary {
+        let ax_diff = json!({
+            "windows_added": summary.windows_added,
+            "windows_removed": summary.windows_removed,
+            "windows_modified": summary.windows_modified,
+            "elements_added": summary.elements_added,
+            "elements_removed": summary.elements_removed,
+            "elements_modified": summary.elements_modified,
+        });
+        evidence.insert("ax_diff".into(), ax_diff);
+    }
+    error_envelope(
+        ComputerActErrorCode::VerifyFailed,
+        format!("动作 {action} 执行成功但 GUI 未变化, AX diff 显示无新增/修改/删除"),
+        Some(Value::Object(evidence)),
+    )
+    .to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -355,6 +387,51 @@ mod tests {
         assert!(env["retry"]["hint"].is_string());
         assert_eq!(env["evidence"]["target_os"], "linux");
         assert_eq!(env["evidence"]["app_name"], "Calculator");
+    }
+
+    // ====== Phase F-2 wrapper helper tests (ticket F-2) ======
+
+    #[test]
+    fn verify_failed_envelope_json_matches_e2_shape() {
+        use crate::control_computer_act::verify::AxDiffSummary;
+        let summary = AxDiffSummary {
+            windows_added: 0,
+            windows_removed: 0,
+            windows_modified: 0,
+            elements_added: 0,
+            elements_removed: 0,
+            elements_modified: 0,
+            verify_ms: 50,
+            dispatch_ms: 100,
+            full_report: Value::Null,
+        };
+        let s = verify_failed_envelope_json("click", "ax_diff", Some(&summary));
+        let env: Value = serde_json::from_str(&s).expect("valid JSON");
+        assert_eq!(env["ok"], false);
+        assert_eq!(env["error_code"], "verify_failed");
+        assert_eq!(env["retry"]["strategy"], "manual_only");
+        assert!(env["retry"]["hint"].is_string());
+        assert_eq!(env["evidence"]["action"], "click");
+        assert_eq!(env["evidence"]["verify_method"], "ax_diff");
+        // 默认 evidence key verification = null (caller 可以替换为更详细的 diff)
+        assert_eq!(env["evidence"]["verification"], Value::Null);
+        // ax_diff 摘要应包含 6 个字段, 全 0 表示 GUI 没变
+        assert_eq!(env["evidence"]["ax_diff"]["windows_added"], 0);
+        assert_eq!(env["evidence"]["ax_diff"]["elements_modified"], 0);
+    }
+
+    #[test]
+    fn verify_failed_envelope_json_without_ax_diff_still_emits_action() {
+        // Phase F-2: 边缘场景 — 没传 ax_diff (e.g., 单元测 mock dispatch 但 ax_diff 还没跑)
+        // 也要能正常构造 envelope, action 字段保留
+        let s = verify_failed_envelope_json("open_app", "full_observe", None);
+        let env: Value = serde_json::from_str(&s).expect("valid JSON");
+        assert_eq!(env["ok"], false);
+        assert_eq!(env["error_code"], "verify_failed");
+        assert_eq!(env["evidence"]["action"], "open_app");
+        assert_eq!(env["evidence"]["verify_method"], "full_observe");
+        // ax_diff 字段缺省, evidence 也不应包含
+        assert!(env["evidence"].get("ax_diff").is_none());
     }
 
     #[test]
