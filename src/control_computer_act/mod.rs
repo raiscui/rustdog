@@ -63,7 +63,7 @@ pub(crate) use trace::{
 
 // ticket 15 error envelope E2 (ADR-0004 §Considered Options E2)
 #[path = "error_envelope.rs"]
-mod error_envelope;
+pub(crate) mod error_envelope;
 pub(crate) use error_envelope::{
     error_envelope, ComputerActErrorCode, RetryStrategy,
 };

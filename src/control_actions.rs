@@ -6,6 +6,12 @@ use crate::{
         perform_default_key_delivery, perform_default_type_text, window_activation_verified,
         AxFocusReport,
     },
+    // Phase F-1: 三个 error_envelope wrapper helper (Cancelled / PlatformUnsupported /
+    // PermissionDenied), 让手写 JSON payload 跟其它 error_code 走同一 envelope 形状。
+    control_computer_act::error_envelope::{
+        cancelled_envelope_json, permission_denied_envelope_json,
+        platform_unsupported_envelope_json,
+    },
     control_frames::{default_savefile_directory, SaveFileFrame},
     control_gui_bench::build_gui_bench_response_json,
     control_mouse::{
@@ -318,22 +324,12 @@ pub(crate) fn execute_cancel(
 
 /// `execute_wait` 被取消时返回的 response JSON (走 ADR-0004 E2 envelope)。
 ///
-/// 含 `evidence.cancelled_at_step = "sleep_cancellable"` 标明取消点,
-/// 后续 client 或 agent loop 可基于此判断是否重试。
+/// Phase F-1: 改走 `cancelled_envelope_json()` helper, 自动补 `retry.strategy="never"` /
+/// `retry.hint="..."`, 跟其它 error_code 形状一致。
+/// `evidence.cancelled_at_step = "sleep_cancellable"` 标明取消点, 后续 client 或
+/// agent loop 可基于此判断是否重试 (Cancelled retry=strategy=never, 不需要重试)。
 pub(crate) fn build_cancelled_wait_response_json(request: &WaitRequest) -> String {
-    serde_json::json!({
-        "ok": false,
-        "error_code": "cancelled",
-        "error_message": format!(
-            "@wait 被 @cancel#seq 取消 (requested_duration_ms={})",
-            request.duration_ms
-        ),
-        "evidence": {
-            "cancelled_at_step": "sleep_cancellable",
-            "requested_duration_ms": request.duration_ms,
-        }
-    })
-    .to_string()
+    cancelled_envelope_json(request.duration_ms)
 }
 
 /// `@open-app` 的 executor。
@@ -371,15 +367,14 @@ fn open_app_payload_for_current_platform(request: &OpenAppRequest) -> serde_json
 
     #[cfg(not(target_os = "macos"))]
     {
-        serde_json::json!({
-            "ok": false,
-            "error_code": "platform_unsupported",
-            "error_message": "@open-app 是 macOS-only 的本轮实现;Linux/Windows 见 LATER_PLANS LP1",
-            "evidence": {
-                "target_os": std::env::consts::OS,
-                "app_name": request.app_name,
-            }
-        })
+        // Phase F-1: 走 platform_unsupported_envelope_json() helper, 自动补 retry.strategy
+        // / retry.hint, 跟其它 error_code 形状一致。manual_only 策略告诉客户端这是
+        // 平台不支持, 不要尝试 retry, 需要人工换替代动作。
+        serde_json::from_str(&platform_unsupported_envelope_json(
+            std::env::consts::OS,
+            &request.app_name,
+        ))
+        .expect("envelope_json produces valid JSON")
     }
 }
 
@@ -418,15 +413,13 @@ fn run_open_app_on_macos(request: &OpenAppRequest) -> serde_json::Value {
         }
         Err(e) => {
             // 启动 `open` 命令本身失败 (PATH 缺失等)
-            serde_json::json!({
-                "ok": false,
-                "error_code": "permission_denied",
-                "error_message": format!("无法执行 `open` 命令: {e}"),
-                "evidence": {
-                    "app_name": request.app_name,
-                    "io_error": e.to_string(),
-                }
-            })
+            // Phase F-1: 走 permission_denied_envelope_json() helper, 自动补
+            // retry.strategy="never" / retry.hint="..." / evidence.missing_capability=null。
+            serde_json::from_str(&permission_denied_envelope_json(
+                &request.app_name,
+                &e.to_string(),
+            ))
+            .expect("envelope_json produces valid JSON")
         }
     }
 }

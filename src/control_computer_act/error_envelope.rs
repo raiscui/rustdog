@@ -177,6 +177,62 @@ pub(crate) fn error_envelope(
     env
 }
 
+/// Phase F-1: Cancelled wrapper helper (走 error_envelope + 序列化 String 喂给 response_value_json)。
+///
+/// `requested_duration_ms` 是 wait 原语的预期时长; envelope 标明取消点是 `sleep_cancellable`,
+/// 默认 evidence key `cancelled_at_step` 跟其它字段保持一致。
+pub(crate) fn cancelled_envelope_json(requested_duration_ms: u64) -> String {
+    error_envelope(
+        ComputerActErrorCode::Cancelled,
+        format!(
+            "@wait 被 @cancel#seq 取消 (requested_duration_ms={requested_duration_ms})"
+        ),
+        Some(json!({
+            "cancelled_at_step": "sleep_cancellable",
+            "requested_duration_ms": requested_duration_ms,
+        })),
+    )
+    .to_string()
+}
+
+/// Phase F-1: PlatformUnsupported wrapper helper (Linux/Windows 跑 macOS-only action 时)。
+///
+/// `target_os` 来自 std::env::consts::OS, `app_name` 来自 caller payload。
+///
+/// `#[allow(dead_code)]`: macOS 编译时 control_actions 的 cfg(not(target_os))
+/// 分支被排除, helper 没有 live caller; 但单测 platform_unsupported_envelope_json_matches_e2_shape
+/// 还在用, 不能删。
+#[allow(dead_code)]
+pub(crate) fn platform_unsupported_envelope_json(
+    target_os: &str,
+    app_name: &str,
+) -> String {
+    error_envelope(
+        ComputerActErrorCode::PlatformUnsupported,
+        format!("@open-app 是 macOS-only 的本轮实现;当前平台 {target_os} 不支持"),
+        Some(json!({
+            "target_os": target_os,
+            "app_name": app_name,
+        })),
+    )
+    .to_string()
+}
+
+/// Phase F-1: PermissionDenied wrapper helper (`open` 命令 PATH 缺失等 IO 错误)。
+///
+/// `app_name` 来自 caller payload, `io_error` 是 std::io::Error 的 Display。
+pub(crate) fn permission_denied_envelope_json(app_name: &str, io_error: &str) -> String {
+    error_envelope(
+        ComputerActErrorCode::PermissionDenied,
+        format!("无法执行 `open` 命令: {io_error}"),
+        Some(json!({
+            "app_name": app_name,
+            "io_error": io_error,
+        })),
+    )
+    .to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -271,5 +327,51 @@ mod tests {
         assert_eq!(env["error_code"], "verify_failed");
         assert_eq!(env["retry"]["strategy"], "manual_only");
         assert_eq!(env["evidence"]["verification"]["ax_diff"]["changed"], 0);
+    }
+
+    // ====== Phase F-1 wrapper helper tests (ticket F-1) ======
+
+    #[test]
+    fn cancelled_envelope_json_matches_e2_shape() {
+        // Phase F-1: @cancel#seq 命中 @wait 时 envelope shape
+        let s = cancelled_envelope_json(10000);
+        let env: Value = serde_json::from_str(&s).expect("valid JSON");
+        assert_eq!(env["ok"], false);
+        assert_eq!(env["error_code"], "cancelled");
+        assert_eq!(env["retry"]["strategy"], "never");
+        assert!(env["retry"]["hint"].is_string());
+        assert_eq!(env["evidence"]["cancelled_at_step"], "sleep_cancellable");
+        assert_eq!(env["evidence"]["requested_duration_ms"], 10000);
+    }
+
+    #[test]
+    fn platform_unsupported_envelope_json_matches_e2_shape() {
+        // Phase F-1: Linux/Windows 跑 @open-app 时 envelope shape
+        let s = platform_unsupported_envelope_json("linux", "Calculator");
+        let env: Value = serde_json::from_str(&s).expect("valid JSON");
+        assert_eq!(env["ok"], false);
+        assert_eq!(env["error_code"], "platform_unsupported");
+        assert_eq!(env["retry"]["strategy"], "manual_only");
+        assert!(env["retry"]["hint"].is_string());
+        assert_eq!(env["evidence"]["target_os"], "linux");
+        assert_eq!(env["evidence"]["app_name"], "Calculator");
+    }
+
+    #[test]
+    fn permission_denied_envelope_json_matches_e2_shape() {
+        // Phase F-1: `open` 命令 PATH 缺失等 IO 错误 envelope shape
+        let s = permission_denied_envelope_json("Calculator", "No such file or directory");
+        let env: Value = serde_json::from_str(&s).expect("valid JSON");
+        assert_eq!(env["ok"], false);
+        assert_eq!(env["error_code"], "permission_denied");
+        assert_eq!(env["retry"]["strategy"], "never");
+        assert!(env["retry"]["hint"].is_string());
+        // 默认 evidence key missing_capability = null (caller 没填具体能力)
+        assert_eq!(env["evidence"]["missing_capability"], Value::Null);
+        assert_eq!(env["evidence"]["app_name"], "Calculator");
+        assert!(
+            env["evidence"]["io_error"].as_str().unwrap().contains("No such file"),
+            "io_error 字段应保留具体错误描述"
+        );
     }
 }

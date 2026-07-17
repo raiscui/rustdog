@@ -977,3 +977,42 @@
 
 ### 状态
 **ticket 22 实施完成, 10/10 win, ADR-0001 high-density promise 验证通过。critical path 9/9 全部完成。准备 commit + push。**
+
+## [2026-07-17 14:00:00] [Session ID: omx-1783957580965-m4bn8e] Phase F-1: Cancelled / PlatformUnsupported / PermissionDenied envelope 收口
+
+### 触发
+- 用户选 "A: Phase F-1" (3 个 error_code 改 envelope helper 对齐 ADR-0004 E2)。
+
+### 当前状态 (LP-ticket-15-deferred-1)
+- error_envelope.rs 11 个 ComputerActErrorCode 全定义 as_str/retry/hint/evidence_key,
+  但只有 4 个真正在 dispatch 路径触发 (UnknownAction / InvalidArgs / InvalidVerify / Timeout)。
+- 3 个变种**已经手写 JSON payload 但没用 error_envelope() helper**:
+  1. `control_actions.rs:323 build_cancelled_wait_response_json` (@cancel 命中 @wait)
+  2. `control_actions.rs:376 open_app platform_unsupported 分支` (Linux/Windows 跑 open_app)
+  3. `control_actions.rs:423 open_app permission_denied 分支` (`open` 命令 PATH 缺失)
+- 4 个变种**完全没触发路径**: ObservationExpired / TargetNotFound (依赖 Phase I) /
+  VerifyFailed (verify 是 placeholder) / Infrastructure (zenoh/pipe 失败模拟)。
+
+### 实施范围 (Phase F-1)
+- [ ] Step 1: 改 `build_cancelled_wait_response_json` 走 error_envelope(Cancelled, ...)
+- [ ] Step 2: 改 `open_app_payload_for_current_platform` platform_unsupported 分支走 error_envelope(PlatformUnsupported, ...)
+- [ ] Step 3: 改 `run_open_app_on_macos` permission_denied 分支走 error_envelope(PermissionDenied, ...)
+- [ ] Step 4: 加单测验证 envelope shape (error_code + retry.strategy + retry.hint + evidence) 各 1 个
+- [ ] Step 5: 加 smoke (scripts/smoke_computer_act_error_envelope.sh) 真触发 3 段:
+        - Cancelled: @wait#1:{duration_ms:10000} + @cancel#1 后看 envelope
+        - PlatformUnsupported: cfg(test) helper (本机 macOS 不能跑 Linux 分支) — 改成 mock dispatch
+        - PermissionDenied: 把 PATH 清空后跑 open_app 看 envelope
+- [ ] Step 6: 跑回归 7/7 smoke + 600+ tests 全过, 0 warning
+- [ ] Step 7: commit + push + WORKLOG/LATER_PLANS 收口
+
+### 实施决策 (待办)
+1. **evidence 字段保留扩展**: 三个 caller 已有自定 evidence (cancelled_at_step / target_os+app_name / app_name+io_error),
+   error_envelope 已经支持 `evidence: Some(json!({...}))` merge 进默认 evidence key。
+2. **PermissionDenied 真触发难**: macOS 上 `open` 命令默认在 PATH, 模拟需要 cfg(test) mock
+   或者抽 helper 后单测 envelope shape 就行。倾向 cfg(test) 走 mock Command 路径。
+3. **PlatformUnsupported macOS 不可触发**: 本机 macOS 走 `run_open_app_on_macos`, Linux/Windows
+   才走 PlatformUnsupported 分支。smoke 只能 cfg(test) 或单元测, 不能 live 触发。
+4. **Cancelled smoke 真实**: macOS 上 @cancel#seq 可以真触发 @wait cancellation。
+
+### 状态
+**Phase F-1 计划已建, 准备从 Step 1 开始。**
