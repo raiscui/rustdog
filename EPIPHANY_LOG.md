@@ -709,3 +709,55 @@ ticket 03 cancel registry 跨实例 bug 实际是**两个 instance**:
 - 看 `src/control_actions.rs:114-122` (cancel_registry accessor) +
   `src/zenoh_control.rs:240` + `src/zenoh_control/daemon_bridge.rs:310` 三处协同修改.
 - 调试时必看 `cancellation.rs:112 sleep_cancellable` (50ms 循环检查 cancel.is_cancelled()).
+
+
+## [2026-07-17 16:35:00] [Session ID: omx-1783957580965-m4bn8e] 主题: verify logic 真实化不只是"跑 diff", 关键是"diff 失败时报错"
+
+### 发现来源
+- Phase F-2 实施前, 跟用户对话发现 "VerifyFailed envelope 真实触发" 是关键需求
+- ticket 13/14 早就实现 best_effort/always 真跑 AX diff + compute_verification_passed,
+  但 envelope 仍 ok:true. 这是 ticket 13/14 留下的最后一步
+
+### 核心问题
+verify tier (best_effort / always) 真实化的"最后一公里"不是"跑 diff", 是
+"diff 失败时报错让 client 知道". 之前实现:
+1. 跑 AX diff (ticket 13/14 完成) ✓
+2. 算 verification_passed bool (ticket 17 沿用) ✓
+3. **把 verification_passed 转化为 envelope error 状态** ✗ ← 关键缺失
+
+第 3 步缺失导致 client 看到 ok:true 以为动作成功, 但 GUI 实际没变 (动作点错地方
+或 selector 失效). 这是 silent failure, 比 dispatch 错误更危险 — 错误地相信
+"成功"比"失败"更糟糕.
+
+### 为什么重要
+- **silent failure 比 hard failure 危险**: hard failure 容易发现, silent
+  failure 让 client 累积错误状态 (连续点错位置还以为是有效操作)
+- **VerifyFailed 是 verify tier 的核心承诺**: 既然有 best_effort/always
+  档, 就应该真的 verify, 不应该"假装 verify 但忽略结果"
+- **保留 dispatch metadata 是关键设计**: VerifyFailed envelope 不能只返
+  error_code:verify_failed, 必须保留 action + dispatched_to + duration_ms +
+  density + trace_summary + verification, 这样 client 知道是哪个动作失败
+  + 多少耗时 + 完整的 verify 报告. 比单纯 error 多了"verify 的细节".
+
+### 未来风险
+- 任何 verify tier 实现, 必须**同时**实现 "verify 失败时报错" 才能算
+  完整. 跑 diff 不报错等于 noop, 比不跑 diff 还糟糕 (浪费 CPU)
+- 行为变化是 breaking change, smoke 期望必须同步更新. smoke_computer_act_verify
+  test 3 之前期望 ok:true, Phase F-2 改 ok:false. 这种行为变化是 "bug fix"
+  而非 "feature change", 应该主动说清楚.
+- VerifyFailed 优先级: dispatch 错误 > verify 错误. 如果 dispatch 真的失败
+  (e.g. 调 execute_wait 抛错), 用 dispatch 错误码; 只有 dispatch 成功但
+  verify 失败才用 VerifyFailed. 这保证错误码语义不被 verify 状态覆盖.
+
+### 当前结论
+- Phase F-2 commit `4c74a01` 收口, 598 tests + 7/7 smoke 全过.
+- 加 `verify_failed_envelope_json_matches_e2_shape` 单测防止未来 refactor
+  破坏 envelope shape (e.g. 忘了保留 dispatch metadata)
+- 加 `verify_failed_envelope_json_without_ax_diff_still_emits_action` 边缘测试
+  (没传 ax_diff 也正常构造, action 字段保留)
+
+### 后续讨论入口
+- 看 `src/control_computer_act/mod.rs:594-637` (verify_failed envelope 触发逻辑)
+- 看 `src/control_computer_act/error_envelope.rs:228-265` (helper + 2 tests)
+- 复现验证: 跑 `@computer-act#N:{...,action:"wait",verify:"best_effort",args:{duration_ms:0}}` → 返 VerifyFailed
+- 边界: `verify:"none"` 不触发 VerifyFailed (compute_verification_passed 对 None 返 false 但 matches! 排除)

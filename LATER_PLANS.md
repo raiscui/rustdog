@@ -723,3 +723,39 @@ injectable open_fn (cfg(test) mock Command path).
 - Infrastructure: 依赖 client 断开测试 (zenoh router down / pipe broken)
 
 触发条件: 用户给具体场景再启 ticket.
+
+
+### LP-ticket-15-deferred-2-RESOLVED: VerifyFailed envelope 真实触发
+Phase F-2 收口, 详见 commit 4c74a01 + WORKLOG `[2026-07-17 16:30:00]` entry.
+
+修法:
+- src/control_computer_act/mod.rs: render_verification 之后 + !ok 错误处理之前,
+  加 verify_failed envelope 触发分支 (条件: !verification_passed && verify ∈ {BestEffort, Always} && ok)
+- src/control_computer_act/error_envelope.rs: 加 verify_failed_envelope_json helper
+  + 2 个 envelope shape 单测
+
+行为变化 (Phase F-2 改进):
+- 之前 best_effort/always verify 失败时 envelope 仍 ok:true, 错误地让 client
+  以为动作成功 (GUI 实际没变)
+- Phase F-2 改 envelope 为 VerifyFailed: ok:false + error_code:verify_failed +
+  retry:{strategy:manual_only, hint:...}, 保留 dispatch metadata
+
+smoke 更新:
+- smoke_computer_act_verify.sh test 3: 改 VerifyFailed 期望
+- smoke_computer_act_trace.sh test 3: 改 VerifyFailed 期望 (保留 trace_summary.verify status=ok + trace_savefile)
+
+### LP-ticket-15-deferred-7: ObservationExpired + TargetNotFound live trigger (Phase I 候选)
+剩 2 个 variant 完全没触发路径, 依赖 Phase I 真实 observe 集成:
+- ObservationExpired: implicit_observe stale + re-observe 失败时返
+  (tied to LP-ticket-11-deferred-1, ticket 11 synthetic ref 占位)
+- TargetNotFound: click / scroll / drag 命中坐标但 AX 找不到 element 时
+- 两者都需要真实 observe bundle (screenshot + AX tree + windows),
+  而不是当前 ticket 11 的 synthetic ref_id 占位
+
+触发条件: Phase I 集成 + TTL 真正过期 / GUI 元素真找不到.
+
+### LP-ticket-15-deferred-8: Infrastructure live trigger
+zenoh router down / unixpipe broken / zenoh timeout 等场景.
+
+触发条件: 需要 client 端断开测试, 或 daemon 端临时 kill zenoh session,
+可以 mock 但 live trigger 比较难稳定.

@@ -664,3 +664,80 @@
   injectable open_fn (cfg(test) mock Command), 涉及 cross-platform 行为
 - Phase F-2: verify logic 真实化 (VerifyFailed envelope 触发)
 - Phase I: 真实 observe 集成 (ObservationExpired / TargetNotFound 触发)
+
+
+## [2026-07-17 16:30:00] [Session ID: omx-1783957580965-m4bn8e] 任务名称: rdog `@computer-act` Phase F-2 (VerifyFailed envelope 真实触发 + verify logic 真实化)
+
+### 任务内容
+- 实施 Phase F-2: 修 LP-ticket-15-deferred-2
+- 让 best_effort / always verify 在 dispatch 成功 + verify 失败 (AX diff 全 0) 时,
+  改 envelope 为 VerifyFailed (而不是错误地保留 ok:true 让 client 误以为动作成功)
+- 不实现 ObservationExpired / TargetNotFound / Infrastructure (留 LP-deferred-6)
+
+### 完成过程
+
+**Step 1: 在 mod.rs:execute_computer_act 末尾, render_verification 之后 + !ok 错误处理之前, 加 verify_failed envelope 触发分支**
+- 条件: `!verification_passed && matches!(verify_policy, BestEffort | Always) && ok`
+- 改写 payload: ok:false + error_code:verify_failed + retry:{strategy:manual_only,hint}
+- 保留 dispatch metadata (action / dispatched_to / duration_ms / density / trace_summary / observation_id / verification)
+- 优先级: dispatch 错误 > verify 错误 (如果 !ok 走 dispatch 错误路径)
+
+**Step 2: 加 verify_failed_envelope_json helper + 2 个单测 (src/control_computer_act/error_envelope.rs)**
+- `verify_failed_envelope_json(action, verify_method, ax_diff_summary)` (跟 Phase F-1 三个 helper 风格一致)
+- `verify_failed_envelope_json_matches_e2_shape`: 验 envelope shape
+  (ok:false + error_code:verify_failed + retry.strategy:manual_only + action/verify_method/ax_diff)
+- `verify_failed_envelope_json_without_ax_diff_still_emits_action`: 边缘场景
+  (没传 ax_diff 也正常构造, action 字段保留)
+
+**Step 3: smoke 行为变化 (Phase F-2 改进)**
+- smoke_computer_act_verify.sh test 3: 之前期望 ok:true + verification.method=ax_diff
+  (verify 失败仍 ok:true), Phase F-2 改期望 ok:false + error_code:verify_failed +
+  retry.strategy:manual_only + 保留 verification 段
+- smoke_computer_act_trace.sh test 3: 同样 Phase F-2 改 VerifyFailed 期望
+  (保留 trace_summary.verify status=ok + trace_savefile 仍存在)
+- smoke_computer_act_error_envelope.sh: test 1 cancelled 仍走 live trigger
+  (Phase F-3 修的); test 2/3 仍 unit-test driven (PATH 隔离 + macOS 编译)
+
+### 验证
+- `RUSTFLAGS="-Awarnings" cargo test --bin rdog`: 598 passed (+2 from Phase F-2), 0 failed
+- 7/7 smoke 全过:
+  - smoke_computer_act 5/5
+  - smoke_computer_act_observe 4/4
+  - smoke_computer_act_verify 5/5 (test 3 改 VerifyFailed 期望)
+  - smoke_computer_act_trace 3/3 (test 3 改 VerifyFailed 期望)
+  - smoke_computer_act_all 13/13 + bonus
+  - smoke_flow_computer_act 6/6
+  - smoke_computer_act_error_envelope 3/3
+- 实测 envelope 例子 (verify=best_effort + wait 0ms → VerifyFailed):
+  ```
+  ok:false
+  error_code:verify_failed
+  error_message: 动作执行成功但 GUI 未变化, AX diff 显示无新增/修改/删除
+  retry:{strategy:manual_only, hint:...}
+  evidence:{verification:{method:ax_diff, ax_diff:{...6 字段全 0...}}}
+  ```
+- `git push origin main`: 5826dd8..4c74a01 成功
+
+### 总结感悟
+
+- **VerifyFailed 是 verify logic 真实化的"最后一公里"**: 之前 ticket 13/14 实现
+  best_effort/always 真跑 AX diff + compute_verification_passed 推导
+  verification_passed, 但 envelope 仍 ok:true. verify 失败时 dispatch metadata
+  (action/duration_ms/density) 都还在, 但 ok:true 让 client 误以为动作成功.
+  Phase F-2 把 verify 失败显式转化为 error envelope, 这是真正的"verify
+  logic 真实化", 而不是只跑 diff 不告警 client.
+
+- **保留 dispatch metadata 是关键设计**: VerifyFailed envelope 不能只返
+  error_code:verify_failed, 必须保留 action + dispatched_to + duration_ms +
+  density + trace_summary + verification, 这样 client 知道是哪个动作失败 + 多少
+  耗时 + 完整的 verify 报告. 比单纯 error 多了"verify 的细节".
+
+- **smoke 行为变化是 Phase F-2 的本质**: smoke_computer_act_verify test 3 之前
+  期望 ok:true (verify 失败但 envelope 仍成功), Phase F-2 改 ok:false. 这是
+  行为 breaking change, 但属于"bug fix"而非"feature change" — verify 失败
+  本来就应该报错.
+
+- **优先级 dispatch 错误 > verify 错误**: 如果 dispatch 真的失败 (e.g. 调
+  execute_wait 抛错), 用 dispatch 错误码 (cancelled / invalid_args 等);
+  只有 dispatch 成功但 verify 失败才用 VerifyFailed. 这保证错误码的语义
+  不会被 verify 状态覆盖.
