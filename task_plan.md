@@ -310,3 +310,30 @@ handle_daemon_control_query (zenoh_control.rs:240)
   - Pi tools 集成闭环: prompt → Mano-CUA tool_call → rdog control action → screenshot → next step
 - LP-2026-07-06-3 multi-step agent loop benchmark (5 步)
 
+
+## [2026-07-17 20:00:00] 跨项目索引: fast-infer Phase B rdag-control-16-actions profile + Mano-CUA + rdag 端到端 e2e 闭环
+
+### 触发
+- 用户 "B 接着做" (rdag-control-16-actions Pi profile + 闭环)
+- fast-infer 上 commit 36a0872 (Phase A) → 6f2548b (Phase B)
+
+### 跨项目状态
+- **Mano-CUA server schema 已对齐 rdag @computer-act.v1**: 
+  `mano_cua_actions.py`: start_box / end_box 从 string literal 改 int array [int, int],
+  duration 改 duration_ms:int. 16 action 同名 (rdag <-> Mano-CUA).
+  防御性 fallback: model 输出 box_start literal 时, server 自动 strip 转 [int, int].
+- **Pi provider local-mano-cua-vlm 已写 + toolUseProfile rdag-control-16-actions 已写**.
+- **端到端 smoke (`smoke_mano_cua_to_rdag_e2e.py`)** 全过:
+  click(701, 501) (model output) → rdag control @computer-act#1001:click →
+  rdag @click dispatch 173ms, ok=true, observation_used.freshness=fresh,
+  坐标精度 3-5px.
+
+### rustdog 后续候选
+- **LP-2026-07-06-4 (Pi 真实端到端)**: 在 /tmp/干净小目录跑 
+  `pi --provider local-mano-cua-vlm --tools bash --skill rdog-control`,
+  验证 Pi 真实 binary 走 Mano-CUA → tool_call → bash → rdag control 完整闭环.
+- **LP-2026-07-06-3 (multi-step agent loop)**: 仿 smoke_holo31_agent_loop.py 模式,
+  5 步 loop, 测 tool role 回灌 + multi-turn image_url 注入.
+- **rustdog 没有改动**: rdag @computer-act.v1 已支持 13 个 action, 跟 Mano-CUA 16 个
+  只是含 3 个 termination signal (finish/stop/call_user) 不 dispatch, 不影响 rdag 端.
+
