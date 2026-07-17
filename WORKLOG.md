@@ -579,3 +579,88 @@
 - **smoke 退到 unit-test driven 是诚实选择**: 不假装 e2e live trigger, 明确写注释说
   "ticket 03 / Phase F-3 范围", 这样未来读者知道为何这里 smoke 跑 cargo test 而不是
   live rdog control。
+
+
+## [2026-07-17 15:30:00] [Session ID: omx-1783957580965-m4bn8e] 任务名称: rdog `@computer-act` Phase F-3 (ticket 03 cancel registry 跨实例 bug 修复 + Cancelled live trigger)
+
+### 任务内容
+- 实施 Phase F-3: 修 LP-ticket-15-deferred-3 (ticket 03 cancel registry 跨实例 bug)
+- 让 @cancel#seq 真的能命中 @wait 的 in-flight token (Cancelled envelope live trigger)
+- 不实现 PermissionDenied live trigger (留 Phase F-3.5)
+
+### 完成过程
+
+**Step 0: 调试 - ticket 03 真实根因发现**
+- 一开始以为 zenoh_control.rs:240 传 `&CancelRegistry::new()` 是唯一 bug
+- 加 eprintln trace register/signal/sleep_cancellable 发现 daemon 真的收到 wait
+- 但 sleep_cancellable 没醒, cancel response 显示 signaled:true
+- 进一步 trace 才发现 zenoh_control/daemon_bridge.rs:310 有第二处 `&CancelRegistry::new()`
+  (session bridge path), wait 走这条路
+- ticket 03 真实根因: 跨实例 bug 有**两个 instance**, 必须都修
+
+**Step 1: 加 executor accessor (src/control_actions.rs)**
+- `SystemControlActionExecutor` 加 `pub(crate) fn cancel_registry(&self) -> &Arc<CancelRegistry>`
+- 让 dispatcher (queryable + session bridge) 跟 executor 共享同一 Arc
+- executor clone (Clone impl) 已经共享 Arc, 关键是 dispatcher 用 accessor 拿同一 Arc
+
+**Step 2: 修两处 dispatcher (src/zenoh_control.rs + src/zenoh_control/daemon_bridge.rs)**
+- zenoh_control.rs:240: `parse_and_execute_control_line(..., executor.cancel_registry())`
+- daemon_bridge.rs:310: 同样改成 `executor.cancel_registry()`
+- 修后 cancel 真的命中, sleep_cancellable 50ms 内醒 (实测 340ms, 6 次循环)
+
+**Step 3: 加集成测试 (src/control_core.rs tests mod 末尾)**
+- `shared_cancel_registry_lets_cancel_signal_hit_wait_in_flight`: background thread
+  跑 wait + main thread signal cancel + 验证 cancelled envelope shape
+- `executor_cancel_registry_returns_internal_arc`: 验证 Arc::as_ptr 跨次返回同一实例
+  (防止未来 refactor 重蹈跨实例覆辙)
+
+**Step 4: smoke test 1 升级为 live trigger**
+- scripts/smoke_computer_act_error_envelope.sh test 1 从 unit-test driven 升级
+- 验 envelope shape: ok:false + error_code:cancelled + cancelled_at_step + retry.{strategy,hint}
+- 验 cancel 真命中: 走 cancelled 路径 (没 dispatched_to=@wait) + ok:false
+- (test 2 PermissionDenied 仍 unit-test driven, 因为 daemon PATH 隔离无法 live trigger;
+  test 3 PlatformUnsupported 仍 unit-test driven, 因为 macOS 编译不包含 cfg(not(target_os)) 分支)
+
+### 验证
+- `RUSTFLAGS="-Awarnings" cargo test --bin rdog`: 596 passed (+2 from Phase F-3), 0 failed
+- 7/7 smoke 全过:
+  - smoke_computer_act 5/5
+  - smoke_computer_act_observe 4/4
+  - smoke_computer_act_verify 5/5
+  - smoke_computer_act_trace 3/3
+  - smoke_computer_act_all 13/13 + bonus error path
+  - smoke_flow_computer_act 6/6
+  - smoke_computer_act_error_envelope 3/3 (test 1 升级为 live trigger)
+- 调试 trace 实测 cancel latency: 340ms (6 次 50ms sleep_cancellable 循环)
+- `git push origin main`: 20eaa4c..dda4cc2 成功
+
+### 总结感悟
+
+- **bug 真实根因排查比代码修复更重要**: ticket 03 cancel registry 跨实例 bug,
+  表面只看到 zenoh_control.rs:240 一处 `&CancelRegistry::new()`, 但加 trace
+  才发现 daemon_bridge.rs:310 有**第二处**同样的反模式. 修了一处但 wait 仍
+  跑满 10s, 因为 wait 走的是 session bridge path. 完整 fix 必须两处都改.
+  教训: 跨 module 的反模式 (new 一个本应共享的对象) 要全局搜, 不能看一处改一处.
+
+- **"signaled:true" 假象误导调试**: 第一版修完一处后, cancel response 显示
+  `signaled:true`, 让人以为 cancel 命中. 但 wait 仍跑满 10s. 真正线索是
+  sleep_cancellable trace 显示 cancel 后没醒. "signaled:true" 只代表
+  cancel 调了 signal(seq=1) 且返 true, **不**代表 wait token 真的被 signal
+  (token 不在 registry 里 signal 返 false, 但 token 在另一个 registry 里
+  signal 返 true 但 wait 那个 token 看不到).
+
+- **跨 Arc 共享靠 Clone 不靠新建**: Arc::clone() 共享同一内部 ptr. 如果
+  dispatcher 新建 CancelRegistry::new(), 跟 executor 内部 Arc 完全是两个
+  instance. 修法是 dispatcher 拿 executor 的 Arc 引用 (executor.cancel_registry())
+  而不是新建. 这跟 daemon 启动时 `executor.clone()` 给 session bridge 共享
+  Arc 是同款哲学.
+
+- **Unit-test 到 live-trigger 升级时机**: Phase F-1 收口时 test 1 退到
+  unit-test driven 是诚实选择 (因为 bug 没修). Phase F-3 修完 bug 后,
+  test 1 应该升级为 live trigger 验证真实链路. smoke 跑得更有信心.
+
+### 后续 (Phase F-3.5 / Phase F-2)
+- PermissionDenied live trigger: 需要 refactor execute_open_app 暴露
+  injectable open_fn (cfg(test) mock Command), 涉及 cross-platform 行为
+- Phase F-2: verify logic 真实化 (VerifyFailed envelope 触发)
+- Phase I: 真实 observe 集成 (ObservationExpired / TargetNotFound 触发)

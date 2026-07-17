@@ -658,3 +658,54 @@ python 命令字符串里又有 JSON 字符串字面量带 `\"`, 经过 bash →
 - 看 `src/zenoh_control.rs:240` (ticket 03 registry bug 位置)。
 - 复现 ticket 03 bug: 启 daemon, `@wait#1:{duration_ms:10000}` 后立刻
   `@cancel#seq#99:{target_seq:1}`, 看 cancel response 是 "unknown_target_seq"。
+
+
+## [2026-07-17 15:35:00] [Session ID: omx-1783957580965-m4bn8e] 主题: 跨 module 的反模式要全局搜, 不能看一处改一处
+
+### 发现来源
+- Phase F-3 修 ticket 03 cancel registry 跨实例 bug
+- 第一版只修 zenoh_control.rs:240 一处 (queryable path) `&CancelRegistry::new()` → executor.cancel_registry()
+- 修后 cancel response 显示 `signaled:true`, 但 wait 仍跑满 10s
+- 加 sleep_cancellable trace 发现 cancel 命中 (signal seq=1 contains=true) 但 sleep_cancellable 没醒
+- 进一步 trace 才发现 zenoh_control/daemon_bridge.rs:310 (session bridge path) 有**第二处**同样的 `&CancelRegistry::new()`
+- 修两处后 cancel 真的命中, sleep_cancellable 50ms 内醒 (实测 340ms, 6 次循环)
+
+### 核心问题
+ticket 03 cancel registry 跨实例 bug 实际是**两个 instance**:
+- queryable path (zenoh_control.rs:240)
+- session bridge path (zenoh_control/daemon_bridge.rs:310)
+
+两个 path 都各 `parse_and_execute_control_line(..., &CancelRegistry::new())`,
+跟 `SystemControlActionExecutor::cancel_registry` 跨实例.
+
+### 为什么重要
+- 跨 module 的反模式 (`new()` 一个本应共享的对象) 要**全局搜**,
+  不能看一处改一处. 修了一处但 wait 仍跑满 10s, 表面看是 fix 不彻底,
+  实际是**根本不是这个 path** 在 dispatch.
+- "signaled:true" 假象误导: cancel 调 signal(seq) 返 true, 但 token 不在
+  cancel 那个 registry, 而是 wait 那个 registry. cancel 看着像命中, 但
+  wait 那个 token 看不到 signal. 真正线索是 sleep_cancellable 内部 trace
+  (cancel 后没醒).
+- Arc::clone() 共享内部 ptr, 但 `CancelRegistry::new()` 创建**新** instance.
+  修法是 dispatcher 拿 executor 内部 Arc (`executor.cancel_registry()`),
+  不是新建 registry.
+
+### 未来风险
+- 任何跨 module 的 "dispatch 模式" 都要警惕 `&SomeType::new()` 反模式.
+  跨 module 共享资源应该走 executor 内部 field accessor, 不应该 dispatcher
+  自己 new 一个独立 instance.
+- 调试这类 bug 时, "响应看起来对" 不是终点 (signaled:true) — 要 trace
+  到**实际被影响**的代码路径, 看到 token 内部 state 变化 (sleep_cancellable
+  真的醒 + cancelled_at_step 字段 + elapsed_ms 远小于 duration_ms).
+
+### 当前结论
+- Phase F-3 commit `dda4cc2` 收口, 596 tests + 7/7 smoke 全过.
+- 加 `executor_cancel_registry_returns_internal_arc` 单元测防止未来 refactor
+  重蹈覆辙 (验 Arc::as_ptr 跨次同一实例).
+- 加 `shared_cancel_registry_lets_cancel_signal_hit_wait_in_flight` 集成测
+  验证 cancelled envelope shape (e2e background thread + signal).
+
+### 后续讨论入口
+- 看 `src/control_actions.rs:114-122` (cancel_registry accessor) +
+  `src/zenoh_control.rs:240` + `src/zenoh_control/daemon_bridge.rs:310` 三处协同修改.
+- 调试时必看 `cancellation.rs:112 sleep_cancellable` (50ms 循环检查 cancel.is_cancelled()).

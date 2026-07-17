@@ -692,3 +692,34 @@ Phase F-1 smoke 调试时发现 `src/zenoh_control.rs:240` 每次请求都新建
 在所有平台都有 caller, 移除 #[allow(dead_code)]。
 
 触发条件: 跨平台 action 增加, 或当前 dead_code 累积需要 batch 清理。
+
+
+### LP-ticket-15-deferred-3-RESOLVED: ticket 03 cancel registry 跨实例 bug
+Phase F-3 收口, 详见 commit dda4cc2 + WORKLOG `[2026-07-17 15:30:00]` entry.
+
+修法:
+- src/control_actions.rs: SystemControlActionExecutor 加 cancel_registry() accessor
+- src/zenoh_control.rs:240 + src/zenoh_control/daemon_bridge.rs:310: 都改用
+  executor.cancel_registry() (跟 executor 内部 Arc 共享)
+
+实操关键: ticket 03 bug 实际有**两个 instance** (queryable + session bridge path),
+必须两处都改. 第一版修完一处 wait 仍跑满 10s, 第二处 trace 后才发现.
+
+### LP-ticket-15-deferred-5: PermissionDenied live trigger (Phase F-3.5 候选)
+Phase F-3 没实现 PermissionDenied live trigger, 因为 daemon PATH 隔离
+(client 改 PATH 不影响 daemon 进程) + 需要 refactor execute_open_app 暴露
+injectable open_fn (cfg(test) mock Command path).
+
+后续方案:
+- 抽 `run_open_app_command(app_name) -> io::Result<()>` helper 走 env::var("PATH") 控制
+- 单测直接用 mock (cfg(test) 注入测试), live trigger 留 Linux/Windows CI
+- Phase F-3.5 单独 ticket 跟进
+
+### LP-ticket-15-deferred-6: ObservationExpired / TargetNotFound / VerifyFailed / Infrastructure
+剩 4 个 variant 完全没触发路径:
+- ObservationExpired: 依赖 Phase I 真实 observe 集成 + TTL 真正过期
+- TargetNotFound: 依赖 Phase I 真实 observe (AX 找不到 element)
+- VerifyFailed: 依赖 Phase F-2 verify logic 真实化 (当前 best_effort 是 placeholder)
+- Infrastructure: 依赖 client 断开测试 (zenoh router down / pipe broken)
+
+触发条件: 用户给具体场景再启 ticket.
