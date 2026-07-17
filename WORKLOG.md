@@ -822,3 +822,73 @@
   - ObservationExpired / TargetNotFound 依赖 Phase I 真实 observe 集成
   - Infrastructure 依赖 client 断开测试 / sandbox 测试
 - fast-infer 跨项目 task_plan 同步追加 Phase F-3.5 收口索引
+
+## [2026-07-17 18:00:00] [Session ID: omx-1783957580965-m4bn8e] 任务: @cancel#seq self-target bug 修复 (Phase F-3.5 follow-up)
+
+### 任务内容
+- 用户 "继续" (本会话延续 Phase F-3.5 收口)
+- 上一轮我把 smoke_cancel_seq test 5 (self-target) 标为 pre-existing bug 跳过
+- 仔细 trace 发现这是真 bug (root cause 在 control_core.rs), 不是 smoke 期望错
+- 修法: control_core.rs default 分支加 `is_cancel_command` guard, 跳过 register/unregister
+
+### 完成过程
+1. **诊断 - root cause trace**
+   - `@cancel#seq#205:{target_seq:205}` 路由: kind=`cancel#seq`, request_id=205
+   - control_core.rs:104 `command =>` catch-all 分支命中 Cancel
+   - control_core.rs:141 `cancel_registry.register(205)` 把 seq=205 加进 SHARED registry
+   - control_actions.rs:146 Cancel 分支: `execute_cancel(request, &self.cancel_registry)`
+   - execute_cancel 调 `registry.signal(205)` → true (因为刚刚 register 进去了!)
+   - 返回 {signaled:true, ok:true} ← 错, 应该是 {ok:false, error_code:unknown_target_seq}
+
+2. **修法 (做正确修复而非最小修复)**
+   - control_core.rs: skip register/unregister for Cancel commands
+   - Cancel 是 signal-only, 没有自己的 in-flight 期, 不该进入 cancel registry
+   - 加 `is_cancel_command = matches!(command, ControlCommand::Cancel(_))` guard
+   - token 与 unregister 都 wrap if !is_cancel_command
+
+3. **测试覆盖**
+   - `execute_cancel_emits_unknown_target_seq_when_target_not_in_registry`: 不预 register,
+     期望 error_code=unknown_target_seq + evidence.registry_state=empty_or_completed
+   - `execute_cancel_emits_ok_when_target_signal_succeeds`: 预 register(42), 期望
+     ok=true + signaled=true + dispatched_to=@cancel#seq (happy path 不退化)
+   - 这两个测都在 src/control_actions/tests.rs 末尾
+
+### 总结感悟
+- **先 trace 再标 "pre-existing"**: 上一轮看到 smoke fail 立刻标 pre-existing 跳过了,
+  没仔细 trace. 实际上 root cause 在 control_core.rs:141 (cancel 命令被错误加进 registry)
+  这是个真 bug, 跟当前 task (Phase F-3.5) 强相关.
+- **Cancel 是 signal-only 不是 in-flight**: 它跟其它命令语义不同, 其它命令需要 in-flight
+  期才能被 cancel, cancel 命令本身没有可被 cancel 的目标. 让它走 register 路径就是
+  自找麻烦. 显式 guard 是设计层面的正确修复, 比最小修复 (在 execute_cancel 加 if check)
+  更彻底.
+- **debug 静态 vs 动态**: 这种 bug 单靠静态读 control_actions.rs 看不出来, 必须真的跑
+  smoke_cancel_seq 看到 signaled:true, 然后反向 trace 调用链到 control_core.rs:141
+  找到 register 调用点. 跟 Phase F-3.5 一样, "静态阅读" 不够, "动态证据" 找根因.
+- **修复 commit + docs 一起发**: 本会话 commit b13d834 已经含 Phase F-3.5 WORKLOG,
+  这次 follow-up fix 也是 1 ticket per commit 的延续, WORKLOG/LATER_PLANS/EPIPHANY 一起 append.
+
+### 验收
+- cargo test: **603 passed** (was 601, +2 execute_cancel unit tests), 0 failed, 1 ignored
+- smoke_cancel_seq.sh: **5/5 passed** (was 4/5, self-target fix)
+- 6 个其他 smoke scripts 验证不退化:
+  - smoke_computer_act_error_envelope (3/3)
+  - smoke_computer_act_min (2/2)
+  - smoke_open_app (3/3)
+  - smoke_computer_act_verify (5/5)
+  - smoke_wait (5/5)
+  - smoke_computer_act_trace (3/3)
+  - smoke_flow_computer_act (6/6)
+  - smoke_computer_act_observe (4/4)
+- LP-ticket-15-deferred-3 (cross-instance cancel registry bug) 仍是 RESOLVED 状态
+  (本次 fix 是其后续发现的 bug, 跟跨实例 bug 不同)
+
+### 后续
+- Phase F / ADR-0004 ComputerActErrorCode 全 8 个 variant live trigger:
+  - Cancelled (Phase F-1) ✓
+  - VerifyFailed (Phase F-2) ✓
+  - PermissionDenied (Phase F-3.5) ✓
+  - PlatformUnsupported (cfg(not(target_os)) → 单元测覆盖) ✓
+  - ObservationExpired / TargetNotFound (依赖 Phase I)
+  - Infrastructure (依赖 client 断开测试)
+- Phase I (LP-ticket-11-deferred-1): 真实 observe 集成, ticket 21+
+- fast-infer: LFM2.5 + Pi + rdog 端到端稳定化 (Pythonic 格式 hint 实装后还要测更多 prompt)

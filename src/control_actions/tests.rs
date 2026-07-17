@@ -759,3 +759,108 @@ fn execute_open_app_emits_ok_envelope_when_open_succeeds() {
     assert!(payload.get("retry").is_none());
     assert!(payload.get("evidence").is_none());
 }
+
+
+// ============================================================================
+// Phase F-3.5 follow-up: `@cancel#seq` self-target bug fix unit tests
+//
+// Bug: control_core.rs:141 `command =>` 默认分支会把 Cancel 命令自己的 seq
+//      先 register 进 cancel_registry, 然后 execute_cancel(..., &self.cancel_registry)
+//      .signal(self_seq) 会返 true, 让 `@cancel#seq#N:{target_seq:N}` 误报成功。
+//
+// Fix: control_core.rs default 分支加 `is_cancel_command` guard, 跳过 register/unregister。
+//      这两个 unit test 在 executor 层面锁住 execute_cancel 语义
+//      (单测不依赖 control_core routing, smoke_cancel_seq test 5 是集成证明).
+// ============================================================================
+
+/// `execute_cancel` 在目标 seq 不在 registry 时返 envelope error_code=unknown_target_seq。
+///
+/// 这是 self-target bug 的根因场景: cancel 命令自己的 seq 不该在 registry 里。
+/// 测试不预 register, 直接调 execute_cancel, 期望 unknown_target_seq envelope.
+#[test]
+fn execute_cancel_emits_unknown_target_seq_when_target_not_in_registry() {
+    use crate::control_protocol::CancelRequest;
+
+    let registry = crate::cancellation::CancelRegistry::new();
+    let request = CancelRequest { target_seq: 999 };
+
+    let result = execute_cancel(&request, &registry)
+        .expect("executor itself should not error; envelope encodes the failure");
+
+    // exit_code != 0 表示上层要按失败处理
+    assert_ne!(result.exit_code, 0);
+
+    let payload: serde_json::Value = serde_json::from_str(
+        result
+            .response_value_json
+            .as_deref()
+            .expect("payload should be present"),
+    )
+    .expect("payload should be valid JSON");
+
+    assert_eq!(payload.get("ok"), Some(&serde_json::json!(false)));
+    assert_eq!(
+        payload.get("error_code"),
+        Some(&serde_json::json!("unknown_target_seq"))
+    );
+    assert_eq!(
+        payload.get("dispatched_to"),
+        Some(&serde_json::json!("@cancel#seq"))
+    );
+    assert_eq!(
+        payload.get("target_seq"),
+        Some(&serde_json::json!(999))
+    );
+
+    // evidence 字段必须说明 registry state (设计区别于其它 error_code)
+    let evidence = payload
+        .get("evidence")
+        .expect("unknown_target_seq envelope must include evidence");
+    assert_eq!(
+        evidence.get("registry_state"),
+        Some(&serde_json::json!("empty_or_completed"))
+    );
+}
+
+/// `execute_cancel` 在目标 seq 已 register 时返 ok=true, signaled=true.
+///
+/// 这是 non-self-target happy path: 取消一个真实在跑的 cmd (e.g. test 1
+/// `@wait` 注册 seq=1 后 `@cancel#seq#2:{target_seq:1}` 取消它). 此测试
+/// 验 happy path envelope shape, 锁住 fix 没破坏现有 cancel 行为.
+#[test]
+fn execute_cancel_emits_ok_when_target_signal_succeeds() {
+    use crate::control_protocol::CancelRequest;
+
+    let registry = crate::cancellation::CancelRegistry::new();
+    // 预注册 seq=42 模拟"有一个 in-flight 命令在跑"
+    let _token = registry.register(42);
+
+    let request = CancelRequest { target_seq: 42 };
+    let result = execute_cancel(&request, &registry)
+        .expect("executor itself should not error on success");
+
+    assert_eq!(result.exit_code, 0);
+
+    let payload: serde_json::Value = serde_json::from_str(
+        result
+            .response_value_json
+            .as_deref()
+            .expect("payload should be present"),
+    )
+    .expect("payload should be valid JSON");
+
+    assert_eq!(payload.get("ok"), Some(&serde_json::json!(true)));
+    assert_eq!(payload.get("signaled"), Some(&serde_json::json!(true)));
+    assert_eq!(
+        payload.get("dispatched_to"),
+        Some(&serde_json::json!("@cancel#seq"))
+    );
+    assert_eq!(payload.get("target_seq"), Some(&serde_json::json!(42)));
+
+    // happy path 没有 error_code / evidence 字段
+    assert!(payload.get("error_code").is_none());
+    assert!(payload.get("evidence").is_none());
+
+    // 关键不变量: 取消成功后, 调用方负责 unregister. 测试模拟"调用方忘了 unregister"
+    // 也通过 (token 继续存活, 不会破坏 cancel 语义).
+}

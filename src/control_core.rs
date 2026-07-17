@@ -136,12 +136,26 @@ pub fn execute_explicit_control_request<E: ControlActionExecutor>(
             // ADR-0005 ticket 03: in-flight 命令走 cancel registry。
             // 每次调用前 register,完成后 unregister;@cancel#seq 通过同一
             // registry signal 对应 token。
-            let token = request
-                .request_id
-                .map(|seq| cancel_registry.register(seq));
+            //
+            // 重要 (`@cancel#seq` self-target bug fix, 2026-07-17):
+            // Cancel 命令是 signal-only, 没有自己的 in-flight 期, 不应进 registry。
+            // 否则 control_core 会先把 cancel 自己的 seq (e.g. 205) register 进去,
+            // 然后 execute_cancel(..., &self.cancel_registry).signal(205) 会返 true,
+            // 让 `@cancel#seq#205:{target_seq:205}` 误报成功。
+            // 真实 self-target 必须返 `error_code: "unknown_target_seq"`。
+            let is_cancel_command = matches!(command, ControlCommand::Cancel(_));
+            let token = if is_cancel_command {
+                None
+            } else {
+                request
+                    .request_id
+                    .map(|seq| cancel_registry.register(seq))
+            };
             let result = executor.execute(command, shell, token.as_ref());
-            if let Some(seq) = request.request_id {
-                cancel_registry.unregister(seq);
+            if !is_cancel_command {
+                if let Some(seq) = request.request_id {
+                    cancel_registry.unregister(seq);
+                }
             }
             match result {
                 Ok(result) => {

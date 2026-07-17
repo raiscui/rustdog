@@ -841,3 +841,84 @@ smoke_cancel_seq test 5 期望:
   还是直接用 client 进程的 env. 这决定哪些 env-sensitive 测试需要 mock 注入.
 - 想 fix self-target bug: 看 src/control_computer_act/mod.rs:execute_cancel,
   target_seq == current_seq 时返 envelope 即可.
+
+## [2026-07-17 18:00:00] [Session ID: omx-1783957580965-m4bn8e] 主题: @cancel#seq self-target bug 控制逻辑 trace + Cancel 不该参与 cancel registry
+
+### 发现来源
+- Phase F-3.5 收口后跑 smoke_cancel_seq.sh test 5 (self-target) fail
+- 上一轮我标 "pre-existing bug" 跳过, 这一轮仔细 trace 发现是真 bug
+
+### 核心问题
+**Cancel 命令不该参与 cancel registry**
+
+`@cancel#seq#N:{target_seq:M}` 是 signal-only 操作 (把 M in-flight 命令取消),
+自身没有可被取消的 in-flight 期. 然而 control_core.rs:104 `command =>` default
+catch-all 把 Cancel 跟其它命令 (OpenApp/Wait/Key 等) 一样处理:
+
+```
+1. cancel_registry.register(205)      // 把 cancel 自己的 seq 加进 registry
+2. executor.execute(Cancel(...))      // 进 execute_cancel
+3. registry.signal(205)               // 返 true (步骤 1 刚刚加进去的)
+4. 返回 {signaled:true, ok:true}      // 错
+```
+
+完整调用链:
+- control_protocol/parsers.rs:199 解析 `@cancel#seq#N` 为 kind=`cancel#seq`, request_id=N
+- control_core.rs:104 `command =>` 默认分支
+- control_core.rs:141 `cancel_registry.register(seq)`  
+- control_core.rs:142 `executor.execute(command, ...)`  
+- control_actions.rs:146 Cancel 分支: `execute_cancel(&req, &self.cancel_registry)`
+- control_actions.rs:317 `signal(target_seq)` → true
+- control_actions.rs:308 payload `{"ok":true, "signaled":true, ...}`
+
+### 为什么重要
+- 这是典型的 "control flow + state race": 同一份 state (cancel registry) 既被 register
+  又被 signal, 在 self-target 场景下竞态出 false positive
+- 用户能踩到: 任何 `@cancel#seq#1:{target_seq:1}` 都会被误判为 "成功 cancel seq=1",
+  即使 seq=1 实际上是这条 cancel 命令自己
+
+### 修法 (做正确修复而非最小修复)
+**跳过 register/unregister for Cancel commands** (control_core.rs)
+
+```rust
+command => {
+    let is_cancel_command = matches!(command, ControlCommand::Cancel(_));
+    let token = if is_cancel_command {
+        None
+    } else {
+        request.request_id.map(|seq| cancel_registry.register(seq))
+    };
+    let result = executor.execute(command, shell, token.as_ref());
+    if !is_cancel_command {
+        if let Some(seq) = request.request_id {
+            cancel_registry.unregister(seq);
+        }
+    }
+    // ... 处理 result
+}
+```
+
+为什么不选最小修复 (execute_cancel 加 self-target check):
+- execute_cancel 不暴露 current seq, 加 self-target 需要穿透函数签名 (传 current_seq 或
+  registry 句柄的 "signal history")
+- 显式 guard 在 control_core.rs 集中, 未来加新命令 (e.g. cancel_all) 也好处理
+- guard 语义清晰: "cancel 命令不进 cancel registry, 因为它本身就是 signal-only"
+
+### 验收
+- `cargo test --bin rdog`: 603 passed (+2 unit tests), 0 failed
+- `bash scripts/smoke_cancel_seq.sh`: 5/5 PASSED (含 test 5 self-target)
+- smoke_computer_act_error_envelope / smoke_computer_act_min / smoke_open_app /
+  smoke_computer_act_verify / smoke_wait / smoke_computer_act_trace /
+  smoke_flow_computer_act / smoke_computer_act_observe: 全部不退化
+
+### 后续讨论入口
+- 想弄清 cancel registry 设计: 看 src/cancellation.rs + ADR-0005 §Cancellation.
+- 想跟 ticket 03 跨实例 bug 区分: 那是 queryable / session bridge 各自一份 registry,
+  改用 executor.cancel_registry() accessor 共享. 本次 self-target bug 是同一 registry
+  内 register+signal 竞态, 跟跨实例无关.
+
+### 当前结论
+- 真 bug, 不是 smoke 期望错, 已修 (commit 在 b13d834 之后).
+- LP-ticket-15-deferred-3-RESOLVED 已追加 self-target fix 段.
+- Cancel 命令的语义边界 (signal-only, 不参与 in-flight state) 现在在 control_core.rs
+  显式 guard 里显式声明, 未来 review 时不会再滑落.

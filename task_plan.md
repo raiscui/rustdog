@@ -244,3 +244,40 @@ handle_daemon_control_query (zenoh_control.rs:240)
 - cargo test 601 passed, 0 failed, 1 ignored
 - 8/9 smoke scripts 7+ 段端到端验证通过 (smoke_cancel_seq test 5 self-target
   是 main 上 pre-existing bug, 不在 Phase F-3.5 范围内, 已在 EPIPHANY 记录)
+
+
+## [2026-07-17 18:00:00] [Session ID: omx-1783957580965-m4bn8e] 任务: @cancel#seq self-target bug fix (Phase F-3.5 follow-up)
+
+### 触发
+- 用户说 "继续" (Phase F-3.5 收口后续)
+- 我上一轮标 smoke_cancel_seq test 5 self-target 是 pre-existing bug 跳过
+- 这一轮仔细 trace 发现是 root cause 明确的真 bug
+
+### root cause 静态 + 动态证据
+**静态证据**:
+- control_core.rs:104 `command =>` catch-all (包括 Cancel)
+- control_core.rs:141 `cancel_registry.register(seq)` 把 cancel 自己的 seq 加进共享 registry
+- control_actions.rs:146 Cancel 分支: `execute_cancel(request, &self.cancel_registry)` 用同一 registry
+- control_actions.rs:317 `registry.signal(target_seq)` 然后 `signaled = true`
+
+**动态证据**:
+- 跑 smoke_cancel_seq, test 5 输出 `{signaled:true, ok:true}` 而不是
+  `{ok:false, error_code:unknown_target_seq}`
+- git stash 验证 main (9e2b329) 上同样 fail → 排除本会话引入
+- fix 后跑 smoke_cancel_seq, test 5 输出 `{ok:false, error_code:unknown_target_seq}` ✓
+
+### 实施
+**Step 1** (committed in this session): control_core.rs catch-all 加
+`is_cancel_command` guard, Cancel 命令不进 cancel registry (signal-only,
+没有 in-flight 期).
+
+**Step 2**: src/control_actions/tests.rs 末尾 2 个 unit test
+(`execute_cancel_emits_unknown_target_seq_when_target_not_in_registry` +
+`execute_cancel_emits_ok_when_target_signal_succeeds`).
+
+**Step 3**: cargo test 603 passed (+2), 0 failed
+**Step 4**: smoke_cancel_seq 5/5 PASSED, 6 个其他 smoke 全过不退化
+**Step 5**: WORKLOG + LATER_PLANS (LP-15-deferred-3-RESOLVED 追加) + EPIPHANY_LOG 一起发
+
+### 状态
+**Self-target bug fix 收口 ✓**

@@ -694,8 +694,9 @@ Phase F-1 smoke 调试时发现 `src/zenoh_control.rs:240` 每次请求都新建
 触发条件: 跨平台 action 增加, 或当前 dead_code 累积需要 batch 清理。
 
 
-### LP-ticket-15-deferred-3-RESOLVED: ticket 03 cancel registry 跨实例 bug
-Phase F-3 收口, 详见 commit dda4cc2 + WORKLOG `[2026-07-17 15:30:00]` entry.
+### LP-ticket-15-deferred-3-RESOLVED: ticket 03 cancel registry 跨实例 bug + self-target fix
+**Phase F-3 收口 (跨 instance)**: commit dda4cc2 + WORKLOG `[2026-07-17 15:30:00]` entry.
+**Phase F-3.5 follow-up (self-target)**: commit (after b13d834) + WORKLOG `[2026-07-17 18:00:00]` entry.
 
 修法:
 - src/control_actions.rs: SystemControlActionExecutor 加 cancel_registry() accessor
@@ -704,6 +705,30 @@ Phase F-3 收口, 详见 commit dda4cc2 + WORKLOG `[2026-07-17 15:30:00]` entry.
 
 实操关键: ticket 03 bug 实际有**两个 instance** (queryable + session bridge path),
 必须两处都改. 第一版修完一处 wait 仍跑满 10s, 第二处 trace 后才发现.
+
+**Phase F-3.5 follow-up (2026-07-17 18:00:00) — self-target fix**
+
+smoke_cancel_seq test 5 (`@cancel#seq#205:{target_seq:205}`) 在 dda4cc2 后续
+发现 fail: 期望 `error_code=unknown_target_seq`, 实际 `signaled:true, ok:true`.
+
+Root cause: control_core.rs:104 `command =>` catch-all 把 Cancel 跟其它命令一视同仁,
+先 `cancel_registry.register(205)` 再 execute_cancel. 因为 cancel 自己的 seq 刚刚
+register 进去, execute_cancel.signal(205) 返 true.
+
+修法 (做正确修复):
+- src/control_core.rs: skip register/unregister for Cancel commands
+  (Cancel 是 signal-only, 没有 in-flight 期, 不该进 cancel registry)
+- 加 `is_cancel_command = matches!(command, ControlCommand::Cancel(_))` guard
+- wrap token 取与 unregister 都用 `if !is_cancel_command`
+
+测试:
+- src/control_actions/tests.rs 末尾 2 个 unit test (execute_cancel happy path + unknown_target_seq)
+- 集成通过 smoke_cancel_seq test 5 (改前 fail, 改后 PASS)
+
+验收:
+- cargo test: 603 passed (was 601, +2), 0 failed, 1 ignored
+- smoke_cancel_seq: 5/5 passed (was 4/5)
+- 6 个其他 smoke scripts 验证不退化
 
 ### LP-ticket-15-deferred-5-RESOLVED: PermissionDenied live trigger (Phase F-3.5 收口)
 Phase F-3.5 收口, 详见 commit + WORKLOG `[2026-07-17 17:30:00]` entry.
