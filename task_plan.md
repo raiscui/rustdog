@@ -281,3 +281,32 @@ handle_daemon_control_query (zenoh_control.rs:240)
 
 ### 状态
 **Self-target bug fix 收口 ✓**
+
+## [2026-07-17 19:30:00] 跨项目索引: fast-infer Mano-CUA OpenAI server 上线 (port 18094)
+
+### 触发
+- 用户指令: LFM2.5 已删除 + 主要关注 Mano-CUA + "继续 A" (开 OpenAI-compatible server wrapper)
+- fast-infer commit: 36a0872 (feat) + 46d3ed6 (docs)
+
+### 上线状态 (fast-infer origin/main)
+- **端口 18094** Mano-CUA OpenAI-compatible server 已 runnable
+  - 16 action space (OpenAI tools=[] schema 完整)
+  - 双 parser 路径 (自然 XML / qwen3-coder XML)
+  - 4/4 smoke 全过 (含 click 精度 ~5px)
+- **Pi 集成**: `local-mano-cua-vlm` provider 已在 `~/.pi/agent/models.json`
+  - baseUrl http://127.0.0.1:18094/v1
+  - 支持 tools + image_url
+- 待补: rdog-control-16-actions toolUseProfile (LP-2026-07-06-1 follow-up)
+
+### 关键发现 (跨项目共享经验)
+- **Apple Metal multi-call GPU crash** (fast-infer EPIPHANY 沉淀):
+  - Apple MLX Metal stateful, 连续推理第二次 prefill 时崩
+  - 修复: per-request `mx.clear_cache()` + `gc.collect()` — 跟 Holo 3.1 / mlx-vlm 同款
+  - 重要性: rustdog 未来如果接 Apple Silicon MLX 后端, 必须继承这个 pattern
+
+### rustdog 后续候选
+- LP-2026-07-06-1 follow-up: 设计 rdog-control-16-actions toolUseProfile
+  - 16 个 Mano-CUA action 怎么映射到 rdog control 命令 (click/type/scroll/drag/hotkey 等)
+  - Pi tools 集成闭环: prompt → Mano-CUA tool_call → rdog control action → screenshot → next step
+- LP-2026-07-06-3 multi-step agent loop benchmark (5 步)
+
