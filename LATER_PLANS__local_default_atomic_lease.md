@@ -17,6 +17,11 @@
 - 移除legacy create/unlink兼容分支,或提供一次性迁移命令检查并固化stable lock path.
 - 增加跨主机版本矩阵测试,明确允许的滚动升级组合.
 
+### 执行状态
+
+- [2026-07-18 12:51:22] [Session ID: omx-1784340333160-6bwnss] 用户选择后续建议1,本项已进入执行.
+- 新任务使用支线上下文后缀`local_default_legacy_retirement`;后续状态不再写入本文件.
+
 ## [2026-07-18 12:40:06] [Session ID: omx-1784340333160-6bwnss] 后续: 拆分超长zenoh_runtime模块
 
 - `src/zenoh_runtime.rs`已明显超过项目建议的1000行上限.

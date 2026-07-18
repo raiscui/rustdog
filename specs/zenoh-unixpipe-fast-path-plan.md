@@ -43,10 +43,10 @@ agent 高频跑 `@web-find` / `@screenshot` / `@click` 时,这段延迟会肉眼
 - daemon 启动时:
   1. 统一解析最终 endpoint 列表和 unixpipe base;显式 listen endpoint 优先,与 `socket_path` 同时存在时必须一致
   2. 如果 unixpipe enabled 且没有显式 unixpipe endpoint,把 `unixpipe/{socket_path 或推导路径}` 注入到 `listen_endpoints` 最前
-  3. 先获取 `(namespace, daemon_name)` 的 service-name PID guard;同名活跃 daemon 存在时直接退出,不得触碰现有 FIFO
-  4. 再获取 canonical base path 的 sidecar PID guard;不同 daemon name 共用显式 path 时,后启动者直接退出
-  5. 两把 ownership guard 都成功后,才 `unlink` 旧 FIFO 文件(stale cleanup)
-  6. 如果 `local_default = true`,写入本机 local-default registry 并持有 PID guard
+  3. 先获取 `(namespace, daemon_name)` 的 service-name process lease;同名活跃 daemon 存在时直接退出,不得触碰现有 FIFO
+  4. 再获取 canonical base path 的 process lease;不同 daemon name 共用显式 path 时,后启动者直接退出
+  5. 两把 ownership lease 都成功后,才 `unlink` 旧 FIFO 文件(stale cleanup)
+  6. 如果 `local_default = true`,获取namespace process lease并原子发布本机 local-default registry
   7. 把最终 FIFO base 路径通过启动日志打出来,便于排错
 
 ### 3.3 client 端行为
@@ -65,13 +65,14 @@ agent 高频跑 `@web-find` / `@screenshot` / `@click` 时,这段延迟会肉眼
 - **`self` / 空 target 入口**(2026-06-21 加):
   - `rdog control self @<line>` = 显式本机 fast path,可加可不加 `--namespace`
   - `rdog control --namespace <ns> @<line>`(空 target)= 隐式本机 fast path
-  - 客户端通过 `find_local_daemon_name(namespace)` 先读取 local-default registry
-  - registry 有且只有一个有效 daemon → 使用 registry 中的 daemon_name
-  - registry stale(pid 不存在、schema 不对、FIFO 超过启动宽限仍不存在) → 清理后继续 fallback
-  - 没有有效 registry → 扫描 `$TMPDIR/rdog-{ns}-*.pipe_uplink` 找唯一 daemon
-  - fallback 0 个 → NotFound 错误,提示启动 daemon 或显式指定 target
-  - fallback 1 个 → 用它,namespace 必要时从 daemon_name 后缀推断
-  - fallback >1 个 → AlreadyExists 错误,列出所有候选,提示显式指定 target 或设置 `[zenoh.unixpipe] local_default = true`
+  - 客户端通过 `find_local_daemon_name(namespace)` 读取 local-default registry
+  - registry必须包含完整lease identity,并与sidecar metadata和active OS lock一致
+  - 有且只有一个active managed daemon → 使用registry中的daemon_name
+  - 多个active managed daemon → `AlreadyExists`,提示用`--namespace`或显式target消除歧义
+  - 纯v1 PID记录、部分managed记录、identity不匹配、lease已释放或FIFO超出启动宽限仍不存在 → 忽略,但client不得删除稳定lease/registry状态
+  - 没有active managed registry → 扫描`$TMPDIR/rdog-{ns}-*.pipe_uplink`生成诊断,不把FIFO当作owner身份
+  - FIFO 0个 → `NotFound`,提示启用`local_default = true`并启动daemon,或显式指定target
+  - FIFO 1个或多个 → `NotFound`,列出候选并说明自动选择已退役;升级期可显式指定target
   - PTY 不支持,one-shot 多 line 支持(复用单 session 串行发)
   - 关键实现: Zenoh 1.8.0 实际只创建 `<base>_uplink` 和 `<base>_downlink` 两个 FIFO,
     `<base>` 本身不一定存在,所以扫描必须按 `*.pipe_uplink` 而不是 `*.pipe`
@@ -80,7 +81,7 @@ agent 高频跑 `@web-find` / `@screenshot` / `@click` 时,这段延迟会肉眼
 
 - FIFO base 路径超过 95 字节: daemon 启动 fail-fast,明确报错让用户改短 namespace / daemon_name。
 - 多个显式 unixpipe endpoint,或显式 endpoint 与 `socket_path` 不一致:daemon 启动 fail-fast,避免 cleanup/registry 操作错误路径。
-- canonical base path 已被活跃 PID guard 占用:daemon 启动失败,不得 unlink 现有 FIFO。
+- canonical base path 的process lease已被活跃owner持有:daemon启动失败,不得unlink现有FIFO。
 - stale FIFO 文件存在: daemon 启动时 unlink 掉,不报 `Address already in use`。
 - 同机 unixpipe 不可达: client 自动 fallback 到 UDP scout,行为完全透明,远端场景不受影响。
 - 显式 `--entry-point` 给 `unixpipe/<path>` 但路径不存在: 当前实现应 fail-fast,不 fallback(避免静默走错路径)。
@@ -170,7 +171,8 @@ sequenceDiagram
 - 新版本拿到lock后,若metadata含匹配lease字段,即使旧PID被复用也按"前一受管owner已释放"处理.
 - metadata没有lease字段时视为legacy状态;PID仍活跃则拒绝接管,PID失效才迁移.
 - 新版本owner持锁时保留PID内容,旧版本daemon会继续拒绝同资源重复启动.
-- 新client先比对registry与sidecar的完整lease identity,再验证lease lock;旧v1记录继续使用PID + uplink兼容校验.
+- 新client先比对registry与sidecar的完整lease identity,再验证lease lock;纯v1记录不再作为正常owner来源.
+- legacy PID只在新daemon获取lease时作为fail-closed升级门:PID仍活跃则拒绝接管,失效后在原inode上迁移.
 - 新client不得删除稳定lock file;无owner时允许忽略stale metadata,由下一owner原子覆盖.
 - 已发布过新lease metadata的失败启动可以安全重试;发布前的普通I/O失败会恢复旧lock内容.
 - 旧二进制仍会删除它认为stale的PID文件,因此"旧版与新版同时争抢stale资源"无法建立跨版本原子互锁.升级切换必须先停止旧daemon,确认退出后再启动新版;任一版本已经写入存活PID后,另一版本会按兼容PID拒绝重复启动.
@@ -182,7 +184,7 @@ sequenceDiagram
 - `cargo check` 在 macOS / Linux 上通过。
 - `cargo build` 通过,无新增 warning。
 - `cargo test --lib` 所有新增单测通过。
-- `cargo test --test zenoh_unixpipe_fast_path` e2e 集成测试通过(同机成功、self/空 target、local-default、多 FIFO、stale 清理、重复 identity、共享显式 path)。
+- `cargo test --test zenoh_unixpipe_fast_path` e2e 集成测试通过(显式target同机成功、managed self/空target、unmanaged FIFO拒绝、stale清理、重复identity、共享显式path)。
 - 已有的 `cargo test --test zenoh_router_client` 不回归。
 
 ### 性能(目标)
@@ -212,7 +214,7 @@ sequenceDiagram
 - `EXPERIENCE.md`:沉淀 2 条经验
 - "Zenoh 本机 fast path 优先用 unixpipe transport 而不是新增独立 UDS 控制面:保留 Zenoh 协议层语义,只是 link 层换本机 FIFO"
 - "同机 IPC 路径用 `$TMPDIR/rdog-{ns}-{name}.pipe` 而不是 `/var/run/...`:macOS 的 $TMPDIR 已经 per-user,自然有权限隔离"
-- "空 target / self target 先读 local-default registry,再 fallback 到唯一 FIFO 扫描;不要把 `$TMPDIR` 里的多个测试 FIFO 当成真实默认目标"
+- "空target/self只接受active managed local-default registry;`$TMPDIR`中的FIFO只提供升级诊断,不能成为owner身份"
 - `.codex/skills/rdog-control/SKILL.md`:troubleshooting 段加入"同机 ping 慢? 确认 unixpipe 是否 enabled"的诊断路径。
 
 ## 7. ADR(摘要)

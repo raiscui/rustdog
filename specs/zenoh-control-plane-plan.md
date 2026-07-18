@@ -117,15 +117,15 @@ macOS / Linux 上同机 `rdog daemon` + `rdog control <target>` 必须自动走 
 4. **daemon 端**:endpoint composition 同时产出最终 `listen_endpoints` 和唯一 resolved base。
    - 显式 unixpipe endpoint 优先;它与 `unixpipe.socket_path` 同时出现时必须一致。
    - 没有显式 endpoint 且 `unixpipe.enabled = true` 时,自动把 `unixpipe/{base}` 注入列表最前。
-   - destructive cleanup 前依次获取 service-name PID guard 和 resolved base-path PID guard。
-   - 两把 guard 都成功后,才 unlink `<base>` / `<base>_uplink` / `<base>_downlink` 残留文件。
+   - destructive cleanup前依次获取service-name process lease和resolved base-path process lease。
+   - 两把lease都成功后,才unlink`<base>` / `<base>_uplink` / `<base>_downlink`残留文件。
    - 不同 daemon name 复用同一显式 base 时,后启动者失败且不能替换活跃 FIFO。
 5. **空 target / self target**:`rdog control @<line>` 和 `rdog control self @<line>` 先读 local-default registry。
    - daemon 只有在 `[zenoh.unixpipe] local_default = true` 时才声明自己是本 namespace 的本机默认 daemon。
-   - registry 记录 `namespace`、`daemon_name`、`pid` 和 FIFO base path。
-   - client 每次读取时检查 PID 存活和 `<base>_uplink` 是否存在;stale registry 会被清理。
-   - 没有有效 registry 时,才 fallback 到旧的唯一 FIFO 扫描。
-   - 这条规则避免 `$TMPDIR` 里存在多个测试 FIFO 时,空 target 直接失败。
+   - registry必须引用完整process lease identity,并与sidecar metadata、active OS lock和FIFO base一致。
+   - client不再把纯v1 PID记录或部分managed记录当作owner,也不得删除stable lease/registry状态。
+   - 没有active managed registry时,`$TMPDIR` FIFO只用于列出升级诊断,不自动选择任何候选。
+   - 升级期使用显式target;正常空target/self要求daemon配置`local_default = true`。
 6. **远端 fallback**:Unix 平台用户显式 `unixpipe.enabled = false` 可以关掉;跨主机场景 daemon
    端 unixpipe 不在另一台机器的 `$TMPDIR` 里,client 端 `Path::exists` 自然返回 false,透明走 UDP scout。
 7. **CLI 不动**:`rdog control <target>` 仍然是无 flag 命令,fast path 对用户透明。

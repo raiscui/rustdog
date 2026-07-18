@@ -1,6 +1,6 @@
 ---
 name: rdog-control
-version: "1.6"  # 2026-07-14: WeChat内容定位暂时禁用AX,改走window+screenshot+guarded coordinates
+version: "1.7"  # 2026-07-18: 空target/self只接受active managed local-default lease
 description: "Use when controlling a local or named machine through rdog control: target selection, line-control frames, GUI/web/window actions, shell/PTY/@flow, validation, and safety."
 ---
 
@@ -50,10 +50,10 @@ Expected liveness frame:
 
 Local fast path selection:
 
-- valid local-default registry -> use that daemon, even if extra FIFO candidates exist.
-- no valid registry and 0 FIFO candidates -> report no local daemon.
-- no valid registry and 1 FIFO candidate -> use the Zenoh unixpipe fast path.
-- no valid registry and 2+ FIFO candidates -> use an explicit daemon name / namespace.
+- one active managed local-default registry -> use that daemon, even if extra FIFO candidates exist.
+- multiple active managed local-default registries -> select with `--namespace` or an explicit target.
+- no active managed registry -> do not select FIFO candidates, regardless of count.
+- unmanaged FIFO candidates are diagnostics only -> use an explicit target during upgrade, or start a daemon with `[zenoh.unixpipe] local_default = true`.
 
 If command shape matters, verify live syntax:
 

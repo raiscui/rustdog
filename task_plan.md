@@ -366,3 +366,19 @@ handle_daemon_control_query (zenoh_control.rs:240)
 - 最终daemon PID 29465正在`rdog-daemon` tmux运行,bare ping返回pong,重复启动正确拒绝.
 - 详细证据:`task_plan__local_default_atomic_lease.md`、`notes__local_default_atomic_lease.md`.
 - 交付与风险:`WORKLOG__local_default_atomic_lease.md`、`ERRORFIX__local_default_atomic_lease.md`、`LATER_PLANS__local_default_atomic_lease.md`、`EPIPHANY_LOG__local_default_atomic_lease.md`.
+
+## [2026-07-18 12:51:22] [Session ID: omx-1784340333160-6bwnss] [支线索引]: local-default legacy退役
+
+- 启用支线上下文集后缀:`local_default_legacy_retirement`.
+- 触发:用户选择上一轮后续建议1,要求退役旧二进制stale PID unlink迁移窗口.
+- 目标:把legacy状态限制为fail-closed升级入口,managed-only成为唯一正常运行契约,并用旧版/新版矩阵验证不会出现双owner.
+- 当前计划文件:`task_plan__local_default_legacy_retirement.md`.
+
+## [2026-07-18 13:35:10] [Session ID: omx-1784304547353-h5409r] [支线完成]: local-default legacy退役
+
+- 空target/self已改为只接受完整managed registry、匹配sidecar identity与active OS lock;纯v1 PID和FIFO候选不再自动成为owner.
+- active legacy PID检查保留为fail-closed升级门;stopped legacy继续在stable inode上原地迁移.
+- runtime 34、unixpipe e2e 12、router-client 26通过,all-targets check和release build为0 error.
+- 最终安装版hash:`96955460e968cc8ccaf06c1b4fc2bce888e4c5564df5b6f0cac69e348249cc75`;正式daemon PID 19047,bare ping返回pong.
+- 详细证据:`task_plan__local_default_legacy_retirement.md`、`notes__local_default_legacy_retirement.md`、`WORKLOG__local_default_legacy_retirement.md`、`ERRORFIX__local_default_legacy_retirement.md`.
+- 后续边界:Windows ownership迁移见`LATER_PLANS__local_default_legacy_retirement.md`;超长runtime模块拆分仍见`LATER_PLANS__local_default_atomic_lease.md`.

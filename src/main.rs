@@ -379,8 +379,8 @@ fn run(opts: input::Opts) -> Result<(), String> {
                         );
                     }
 
-                    // 本机默认选择由 runtime 层统一处理:
-                    // 先读 local-default registry,再 fallback 到唯一 FIFO 扫描。
+                    // 本机默认选择由runtime层统一处理:
+                    // 只接受active managed local-default registry,FIFO扫描仅用于升级诊断。
                     let target_name = zenoh_runtime::find_local_daemon_name(namespace.as_deref())
                         .map_err(|err| err.to_string())?;
 

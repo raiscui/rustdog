@@ -474,7 +474,7 @@ fn distinct_daemon_names_should_not_replace_a_shared_explicit_unixpipe() {
 // ============================================================================
 
 #[test]
-fn self_target_with_explicit_namespace_should_find_local_daemon() {
+fn self_target_with_explicit_namespace_should_reject_unmanaged_daemon() {
     // 独立 namespace,完全跟其他 `lab` 测试隔离,允许 cargo test 默认并发。
     let ns = format!("self{}", next_port());
     let state_home = TestStateHome::new("self-explicit");
@@ -512,18 +512,17 @@ fn self_target_with_explicit_namespace_should_find_local_daemon() {
     drop(daemon);
     cleanup_unixpipe_artifacts(&base_path);
 
+    assert!(!status.success(), "unmanaged control self should fail");
     assert!(
-        status.success(),
-        "control self should succeed, stderr={stderr}"
-    );
-    assert!(
-        stdout.contains("pong"),
-        "@ping 应该返回 pong,stdout={stdout}"
+        !stdout.contains("pong")
+            && stderr.contains("自动选择已退役")
+            && stderr.contains("显式指定 target name"),
+        "应拒绝unmanaged FIFO并给出显式target恢复路径,stdout={stdout},stderr={stderr}"
     );
 }
 
 #[test]
-fn empty_target_with_namespace_should_find_local_daemon() {
+fn empty_target_with_namespace_should_reject_unmanaged_daemon() {
     let ns = format!("empty{}", next_port());
     let state_home = TestStateHome::new("empty-target");
     cleanup_namespace_artifacts(&ns);
@@ -560,13 +559,12 @@ fn empty_target_with_namespace_should_find_local_daemon() {
     drop(daemon);
     cleanup_unixpipe_artifacts(&base_path);
 
+    assert!(!status.success(), "unmanaged 空target应该失败");
     assert!(
-        status.success(),
-        "control 空 target + --namespace 应该成功,stderr={stderr}"
-    );
-    assert!(
-        stdout.contains("pong"),
-        "@ping 应该返回 pong,stdout={stdout}"
+        !stdout.contains("pong")
+            && stderr.contains("自动选择已退役")
+            && stderr.contains("local_default = true"),
+        "应拒绝unmanaged FIFO并给出managed恢复路径,stdout={stdout},stderr={stderr}"
     );
 }
 
@@ -699,7 +697,7 @@ fn self_target_should_error_when_no_local_daemon_running() {
 }
 
 #[test]
-fn self_target_should_error_when_multiple_local_daemons() {
+fn self_target_should_report_multiple_unmanaged_local_daemons() {
     // 使用私有 namespace/state 启动两个 daemon,不能读取或清理真实 lab registry。
     let namespace = format!("multi{}", next_port());
     let state_home = TestStateHome::new("multiple-daemons");
@@ -765,11 +763,12 @@ fn self_target_should_error_when_multiple_local_daemons() {
 
     assert!(
         !status.success(),
-        "两个本地 daemon 时 control self 应该失败(歧义)"
+        "两个unmanaged本地daemon时control self应该失败"
     );
-    let err_lower = stderr.to_lowercase();
     assert!(
-        err_lower.contains("already exists") || err_lower.contains("多个"),
-        "应该报多个 daemon 冲突,实际 stderr={stderr}"
+        stderr.contains(&daemon_name_a)
+            && stderr.contains(&daemon_name_b)
+            && stderr.contains("自动选择已退役"),
+        "应该列出unmanaged FIFO诊断且拒绝自动选择,实际 stderr={stderr}"
     );
 }

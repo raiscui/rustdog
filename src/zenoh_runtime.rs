@@ -641,10 +641,9 @@ impl LocalDefaultDaemonRecord {
 
     fn owner_is_active(&self) -> io::Result<bool> {
         let Some(metadata) = self.lease_metadata() else {
-            if self.has_any_lease_field() {
-                return Ok(false);
-            }
-            return Ok(process_lease::process_exists(self.pid));
+            // client只接受完整managed lease作为运行态owner证据。
+            // 纯v1 PID记录和部分managed记录都只属于升级输入,不能用于正常发现。
+            return Ok(false);
         };
 
         let guard_path = local_default_daemon_guard_path(&self.namespace)?;
@@ -665,14 +664,6 @@ impl LocalDefaultDaemonRecord {
             && metadata.lease_resource_kind == "local-default"
             && metadata.lease_resource_key == self.namespace)
             .then_some(metadata)
-    }
-
-    fn has_any_lease_field(&self) -> bool {
-        self.lease_schema.is_some()
-            || self.lease_id.is_some()
-            || self.lease_resource_kind.is_some()
-            || self.lease_resource_key.is_some()
-            || self.lease_created_at_unix_ms.is_some()
     }
 }
 
@@ -928,10 +919,10 @@ pub fn compose_listen_endpoints(
     })
 }
 
-/// 在 $TMPDIR(或 /tmp fallback)下扫描所有 unixpipe FIFO,
-/// 找一条唯一可用的本地 daemon,返回它的 daemon_name。
+/// 为`self`/空target解析唯一的managed local-default daemon。
 ///
-/// `namespace_filter = Some(ns)` 时,只扫描 `rdog-{ns}-*.pipe_uplink`;`None` 时扫描全部。
+/// active managed registry是owner身份的唯一真相源。registry不可用时仍扫描
+/// `$TMPDIR`(或`/tmp`fallback)下的FIFO,但只用于生成升级诊断,不再自动选择daemon。
 ///
 /// 关键实现细节:
 /// - Zenoh 1.8.0 `transport_unixpipe` listener 实际只创建 `<base>_uplink` 和 `<base>_downlink`
@@ -939,7 +930,7 @@ pub fn compose_listen_endpoints(
 /// - 因此扫描对象是 `*.pipe_uplink`,不是 `*.pipe`。同名 daemon 的 `<base>_downlink`
 ///   也存在,但只看 `_uplink` 就足够,避免双倍计数。
 /// - 候选 base 路径必须以 `rdog-` 开头,中间段 `{ns}-{name}` 用第一个 `-` 切分。
-/// - 0/1/>1 个候选分别返回 Ok(1) / NotFound(0) / AlreadyExists(>1)。
+/// - 任何FIFO候选都不能代替managed registry;显式target仍可用于升级排障。
 #[cfg(unix)]
 pub fn find_local_daemon_name(namespace_filter: Option<&str>) -> io::Result<String> {
     let local_defaults = find_valid_local_default_daemons(namespace_filter)?;
@@ -1030,11 +1021,10 @@ pub fn find_local_daemon_name(namespace_filter: Option<&str>) -> io::Result<Stri
 
     match candidates.len() {
         0 => Err(no_local_daemon_error(namespace_filter)),
-        1 => Ok(candidates.remove(0)),
         _ => Err(io::Error::new(
-            io::ErrorKind::AlreadyExists,
+            io::ErrorKind::NotFound,
             format!(
-                "本机发现多个 unixpipe FIFO 候选,且没有可用 local-default registry: [{}];请显式指定 target name(例如 `rdog control <name> @<line>`),或在 daemon 配置中设置 `[zenoh.unixpipe] local_default = true`",
+                "本机没有可用的active managed local-default registry;检测到未托管的 unixpipe FIFO 候选: [{}],但FIFO自动选择已退役;请显式指定 target name(例如 `rdog control <name> @<line>`),或在 daemon 配置中设置 `[zenoh.unixpipe] local_default = true`",
                 candidates
                     .iter()
                     .map(|name| format!("`{name}`"))
@@ -1057,14 +1047,14 @@ pub fn find_local_daemon_name(namespace_filter: Option<&str>) -> io::Result<Stri
 
 #[cfg(unix)]
 fn no_local_daemon_error(namespace_filter: Option<&str>) -> io::Error {
-    let detail = match namespace_filter {
-        Some(ns) => format!("namespace={ns} 的本地 daemon"),
-        None => "本地 daemon".to_string(),
+    let scope = match namespace_filter {
+        Some(ns) => format!("namespace={ns} 的"),
+        None => String::new(),
     };
     io::Error::new(
         io::ErrorKind::NotFound,
         format!(
-            "未找到{detail};请先启动 `rdog daemon`,或显式指定 target name(例如 `rdog control <name> @<line>`)"
+            "未找到{scope}active managed local-default registry;请确保daemon配置了 `[zenoh.unixpipe] local_default = true`并已启动,或显式指定 target name(例如 `rdog control <name> @<line>`)"
         ),
     )
 }
@@ -1301,29 +1291,32 @@ mod tests {
     }
 
     #[test]
-    fn find_local_daemon_name_should_prefer_valid_local_default_registry_over_fifo_candidates() {
+    fn find_local_daemon_name_should_reject_legacy_registry_even_with_matching_fifo() {
         let _guard = env_test_guard();
-        with_local_default_test_dir("local-default-prefer", |registry_dir| {
-            with_tmpdir_test_dir("local-default-prefer-fifo", |fifo_dir| {
-                let ns = "ldprefer";
-                let default_base = mock_unixpipe_base_in(fifo_dir, ns, "default.ldprefer");
-                let extra_base = make_mock_unixpipe(ns, "other.ldprefer");
+        with_local_default_test_dir("local-default-legacy", |registry_dir| {
+            with_tmpdir_test_dir("local-default-legacy-fifo", |fifo_dir| {
+                let ns = "ldlegacy";
+                let legacy_base = mock_unixpipe_base_in(fifo_dir, ns, "legacy.ldlegacy");
                 write_local_default_record_for_test(
                     ns,
-                    "default.ldprefer",
+                    "legacy.ldlegacy",
                     std::process::id(),
-                    default_base.clone(),
+                    legacy_base,
                     unix_timestamp_ms(),
                 );
 
-                let result = find_local_daemon_name(Some(ns));
+                let err = find_local_daemon_name(Some(ns)).unwrap_err();
 
-                cleanup_mock_unixpipe(&extra_base);
                 let _ = fs::remove_dir_all(registry_dir);
-
-                assert_eq!(
-                    result.expect("有效 local-default registry 必须优先"),
-                    "default.ldprefer"
+                let msg = err.to_string();
+                assert_eq!(err.kind(), io::ErrorKind::NotFound);
+                assert!(
+                    msg.contains("自动选择已退役"),
+                    "应说明legacy registry/FIFO不能再自动选择: {msg}"
+                );
+                assert!(
+                    msg.contains("显式指定 target name") && msg.contains("local_default = true"),
+                    "应给出显式target和managed local-default恢复路径: {msg}"
                 );
             });
         });
@@ -1346,7 +1339,7 @@ mod tests {
                 );
                 let record_path = local_default_daemon_record_path(ns).expect("path");
 
-                let result = find_local_daemon_name(Some(ns));
+                let err = find_local_daemon_name(Some(ns)).unwrap_err();
 
                 cleanup_mock_unixpipe(&fallback_base);
                 assert!(
@@ -1354,9 +1347,11 @@ mod tests {
                     "client只能忽略stale registry,不能删除稳定lease状态"
                 );
                 let _ = fs::remove_dir_all(registry_dir);
-                assert_eq!(
-                    result.expect("stale registry 后应 fallback"),
-                    "fallback.ldstalepid"
+                let msg = err.to_string();
+                assert_eq!(err.kind(), io::ErrorKind::NotFound);
+                assert!(
+                    msg.contains("fallback.ldstalepid") && msg.contains("自动选择已退役"),
+                    "stale legacy registry后只能报告unmanaged FIFO诊断: {msg}"
                 );
             });
         });
@@ -1370,26 +1365,31 @@ mod tests {
                 let ns = "ldmissup";
                 let missing_base = fifo_dir.join(format!("rdog-{ns}-missing.ldmissup.pipe"));
                 let fallback_base = make_mock_unixpipe(ns, "fallback.ldmissup");
-                write_local_default_record_for_test(
-                    ns,
-                    "missing.ldmissup",
-                    std::process::id(),
-                    missing_base,
-                    unix_timestamp_ms().saturating_sub(LOCAL_DEFAULT_STARTUP_GRACE_MS + 1),
-                );
+                let lease_guard =
+                    register_local_default_daemon(ns, "missing.ldmissup", &missing_base)
+                        .expect("managed local-default owner should register");
                 let record_path = local_default_daemon_record_path(ns).expect("path");
+                let mut record = read_local_default_daemon_record(&record_path)
+                    .expect("managed registry should be readable");
+                record.created_at_unix_ms =
+                    unix_timestamp_ms().saturating_sub(LOCAL_DEFAULT_STARTUP_GRACE_MS + 1);
+                write_local_default_daemon_record(&record_path, &record)
+                    .expect("aged managed registry should be written");
 
-                let result = find_local_daemon_name(Some(ns));
+                let err = find_local_daemon_name(Some(ns)).unwrap_err();
 
                 cleanup_mock_unixpipe(&fallback_base);
                 assert!(
                     record_path.exists(),
                     "缺失uplink时只能忽略registry,不能与新owner并发删除"
                 );
+                drop(lease_guard);
                 let _ = fs::remove_dir_all(registry_dir);
-                assert_eq!(
-                    result.expect("缺失 uplink 后应 fallback"),
-                    "fallback.ldmissup"
+                let msg = err.to_string();
+                assert_eq!(err.kind(), io::ErrorKind::NotFound);
+                assert!(
+                    msg.contains("fallback.ldmissup") && msg.contains("自动选择已退役"),
+                    "缺失uplink后只能报告unmanaged FIFO诊断: {msg}"
                 );
             });
         });
@@ -1402,18 +1402,24 @@ mod tests {
             with_tmpdir_test_dir("local-default-starting-fifo", |fifo_dir| {
                 let ns = "ldstarting";
                 let missing_base = fifo_dir.join(format!("rdog-{ns}-starting.ldstarting.pipe"));
-                write_local_default_record_for_test(
-                    ns,
-                    "starting.ldstarting",
-                    std::process::id(),
-                    missing_base,
-                    unix_timestamp_ms(),
-                );
+                let lease_guard =
+                    register_local_default_daemon(ns, "starting.ldstarting", &missing_base)
+                        .expect("starting managed owner should register");
                 let record_path = local_default_daemon_record_path(ns).expect("path");
+                let record = read_local_default_daemon_record(&record_path)
+                    .expect("starting managed registry should be readable");
+
+                assert!(
+                    record
+                        .should_keep_during_startup(Some(ns))
+                        .expect("startup grace probe should work"),
+                    "active managed owner在短暂缺失uplink时应进入启动宽限期"
+                );
 
                 let result = find_local_daemon_name(Some(ns));
 
                 assert!(record_path.exists(), "启动宽限期内 registry 不应被清理");
+                drop(lease_guard);
                 let _ = fs::remove_dir_all(registry_dir);
                 assert_eq!(result.unwrap_err().kind(), io::ErrorKind::NotFound);
             });
@@ -1427,23 +1433,15 @@ mod tests {
             with_tmpdir_test_dir("local-default-multiple-fifo", |fifo_dir| {
                 let base_a = mock_unixpipe_base_in(fifo_dir, "ldmulti1", "one.ldmulti1");
                 let base_b = mock_unixpipe_base_in(fifo_dir, "ldmulti2", "two.ldmulti2");
-                write_local_default_record_for_test(
-                    "ldmulti1",
-                    "one.ldmulti1",
-                    std::process::id(),
-                    base_a,
-                    unix_timestamp_ms(),
-                );
-                write_local_default_record_for_test(
-                    "ldmulti2",
-                    "two.ldmulti2",
-                    std::process::id(),
-                    base_b,
-                    unix_timestamp_ms(),
-                );
+                let guard_a = register_local_default_daemon("ldmulti1", "one.ldmulti1", &base_a)
+                    .expect("first managed local-default should register");
+                let guard_b = register_local_default_daemon("ldmulti2", "two.ldmulti2", &base_b)
+                    .expect("second managed local-default should register");
 
                 let err = find_local_daemon_name(None).unwrap_err();
 
+                drop(guard_b);
+                drop(guard_a);
                 let _ = fs::remove_dir_all(registry_dir);
                 let msg = err.to_string();
                 assert_eq!(err.kind(), io::ErrorKind::AlreadyExists);
@@ -1572,32 +1570,44 @@ mod tests {
     }
 
     #[test]
-    fn find_local_daemon_name_should_resolve_unique_match_in_namespace() {
+    fn find_local_daemon_name_should_reject_unique_unmanaged_fifo() {
         let _guard = env_test_guard();
         with_tmpdir_test_dir("find-unique", |_| {
             let base = make_mock_unixpipe("rdogfindunique", "findme.findunique");
 
-            let result = find_local_daemon_name(Some("rdogfindunique"));
+            let err = find_local_daemon_name(Some("rdogfindunique")).unwrap_err();
             cleanup_mock_unixpipe(&base);
 
-            result.expect("唯一候选必须能找到");
+            let msg = err.to_string();
+            assert_eq!(err.kind(), io::ErrorKind::NotFound);
+            assert!(msg.contains("findme.findunique"), "应列出诊断候选: {msg}");
+            assert!(
+                msg.contains("自动选择已退役"),
+                "唯一unmanaged FIFO也不能作为owner真相源: {msg}"
+            );
         });
     }
 
     #[test]
-    fn find_local_daemon_name_should_filter_by_namespace() {
+    fn find_local_daemon_name_should_filter_unmanaged_fifo_diagnostics_by_namespace() {
         let _guard = env_test_guard();
         with_tmpdir_test_dir("find-filter", |_| {
             let base_keep = make_mock_unixpipe("rdogkeepns", "keep.keepns");
             let base_skip = make_mock_unixpipe("rdogotherns", "skip.otherns");
 
-            let result = find_local_daemon_name(Some("rdogkeepns"));
+            let err = find_local_daemon_name(Some("rdogkeepns")).unwrap_err();
             cleanup_mock_unixpipe(&base_keep);
             cleanup_mock_unixpipe(&base_skip);
 
-            assert_eq!(
-                result.expect("keepns namespace 必须找到 keep"),
-                "keep.keepns"
+            let msg = err.to_string();
+            assert_eq!(err.kind(), io::ErrorKind::NotFound);
+            assert!(
+                msg.contains("keep.keepns"),
+                "应保留目标namespace候选: {msg}"
+            );
+            assert!(
+                !msg.contains("skip.otherns"),
+                "不能泄漏其他namespace候选: {msg}"
             );
         });
     }
@@ -1614,10 +1624,10 @@ mod tests {
     }
 
     #[test]
-    fn find_local_daemon_name_should_error_when_multiple_match() {
+    fn find_local_daemon_name_should_report_multiple_unmanaged_fifo_candidates() {
         let _guard = env_test_guard();
         with_tmpdir_test_dir("find-multiple", |_| {
-            // 在一个不跟其他测试冲突的 namespace 放两个 daemon,触发多候选
+            // 多个FIFO只作为诊断信息,不能恢复旧的候选选择逻辑。
             let base1 = make_mock_unixpipe("rdogmulti", "first.multi");
             let base2 = make_mock_unixpipe("rdogmulti", "second.multi");
 
@@ -1626,11 +1636,11 @@ mod tests {
             cleanup_mock_unixpipe(&base2);
 
             let err = result.unwrap_err();
-            assert_eq!(err.kind(), io::ErrorKind::AlreadyExists);
+            assert_eq!(err.kind(), io::ErrorKind::NotFound);
             let msg = err.to_string();
-            assert!(msg.contains("多个"), "错误信息应提示多个: {msg}");
             assert!(msg.contains("first.multi"), "应列出 first.multi: {msg}");
             assert!(msg.contains("second.multi"), "应列出 second.multi: {msg}");
+            assert!(msg.contains("自动选择已退役"), "应说明退役契约: {msg}");
         });
     }
 

@@ -25,18 +25,19 @@ rdog control --url ws://127.0.0.1:5555/control
 ## Local Shortcut Forms (本机 fast path)
 
 当 agent 跟 daemon 在同一台机器上跑、且只需要连本机 daemon 时,
-可以省略 `TARGET`。客户端会先读 local-default registry,再 fallback 到 `$TMPDIR/rdog-{ns}-*.pipe_uplink` 唯一候选扫描。
+可以省略 `TARGET`。客户端只接受active managed local-default registry作为owner;
+`$TMPDIR/rdog-{ns}-*.pipe_uplink`只提供升级诊断,不会被自动选择。
 底层走 Zenoh `transport_unixpipe`(Zenoh 1.8.0 的 named pipe / FIFO transport),本机 link
 比 UDP loopback 快 2~5x,典型 `rdog control @ping` round-trip ≈ 20ms。
 
 ```bash
 # === 显式 self 关键字 ===
 # 等价于 `rdog control <name> @<line>`,但省略 target name。
-# client 优先使用 local-default registry,没有 registry 时才扫唯一 FIFO。
+# client要求daemon通过`local_default = true`发布managed registry。
 rdog control self @ping
 rdog control self @ping @capabilities#1 @observe#3
 
-# 也支持显式 namespace,缩小扫描范围(本机多 daemon 时不会歧义)
+# 也支持显式namespace,缩小registry解析和FIFO诊断范围。
 rdog control self --namespace lab @ping
 
 # === 空 target + 显式 namespace ===
@@ -51,42 +52,42 @@ rdog control @ping
 rdog control @ping @capabilities#1 @observe#3
 ```
 
-**客户端扫描规则**(`src/zenoh_runtime.rs::find_local_daemon_name`):
+**客户端解析规则**(`src/zenoh_runtime.rs::find_local_daemon_name`):
 
 1. 先读 local-default registry。
    - registry 由 daemon 启动时的 `[zenoh.unixpipe] local_default = true` 写入。
-   - 每次读取都会检查 schema、namespace、pid 存活和 `<base>_uplink` 是否存在。
-   - stale registry 会被清理。
-2. 有且只有一个有效 registry → 使用 registry 里的 `daemon_name`。
-3. 多个有效 registry → 报 `AlreadyExists`,要求加 `--namespace` 或显式 target。
-4. 没有有效 registry → fallback 到 FIFO 扫描:
+   - 每次读取都会检查schema、namespace、完整lease identity、sidecar metadata、active OS lock和`<base>_uplink`。
+   - 纯v1 PID记录、部分managed记录和已释放lease都不是正常owner;client不会删除stable状态文件。
+2. 有且只有一个active managed registry → 使用registry里的`daemon_name`。
+3. 多个active managed registry → 报`AlreadyExists`,要求加`--namespace`或显式target。
+4. 没有active managed registry → 扫描FIFO生成诊断:
    - 路径模板 `{tmpdir}/rdog-{namespace}-{daemon_name}.pipe`
    - 找所有匹配 `rdog-*.pipe_uplink`(Zenoh 实际只创建 `_uplink` 和 `_downlink` 两个 FIFO,<base> 本身不一定存在)
    - 把中间段 `{ns}-{name}` 用第一个 `-` 切分
    - 如果传了 `--namespace`,只保留 `ns == filter` 的候选
 5. FIFO 候选排序 + dedup 后:
-   - **0 个** → `NotFound` 错,提示启动 daemon 或显式指定 target
-   - **1 个** → 用这唯一的一个,namespace 必要时从 `daemon_name` 的点后缀推断(`mac.lab` → `lab`)
-   - **≥2 个** → `AlreadyExists` 错,列出全部候选,要求显式指定 target 或开启 `local_default`
+   - **0个** → `NotFound`,提示启用`local_default = true`并启动daemon,或显式指定target
+   - **1个或多个** → `NotFound`,列出全部候选并说明FIFO自动选择已退役
 
 **错误样例**:
 
 ```text
 # 0 个 daemon
 $ rdog control @ping
-error: 未找到本地 daemon;请先启动 `rdog daemon`,或显式指定 target name
-       (例如 `rdog control <name> @<line>`)
+error: 未找到active managed local-default registry;请确保daemon配置了
+       `[zenoh.unixpipe] local_default = true`并已启动,或显式指定 target name
 
-# ≥2 个 daemon(本机有 mac.lab 和 other.lab 同 namespace)
+# 存在unmanaged FIFO候选
 $ rdog control @ping
-error: 本机发现多个 unixpipe FIFO 候选,且没有可用 local-default registry: [`mac.lab`, `other.lab`];
-       请显式指定 target name,或在 daemon 配置中设置 `[zenoh.unixpipe] local_default = true`
+error: 本机没有可用的active managed local-default registry;检测到未托管的 unixpipe FIFO 候选:
+       [`mac.lab`, `other.lab`],但FIFO自动选择已退役;请显式指定 target name,
+       或在daemon配置中设置`[zenoh.unixpipe] local_default = true`
 ```
 
 **和显式 target 的关系**:
 
 - `rdog control <name> @ping` = 强制指定 daemon,即使本地有多个也不歧义
-- `rdog control self @ping` / `rdog control @ping` = 优先使用 local-default registry;没有 registry 时才依赖本机唯一 FIFO 假设
+- `rdog control self @ping` / `rdog control @ping` = 只使用active managed local-default registry
 - `rdog control --entry-point udp/...` = 显式指定 entry point(跨主机场景)
 
 **PTY / 长会话**:

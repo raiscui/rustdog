@@ -116,6 +116,7 @@ keyexpr = "rdog/default/daemon/mini-a.lab/member/mini-a.lab/keyinput"
 [zenoh.unixpipe]
 enabled = true
 # 让 `rdog control @ping` / `rdog control @screenshot` 优先选择本配置里的 daemon。
-# 没有这个显式默认身份时,空 target 只能退回到 `$TMPDIR` 里唯一 FIFO 候选扫描。
+# 空target/self只接受这个managed local-default身份;FIFO只用于诊断,不会被自动选择。
+# 升级旧daemon时可临时使用显式target,完成升级后应保持这里为true。
 local_default = true
 # ----------------------------------------------------------------------------

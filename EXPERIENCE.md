@@ -367,3 +367,11 @@
 - 请求目标和实际hit owner是两份不同状态,必须分别采集证据后再建立关联。
 - GUI自动化中,稳定操作错误目标比明确返回"不可定位"更危险。
 - 对坐标发现机制的测试必须包含foreign重叠窗口反例,不能只用单窗口正向fixture。
+
+## [2026-07-18 13:26:23] [Session ID: omx-1784304547353-h5409r] local-default升级必须拆开正常owner与legacy安全门
+
+- 空target/self的正常owner只能来自完整registry、匹配sidecar identity和active OS lock.纯v1 PID记录与`$TMPDIR` FIFO都不能证明owner身份;FIFO最多提供显式target排障线索.
+- `ProcessLease::acquire`中的active legacy PID检查不能随PID fallback一起删除.它只在新daemon已拿到exclusive lock、但前态没有匹配managed metadata时fail closed,防止仍运行的旧daemon与新版并行.
+- stopped legacy状态应在同一个stable lock inode上原地迁移.新owner覆盖PID和sidecar metadata,不要unlink lock file.
+- 新版代码无法约束仍可执行的旧二进制.真实旧版会在判断PID stale后unlink新lease inode,所以部署验收必须包含旧副本/自启动项审计,不能只依赖协议兼容.
+- TDD必须同时覆盖"纯v1 registry + matching FIFO"和"无registry + 唯一FIFO".只关闭其中一条路径,另一条仍会把旧daemon恢复成自动发现目标.
