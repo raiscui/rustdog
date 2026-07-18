@@ -1,9 +1,10 @@
+use std::{fs, io, path::PathBuf, time::Duration};
+
+#[cfg(not(unix))]
 use std::{
-    fs::{self, OpenOptions},
-    io::{self, Write},
-    path::PathBuf,
+    fs::OpenOptions,
+    io::Write,
     process::{Command, Stdio},
-    time::Duration,
 };
 
 use zenoh::Wait;
@@ -22,9 +23,13 @@ pub(super) struct ResolvedTarget {
 
 #[derive(Debug)]
 pub(super) struct DaemonNameGuard {
+    #[cfg(unix)]
+    _lease: crate::zenoh_runtime::process_lease::ProcessLease,
+    #[cfg(not(unix))]
     path: PathBuf,
 }
 
+#[cfg(not(unix))]
 impl Drop for DaemonNameGuard {
     fn drop(&mut self) {
         let _ = fs::remove_file(&self.path);
@@ -81,34 +86,64 @@ pub(super) fn acquire_daemon_name_guard(
     let lock_dir = zenoh_guard_dir()?;
     fs::create_dir_all(&lock_dir)?;
     let path = lock_dir.join(format!("{namespace}__{daemon_name}.pid"));
-    let pid = std::process::id().to_string();
 
-    loop {
-        match OpenOptions::new().create_new(true).write(true).open(&path) {
-            Ok(mut file) => {
-                file.write_all(pid.as_bytes())?;
-                return Ok(DaemonNameGuard { path });
+    #[cfg(unix)]
+    {
+        let metadata_path = crate::zenoh_runtime::process_lease::metadata_path_for_lock(&path);
+        let resource_key = format!("{namespace}/{daemon_name}");
+        let mut lease = crate::zenoh_runtime::process_lease::ProcessLease::acquire(
+            path.clone(),
+            metadata_path,
+            "service-name",
+            &resource_key,
+        )
+        .map_err(|err| {
+            if err.kind() == io::ErrorKind::AlreadyExists {
+                io::Error::new(
+                    io::ErrorKind::AlreadyExists,
+                    format!(
+                        "发现重复 service_name 活跃 member: namespace={namespace}, service_name={daemon_name}, local_guard={}",
+                        path.display()
+                    ),
+                )
+            } else {
+                err
             }
-            Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {
-                let existing = fs::read_to_string(&path).unwrap_or_default();
-                let existing_pid = existing.trim().parse::<u32>().ok();
-                if existing_pid.is_some_and(process_exists) {
-                    return Err(io::Error::new(
-                        io::ErrorKind::AlreadyExists,
-                        format!(
-                            "发现重复 service_name 活跃 member: namespace={namespace}, service_name={daemon_name}, local_guard={}",
-                            path.display()
-                        ),
-                    ));
-                }
+        })?;
+        lease.publish_metadata()?;
+        return Ok(DaemonNameGuard { _lease: lease });
+    }
 
-                match fs::remove_file(&path) {
-                    Ok(()) => continue,
-                    Err(remove_err) if remove_err.kind() == io::ErrorKind::NotFound => continue,
-                    Err(remove_err) => return Err(remove_err),
+    #[cfg(not(unix))]
+    {
+        let pid = std::process::id().to_string();
+        loop {
+            match OpenOptions::new().create_new(true).write(true).open(&path) {
+                Ok(mut file) => {
+                    file.write_all(pid.as_bytes())?;
+                    return Ok(DaemonNameGuard { path });
                 }
+                Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {
+                    let existing = fs::read_to_string(&path).unwrap_or_default();
+                    let existing_pid = existing.trim().parse::<u32>().ok();
+                    if existing_pid.is_some_and(process_exists) {
+                        return Err(io::Error::new(
+                            io::ErrorKind::AlreadyExists,
+                            format!(
+                                "发现重复 service_name 活跃 member: namespace={namespace}, service_name={daemon_name}, local_guard={}",
+                                path.display()
+                            ),
+                        ));
+                    }
+
+                    match fs::remove_file(&path) {
+                        Ok(()) => continue,
+                        Err(remove_err) if remove_err.kind() == io::ErrorKind::NotFound => continue,
+                        Err(remove_err) => return Err(remove_err),
+                    }
+                }
+                Err(err) => return Err(err),
             }
-            Err(err) => return Err(err),
         }
     }
 }
@@ -235,6 +270,7 @@ fn zenoh_guard_dir() -> io::Result<PathBuf> {
     Ok(std::env::temp_dir().join("rustdog").join("zenoh-guards"))
 }
 
+#[cfg(not(unix))]
 fn process_exists(pid: u32) -> bool {
     #[cfg(windows)]
     {

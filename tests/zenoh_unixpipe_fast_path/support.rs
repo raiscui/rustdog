@@ -162,6 +162,11 @@ impl TestDaemon {
         &self.output
     }
 
+    /// 模拟daemon崩溃:Unix上的 `Child::kill` 发送SIGKILL,不会运行子进程Drop.
+    pub(super) fn kill_abruptly(&mut self) {
+        self.stop();
+    }
+
     fn stop(&mut self) {
         if self.child.try_wait().ok().flatten().is_none() {
             let _ = self.child.kill();

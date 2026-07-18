@@ -351,3 +351,18 @@ handle_daemon_control_query (zenoh_control.rs:240)
 - 真实 `mac.lab` daemon已切换到安装版PID 69053;重复启动正确失败,前后裸 ping都返回pong.
 - 详细计划与证据: `task_plan__local_default_registry_recovery.md`、`notes__local_default_registry_recovery.md`.
 - 交付与后续: `WORKLOG__local_default_registry_recovery.md`、`ERRORFIX__local_default_registry_recovery.md`、`LATER_PLANS__local_default_registry_recovery.md`、`EPIPHANY_LOG__local_default_registry_recovery.md`.
+
+## [2026-07-18 10:54:47] [Session ID: omx-1784304547353-h5409r] [支线索引]: local-default 原子 lease状态源
+
+- 启用支线上下文集后缀: `local_default_atomic_lease`.
+- 触发:用户要求按建议继续,上一轮首个后续风险是PID复用、双文件写入中断与guard状态分裂.
+- 目标:用OS生命周期绑定的ownership lease统一三类guard记录格式与校验语义,同时保留现有v1本地状态兼容恢复.
+- 当前计划文件: `task_plan__local_default_atomic_lease.md`.
+
+## [2026-07-18 12:40:06] [Session ID: omx-1784340333160-6bwnss] [支线完成]: local-default 原子process lease
+
+- Unix service-name、canonical path和local-default已迁移到OS文件锁lease,保留独立冲突域与legacy v1读取兼容.
+- 已验证metadata失败回滚、lease ID关联、部分managed拒绝、SIGKILL接管和stable inode不变.
+- 最终daemon PID 29465正在`rdog-daemon` tmux运行,bare ping返回pong,重复启动正确拒绝.
+- 详细证据:`task_plan__local_default_atomic_lease.md`、`notes__local_default_atomic_lease.md`.
+- 交付与风险:`WORKLOG__local_default_atomic_lease.md`、`ERRORFIX__local_default_atomic_lease.md`、`LATER_PLANS__local_default_atomic_lease.md`、`EPIPHANY_LOG__local_default_atomic_lease.md`.

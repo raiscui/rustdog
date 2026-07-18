@@ -1,10 +1,7 @@
 use std::{
-    fs,
-    fs::OpenOptions,
-    io::{self, Write},
+    fs, io,
     net::{IpAddr, SocketAddr},
     path::{Path, PathBuf},
-    process::{Command, Stdio},
     str::FromStr,
     sync::mpsc,
     thread,
@@ -16,6 +13,9 @@ use serde::{Deserialize, Serialize};
 use zenoh::{config::WhatAmI, scouting::Hello, Config, Session, Wait};
 
 use crate::config::UNIXPIPE_SOCKET_PATH_MAX_BYTES;
+
+#[cfg(unix)]
+pub(crate) mod process_lease;
 
 pub fn open_router_session(listen_endpoints: &[String]) -> io::Result<Session> {
     open_session("router", &[], listen_endpoints)
@@ -355,25 +355,11 @@ fn unixpipe_fifo_paths(base: &Path) -> [PathBuf; 2] {
 /// unixpipe base path 的跨进程 ownership guard。
 ///
 /// guard 与 base path 放在同一目录,确保不同 daemon identity 只要解析到同一 FIFO,
-/// 就会竞争同一把锁。PID 已死亡时允许新 daemon 接管并执行 stale cleanup。
+/// 就会竞争同一把锁。进程退出后OS释放lock,新 daemon可接管并执行 stale cleanup。
 #[cfg(unix)]
 #[derive(Debug)]
 pub struct UnixpipePathGuard {
-    guard_path: PathBuf,
-    pid: u32,
-}
-
-#[cfg(unix)]
-impl Drop for UnixpipePathGuard {
-    fn drop(&mut self) {
-        let owned_by_self = fs::read_to_string(&self.guard_path)
-            .ok()
-            .and_then(|value| value.trim().parse::<u32>().ok())
-            == Some(self.pid);
-        if owned_by_self {
-            let _ = fs::remove_file(&self.guard_path);
-        }
-    }
+    _lease: process_lease::ProcessLease,
 }
 
 /// 获取 base path ownership,随后清理崩溃残留 FIFO。
@@ -392,51 +378,29 @@ fn acquire_unixpipe_path_guard(base: &Path) -> io::Result<UnixpipePathGuard> {
     let mut guard_name = base.as_os_str().to_os_string();
     guard_name.push(".rdog-owner.pid");
     let guard_path = PathBuf::from(guard_name);
-    let pid = std::process::id();
-
-    loop {
-        match OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .open(&guard_path)
-        {
-            Ok(mut file) => {
-                if let Err(err) = file.write_all(pid.to_string().as_bytes()) {
-                    let _ = fs::remove_file(&guard_path);
-                    return Err(io::Error::new(
-                        err.kind(),
-                        format!(
-                            "写入 unixpipe ownership guard {} 失败: {err}",
-                            guard_path.display()
-                        ),
-                    ));
-                }
-                return Ok(UnixpipePathGuard { guard_path, pid });
-            }
-            Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {
-                let existing_pid = fs::read_to_string(&guard_path)
-                    .ok()
-                    .and_then(|value| value.trim().parse::<u32>().ok());
-                if existing_pid.is_some_and(process_exists) {
-                    return Err(io::Error::new(
-                        io::ErrorKind::AlreadyExists,
-                        format!(
-                            "unixpipe FIFO base 已被活跃 daemon 占用: base={}, owner_guard={}",
-                            base.display(),
-                            guard_path.display()
-                        ),
-                    ));
-                }
-
-                match fs::remove_file(&guard_path) {
-                    Ok(()) => continue,
-                    Err(remove_err) if remove_err.kind() == io::ErrorKind::NotFound => continue,
-                    Err(remove_err) => return Err(remove_err),
-                }
-            }
-            Err(err) => return Err(err),
+    let metadata_path = process_lease::metadata_path_for_lock(&guard_path);
+    let mut lease = process_lease::ProcessLease::acquire(
+        guard_path.clone(),
+        metadata_path,
+        "unixpipe-path",
+        &base.to_string_lossy(),
+    )
+    .map_err(|err| {
+        if err.kind() == io::ErrorKind::AlreadyExists {
+            io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                format!(
+                    "unixpipe FIFO base 已被活跃 daemon 占用: base={}, owner_guard={}",
+                    base.display(),
+                    guard_path.display()
+                ),
+            )
+        } else {
+            err
         }
-    }
+    })?;
+    lease.publish_metadata()?;
+    Ok(UnixpipePathGuard { _lease: lease })
 }
 
 /// 清理 stale FIFO 文件。
@@ -499,20 +463,7 @@ fn cleanup_stale_unixpipe_socket(base: &Path) -> io::Result<()> {
 #[cfg(unix)]
 #[derive(Debug)]
 pub struct LocalDefaultDaemonGuard {
-    daemon_name: String,
-    record_path: PathBuf,
-    guard_path: PathBuf,
-}
-
-#[cfg(unix)]
-impl Drop for LocalDefaultDaemonGuard {
-    fn drop(&mut self) {
-        let _ = cleanup_local_default_daemon_paths(
-            &self.record_path,
-            &self.guard_path,
-            &self.daemon_name,
-        );
-    }
+    _lease: process_lease::ProcessLease,
 }
 
 #[cfg(unix)]
@@ -524,6 +475,16 @@ struct LocalDefaultDaemonRecord {
     pid: u32,
     unixpipe_base: PathBuf,
     created_at_unix_ms: u128,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    lease_schema: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    lease_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    lease_resource_kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    lease_resource_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    lease_created_at_unix_ms: Option<u128>,
 }
 
 #[cfg(unix)]
@@ -539,69 +500,45 @@ pub fn register_local_default_daemon(
     fs::create_dir_all(&dir)?;
     let record_path = local_default_daemon_record_path(namespace)?;
     let guard_path = local_default_daemon_guard_path(namespace)?;
-    let pid = std::process::id();
-
-    loop {
-        match OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .open(&guard_path)
-        {
-            Ok(mut file) => {
-                file.write_all(pid.to_string().as_bytes())?;
-                break;
-            }
-            Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {
-                let existing = fs::read_to_string(&guard_path).unwrap_or_default();
-                let existing_pid = existing.trim().parse::<u32>().ok();
-                if existing_pid.is_some_and(process_exists) {
-                    return Err(io::Error::new(
-                        io::ErrorKind::AlreadyExists,
-                        format!(
-                            "本机默认 daemon 已存在: namespace={namespace}, local_default_guard={}",
-                            guard_path.display()
-                        ),
-                    ));
-                }
-                remove_local_default_file_if_present(&guard_path)?;
-                remove_local_default_file_if_present(&record_path)?;
-            }
-            Err(err) => return Err(err),
+    let metadata_path = process_lease::metadata_path_for_lock(&guard_path);
+    let mut lease = process_lease::ProcessLease::acquire(
+        guard_path.clone(),
+        metadata_path,
+        "local-default",
+        namespace,
+    )
+    .map_err(|err| {
+        if err.kind() == io::ErrorKind::AlreadyExists {
+            io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                format!(
+                    "本机默认 daemon 已存在: namespace={namespace}, local_default_guard={}",
+                    guard_path.display()
+                ),
+            )
+        } else {
+            err
         }
-    }
+    })?;
+    lease.publish_metadata()?;
+    let lease_metadata = lease.metadata();
 
     let record = LocalDefaultDaemonRecord {
         schema: LOCAL_DEFAULT_SCHEMA.to_string(),
         namespace: namespace.to_string(),
         daemon_name: daemon_name.to_string(),
-        pid,
+        pid: lease_metadata.pid,
         unixpipe_base: unixpipe_base.to_path_buf(),
         created_at_unix_ms: unix_timestamp_ms(),
+        lease_schema: Some(lease_metadata.lease_schema.clone()),
+        lease_id: Some(lease_metadata.lease_id.clone()),
+        lease_resource_kind: Some(lease_metadata.lease_resource_kind.clone()),
+        lease_resource_key: Some(lease_metadata.lease_resource_key.clone()),
+        lease_created_at_unix_ms: Some(lease_metadata.lease_created_at_unix_ms),
     };
     write_local_default_daemon_record(&record_path, &record)?;
 
-    Ok(LocalDefaultDaemonGuard {
-        daemon_name: daemon_name.to_string(),
-        record_path,
-        guard_path,
-    })
-}
-
-#[cfg(unix)]
-fn cleanup_local_default_daemon_paths(
-    record_path: &Path,
-    guard_path: &Path,
-    daemon_name: &str,
-) -> io::Result<()> {
-    if let Ok(record) = read_local_default_daemon_record(&record_path) {
-        if record.daemon_name != daemon_name {
-            return Ok(());
-        }
-    }
-
-    remove_local_default_file_if_present(&record_path)?;
-    remove_local_default_file_if_present(&guard_path)?;
-    Ok(())
+    Ok(LocalDefaultDaemonGuard { _lease: lease })
 }
 
 #[cfg(unix)]
@@ -660,65 +597,82 @@ fn load_valid_local_default_record(
     let record = match read_local_default_daemon_record(record_path) {
         Ok(record) => record,
         Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(None),
-        Err(_) => {
-            remove_local_default_file_if_present(record_path)?;
-            return Ok(None);
-        }
+        Err(_) => return Ok(None),
     };
 
-    if record.is_valid_for(namespace_filter) {
+    if record.is_valid_for(namespace_filter)? {
         return Ok(Some(record));
     }
 
-    if record.should_keep_during_startup(namespace_filter) {
+    if record.should_keep_during_startup(namespace_filter)? {
         return Ok(None);
     }
 
-    remove_stale_local_default(&record, Some(record_path))?;
     Ok(None)
 }
 
 #[cfg(unix)]
 impl LocalDefaultDaemonRecord {
-    fn is_valid_for(&self, namespace_filter: Option<&str>) -> bool {
-        if self.schema != LOCAL_DEFAULT_SCHEMA {
-            return false;
+    fn is_valid_for(&self, namespace_filter: Option<&str>) -> io::Result<bool> {
+        if !self.identity_is_valid(namespace_filter) || !self.owner_is_active()? {
+            return Ok(false);
         }
-        if namespace_filter.is_some_and(|namespace| namespace != self.namespace) {
-            return false;
-        }
-        if validate_unixpipe_component("namespace", &self.namespace).is_err()
-            || validate_unixpipe_component("daemon_name", &self.daemon_name).is_err()
-        {
-            return false;
-        }
-        if !process_exists(self.pid) {
-            return false;
-        }
-        unixpipe_base_path_alive(&self.unixpipe_base)
+        Ok(unixpipe_base_path_alive(&self.unixpipe_base))
     }
 
-    fn should_keep_during_startup(&self, namespace_filter: Option<&str>) -> bool {
-        if self.schema != LOCAL_DEFAULT_SCHEMA {
-            return false;
-        }
-        if namespace_filter.is_some_and(|namespace| namespace != self.namespace) {
-            return false;
-        }
-        if validate_unixpipe_component("namespace", &self.namespace).is_err()
-            || validate_unixpipe_component("daemon_name", &self.daemon_name).is_err()
-        {
-            return false;
-        }
-        if !process_exists(self.pid) {
-            return false;
+    fn should_keep_during_startup(&self, namespace_filter: Option<&str>) -> io::Result<bool> {
+        if !self.identity_is_valid(namespace_filter) || !self.owner_is_active()? {
+            return Ok(false);
         }
         if unixpipe_base_path_alive(&self.unixpipe_base) {
-            return false;
+            return Ok(false);
         }
 
-        unix_timestamp_ms().saturating_sub(self.created_at_unix_ms)
-            <= LOCAL_DEFAULT_STARTUP_GRACE_MS
+        Ok(unix_timestamp_ms().saturating_sub(self.created_at_unix_ms)
+            <= LOCAL_DEFAULT_STARTUP_GRACE_MS)
+    }
+
+    fn identity_is_valid(&self, namespace_filter: Option<&str>) -> bool {
+        self.schema == LOCAL_DEFAULT_SCHEMA
+            && !namespace_filter.is_some_and(|namespace| namespace != self.namespace)
+            && validate_unixpipe_component("namespace", &self.namespace).is_ok()
+            && validate_unixpipe_component("daemon_name", &self.daemon_name).is_ok()
+    }
+
+    fn owner_is_active(&self) -> io::Result<bool> {
+        let Some(metadata) = self.lease_metadata() else {
+            if self.has_any_lease_field() {
+                return Ok(false);
+            }
+            return Ok(process_lease::process_exists(self.pid));
+        };
+
+        let guard_path = local_default_daemon_guard_path(&self.namespace)?;
+        process_lease::managed_lease_is_active(&guard_path, &metadata)
+    }
+
+    fn lease_metadata(&self) -> Option<process_lease::LeaseMetadata> {
+        let metadata = process_lease::LeaseMetadata {
+            lease_schema: self.lease_schema.clone()?,
+            lease_id: self.lease_id.clone()?,
+            lease_resource_kind: self.lease_resource_kind.clone()?,
+            lease_resource_key: self.lease_resource_key.clone()?,
+            lease_created_at_unix_ms: self.lease_created_at_unix_ms?,
+            pid: self.pid,
+        };
+        (metadata.lease_schema == process_lease::PROCESS_LEASE_SCHEMA
+            && !metadata.lease_id.is_empty()
+            && metadata.lease_resource_kind == "local-default"
+            && metadata.lease_resource_key == self.namespace)
+            .then_some(metadata)
+    }
+
+    fn has_any_lease_field(&self) -> bool {
+        self.lease_schema.is_some()
+            || self.lease_id.is_some()
+            || self.lease_resource_kind.is_some()
+            || self.lease_resource_key.is_some()
+            || self.lease_created_at_unix_ms.is_some()
     }
 }
 
@@ -741,8 +695,7 @@ fn write_local_default_daemon_record(
     path: &Path,
     record: &LocalDefaultDaemonRecord,
 ) -> io::Result<()> {
-    let text = serde_json::to_string_pretty(record).map_err(to_io_error)?;
-    fs::write(path, text)
+    process_lease::write_json_atomically(path, record)
 }
 
 #[cfg(unix)]
@@ -799,55 +752,11 @@ fn local_default_daemon_guard_path(namespace: &str) -> io::Result<PathBuf> {
 }
 
 #[cfg(unix)]
-fn remove_stale_local_default(
-    record: &LocalDefaultDaemonRecord,
-    record_path: Option<&Path>,
-) -> io::Result<()> {
-    let record_path = match record_path {
-        Some(path) => path.to_path_buf(),
-        None => local_default_daemon_record_path(&record.namespace)?,
-    };
-    let guard_path = local_default_daemon_guard_path(&record.namespace).ok();
-    remove_local_default_file_if_present(&record_path)?;
-    if let Some(guard_path) = guard_path {
-        remove_local_default_file_if_present(&guard_path)?;
-    }
-    Ok(())
-}
-
-#[cfg(unix)]
-fn remove_local_default_file_if_present(path: &Path) -> io::Result<()> {
-    match fs::remove_file(path) {
-        Ok(()) => Ok(()),
-        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
-        Err(err) => Err(io::Error::new(
-            err.kind(),
-            format!("删除本机默认 daemon 文件 {} 失败: {err}", path.display()),
-        )),
-    }
-}
-
-#[cfg(unix)]
 fn unix_timestamp_ms() -> u128 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_millis())
         .unwrap_or_default()
-}
-
-#[cfg(unix)]
-fn process_exists(pid: u32) -> bool {
-    if pid == 0 {
-        return false;
-    }
-
-    Command::new("kill")
-        .args(["-0", &pid.to_string()])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .ok()
-        .is_some_and(|status| status.success())
 }
 
 /// 客户端探测:base 路径对应的 FIFO 是否有一个 reader 在监听。
@@ -1381,6 +1290,11 @@ mod tests {
             pid,
             unixpipe_base,
             created_at_unix_ms,
+            lease_schema: None,
+            lease_id: None,
+            lease_resource_kind: None,
+            lease_resource_key: None,
+            lease_created_at_unix_ms: None,
         };
         write_local_default_daemon_record(&record_path, &record)
             .expect("registry record 应该能写入");
@@ -1416,7 +1330,7 @@ mod tests {
     }
 
     #[test]
-    fn find_local_daemon_name_should_ignore_and_remove_stale_local_default_pid() {
+    fn find_local_daemon_name_should_ignore_but_preserve_stale_local_default_lease() {
         let _guard = env_test_guard();
         with_local_default_test_dir("local-default-stale-pid", |registry_dir| {
             with_tmpdir_test_dir("local-default-stale-pid-fifo", |fifo_dir| {
@@ -1435,7 +1349,10 @@ mod tests {
                 let result = find_local_daemon_name(Some(ns));
 
                 cleanup_mock_unixpipe(&fallback_base);
-                assert!(!record_path.exists(), "stale registry 应该被清理");
+                assert!(
+                    record_path.exists(),
+                    "client只能忽略stale registry,不能删除稳定lease状态"
+                );
                 let _ = fs::remove_dir_all(registry_dir);
                 assert_eq!(
                     result.expect("stale registry 后应 fallback"),
@@ -1466,8 +1383,8 @@ mod tests {
 
                 cleanup_mock_unixpipe(&fallback_base);
                 assert!(
-                    !record_path.exists(),
-                    "缺失 uplink 且超过启动宽限的 registry 应该被清理"
+                    record_path.exists(),
+                    "缺失uplink时只能忽略registry,不能与新owner并发删除"
                 );
                 let _ = fs::remove_dir_all(registry_dir);
                 assert_eq!(
@@ -1544,14 +1461,112 @@ mod tests {
             with_tmpdir_test_dir("local-default-guard-fifo", |fifo_dir| {
                 let ns = "ldguard";
                 let base = mock_unixpipe_base_in(fifo_dir, ns, "first.ldguard");
-                let _guard =
+                let first_guard =
                     register_local_default_daemon(ns, "first.ldguard", &base).expect("first guard");
 
-                let err = register_local_default_daemon(ns, "second.ldguard", &base).unwrap_err();
+                assert_eq!(
+                    find_local_daemon_name(Some(ns))
+                        .expect("shared probe应该识别active managed lease"),
+                    "first.ldguard"
+                );
 
-                let _ = fs::remove_dir_all(registry_dir);
+                let err = register_local_default_daemon(ns, "second.ldguard", &base).unwrap_err();
                 assert_eq!(err.kind(), io::ErrorKind::AlreadyExists);
                 assert!(err.to_string().contains("本机默认 daemon 已存在"));
+
+                let guard_path = local_default_daemon_guard_path(ns).expect("guard path");
+                let record_path = local_default_daemon_record_path(ns).expect("record path");
+                drop(first_guard);
+
+                // lease文件是稳定inode,owner退出只释放lock,不能删除路径。
+                assert!(guard_path.exists(), "namespace lease file应该保留");
+                assert!(record_path.exists(), "registry metadata应该保留");
+                let second_guard = register_local_default_daemon(ns, "second.ldguard", &base)
+                    .expect("released managed lease应该允许新owner接管");
+                drop(second_guard);
+
+                let _ = fs::remove_dir_all(registry_dir);
+            });
+        });
+    }
+
+    #[test]
+    fn managed_local_default_record_should_require_matching_lease_id() {
+        let _guard = env_test_guard();
+        with_local_default_test_dir("local-default-lease-id", |registry_dir| {
+            with_tmpdir_test_dir("local-default-lease-id-fifo", |fifo_dir| {
+                let namespace = "ldleaseid";
+                let base = mock_unixpipe_base_in(fifo_dir, namespace, "old.ldleaseid");
+                let first_guard = register_local_default_daemon(namespace, "old.ldleaseid", &base)
+                    .expect("first local-default owner should register");
+                let record_path = local_default_daemon_record_path(namespace).expect("record path");
+                let stale_record = read_local_default_daemon_record(&record_path)
+                    .expect("first managed record should be readable");
+                let guard_path = local_default_daemon_guard_path(namespace).expect("guard path");
+                let metadata_path = process_lease::metadata_path_for_lock(&guard_path);
+                drop(first_guard);
+
+                // 模拟同PID的新lease已经持锁并发布不同lease ID,但registry尚未覆盖的窗口。
+                let replacement_metadata = process_lease::LeaseMetadata {
+                    lease_schema: process_lease::PROCESS_LEASE_SCHEMA.to_owned(),
+                    lease_id: uuid::Uuid::new_v4().to_string(),
+                    lease_resource_kind: "local-default".to_owned(),
+                    lease_resource_key: namespace.to_owned(),
+                    lease_created_at_unix_ms: unix_timestamp_ms(),
+                    pid: std::process::id(),
+                };
+                process_lease::write_json_atomically(&metadata_path, &replacement_metadata)
+                    .expect("replacement lease metadata should publish");
+                let lock_file = std::fs::OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .open(&guard_path)
+                    .expect("stable lease file should open");
+                lock_file
+                    .try_lock()
+                    .expect("released namespace lease should be lockable");
+
+                assert!(
+                    !stale_record
+                        .owner_is_active()
+                        .expect("managed owner probe should work"),
+                    "旧registry的lease ID不能冒充当前active lease"
+                );
+
+                drop(lock_file);
+                cleanup_mock_unixpipe(&base);
+                let _ = fs::remove_dir_all(registry_dir);
+            });
+        });
+    }
+
+    #[test]
+    fn partial_managed_local_default_record_should_not_fallback_to_legacy_pid() {
+        let _guard = env_test_guard();
+        with_local_default_test_dir("local-default-partial-lease", |registry_dir| {
+            with_tmpdir_test_dir("local-default-partial-lease-fifo", |fifo_dir| {
+                let namespace = "ldpartial";
+                let base = mock_unixpipe_base_in(fifo_dir, namespace, "partial.ldpartial");
+                let lease_guard =
+                    register_local_default_daemon(namespace, "partial.ldpartial", &base)
+                        .expect("managed local-default owner should register");
+                let record_path = local_default_daemon_record_path(namespace).expect("record path");
+                let mut partial_record = read_local_default_daemon_record(&record_path)
+                    .expect("managed record should be readable");
+
+                // 任一lease字段存在就表明这是managed记录。字段缺失时必须判invalid,
+                // 不能回退到只看PID的legacy路径。
+                partial_record.lease_id = None;
+                assert!(
+                    !partial_record
+                        .owner_is_active()
+                        .expect("partial managed owner probe should work"),
+                    "部分managed字段不能降级为legacy PID owner"
+                );
+
+                drop(lease_guard);
+                cleanup_mock_unixpipe(&base);
+                let _ = fs::remove_dir_all(registry_dir);
             });
         });
     }
@@ -1845,9 +1860,13 @@ mod tests {
             );
         }
 
-        // 正常退出只删除自己持有的 sidecar,不会给下一轮启动留下假 owner。
+        // 正常退出只释放lock,稳定inode必须保留并允许下一轮接管。
         drop(guard);
-        assert!(!owner_guard.exists());
+        assert!(owner_guard.exists(), "owner lease file应该永久保留");
+        let next_guard = prepare_unixpipe_listener(&base)
+            .expect("released managed lease不应因旧PID仍存活而拒绝接管");
+        drop(next_guard);
+        assert!(owner_guard.exists(), "重复接管后lease file仍应保留");
         fs::remove_dir_all(dir).expect("test directory should be removed");
     }
 

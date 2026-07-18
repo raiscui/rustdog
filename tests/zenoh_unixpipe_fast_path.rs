@@ -308,6 +308,98 @@ fn duplicate_daemon_start_should_not_break_running_local_default_unixpipe() {
 }
 
 #[test]
+fn crashed_daemon_should_release_all_leases_for_same_identity_restart() {
+    let namespace = format!("cr{}", next_port());
+    cleanup_namespace_artifacts(&namespace);
+    let state_home = TestStateHome::new("crash-restart");
+    let daemon_name = format!("d.{namespace}");
+    let base_path = derive_unixpipe_base_path(&namespace, &daemon_name);
+    cleanup_unixpipe_artifacts(&base_path);
+
+    let mut first = start_zenoh_daemon_with_namespace_and_local_default(
+        &daemon_name,
+        &namespace,
+        next_port(),
+        true,
+        true,
+        state_home.path(),
+        None,
+    );
+    wait_for_marker(
+        first.output(),
+        "zenoh router daemon ready",
+        Duration::from_secs(8),
+    )
+    .expect("first daemon should be ready");
+
+    let uplink_path = PathBuf::from(format!("{}_uplink", base_path.display()));
+    assert!(wait_for_fifo(&uplink_path, Duration::from_secs(2)));
+    first.kill_abruptly();
+    drop(first);
+
+    // SIGKILL后文件应保留,但OS必须已经释放三个exclusive lock。
+    let service_guard = state_home
+        .path()
+        .join("rustdog/zenoh-guards")
+        .join(format!("{namespace}__{daemon_name}.pid"));
+    let local_default_guard = state_home
+        .path()
+        .join("rustdog/local-default")
+        .join(format!("{namespace}.pid"));
+    let local_default_record = state_home
+        .path()
+        .join("rustdog/local-default")
+        .join(format!("{namespace}.json"));
+    let path_guard = PathBuf::from(format!("{}.rdog-owner.pid", base_path.display()));
+    let service_metadata = PathBuf::from(format!("{}.lease.json", service_guard.display()));
+    let local_default_metadata =
+        PathBuf::from(format!("{}.lease.json", local_default_guard.display()));
+    let path_metadata = PathBuf::from(format!("{}.lease.json", path_guard.display()));
+    for path in [
+        &service_guard,
+        &service_metadata,
+        &local_default_guard,
+        &local_default_metadata,
+        &local_default_record,
+        &path_guard,
+        &path_metadata,
+    ] {
+        assert!(
+            path.exists(),
+            "crashed daemon lease artifact should remain: {}",
+            path.display()
+        );
+    }
+
+    let second = start_zenoh_daemon_with_namespace_and_local_default(
+        &daemon_name,
+        &namespace,
+        next_port(),
+        true,
+        true,
+        state_home.path(),
+        None,
+    );
+    wait_for_marker(
+        second.output(),
+        "zenoh router daemon ready",
+        Duration::from_secs(8),
+    )
+    .expect("second daemon should take over released leases");
+    let (status, stdout, stderr) =
+        run_control_with_args_and_env(&["--namespace", &namespace], Some(state_home.path()));
+
+    drop(second);
+    cleanup_unixpipe_artifacts(&base_path);
+    cleanup_namespace_artifacts(&namespace);
+    assert!(
+        status.success(),
+        "restarted local-default daemon should be reachable, stdout={stdout}, stderr={stderr}"
+    );
+    assert!(stdout.contains("pong"), "restart ping should return pong");
+}
+
+#[test]
 fn distinct_daemon_names_should_not_replace_a_shared_explicit_unixpipe() {
     // service-name 不同,但显式 socket_path 相同;FIFO path 必须有独立 ownership guard。
     let namespace = format!("p{}", next_port());

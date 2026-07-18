@@ -85,6 +85,96 @@ agent 高频跑 `@web-find` / `@screenshot` / `@click` 时,这段延迟会肉眼
 - 同机 unixpipe 不可达: client 自动 fallback 到 UDP scout,行为完全透明,远端场景不受影响。
 - 显式 `--entry-point` 给 `unixpipe/<path>` 但路径不存在: 当前实现应 fail-fast,不 fallback(避免静默走错路径)。
 
+### 3.5 原子 process lease 契约
+
+PID只用于诊断和旧版本兼容,不能继续作为新版本的liveness真相源。新版本使用
+`std::fs::File::try_lock` 的非阻塞exclusive lock声明owner,使用shared lock probe判断owner是否仍活跃。
+
+三类资源保持独立冲突域,但共享同一个lease实现:
+
+- service-name:`(namespace, daemon_name)`.
+- unixpipe path:canonical FIFO base path.
+- local-default:namespace.
+
+稳定lock file规则:
+
+1. lock绑定inode,因此lock file一旦创建就永久保留;Drop、stale recovery和client cleanup都禁止unlink.
+2. daemon持有 `File` handle覆盖router生命周期;正常退出或异常终止时由OS关闭descriptor并释放lock.
+3. lock file内容保持单行PID,让旧版daemon仍能识别活跃新版本进程;新版本不以该PID判断受管lease是否活跃.
+4. service/path/local-default lease metadata使用guard旁的`.lease.json` sidecar;local-default业务registry继续使用namespace JSON,并引用同一个lease ID.
+5. 所有JSON使用同目录临时文件 + file sync + rename + parent directory sync原子发布.
+6. metadata包含 `lease_schema`、`lease_id`、`lease_resource_kind`、`lease_resource_key`、PID和创建时间.
+7. local-default继续输出旧版可解析的 `rdog.local-default.v1`字段,新增lease字段必须是可选扩展.
+8. lease metadata发布失败时,owner必须在仍持exclusive lock期间恢复获取前的lock内容;禁止留下当前进程PID伪装成legacy owner.
+
+```mermaid
+flowchart TD
+    Start["daemon启动"]
+    Service["获取service-name lease"]
+    Path["获取canonical path lease"]
+    Cleanup["清理stale FIFO"]
+    Default{"是否local-default"}
+    Namespace["获取namespace lease"]
+    LeaseMetadata["原子发布lease sidecar"]
+    Publish["原子发布registry JSON"]
+    Session["打开Zenoh session"]
+    Ready["router ready并持有全部File handle"]
+    Reject["WouldBlock并拒绝启动"]
+
+    Start --> Service
+    Service -->|acquired| Path
+    Service -->|busy| Reject
+    Path -->|acquired| Cleanup
+    Path -->|busy| Reject
+    Cleanup --> Default
+    Default -->|yes| Namespace
+    Default -->|no| Session
+    Namespace -->|acquired| LeaseMetadata
+    Namespace -->|busy| Reject
+    LeaseMetadata --> Publish
+    Publish --> Session
+    Session --> Ready
+```
+
+```mermaid
+sequenceDiagram
+    participant D1 as 当前daemon
+    participant L as 稳定lease文件
+    participant M as lease metadata sidecar
+    participant R as 原子registry JSON
+    participant D2 as 第二daemon
+    participant C as control client
+
+    D1->>L: try_lock exclusive
+    L-->>D1: acquired
+    D1->>L: 写入兼容PID
+    D1->>M: temp + sync + rename + dir sync
+    D1->>R: 引用同一lease ID并原子发布
+    D2->>L: try_lock exclusive
+    L-->>D2: WouldBlock
+    C->>L: try_lock shared
+    L-->>C: WouldBlock表示owner活跃
+    C->>R: 读取daemon name、unixpipe base和lease ID
+    C->>M: 校验完整lease identity
+    M-->>C: lease ID、resource和PID一致
+    D1->>L: 进程退出或异常终止
+    Note over L: OS关闭descriptor并释放lock,文件保留
+    D2->>L: try_lock exclusive
+    L-->>D2: acquired
+    D2->>M: 原子覆盖新lease metadata
+    D2->>R: 发布引用新lease ID的registry
+```
+
+迁移规则:
+
+- 新版本拿到lock后,若metadata含匹配lease字段,即使旧PID被复用也按"前一受管owner已释放"处理.
+- metadata没有lease字段时视为legacy状态;PID仍活跃则拒绝接管,PID失效才迁移.
+- 新版本owner持锁时保留PID内容,旧版本daemon会继续拒绝同资源重复启动.
+- 新client先比对registry与sidecar的完整lease identity,再验证lease lock;旧v1记录继续使用PID + uplink兼容校验.
+- 新client不得删除稳定lock file;无owner时允许忽略stale metadata,由下一owner原子覆盖.
+- 已发布过新lease metadata的失败启动可以安全重试;发布前的普通I/O失败会恢复旧lock内容.
+- 旧二进制仍会删除它认为stale的PID文件,因此"旧版与新版同时争抢stale资源"无法建立跨版本原子互锁.升级切换必须先停止旧daemon,确认退出后再启动新版;任一版本已经写入存活PID后,另一版本会按兼容PID拒绝重复启动.
+
 ## 4. 验收标准
 
 ### 功能性
