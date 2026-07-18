@@ -27,3 +27,10 @@
 - `src/zenoh_runtime.rs`已明显超过项目建议的1000行上限.
 - 本轮已把process lease独立成子模块,但unixpipe path、local-default registry和session discovery仍集中在同一文件.
 - 建议另开架构任务,按`session`、`unixpipe`、`local_default`职责拆分,保持当前public API不变并以现有38项runtime测试护航.
+
+## [2026-07-18 17:00:00] [Session ID: omx-1784304547353-h5409r] 执行状态: 超长zenoh_runtime模块拆分已完成
+
+- 原延期项已由支线`zenoh_runtime_split`完成.
+- 父门面从1928行收敛为22行,session、unixpipe、local-default与各自测试已按职责下沉.
+- 旧/新symbol、外部调用路径、38项runtime测试与live unixpipe fast path均已验证等价.
+- 详细记录见`task_plan__zenoh_runtime_split.md`、`notes__zenoh_runtime_split.md`、`WORKLOG__zenoh_runtime_split.md`与`ERRORFIX__zenoh_runtime_split.md`.

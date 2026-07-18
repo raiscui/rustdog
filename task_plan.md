@@ -382,3 +382,18 @@ handle_daemon_control_query (zenoh_control.rs:240)
 - 最终安装版hash:`96955460e968cc8ccaf06c1b4fc2bce888e4c5564df5b6f0cac69e348249cc75`;正式daemon PID 19047,bare ping返回pong.
 - 详细证据:`task_plan__local_default_legacy_retirement.md`、`notes__local_default_legacy_retirement.md`、`WORKLOG__local_default_legacy_retirement.md`、`ERRORFIX__local_default_legacy_retirement.md`.
 - 后续边界:Windows ownership迁移见`LATER_PLANS__local_default_legacy_retirement.md`;超长runtime模块拆分仍见`LATER_PLANS__local_default_atomic_lease.md`.
+
+## [2026-07-18 16:13:17] [Session ID: omx-1784304547353-h5409r] [支线索引]: zenoh_runtime职责拆分
+
+- 启用支线上下文集后缀:`zenoh_runtime_split`.
+- 触发:用户要求拆分已经达到1928行的`src/zenoh_runtime.rs`.
+- 目标:保持`zenoh_runtime`外部interface和运行行为不变,按session、unixpipe、local-default职责形成深模块,并把单元测试移出生产门面文件.
+- 当前计划文件:`task_plan__zenoh_runtime_split.md`.
+
+## [2026-07-18 17:05:00] [Session ID: omx-1784304547353-h5409r] [支线完成]: zenoh_runtime职责拆分
+
+- `src/zenoh_runtime.rs`从1928行收敛为22行稳定门面;session、unixpipe、local-default及各自测试已按职责拆分.
+- production symbol、34个测试名与26个外部调用行均与HEAD旧实现等价,没有改变公开调用路径.
+- 全bin 612 passed / 1 ignored,runtime 38 passed,unixpipe e2e 12 passed,router-client 26 passed / 2 ignored;check与release build为0 error.
+- 安装版和release hash一致,正式daemon PID 82774的bare/self/显式target ping均返回pong,重复daemon正确拒绝.
+- 详细记录:`task_plan__zenoh_runtime_split.md`、`notes__zenoh_runtime_split.md`、`WORKLOG__zenoh_runtime_split.md`、`ERRORFIX__zenoh_runtime_split.md`.

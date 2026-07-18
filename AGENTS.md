@@ -106,7 +106,7 @@ rustdog 首先被LLM agent 智能体使用，其次被人类使用。要以agent
 - `specs/zenoh-unixpipe-fast-path-plan.md`
   - 主题: rdog control macOS / Linux 本机 fast path(Zenoh `transport_unixpipe`)规划
   - 用途: 固定"同机 daemon + control 自动走 Zenoh unixpipe FIFO,失败透明 fallback 到 UDP/TCP"的契约,以及 FIFO base 路径推导、local-default registry、daemon/client 行为边界、错误处理、验收标准;包含 2026-06-21 加的 `self` / 空 target 入口设计和 2026-06-25 加的 local-default 默认 daemon 规则
-  - 何时阅读: 修改 `src/zenoh_runtime.rs` / `src/zenoh_control.rs` / `src/config.rs` / `src/main.rs` 的 unixpipe 相关逻辑、`Cargo.toml` 的 `transport_unixpipe` feature、`rdog_macos.toml` / `rdog_linux.toml` 模板,或排查"同机 ping 慢" / "FIFO 创建失败" / "远端 fallback 是否生效" / "`rdog control self` 找不到 daemon"前
+  - 何时阅读: 修改 `src/zenoh_runtime.rs`、`src/zenoh_runtime/` 子模块、`src/zenoh_control.rs`、`src/config.rs` 或 `src/main.rs` 的 unixpipe 相关逻辑、`Cargo.toml` 的 `transport_unixpipe` feature、`rdog_macos.toml` / `rdog_linux.toml` 模板,或排查"同机 ping 慢" / "FIFO 创建失败" / "远端 fallback 是否生效" / "`rdog control self` 找不到 daemon"前
 
 - `specs/zenoh-control-plane-plan.md`
   - 主题: `rustdog` 的 canonical Zenoh router/serial control-plane 规划

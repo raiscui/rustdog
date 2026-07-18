@@ -375,3 +375,19 @@
 - stopped legacy状态应在同一个stable lock inode上原地迁移.新owner覆盖PID和sidecar metadata,不要unlink lock file.
 - 新版代码无法约束仍可执行的旧二进制.真实旧版会在判断PID stale后unlink新lease inode,所以部署验收必须包含旧副本/自启动项审计,不能只依赖协议兼容.
 - TDD必须同时覆盖"纯v1 registry + matching FIFO"和"无registry + 唯一FIFO".只关闭其中一条路径,另一条仍会把旧daemon恢复成自动发现目标.
+
+## [2026-07-18 17:00:00] [Session ID: omx-1784304547353-h5409r] 模块拆分会改变测试调度,进程级环境必须使用唯一共享锁
+
+### 适用场景
+
+- 把单一Rust文件中的inline tests拆成多个sibling module.
+- 测试会修改`TMPDIR`、`HOME`、`XDG_STATE_HOME`或其他进程级环境变量.
+- focused测试通过,完整测试默认并发失败,而`--test-threads=1`通过.
+
+### 可复用判断
+
+- 模块拆分即使不改production逻辑,也可能改变libtest的调度顺序和并发重叠窗口.
+- 每个测试模块各自创建一个`static Mutex`没有隔离作用.锁的真相源必须唯一,放在共同祖先的`#[cfg(test)] test_support`中.
+- 最小证伪顺序是:focused运行、默认并发复现、串行对照、接入共享锁、默认并发重复多轮.
+- 只有静态看到`std::env::set_var`还不能确认原因.必须用并发/串行差异和共享锁前后结果建立动态证据.
+- 这类失败先按测试隔离问题调查,不要直接修改production cleanup、lease或重试逻辑来掩盖症状.

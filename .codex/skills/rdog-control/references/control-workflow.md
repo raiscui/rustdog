@@ -52,7 +52,7 @@ rdog control @ping
 rdog control @ping @capabilities#1 @observe#3
 ```
 
-**客户端解析规则**(`src/zenoh_runtime.rs::find_local_daemon_name`):
+**客户端解析规则**(`src/zenoh_runtime/local_default.rs::find_local_daemon_name`):
 
 1. 先读 local-default registry。
    - registry 由 daemon 启动时的 `[zenoh.unixpipe] local_default = true` 写入。

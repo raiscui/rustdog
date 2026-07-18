@@ -318,6 +318,7 @@ fn to_io_error(err: impl std::fmt::Display) -> io::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::zenoh_runtime::test_support::env_test_guard;
 
     fn test_paths(prefix: &str) -> (PathBuf, PathBuf, PathBuf) {
         let dir = std::env::temp_dir().join(format!(
@@ -330,6 +331,7 @@ mod tests {
 
     #[test]
     fn active_lease_blocks_competitor_then_releases_without_unlink() {
+        let _guard = env_test_guard();
         let (dir, lock_path, metadata_path) = test_paths("lifecycle");
         let mut first = ProcessLease::acquire(
             lock_path.clone(),
@@ -374,6 +376,7 @@ mod tests {
 
     #[test]
     fn live_legacy_pid_without_managed_metadata_is_rejected() {
+        let _guard = env_test_guard();
         let (dir, lock_path, metadata_path) = test_paths("legacy");
         fs::write(&lock_path, std::process::id().to_string())
             .expect("legacy PID guard should be written");
@@ -387,6 +390,7 @@ mod tests {
 
     #[test]
     fn metadata_publish_failure_should_not_leave_self_blocking_legacy_pid() {
+        let _guard = env_test_guard();
         let (dir, lock_path, metadata_path) = test_paths("publish-rollback");
         let mut first = ProcessLease::acquire(
             lock_path.clone(),
@@ -418,6 +422,7 @@ mod tests {
 
     #[test]
     fn atomic_json_publish_replaces_complete_document() {
+        let _guard = env_test_guard();
         let (dir, _lock_path, metadata_path) = test_paths("atomic-json");
         let first = LeaseMetadata::new("test", "first");
         let second = LeaseMetadata::new("test", "second");

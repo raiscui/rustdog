@@ -177,6 +177,27 @@ sequenceDiagram
 - 已发布过新lease metadata的失败启动可以安全重试;发布前的普通I/O失败会恢复旧lock内容.
 - 旧二进制仍会删除它认为stale的PID文件,因此"旧版与新版同时争抢stale资源"无法建立跨版本原子互锁.升级切换必须先停止旧daemon,确认退出后再启动新版;任一版本已经写入存活PID后,另一版本会按兼容PID拒绝重复启动.
 
+### 3.6 runtime模块职责
+
+`src/zenoh_runtime.rs`只保留稳定门面.实现按真实职责放入同名目录,调用者继续使用原`crate::zenoh_runtime::<symbol>`路径.
+
+```mermaid
+flowchart LR
+    Caller["daemon / control调用者"] --> Facade["zenoh_runtime门面"]
+    Facade --> Session["session: open / discovery / endpoint解析"]
+    Facade --> LocalDefault["local_default: registry / managed owner"]
+    Facade --> Unixpipe["unixpipe: path / ownership / listener"]
+    Session --> Unixpipe
+    LocalDefault --> Unixpipe
+    LocalDefault --> Lease["process_lease: lifecycle-bound lock"]
+    Unixpipe --> Lease
+```
+
+- `session`只依赖unixpipe路径、存活检查和locator,不持有registry状态.
+- `local_default`依赖unixpipe组件校验和FIFO存活检查,同时校验process lease identity.
+- `unixpipe`负责canonical path、FIFO cleanup、path lease和listener composition.
+- 测试跟随各实现模块;共享`TMPDIR`的测试通过test-only mutex串行,避免进程级环境变量竞争.
+
 ## 4. 验收标准
 
 ### 功能性
