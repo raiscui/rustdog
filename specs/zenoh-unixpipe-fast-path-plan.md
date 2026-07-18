@@ -32,7 +32,8 @@ agent 高频跑 `@web-find` / `@screenshot` / `@click` 时,这段延迟会肉眼
   - macOS 上 `$TMPDIR` 是 per-user(例如 `/var/folders/xx/yy/T/`),自然提供权限隔离
   - Linux 上 `$TMPDIR` 不一定存在,直接 `/tmp` 兜底
 - 路径总长必须 ≤ 95 字节(macOS `sun_path` 限制 104,Zenoh 派生 `_downlink` 需要 9 字节),超过时 daemon 启动 fail-fast。
-- `(namespace, daemon_name)` 在 daemon 端和 client 端都已知,推导稳定,不需要额外 control-plane "发现 FIFO 路径"。
+- 默认路径由 `(namespace, daemon_name)` 稳定推导。若配置显式 unixpipe listen endpoint,
+  该 endpoint 的 base path 是 listener、cleanup、registry 与 ownership guard 的唯一真相源。
 
 ### 3.2 daemon 端行为
 
@@ -40,11 +41,13 @@ agent 高频跑 `@web-find` / `@screenshot` / `@click` 时,这段延迟会肉眼
 - `ZenohConfig` 新增 `unixpipe: UnixpipeConfig` 子结构,默认 unix 平台 `enabled = true`,Windows `enabled = false`。
 - `UnixpipeConfig` 包含 `local_default`。默认 false,模板可显式打开。
 - daemon 启动时:
-  1. 校验 `unixpipe.socket_path`(如果显式给了)长度合法
-  2. 如果 unixpipe enabled 且用户没在 `listen_endpoints` 显式声明 `unixpipe/...`,自动把 `unixpipe/{推导路径}` 注入到 `listen_endpoints` 最前
-  3. `unlink` 旧 FIFO 文件(stale cleanup)
-  4. 如果 `local_default = true`,写入本机 local-default registry 并持有 PID guard
-  5. 把最终 FIFO base 路径通过启动日志打出来,便于排错
+  1. 统一解析最终 endpoint 列表和 unixpipe base;显式 listen endpoint 优先,与 `socket_path` 同时存在时必须一致
+  2. 如果 unixpipe enabled 且没有显式 unixpipe endpoint,把 `unixpipe/{socket_path 或推导路径}` 注入到 `listen_endpoints` 最前
+  3. 先获取 `(namespace, daemon_name)` 的 service-name PID guard;同名活跃 daemon 存在时直接退出,不得触碰现有 FIFO
+  4. 再获取 canonical base path 的 sidecar PID guard;不同 daemon name 共用显式 path 时,后启动者直接退出
+  5. 两把 ownership guard 都成功后,才 `unlink` 旧 FIFO 文件(stale cleanup)
+  6. 如果 `local_default = true`,写入本机 local-default registry 并持有 PID guard
+  7. 把最终 FIFO base 路径通过启动日志打出来,便于排错
 
 ### 3.3 client 端行为
 
@@ -76,6 +79,8 @@ agent 高频跑 `@web-find` / `@screenshot` / `@click` 时,这段延迟会肉眼
 ### 3.4 错误处理契约
 
 - FIFO base 路径超过 95 字节: daemon 启动 fail-fast,明确报错让用户改短 namespace / daemon_name。
+- 多个显式 unixpipe endpoint,或显式 endpoint 与 `socket_path` 不一致:daemon 启动 fail-fast,避免 cleanup/registry 操作错误路径。
+- canonical base path 已被活跃 PID guard 占用:daemon 启动失败,不得 unlink 现有 FIFO。
 - stale FIFO 文件存在: daemon 启动时 unlink 掉,不报 `Address already in use`。
 - 同机 unixpipe 不可达: client 自动 fallback 到 UDP scout,行为完全透明,远端场景不受影响。
 - 显式 `--entry-point` 给 `unixpipe/<path>` 但路径不存在: 当前实现应 fail-fast,不 fallback(避免静默走错路径)。
@@ -87,7 +92,7 @@ agent 高频跑 `@web-find` / `@screenshot` / `@click` 时,这段延迟会肉眼
 - `cargo check` 在 macOS / Linux 上通过。
 - `cargo build` 通过,无新增 warning。
 - `cargo test --lib` 所有新增单测通过。
-- `cargo test --test zenoh_unixpipe_fast_path` e2e 集成测试通过(同机成功、self/空 target、local-default、多 FIFO、stale 清理)。
+- `cargo test --test zenoh_unixpipe_fast_path` e2e 集成测试通过(同机成功、self/空 target、local-default、多 FIFO、stale 清理、重复 identity、共享显式 path)。
 - 已有的 `cargo test --test zenoh_router_client` 不回归。
 
 ### 性能(目标)

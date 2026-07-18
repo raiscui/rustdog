@@ -892,3 +892,28 @@
   - Infrastructure (依赖 client 断开测试)
 - Phase I (LP-ticket-11-deferred-1): 真实 observe 集成, ticket 21+
 - fast-infer: LFM2.5 + Pi + rdog 端到端稳定化 (Pythonic 格式 hint 实装后还要测更多 prompt)
+
+## [2026-07-18 10:23:45] [Session ID: omx-1784304547353-h5409r] 任务名称: local-default registry 恢复支线收口
+
+### 任务内容
+
+- 修复重复 daemon启动破坏活跃 unixpipe FIFO,并恢复本机空 target control.
+- 交付生产代码、回归测试、Zenoh规格、安装版 CLI和真实环境验证.
+
+### 完成过程
+
+- 通过同名重复启动和不同名称共享显式 path两组动态实验确认 ownership缺口.
+- 引入 canonical base-path guard,把 destructive cleanup移到两级 ownership之后.
+- 隔离 e2e的 namespace/state/子进程资源,补 stale owner与多 endpoint测试.
+- 安装当前工作树,切换 `rdog-daemon` tmux会话并完成重复启动 smoke.
+
+### 验证
+
+- runtime 32 passed;unixpipe e2e 11 passed;router-client 26 passed,2 skipped.
+- 格式、diff、all-targets check、debug build和release install均成功.
+- 新 daemon PID 69053;重复启动前后 uplink inode不变,裸/显式 ping都返回pong.
+
+### 总结感悟
+
+- 资源清理权限必须由资源自己的 canonical identity guard证明.
+- 支线详细证据和延期项见后缀 `local_default_registry_recovery` 的六文件上下文.

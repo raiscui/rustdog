@@ -352,6 +352,93 @@ fn unixpipe_fifo_paths(base: &Path) -> [PathBuf; 2] {
     ]
 }
 
+/// unixpipe base path 的跨进程 ownership guard。
+///
+/// guard 与 base path 放在同一目录,确保不同 daemon identity 只要解析到同一 FIFO,
+/// 就会竞争同一把锁。PID 已死亡时允许新 daemon 接管并执行 stale cleanup。
+#[cfg(unix)]
+#[derive(Debug)]
+pub struct UnixpipePathGuard {
+    guard_path: PathBuf,
+    pid: u32,
+}
+
+#[cfg(unix)]
+impl Drop for UnixpipePathGuard {
+    fn drop(&mut self) {
+        let owned_by_self = fs::read_to_string(&self.guard_path)
+            .ok()
+            .and_then(|value| value.trim().parse::<u32>().ok())
+            == Some(self.pid);
+        if owned_by_self {
+            let _ = fs::remove_file(&self.guard_path);
+        }
+    }
+}
+
+/// 获取 base path ownership,随后清理崩溃残留 FIFO。
+///
+/// 返回的 guard 必须覆盖 Zenoh listener 生命周期。这样第二实例在 ownership 检查失败时,
+/// 不会执行任何 destructive cleanup。
+#[cfg(unix)]
+pub fn prepare_unixpipe_listener(base: &Path) -> io::Result<UnixpipePathGuard> {
+    let guard = acquire_unixpipe_path_guard(base)?;
+    cleanup_stale_unixpipe_socket(base)?;
+    Ok(guard)
+}
+
+#[cfg(unix)]
+fn acquire_unixpipe_path_guard(base: &Path) -> io::Result<UnixpipePathGuard> {
+    let mut guard_name = base.as_os_str().to_os_string();
+    guard_name.push(".rdog-owner.pid");
+    let guard_path = PathBuf::from(guard_name);
+    let pid = std::process::id();
+
+    loop {
+        match OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&guard_path)
+        {
+            Ok(mut file) => {
+                if let Err(err) = file.write_all(pid.to_string().as_bytes()) {
+                    let _ = fs::remove_file(&guard_path);
+                    return Err(io::Error::new(
+                        err.kind(),
+                        format!(
+                            "写入 unixpipe ownership guard {} 失败: {err}",
+                            guard_path.display()
+                        ),
+                    ));
+                }
+                return Ok(UnixpipePathGuard { guard_path, pid });
+            }
+            Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {
+                let existing_pid = fs::read_to_string(&guard_path)
+                    .ok()
+                    .and_then(|value| value.trim().parse::<u32>().ok());
+                if existing_pid.is_some_and(process_exists) {
+                    return Err(io::Error::new(
+                        io::ErrorKind::AlreadyExists,
+                        format!(
+                            "unixpipe FIFO base 已被活跃 daemon 占用: base={}, owner_guard={}",
+                            base.display(),
+                            guard_path.display()
+                        ),
+                    ));
+                }
+
+                match fs::remove_file(&guard_path) {
+                    Ok(()) => continue,
+                    Err(remove_err) if remove_err.kind() == io::ErrorKind::NotFound => continue,
+                    Err(remove_err) => return Err(remove_err),
+                }
+            }
+            Err(err) => return Err(err),
+        }
+    }
+}
+
 /// 清理 stale FIFO 文件。
 ///
 /// Zenoh 1.8.0 listener 在 `mkfifo` 失败 EEXIST 时会直接报错,不会自动清理。
@@ -360,7 +447,7 @@ fn unixpipe_fifo_paths(base: &Path) -> [PathBuf; 2] {
 /// 返回 Ok(()) 即视为"路径已干净(本来就干净 或 已被本调用清理)"。
 /// 文件存在但是是目录(不是 FIFO)才会返回错误,避免误删用户的目录。
 #[cfg(unix)]
-pub fn cleanup_stale_unixpipe_socket(base: &Path) -> io::Result<()> {
+fn cleanup_stale_unixpipe_socket(base: &Path) -> io::Result<()> {
     let candidates: [PathBuf; 3] = [
         base.to_path_buf(),
         unixpipe_fifo_paths(base)[0].clone(),
@@ -814,57 +901,110 @@ pub fn try_unixpipe_probe(base: &Path, timeout: Duration) -> io::Result<()> {
     }
 }
 
+/// daemon 最终使用的 listen endpoints 与唯一 unixpipe base path。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ComposedListenEndpoints {
+    pub listen_endpoints: Vec<String>,
+    pub unixpipe_base_path: Option<PathBuf>,
+}
+
 /// 把 unixpipe endpoint 自动注入到 listen_endpoints 列表里。
 ///
 /// 规则:
-/// 1. 如果 `config.zenoh.unixpipe.enabled == false`,返回原列表不动。
-/// 2. 如果 `config.zenoh.unixpipe.socket_path` 是 None,用 `(namespace, daemon_name)` 自动推导。
-/// 3. 如果推导或显式给的路径超过 `UNIXPIPE_SOCKET_PATH_MAX_BYTES`,返回 InvalidInput 错误。
-/// 4. 如果 listen_endpoints 列表里已经包含 `unixpipe/...`,跳过注入(用户显式控制时优先)。
-/// 5. 注入的 endpoint 放在最前,这样即使同机 fast path 不可达,后续 UDP 也能 fallback。
+/// 1. `listen_endpoints` 里的显式 unixpipe endpoint 优先,并成为 cleanup/registry/guard 的路径真相源。
+/// 2. 显式 endpoint 最多一条;它与 `unixpipe.socket_path` 同时存在时必须指向同一路径。
+/// 3. 没有显式 endpoint 且 `unixpipe.enabled == false` 时,返回原列表且不声明 unixpipe base。
+/// 4. 其余情况使用 `socket_path`,或按 `(namespace, daemon_name)` 自动推导并注入到列表最前。
 #[cfg(unix)]
 pub fn compose_listen_endpoints(
     config: &crate::config::ZenohConfig,
     namespace: &str,
     daemon_name: &str,
-) -> io::Result<Vec<String>> {
+) -> io::Result<ComposedListenEndpoints> {
+    let explicit_unixpipe_paths = config
+        .listen_endpoints
+        .iter()
+        .filter_map(|endpoint| endpoint.strip_prefix("unixpipe/"))
+        .map(PathBuf::from)
+        .collect::<Vec<_>>();
+
+    if explicit_unixpipe_paths.len() > 1 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "zenoh.listen_endpoints 最多只能包含一个 unixpipe endpoint",
+        ));
+    }
+
+    if let Some(explicit_base) = explicit_unixpipe_paths.into_iter().next() {
+        validate_composed_unixpipe_base_path(&explicit_base, "显式 unixpipe listen endpoint")?;
+        if config
+            .unixpipe
+            .socket_path
+            .as_ref()
+            .is_some_and(|socket_path| socket_path != &explicit_base)
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "zenoh.unixpipe.socket_path 与显式 unixpipe listen endpoint 不一致: socket_path={}, endpoint_base={}",
+                    config
+                        .unixpipe
+                        .socket_path
+                        .as_ref()
+                        .expect("socket_path checked above")
+                        .display(),
+                    explicit_base.display()
+                ),
+            ));
+        }
+        return Ok(ComposedListenEndpoints {
+            listen_endpoints: config.listen_endpoints.clone(),
+            unixpipe_base_path: Some(explicit_base),
+        });
+    }
+
     if !config.unixpipe.enabled {
-        return Ok(config.listen_endpoints.clone());
+        return Ok(ComposedListenEndpoints {
+            listen_endpoints: config.listen_endpoints.clone(),
+            unixpipe_base_path: None,
+        });
     }
 
     let base_path = match config.unixpipe.socket_path.as_ref() {
-        Some(explicit) => {
-            let explicit_str = explicit.as_os_str();
-            if explicit_str.len() > UNIXPIPE_SOCKET_PATH_MAX_BYTES {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    format!(
-                        "显式 unixpipe.socket_path 太长: {} 字节,上限 {} 字节",
-                        explicit_str.len(),
-                        UNIXPIPE_SOCKET_PATH_MAX_BYTES
-                    ),
-                ));
-            }
-            explicit.clone()
-        }
+        Some(explicit) => explicit.clone(),
         None => unixpipe_socket_path(namespace, daemon_name)?,
     };
+    validate_composed_unixpipe_base_path(&base_path, "unixpipe base path")?;
 
-    let locator = unixpipe_locator(&base_path);
+    let mut listen_endpoints = Vec::with_capacity(config.listen_endpoints.len() + 1);
+    listen_endpoints.push(unixpipe_locator(&base_path));
+    listen_endpoints.extend(config.listen_endpoints.iter().cloned());
+    Ok(ComposedListenEndpoints {
+        listen_endpoints,
+        unixpipe_base_path: Some(base_path),
+    })
+}
 
-    if config
-        .listen_endpoints
-        .iter()
-        .any(|endpoint| endpoint.starts_with(UNIXPIPE_LOCATOR_PREFIX))
-    {
-        // 用户在 listen_endpoints 里显式给了 unixpipe,尊重用户选择,不再注入。
-        return Ok(config.listen_endpoints.clone());
+#[cfg(unix)]
+fn validate_composed_unixpipe_base_path(path: &Path, source: &str) -> io::Result<()> {
+    let path_str = path.as_os_str();
+    if path_str.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("{source} 不能为空"),
+        ));
     }
-
-    let mut composed = Vec::with_capacity(config.listen_endpoints.len() + 1);
-    composed.push(locator);
-    composed.extend(config.listen_endpoints.iter().cloned());
-    Ok(composed)
+    if path_str.len() > UNIXPIPE_SOCKET_PATH_MAX_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "{source} 太长: {} 字节,上限 {} 字节",
+                path_str.len(),
+                UNIXPIPE_SOCKET_PATH_MAX_BYTES
+            ),
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(not(unix))]
@@ -872,8 +1012,11 @@ pub fn compose_listen_endpoints(
     config: &crate::config::ZenohConfig,
     _namespace: &str,
     _daemon_name: &str,
-) -> io::Result<Vec<String>> {
-    Ok(config.listen_endpoints.clone())
+) -> io::Result<ComposedListenEndpoints> {
+    Ok(ComposedListenEndpoints {
+        listen_endpoints: config.listen_endpoints.clone(),
+        unixpipe_base_path: None,
+    })
 }
 
 /// 在 $TMPDIR(或 /tmp fallback)下扫描所有 unixpipe FIFO,
@@ -1573,10 +1716,14 @@ mod tests {
         cfg.listen_endpoints = vec!["udp/0.0.0.0:7447".to_string()];
 
         let composed = compose_listen_endpoints(&cfg, "lab", "mac.lab").expect("ok");
-        assert_eq!(composed.len(), 2);
-        assert!(composed[0].starts_with("unixpipe/"));
-        assert!(composed[0].contains("rdog-lab-mac.lab.pipe"));
-        assert_eq!(composed[1], "udp/0.0.0.0:7447");
+        assert_eq!(composed.listen_endpoints.len(), 2);
+        assert!(composed.listen_endpoints[0].starts_with("unixpipe/"));
+        assert!(composed.listen_endpoints[0].contains("rdog-lab-mac.lab.pipe"));
+        assert_eq!(composed.listen_endpoints[1], "udp/0.0.0.0:7447");
+        assert!(composed
+            .unixpipe_base_path
+            .expect("unixpipe base should be resolved")
+            .ends_with("rdog-lab-mac.lab.pipe"));
     }
 
     #[test]
@@ -1587,7 +1734,11 @@ mod tests {
         cfg.listen_endpoints = vec!["udp/0.0.0.0:7447".to_string()];
 
         let composed = compose_listen_endpoints(&cfg, "lab", "mac.lab").expect("ok");
-        assert_eq!(composed, vec!["udp/0.0.0.0:7447".to_string()]);
+        assert_eq!(
+            composed.listen_endpoints,
+            vec!["udp/0.0.0.0:7447".to_string()]
+        );
+        assert!(composed.unixpipe_base_path.is_none());
     }
 
     #[test]
@@ -1604,11 +1755,15 @@ mod tests {
         let composed = compose_listen_endpoints(&cfg, "lab", "mac.lab").expect("ok");
         // 用户的显式 unixpipe 必须保留,不能被自动推导覆盖。
         assert_eq!(
-            composed,
+            composed.listen_endpoints,
             vec![
                 "unixpipe//tmp/explicit.pipe".to_string(),
                 "udp/0.0.0.0:7447".to_string(),
             ]
+        );
+        assert_eq!(
+            composed.unixpipe_base_path,
+            Some(PathBuf::from("/tmp/explicit.pipe"))
         );
     }
 
@@ -1621,8 +1776,79 @@ mod tests {
         cfg.listen_endpoints = vec!["udp/0.0.0.0:7447".to_string()];
 
         let composed = compose_listen_endpoints(&cfg, "lab", "mac.lab").expect("ok");
-        assert_eq!(composed[0], "unixpipe//tmp/explicit-socket.pipe");
-        assert_eq!(composed[1], "udp/0.0.0.0:7447");
+        assert_eq!(
+            composed.listen_endpoints[0],
+            "unixpipe//tmp/explicit-socket.pipe"
+        );
+        assert_eq!(composed.listen_endpoints[1], "udp/0.0.0.0:7447");
+        assert_eq!(
+            composed.unixpipe_base_path,
+            Some(PathBuf::from("/tmp/explicit-socket.pipe"))
+        );
+    }
+
+    #[test]
+    fn compose_listen_endpoints_should_reject_conflicting_explicit_paths() {
+        use crate::config::ZenohConfig;
+        let mut cfg = ZenohConfig::default();
+        cfg.unixpipe.enabled = true;
+        cfg.unixpipe.socket_path = Some(PathBuf::from("/tmp/socket-path.pipe"));
+        cfg.listen_endpoints = vec!["unixpipe//tmp/listen-endpoint.pipe".to_string()];
+
+        let err = compose_listen_endpoints(&cfg, "lab", "mac.lab").unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+        assert!(err.to_string().contains("不一致"));
+    }
+
+    #[test]
+    fn compose_listen_endpoints_should_reject_multiple_explicit_unixpipe_endpoints() {
+        use crate::config::ZenohConfig;
+        let mut cfg = ZenohConfig::default();
+        cfg.unixpipe.enabled = true;
+        cfg.listen_endpoints = vec![
+            "unixpipe//tmp/first.pipe".to_string(),
+            "unixpipe//tmp/second.pipe".to_string(),
+        ];
+
+        let err = compose_listen_endpoints(&cfg, "lab", "mac.lab").unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+        assert!(err.to_string().contains("最多只能包含一个"));
+    }
+
+    #[test]
+    fn prepare_unixpipe_listener_should_recover_stale_owner_guard_and_files() {
+        let dir = unique_test_dir("unixpipe-stale-owner");
+        let base = dir.join("shared.pipe");
+        let owner_guard = PathBuf::from(format!("{}.rdog-owner.pid", base.display()));
+
+        // PID 0 永远不会被识别为活跃进程,用于模拟 daemon 崩溃后的 sidecar。
+        fs::write(&owner_guard, "0").expect("stale owner guard should be created");
+        for suffix in ["", "_uplink", "_downlink"] {
+            fs::write(format!("{}{suffix}", base.display()), "stale")
+                .expect("stale unixpipe artifact should be created");
+        }
+
+        let guard = prepare_unixpipe_listener(&base)
+            .expect("stale owner and unixpipe files should be recoverable");
+        assert_eq!(
+            fs::read_to_string(&owner_guard)
+                .expect("new owner guard should exist")
+                .trim(),
+            std::process::id().to_string()
+        );
+        for suffix in ["", "_uplink", "_downlink"] {
+            let path = PathBuf::from(format!("{}{suffix}", base.display()));
+            assert!(
+                !path.exists(),
+                "stale file should be removed: {}",
+                path.display()
+            );
+        }
+
+        // 正常退出只删除自己持有的 sidecar,不会给下一轮启动留下假 owner。
+        drop(guard);
+        assert!(!owner_guard.exists());
+        fs::remove_dir_all(dir).expect("test directory should be removed");
     }
 
     // -----------------------------------------------------------------

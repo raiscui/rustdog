@@ -337,3 +337,17 @@ handle_daemon_control_query (zenoh_control.rs:240)
 - **rustdog 没有改动**: rdag @computer-act.v1 已支持 13 个 action, 跟 Mano-CUA 16 个
   只是含 3 个 termination signal (finish/stop/call_user) 不 dispatch, 不影响 rdag 端.
 
+## [2026-07-18 00:10:44] [Session ID: omx-1784304547353-h5409r] [支线索引]: local-default registry 恢复与一致性验证
+
+- 启用支线上下文集后缀: `local_default_registry_recovery`.
+- 触发: daemon 报 `local-default` 守卫已存在,但裸 `rdog control` 同时报告没有可用 registry,并发现两个 FIFO 候选.
+- 目标: 区分真实存活实例、陈旧 PID guard、缺失/失效 registry 与残留 FIFO,用动态证据决定运行态恢复还是代码修复.
+- 当前计划文件: `task_plan__local_default_registry_recovery.md`.
+
+## [2026-07-18 10:23:45] [Session ID: omx-1784304547353-h5409r] [支线完成]: local-default registry 恢复与一致性验证
+
+- 已修复重复 daemon在 ownership确认前删除活跃 unixpipe FIFO的问题.
+- canonical base-path guard、endpoint单一真相源、隔离 e2e与规格同步均已完成.
+- 真实 `mac.lab` daemon已切换到安装版PID 69053;重复启动正确失败,前后裸 ping都返回pong.
+- 详细计划与证据: `task_plan__local_default_registry_recovery.md`、`notes__local_default_registry_recovery.md`.
+- 交付与后续: `WORKLOG__local_default_registry_recovery.md`、`ERRORFIX__local_default_registry_recovery.md`、`LATER_PLANS__local_default_registry_recovery.md`、`EPIPHANY_LOG__local_default_registry_recovery.md`.

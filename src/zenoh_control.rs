@@ -10,6 +10,9 @@ use std::{
 use std::os::fd::AsRawFd;
 
 #[cfg(unix)]
+use std::path::PathBuf;
+
+#[cfg(unix)]
 use termios::{tcflush, TCIFLUSH};
 
 #[cfg(windows)]
@@ -57,6 +60,14 @@ use crate::{
     zenoh_runtime,
 };
 
+/// daemon 已解析完成、等待 ownership guard 后执行的 unixpipe 启动参数。
+#[cfg(unix)]
+#[derive(Debug, Clone)]
+pub struct ZenohUnixpipeStartupConfig {
+    pub base_path: PathBuf,
+    pub local_default: bool,
+}
+
 /// daemon 侧运行时所需的最小参数。
 #[derive(Debug, Clone)]
 pub struct ZenohDaemonRuntimeConfig {
@@ -67,6 +78,8 @@ pub struct ZenohDaemonRuntimeConfig {
     pub startup_guard_window_ms: u64,
     pub key_input_events: KeyInputEventsConfig,
     pub observation: ObservationConfig,
+    #[cfg(unix)]
+    pub unixpipe_startup: Option<ZenohUnixpipeStartupConfig>,
 }
 
 pub fn run_router_daemon(config: ZenohDaemonRuntimeConfig, shell: &str) -> io::Result<()> {
@@ -77,12 +90,50 @@ pub fn run_router_daemon(config: ZenohDaemonRuntimeConfig, shell: &str) -> io::R
     let legacy_control_key =
         build_control_key_with_root(LEGACY_KEYEXPR_ROOT, &config.namespace, &config.daemon_name);
     let member_id = crate::zenoh_identity::member_id_from_daemon_name(&config.daemon_name);
+    // 先确认当前进程拥有 daemon identity,再执行任何会改写共享运行态的初始化。
+    // 同名第二实例会在这里退出,无权删除第一实例正在使用的 FIFO。
+    let _name_guard = acquire_daemon_name_guard(&config.namespace, &config.daemon_name)?;
     initialize_durable_observation_state(
         &config.observation,
         Some(&config.namespace),
         &config.daemon_name,
     )?;
-    let _name_guard = acquire_daemon_name_guard(&config.namespace, &config.daemon_name)?;
+
+    // service-name 之外再锁定 canonical FIFO path,覆盖不同 daemon name 共用显式路径。
+    // prepare 只有在 path guard 成功后才会执行 stale cleanup。
+    #[cfg(unix)]
+    let _unixpipe_path_guard = if let Some(unixpipe) = config.unixpipe_startup.as_ref() {
+        let guard = zenoh_runtime::prepare_unixpipe_listener(&unixpipe.base_path)?;
+        log::info!(
+            "zenoh unixpipe fast path 启用: base={}",
+            unixpipe.base_path.display()
+        );
+        Some(guard)
+    } else {
+        None
+    };
+
+    // local-default guard 与 router 主循环同生命周期,退出时统一清理 registry。
+    #[cfg(unix)]
+    let _local_default_guard = if let Some(unixpipe) = config.unixpipe_startup.as_ref() {
+        if unixpipe.local_default {
+            let guard = zenoh_runtime::register_local_default_daemon(
+                &config.namespace,
+                &config.daemon_name,
+                &unixpipe.base_path,
+            )?;
+            log::info!(
+                "zenoh unixpipe local-default 已注册: namespace={}, daemon_name={}",
+                config.namespace,
+                config.daemon_name
+            );
+            Some(guard)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
 
     let session = zenoh_runtime::open_router_session(&config.listen_endpoints)?;
     ensure_unique_daemon_name(

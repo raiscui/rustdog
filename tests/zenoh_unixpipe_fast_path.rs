@@ -11,238 +11,21 @@
 //! 2. daemon 没启用 unixpipe,control 走 fallback(走 UDP scout)
 //! 3. 残留的 stale FIFO 文件会被 daemon 启动时清理
 
+#[path = "zenoh_unixpipe_fast_path/support.rs"]
+mod support;
+
 use std::{
     fs,
-    io::{Read, Write},
-    net::TcpListener,
+    os::unix::fs::MetadataExt,
     path::PathBuf,
-    process::{Child, Command, Stdio},
-    sync::{Arc, Mutex},
+    process::Command,
     thread,
     time::{Duration, Instant},
 };
 
+use support::*;
+
 const RDOG_NAMESPACE: &str = "lab";
-
-fn next_port() -> u16 {
-    TcpListener::bind(("127.0.0.1", 0))
-        .expect("ephemeral port probe should bind")
-        .local_addr()
-        .expect("ephemeral port probe should expose local addr")
-        .port()
-}
-
-fn rdog_binary_path() -> PathBuf {
-    let current_exe = std::env::current_exe().expect("current test binary path should exist");
-    let debug_dir = current_exe
-        .parent()
-        .expect("test binary should have parent directory")
-        .parent()
-        .expect("test binary should live under target/debug/deps");
-    let binary = debug_dir.join("rdog");
-
-    assert!(
-        binary.exists(),
-        "expected rdog binary at {}",
-        binary.display()
-    );
-    binary
-}
-
-fn write_temp_zenoh_router_config(
-    daemon_name: &str,
-    listen_endpoints: &[String],
-    mode: &str,
-    unixpipe_enabled: bool,
-) -> PathBuf {
-    write_temp_zenoh_router_config_for_namespace(
-        daemon_name,
-        RDOG_NAMESPACE,
-        listen_endpoints,
-        mode,
-        unixpipe_enabled,
-        false,
-    )
-}
-
-fn write_temp_zenoh_router_config_for_namespace(
-    daemon_name: &str,
-    namespace: &str,
-    listen_endpoints: &[String],
-    mode: &str,
-    unixpipe_enabled: bool,
-    local_default: bool,
-) -> PathBuf {
-    let path = std::env::temp_dir().join(format!(
-        "rdog-zenoh-unixpipe-{}-{}-{}.toml",
-        std::process::id(),
-        daemon_name,
-        next_port()
-    ));
-
-    let listen_endpoints = listen_endpoints
-        .iter()
-        .map(|endpoint| format!("\"{endpoint}\""))
-        .collect::<Vec<_>>()
-        .join(", ");
-
-    let unixpipe_block = if unixpipe_enabled {
-        format!("\n[zenoh.unixpipe]\nenabled = true\nlocal_default = {local_default}\n")
-    } else {
-        "\n[zenoh.unixpipe]\nenabled = false\n".to_string()
-    };
-
-    let contents = format!(
-        r#"[zenoh]
-enabled = true
-mode = "{mode}"
-namespace = "{namespace}"
-daemon_name = "{daemon_name}"
-listen_endpoints = [{listen_endpoints}]
-request_timeout_ms = 3000
-startup_guard_window_ms = 500
-{unixpipe_block}
-"#
-    );
-
-    fs::write(&path, contents).expect("should write temporary daemon config");
-    path
-}
-
-fn spawn_output_collector<R: Read + Send + 'static>(
-    mut reader: R,
-    buffer: Arc<Mutex<String>>,
-) -> thread::JoinHandle<()> {
-    thread::spawn(move || {
-        let mut chunk = [0_u8; 1024];
-        loop {
-            match reader.read(&mut chunk) {
-                Ok(0) => return,
-                Ok(len) => {
-                    let text = String::from_utf8_lossy(&chunk[..len]);
-                    buffer
-                        .lock()
-                        .expect("collector buffer lock should work")
-                        .push_str(&text);
-                }
-                Err(_) => return,
-            }
-        }
-    })
-}
-
-/// 启动 Zenoh daemon 并把 stdout + stderr 合成到一个 buffer。
-fn start_zenoh_daemon_with_combined_output(
-    name: &str,
-    listen_port: u16,
-    unixpipe_enabled: bool,
-) -> (Child, PathBuf, String, Arc<Mutex<String>>) {
-    let entrypoint = format!("tcp/127.0.0.1:{listen_port}");
-    let config_path =
-        write_temp_zenoh_router_config(name, &[entrypoint.clone()], "router", unixpipe_enabled);
-    let mut child = Command::new(rdog_binary_path())
-        .args(["daemon", "-c", config_path.display().to_string().as_str()])
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("zenoh daemon should start");
-
-    let daemon_stdout = child.stdout.take().expect("daemon stdout should exist");
-    let daemon_stderr = child.stderr.take().expect("daemon stderr should exist");
-    let combined = Arc::new(Mutex::new(String::new()));
-    let _stdout_thread = spawn_output_collector(daemon_stdout, Arc::clone(&combined));
-    let _stderr_thread = spawn_output_collector(daemon_stderr, Arc::clone(&combined));
-    (child, config_path, entrypoint, combined)
-}
-
-fn start_zenoh_daemon_with_namespace_and_local_default(
-    name: &str,
-    namespace: &str,
-    listen_port: u16,
-    unixpipe_enabled: bool,
-    local_default: bool,
-    xdg_state_home: &PathBuf,
-) -> (Child, PathBuf, String, Arc<Mutex<String>>) {
-    let entrypoint = format!("tcp/127.0.0.1:{listen_port}");
-    let config_path = write_temp_zenoh_router_config_for_namespace(
-        name,
-        namespace,
-        &[entrypoint.clone()],
-        "router",
-        unixpipe_enabled,
-        local_default,
-    );
-    let mut child = Command::new(rdog_binary_path())
-        .args(["daemon", "-c", config_path.display().to_string().as_str()])
-        .env("XDG_STATE_HOME", xdg_state_home)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("zenoh daemon should start");
-
-    let daemon_stdout = child.stdout.take().expect("daemon stdout should exist");
-    let daemon_stderr = child.stderr.take().expect("daemon stderr should exist");
-    let combined = Arc::new(Mutex::new(String::new()));
-    let _stdout_thread = spawn_output_collector(daemon_stdout, Arc::clone(&combined));
-    let _stderr_thread = spawn_output_collector(daemon_stderr, Arc::clone(&combined));
-    (child, config_path, entrypoint, combined)
-}
-
-fn wait_for_marker(
-    output: &Arc<Mutex<String>>,
-    needle: &str,
-    timeout: Duration,
-) -> Result<String, String> {
-    let deadline = Instant::now() + timeout;
-    while Instant::now() < deadline {
-        let collected = output
-            .lock()
-            .expect("collector buffer lock should work")
-            .clone();
-        if collected.contains(needle) {
-            return Ok(collected);
-        }
-        thread::sleep(Duration::from_millis(50));
-    }
-    let collected = output
-        .lock()
-        .expect("collector buffer lock should work")
-        .clone();
-    Err(format!(
-        "marker `{needle}` not found before timeout. output={collected}"
-    ))
-}
-
-/// 跑 `rdog control <target> @ping` 并返回 (exit_status, stdout, stderr)。
-fn run_control_ping(args: &[&str]) -> (std::process::ExitStatus, String, String) {
-    let mut child = Command::new(rdog_binary_path())
-        .arg("control")
-        .args(args)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("control should start");
-
-    child
-        .stdin
-        .as_mut()
-        .expect("stdin should exist")
-        .write_all(b"@ping\n")
-        .expect("should send control line");
-    drop(child.stdin.take());
-
-    let output = child
-        .wait_with_output()
-        .expect("should collect control output");
-    (
-        output.status,
-        String::from_utf8_lossy(&output.stdout).to_string(),
-        String::from_utf8_lossy(&output.stderr).to_string(),
-    )
-}
 
 fn unique_daemon_name(prefix: &str) -> String {
     // daemon_name 必须带 `.lab` 后缀,namespace 才能从名字后缀推断出来。
@@ -252,17 +35,6 @@ fn unique_daemon_name(prefix: &str) -> String {
         std::process::id(),
         next_port()
     )
-}
-
-fn unique_state_home(prefix: &str) -> PathBuf {
-    let path = std::env::temp_dir().join(format!(
-        "rdog-{prefix}-state-{}-{}",
-        std::process::id(),
-        next_port()
-    ));
-    let _ = fs::remove_dir_all(&path);
-    fs::create_dir_all(&path).expect("state home should be created");
-    path
 }
 
 /// 等 FIFO 出现,或返回 NotFound。
@@ -346,12 +118,11 @@ fn unixpipe_endpoint_should_be_created_when_daemon_starts_with_unixpipe_enabled(
     let base_path = derive_unixpipe_base_path(RDOG_NAMESPACE, &daemon_name);
     cleanup_unixpipe_artifacts(&base_path);
 
-    let (mut child, _config_path, _entry, combined) =
-        start_zenoh_daemon_with_combined_output(&daemon_name, next_port(), true);
+    let daemon = start_zenoh_daemon_with_combined_output(&daemon_name, next_port(), true);
 
     // 等待 daemon 起来 + log
     wait_for_marker(
-        &combined,
+        daemon.output(),
         "zenoh router daemon ready",
         Duration::from_secs(8),
     )
@@ -364,8 +135,7 @@ fn unixpipe_endpoint_should_be_created_when_daemon_starts_with_unixpipe_enabled(
         "expected {uplink_path} to be created"
     );
 
-    let _ = child.kill();
-    let _ = child.wait();
+    drop(daemon);
     cleanup_unixpipe_artifacts(&base_path);
 }
 
@@ -375,11 +145,10 @@ fn unixpipe_fast_path_should_make_ping_respond_within_budget() {
     let base_path = derive_unixpipe_base_path(RDOG_NAMESPACE, &daemon_name);
     cleanup_unixpipe_artifacts(&base_path);
 
-    let (mut child, _config_path, _entry, combined) =
-        start_zenoh_daemon_with_combined_output(&daemon_name, next_port(), true);
+    let daemon = start_zenoh_daemon_with_combined_output(&daemon_name, next_port(), true);
 
     wait_for_marker(
-        &combined,
+        daemon.output(),
         "zenoh router daemon ready",
         Duration::from_secs(8),
     )
@@ -411,8 +180,7 @@ fn unixpipe_fast_path_should_make_ping_respond_within_budget() {
         "unixpipe fast path 必须在 1s 内返回,实际 {elapsed:?}"
     );
 
-    let _ = child.kill();
-    let _ = child.wait();
+    drop(daemon);
     cleanup_unixpipe_artifacts(&base_path);
 }
 
@@ -433,8 +201,7 @@ fn stale_unixpipe_socket_files_should_be_cleaned_on_daemon_start() {
     }
 
     // 启动 daemon,触发 stale cleanup。
-    let (mut child, _config_path, _entry, combined) =
-        start_zenoh_daemon_with_combined_output(&daemon_name, next_port(), true);
+    let daemon = start_zenoh_daemon_with_combined_output(&daemon_name, next_port(), true);
 
     // daemon 起来后,残留的 3 个文件必须已经被清理。
     // 重新创建新的 FIFO 是 daemon 自己的事,我们只验证旧的被 unlink。
@@ -442,7 +209,7 @@ fn stale_unixpipe_socket_files_should_be_cleaned_on_daemon_start() {
     let uplink_path = format!("{}_uplink", base_path.display());
 
     wait_for_marker(
-        &combined,
+        daemon.output(),
         "zenoh router daemon ready",
         Duration::from_secs(8),
     )
@@ -458,68 +225,185 @@ fn stale_unixpipe_socket_files_should_be_cleaned_on_daemon_start() {
     // 这里我们用 base path 的"派生路径"来验证,而不是 base 本身。
     let _ = base_only;
 
-    let _ = child.kill();
-    let _ = child.wait();
+    drop(daemon);
     cleanup_unixpipe_artifacts(&base_path);
+}
+
+#[test]
+fn duplicate_daemon_start_should_not_break_running_local_default_unixpipe() {
+    // 使用短 namespace 控制 unixpipe 路径长度,同时隔离 registry 和历史 FIFO。
+    let namespace = format!("dup{}", next_port());
+    cleanup_namespace_artifacts(&namespace);
+    let state_home = TestStateHome::new("duplicate-start");
+    let daemon_name = format!("d.{namespace}");
+    let base_path = derive_unixpipe_base_path(&namespace, &daemon_name);
+    cleanup_unixpipe_artifacts(&base_path);
+
+    let first = start_zenoh_daemon_with_namespace_and_local_default(
+        &daemon_name,
+        &namespace,
+        next_port(),
+        true,
+        true,
+        state_home.path(),
+        None,
+    );
+    wait_for_marker(
+        first.output(),
+        "zenoh router daemon ready",
+        Duration::from_secs(8),
+    )
+    .expect("first daemon should be ready");
+
+    let uplink_path = PathBuf::from(format!("{}_uplink", base_path.display()));
+    assert!(
+        wait_for_fifo(&uplink_path, Duration::from_secs(2)),
+        "first daemon should create {}",
+        uplink_path.display()
+    );
+
+    // 同名第二实例必须被 ownership guard 拒绝,且不能先删除第一实例的 FIFO。
+    let mut second = start_zenoh_daemon_with_namespace_and_local_default(
+        &daemon_name,
+        &namespace,
+        next_port(),
+        true,
+        true,
+        state_home.path(),
+        None,
+    );
+    let second_status = wait_for_child_exit(&mut second, Duration::from_secs(5));
+    let duplicate_output = second
+        .output()
+        .lock()
+        .expect("duplicate output lock should work")
+        .clone();
+    let fifo_survived = uplink_path.exists();
+    let (control_status, control_stdout, control_stderr) =
+        run_control_with_args_and_env(&["--namespace", &namespace], Some(state_home.path()));
+
+    // 先清理本测试创建的资源,再做断言;RED 阶段也不会留下新 daemon 和 FIFO。
+    drop(second);
+    drop(first);
+    cleanup_unixpipe_artifacts(&base_path);
+    cleanup_namespace_artifacts(&namespace);
+
+    assert!(
+        second_status.is_some_and(|status| !status.success()),
+        "duplicate daemon should exit with failure, output={duplicate_output}"
+    );
+    assert!(
+        fifo_survived,
+        "duplicate daemon removed the running daemon FIFO {}, duplicate_output={duplicate_output}, control_status={control_status}, control_stdout={control_stdout}, control_stderr={control_stderr}",
+        uplink_path.display(),
+    );
+    assert!(
+        control_status.success(),
+        "running local-default daemon should remain reachable, stdout={control_stdout}, stderr={control_stderr}, duplicate_output={duplicate_output}"
+    );
+    assert!(
+        control_stdout.contains("pong"),
+        "empty target @ping should still return pong, stdout={control_stdout}"
+    );
+}
+
+#[test]
+fn distinct_daemon_names_should_not_replace_a_shared_explicit_unixpipe() {
+    // service-name 不同,但显式 socket_path 相同;FIFO path 必须有独立 ownership guard。
+    let namespace = format!("p{}", next_port());
+    let state_home = TestStateHome::new("shared-unixpipe");
+    let daemon_a = format!("a.{namespace}");
+    let daemon_b = format!("b.{namespace}");
+    let shared_base = derive_unixpipe_base_path(&namespace, "shared");
+    cleanup_unixpipe_artifacts(&shared_base);
+
+    let first = start_zenoh_daemon_with_namespace_and_local_default(
+        &daemon_a,
+        &namespace,
+        next_port(),
+        true,
+        false,
+        state_home.path(),
+        Some(&shared_base),
+    );
+    wait_for_marker(
+        first.output(),
+        "zenoh router daemon ready",
+        Duration::from_secs(8),
+    )
+    .expect("first daemon should be ready");
+
+    let uplink_path = PathBuf::from(format!("{}_uplink", shared_base.display()));
+    assert!(
+        wait_for_fifo(&uplink_path, Duration::from_secs(2)),
+        "first daemon should create {}",
+        uplink_path.display()
+    );
+    let inode_before = fs::metadata(&uplink_path)
+        .expect("first daemon uplink metadata should exist")
+        .ino();
+
+    let mut second = start_zenoh_daemon_with_namespace_and_local_default(
+        &daemon_b,
+        &namespace,
+        next_port(),
+        true,
+        false,
+        state_home.path(),
+        Some(&shared_base),
+    );
+    let second_status = wait_for_child_exit(&mut second, Duration::from_secs(3));
+    let duplicate_output = second
+        .output()
+        .lock()
+        .expect("shared path output lock should work")
+        .clone();
+    let inode_after = fs::metadata(&uplink_path)
+        .ok()
+        .map(|metadata| metadata.ino());
+
+    drop(second);
+    drop(first);
+    cleanup_unixpipe_artifacts(&shared_base);
+
+    assert!(
+        second_status.is_some_and(|status| !status.success()),
+        "different daemon name must not acquire an active unixpipe path, output={duplicate_output}, inode_before={inode_before}, inode_after={inode_after:?}"
+    );
+    assert_eq!(
+        inode_after,
+        Some(inode_before),
+        "second daemon replaced the active FIFO, output={duplicate_output}"
+    );
 }
 
 // ============================================================================
 // self / 空 target 入口(`rdog control self @<line>` / `rdog control @<line>`)
 // ============================================================================
 
-fn run_control_with_args(args: &[&str]) -> (std::process::ExitStatus, String, String) {
-    run_control_with_args_and_env(args, None)
-}
-
-fn run_control_with_args_and_env(
-    args: &[&str],
-    xdg_state_home: Option<&PathBuf>,
-) -> (std::process::ExitStatus, String, String) {
-    let mut command = Command::new(rdog_binary_path());
-    command
-        .arg("control")
-        .args(args)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    if let Some(xdg_state_home) = xdg_state_home {
-        command.env("XDG_STATE_HOME", xdg_state_home);
-    }
-    let mut child = command.spawn().expect("control should start");
-
-    child
-        .stdin
-        .as_mut()
-        .expect("stdin should exist")
-        .write_all(b"@ping\n")
-        .expect("should send control line");
-    drop(child.stdin.take());
-
-    let output = child
-        .wait_with_output()
-        .expect("should collect control output");
-    (
-        output.status,
-        String::from_utf8_lossy(&output.stdout).to_string(),
-        String::from_utf8_lossy(&output.stderr).to_string(),
-    )
-}
-
 #[test]
 fn self_target_with_explicit_namespace_should_find_local_daemon() {
     // 独立 namespace,完全跟其他 `lab` 测试隔离,允许 cargo test 默认并发。
-    let ns = "selfexp";
-    cleanup_namespace_artifacts(ns);
+    let ns = format!("self{}", next_port());
+    let state_home = TestStateHome::new("self-explicit");
+    cleanup_namespace_artifacts(&ns);
 
     let daemon_name = format!("selftest.{ns}");
-    let base_path = derive_unixpipe_base_path(ns, &daemon_name);
+    let base_path = derive_unixpipe_base_path(&ns, &daemon_name);
     cleanup_unixpipe_artifacts(&base_path);
 
-    let (mut child, _config_path, _entry, combined) =
-        start_zenoh_daemon_with_combined_output(&daemon_name, next_port(), true);
+    let daemon = start_zenoh_daemon_with_namespace_and_local_default(
+        &daemon_name,
+        &ns,
+        next_port(),
+        true,
+        false,
+        state_home.path(),
+        None,
+    );
 
     wait_for_marker(
-        &combined,
+        daemon.output(),
         "zenoh router daemon ready",
         Duration::from_secs(8),
     )
@@ -531,9 +415,9 @@ fn self_target_with_explicit_namespace_should_find_local_daemon() {
         "expected {uplink_path} to be created"
     );
 
-    let (status, stdout, stderr) = run_control_with_args(&["self", "--namespace", ns]);
-    let _ = child.kill();
-    let _ = child.wait();
+    let (status, stdout, stderr) =
+        run_control_with_args_and_env(&["self", "--namespace", &ns], Some(state_home.path()));
+    drop(daemon);
     cleanup_unixpipe_artifacts(&base_path);
 
     assert!(
@@ -548,18 +432,26 @@ fn self_target_with_explicit_namespace_should_find_local_daemon() {
 
 #[test]
 fn empty_target_with_namespace_should_find_local_daemon() {
-    let ns = "emptytgt";
-    cleanup_namespace_artifacts(ns);
+    let ns = format!("empty{}", next_port());
+    let state_home = TestStateHome::new("empty-target");
+    cleanup_namespace_artifacts(&ns);
 
     let daemon_name = format!("only.{ns}");
-    let base_path = derive_unixpipe_base_path(ns, &daemon_name);
+    let base_path = derive_unixpipe_base_path(&ns, &daemon_name);
     cleanup_unixpipe_artifacts(&base_path);
 
-    let (mut child, _config_path, _entry, combined) =
-        start_zenoh_daemon_with_combined_output(&daemon_name, next_port(), true);
+    let daemon = start_zenoh_daemon_with_namespace_and_local_default(
+        &daemon_name,
+        &ns,
+        next_port(),
+        true,
+        false,
+        state_home.path(),
+        None,
+    );
 
     wait_for_marker(
-        &combined,
+        daemon.output(),
         "zenoh router daemon ready",
         Duration::from_secs(8),
     )
@@ -571,9 +463,9 @@ fn empty_target_with_namespace_should_find_local_daemon() {
         "expected {uplink_path} to be created"
     );
 
-    let (status, stdout, stderr) = run_control_with_args(&["--namespace", ns]);
-    let _ = child.kill();
-    let _ = child.wait();
+    let (status, stdout, stderr) =
+        run_control_with_args_and_env(&["--namespace", &ns], Some(state_home.path()));
+    drop(daemon);
     cleanup_unixpipe_artifacts(&base_path);
 
     assert!(
@@ -588,28 +480,28 @@ fn empty_target_with_namespace_should_find_local_daemon() {
 
 #[test]
 fn empty_target_should_use_local_default_even_when_extra_fifo_candidate_exists() {
-    let ns = "lde";
-    cleanup_namespace_artifacts(ns);
-    let state_home = unique_state_home("localdefempty");
+    let ns = format!("lde{}", next_port());
+    cleanup_namespace_artifacts(&ns);
+    let state_home = TestStateHome::new("localdefempty");
 
     let daemon_name = format!("d{}.{ns}", next_port());
     let extra_daemon_name = format!("x.{ns}");
-    let base_path = derive_unixpipe_base_path(ns, &daemon_name);
-    let extra_base = create_fake_uplink_candidate(ns, &extra_daemon_name);
+    let base_path = derive_unixpipe_base_path(&ns, &daemon_name);
+    let extra_base = create_fake_uplink_candidate(&ns, &extra_daemon_name);
     cleanup_unixpipe_artifacts(&base_path);
 
-    let (mut child, _config_path, _entry, combined) =
-        start_zenoh_daemon_with_namespace_and_local_default(
-            &daemon_name,
-            ns,
-            next_port(),
-            true,
-            true,
-            &state_home,
-        );
+    let daemon = start_zenoh_daemon_with_namespace_and_local_default(
+        &daemon_name,
+        &ns,
+        next_port(),
+        true,
+        true,
+        state_home.path(),
+        None,
+    );
 
     wait_for_marker(
-        &combined,
+        daemon.output(),
         "zenoh router daemon ready",
         Duration::from_secs(8),
     )
@@ -622,13 +514,11 @@ fn empty_target_should_use_local_default_even_when_extra_fifo_candidate_exists()
     );
 
     let (status, stdout, stderr) =
-        run_control_with_args_and_env(&["--namespace", ns], Some(&state_home));
+        run_control_with_args_and_env(&["--namespace", &ns], Some(state_home.path()));
 
-    let _ = child.kill();
-    let _ = child.wait();
+    drop(daemon);
     cleanup_unixpipe_artifacts(&base_path);
     cleanup_unixpipe_artifacts(&extra_base);
-    let _ = fs::remove_dir_all(&state_home);
 
     assert!(
         status.success(),
@@ -642,28 +532,28 @@ fn empty_target_should_use_local_default_even_when_extra_fifo_candidate_exists()
 
 #[test]
 fn self_target_should_use_local_default_even_when_extra_fifo_candidate_exists() {
-    let ns = "lds";
-    cleanup_namespace_artifacts(ns);
-    let state_home = unique_state_home("localdefself");
+    let ns = format!("lds{}", next_port());
+    cleanup_namespace_artifacts(&ns);
+    let state_home = TestStateHome::new("localdefself");
 
     let daemon_name = format!("d{}.{ns}", next_port());
     let extra_daemon_name = format!("x.{ns}");
-    let base_path = derive_unixpipe_base_path(ns, &daemon_name);
-    let extra_base = create_fake_uplink_candidate(ns, &extra_daemon_name);
+    let base_path = derive_unixpipe_base_path(&ns, &daemon_name);
+    let extra_base = create_fake_uplink_candidate(&ns, &extra_daemon_name);
     cleanup_unixpipe_artifacts(&base_path);
 
-    let (mut child, _config_path, _entry, combined) =
-        start_zenoh_daemon_with_namespace_and_local_default(
-            &daemon_name,
-            ns,
-            next_port(),
-            true,
-            true,
-            &state_home,
-        );
+    let daemon = start_zenoh_daemon_with_namespace_and_local_default(
+        &daemon_name,
+        &ns,
+        next_port(),
+        true,
+        true,
+        state_home.path(),
+        None,
+    );
 
     wait_for_marker(
-        &combined,
+        daemon.output(),
         "zenoh router daemon ready",
         Duration::from_secs(8),
     )
@@ -676,13 +566,11 @@ fn self_target_should_use_local_default_even_when_extra_fifo_candidate_exists() 
     );
 
     let (status, stdout, stderr) =
-        run_control_with_args_and_env(&["self", "--namespace", ns], Some(&state_home));
+        run_control_with_args_and_env(&["self", "--namespace", &ns], Some(state_home.path()));
 
-    let _ = child.kill();
-    let _ = child.wait();
+    drop(daemon);
     cleanup_unixpipe_artifacts(&base_path);
     cleanup_unixpipe_artifacts(&extra_base);
-    let _ = fs::remove_dir_all(&state_home);
 
     assert!(
         status.success(),
@@ -696,23 +584,17 @@ fn self_target_should_use_local_default_even_when_extra_fifo_candidate_exists() 
 
 #[test]
 fn self_target_should_error_when_no_local_daemon_running() {
-    // 清理掉所有残留 FIFO,确保本地没有 daemon
-    let tmpdir = std::env::var_os("TMPDIR")
-        .map(PathBuf::from)
-        .filter(|p| !p.as_os_str().is_empty())
-        .unwrap_or_else(|| PathBuf::from("/tmp"));
-    if let Ok(entries) = std::fs::read_dir(&tmpdir) {
-        for entry in entries.flatten() {
-            if let Some(name) = entry.file_name().to_str() {
-                if name.starts_with("rdog-") && name.ends_with(".pipe_uplink") {
-                    let _ = std::fs::remove_file(entry.path());
-                }
-            }
-        }
-    }
+    // 用唯一 namespace 和 state home 构造空环境,不能删除真实 daemon 的 FIFO。
+    let namespace = format!("none{}", next_port());
+    let state_home = TestStateHome::new("no-local-daemon");
+    cleanup_namespace_artifacts(&namespace);
 
-    let (status, _stdout, stderr) =
-        run_control_with_args(&["self", "--namespace", "rdog-namespace-no-such-daemon-12345"]);
+    let (status, _stdout, stderr) = run_control_with_args_and_env(
+        &["self", "--namespace", &namespace],
+        Some(state_home.path()),
+    );
+    cleanup_namespace_artifacts(&namespace);
+
     assert!(
         !status.success(),
         "没有本地 daemon 时 control self 应该失败"
@@ -726,27 +608,43 @@ fn self_target_should_error_when_no_local_daemon_running() {
 
 #[test]
 fn self_target_should_error_when_multiple_local_daemons() {
-    // 在同 namespace 启动两个 daemon
-    let daemon_name_a = unique_daemon_name("self-multi-a");
-    let daemon_name_b = unique_daemon_name("self-multi-b");
-    let base_a = derive_unixpipe_base_path(RDOG_NAMESPACE, &daemon_name_a);
-    let base_b = derive_unixpipe_base_path(RDOG_NAMESPACE, &daemon_name_b);
+    // 使用私有 namespace/state 启动两个 daemon,不能读取或清理真实 lab registry。
+    let namespace = format!("multi{}", next_port());
+    let state_home = TestStateHome::new("multiple-daemons");
+    let daemon_name_a = format!("a.{namespace}");
+    let daemon_name_b = format!("b.{namespace}");
+    let base_a = derive_unixpipe_base_path(&namespace, &daemon_name_a);
+    let base_b = derive_unixpipe_base_path(&namespace, &daemon_name_b);
     cleanup_unixpipe_artifacts(&base_a);
     cleanup_unixpipe_artifacts(&base_b);
 
-    let (mut child_a, _cp_a, _e_a, combined_a) =
-        start_zenoh_daemon_with_combined_output(&daemon_name_a, next_port(), true);
-    let (mut child_b, _cp_b, _e_b, combined_b) =
-        start_zenoh_daemon_with_combined_output(&daemon_name_b, next_port(), true);
+    let daemon_a = start_zenoh_daemon_with_namespace_and_local_default(
+        &daemon_name_a,
+        &namespace,
+        next_port(),
+        true,
+        false,
+        state_home.path(),
+        None,
+    );
+    let daemon_b = start_zenoh_daemon_with_namespace_and_local_default(
+        &daemon_name_b,
+        &namespace,
+        next_port(),
+        true,
+        false,
+        state_home.path(),
+        None,
+    );
 
     wait_for_marker(
-        &combined_a,
+        daemon_a.output(),
         "zenoh router daemon ready",
         Duration::from_secs(8),
     )
     .expect("daemon A should be ready");
     wait_for_marker(
-        &combined_b,
+        daemon_b.output(),
         "zenoh router daemon ready",
         Duration::from_secs(8),
     )
@@ -764,11 +662,12 @@ fn self_target_should_error_when_multiple_local_daemons() {
         Duration::from_secs(2)
     ));
 
-    let (status, _stdout, stderr) = run_control_with_args(&["self", "--namespace", RDOG_NAMESPACE]);
-    let _ = child_a.kill();
-    let _ = child_a.wait();
-    let _ = child_b.kill();
-    let _ = child_b.wait();
+    let (status, _stdout, stderr) = run_control_with_args_and_env(
+        &["self", "--namespace", &namespace],
+        Some(state_home.path()),
+    );
+    drop(daemon_b);
+    drop(daemon_a);
     cleanup_unixpipe_artifacts(&base_a);
     cleanup_unixpipe_artifacts(&base_b);
 

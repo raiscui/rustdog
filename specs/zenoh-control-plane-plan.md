@@ -114,9 +114,12 @@ macOS / Linux 上同机 `rdog daemon` + `rdog control <target>` 必须自动走 
    - **不**主动 open FIFO 探活(那会让 Zenoh request channel 单 reader 复用机制看到 EOF 并破坏 daemon 状态)。
    - 存在 → 把 `unixpipe/{base}` 作为唯一 connect endpoint 传给 `zenoh::open`。
    - 不存在 → 走原来的 `autodiscover_router_endpoints` 路径。
-4. **daemon 端**:启用 `unixpipe.enabled = true` 时自动把 `unixpipe/{base}` 注入 `listen_endpoints` 列表最前。
-   启动时调用 `cleanup_stale_unixpipe_socket` unlink `<base>` / `<base>_uplink` / `<base>_downlink`
-   三个残留文件。
+4. **daemon 端**:endpoint composition 同时产出最终 `listen_endpoints` 和唯一 resolved base。
+   - 显式 unixpipe endpoint 优先;它与 `unixpipe.socket_path` 同时出现时必须一致。
+   - 没有显式 endpoint 且 `unixpipe.enabled = true` 时,自动把 `unixpipe/{base}` 注入列表最前。
+   - destructive cleanup 前依次获取 service-name PID guard 和 resolved base-path PID guard。
+   - 两把 guard 都成功后,才 unlink `<base>` / `<base>_uplink` / `<base>_downlink` 残留文件。
+   - 不同 daemon name 复用同一显式 base 时,后启动者失败且不能替换活跃 FIFO。
 5. **空 target / self target**:`rdog control @<line>` 和 `rdog control self @<line>` 先读 local-default registry。
    - daemon 只有在 `[zenoh.unixpipe] local_default = true` 时才声明自己是本 namespace 的本机默认 daemon。
    - registry 记录 `namespace`、`daemon_name`、`pid` 和 FIFO base path。
