@@ -5,12 +5,27 @@ rustdog 首先被LLM agent 智能体使用，其次被人类使用。要以agent
 这个文件只负责给仓库里的长期知识载体建索引。
 更具体的执行规范,以外层注入的 AGENTS 指令和会话中的高优先级消息为准。
 
+## Agent skills
+
+### Issue tracker
+
+Issues 和 Wayfinder maps 使用 GitHub Issues。详见 `docs/agents/issue-tracker.md`。
+
+### Triage labels
+
+使用默认 triage 标签词汇。详见 `docs/agents/triage-labels.md`。
+
+### Domain docs
+
+使用 single-context 布局。领域术语见根级 `CONTEXT.md`,消费规则见 `docs/agents/domain.md`。
+
 ## 何时优先阅读
 
 - 修改 `src/control_protocol.rs`、`src/shell.rs`、`tests/control_lanes.rs`、`tests/control_mode.rs` 前,先看 line-control 协议规格。
 - 修改 `src/pty_control.rs`、`src/control_transport.rs`、`src/zenoh_control.rs` 或 `rdog control --pty` 行为前,先看 PTY control 规划。
 - 需要理解当前协议为什么会同时保留显式协议请求和裸 shell 行时,先看项目经验沉淀。
 - 修改 UI script runner、GUI 自动化 JSON DSL、control-flow 脚本编译或后续 `@ui-flow` 前,先看 UI script 控制计划。
+- 设计或实现 macOS Recorder capture backend、权限 lane、Secure Input 脱敏或自身注入过滤前,先看 macOS operation capture 调研。
 
 ## 长期文件索引
 
@@ -207,3 +222,8 @@ rustdog 首先被LLM agent 智能体使用，其次被人类使用。要以agent
   - 主题: control core / outbound frame / session 抽象的分阶段重构计划
   - 用途: 固定从 `String @response` 返回模型演进到 `ControlExecutionOutcome + ControlFrame + ControlPeerSession` 的实施顺序,以及 TCP/WebSocket 先行、Zenoh 后续迁移的验证路径
   - 何时阅读: 准备开始写双向控制代码、评估先改哪层抽象、或 review `@savefile`/双向 frame 改造顺序时
+
+- `specs/rdog-macos-operation-capture-research.md`
+  - 主题: macOS Recorder 的全局键鼠捕获、AX/Workspace 语义富化、权限生命周期、Secure Input 与 App Sandbox 边界
+  - 用途: 固定 session listen-only event tap、独立权限 lane、gap/status、self-event marker、窗口几何通知和 prototype 未知项
+  - 何时阅读: 设计或实现 Recorder capture runtime、扩展 `@capabilities` 的录制权限状态、处理 TCC/AX 权限恢复或验证输入自回录前
