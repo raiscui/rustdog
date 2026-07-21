@@ -227,3 +227,8 @@ Issues 和 Wayfinder maps 使用 GitHub Issues。详见 `docs/agents/issue-track
   - 主题: macOS Recorder 的全局键鼠捕获、AX/Workspace 语义富化、权限生命周期、Secure Input 与 App Sandbox 边界
   - 用途: 固定 session listen-only event tap、独立权限 lane、gap/status、self-event marker、窗口几何通知和 prototype 未知项
   - 何时阅读: 设计或实现 Recorder capture runtime、扩展 `@capabilities` 的录制权限状态、处理 TCC/AX 权限恢复或验证输入自回录前
+
+- `specs/rdog-recording-session-lifecycle.md`
+  - 主题: Recording Session lifecycle control protocol
+  - 用途: 固定 `@record-start` / `@record-status` / `@record-mark` / `@record-stop` / `@record-cancel`、connection ownership、required lane failure、原子 Bundle commit、远程 delivery retry、crash cleanup 和 `rdog record` wrapper
+  - 何时阅读: 设计或实现 Recorder lifecycle、录制 CLI、Recording Bundle export、录制权限提示、Session 状态机或失败恢复前
