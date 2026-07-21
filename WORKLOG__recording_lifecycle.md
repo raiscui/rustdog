@@ -22,3 +22,21 @@
 - lifecycle 只负责 Session 事务边界。Journal schema、Bundle evidence policy、确定性编译和 replay safety 继续由各自 ticket 决定。
 - 对录制一致性有影响的窗口位置和大小不应另建隐式恢复通道,Replay Script 直接使用现有 `@window-resize`。
 - 系统权限请求属于用户显式 start 的恢复动作,必须主动弹窗、限制单次请求次数,并把 blocked 状态诚实返回给 controller。
+
+## [2026-07-21 20:32:55] [Session ID: omx-1784512435044-92wxat] 任务名称: lifecycle ticket 最终验证
+
+### 任务内容
+
+- 对规格 commit、支线上下文 commit、GitHub ticket、Wayfinder map、dependency frontier 和本地工作树执行最终复核。
+
+### 完成过程
+
+- 确认本地 HEAD 与 `origin/main` 同为 `1aa948a0897aff5b664f937fbd19fa575947f431`。
+- 确认 lifecycle ticket 已关闭,resolution comment 保持可访问。
+- 确认 map 已增加 lifecycle pointer,同时没有删除 Evidence retention fog。
+- 确认当前唯一 frontier 是 `定义 rdog.recording.v1 Recording Journal 模型`。
+- 确认默认三文件的既有改动仍未暂存、未提交。
+
+### 总结感悟
+
+- 本 ticket 已按 Wayfinder 单票边界结束。下一 ticket 需要新 session claim,不在本轮继续展开。
