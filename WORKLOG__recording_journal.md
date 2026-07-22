@@ -28,3 +28,21 @@
 - `journal_seq` 与 `capture_seq` 分工可以同时保住全局追加顺序和物理丢失证据,但不能让 timestamp 成为第三排序源。
 - append-only 的正确边界是 physical 不变、semantic candidate 后补,不是等待富化后改写 raw event。
 - crash recovery 在当前 lifecycle 中只负责验证和 privacy-first cleanup,不应该借 Journal 格式重新引入 active Session resume。
+
+## [2026-07-22 12:17:54] [Session ID: omx-1784512435044-92wxat] 任务名称: Recording Journal ticket 最终验证
+
+### 任务内容
+
+- 复核正式规格、支线上下文、GitHub ticket、Wayfinder map、native frontier 和本地工作树终态。
+
+### 完成过程
+
+- 确认本地 HEAD 与 `origin/main` 同为 `62e9964ce89531fbcc4ce1cd98549d6efc54f244`。
+- 确认 Journal ticket 已关闭,resolution comment 和固定规格链接可访问。
+- 确认 map 已增加 Journal pointer,同时三项 fog 都未被误删。
+- 确认新 frontier 恰好两张,其他 open tickets 仍有 blocker。
+- 确认默认三文件的既有改动未暂存、未提交。
+
+### 总结感悟
+
+- 本 ticket 已按 Wayfinder 单票边界完成。下一轮应从当前 frontier 重新 claim,不复用本 ticket 的 active 状态。
