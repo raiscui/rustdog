@@ -20,6 +20,14 @@ _Avoid_: Raw script, temporary event dump
 从 Recording Journal 派生、可由 rdog control 执行的有限步骤序列。
 _Avoid_: Recording source, raw capture
 
+**Semantic Promotion**:
+Replay compiler根据Recording Journal中的target、ownership、capability和freshness事实,把physical operation编译为可重新定位的语义动作。
+_Avoid_: Best-effort semantic guess, confidence-based promotion
+
+**Guarded Coordinate Fallback**:
+没有录制语义身份时,经过Participating Window、geometry、display、point/path和verification门禁后生成的`os-logical`坐标动作。
+_Avoid_: Silent coordinate downgrade, raw coordinate replay
+
 **Participating Window**:
 Recording Session 中成为操作目标,或被用户主动移动、缩放的窗口。只有这类窗口属于回放环境恢复范围。
 _Avoid_: All desktop windows, unrelated window

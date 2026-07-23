@@ -495,10 +495,11 @@ v1 不增加 per-entry `critical` / `advisory` 标志。顶层 kind 固定和 co
 - Participating Window geometry: `specs/rdog-window-control-plan.md`。
 - semantic action boundary: `specs/rdog-non-mouse-semantic-control-plan.md`。
 - coordinate fallback: `specs/rdog-mouse-control-coordinate-plan.md` 和 `specs/rdog-multi-display-screenshot-coordinate-plan.md`。
+- Recording Journal到Replay Script的Semantic Promotion与Guarded Coordinate Fallback选择: `specs/rdog-recording-semantic-promotion-policy.md`。
 
 ## Non-goals
 
-- Replay compiler 选择、合并、等待或 retry policy。
+- 上述Semantic Promotion policy之外的Replay compiler合并、等待或retry policy。
 - mouse move、typing 或 scroll 的 Replay-oriented coalescing。
 - Binary journal、WAL、hash chain、chunk index 或 random-access database。
 - Partial Bundle 或 failed Journal export。
