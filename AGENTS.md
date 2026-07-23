@@ -237,3 +237,8 @@ Issues 和 Wayfinder maps 使用 GitHub Issues。详见 `docs/agents/issue-track
   - 主题: `rdog.recording.v1` append-only Recording Journal 模型
   - 用途: 固定 JSONL envelope、journal/capture ordering、physical 与 semantic candidate、window/display snapshot、lane/redaction/gap/mark/terminal、durability、crash 和 schema compatibility
   - 何时阅读: 设计或实现 Recorder journal writer/reader、录制事件 schema、Journal validator、Replay compiler 输入或 crash orphan cleanup 前
+
+- `specs/rdog-recording-redaction-parameter-model.md`
+  - 主题: Recorder 输入脱敏与 Replay Parameter 正式规格
+  - 用途: 固定 ordinary/sensitive/unknown 分类、redaction segment、canonical descriptor、typed `TypeText`、runtime-only bindings、capability/transport gate、审计与 no-retry 边界
+  - 何时阅读: 设计或实现 Recorder 输入分类、Secure Input/paste 脱敏、Replay 参数、`flow_parameters` capability、参数 transport gate 或参数化 `TypeText` 前

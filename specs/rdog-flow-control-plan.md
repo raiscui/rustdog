@@ -133,3 +133,15 @@ Expected final response contains:
 - `"status":"ok"`
 - captured stdout containing `flow-ok`
 - `response_count` at least `1`
+
+## Planned Replay Parameter extension
+
+`specs/rdog-recording-redaction-parameter-model.md` 已固定 `rdog.flow.v1` 的 planned parameter extension:
+
+- 保存的 Flow 增加 descriptor-only `parameters[]`。
+- 单次 execution request 可以临时携带 `bindings`,但 serializer 不得写回保存文件。
+- Literal 和 parameterized text 统一使用 typed `TypeText` step,并复用现有 `@type-text` control core/backend。
+- `ControlLine`、`Cmd`、`Script`、`env`、`Expect` 和 artifact path 禁止参数插值。
+- Daemon 通过 `@capabilities.flow_parameters` 显式声明支持;旧 daemon 必须返回 `FLOW_PARAMETERS_UNSUPPORTED`,不能降级执行。
+
+当前实现仍只支持本文 Status 中列出的 minimum steps,尚未实现 `parameters`、`bindings` 或 `TypeText`。

@@ -31,3 +31,19 @@ _Avoid_: Desktop layout snapshot, global window reset
 **Recording Bundle**:
 Recording Session 完成后导出的自描述产物集合,包含 Recording Journal、Replay Script、manifest 和必要 evidence。
 _Avoid_: Script file, video recording
+
+**Ordinary Input**:
+Recorder 拥有完整、明确的非安全输入证据,因而允许保存其文本语义的输入。
+_Avoid_: Probably safe input, visible text
+
+**Sensitive Input**:
+由 Secure Input、secure field 或显式 secret 声明确认需要保密,其真实值不得进入任何持久化录制产物的输入。
+_Avoid_: Password keystrokes, captured secret
+
+**Unknown-Safety Input**:
+Recorder 缺少足够证据判断是否安全,因此采用与 Sensitive Input 相同持久化边界的输入。
+_Avoid_: Ordinary input fallback, unclassified plaintext
+
+**Replay Parameter**:
+Replay 开始前由调用方显式提供,用于补全录制期未保存或无法可靠重建的输入值。
+_Avoid_: Embedded secret, template variable, stored credential

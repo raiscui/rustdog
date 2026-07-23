@@ -518,3 +518,14 @@ v1 不增加 per-entry `critical` / `advisory` 标志。顶层 kind 固定和 co
 - crash orphan 不恢复、不编译并按 privacy-first cleanup 处理。
 - v1 unknown event 不会被 Replay compiler 静默忽略。
 - Replay Script 始终从 frozen Journal 派生,不能反向成为 Recording source。
+
+## Planned Replay Parameter extension
+
+`specs/rdog-recording-redaction-parameter-model.md` 已固定 planned parameter extension:
+
+- 不增加 `rdog.recording.v1` 顶层 event family。
+- Sensitive、unknown 和 paste segment 在既有 `redaction` enter payload 中创建 canonical descriptor。
+- Ordinary input 的最终 committed text 无法确认时,由既有 `semantic_candidate` 的 `parameter_required` payload 创建 descriptor。
+- Journal 是 descriptor 的唯一创建者;manifest 和 Replay Script 只能复制。
+
+这些 payload subtype 与字段尚未实现。Journal writer、reader 和 validator 在实施完成前不能宣称支持 Replay Parameter。
