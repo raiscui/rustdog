@@ -36,3 +36,20 @@
 
 - 没有根据不完整输出推断 frontier。
 - 单独重试相同 API,成功确认 `定义 Participating Window 与 geometry precondition 编译` 仍被 `验证语义提升与坐标 fallback 的可行性` 阻塞。
+
+## [2026-07-23 17:21:00] [Session ID: omx-1784512435044-92wxat] 问题: remote-tracking 状态被过早解释
+
+### 现象与候选假设
+
+- Context commit 后一次 `git log --decorate` 暂时显示 `origin/main` 仍在上一笔 commit。
+- 当时的候选假设是前一次 push 没有更新远端。
+
+### 推翻证据
+
+- 随后执行未过滤的 `git push origin main`,返回 `Everything up-to-date`。
+- `git rev-parse HEAD` 与 `git rev-parse origin/main` 同为 `fe39ffeb738c982ebdb9e58780bf32f522490275`。
+
+### 结论
+
+- 上一候选假设不成立。可验证事实是 context commit 已在远端。
+- 后续发布判断以 local/remote ref SHA 相等为准,不只依赖一条 decorate 输出。

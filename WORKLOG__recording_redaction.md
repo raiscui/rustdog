@@ -42,3 +42,21 @@
 
 - 本轮未创建 `LATER_PLANS__recording_redaction.md`: 后续实施和剩余决策已经由 Wayfinder map 跟踪。
 - 本轮未创建 `EPIPHANY_LOG__recording_redaction.md`: 安全边界已经写入正式规格,没有脱离当前 ticket 且尚未落盘的灾难点。
+
+## [2026-07-23 17:21:00] [Session ID: omx-1784512435044-92wxat] 任务名称: 支线上下文发布收口
+
+### 任务内容
+
+- 将本 ticket 的 task plan、notes、WORKLOG 和 ERRORFIX 作为独立支线上下文提交。
+- 保留默认 `task_plan.md`、`notes.md`、`WORKLOG.md` 的既有修改,没有暂存或撤回。
+
+### 完成过程
+
+- 4 个支线文件通过 UTF-8、末尾换行、行尾空白和 Markdown fence 检查。
+- Context commit `fe39ffeb738c982ebdb9e58780bf32f522490275` 已推送。
+- 通过 `git rev-parse HEAD` 与 `git rev-parse origin/main` 相等验证远端状态。
+
+### 总结感悟
+
+- Mixed worktree 下继续坚持 explicit path staging,不能用 `git add .`。
+- Push 结论以 local/remote ref SHA 动态对比为准,避免把一次短暂显示当成已确认失败。
