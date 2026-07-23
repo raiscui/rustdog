@@ -1,0 +1,278 @@
+{
+  "schema": "rdog.semantic-promotion.prototype.v1",
+  "scenarios": [
+    {
+      "id": "native-click-unique-ax",
+      "title": "原生按钮唯一 AXPress",
+      "action": "click",
+      "tags": ["native_ax"],
+      "physical": {"event_count": 3, "point": {"x": 720, "y": 480}, "button": "left"},
+      "semantic": {
+        "candidate_count": 1,
+        "candidate_owned": true,
+        "durable_selector": {"role": "AXButton", "name": "Save"},
+        "action_capability": "AXPress",
+        "captured_ref": "@e12",
+        "captured_observation_id": "obs-recording-1"
+      },
+      "freshness": {"observation_age_ms": 120, "observation_ttl_ms": 1000, "execution_refind": "unique"},
+      "window": {"identity_resolved": true, "ownership_match": true, "focus_verified": true, "geometry_precondition": true, "rect_fresh": true},
+      "display": {"display_id": "d1", "topology_match": true, "guard_present": true, "points_valid": true},
+      "verification": {"required": ["ax-state"], "available": ["ax-state"]},
+      "action_data": {"button": "left", "count": 1},
+      "expected_decision": "semantic"
+    },
+    {
+      "id": "web-click-dynamic-refind",
+      "title": "动态 Web 页面 stale ref 后唯一 re-find",
+      "action": "click",
+      "tags": ["web", "dynamic_page", "stale_target"],
+      "physical": {"event_count": 3, "point": {"x": 240, "y": 360}, "button": "left"},
+      "semantic": {
+        "candidate_count": 1,
+        "candidate_owned": true,
+        "durable_selector": {"scope": "AXWebArea", "role": "AXLink", "description": "首页"},
+        "action_capability": "AXPress",
+        "captured_ref": "@e4",
+        "captured_observation_id": "obs-recording-2"
+      },
+      "freshness": {"observation_age_ms": 4200, "observation_ttl_ms": 1000, "execution_refind": "unique"},
+      "window": {"identity_resolved": true, "ownership_match": true, "focus_verified": true, "geometry_precondition": true, "rect_fresh": true},
+      "display": {"display_id": "d1", "topology_match": true, "guard_present": true, "points_valid": true},
+      "verification": {"required": ["fresh-web-area"], "available": ["fresh-web-area", "ax-diff"]},
+      "action_data": {"button": "left", "count": 1},
+      "expected_decision": "semantic"
+    },
+    {
+      "id": "web-click-refind-not-found",
+      "title": "动态 Web 语义 target 已丢失",
+      "action": "click",
+      "tags": ["web", "dynamic_page", "stale_target"],
+      "physical": {"event_count": 3, "point": {"x": 240, "y": 360}, "button": "left"},
+      "semantic": {
+        "candidate_count": 1,
+        "candidate_owned": true,
+        "durable_selector": {"scope": "AXWebArea", "role": "AXLink", "description": "首页"},
+        "action_capability": "AXPress",
+        "captured_ref": "@e4",
+        "captured_observation_id": "obs-recording-2"
+      },
+      "freshness": {"observation_age_ms": 4200, "observation_ttl_ms": 1000, "execution_refind": "not_found"},
+      "window": {"identity_resolved": true, "ownership_match": true, "focus_verified": true, "geometry_precondition": true, "rect_fresh": true},
+      "display": {"display_id": "d1", "topology_match": true, "guard_present": true, "points_valid": true},
+      "verification": {"required": ["fresh-web-area"], "available": ["fresh-web-area", "ax-diff"]},
+      "action_data": {"button": "left", "count": 1},
+      "expected_decision": "reject"
+    },
+    {
+      "id": "web-click-ambiguous",
+      "title": "动态 Web 页面 re-find 多候选",
+      "action": "click",
+      "tags": ["web", "dynamic_page", "ambiguity"],
+      "physical": {"event_count": 3, "point": {"x": 240, "y": 360}, "button": "left"},
+      "semantic": {
+        "candidate_count": 2,
+        "candidate_owned": true,
+        "durable_selector": {"scope": "AXWebArea", "role": "AXLink", "description": "首页"},
+        "action_capability": "AXPress",
+        "captured_ref": "@e4",
+        "captured_observation_id": "obs-recording-3"
+      },
+      "freshness": {"observation_age_ms": 3900, "observation_ttl_ms": 1000, "execution_refind": "ambiguous"},
+      "window": {"identity_resolved": true, "ownership_match": true, "focus_verified": true, "geometry_precondition": true, "rect_fresh": true},
+      "display": {"display_id": "d1", "topology_match": true, "guard_present": true, "points_valid": true},
+      "verification": {"required": ["fresh-web-area"], "available": ["fresh-web-area"]},
+      "action_data": {"button": "left", "count": 1},
+      "expected_decision": "reject"
+    },
+    {
+      "id": "no-ax-click-guarded",
+      "title": "no-AX 自绘按钮 guarded click",
+      "action": "click",
+      "tags": ["no_ax"],
+      "physical": {"event_count": 3, "point": {"x": 980, "y": 640}, "button": "left"},
+      "semantic": {
+        "candidate_count": 0,
+        "candidate_owned": false,
+        "durable_selector": null,
+        "action_capability": null,
+        "captured_ref": null,
+        "captured_observation_id": null
+      },
+      "freshness": {"observation_age_ms": 80, "observation_ttl_ms": 1000, "execution_refind": "not_found"},
+      "window": {"identity_resolved": true, "ownership_match": true, "focus_verified": true, "geometry_precondition": true, "rect_fresh": true},
+      "display": {"display_id": "d2", "topology_match": true, "guard_present": true, "points_valid": true},
+      "verification": {"required": ["visual-region"], "available": ["visual-region"]},
+      "action_data": {"button": "left", "count": 1},
+      "expected_decision": "guarded-coordinate"
+    },
+    {
+      "id": "text-ordinary-committed",
+      "title": "ordinary committed text",
+      "action": "text",
+      "tags": ["native_ax"],
+      "physical": {"event_count": 8, "point": null, "button": null},
+      "semantic": {
+        "candidate_count": 1,
+        "candidate_owned": true,
+        "durable_selector": {"role": "AXTextField", "identifier": "title"},
+        "action_capability": "AXValue",
+        "captured_ref": "@e8",
+        "captured_observation_id": "obs-recording-4"
+      },
+      "freshness": {"observation_age_ms": 140, "observation_ttl_ms": 1000, "execution_refind": "unique"},
+      "window": {"identity_resolved": true, "ownership_match": true, "focus_verified": true, "geometry_precondition": true, "rect_fresh": true},
+      "display": {"display_id": "d1", "topology_match": true, "guard_present": true, "points_valid": true},
+      "verification": {"required": ["ax-value"], "available": ["ax-value"]},
+      "action_data": {"classification": "ordinary", "committed": true, "literal": "hello", "parameter_id": null},
+      "expected_decision": "semantic"
+    },
+    {
+      "id": "text-sensitive-parameter",
+      "title": "sensitive text 只生成参数",
+      "action": "text",
+      "tags": ["sensitive"],
+      "physical": {"event_count": 0, "point": null, "button": null},
+      "semantic": {
+        "candidate_count": 1,
+        "candidate_owned": true,
+        "durable_selector": {"role": "AXSecureTextField", "identifier": "password"},
+        "action_capability": "TypeText",
+        "captured_ref": null,
+        "captured_observation_id": null
+      },
+      "freshness": {"observation_age_ms": 110, "observation_ttl_ms": 1000, "execution_refind": "unique"},
+      "window": {"identity_resolved": true, "ownership_match": true, "focus_verified": true, "geometry_precondition": true, "rect_fresh": true},
+      "display": {"display_id": "d1", "topology_match": true, "guard_present": true, "points_valid": true},
+      "verification": {"required": ["target-state"], "available": ["target-state"]},
+      "action_data": {"classification": "sensitive", "committed": false, "literal": null, "parameter_id": "param-1"},
+      "expected_decision": "parameterized-semantic"
+    },
+    {
+      "id": "text-target-unresolved",
+      "title": "文本 target 无法恢复",
+      "action": "text",
+      "tags": ["stale_target"],
+      "physical": {"event_count": 5, "point": null, "button": null},
+      "semantic": {
+        "candidate_count": 0,
+        "candidate_owned": false,
+        "durable_selector": null,
+        "action_capability": null,
+        "captured_ref": "@e9",
+        "captured_observation_id": "obs-recording-5"
+      },
+      "freshness": {"observation_age_ms": 5100, "observation_ttl_ms": 1000, "execution_refind": "not_found"},
+      "window": {"identity_resolved": true, "ownership_match": true, "focus_verified": true, "geometry_precondition": true, "rect_fresh": true},
+      "display": {"display_id": "d1", "topology_match": true, "guard_present": true, "points_valid": true},
+      "verification": {"required": ["target-state"], "available": []},
+      "action_data": {"classification": "ordinary", "committed": false, "literal": null, "parameter_id": "param-2"},
+      "expected_decision": "reject"
+    },
+    {
+      "id": "shortcut-window-targeted",
+      "title": "窗口定向快捷键",
+      "action": "shortcut",
+      "tags": ["shortcut"],
+      "physical": {"event_count": 4, "point": null, "button": null},
+      "semantic": {
+        "candidate_count": 0,
+        "candidate_owned": true,
+        "durable_selector": {"window": {"bundle_id": "com.example.Editor", "title_contains": "Draft"}},
+        "action_capability": "KeyDelivery",
+        "captured_ref": null,
+        "captured_observation_id": null
+      },
+      "freshness": {"observation_age_ms": 90, "observation_ttl_ms": 1000, "execution_refind": "unique"},
+      "window": {"identity_resolved": true, "ownership_match": true, "focus_verified": true, "geometry_precondition": true, "rect_fresh": true},
+      "display": {"display_id": "d1", "topology_match": true, "guard_present": true, "points_valid": true},
+      "verification": {"required": ["window-state"], "available": ["window-state"]},
+      "action_data": {"chord": "Cmd+S", "classified_non_text": true, "redaction_active": false},
+      "expected_decision": "semantic"
+    },
+    {
+      "id": "scroll-ax-container",
+      "title": "AX scroll container",
+      "action": "scroll",
+      "tags": ["native_ax"],
+      "physical": {"event_count": 1, "point": {"x": 640, "y": 520}, "button": null},
+      "semantic": {
+        "candidate_count": 1,
+        "candidate_owned": true,
+        "durable_selector": {"role": "AXScrollArea", "identifier": "document"},
+        "action_capability": "AXScroll",
+        "captured_ref": "@e15",
+        "captured_observation_id": "obs-recording-6"
+      },
+      "freshness": {"observation_age_ms": 130, "observation_ttl_ms": 1000, "execution_refind": "unique"},
+      "window": {"identity_resolved": true, "ownership_match": true, "focus_verified": true, "geometry_precondition": true, "rect_fresh": true},
+      "display": {"display_id": "d1", "topology_match": true, "guard_present": true, "points_valid": true},
+      "verification": {"required": ["ax-scroll-value"], "available": ["ax-scroll-value"]},
+      "action_data": {"direction": "down", "pages": 2, "delta_y": 0},
+      "expected_decision": "semantic"
+    },
+    {
+      "id": "scroll-no-ax-guarded",
+      "title": "no-AX guarded wheel",
+      "action": "scroll",
+      "tags": ["no_ax"],
+      "physical": {"event_count": 1, "point": {"x": 1100, "y": 700}, "button": null},
+      "semantic": {
+        "candidate_count": 0,
+        "candidate_owned": false,
+        "durable_selector": null,
+        "action_capability": null,
+        "captured_ref": null,
+        "captured_observation_id": null
+      },
+      "freshness": {"observation_age_ms": 70, "observation_ttl_ms": 1000, "execution_refind": "not_found"},
+      "window": {"identity_resolved": true, "ownership_match": true, "focus_verified": true, "geometry_precondition": true, "rect_fresh": true},
+      "display": {"display_id": "d2", "topology_match": true, "guard_present": true, "points_valid": true},
+      "verification": {"required": ["visual-region"], "available": ["visual-region"]},
+      "action_data": {"direction": "down", "pages": 0, "delta_y": 3},
+      "expected_decision": "guarded-coordinate"
+    },
+    {
+      "id": "drag-canvas-guarded",
+      "title": "canvas complex drag",
+      "action": "drag",
+      "tags": ["no_ax", "canvas"],
+      "physical": {"event_count": 28, "point": null, "button": "left"},
+      "semantic": {
+        "candidate_count": 0,
+        "candidate_owned": false,
+        "durable_selector": null,
+        "action_capability": null,
+        "captured_ref": null,
+        "captured_observation_id": null
+      },
+      "freshness": {"observation_age_ms": 60, "observation_ttl_ms": 1000, "execution_refind": "not_found"},
+      "window": {"identity_resolved": true, "ownership_match": true, "focus_verified": true, "geometry_precondition": true, "rect_fresh": true},
+      "display": {"display_id": "d2", "topology_match": true, "guard_present": true, "points_valid": true},
+      "verification": {"required": ["visual-region"], "available": ["visual-region"]},
+      "action_data": {"from": {"x": 900, "y": 420}, "to": {"x": 1200, "y": 540}, "duration_ms": 450, "steps": 24},
+      "expected_decision": "guarded-coordinate"
+    },
+    {
+      "id": "drag-stale-geometry",
+      "title": "drag window geometry 已 stale",
+      "action": "drag",
+      "tags": ["no_ax", "canvas", "stale_target"],
+      "physical": {"event_count": 28, "point": null, "button": "left"},
+      "semantic": {
+        "candidate_count": 0,
+        "candidate_owned": false,
+        "durable_selector": null,
+        "action_capability": null,
+        "captured_ref": null,
+        "captured_observation_id": null
+      },
+      "freshness": {"observation_age_ms": 2800, "observation_ttl_ms": 1000, "execution_refind": "not_found"},
+      "window": {"identity_resolved": true, "ownership_match": true, "focus_verified": true, "geometry_precondition": true, "rect_fresh": false},
+      "display": {"display_id": "d2", "topology_match": true, "guard_present": true, "points_valid": true},
+      "verification": {"required": ["visual-region"], "available": ["visual-region"]},
+      "action_data": {"from": {"x": 900, "y": 420}, "to": {"x": 1200, "y": 540}, "duration_ms": 450, "steps": 24},
+      "expected_decision": "reject"
+    }
+  ]
+}
