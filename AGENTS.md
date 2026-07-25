@@ -247,3 +247,8 @@ Issues 和 Wayfinder maps 使用 GitHub Issues。详见 `docs/agents/issue-track
   - 主题: Recording Journal到Replay Script的Semantic Promotion与Guarded Coordinate Fallback正式规则
   - 用途: 固定semantic优先、ambiguous/stale fail closed、coordinate独立门禁、Window Geometry Precondition边界和fresh verification要求
   - 何时阅读: 设计或实现Replay compiler、Recording semantic candidate选择、Participating Window geometry编译、坐标fallback或replay verification前
+
+- `specs/rdog-recording-window-geometry-policy.md`
+  - 主题: Recorder Participating Window与Window Geometry Precondition正式规则
+  - 用途: 固定事件驱动participation、pre-action initial snapshot、intentional move/resize、durable window/display解析、normal windowed边界、精确topology、`@window-resize`编译顺序与fail-closed verification
+  - 何时阅读: 设计或实现Participating Window识别、geometry journal enrichment、Replay preflight、窗口位置大小恢复、多显示器geometry guard或Recording Journal到`rdog.flow.v1`的window step编译前

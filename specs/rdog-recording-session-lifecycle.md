@@ -23,10 +23,10 @@
 - Recording Journal event schema: `rdog.recording.v1`
 - Recording Bundle 的内部文件和 manifest schema
 - Journal 到 `rdog.flow.v1` 的确定性编译规则
-- replay preflight、guard 和 post-action verification
-- Participating Window 与 geometry precondition 编译
+- replay preflight、guard 和 post-action verification: `specs/rdog-recording-semantic-promotion-policy.md`
+- Participating Window 与 geometry precondition 编译: `specs/rdog-recording-window-geometry-policy.md`
 
-Replay Script 必须复用 `specs/rdog-flow-control-plan.md` 中的 `rdog.flow.v1`。窗口位置和大小恢复必须复用 `specs/rdog-window-control-plan.md` 中的显式 `@window-resize`,不新增录制专用 resize 命令。
+Replay Script 必须复用 `specs/rdog-flow-control-plan.md` 中的 `rdog.flow.v1`。窗口位置和大小恢复必须遵守 `specs/rdog-recording-window-geometry-policy.md`,并复用 `specs/rdog-window-control-plan.md` 中的显式 `@window-resize`,不新增录制专用 resize 命令。
 
 ## Terms
 

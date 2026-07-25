@@ -267,7 +267,7 @@ Prototype是decision evidence,不是生产compiler或长期测试套件。
 
 - Journal facts和candidate provenance: `specs/rdog-recording-journal-model.md`。
 - 输入脱敏与Replay Parameter: `specs/rdog-recording-redaction-parameter-model.md`。
-- Participating Window和`@window-resize`: `specs/rdog-window-control-plan.md`。
+- Participating Window和Window Geometry Precondition编译: `specs/rdog-recording-window-geometry-policy.md`;底层`@window-resize`: `specs/rdog-window-control-plan.md`。
 - Observation ref、durable selector和semantic re-find: `specs/rdog-observation-scoped-refmap-plan.md`。
 - AX、Web、text、keyboard和scroll语义动作: `specs/rdog-non-mouse-semantic-control-plan.md`。
 - `os-logical` mouse contract: `specs/rdog-mouse-control-coordinate-plan.md`。

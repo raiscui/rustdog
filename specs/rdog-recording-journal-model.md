@@ -492,7 +492,7 @@ v1 不增加 per-entry `critical` / `advisory` 标志。顶层 kind 固定和 co
 - macOS capture fields、CGEventTap、AX enrichment、Secure Input 和 gap source: `specs/rdog-macos-operation-capture-research.md`。
 - Replay Script schema: `specs/rdog-flow-control-plan.md`。
 - durable selector 与 observation ref 边界: `specs/rdog-observation-scoped-refmap-plan.md`。
-- Participating Window geometry: `specs/rdog-window-control-plan.md`。
+- Participating Window membership、snapshot和geometry编译: `specs/rdog-recording-window-geometry-policy.md`;底层window control契约: `specs/rdog-window-control-plan.md`。
 - semantic action boundary: `specs/rdog-non-mouse-semantic-control-plan.md`。
 - coordinate fallback: `specs/rdog-mouse-control-coordinate-plan.md` 和 `specs/rdog-multi-display-screenshot-coordinate-plan.md`。
 - Recording Journal到Replay Script的Semantic Promotion与Guarded Coordinate Fallback选择: `specs/rdog-recording-semantic-promotion-policy.md`。
