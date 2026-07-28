@@ -1,6 +1,6 @@
 ---
 name: rdog-control
-version: "2.21-darwin-dim3"  # 2026-07-28:加 Failure Handling 三段式表
+version: "2.22-darwin-dim3+dim9"  # 2026-07-28:加 Anti-Patterns 表
 description: "Use for rdog control on a local or named machine: health, shell, GUI, browser, window, AX, PTY, flow, verification, and safety."
 ---
 
@@ -141,6 +141,30 @@ Never infer app state from screenshot output alone; screenshot is a
 cross-check, not the primary source. The primary source is always a
 fresh `@ax-find` (or `@window-find` for window state) read that returns
 matching elements.
+
+## Anti-Patterns (Don't)
+
+Each row is a behavior we have observed in real rdog-control sessions.
+None of these are valid tactics.
+
+| Don't do | Why |
+| --- | --- |
+| Use `@screenshot` as the primary source of state | Screenshots are a cross-check; the canonical source is a fresh `@ax-find` or `@window-find` that returns matches. A screenshot cannot tell you which role's value is which. |
+| Retry the same `@ax-press` more than three times with the same description | If the description still does not resolve, the locator is wrong. Re-query the role or change lane; do not throw the same payload at the daemon. |
+| Pre-emptively press a clear / reset button on a fresh app | A reset before reading state is a protocol violation, not a safety measure. The fresh read tells you whether the app already starts at the target baseline. |
+| Use `@cmd` to compute math, parse JSON, or evaluate expressions | Shell math has nothing to do with the GUI task. `@cmd` is for legitimate system commands; bypassing semantic actions defeats all rdog-control evidence. |
+| Pass `app:计算器`, `app:計算機`, or any non-ASCII app name | `@window-find` only resolves ASCII app names. Non-ASCII names return 0 matches and will never succeed. |
+| Mix `app:APP` with `pid:PID/window:INDEX`, `process:`, or `window_title:` in the same target | The target validator rejects the request. Pick exactly one ownership channel. |
+| Reuse `@eN` ref across daemon restarts or turn boundaries | Observation refs are short-lived. A ref that resolved in the previous turn may resolve to a different element today. Re-query via `@ax-find`. |
+| Skip the fresh read between consecutive `@ax-press` calls | Every press must prove `performed:true` AND that the press changed the visible state for the value role. Sequential presses without reads cannot tell which press had which effect. |
+| Treat `performed:true` as proof of success | `performed:true` only proves the press was dispatched. The result depends on a fresh `@ax-find` of the value role. |
+| Assume a fixed number of reset presses when stale length is unknown | Use guarded press (`@ax-press:app:APP,BUTTON,RESULT_ROLE,EXPECTED_VALUE,MAX_ATTEMPTS`) so the program verifies each press. Counting blindly produces either residual content or wasted actions. |
+| Pipe `@response` output to `jq` / `grep` / shell tools | Pipe bypasses the protocol; the daemon records `usedPipeInRdogCommand=true` and the audit field flags the run. Read `@response` literally from full stdout. |
+| Press `Cmd+Q` / `Cmd+W` / `Esc` / other destructive shortcuts without explicit user confirmation | These are terminal actions. The Safety section requires user confirmation before destructive operations. |
+
+If you find yourself reaching for any of the above, the correct fix is
+almost always: re-`@ax-find` for the right role, read the result, then
+choose the smallest semantic action.
 
 ## Safety
 
