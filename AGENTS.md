@@ -252,3 +252,8 @@ Issues 和 Wayfinder maps 使用 GitHub Issues。详见 `docs/agents/issue-track
   - 主题: Recorder Participating Window与Window Geometry Precondition正式规则
   - 用途: 固定事件驱动participation、pre-action initial snapshot、intentional move/resize、durable window/display解析、normal windowed边界、精确topology、`@window-resize`编译顺序与fail-closed verification
   - 何时阅读: 设计或实现Participating Window识别、geometry journal enrichment、Replay preflight、窗口位置大小恢复、多显示器geometry guard或Recording Journal到`rdog.flow.v1`的window step编译前
+
+- `specs/rdog-recording-bundle-schema.md`
+  - 主题: Recording Bundle schema 与原子导出正式规格
+  - 用途: 固定单一确定性 `.rdogrec.tar` 归档、manifest schema、per-file 与 whole-archive SHA-256、USTAR determinism、canonical JSON、evidence allowlist、Bundle size 边界、单帧 `@savefile` 远程交付、completed retry 幂等、connection ownership 与 `delivery_failed` 语义
+  - 何时阅读: 设计或实现 Recording Bundle writer、manifest 序列化、TAR 字节确定性、Bundle 完整性校验、远程交付 sequence、`@savefile` 路径或 completion retry 前
