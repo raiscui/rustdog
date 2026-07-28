@@ -1,6 +1,6 @@
 ---
 name: rdog-control
-version: "2.22-darwin-dim3+dim9"  # 2026-07-28:加 Anti-Patterns 表
+version: "2.23-darwin-dim3+dim9+dim4"  # 2026-07-28:加 When to Defer + 视觉标记
 description: "Use for rdog control on a local or named machine: health, shell, GUI, browser, window, AX, PTY, flow, verification, and safety."
 ---
 
@@ -119,7 +119,7 @@ Read only the matching reference before using an Other Lane:
 
 ## Failure Handling
 
-When a control returns `performed:false`, zero matches, or an unexpected
+🔴 **REPAIR — when a control fails.** When a control returns `performed:false`, zero matches, or an unexpected
 fresh read, walk the three-tier ladder below before retrying with a new
 lane or locator. Each repair step must end with a fresh read that proves
 the change actually took effect on the relevant subtree.
@@ -160,14 +160,27 @@ None of these are valid tactics.
 | Treat `performed:true` as proof of success | `performed:true` only proves the press was dispatched. The result depends on a fresh `@ax-find` of the value role. |
 | Assume a fixed number of reset presses when stale length is unknown | Use guarded press (`@ax-press:app:APP,BUTTON,RESULT_ROLE,EXPECTED_VALUE,MAX_ATTEMPTS`) so the program verifies each press. Counting blindly produces either residual content or wasted actions. |
 | Pipe `@response` output to `jq` / `grep` / shell tools | Pipe bypasses the protocol; the daemon records `usedPipeInRdogCommand=true` and the audit field flags the run. Read `@response` literally from full stdout. |
-| Press `Cmd+Q` / `Cmd+W` / `Esc` / other destructive shortcuts without explicit user confirmation | These are terminal actions. The Safety section requires user confirmation before destructive operations. |
+| 🔴 Press `Cmd+Q` / `Cmd+W` / `Esc` / other destructive shortcuts without explicit user confirmation | These are terminal actions. The Safety section requires user confirmation before destructive operations. |
 
 If you find yourself reaching for any of the above, the correct fix is
 almost always: re-`@ax-find` for the right role, read the result, then
 choose the smallest semantic action.
 
+## When to Defer to the User
+
+Stop the agent loop and surface to the calling user when any row below holds.
+
+| Marker | Condition | Action |
+| --- | --- | --- |
+| 🔴 DEFER | Task involves `Cmd+Q`, `Cmd+W`, reboot, or any irreversible UI action | The user must explicitly confirm |
+| 🔴 DEFER | Task needs permissions `@capabilities` reports denied | User grants permissions out-of-band (macOS: System Settings → Privacy & Security → Accessibility / Input Monitoring) |
+| 🔴 DEFER | Window ownership ambiguous AND task is destructive (close / delete / submit) | Read-only tasks may proceed; write tasks must defer |
+| 🛑 STOP | Same `@ax-press` description retried ≥ 3 times without `performed:true` changing | Surface the last failed description and error code |
+| 🛑 STOP | Two consecutive fresh AX reads return different element roles or paths (not just different values) | The app's AX tree has shifted; surface the inconsistency |
+
+When none of the above holds, continue the agent loop autonomously.
 ## Safety
 
-Stop on ambiguous ownership, permission denial, or a failed action. Retry a step at
+🛑 **STOP — destructive operations require user confirmation.** Stop on ambiguous ownership, permission denial, or a failed action. Retry a step at
 most three times with a different locator or lane. Ask before destructive, security,
 permission, reboot, or production actions.
