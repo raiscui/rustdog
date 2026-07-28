@@ -257,3 +257,8 @@ Issues 和 Wayfinder maps 使用 GitHub Issues。详见 `docs/agents/issue-track
   - 主题: Recording Bundle schema 与原子导出正式规格
   - 用途: 固定单一确定性 `.rdogrec.tar` 归档、manifest schema、per-file 与 whole-archive SHA-256、USTAR determinism、canonical JSON、evidence allowlist、Bundle size 边界、单帧 `@savefile` 远程交付、completed retry 幂等、connection ownership 与 `delivery_failed` 语义
   - 何时阅读: 设计或实现 Recording Bundle writer、manifest 序列化、TAR 字节确定性、Bundle 完整性校验、远程交付 sequence、`@savefile` 路径或 completion retry 前
+
+- `specs/rdog-replay-preflight-guard-verification.md`
+  - 主题: Replay preflight、guard 与 verification policy 正式规格
+  - 用途: 固定 Bundle provenance gate、8 个顺序 preflight gate、reject reason code 命名空间、state-mutating action 必须 post-action verification、best-effort 与 strict 的差异、5 类 safety rollback trigger 与统一收口动作
+  - 何时阅读: 设计或实现 replay preflight 检查链、quarantine 隔离机制、verification 报告 contract、最小 safety rollback 路径或 best-effort profile 前
