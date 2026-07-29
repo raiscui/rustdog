@@ -113,6 +113,12 @@ back off in that case.
   `"manual"` or `"auto_duration"`. Old clients ignore unknown fields.
 - `@record-status` response: when `last_session` is present, include
   `stop_trigger: Option<&str>`.
+- `@record-status` response (active session): include `duration_ms:
+  Option<u64>` and `remaining_ms: Option<u64>` when an auto-stop timer
+  is active. `remaining_ms` is computed from
+  `Instant::now() - started_at` against `duration_ms` and is clamped
+  to 0 once the deadline has passed. When no timer is configured
+  (`--duration` omitted), both fields are null.
 
 ## Out of scope
 

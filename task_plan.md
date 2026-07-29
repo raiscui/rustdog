@@ -613,3 +613,10 @@ handle_daemon_control_query (zenoh_control.rs:240)
 - 3 个修改: `src/control_recording/session.rs`, `src/control_recording/control_handler.rs`, `src/control_recording/control_handler_tests.rs`。
 - 697 个测试通过 (从 690 增加 +7)。
 - 分支 `feature/recorder-bundle-delivery` 现在含 6 commits, 都是 recording 相关。
+
+### 后续 #3 实现: remaining_ms 倒计时
+- [x] AutoStopTimer 加 `duration_ms` + `started_at` 字段 + `remaining_ms()` 方法。
+- [x] `status` 响应在 active recording 时输出 `duration_ms` + `remaining_ms`。
+- [x] 加 2 测试: `status_reports_duration_and_remaining_ms_when_auto_stop_active`, `status_remaining_ms_clamped_to_zero_after_deadline`。
+- [x] commit `77b9667` 已 push, 699 tests pass (+2)。
+- [x] spec `specs/rdog-recording-auto-stop.md` 已加 `duration_ms` + `remaining_ms` 字段说明。
