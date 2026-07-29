@@ -633,3 +633,15 @@ handle_daemon_control_query (zenoh_control.rs:240)
   - `parse_control_line` 拒绝 `@record-status` (无冒号) — 加 special-case,2 个 parser 测试
   - `daemon::run` + `daemon::run_zenoh_router` 不 install RecordingHandler — 加 `install_recording_stack()` helper,支持 `RDOG_RECORDING_DIR` env var
 - commit `98572af` 已 push, 701 tests pass (+2)
+
+### E2E 自动化 (issue #23 acceptance, 选项 4)
+- [x] 创建 `tests/recording_e2e.rs`, 跑真 daemon 子进程 + TCP 控制线 (无 mock)。
+- [x] 测试 1: `recording_auto_stop_pipeline_commits_bundle_and_marks_auto_duration` — start 200ms → sleep 300ms → status → 验证 response + bundle 落盘。
+- [x] 测试 2: `recording_duration_too_small_returns_4121_without_starting_session` — duration 50ms 拒绝 + 无 session 残留。
+- [x] 3 runs 全过, 无 flake。
+- [x] commit `73d75cf` (test) + `a2b19c5` (doc) 已 push。
+- [x] `cargo test --bin rdg`: 701 passed; `cargo test --test recording_e2e`: 2 passed; 总计 703。
+
+### Acceptance matrix 状态
+- ✅ 旧的 manual smoke 仍保留作 ad-hoc 验证。
+- ✅ CI 入口: `cargo test --test recording_e2e`。
