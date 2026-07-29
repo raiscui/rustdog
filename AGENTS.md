@@ -272,3 +272,8 @@ Issues 和 Wayfinder maps 使用 GitHub Issues。详见 `docs/agents/issue-track
   - 主题: 首版验收矩阵、fixtures 与性能预算正式规格(ticket #7 交付物)
   - 用途: 固化 7 大类验收测试维度、fixtures 目录、性能预算数值、crash recovery 3 场景、E2E record→compile→replay 验收条件、长录制 soak 场景、acceptance pass/fail 硬条件与 report 格式
   - 何时阅读: 准备实施 acceptance matrix、扩展 fixtures 集、调整性能预算、跑 E2E / soak CI 检查、或评审 macOS 首版 release readiness 前
+
+- `specs/rdog-wayfinder-overdesign-simplification.md`
+  - 主题: Wayfinder resolution spec overdesign 简化方案(ticket #13 交付物)
+  - 用途: 固化 4 个 closed spec (#4 / #9 / #8 / #7) 累积抽象的删减/合并方案,每个简化标注 ceiling 与 upgrade trigger
+  - 何时阅读: 准备重写已 close Wayfinder spec、引入 v2 协议、需要 warning/reporting/多 soak 等当前被删除的抽象、或评审 macOS 首版 release readiness 之前确认简化已落地前
