@@ -645,3 +645,12 @@ handle_daemon_control_query (zenoh_control.rs:240)
 ### Acceptance matrix 状态
 - ✅ 旧的 manual smoke 仍保留作 ad-hoc 验证。
 - ✅ CI 入口: `cargo test --test recording_e2e`。
+
+### E2E 场景扩展 (选项 1)
+- [x] 添加 3 个 e2e 场景:
+  - `recording_manual_cancel_before_deadline_leaves_no_bundle`
+  - `recording_manual_stop_before_deadline_yields_manual_trigger_and_bundle`
+  - `recording_auto_stop_survives_owner_disconnect_and_reconnect`
+- [x] helper 修复: `read_response_line` 改成读到 read deadline, 而不是首个 `@response` (daemon 的 savefile + response 分多个 TCP 包, 单 marker 会截断 body)
+- [x] 3 次跑全过, 总计 5 个 e2e 测试 (2 + 3), cargo test --bin rdg 仍 701
+- [x] commit `10dd653` 已 push
