@@ -426,3 +426,49 @@ handle_daemon_control_query (zenoh_control.rs:240)
 - [x] 阶段4: `delivery.rs` 提供 owner-only base64 `@savefile` frame、384 MiB frame gate、4 个 stable reason code、5/sec/connection sliding limit。
 - [x] 阶段4验证: `cargo test --bin rdog control_recording` -> 45 passed; `cargo test --bin rdog` -> 657 passed, 1 ignored;系统 `tar -tf` 成功读取并确认 entry order。
 - [ ] 阶段5: commit/push/关闭 ticket #19,更新 map #14。
+
+## [2026-07-29 00:08:00] [Session ID: omx-1784512435044-92wxat] [阶段完成]: 代码交付完成,GitHub ticket 更新受认证阻塞
+
+- [x] 阶段5代码部分: commit `a4bd441` 已创建并推送到 `origin/feature/recorder-bundle-delivery`。
+- [ ] 阶段5 issue部分: `gh issue comment/close` 未执行,GitHub API 返回 `invalid header field value for "Authorization"`;不能宣称 ticket 已关闭。
+- 当前停止条件: 本地实现、测试、推送均完成;仅外部 GitHub CLI 凭据需要后续恢复后再更新 issue/map。
+
+## [2026-07-29 00:12:00] [Session ID: omx-1784512435044-92wxat] [外部同步重试]: 使用 GITHUB_TOKEN 更新 issue
+
+- 重试命令使用 `GH_TOKEN="$GITHUB_TOKEN" gh issue ...`。
+- GitHub API 仍返回 `invalid header field value for "Authorization"`,因此 #19 comment/close 与 #14 map comment 仍未提交。
+- 代码分支 `feature/recorder-bundle-delivery` 已推送且本地验证完成,不修改实现。
+
+## [2026-07-29 00:16:00] [Session ID: omx-1784512435044-92wxat] [阶段完成]: GitHub 状态同步完成
+
+- [x] 诊断: `GITHUB_TOKEN` 原始值含 `\r`,导致 gh Authorization header 非法。
+- [x] 修复执行: 仅在进程内使用 `tr -d '\r\n'` 清洗 token,未持久化或修改配置。
+- [x] GitHub: #19 已评论并关闭; #14 已追加 map 完成记录。
+- [x] 阶段5: commit `a4bd441` 已推送,代码/测试/issue/map 全部完成。
+
+## [2026-07-29 00:25:00] [Session ID: omx-1784512435044-92wxat] [实施继续]: control plane 集成 @record-start/status/mark/stop/cancel
+
+### 目标
+- 把 lifecycle / Bundle writer / DeliveryManager 接入 line-control。
+- 仅引入 5 个 line-control 解析分支 + 1 个 `ControlCommand::Record` 变体 + 1 个 `RecordingHandler`。
+- 不重写 `LifecycleManager`、不重写 Bundle writer、不暴露 `internal` API。
+
+### 阶段
+- [ ] 阶段6: 设计 `ControlCommand::Record` 与 `RecordingHandler` 边界
+- [ ] 阶段7: 在 control_protocol.rs 注册 5 个解析分支
+- [ ] 阶段8: 在 control_core.rs 路由到 RecordingHandler
+- [ ] 阶段9: 实现 `RecordingHandler` 调用 LifecycleManager/BundleWriter/DeliveryManager
+- [ ] 阶段10: 添加集成测试,跑全量回归
+- [ ] 阶段11: 提交并推送分支
+
+### 当前状态
+- 当前在阶段6 起步。
+
+## [2026-07-29 00:45:00] [Session ID: omx-1784512435044-92wxat] [阶段完成]: control plane 集成 + 全量测试
+
+- [x] 阶段6: 设计 `ControlCommand::Record` 与 `RecordingHandler` 边界。
+- [x] 阶段7: 在 `control_protocol.rs` 注册 5 个 `@record-*` 解析分支。
+- [x] 阶段8: 在 `control_core.rs` 加全局 `RecordingHandler` 槽 + `handle_record_command` 路由。
+- [x] 阶段9: `RecordingHandler` 完整 start/status/stop/cancel + mark 未实现占位。
+- [x] 阶段10: 4 项 handler 集成测试 + 全量 661 pass,1 ignored。
+- [ ] 阶段11: 提交并推送分支,更新 issue。

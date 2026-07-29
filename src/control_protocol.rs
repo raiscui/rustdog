@@ -23,6 +23,11 @@ use crate::control_ax::{
 use crate::control_bootstrap::{parse_bootstrap_payload, BootstrapRequest};
 use crate::control_flow::{parse_flow_payload, FlowRequest};
 use crate::control_frames::SaveFileFrame;
+use crate::control_recording::control_handler::RecordRequest;
+use crate::control_recording::protocol::{
+    parse_record_cancel_payload, parse_record_mark_payload, parse_record_start_payload,
+    parse_record_status_payload, parse_record_stop_payload,
+};
 use crate::control_gui_bench::{parse_gui_bench_payload, GuiBenchRequest};
 use crate::control_mouse::{
     parse_click_payload, parse_drag_payload, parse_mouse_button_payload, parse_mouse_move_payload,
@@ -99,6 +104,7 @@ pub enum ControlCommand {
     OpenApp(OpenAppRequest),
     Cancel(CancelRequest),
     ComputerAct(ComputerActRequest),
+    Record(RecordRequest),
     /// ticket 08 + 21: composite 复合命令 (e.g., hotkey_click = key down + click + key up)
     /// mod.rs dispatch_underlying 顺序执行每个 sub-command, 任一失败回滚已执行的 (modifier release)。
     Composite(Vec<ControlCommand>),
@@ -498,6 +504,11 @@ pub fn parse_control_line(line: &str) -> io::Result<ControlParseResult> {
         "open-app" => ControlCommand::OpenApp(parse_open_app_payload(payload)?),
         "cancel#seq" => ControlCommand::Cancel(parse_cancel_payload(payload)?),
         "computer-act" => ControlCommand::ComputerAct(parse_computer_act_payload(payload)?),
+        "record-start" => ControlCommand::Record(parse_record_start_payload(payload)?),
+        "record-status" => ControlCommand::Record(parse_record_status_payload(payload)?),
+        "record-mark" => ControlCommand::Record(parse_record_mark_payload(payload)?),
+        "record-stop" => ControlCommand::Record(parse_record_stop_payload(payload)?),
+        "record-cancel" => ControlCommand::Record(parse_record_cancel_payload(payload)?),
         _ => {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,

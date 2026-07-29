@@ -269,6 +269,8 @@ pub fn filter_self_event(user_data: u64, event: CaptureEvent) -> Option<CaptureE
 }
 
 pub mod bundle;
+pub mod control_handler;
+pub mod protocol;
 pub mod delivery;
 pub mod journal;
 pub mod session;
@@ -289,6 +291,9 @@ mod bundle_tests;
 
 #[cfg(test)]
 mod delivery_tests;
+
+#[cfg(test)]
+mod control_handler_tests;
 
 #[cfg(test)]
 mod journal_tests;

@@ -197,6 +197,10 @@ impl ControlActionExecutor for SystemControlActionExecutor {
                 io::ErrorKind::Unsupported,
                 "@flow 由 control_core 直接返回多 frame outcome,不应进入默认 executor 分支",
             )),
+            ControlCommand::Record(_) => Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "@record-* 由 control_core 直接走 RecordingHandler,不应进入默认 executor 分支",
+            )),
             ControlCommand::Capabilities => Err(io::Error::new(
                 io::ErrorKind::Unsupported,
                 "@capabilities 由 control_core 直接生成能力报告,不应进入默认 executor 分支",

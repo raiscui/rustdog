@@ -933,3 +933,23 @@
 
 ### 总结感悟
 - 本 ticket 按 #13 简化方案交付,没有实现 reader、真实 flow compiler、evidence pipeline 或 control parser。
+
+## [2026-07-29 00:45:00] [Session ID: omx-1784512435044-92wxat] 任务名称: line-control @record-* 接入 LifecycleManager + Bundle + Delivery
+
+### 任务内容
+- 新增 `src/control_recording/control_handler.rs`:把 line-control 5 个 `@record-*` 派发到 `LifecycleManager` / `DeliveryManager`。
+- 新增 `src/control_recording/protocol.rs`:5 个 parser 转成 `RecordRequest`。
+- 修改 `src/control_protocol.rs`:注册 `ControlCommand::Record(RecordRequest)` 变体和 5 个 `@record-*` 解析分支。
+- 修改 `src/control_core.rs`:全局 `RecordingHandler` slot + `handle_record_command` 路由。
+- 修改 `src/control_actions.rs`:在 default catch-all 中显式拒绝 `Record`。
+- 修改 `src/shell/tests.rs`:补全 fake executor 的 `Record` match。
+- 新增 `src/control_recording/control_handler_tests.rs`:4 项端到端集成测试。
+
+### 完成过程
+- 严格只复用现有 `LifecycleManager`、`BundleWriter`、`DeliveryManager`、line-control 公共 helper,没有新增依赖。
+- 全局 `OnceLock<Mutex<RecordingHandler>>` slot 避免修改 control flow / transport 6 个签名。
+- `@record-mark` 在本次范围外,session 端 wrapper 缺失,先返回 4109 NOT_IMPLEMENTED。
+
+### 总结感悟
+- 测试侧 `{"id":N,"value":{...}}` 包装是 line-control 协议稳定契约,断言前必须先解 `value` 字段。
+- `render_protocol_error_response` 把 JSON 序列化到 `error` 字符串里,测试侧反序列化一次可拿到结构化错误对象。
