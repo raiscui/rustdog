@@ -262,3 +262,13 @@ Issues 和 Wayfinder maps 使用 GitHub Issues。详见 `docs/agents/issue-track
   - 主题: Replay preflight、guard 与 verification policy 正式规格
   - 用途: 固定 Bundle provenance gate、8 个顺序 preflight gate、reject reason code 命名空间、state-mutating action 必须 post-action verification、best-effort 与 strict 的差异、5 类 safety rollback trigger 与统一收口动作
   - 何时阅读: 设计或实现 replay preflight 检查链、quarantine 隔离机制、verification 报告 contract、最小 safety rollback 路径或 best-effort profile 前
+
+- `specs/rdog-recording-replay-compiler-prototype.md`
+  - 主题: Recording Replay Compiler prototype 设计说明(ticket #8 交付物)
+  - 用途: 固化 prototype binary 的 11 项 pass 责任、determinism contract、fixture 覆盖、stub 与 emit-time 实现区分,以及留给 production compiler 的延后工作
+  - 何时阅读: 改造 prototype 为 production compiler、补全 stub pass(scroll_coalesce / shortcut_hotkey)、设计 `@flow` 集成或 `manifest.compiler.version` 校验前
+
+- `specs/rdog-acceptance-matrix.md`
+  - 主题: 首版验收矩阵、fixtures 与性能预算正式规格(ticket #7 交付物)
+  - 用途: 固化 7 大类验收测试维度、fixtures 目录、性能预算数值、crash recovery 3 场景、E2E record→compile→replay 验收条件、长录制 soak 场景、acceptance pass/fail 硬条件与 report 格式
+  - 何时阅读: 准备实施 acceptance matrix、扩展 fixtures 集、调整性能预算、跑 E2E / soak CI 检查、或评审 macOS 首版 release readiness 前
