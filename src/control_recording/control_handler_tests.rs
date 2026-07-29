@@ -157,3 +157,220 @@ fn mark_without_active_session_returns_no_active() {
     let value = first_response_value(&mark);
     assert_eq!(value["error_code"], "RECORD_NO_ACTIVE_SESSION");
 }
+
+// ----------------------------------------------------------------------------
+// Issue #23 auto-stop integration tests
+// ----------------------------------------------------------------------------
+
+use std::time::Duration;
+use super::session::{Profile, StopTrigger, SessionPhase};
+
+#[test]
+fn auto_stop_fires_after_duration() {
+    let (journal, bundle) = temp_dirs();
+    let mut handler = RecordingHandler::new(journal, bundle.clone());
+    let owner = ConnectionId(1);
+
+    let start = handler.handle(
+        Some(1),
+        owner,
+        RecordRequest::Start {
+            profile: Profile::Semantic,
+            duration_ms: Some(200),
+        },
+    );
+    let start_value = first_response_value(&start);
+    let recording_id = start_value["recording_id"].as_str().unwrap().to_owned();
+
+    // Sleep 250ms so the auto-stop timer fires (200ms). The next
+    // handler call observes the FIRED flag and runs the auto-stop
+    // inline.
+    std::thread::sleep(Duration::from_millis(250));
+
+    let status = handler.handle(Some(2), owner, RecordRequest::Status);
+    let status_value = first_response_value(&status);
+    assert_eq!(status_value["status"], "idle", "session should be auto-stopped");
+    let last_session = &status_value["last_session"];
+    assert_eq!(last_session["phase"], "completed");
+    assert_eq!(last_session["stop_trigger"], "auto_duration");
+
+    let summary = handler.last_session().expect("last_session present");
+    assert_eq!(summary.phase, SessionPhase::Completed);
+    assert_eq!(summary.stop_trigger, Some(StopTrigger::AutoDuration));
+    assert!(handler.completed().contains_key(&recording_id), "bundle persisted");
+}
+
+#[test]
+fn auto_stop_cancelled_by_manual_stop() {
+    let (journal, bundle) = temp_dirs();
+    let mut handler = RecordingHandler::new(journal, bundle.clone());
+    let owner = ConnectionId(1);
+
+    let _ = handler.handle(
+        Some(10),
+        owner,
+        RecordRequest::Start {
+            profile: Profile::Semantic,
+            duration_ms: Some(200),
+        },
+    );
+    // Sleep 50ms then issue a manual stop; the timer should observe
+    // the CANCELLED flag and exit cleanly.
+    std::thread::sleep(Duration::from_millis(50));
+
+    let stop = handler.handle(Some(11), owner, RecordRequest::Stop);
+    assert_eq!(stop.outbound_frames.len(), 2);
+    let final_text = match &stop.outbound_frames[1] {
+        super::super::control_frames::ControlFrame::ResponseLine(s) => s.clone(),
+        other => panic!("expected response, got {other:?}"),
+    };
+    let envelope: Value = serde_json::from_str(
+        final_text.strip_prefix("@response ").unwrap(),
+    )
+    .unwrap();
+    let final_value = envelope.get("value").cloned().unwrap_or(Value::Null);
+    assert_eq!(final_value["trigger"], "manual");
+
+    let summary = handler.last_session().expect("last_session present");
+    assert_eq!(summary.phase, SessionPhase::Completed);
+    assert_eq!(summary.stop_trigger, Some(StopTrigger::Manual));
+
+    // Sleep past the original deadline to confirm the timer thread
+    // exited without firing.
+    std::thread::sleep(Duration::from_millis(250));
+    let summary_after = handler.last_session().expect("last_session still present");
+    assert_eq!(summary_after.stop_trigger, Some(StopTrigger::Manual));
+}
+
+#[test]
+fn auto_stop_cancelled_by_cancel() {
+    let (journal, bundle) = temp_dirs();
+    let mut handler = RecordingHandler::new(journal, bundle);
+    let owner = ConnectionId(1);
+
+    let _ = handler.handle(
+        Some(20),
+        owner,
+        RecordRequest::Start {
+            profile: Profile::Semantic,
+            duration_ms: Some(200),
+        },
+    );
+    std::thread::sleep(Duration::from_millis(50));
+
+    let cancel = handler.handle(Some(21), owner, RecordRequest::Cancel);
+    let value = first_response_value(&cancel);
+    assert_eq!(value["phase"], "cancelled");
+    assert_eq!(value["stop_trigger"], "manual");
+
+    let summary = handler.last_session().expect("last_session present");
+    assert_eq!(summary.phase, SessionPhase::Cancelled);
+    assert_eq!(summary.stop_trigger, Some(StopTrigger::Manual));
+    assert!(handler.completed().is_empty(), "no bundle for cancelled session");
+
+    // Wait past the deadline to confirm the timer thread has exited
+    // without surprising side effects.
+    std::thread::sleep(Duration::from_millis(250));
+    assert!(handler.completed().is_empty());
+}
+
+#[test]
+fn auto_stop_continues_when_owner_disconnects() {
+    // The handler keeps running even after the original owner is
+    // "disconnected" because the auto-stop is observed by the next
+    // handler call regardless of the connection argument. Per issue
+    // #23, the bundle is still committed to disk.
+    let (journal, bundle) = temp_dirs();
+    let mut handler = RecordingHandler::new(journal.clone(), bundle.clone());
+    let owner = ConnectionId(1);
+
+    let start = handler.handle(
+        Some(30),
+        owner,
+        RecordRequest::Start {
+            profile: Profile::Semantic,
+            duration_ms: Some(200),
+        },
+    );
+    let start_value = first_response_value(&start);
+    let recording_id = start_value["recording_id"].as_str().unwrap().to_owned();
+
+    // "Owner disconnects" — sleep 250ms (past deadline) without any
+    // handler call from the owner.
+    std::thread::sleep(Duration::from_millis(250));
+
+    // A status call (in practice: from a new admin connection) picks
+    // up the auto-stop and the bundle is committed.
+    let status = handler.handle(Some(31), ConnectionId(99), RecordRequest::Status);
+    let status_value = first_response_value(&status);
+    assert_eq!(status_value["status"], "idle");
+    let last_session = &status_value["last_session"];
+    assert_eq!(last_session["phase"], "completed");
+    assert_eq!(last_session["stop_trigger"], "auto_duration");
+
+    assert!(handler.completed().contains_key(&recording_id));
+    // Bundle file is on disk.
+    let bundle_path = bundle.join(format!("{recording_id}.rdogrec.tar"));
+    assert!(bundle_path.is_file(), "bundle file should exist on disk");
+    let _ = journal;
+}
+
+#[test]
+fn duration_too_large_rejected() {
+    let (journal, bundle) = temp_dirs();
+    let mut handler = RecordingHandler::new(journal, bundle);
+    let owner = ConnectionId(1);
+
+    let start = handler.handle(
+        Some(40),
+        owner,
+        RecordRequest::Start {
+            profile: Profile::Semantic,
+            duration_ms: Some(4_000_000),
+        },
+    );
+    let value = first_response_value(&start);
+    assert_eq!(value["error_code"], "DURATION_TOO_LARGE");
+    // No session should be active after the rejection.
+    let status = handler.handle(Some(41), owner, RecordRequest::Status);
+    let status_value = first_response_value(&status);
+    assert_eq!(status_value["status"], "idle");
+    assert!(handler.completed().is_empty());
+}
+
+#[test]
+fn duration_too_small_rejected() {
+    let (journal, bundle) = temp_dirs();
+    let mut handler = RecordingHandler::new(journal, bundle);
+    let owner = ConnectionId(1);
+
+    let start = handler.handle(
+        Some(50),
+        owner,
+        RecordRequest::Start {
+            profile: Profile::Semantic,
+            duration_ms: Some(50),
+        },
+    );
+    let value = first_response_value(&start);
+    assert_eq!(value["error_code"], "DURATION_TOO_SMALL");
+    let status = handler.handle(Some(51), owner, RecordRequest::Status);
+    let status_value = first_response_value(&status);
+    assert_eq!(status_value["status"], "idle");
+    assert!(handler.completed().is_empty());
+}
+
+#[test]
+fn stop_trigger_serializes_to_snake_case_strings() {
+    // Per issue #23 acceptance: cover all 4 variants.
+    let cases = [
+        (StopTrigger::Manual, "\"manual\""),
+        (StopTrigger::AutoDuration, "\"auto_duration\""),
+        (StopTrigger::OwnerDisconnected, "\"owner_disconnected\""),
+        (StopTrigger::AutoFailed, "\"auto_failed\""),
+    ];
+    for (trigger, expected) in cases {
+        let actual = serde_json::to_string(&trigger).expect("serialize");
+        assert_eq!(actual, expected, "trigger {trigger:?} serialization");
+    }
+}

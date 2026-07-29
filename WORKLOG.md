@@ -1005,3 +1005,29 @@
 ### 总结感悟
 - 单引号 vs 双引号在 heredoc Python 转义非常容易出错, 改用 `cat <<'PY'` 安全。
 - 调试 `serde_json::from_str` 列号错误时, 一定要先 print inner 字符串看实际值, 不要只信错误消息。
+
+## [2026-07-29 22:30:00] [Session ID: omx-1784512435044-92wxat] 任务名称: Recording auto-stop timer (issue #23)
+
+### 任务内容
+- 实现 issue #23: daemon-side auto-stop timer + lifecycle integration。
+- 让 `rdog record start --duration <X>` 在 X 毫秒后自动 stop, 复用现有 manual stop 路径 (begin_finalize + bundle commit + savefile delivery)。
+
+### 完成过程
+- 在 `session.rs` 加 `StopTrigger` enum (Manual/AutoDuration/OwnerDisconnected/AutoFailed) + `TerminalSummary.stop_trigger` 字段 + `with_trigger()` builder。
+- 在 `control_handler.rs` 加 `AutoStopTimer` struct + `Option<AutoStopTimer>` 字段 + `Drop` impl。
+- timer 线程 100 ms tick poll, 用 `Arc<AtomicU8>` 三态 flag (PENDING/CANCELLED/FIRED)。
+- **auto-stop 内联到 handler 调用中** (非 timer thread 内), 避免 lock 死锁。
+- `cancel_auto_stop_timer` 在 `stop`/`cancel`/`Drop` 中调用, set flag 1 + join thread。
+- `@record-status` last_session 暴露 `stop_trigger`; `@record-stop` 加 `trigger` 字段。
+- duration 校验: `[100, 3_600_000]` ms, 50 ms→4121, 4_000_000 ms→4120。
+- 7 测试加到 `control_handler_tests.rs`: 6 集成 + 1 enum 序列化。
+- spec + ADR + E2E smoke 文档: `specs/rdog-recording-auto-stop.md`, `docs/adr/0007-recording-auto-stop.md`, `specs/rdog-acceptance-matrix.md`。
+
+### 验证
+- `cargo test --bin rdog`: 697 passed, 0 failed, 1 ignored (+7)。
+- 全部 14 个 `control_handler_tests` 测试通过。
+
+### 总结感悟
+- "timer 线程调 auto_stop" 在 Mutex 锁下会死锁: 用户持锁 join, 线程等锁。让 handler 内联触发 auto-stop 是关键。
+- `last_session_override` 字段避免改 `LifecycleManager` API, 保持 spec 稳定。
+- 100 ms tick poll 而不是 upfront `thread::sleep(duration_ms)`, 是为了让 cancel 响应 ≤ 100 ms。

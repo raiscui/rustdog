@@ -114,6 +114,37 @@ pub enum FailureReason {
     PermissionRevoked,
 }
 
+/// Stop trigger that ended a session. Exposed via `TerminalSummary` and
+/// the `@record-status` / `@record-stop` responses so callers can
+/// distinguish manual stops from auto-stop and other daemon-side
+/// triggers. Per issue #23 acceptance.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StopTrigger {
+    /// Owner issued `@record-stop` or `@record-cancel` explicitly.
+    Manual,
+    /// `RecordingHandler` auto-stop timer fired after `--duration`.
+    AutoDuration,
+    /// Owner WebSocket / TCP connection dropped; recording continues to
+    /// the next event-boundary then ends.
+    OwnerDisconnected,
+    /// Lifecycle transitioned to `Failed`; trigger kind is the failure
+    /// reason itself, but this label keeps the summary uniform.
+    AutoFailed,
+}
+
+impl StopTrigger {
+    /// Stable snake-case name used by the JSON wire protocol.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            StopTrigger::Manual => "manual",
+            StopTrigger::AutoDuration => "auto_duration",
+            StopTrigger::OwnerDisconnected => "owner_disconnected",
+            StopTrigger::AutoFailed => "auto_failed",
+        }
+    }
+}
+
 /// Failure detail recorded when a session transitions to `Failed`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct FailureDetail {
@@ -132,6 +163,22 @@ pub struct TerminalSummary {
     pub mark_count: u64,
     pub gap_count: u64,
     pub failure: Option<FailureDetail>,
+    /// What triggered the session to end. `None` only for summaries
+    /// produced before this field existed; new code should always set
+    /// one via `with_trigger`. Per issue #23.
+    pub stop_trigger: Option<StopTrigger>,
+}
+
+impl TerminalSummary {
+    /// Builder-style setter for `stop_trigger`. Returns the modified
+    /// summary so callers can chain. The `RecordingHandler` calls this
+    /// after `LifecycleManager::complete_current` / `cancel_current` /
+    /// `fail_current` because the manager-side API does not accept a
+    /// trigger (kept stable per spec).
+    pub fn with_trigger(mut self, trigger: StopTrigger) -> Self {
+        self.stop_trigger = Some(trigger);
+        self
+    }
 }
 
 /// Owner connection identifier. Production code maps to the line-control
@@ -624,6 +671,7 @@ impl Session {
             mark_count: self.mark_count,
             gap_count: self.gap_count,
             failure,
+            stop_trigger: None,
         }
     }
 

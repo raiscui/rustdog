@@ -547,3 +547,58 @@ handle_daemon_control_query (zenoh_control.rs:240)
 - [x] 5+3+5 = 13 new tests (humantime + cli + protocol); 690 全过, 1 ignored.
 - [x] 实际 `rdog record start --duration 1.5m self` 走通 (clap 接受 humantime, 后端 daemon 找不到是预期).
 - [ ] commit + push + close #22.
+
+## [2026-07-29 22:00:00] [Session ID: omx-1784512435044-92wxat] [#23 任务规划]: Recording auto-stop timer + lifecycle integration
+
+### 目标
+- 按 issue #23 验收清单,实现 daemon-side auto-stop timer + lifecycle 集成,并发到 `feature/recorder-bundle-delivery`。
+- 新增 `StopTrigger` 枚举 + `TerminalSummary.stop_trigger` + `RecordingHandler::Drop` + 6 集成测试 + 1 enum 序列化测试。
+- All 690+ 已有测试保持绿,新增 +6 测试也绿。
+- 关闭 GitHub issue #23 并更新 Wayfinder map 决策索引。
+
+### 阶段
+- [ ] 阶段1:在 `session.rs` 加 `StopTrigger` enum + `TerminalSummary.stop_trigger` + `with_trigger()` builder。
+- [ ] 阶段2:在 `control_handler.rs` 加 `AutoStopTimer` struct + `auto_stop_timer: Option<AutoStopTimer>` 字段 + `Drop` impl。
+- [ ] 阶段3:在 `start` 时 spawn timer 线程 (100 ms tick poll, `Arc<AtomicU8>` flag 三态)。
+- [ ] 阶段4:在 `stop` / `cancel` / `Drop` 中 set flag 1 + join thread, 复用现有 stop 路径。
+- [ ] 阶段5:`@record-status` last_session 暴露 stop_trigger;@record-stop 响应加 trigger 字段。
+- [ ] 阶段6:6 集成测试 + 1 enum 序列化测试 (auto_stop_fires_after_duration 等)。
+- [ ] 阶段7:`cargo test --bin rdog` 全过,scoped commit, push, close #23,更新 Wayfinder map。
+
+### 关键设计
+- 单 `Arc<AtomicU8>` flag 三态: 0=pending, 1=cancelled, 2=fired。
+- timer 线程 100 ms `std::thread::sleep` 循环 tick, 唤醒后检查 flag 或 elapsed。
+- 复用现有 `RecordingHandler::stop` 完整路径 (begin_finalize + bundle write + savefile delivery)。
+- `RecordingHandler::Drop` 先 set flag=1 + join thread。
+- `0` 视为不传 duration, 不起 timer。
+
+### 风险
+- `RecordingHandler` Send? `DeliveryManager` 内 `HashMap<ConnectionId, VecDeque<Instant>>` 中 `Instant` 是 Send + Sync,问题不大。但 `Session` 含 `Box<dyn RecorderCapture>`,需要查 `RecorderCapture` 是否 Send。
+- 若非 Send, timer 线程必须捕获克隆而非 `self`。
+- Timer 触发时 Mutex 必须不被持有,否则死锁。caller 释放 Mutex 后 timer 才能 lock。
+
+### 状态
+**目前在阶段1** — 准备改 `session.rs` 加 StopTrigger 字段。
+
+### 进展
+- [x] 阶段1:在 `session.rs` 加 `StopTrigger` enum + `TerminalSummary.stop_trigger` + `with_trigger()` builder。
+- [x] 阶段2:在 `control_handler.rs` 加 `AutoStopTimer` struct + `auto_stop_timer: Option<AutoStopTimer>` 字段 + `Drop` impl。
+- [x] 阶段3:在 `start` 时 spawn timer 线程 (100 ms tick poll, `Arc<AtomicU8>` flag 三态)。
+- [x] 阶段4:在 `stop` / `cancel` / `Drop` 中 set flag 1 + join thread, 复用现有 stop 路径。
+- [x] 阶段5:`@record-status` last_session 暴露 stop_trigger;@record-stop 响应加 trigger 字段。
+- [x] 阶段6:6 集成测试 + 1 enum 序列化测试都已加,全过。
+- [x] 阶段7:`cargo test --bin rdog` 全过,697 pass (从 690 增加 +7),下一步 commit + push + close #23 + 更新 Wayfinder map。
+
+### 关键设计
+- 单 `Arc<AtomicU8>` flag 三态: PENDING(0) / CANCELLED(1) / FIRED(2)。
+- timer 线程 100 ms tick poll, 唤醒后检查 flag 或 elapsed。
+- **auto-stop 本身在 handler 调用时内联执行**(非 timer thread 内),避免死锁。
+- `RecordingHandler::Drop` join all timers before fields drop。
+- `0` 视为不传 duration, 不起 timer。
+- `last_session_override` 字段让 handler 持有 trigger, 不改 `LifecycleManager` API。
+
+### 验证
+- `cargo test --bin rdog`: 697 passed, 0 failed, 1 ignored.
+- 新增 7 测试: 6 集成 + 1 enum 序列化。
+- E2E smoke 文档已写入 `specs/rdog-acceptance-matrix.md`。
+- spec/ADR 已写入 `specs/rdog-recording-auto-stop.md` + `docs/adr/0007-recording-auto-stop.md`。
