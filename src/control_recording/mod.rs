@@ -268,6 +268,8 @@ pub fn filter_self_event(user_data: u64, event: CaptureEvent) -> Option<CaptureE
     }
 }
 
+pub mod bundle;
+pub mod delivery;
 pub mod journal;
 pub mod session;
 
@@ -281,6 +283,12 @@ mod tests;
 
 #[cfg(test)]
 mod session_tests;
+
+#[cfg(test)]
+mod bundle_tests;
+
+#[cfg(test)]
+mod delivery_tests;
 
 #[cfg(test)]
 mod journal_tests;

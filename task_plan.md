@@ -397,3 +397,32 @@ handle_daemon_control_query (zenoh_control.rs:240)
 - 全bin 612 passed / 1 ignored,runtime 38 passed,unixpipe e2e 12 passed,router-client 26 passed / 2 ignored;check与release build为0 error.
 - 安装版和release hash一致,正式daemon PID 82774的bare/self/显式target ping均返回pong,重复daemon正确拒绝.
 - 详细记录:`task_plan__zenoh_runtime_split.md`、`notes__zenoh_runtime_split.md`、`WORKLOG__zenoh_runtime_split.md`、`ERRORFIX__zenoh_runtime_split.md`.
+
+## [2026-07-29 00:00:00] [Session ID: omx-1784512435044-92wxat] [实施继续]: Wayfinder ticket #19 Bundle 导出与远程交付
+
+### 目标
+- 交付确定性 `.rdogrec.tar` Bundle writer、原子提交、SHA-256 完整性元数据和 owner-only 单帧 `@savefile` 交付。
+- 遵循 ticket #13 简化边界: 不实现 reader、control parser、evidence 收集、真实 replay compiler 或扩展 reject code。
+
+### 阶段
+- [x] 阶段1: 恢复 #19 worktree、分支和前序实现状态
+- [ ] 阶段2: 阅读 Bundle / lifecycle / savefile 现有契约并确定最小复用面
+- [ ] 阶段3: 实现 Bundle writer 与 delivery helper
+- [ ] 阶段4: 添加最小回归测试并修复验证问题
+- [ ] 阶段5: 全量验证、提交、推送并关闭 ticket #19
+
+### 当前状态
+- 当前在阶段2。先复用已有 `SaveFileFrame`、Session owner 和哈希依赖,避免平行协议模型。
+
+## [2026-07-29 00:01:00] [Session ID: omx-1784512435044-92wxat] [阶段更新]: #19 最小复用面确认
+
+- [x] 阶段2: 已确认复用 `SaveFileFrame`、`ConnectionId`、Session owner/getter、`sha2` 和 `base64`。
+- [ ] 阶段3: 实现 Bundle writer 与 delivery helper。
+- 决定: 不新增 dependency、不新增 reader、不接 control parser。Bundle manifest 按 ticket #13 只保留 `redaction_summary.segment_count`,不生成 `warnings`。
+
+## [2026-07-29 00:05:00] [Session ID: omx-1784512435044-92wxat] [阶段完成]: Bundle 与 delivery 验证完成
+
+- [x] 阶段3: `bundle.rs` 提供 canonical JSON、POSIX USTAR、路径安全、256 MiB 限制、staging + fsync + rename、per-file/whole-archive SHA-256。
+- [x] 阶段4: `delivery.rs` 提供 owner-only base64 `@savefile` frame、384 MiB frame gate、4 个 stable reason code、5/sec/connection sliding limit。
+- [x] 阶段4验证: `cargo test --bin rdog control_recording` -> 45 passed; `cargo test --bin rdog` -> 657 passed, 1 ignored;系统 `tar -tf` 成功读取并确认 entry order。
+- [ ] 阶段5: commit/push/关闭 ticket #19,更新 map #14。

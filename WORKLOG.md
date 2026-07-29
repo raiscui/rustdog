@@ -917,3 +917,19 @@
 
 - 资源清理权限必须由资源自己的 canonical identity guard证明.
 - 支线详细证据和延期项见后缀 `local_default_registry_recovery` 的六文件上下文.
+
+## [2026-07-29 00:05:00] [Session ID: omx-1784512435044-92wxat] 任务名称: Wayfinder ticket #19 Recording Bundle 与远程交付
+
+### 任务内容
+- 新增 `src/control_recording/bundle.rs`: 确定性 `rdog.recording.bundle.v1` POSIX USTAR Bundle writer。
+- 新增 `src/control_recording/delivery.rs`: owner-only 单帧 base64 `@savefile` frame 和 per-connection rate limit。
+- 新增 bundle/delivery 回归测试并注册模块。
+
+### 完成过程
+- 复用现有 `SaveFileFrame`、`ConnectionId`、`sha2`、`base64` 和 Session lifecycle 边界,未引入依赖。
+- Bundle 包含 `manifest.json`、冻结 `journal.jsonl`、canonical `flow.json`;使用固定 USTAR header、零 padding、双零结束块。
+- staging 文件完成 fsync 后通过同文件系统 rename 原子提交,并返回 archive size 与 SHA-256。
+- 测试覆盖 canonical JSON、tar 标准工具读取、重复导出字节一致、unsafe path、owner gate 和第 6 次 stop 限流。
+
+### 总结感悟
+- 本 ticket 按 #13 简化方案交付,没有实现 reader、真实 flow compiler、evidence pipeline 或 control parser。
