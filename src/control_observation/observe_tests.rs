@@ -195,3 +195,77 @@ fn fake_ax_window() -> AxWindow {
         }],
     }
 }
+
+#[test]
+fn parse_observe_payload_should_accept_compact_form() {
+    use crate::control_observation::observe::ObserveTarget;
+
+    // Mode-only compact: "@observe:window" should set mode, no target.
+    let mode_only = parse_observe_payload("window").unwrap();
+    assert_eq!(mode_only.mode, ObserveMode::Window);
+    assert!(mode_only.target.is_none());
+
+    // Target-only compact: "@observe:app:Calculator" should set target, default mode (Hybrid).
+    let target_only = parse_observe_payload("app:Calculator").unwrap();
+    assert_eq!(target_only.mode, ObserveMode::Hybrid);
+    assert_eq!(
+        target_only
+            .target
+            .as_ref()
+            .and_then(|t| t.app.as_deref()),
+        Some("Calculator")
+    );
+
+    // Both: "@observe:app:Calculator,window" should set both.
+    let both = parse_observe_payload("app:Calculator,window").unwrap();
+    assert_eq!(both.mode, ObserveMode::Window);
+    assert_eq!(
+        both.target.as_ref().and_then(|t| t.app.as_deref()),
+        Some("Calculator")
+    );
+
+    // ax mode compact.
+    let ax_mode = parse_observe_payload("ax").unwrap();
+    assert_eq!(ax_mode.mode, ObserveMode::Ax);
+    assert!(ax_mode.target.is_none());
+
+    // ax + target.
+    let ax_target = parse_observe_payload("app:Settings,ax").unwrap();
+    assert_eq!(ax_target.mode, ObserveMode::Ax);
+    assert_eq!(
+        ax_target.target.as_ref().and_then(|t| t.app.as_deref()),
+        Some("Settings")
+    );
+
+    // Empty trailing mode should default to Hybrid, not error.
+    let empty_mode = parse_observe_payload("app:Calculator,").unwrap();
+    assert_eq!(empty_mode.mode, ObserveMode::Hybrid);
+    assert_eq!(
+        empty_mode.target.as_ref().and_then(|t| t.app.as_deref()),
+        Some("Calculator")
+    );
+}
+
+#[test]
+fn parse_observe_payload_should_reject_non_ascii_app_in_compact_form() {
+    let err = parse_observe_payload("app:计算器")
+        .expect_err("non-ASCII app name must fail at parser layer");
+    let msg = err.to_string();
+    assert!(msg.contains("ASCII"), "error must mention ASCII: {msg}");
+    // After format substitution the input echoes in `received: 计算器`.
+    assert!(msg.contains("计算器"), "error must echo input name: {msg}");
+    // Should also reject in target-only form.
+    assert!(parse_observe_payload("app:計算機,window").is_err());
+}
+
+#[test]
+fn parse_observe_payload_should_reject_too_many_compact_fields() {
+    assert!(parse_observe_payload("app:Calculator,window,ax").is_err());
+    assert!(parse_observe_payload("window,ax,hybrid").is_err());
+}
+
+#[test]
+fn parse_observe_payload_should_reject_unknown_mode_in_compact_form() {
+    let err = parse_observe_payload("desktop").expect_err("unknown mode must fail");
+    assert!(err.to_string().contains("desktop"));
+}
