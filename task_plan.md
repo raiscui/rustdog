@@ -620,3 +620,16 @@ handle_daemon_control_query (zenoh_control.rs:240)
 - [x] 加 2 测试: `status_reports_duration_and_remaining_ms_when_auto_stop_active`, `status_remaining_ms_clamped_to_zero_after_deadline`。
 - [x] commit `77b9667` 已 push, 699 tests pass (+2)。
 - [x] spec `specs/rdog-recording-auto-stop.md` 已加 `duration_ms` + `remaining_ms` 字段说明。
+
+### E2E smoke 结果 (issue #23 acceptance)
+- 启动 daemon (zenoh router, namespace=smoke, target=mac.smoke)
+- 跑 `#1.  manual E2E smoke` 步骤 (start 3s → status → sleep 4s → status)
+- 验证全部通过:
+  - start 返回 `duration_ms: 3000`, `recording_id: rec-256c97ac0f01b752add9`
+  - 即时 status 显示 `remaining_ms: 2976` (auto-stop 倒计时正确)
+  - sleep 4s 后 status: `last_session.phase="completed"`, `stop_trigger="auto_duration"`
+  - bundle 落盘: `~/.cache/rdog/recording/bundle/rec-256c97ac0f01b752add9.rdogrec.tar` (5120 bytes, 3 个文件: manifest.json + journal.jsonl + flow.json)
+- 顺手修了 2 个 issue #15 regression:
+  - `parse_control_line` 拒绝 `@record-status` (无冒号) — 加 special-case,2 个 parser 测试
+  - `daemon::run` + `daemon::run_zenoh_router` 不 install RecordingHandler — 加 `install_recording_stack()` helper,支持 `RDOG_RECORDING_DIR` env var
+- commit `98572af` 已 push, 701 tests pass (+2)
