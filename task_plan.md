@@ -472,3 +472,40 @@ handle_daemon_control_query (zenoh_control.rs:240)
 - [x] 阶段9: `RecordingHandler` 完整 start/status/stop/cancel + mark 未实现占位。
 - [x] 阶段10: 4 项 handler 集成测试 + 全量 661 pass,1 ignored。
 - [ ] 阶段11: 提交并推送分支,更新 issue。
+
+## [2026-07-29 00:52:00] [Session ID: omx-1784512435044-92wxat] [阻塞]: GitHub 推送受网络阻断
+
+- commit `e60eea6`(本次集成)已创建在本地分支 `feature/recorder-bundle-delivery`。
+- 推送连续 3 次被 `Connection closed by UNKNOWN port 65535` 阻断,LibreSSL SSL_ERROR_SYSCALL + SSH 代理异常都失败。
+- 本地备份:`/tmp/rdog-feature-recorder-bundle-delivery.bundle` 包含 `feature/recorder-lifecycle..feature/recorder-bundle-delivery`。
+- issue #20+#14 的 GitHub 同步等推送恢复后补做。
+
+## [2026-07-29 00:55:00] [Session ID: omx-1784512435044-92wxat] [阶段完成]: 网络恢复 + 推送 + issue 同步
+
+- [x] 推送: SSH 远程恢复,一次成功,`a4bd441..e60eea6` 已落在 `origin/feature/recorder-bundle-delivery`。
+- [x] map #14 已追加 4/5 集成完成 + @record-mark 阻塞说明。
+- [x] follow-up issue 已创建,等 issue 号回填到本任务文件。
+
+## [2026-07-29 01:00:00] [Session ID: omx-1784512435044-92wxat] [实施继续]: Wayfinder issue #20 @record-mark 落地
+
+### 目标
+- 把 `control_handler` 里 `RecordRequest::Mark` 的 not_implemented 占位换成真实调用。
+- Session 已有 `mark(label, redaction_active)`,只接它,不重新实现。
+- 加 3 条 owner-only / no-active / success 集成测试。
+
+### 阶段
+- [ ] 阶段A: 用 red 测试锁住当前 not_implemented 行为
+- [ ] 阶段B: 切换为真实 `session.mark(label, false)` 调用并把 `redaction_active` 暴露为可选
+- [ ] 阶段C: 单测 + 全量验证
+- [ ] 阶段D: 提交、推送、关闭 #20
+
+### 当前状态
+- 阶段A 起步。`session.mark(label, redaction_active)` 在 #18 提交时已存在,本次只做桥接。
+
+## [2026-07-29 01:10:00] [Session ID: omx-1784512435044-92wxat] [阶段完成]: issue #20 @record-mark 落地 + 全量 664 pass
+
+- [x] 阶段A: 旧测试用 `assert_eq!(value["kind"], ...)` 一直 panic,改用 `as_str().unwrap_or("")` 显示 left:"" 暴露真实根因。
+- [x] 阶段B: handler.mark 接 Session::mark(label, redaction_active);RecordRequest::Mark 加 redaction_active;protocol 解析支持对象 payload。
+- [x] 阶段C: 补 3 条 mark 测试, 修复 `temp_dirs` 测试目录在同 ms 多线程下文件名冲突 (加 `std::thread::current().id()` 唯一化)。
+- [x] 阶段D: 全量 664 pass,1 ignored,recorder 52 pass。
+- [ ] 阶段E: 提交 + 推送 + 关闭 #20。

@@ -15,7 +15,7 @@ use super::{
 };
 
 fn temp_dirs() -> (PathBuf, PathBuf) {
-    let base = std::env::temp_dir().join(format!("rdog-rec-handler-{}-{}", std::process::id(), crate::control_recording::journal::now_unix_ms()));
+    let base = std::env::temp_dir().join(format!("rdog-rec-handler-{}-{:?}-{}", std::process::id(), std::thread::current().id(), crate::control_recording::journal::now_unix_ms()));
     let journal = base.join("journal");
     let bundle = base.join("bundle");
     fs::create_dir_all(&journal).unwrap();
@@ -32,7 +32,6 @@ fn first_response_value(outcome: &super::super::control_frames::ControlExecution
     let body = text.strip_prefix("@response ").expect("response shape");
     let envelope: Value = serde_json::from_str(body).expect("response envelope json");
     if let Some(value) = envelope.get("value") { return value.clone(); }
-    // 错误响应: error 字段是结构化 JSON 字符串, 反序列化回来供测试断言 error_code 等。
     if let Some(err) = envelope.get("error").and_then(|v| v.as_str()) {
         if let Ok(parsed) = serde_json::from_str::<Value>(err) { return parsed; }
     }
@@ -109,6 +108,51 @@ fn cancel_after_start_returns_cancelled_status() {
     let cancel = handler.handle(Some(31), owner, RecordRequest::Cancel);
     let value = first_response_value(&cancel);
     assert_eq!(value["kind"], "record-cancel");
-    assert_eq!(value["phase"], "cancelled");
+    let phase = value.get("phase").and_then(|v| v.as_str()).unwrap_or("").to_owned();
+    assert_eq!(phase, "cancelled");
     assert!(handler.completed().is_empty());
+}
+
+#[test]
+fn mark_after_start_writes_label_and_bumps_count() {
+    let (journal, bundle) = temp_dirs();
+    let mut handler = RecordingHandler::new(journal, bundle);
+    let owner = ConnectionId(1);
+    let _ = handler.handle(Some(40), owner, RecordRequest::Start { profile: super::session::Profile::Semantic });
+    let mark = handler.handle(Some(41), owner, RecordRequest::Mark { label: Some("step-ready".to_owned()), redaction_active: false });
+    let value = first_response_value(&mark);
+    let label = value.get("label").and_then(|v| v.as_str()).unwrap_or("").to_owned();
+    assert_eq!(label, "step-ready");
+    let redaction_active = value.get("redaction_active").and_then(|v| v.as_bool()).unwrap_or(true);
+    assert!(!redaction_active);
+    let mark_count = value.get("mark_count").and_then(|v| v.as_u64()).unwrap_or(0);
+    assert_eq!(mark_count, 1);
+    let second = handler.handle(Some(42), owner, RecordRequest::Mark { label: None, redaction_active: true });
+    let second_value = first_response_value(&second);
+    let label2 = second_value.get("label").and_then(|v| v.as_str()).unwrap_or("").to_owned();
+    assert_eq!(label2, "mark");
+    let redaction_active2 = second_value.get("redaction_active").and_then(|v| v.as_bool()).unwrap_or(false);
+    assert!(redaction_active2);
+    let mark_count2 = second_value.get("mark_count").and_then(|v| v.as_u64()).unwrap_or(0);
+    assert_eq!(mark_count2, 2);
+}
+
+#[test]
+fn mark_by_non_owner_returns_record_not_owner() {
+    let (journal, bundle) = temp_dirs();
+    let mut handler = RecordingHandler::new(journal, bundle);
+    let _ = handler.handle(Some(50), ConnectionId(1), RecordRequest::Start { profile: super::session::Profile::Semantic });
+    let mark = handler.handle(Some(51), ConnectionId(2), RecordRequest::Mark { label: Some("x".to_owned()), redaction_active: false });
+    let value = first_response_value(&mark);    let mark = handler.handle(Some(51), ConnectionId(2), RecordRequest::Mark { label: Some("x".to_owned()), redaction_active: false });
+    let value = first_response_value(&mark);
+    assert_eq!(value["error_code"], "RECORD_NOT_OWNER");
+}
+
+#[test]
+fn mark_without_active_session_returns_no_active() {
+    let (journal, bundle) = temp_dirs();
+    let mut handler = RecordingHandler::new(journal, bundle);
+    let mark = handler.handle(Some(60), ConnectionId(1), RecordRequest::Mark { label: Some("x".to_owned()), redaction_active: false });
+    let value = first_response_value(&mark);
+    assert_eq!(value["error_code"], "RECORD_NO_ACTIVE_SESSION");
 }

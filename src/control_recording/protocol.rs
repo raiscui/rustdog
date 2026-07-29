@@ -44,12 +44,12 @@ pub(crate) fn parse_record_status_payload(input: &str) -> io::Result<RecordReque
 /// `@record-mark:{...}` 或裸 `@record-mark`。
 pub(crate) fn parse_record_mark_payload(input: &str) -> io::Result<RecordRequest> {
     if input.trim().is_empty() {
-        return Ok(RecordRequest::Mark { label: None });
+        return Ok(RecordRequest::Mark { label: None, redaction_active: false });
     }
     let inner = object_inner(input, "@record-mark")?;
     let value: Value = serde_json::from_str(&inner).map_err(|err| invalid_data(format!("@record-mark payload 不是 JSON: {err}")))?;
     let label = value.get("label").and_then(|v| v.as_str()).map(|s| s.to_owned());
-    Ok(RecordRequest::Mark { label })
+Ok(RecordRequest::Mark { label, redaction_active: value.get("redaction_active").and_then(|v| v.as_bool()).unwrap_or(false) })
 }
 
 /// `@record-stop:{...}` 或裸 `@record-stop`。

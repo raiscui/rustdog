@@ -37,7 +37,7 @@ pub const RECORD_CONTROL_SCHEMA: &str = "rdog.record-control.v1";
 pub enum RecordRequest {
     Start { profile: Profile },
     Status,
-    Mark { label: Option<String> },
+    Mark { label: Option<String>, redaction_active: bool },
     Stop,
     Cancel,
 }
@@ -92,7 +92,9 @@ impl RecordingHandler {
         match request {
             RecordRequest::Start { profile } => self.start(request_id, connection, profile),
             RecordRequest::Status => self.status(request_id),
-            RecordRequest::Mark { .. } => not_implemented(request_id, "record-mark"),
+            RecordRequest::Mark { label, redaction_active } => {
+                self.mark(request_id, connection, label, redaction_active)
+            }
             RecordRequest::Stop => self.stop(request_id, connection),
             RecordRequest::Cancel => self.cancel(request_id, connection),
         }
@@ -232,6 +234,26 @@ impl RecordingHandler {
         let frame = savefile_for_bundle(&bundle, request_id);
         let response = render_structured_success_response(request_id, &serde_json::to_string(&body).unwrap_or_else(|_| "{}".to_owned()));
         ControlExecutionOutcome { outbound_frames: vec![ControlFrame::SaveFile(frame), ControlFrame::ResponseLine(response)] }
+    }
+
+    fn mark(&mut self, request_id: Option<u64>, connection: ConnectionId, label: Option<String>, redaction_active: bool) -> ControlExecutionOutcome {
+        let session = match self.lifecycle.current_mut() {
+            Some(s) if s.owner() == connection => s,
+            Some(_) => return protocol_error(request_id, 4102, json!({"error_code": "RECORD_NOT_OWNER"})),
+            None => return protocol_error(request_id, 4103, json!({"error_code": "RECORD_NO_ACTIVE_SESSION"})),
+        };
+        let label_value = label.unwrap_or_else(|| "mark".to_owned());
+        if let Err(err) = session.mark(label_value.clone(), redaction_active) {
+            return lifecycle_outcome(request_id, &err);
+        }
+        success(request_id, &json!({
+            "schema": RECORD_CONTROL_SCHEMA,
+            "kind": "record-mark",
+            "recording_id": session.recording_id(),
+            "label": label_value,
+            "redaction_active": redaction_active,
+            "mark_count": session.mark_count(),
+        }))
     }
 
     fn cancel(&mut self, request_id: Option<u64>, connection: ConnectionId) -> ControlExecutionOutcome {

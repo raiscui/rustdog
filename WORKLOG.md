@@ -953,3 +953,20 @@
 ### 总结感悟
 - 测试侧 `{"id":N,"value":{...}}` 包装是 line-control 协议稳定契约,断言前必须先解 `value` 字段。
 - `render_protocol_error_response` 把 JSON 序列化到 `error` 字符串里,测试侧反序列化一次可拿到结构化错误对象。
+
+## [2026-07-29 01:10:00] [Session ID: omx-1784512435044-92wxat] 任务名称: Wayfinder issue #20 @record-mark line-control 落地
+
+### 任务内容
+- 在 `RecordRequest::Mark` 加 `redaction_active: bool` 字段。
+- `RecordingHandler` 加 `mark` 方法,内部调 `Session::mark(label, redaction_active)`。
+- `protocol.rs` `@record-mark` 解析支持 `redaction_active` 可选字段。
+- 替换 not_implemented 占位,加 3 条集成测试 (owner / no-active / success)。
+- 修 `temp_dirs` 在同 ms 多线程下产生相同路径导致 `JournalWriter::open` 二次失败 (加 thread id 唯一化)。
+
+### 完成过程
+- 真实根因: 旧测试 `assert_eq!(value["kind"], "...")` 报 left=Null, 因为 `value` 是 envelope 本身;改 `as_str().unwrap_or("")` 显式 left:"" 后,暴露出 `temp_dirs` 在同毫秒多线程产生同名 journal 文件,`create_new` 二次失败,session.start 失败,handler.start 返 error,后续 mark 看不见 session。
+- Session::mark 已存在 (issue #18 提交),本次只做桥接,没新增 lifecycle API。
+
+### 总结感悟
+- 测试 helper 用 `now_unix_ms` 当唯一键不安全:同一进程同毫秒下,不同线程的 `now_unix_ms` 相同,需加 thread id 或 atomic 计数器。
+- 测试时不要只 dump `value`,要同时 dump `envelope` 整包,避免 envelope/value 二选一时的视觉错觉。
