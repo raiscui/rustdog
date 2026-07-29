@@ -654,3 +654,10 @@ handle_daemon_control_query (zenoh_control.rs:240)
 - [x] helper 修复: `read_response_line` 改成读到 read deadline, 而不是首个 `@response` (daemon 的 savefile + response 分多个 TCP 包, 单 marker 会截断 body)
 - [x] 3 次跑全过, 总计 5 个 e2e 测试 (2 + 3), cargo test --bin rdg 仍 701
 - [x] commit `10dd653` 已 push
+
+### CI 集成 (选项 2)
+- [x] 创建 `.github/workflows/ci.yml` (73 行): matrix ubuntu-latest + macos-latest, 跑 build + unit tests + recording e2e tests。
+- [x] 暂不启用 rustfmt + clippy (主分支有 pre-existing format/clippy debt, 需要先清理)。
+- [x] 缓存 cargo registry + target per (os, lock+toml hash) 加速 incremental 跑。
+- [x] commit `7966625` 已 push。
+- [x] YAML 验证通过 (`python3 yaml.safe_load`)。
