@@ -214,6 +214,24 @@ pub enum Command {
         command: ConfigCommand,
     },
 
+    /// Recording control-plane CLI dispatcher
+    /// (转译 5 个子命令到 line-control `@record-*` 文本行)
+    Record {
+        #[clap(subcommand)]
+        subcommand: RecordSubcommand,
+        url: Option<String>,
+        #[clap(long, value_enum)]
+        transport: Option<Transport>,
+        #[clap(long)]
+        namespace: Option<String>,
+        #[clap(long = "target-name")]
+        target_name: Option<String>,
+        #[clap(long = "entry-point")]
+        entry_point: Vec<String>,
+        #[clap(value_name = "TARGET_OR_HOST", num_args = 0..=2)]
+        host: Vec<String>,
+    },
+
     /// Structured diff of two AxSnapshot JSON files
     AxDiff {
         /// Path to the "before" AxSnapshot JSON
@@ -240,6 +258,20 @@ pub enum Command {
         #[clap(long, default_value = "4")]
         max_depth: usize,
     },
+}
+
+/// `rdog record <subcommand> [args] [host...]` 的共享 transport / target 选项。
+///
+/// 这个 struct 只在 dispatcher 内部使用, 字段全部由 `Command::Record` 解析后填入。
+#[derive(Debug, Clone)]
+pub struct RecordCommandShared {
+    pub url: Option<String>,
+    pub transport: Option<Transport>,
+    pub namespace: Option<String>,
+    pub target_name: Option<String>,
+    pub entry_point: Vec<String>,
+    /// target / host / port 位置参数, 跟 `Command::Control` 同源。
+    pub host: Vec<String>,
 }
 
 #[derive(Subcommand, Debug)]
@@ -284,6 +316,30 @@ pub enum UiScriptCommand {
         #[clap(value_name = "TARGET_OR_SCRIPT", num_args = 1..=3)]
         positional: Vec<String>,
     },
+}
+
+/// `rdog record <subcommand>` 的 5 个 line-control subcommand。
+#[derive(Subcommand, Debug)]
+pub enum RecordSubcommand {
+    /// `@record-start` - 打开一个新 recording session
+    Start {
+        /// semantic (默认) 或 physical profile
+        #[clap(long, default_value = "semantic")]
+        profile: String,
+    },
+    /// `@record-status` - 查询当前 session 状态
+    Status,
+    /// `@record-mark` - 在 journal 写一个 mark barrier
+    Mark {
+        #[clap(long)]
+        label: Option<String>,
+        #[clap(long)]
+        redaction_active: bool,
+    },
+    /// `@record-stop` - 收尾 + 提交 + 单帧 base64 `@savefile` delivery
+    Stop,
+    /// `@record-cancel` - 立即停止, 不提交 Bundle
+    Cancel,
 }
 
 #[derive(Subcommand, Debug)]

@@ -7,7 +7,8 @@ use std::{
     process::exit,
 };
 
-use crate::input::{Command, ConfigCommand, Transport};
+use crate::control_recording::cli::{self as record_cli, RecordCommand};
+use crate::input::{Command, ConfigCommand, RecordCommandShared, RecordSubcommand, Transport};
 use crate::listener::{listen, Mode, Opts};
 
 mod ax_diff;
@@ -124,6 +125,34 @@ fn init_logger(command: &Command) -> Result<(), String> {
 
 fn run(opts: input::Opts) -> Result<(), String> {
     match opts.command {
+        Command::Record {
+            subcommand,
+            url,
+            transport,
+            namespace,
+            target_name,
+            entry_point,
+            host,
+        } => {
+            let record_subcommand = match subcommand {
+                RecordSubcommand::Start { profile } => RecordCommand::Start { profile },
+                RecordSubcommand::Status => RecordCommand::Status,
+                RecordSubcommand::Mark { label, redaction_active } => {
+                    RecordCommand::Mark { label, redaction_active }
+                }
+                RecordSubcommand::Stop => RecordCommand::Stop,
+                RecordSubcommand::Cancel => RecordCommand::Cancel,
+            };
+            let shared = RecordCommandShared {
+                url,
+                transport,
+                namespace,
+                target_name,
+                entry_point,
+                host,
+            };
+            record_cli::run(record_subcommand, &shared, &record_cli::default_artifacts_dir())?;
+        }
         Command::Listen {
             interactive,
             block_signals,

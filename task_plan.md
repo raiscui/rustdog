@@ -509,3 +509,29 @@ handle_daemon_control_query (zenoh_control.rs:240)
 - [x] 阶段C: 补 3 条 mark 测试, 修复 `temp_dirs` 测试目录在同 ms 多线程下文件名冲突 (加 `std::thread::current().id()` 唯一化)。
 - [x] 阶段D: 全量 664 pass,1 ignored,recorder 52 pass。
 - [ ] 阶段E: 提交 + 推送 + 关闭 #20。
+
+## [2026-07-29 01:25:00] [Session ID: omx-1784512435044-92wxat] [实施继续]: Wayfinder issue #15 rdog record CLI dispatcher
+
+### 目标
+- `rdog record <start|status|mark|stop|cancel> [args] <target> [--url|--transport|--namespace|--target-name]` 5 个子命令。
+- 复用 `control_invocation::resolve_control_invocation` + `send_control_lines_for_invocation`。
+- 5 个 subcommand 生成对应 `@record-*` 控制行;`record stop` 等待 `SaveFile` 帧并保存到 `rdog_downloads/`。
+
+### 阶段
+- [ ] 阶段A: `RecordCommand` enum + `RecordSubCommand` 在 `input.rs` 中
+- [ ] 阶段B: `control_recording::cli::run` dispatch 实现 (单文件,~150 行)
+- [ ] 阶段C: 在 main.rs 接 `Command::Record { subcommand, host, opts }` 路由
+- [ ] 阶段D: 单元测试覆盖 5 个 subcommand 的 line 构造
+- [ ] 阶段E: 提交 + 推送 + 关闭 #15
+
+### 当前状态
+- 阶段A 起步。决定不引入新依赖,clap derive + 现有 helper 足够。
+
+## [2026-07-29 01:45:00] [Session ID: omx-1784512435044-92wxat] [阶段完成]: issue #15 rdog record CLI dispatcher 落地
+
+- [x] 阶段A: `RecordSubcommand` + `RecordCommandShared` 已注册到 `input::Command`。
+- [x] 阶段B: `control_recording::cli::run` 复用 `resolve_control_invocation` + `send_control_lines_for_invocation`。
+- [x] 阶段C: main.rs 加 `Command::Record` match 分支。
+- [x] 阶段D: 7 条 unit test 覆盖 5 个 subcommand 的 line 构造 + label escape + profile validation。
+- [x] 阶段E: 全量 637 pass, 1 ignored; `rdog record --help` 展示 5 个子命令,`record start --help` / `record mark --help` 验证 clap options。
+- [ ] 阶段F: 提交 + 推送 + 关闭 #15。

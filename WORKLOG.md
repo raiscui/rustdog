@@ -970,3 +970,20 @@
 ### 总结感悟
 - 测试 helper 用 `now_unix_ms` 当唯一键不安全:同一进程同毫秒下,不同线程的 `now_unix_ms` 相同,需加 thread id 或 atomic 计数器。
 - 测试时不要只 dump `value`,要同时 dump `envelope` 整包,避免 envelope/value 二选一时的视觉错觉。
+
+## [2026-07-29 01:45:00] [Session ID: omx-1784512435044-92wxat] 任务名称: Wayfinder issue #15 rdog record CLI dispatcher
+
+### 任务内容
+- 新增 `src/control_recording/cli.rs`:5 个 subcommand (start/status/mark/stop/cancel) 翻译成 line-control `@record-*` 文本行,复用 `control_invocation::resolve_control_invocation` + `send_control_lines_for_invocation`。
+- 修改 `src/input.rs`:新增 `RecordSubcommand` enum (clap derive) + `RecordCommandShared` 数据 struct + `Command::Record` variant。
+- 修改 `src/main.rs`:加 `Command::Record` match 分支。
+- 新增 `src/control_recording/cli_tests.rs`:7 条 unit test 覆盖 line 构造。
+
+### 完成过程
+- 不引入新依赖,clap derive + 现有 control_invocation helper 足够。
+- `RecordCommandShared` 走 `input.rs` 单一真相源,`cli.rs` 用 `type RecordCommandShared = crate::input::RecordCommandShared;` 别名,避免重复定义。
+- `@savefile` Bundle 落盘由 `send_control_lines_for_invocation` 自动写到 `rdog_downloads/`,无需新增路径逻辑。
+
+### 总结感悟
+- 5 个 subcommand 的 line-control 文本由 `render_line` 纯函数生成,无 daemon 也能 100% 覆盖,大幅降低测试成本。
+- clap 长选项名 `--redaction-active` 自动 kebab-case,不用手写 rename。
