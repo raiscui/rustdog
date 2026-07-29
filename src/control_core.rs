@@ -1,5 +1,7 @@
 use std::io;
 
+use crate::control_recording::control_handler::{with_recording_handler, RecordRequest};
+use crate::control_recording::session::ConnectionId;
 use crate::{
     control_actions::{build_shell_command, ControlActionExecutor},
     control_bootstrap::build_bootstrap_outcome,
@@ -31,6 +33,7 @@ pub fn execute_explicit_control_request<E: ControlActionExecutor>(
         ControlCommand::Ping => ControlExecutionOutcome::from_response_line(
             render_response_string(request.request_id, "pong"),
         ),
+        ControlCommand::Record(record_request) => handle_record_command(record_request, request.request_id),
         ControlCommand::PtyClose(pty_close) => {
             match crate::pty_control::close_active_pty_session(&pty_close.session_id) {
                 Ok(true) => ControlExecutionOutcome::from_response_line(
@@ -386,6 +389,22 @@ fn escape_json_string(input: &str) -> String {
     }
 
     escaped
+}
+
+
+/// `ControlCommand::Record` 不走默认 executor,直接派发到
+/// `RecordingHandler`(由 daemon 启动时 install)。未 install 时返回
+/// 结构化 4111 错误,而不是 panic,这样 control plane 测试可以走完。
+fn handle_record_command(request: &RecordRequest, request_id: Option<u64>) -> ControlExecutionOutcome {
+    let connection = ConnectionId(request_id.unwrap_or(0));
+    match with_recording_handler(|handler| handler.handle(request_id, connection, request.clone())) {
+        Some(outcome) => outcome,
+        None => ControlExecutionOutcome::from_response_line(render_protocol_error_response(
+            request_id,
+            4111,
+            &format!("{{\"schema\":\"{}\",\"error_code\":\"RECORDING_NOT_INITIALIZED\"}}", "rdog.record-control.v1"),
+        )),
+    }
 }
 
 #[cfg(test)]
