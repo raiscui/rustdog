@@ -6,9 +6,10 @@
 
 ## Recording auto-stop (issue #23)
 
-End-to-end smoke for the `RecordingHandler` auto-stop timer. This is
-the manual smoke the issue #23 acceptance checklist requires; it is
-not covered by CI.
+End-to-end smoke for the `RecordingHandler` auto-stop timer. CI
+covers the full pipeline via `tests/recording_e2e.rs`
+(`cargo test --test recording_e2e`); the manual recipe below is kept
+for ad-hoc verification.
 
 ### Prerequisites
 
