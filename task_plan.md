@@ -602,3 +602,14 @@ handle_daemon_control_query (zenoh_control.rs:240)
 - 新增 7 测试: 6 集成 + 1 enum 序列化。
 - E2E smoke 文档已写入 `specs/rdog-acceptance-matrix.md`。
 - spec/ADR 已写入 `specs/rdog-recording-auto-stop.md` + `docs/adr/0007-recording-auto-stop.md`。
+
+### 收口
+- [x] commit `5d9671a` 已 push 到 `origin/feature/recorder-bundle-delivery`。
+- [x] GitHub issue #23 已 close (state: closed, state_reason: completed)。
+- [x] Wayfinder map #14 已更新: 加 #15/#19/#20/#22/#23 5 条 decision pointer, 删除原 "Open tickets (frontier)" block (因为都已 close)。
+
+### 交付
+- 3 个新文件: `docs/adr/0007-recording-auto-stop.md`, `specs/rdog-recording-auto-stop.md`, `specs/rdog-acceptance-matrix.md`。
+- 3 个修改: `src/control_recording/session.rs`, `src/control_recording/control_handler.rs`, `src/control_recording/control_handler_tests.rs`。
+- 697 个测试通过 (从 690 增加 +7)。
+- 分支 `feature/recorder-bundle-delivery` 现在含 6 commits, 都是 recording 相关。
