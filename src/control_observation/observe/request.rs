@@ -14,8 +14,9 @@ use std::io;
 
 const DEFAULT_OBSERVE_LIMIT: u16 = 20;
 
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Default)]
 pub enum ObserveMode {
+    #[default]
     Hybrid,
     Visual,
     Ax,
@@ -125,8 +126,19 @@ impl Default for ObserveRequest {
 }
 
 pub fn parse_observe_payload(input: &str) -> io::Result<ObserveRequest> {
-    if input.trim().is_empty() {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
         return Ok(ObserveRequest::default());
+    }
+
+    // ponytail: compact form for the common observe cases.
+    // Forms accepted:
+    //   - "MODE"            → mode only, no target
+    //   - "app:APP"         → target only, default mode
+    //   - "app:APP,MODE"    → target + mode
+    // Object form (`{mode:..., target:...}`) remains for advanced requests.
+    if !trimmed.starts_with('{') {
+        return parse_observe_compact(trimmed);
     }
 
     let inner = object_inner(input, "@observe")?;
@@ -298,6 +310,57 @@ pub fn parse_observe_payload(input: &str) -> io::Result<ObserveRequest> {
         request.ax_include_values = value;
     }
     Ok(request)
+}
+
+fn parse_observe_compact(input: &str) -> io::Result<ObserveRequest> {
+    let mut fields = input.split(',');
+    let first = fields.next().unwrap_or_default();
+    let second = fields.next();
+    if fields.next().is_some() {
+        return Err(invalid_data(
+            "@observe 短格式必须是 MODE / app:APP / app:APP,MODE",
+        ));
+    }
+
+    // ponytail: first field is either app:APP target or a bare mode name.
+    let (target, mode_str) = if let Some(app) = first.strip_prefix("app:") {
+        // Same ASCII gate as parse_compact_window_selector.
+        if !app.is_ascii() {
+            return Err(invalid_data(format!(
+                "@observe 短格式 app:APP 必须是 ASCII 名称(macOS Launch Services 不支持非 ASCII);received: {app};请改用 Launch Services 英文名称"
+            )));
+        }
+        (
+            Some(ObserveTarget {
+                app: Some(app.to_owned()),
+                ..ObserveTarget::default()
+            }),
+            second,
+        )
+    } else {
+        (None, Some(first))
+    };
+
+    let mode = match mode_str {
+        Some(raw) if !raw.is_empty() => parse_observe_mode_bare(raw)?,
+        _ => ObserveMode::Hybrid,
+    };
+
+    let mut request = ObserveRequest::for_mode(mode);
+    request.target = target;
+    Ok(request)
+}
+
+fn parse_observe_mode_bare(input: &str) -> io::Result<ObserveMode> {
+    // ponytail: compact form uses bare mode names (no shell quotes), unlike
+    // object form's from_payload which expects quoted values.
+    match input.trim() {
+        "hybrid" => Ok(ObserveMode::Hybrid),
+        "visual" => Ok(ObserveMode::Visual),
+        "ax" => Ok(ObserveMode::Ax),
+        "window" => Ok(ObserveMode::Window),
+        other => Err(invalid_data(format!("@observe 短格式 mode 不支持: {other}"))),
+    }
 }
 
 fn parse_observe_target(input: &str) -> io::Result<ObserveTarget> {

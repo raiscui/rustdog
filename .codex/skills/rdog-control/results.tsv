@@ -1,0 +1,4 @@
+timestamp	commit	skill	old_score	new_score	status	dimension	note	eval_mode
+2026-07-28T23:18	92a3d06	rdog-control	72.2	75.8	keep	dim3	加 Failure Handling 3-tier fallback 表 (10 行触发/修复/兜底)	full_test
+2026-07-28T23:22	0de28cb	rdog-control	75.8	79.4	keep	dim9	加 Anti-Patterns Don't 表 (12 条带理由)	full_test
+2026-07-28T23:25	5884848	rdog-control	79.4	81.2	keep	dim4	加 When to Defer 表 + 🔴/🛑 视觉标记	full_test

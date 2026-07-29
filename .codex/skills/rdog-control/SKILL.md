@@ -1,229 +1,186 @@
 ---
 name: rdog-control
-version: "1.7"  # 2026-07-18: 空target/self只接受active managed local-default lease
-description: "Use when controlling a local or named machine through rdog control: target selection, line-control frames, GUI/web/window actions, shell/PTY/@flow, validation, and safety."
+version: "2.23-darwin-dim3+dim9+dim4"  # 2026-07-28:加 When to Defer + 视觉标记
+description: "Use for rdog control on a local or named machine: health, shell, GUI, browser, window, AX, PTY, flow, verification, and safety."
 ---
 
 # Rdog Control
 
-## Contract
+`rdog control` sends ordered frames to a trusted `rdog daemon`. Every bash call
+must begin with `rdog control`. Read the literal `@response ` from full stdout.
 
-`rdog control` is a stdio-friendly control bridge to a trusted `rdog daemon`.
-It is not SSH.
-Send ordered line-control frames, then read frames such as `@response`, `@savefile`, `@pty-*`, or structured JSON.
+## Tight Loop
 
-This skill is agent-agnostic.
-It applies to Codex, Claude, GPT, openai-compatible clients, MCP agents, scripts, and human operators.
+1. Read current state and resolve one exact target.
+2. Choose one lane below.
+3. Send the narrowest semantic action once.
+4. Read fresh state in a separate call.
+5. Report only the result proved by that fresh read.
 
-Treat `@cmd`, `@script`, bare shell lines, `@flow` shell steps, PTY, and hardware bridge commands as remote code execution on the daemon host.
-
-## Start Here
-
-Prefer the local fast path when the agent and daemon are on the same machine:
+Use the local fast path when agent and daemon share one machine:
 
 ```bash
 rdog control @ping
-rdog control @ping @capabilities#1
-rdog control @ping @capabilities#1 @observe#3
+rdog control @ping @capabilities#1 @observe#2
 ```
 
-Use `self` or namespace forms only when they make the target clearer:
+Put `TARGET` after `control` only for a named or remote daemon. Permission and
+capability errors are final results.
+
+## Native App Lane
+
+Use this lane for visible app controls, values, and buttons. `app:APP` is valid
+only when the app resolves to one interactable window. `pid:PID/window:INDEX`
+from a fresh `@window-find` is also accepted.
 
 ```bash
-rdog control self @ping
-rdog control self --namespace lab @ping
-rdog control --namespace lab @ping
+rdog control @open-app:APP
+rdog control @ax-find:app:APP,ROLE
+rdog control @ax-press:app:APP,DESCRIPTION
+rdog control @ax-press-sequence:app:APP,DESCRIPTION_1,DESCRIPTION_2
 ```
 
-Use a named target when the user names one, multiple local daemons exist, or the daemon is remote:
+The 5-field `@ax-press:app:APP,DESCRIPTION,RESULT_ROLE,EXPECTED_VALUE,MAX_ATTEMPTS`
+form is intentionally not in this primary list. Read the GUARDED PRESS section
+below before considering it; most tasks do not need it.
 
-```bash
-rdog control TARGET @ping
-rdog control TARGET @ping @capabilities#1 @observe#3
-```
+Read current state before any press. After `@open-app`, the very first read
+must be for the role that carries the app's current value or text (commonly
+`AXStaticText` or `AXValue`), not the control role. The control role
+(`AXButton`, `AXMenuItem`, …) lists the available actions; it does not
+reveal what state those actions will modify. Pressing a control without
+first reading the current state is guessing, and an over-defensive guess
+(such as pressing a clear / reset button before input) is a protocol
+violation, not a safety measure.
 
-Expected liveness frame:
+Use only descriptions returned by that fresh app-scoped AX read. A sequence
+has exactly one comma field per observed AXButton description, in the
+intended action order. Do not place a compound instruction or unobserved
+label in one field.
 
-```text
-@response "pong"
-```
+GUARDED PRESS — opt-in only. The 5-field form
+`@ax-press:app:APP,DESCRIPTION,RESULT_ROLE,EXPECTED_VALUE,MAX_ATTEMPTS`
+makes the program repeat `DESCRIPTION` up to `MAX_ATTEMPTS` (1 to 3) times,
+taking a fresh AX read of `RESULT_ROLE` after each press, and stopping as
+soon as the read matches `EXPECTED_VALUE`. The program does not know the
+app, the button meaning, or the desired baseline — those come from the model.
 
-Local fast path selection:
+Use guarded press only when BOTH conditions hold:
+  1. A prior fresh AX read of `RESULT_ROLE` already showed non-target
+     content, AND
+  2. You cannot safely count individual presses to reach the baseline
+     (for example the stale length is unknown, or the input has nested
+     structure).
 
-- one active managed local-default registry -> use that daemon, even if extra FIFO candidates exist.
-- multiple active managed local-default registries -> select with `--namespace` or an explicit target.
-- no active managed registry -> do not select FIFO candidates, regardless of count.
-- unmanaged FIFO candidates are diagnostics only -> use an explicit target during upgrade, or start a daemon with `[zenoh.unixpipe] local_default = true`.
+If the fresh read already matches the intended baseline, issue input
+directly without reset. If the stale content is a short known string or
+number of characters, prefer counting N plain `@ax-press` calls; each
+attempt then runs independently and the runner records them as separate
+performed actions.
 
-If command shape matters, verify live syntax:
+Do not preemptively reset before input. Adding a reset on a fresh app
+that already shows the target baseline (or starts empty) is a protocol
+violation, not a precaution. Reserve guarded press for genuinely stale
+or unknown content.
 
-```bash
-rdog --help
-rdog control --help
-rdog daemon --help
-```
+After a guarded press, regardless of `verified`, take a separate fresh
+`@ax-find` for the result role before issuing the next input step. The
+fresh read is the only proof the reset actually took effect.
 
-Do not invent stdout.
-Do not claim success until the real command output contains the expected frame.
-Avoid piping rdog output through `jq`, `grep`, `sed`, `awk`, `head`, or `tail` unless the user explicitly asks; ANSI diagnostics can break downstream parsing.
+Use `@key` for an explicit shortcut request or when no semantic action can express
+the operation. Use guarded screenshot coordinates only after semantic lookup fails.
 
-## Choose The Lane
+## Browser Lane
 
-Use the smallest lane that can prove the result:
+Read `references/cookbook-web-content.md` before a browser content action. Use
+global capture only to identify one focused browser, then targeted capture. After
+navigation, use a fresh window or `browser:"active"`; never reuse `/window:N`
+across turns.
 
-1. Liveness or health -> `@ping`.
-2. Capability or permission state -> `@capabilities#1`.
-3. Fresh GUI context -> `@bootstrap` or `@observe`.
-4. One daemon-side shell command -> `@cmd#id:"COMMAND"` or `@script`.
-5. Finite daemon-side workflow -> `@flow`.
-6. Stateful terminal, TUI, Ctrl-C, Ctrl-D -> `rdog control TARGET --pty -- COMMAND`.
-7. Browser page content -> `@web-find` first, `@web-act` only when side effects are intended.
-8. GUI controls -> prefer semantic AX/window/web actions before mouse coordinates, except for the temporary WeChat policy below.
-9. Hardware or MCU work -> control the trusted bridge host, then run serial/flashing/device tools there.
+Success requires fresh PID, display/window ownership, page or URL state, and the
+intended content change. `performed:true` or a screenshot alone is incomplete.
 
-Read-only GUI bootstrap example:
+## Other Lanes
 
-```bash
-rdog control TARGET '@bootstrap#1:{mode:"gui",capability_policy:"fresh",observe:{mode:"hybrid",include_screenshot:true,include_ax:true,include_windows:true,ax_required:false,ax_mode:"interactive"}}'
-```
+| Need | First action |
+| --- | --- |
+| Health | `@ping` |
+| Permissions | `@capabilities` or `@bootstrap` |
+| Window ownership | `@window-find` |
+| One shell command | `@cmd` or `@script` |
+| Finite workflow | `@flow` |
+| Stateful terminal | `rdog control TARGET --pty -- COMMAND` |
 
-## WeChat Temporary No-AX Policy
+Read only the matching reference before using an Other Lane:
 
-When the target app is WeChat (`com.tencent.xinWeChat`) or the user names "WeChat" / "微信", do not use AX to locate or interact with content controls.
-This is a temporary fail-closed policy based on the 2026-07-14 ownership probe.
+- `references/control-workflow.md`: targets, windows, PTY, hosts, and hardware.
+- `references/protocol.md`: frame syntax, responses, errors, AX, mouse, and flow.
+- `references/zenoh-hardware.md`: discovery, SDK, serial, and bridge hosts.
 
-- Do not call `@ax-find`, `@ax-get`, `@ax-action`, `@ax-set-value`, `@ax-scroll`, or `rdog ax-diff` for WeChat content.
-- Do not reuse AX-derived refs or labels such as `发现`, `直播`, or `发布`; a previous fallback attached a Xiaohongshu/Chrome AX tree to WeChat target metadata.
-- The restriction applies to WeChat content targeting. `@window-find`, `@window-activate`, screenshot capture, guarded mouse actions, `@paste`, and targeted `@key` remain allowed.
-- Use `@window-find` to resolve the current WeChat window, then capture a fresh visual observation with `include_screenshot:true`, `include_windows:true`, and `include_ax:false`.
-- Locate visible controls from screenshot pixels plus the resolved window/display geometry. Use `guard.display`, and confirm the point is still inside the fresh window rect before coordinate actions.
-- If the window is hidden, occluded, or stale, activate it and capture a new screenshot before deriving coordinates. Do not use AX hit-testing to bypass occlusion.
-- Verify every action with a fresh screenshot and window state. If visual ownership or coordinates are ambiguous, stop without clicking or typing.
+## Failure Handling
 
-Do not re-enable WeChat AX targeting until a controlled overlap/z-order regression proves root ownership and a live query reliably finds `文件传输助手` without accepting foreign browser content.
+🔴 **REPAIR — when a control fails.** When a control returns `performed:false`, zero matches, or an unexpected
+fresh read, walk the three-tier ladder below before retrying with a new
+lane or locator. Each repair step must end with a fresh read that proves
+the change actually took effect on the relevant subtree.
 
-## CLI-Side UI Script
+| Trigger (observable evidence) | First repair | Still failing |
+| --- | --- | --- |
+| `@window-find` matches 0 windows | Verify the app is open (`@open-app` first); check `app:APP` spelling — ASCII case-insensitive after v2.18, but Chinese names do not resolve | Take a `@screenshot` to confirm visual state; do not guess window state blind |
+| `@ax-find` returns 0 elements for a role | Verify role spelling; re-query the parent role (e.g. `AXWindow`) to find the right subtree first | Drop to `@key` keyboard shortcut if the role has no children |
+| `@ax-press` returns `performed:false` | Re-`@ax-find` for the role; the button may have been renamed, moved, or disabled | Switch to a sibling description or `@key` |
+| `@ax-press-sequence` stops mid-way | The failed step's `target_id` is in the response; re-query just that role and continue from the failing step | Restart the sequence from a known fresh state (`@ax-find` first) |
+| Fresh AX read returns a different value than expected | You may have read the wrong subtree; re-query with the correct value role (commonly `AXStaticText` or `AXValue`) | Use `@screenshot` for visual confirmation |
+| Window ownership is ambiguous (≥2 matching interactive windows) | Disambiguate via fresh `@window-find` and pass `pid:PID/window:INDEX` instead of `app:APP` | Stop; ask the user which window is the target |
+| `@capabilities` reports `permission_status: denied` or `unavailable` | The capability name is in the response; for Accessibility on macOS, system prompt requires System Settings → Privacy & Security → Accessibility | Do not retry without the missing permission; further calls will keep failing identically |
+| `@ping` times out or returns non-`pong` | Check the daemon log/socket path; on macOS, restart with `rdog daemon --config rdog_macos.toml` | Do not keep issuing commands; the daemon may be wedged and a flood will only obscure the real error |
+| `@screenshot` writes to a path the agent cannot read | The daemon writes to its own temp dir; do not guess the path; use the `@observe#N` ref the response returned | Switch to global AX read without window scope |
+| `rdog control` rejected a frame with `code: 64` | Read the literal `error` field; it is the single source of truth for parser/locator failures | Do not retry the same payload — fix the indicated field first |
 
-Use `rdog ui-script run [TARGET] script.json` or `rdog control --ui-script script.json [TARGET]` for controller-side JSON UI automation.
-Both entries share the same runner, target resolver, trace writer, artifact handling, and `Expect` evaluator.
-`--compat iced-emg` and daemon-side GUI-only `@ui-flow` are not implemented.
+Never infer app state from screenshot output alone; screenshot is a
+cross-check, not the primary source. The primary source is always a
+fresh `@ax-find` (or `@window-find` for window state) read that returns
+matching elements.
 
-## Daemon-Side Flow
+## Anti-Patterns (Don't)
 
-Use `@flow` when several steps should run on the daemon with one ordered request.
-It can mix shell, control lines, expects, artifacts, and trace.
+Each row is a behavior we have observed in real rdog-control sessions.
+None of these are valid tactics.
 
-```bash
-rdog control TARGET '@flow#9:{"schema":"rdog.flow.v1","policy":{"allow_shell":true},"steps":[{"Cmd":{"run":"echo flow-ok","capture":"cmd1"}},{"Expect":{"kind":"cmd_exit_code","capture":"cmd1","code":0}},{"ControlLine":"@ping"},{"Expect":{"kind":"response_contains","contains":"pong"}},{"Exit":null}]}'
-```
+| Don't do | Why |
+| --- | --- |
+| Use `@screenshot` as the primary source of state | Screenshots are a cross-check; the canonical source is a fresh `@ax-find` or `@window-find` that returns matches. A screenshot cannot tell you which role's value is which. |
+| Retry the same `@ax-press` more than three times with the same description | If the description still does not resolve, the locator is wrong. Re-query the role or change lane; do not throw the same payload at the daemon. |
+| Pre-emptively press a clear / reset button on a fresh app | A reset before reading state is a protocol violation, not a safety measure. The fresh read tells you whether the app already starts at the target baseline. |
+| Use `@cmd` to compute math, parse JSON, or evaluate expressions | Shell math has nothing to do with the GUI task. `@cmd` is for legitimate system commands; bypassing semantic actions defeats all rdog-control evidence. |
+| Pass `app:计算器`, `app:計算機`, or any non-ASCII app name | `@window-find` only resolves ASCII app names. Non-ASCII names return 0 matches and will never succeed. |
+| Mix `app:APP` with `pid:PID/window:INDEX`, `process:`, or `window_title:` in the same target | The target validator rejects the request. Pick exactly one ownership channel. |
+| Reuse `@eN` ref across daemon restarts or turn boundaries | Observation refs are short-lived. A ref that resolved in the previous turn may resolve to a different element today. Re-query via `@ax-find`. |
+| Skip the fresh read between consecutive `@ax-press` calls | Every press must prove `performed:true` AND that the press changed the visible state for the value role. Sequential presses without reads cannot tell which press had which effect. |
+| Treat `performed:true` as proof of success | `performed:true` only proves the press was dispatched. The result depends on a fresh `@ax-find` of the value role. |
+| Assume a fixed number of reset presses when stale length is unknown | Use guarded press (`@ax-press:app:APP,BUTTON,RESULT_ROLE,EXPECTED_VALUE,MAX_ATTEMPTS`) so the program verifies each press. Counting blindly produces either residual content or wasted actions. |
+| Pipe `@response` output to `jq` / `grep` / shell tools | Pipe bypasses the protocol; the daemon records `usedPipeInRdogCommand=true` and the audit field flags the run. Read `@response` literally from full stdout. |
+| 🔴 Press `Cmd+Q` / `Cmd+W` / `Esc` / other destructive shortcuts without explicit user confirmation | These are terminal actions. The Safety section requires user confirmation before destructive operations. |
 
-Rules:
+If you find yourself reaching for any of the above, the correct fix is
+almost always: re-`@ax-find` for the right role, read the result, then
+choose the smallest semantic action.
 
-- `Cmd` and `Script` require `policy.allow_shell:true`.
-- `SaveArtifact` reads daemon-local files and requires `policy.allow_file_read:true`.
-- `cwd`, `env`, command execution, file reads, and artifact paths are daemon-local.
-- Controller-local files must be inlined or uploaded before the daemon can use them.
-- `ControlLine` reuses the existing control parser/core.
-- inner `@response` frames are consumed into flow state; the outer final response is one flow summary.
-- `SaveArtifact`, inner `@savefile`, and trace savefiles return before the final `@response`.
-- v1 rejects nested `@flow`, `@pty`, and `ControlLine:"@cmd..."` / `ControlLine:"@script..."`.
-- `@ui-flow`, if added later, is a GUI-only profile or alias. It is not the full script runtime.
+## When to Defer to the User
 
-## GUI Targeting
+Stop the agent loop and surface to the calling user when any row below holds.
 
-The WeChat no-AX policy overrides this generic procedure for WeChat content.
+| Marker | Condition | Action |
+| --- | --- | --- |
+| 🔴 DEFER | Task involves `Cmd+Q`, `Cmd+W`, reboot, or any irreversible UI action | The user must explicitly confirm |
+| 🔴 DEFER | Task needs permissions `@capabilities` reports denied | User grants permissions out-of-band (macOS: System Settings → Privacy & Security → Accessibility / Input Monitoring) |
+| 🔴 DEFER | Window ownership ambiguous AND task is destructive (close / delete / submit) | Read-only tasks may proceed; write tasks must defer |
+| 🛑 STOP | Same `@ax-press` description retried ≥ 3 times without `performed:true` changing | Surface the last failed description and error code |
+| 🛑 STOP | Two consecutive fresh AX reads return different element roles or paths (not just different values) | The app's AX tree has shifted; surface the inconsistency |
 
-For GUI work:
+When none of the above holds, continue the agent loop autonomously.
+## Safety
 
-1. Get capability state and an observation.
-2. Locate with `@window-find`, `@web-find`, `@ax-find`, or `@ax-get`.
-3. Act with semantic commands first: `@web-act`, `@ax-action`, `@ax-set-value`, `@paste`, `@ax-scroll`, targeted `@key`, `@window-resize`.
-4. Verify with a fresh observation, AX query, screenshot, window state, command output, or `rdog ax-diff`.
-
-Observation refs such as `@e1` are short-lived.
-Use them only with the matching `observation_id`.
-After daemon restart, stale refs, or `OBSERVATION_EXPIRED`, observe again and re-anchor.
-
-For multi-display hosts, scope before acting:
-
-```bash
-rdog control TARGET '@observe#2:{mode:"hybrid",scope:{display:{name_contains:"DELL"}},include_screenshot:true,include_ax:true,include_windows:true,ax_required:false,ax_mode:"interactive"}'
-rdog control TARGET '@click#4:{target:{ref:"@e12",observation_id:"obs-..."},guard:{display:{id:"d2"}}}'
-```
-
-Supported display selectors: `id`, `name_contains`, `contains_point`, `window_id`, `window_ref + observation_id`.
-Request shape is `scope:{display:{...}}` for observe/find and `guard:{display:{...}}` for mouse fallback.
-Do not generate top-level `display_id:"d2"`.
-Do not generate `scope:{display:{ref:"@d2"}}`; `@eN` refs are UI-element refs, not display refs.
-
-For fixed window size, use `@window-resize`:
-
-```bash
-rdog control TARGET '@window-resize#5:{target:{ref:"@e1",observation_id:"obs-..."},size:{width:1200,height:800,unit:"os-logical",box:"outer"},origin:"keep",verify:true}'
-```
-
-`@window-resize` restores/activates the target window by default, resizes, then verifies.
-Do not add `activate:true`.
-Use `@window-activate` only to restore/focus without changing size, or as recovery after resize reports limited recovery.
-
-## Keyboard And PTY
-
-Outside a PTY session, `@key` sends local OS keystrokes to the focused app:
-
-```bash
-rdog control '@key:"Return"'
-rdog control '@key:"Cmd+R"'
-rdog control '@key#7:{key:"Cmd+Shift+R",hold_ms:80,mode:"press_release"}'
-```
-
-Common modifiers: `Cmd`, `Alt`, `Ctrl`, `Shift`.
-Common main keys: `Return`, `Tab`, `Space`, `Esc`, arrows, `F1` to `F12`, or one Unicode character.
-
-Inside `rdog control TARGET --pty -- COMMAND`, `@key` means remote stdin text for the running program, not local OS input.
-See `references/protocol.md` for full PTY frame rules.
-
-## Validate And Retry
-
-Every side-effecting action needs a proof step.
-A success response is not proof by itself.
-
-| Action | Proof |
-|---|---|
-| `@cmd` / `@script` / `@flow` | inspect exit code, stdout/stderr, final summary, or expected `@savefile` |
-| `@observe` / `@bootstrap` | fresh `observation_id`, expected lanes and element/window counts |
-| `@ax-find` / `@web-find` / `@window-find` | `match_count >= 1`, returned refs/titles match intent |
-| `@ax-set-value` / `@paste` | re-read value or observe visible state |
-| `@ax-action` / `@web-act` / mouse action | fresh observation or AX diff shows the intended change |
-| `@window-resize` | response reports verified size or explains bounded failure |
-| `@savefile` | returned path exists and is non-empty when saved locally |
-| PTY | next PTY frame contains expected output/state |
-
-Retry rules:
-
-- Change something on each retry: observation id, target scope, keyword, attribute, or fallback lane.
-- Do not repeat the same broken command three times.
-- Hard cap: 3 retries per step.
-- `OBSERVATION_EXPIRED` -> observe again immediately.
-- `match_count:0` -> loosen or change locator, or scope by window first.
-- permission denied -> report the missing permission and stop; do not bypass it.
-
-## Safety Boundaries
-
-- Use rdog only against trusted targets.
-- Ask before destructive work: flashing firmware, erasing storage, rebooting production devices, changing OS permissions, unlocking security state.
-- Permission errors are first-class results. Explain them.
-- On macOS, keyboard, mouse, AX, window control, and screenshots require the daemon process to hold the relevant Accessibility or Screen Recording permissions.
-- `@observe` is read-only. It cannot activate windows, type, click, scroll, move the mouse, or bypass permissions.
-- Avoid full AX trees unless necessary. Prefer compact observe modes, `@ax-find`, and `@ax-get`.
-- Treat screenshot-only desktop images caused by permission/backend failure as insufficient visual evidence.
-
-## References
-
-Load deeper references only when needed:
-
-- `references/control-workflow.md` -> target forms, local shortcuts, PTY, common host/hardware workflows.
-- `references/protocol.md` -> line-control syntax, request ids, response shapes, `@savefile`, screenshots, observe, AX, mouse, PTY frames.
-- `references/cookbook-web-content.md` -> active browser page search/action workflows and AX JSON diff verification.
-- `references/zenoh-hardware.md` -> Zenoh discovery, SDK clients, serial endpoints, hardware bridge hosts, microcontroller workflows.
-- `specs/rdog-flow-control-plan.md` -> daemon-side `@flow` schema, runtime, frame, artifact, and safety invariants.
-- `specs/rdog-display-scope-control-plan.md` -> canonical `scope.display` / `guard.display` resolver and negative forms.
+🛑 **STOP — destructive operations require user confirmation.** Stop on ambiguous ownership, permission denial, or a failed action. Retry a step at
+most three times with a different locator or lane. Ask before destructive, security,
+permission, reboot, or production actions.

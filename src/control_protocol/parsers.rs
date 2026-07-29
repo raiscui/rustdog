@@ -8,14 +8,14 @@ mod pty;
 mod screenshot;
 mod wait;
 
+pub(super) use self::cancel_seq::parse_cancel_payload;
+pub(super) use self::computer_act::parse_computer_act_payload;
 pub(super) use self::key::parse_key_payload;
+pub(super) use self::open_app::parse_open_app_payload;
 pub(super) use self::pty::{
     parse_pty_attach_payload, parse_pty_close_payload, parse_pty_detach_payload, parse_pty_payload,
 };
 pub(super) use self::screenshot::parse_screenshot_payload;
-pub(super) use self::cancel_seq::parse_cancel_payload;
-pub(super) use self::computer_act::parse_computer_act_payload;
-pub(super) use self::open_app::parse_open_app_payload;
 pub(super) use self::wait::parse_wait_payload;
 
 pub(crate) fn object_inner<'a>(input: &'a str, kind: &str) -> io::Result<&'a str> {
@@ -30,6 +30,160 @@ pub(crate) fn object_inner<'a>(input: &'a str, kind: &str) -> io::Result<&'a str
                 format!("{kind} payload 必须是对象: {input}"),
             )
         })
+}
+
+/// 解析无需 shell 引号的单个短格式字段.
+///
+/// 允许集刻意小于完整对象合同.空白、通配符、引号和控制符都必须回到
+/// quoted/object payload,避免小模型生成的文本在进入 rdog 前被 shell 改写.
+pub(crate) fn parse_compact_atom(kind: &str, input: &str) -> io::Result<String> {
+    let value = input.trim();
+    if value.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("{kind} 短格式字段不能为空"),
+        ));
+    }
+
+    if let Some(invalid) = value.chars().find(|character| {
+        !character.is_alphanumeric()
+            && !matches!(character, '_' | '-' | '.' | '/' | ':' | '+' | '=' | '@')
+    }) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("{kind} 短格式包含不安全或歧义字符 `{invalid}`: {input}"),
+        ));
+    }
+
+    Ok(value.to_owned())
+}
+
+/// 短格式 AX 命令允许的窗口选择器.
+///
+/// `WindowId` 保留现有 canonical identity 合同.`App` 只表达应用名,
+/// 真正的窗口 ID 必须在执行动作前通过 fresh window query 唯一解析.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum CompactWindowSelector {
+    WindowId(String),
+    App(String),
+}
+
+/// 解析 `window_selector,value` 两字段短格式.
+pub(crate) fn parse_compact_window_pair(
+    kind: &str,
+    input: &str,
+) -> io::Result<(CompactWindowSelector, String)> {
+    let mut fields = input.split(',');
+    let selector = fields.next().unwrap_or_default();
+    let value = fields.next().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("{kind} 短格式必须是 window_selector,value: {input}"),
+        )
+    })?;
+
+    if fields.next().is_some() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("{kind} 短格式只允许两个字段: {input}"),
+        ));
+    }
+
+    Ok((
+        parse_compact_window_selector(kind, selector)?,
+        parse_compact_atom(kind, value)?,
+    ))
+}
+
+/// 解析 `window_selector,button...` AXButton有序短格式.
+pub(crate) fn parse_compact_ax_button_sequence(
+    kind: &str,
+    input: &str,
+) -> io::Result<(CompactWindowSelector, Vec<String>)> {
+    let mut fields = input.split(',');
+    let selector = parse_compact_window_selector(kind, fields.next().unwrap_or_default())?;
+    let mut raw_values = fields.collect::<Vec<_>>();
+    if raw_values
+        .last()
+        .is_some_and(|value| value.trim().is_empty())
+    {
+        raw_values.pop();
+    }
+    let values = raw_values
+        .into_iter()
+        .map(|value| parse_compact_atom(kind, value))
+        .collect::<io::Result<Vec<_>>>()?;
+
+    if values.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("{kind} 至少需要一个 value: {input}"),
+        ));
+    }
+    if values.len() > 32 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("{kind} 最多允许 32 个 value"),
+        ));
+    }
+
+    Ok((selector, values))
+}
+
+pub(crate) fn parse_compact_window_selector(
+    kind: &str,
+    input: &str,
+) -> io::Result<CompactWindowSelector> {
+    let selector = parse_compact_atom(kind, input)?;
+    if let Some(app) = selector.strip_prefix("app:") {
+        // ponytail: ASCII-only gate. macOS Launch Services resolves apps by
+        // bundle id or English display name; non-ASCII app names pass the
+        // compact atom parser but then 0-match at the WindowServer layer
+        // with no actionable error. Reject here so the model sees the
+        // failure with a hint before issuing the control call.
+        if app.is_empty() {
+            return Err(invalid_compact_window_id(kind, &selector));
+        }
+        if !app.is_ascii() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "{kind} 短格式 app:APP 必须是 ASCII 名称(macOS Launch Services 不支持非 ASCII);received: {app};请改用 Launch Services 英文名称(例如 app:Calculator 而不是 app:计算器)"
+                ),
+            ));
+        }
+        return Ok(CompactWindowSelector::App(app.to_owned()));
+    }
+
+    parse_compact_window_id(kind, &selector).map(CompactWindowSelector::WindowId)
+}
+
+fn parse_compact_window_id(kind: &str, input: &str) -> io::Result<String> {
+    let window_id = parse_compact_atom(kind, input)?;
+    let Some(rest) = window_id.strip_prefix("pid:") else {
+        return Err(invalid_compact_window_id(kind, &window_id));
+    };
+    let Some((pid, window_index)) = rest.split_once("/window:") else {
+        return Err(invalid_compact_window_id(kind, &window_id));
+    };
+
+    let pid = pid
+        .parse::<i32>()
+        .ok()
+        .filter(|pid| *pid > 0)
+        .ok_or_else(|| invalid_compact_window_id(kind, &window_id))?;
+    let window_index = window_index
+        .parse::<usize>()
+        .map_err(|_| invalid_compact_window_id(kind, &window_id))?;
+
+    Ok(format!("pid:{pid}/window:{window_index}"))
+}
+
+fn invalid_compact_window_id(kind: &str, window_id: &str) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::InvalidData,
+        format!("{kind} 短格式 window selector 必须是 app:APP 或 pid:<正整数>/window:<非负整数>: {window_id}"),
+    )
 }
 
 fn parse_i32_field(kind: &str, field_name: &str, input: &str) -> io::Result<i32> {
