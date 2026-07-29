@@ -268,6 +268,8 @@ pub fn filter_self_event(user_data: u64, event: CaptureEvent) -> Option<CaptureE
     }
 }
 
+pub mod journal;
+
 #[cfg(target_os = "macos")]
 mod macos;
 #[cfg(not(target_os = "macos"))]
@@ -275,3 +277,6 @@ mod stub;
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod journal_tests;
