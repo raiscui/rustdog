@@ -430,6 +430,24 @@ pub fn parse_control_line(line: &str) -> io::Result<ControlParseResult> {
             command: ControlCommand::Observe(ObserveRequest::default()),
         }));
     }
+    if kind.eq_ignore_ascii_case("record-status") && !has_payload {
+        return Ok(ControlParseResult::Control(ControlRequest {
+            request_id,
+            command: ControlCommand::Record(crate::control_recording::protocol::parse_record_status_payload("")?),
+        }));
+    }
+    if kind.eq_ignore_ascii_case("record-stop") && !has_payload {
+        return Ok(ControlParseResult::Control(ControlRequest {
+            request_id,
+            command: ControlCommand::Record(crate::control_recording::protocol::parse_record_stop_payload("")?),
+        }));
+    }
+    if kind.eq_ignore_ascii_case("record-cancel") && !has_payload {
+        return Ok(ControlParseResult::Control(ControlRequest {
+            request_id,
+            command: ControlCommand::Record(crate::control_recording::protocol::parse_record_cancel_payload("")?),
+        }));
+    }
 
     let Some((_, payload)) = command.split_once(':') else {
         return Err(io::Error::new(
