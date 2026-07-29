@@ -11,6 +11,7 @@ use crate::input::{Command, ConfigCommand, Transport};
 use crate::listener::{listen, Mode, Opts};
 
 mod ax_diff;
+mod control_recording;
 mod cancellation;
 mod config;
 mod control_actions;
