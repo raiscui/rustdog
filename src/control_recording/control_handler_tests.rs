@@ -374,3 +374,82 @@ fn stop_trigger_serializes_to_snake_case_strings() {
         assert_eq!(actual, expected, "trigger {trigger:?} serialization");
     }
 }
+
+#[test]
+fn status_reports_duration_and_remaining_ms_when_auto_stop_active() {
+    let (journal, bundle) = temp_dirs();
+    let mut handler = RecordingHandler::new(journal, bundle);
+    let owner = ConnectionId(1);
+
+    let _ = handler.handle(
+        Some(70),
+        owner,
+        RecordRequest::Start {
+            profile: Profile::Semantic,
+            duration_ms: Some(2_000),
+        },
+    );
+
+    let status = handler.handle(Some(71), owner, RecordRequest::Status);
+    let status_value = first_response_value(&status);
+    assert_eq!(status_value["status"], "recording");
+    let duration_ms = status_value["duration_ms"].as_u64().expect("duration_ms is u64");
+    assert_eq!(duration_ms, 2_000);
+    let remaining_ms = status_value["remaining_ms"].as_u64().expect("remaining_ms is u64");
+    // `remaining_ms` should be ≤ duration_ms and reasonably close to it.
+    assert!(remaining_ms <= duration_ms, "remaining_ms {remaining_ms} > duration_ms {duration_ms}");
+    assert!(
+        remaining_ms >= duration_ms - 250,
+        "remaining_ms {remaining_ms} should be near duration_ms {duration_ms} immediately after start"
+    );
+
+    // No auto-stop: duration_ms and remaining_ms are null.
+    let (journal2, bundle2) = temp_dirs();
+    let mut handler2 = RecordingHandler::new(journal2, bundle2);
+    let _ = handler2.handle(
+        Some(72),
+        owner,
+        RecordRequest::Start {
+            profile: Profile::Semantic,
+            duration_ms: None,
+        },
+    );
+    let status2 = handler2.handle(Some(73), owner, RecordRequest::Status);
+    let status_value2 = first_response_value(&status2);
+    assert!(status_value2["duration_ms"].is_null());
+    assert!(status_value2["remaining_ms"].is_null());
+}
+
+#[test]
+fn status_remaining_ms_clamped_to_zero_after_deadline() {
+    let (journal, bundle) = temp_dirs();
+    let mut handler = RecordingHandler::new(journal, bundle);
+    let owner = ConnectionId(1);
+
+    let _ = handler.handle(
+        Some(80),
+        owner,
+        RecordRequest::Start {
+            profile: Profile::Semantic,
+            duration_ms: Some(100),
+        },
+    );
+
+    // Sleep past the deadline so the timer fires.
+    std::thread::sleep(Duration::from_millis(180));
+
+    // The next status call observes the FIRED flag and runs the
+    // auto-stop inline. After that, `remaining_ms` is 0 (timer state
+    // is gone) and the session is in `completed` state via
+    // `last_session`.
+    let status = handler.handle(Some(81), owner, RecordRequest::Status);
+    let status_value = first_response_value(&status);
+    assert_eq!(status_value["status"], "idle");
+    let remaining_ms = status_value["remaining_ms"].as_u64();
+    // After auto-stop completes, the timer is cleared, so remaining_ms
+    // is null on the last_session branch.
+    assert!(remaining_ms.is_none());
+    let last_session = &status_value["last_session"];
+    assert_eq!(last_session["phase"], "completed");
+    assert_eq!(last_session["stop_trigger"], "auto_duration");
+}

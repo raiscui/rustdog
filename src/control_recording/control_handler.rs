@@ -61,6 +61,13 @@ pub struct AutoStopTimer {
     /// Recording id recorded at `start` time so the auto-stop path can
     /// verify the session still matches.
     pub recording_id: String,
+    /// Total duration the timer was configured for. Captured so the
+    /// `@record-status` handler can compute `remaining_ms` without
+    /// keeping a separate record.
+    pub duration_ms: u64,
+    /// Wall-clock start captured when the timer was spawned. Used
+    /// together with `duration_ms` to compute remaining time.
+    pub started_at: Instant,
 }
 
 impl AutoStopTimer {
@@ -73,6 +80,15 @@ impl AutoStopTimer {
         if let Some(join) = self.join.take() {
             let _ = join.join();
         }
+    }
+
+    /// Compute `remaining_ms` for the auto-stop deadline. Returns 0
+    /// once the wall clock has crossed the deadline or the timer has
+    /// been fired. Used by the `@record-status` response so the owner
+    /// can render a countdown.
+    pub fn remaining_ms(&self) -> u64 {
+        let elapsed = self.started_at.elapsed().as_millis() as u64;
+        self.duration_ms.saturating_sub(elapsed)
     }
 }
 
@@ -241,11 +257,21 @@ impl RecordingHandler {
             join: Some(join),
             owner,
             recording_id,
+            duration_ms,
+            started_at: Instant::now(),
         });
     }
 
     fn status(&self, request_id: Option<u64>) -> ControlExecutionOutcome {
         let body = if let Some(session) = self.lifecycle.current() {
+            // `remaining_ms` reflects the auto-stop countdown. We
+            // populate it next to `duration_ms` so the owner can render
+            // a progress bar without a separate query. `None` when no
+            // timer is active (manual stop only).
+            let (duration_ms, remaining_ms) = match self.auto_stop_timer.as_ref() {
+                Some(timer) => (Some(timer.duration_ms), Some(timer.remaining_ms())),
+                None => (None, None),
+            };
             json!({
                 "schema": RECORD_CONTROL_SCHEMA,
                 "kind": "record-status",
@@ -258,6 +284,8 @@ impl RecordingHandler {
                 "gap_count": session.gap_count(),
                 "owner_present": true,
                 "delivery_status": "pending",
+                "duration_ms": duration_ms,
+                "remaining_ms": remaining_ms,
             })
         } else if let Some(summary) = self.last_session() {
             json!({
