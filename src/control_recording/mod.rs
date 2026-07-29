@@ -270,6 +270,7 @@ pub fn filter_self_event(user_data: u64, event: CaptureEvent) -> Option<CaptureE
 
 pub mod bundle;
 pub mod cli;
+pub mod humantime;
 pub mod control_handler;
 pub mod protocol;
 pub mod delivery;
@@ -291,7 +292,13 @@ mod session_tests;
 mod bundle_tests;
 
 #[cfg(test)]
+mod humantime_tests;
+
+#[cfg(test)]
 mod cli_tests;
+
+#[cfg(test)]
+mod protocol_tests;
 
 #[cfg(test)]
 mod delivery_tests;

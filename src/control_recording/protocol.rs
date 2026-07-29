@@ -19,18 +19,20 @@ fn invalid_data(msg: impl Into<String>) -> io::Error {
 
 /// `@record-start:{...}` 或裸 `@record-start`。
 pub(crate) fn parse_record_start_payload(input: &str) -> io::Result<RecordRequest> {
-    let profile = if input.trim().is_empty() {
-        Profile::Semantic
-    } else {
-        let inner = object_inner(input, "@record-start")?;
-        let value: Value = serde_json::from_str(&inner).map_err(|err| invalid_data(format!("@record-start payload 不是 JSON: {err}")))?;
-        match value.get("profile").and_then(|v| v.as_str()).unwrap_or("semantic") {
-            "semantic" => Profile::Semantic,
-            "physical" => Profile::Physical,
-            other => return Err(invalid_data(format!("@record-start.profile 不支持: {other}"))),
-        }
+    if input.trim().is_empty() {
+        return Ok(RecordRequest::Start { profile: Profile::Semantic, duration_ms: None });
+    }
+    let value: Value = serde_json::from_str(input.trim()).map_err(|err| invalid_data(format!("@record-start payload 不是 JSON: {err}")))?;
+    let profile = match value.get("profile").and_then(|v| v.as_str()).unwrap_or("semantic") {
+        "semantic" => Profile::Semantic,
+        "physical" => Profile::Physical,
+        other => return Err(invalid_data(format!("@record-start.profile 不支持: {other}"))),
     };
-    Ok(RecordRequest::Start { profile })
+    let duration_ms = match value.get("duration_ms") {
+        Some(v) => Some(v.as_u64().ok_or_else(|| invalid_data("@record-start.duration_ms 必须是正整数 (u64)"))?),
+        None => None,
+    };
+    Ok(RecordRequest::Start { profile, duration_ms })
 }
 
 /// `@record-status` 不接受 payload。

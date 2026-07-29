@@ -16,7 +16,7 @@ use crate::{
 /// CLI 5 个子命令的 high-level 视图, 由 input.rs 直接 derive。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RecordCommand {
-    Start { profile: String },
+    Start { profile: String, duration_ms: Option<u64> },
     Status,
     Mark { label: Option<String>, redaction_active: bool },
     Stop,
@@ -29,9 +29,16 @@ pub type RecordCommandShared = crate::input::RecordCommandShared;
 /// 把 subcommand 翻译成对应 line-control 文本行 (无末尾 `\n`)。
 pub fn render_line(subcommand: &RecordCommand) -> Result<String, String> {
     let line = match subcommand {
-        RecordCommand::Start { profile } => match profile.as_str() {
-            "semantic" | "physical" => format!("@record-start:{{\"profile\":\"{profile}\"}}"),
-            other => return Err(format!("`rdog record start` profile 必须是 semantic 或 physical,收到 {other}")),
+        RecordCommand::Start { profile, duration_ms } => {
+            let profile_str = match profile.as_str() {
+                "semantic" | "physical" => profile.as_str(),
+                other => return Err(format!("`rdog record start` profile 必须是 semantic 或 physical,收到 {other}")),
+            };
+            let duration_field = match duration_ms {
+                Some(ms) => format!(",\"duration_ms\":{ms}"),
+                None => String::new(),
+            };
+            format!("@record-start:{{\"profile\":\"{profile_str}\"{duration_field}}}")
         },
         RecordCommand::Status => "@record-status".to_owned(),
         RecordCommand::Mark { label, redaction_active } => {

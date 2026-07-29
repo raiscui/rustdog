@@ -135,7 +135,7 @@ fn run(opts: input::Opts) -> Result<(), String> {
             host,
         } => {
             let record_subcommand = match subcommand {
-                RecordSubcommand::Start { profile } => RecordCommand::Start { profile },
+                RecordSubcommand::Start { profile, duration } => RecordCommand::Start { profile, duration_ms: duration },
                 RecordSubcommand::Status => RecordCommand::Status,
                 RecordSubcommand::Mark { label, redaction_active } => {
                     RecordCommand::Mark { label, redaction_active }

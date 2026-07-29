@@ -44,7 +44,7 @@ fn start_then_status_then_stop_emits_savefile_and_response() {
     let mut handler = RecordingHandler::new(journal, bundle.clone());
     let owner = ConnectionId(1);
 
-    let start = handler.handle(Some(1), owner, RecordRequest::Start { profile: super::session::Profile::Semantic });
+    let start = handler.handle(Some(1), owner, RecordRequest::Start { profile: super::session::Profile::Semantic, duration_ms: None });
     eprintln!("DEBUG start outcome frames = {:?}", start.outbound_frames);
     let start_value = first_response_value(&start);
     assert_eq!(start_value["kind"], "record-start");
@@ -84,7 +84,7 @@ fn start_then_status_then_stop_emits_savefile_and_response() {
 fn non_owner_stop_is_rejected_with_not_owner_code() {
     let (journal, bundle) = temp_dirs();
     let mut handler = RecordingHandler::new(journal, bundle);
-    let _ = handler.handle(Some(10), ConnectionId(1), RecordRequest::Start { profile: super::session::Profile::Semantic });
+    let _ = handler.handle(Some(10), ConnectionId(1), RecordRequest::Start { profile: super::session::Profile::Semantic, duration_ms: None });
     let stop = handler.handle(Some(11), ConnectionId(2), RecordRequest::Stop);
     let value = first_response_value(&stop);
     assert_eq!(value["error_code"], "RECORD_NOT_OWNER");
@@ -104,7 +104,7 @@ fn cancel_after_start_returns_cancelled_status() {
     let (journal, bundle) = temp_dirs();
     let mut handler = RecordingHandler::new(journal, bundle);
     let owner = ConnectionId(1);
-    let _ = handler.handle(Some(30), owner, RecordRequest::Start { profile: super::session::Profile::Semantic });
+    let _ = handler.handle(Some(30), owner, RecordRequest::Start { profile: super::session::Profile::Semantic, duration_ms: None });
     let cancel = handler.handle(Some(31), owner, RecordRequest::Cancel);
     let value = first_response_value(&cancel);
     assert_eq!(value["kind"], "record-cancel");
@@ -118,7 +118,7 @@ fn mark_after_start_writes_label_and_bumps_count() {
     let (journal, bundle) = temp_dirs();
     let mut handler = RecordingHandler::new(journal, bundle);
     let owner = ConnectionId(1);
-    let _ = handler.handle(Some(40), owner, RecordRequest::Start { profile: super::session::Profile::Semantic });
+    let _ = handler.handle(Some(40), owner, RecordRequest::Start { profile: super::session::Profile::Semantic, duration_ms: None });
     let mark = handler.handle(Some(41), owner, RecordRequest::Mark { label: Some("step-ready".to_owned()), redaction_active: false });
     let value = first_response_value(&mark);
     let label = value.get("label").and_then(|v| v.as_str()).unwrap_or("").to_owned();
@@ -141,9 +141,10 @@ fn mark_after_start_writes_label_and_bumps_count() {
 fn mark_by_non_owner_returns_record_not_owner() {
     let (journal, bundle) = temp_dirs();
     let mut handler = RecordingHandler::new(journal, bundle);
-    let _ = handler.handle(Some(50), ConnectionId(1), RecordRequest::Start { profile: super::session::Profile::Semantic });
+    let _ = handler.handle(Some(50), ConnectionId(1), RecordRequest::Start { profile: super::session::Profile::Semantic, duration_ms: None });
     let mark = handler.handle(Some(51), ConnectionId(2), RecordRequest::Mark { label: Some("x".to_owned()), redaction_active: false });
-    let value = first_response_value(&mark);    let mark = handler.handle(Some(51), ConnectionId(2), RecordRequest::Mark { label: Some("x".to_owned()), redaction_active: false });
+    let mark = handler.handle(Some(51), ConnectionId(2), RecordRequest::Mark { label: Some("x".to_owned()), redaction_active: false });
+    let value = first_response_value(&mark);
     let value = first_response_value(&mark);
     assert_eq!(value["error_code"], "RECORD_NOT_OWNER");
 }

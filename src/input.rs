@@ -326,6 +326,12 @@ pub enum RecordSubcommand {
         /// semantic (默认) 或 physical profile
         #[clap(long, default_value = "semantic")]
         profile: String,
+        /// 自动停止时长, humantime 三件套 (s/m/h). 不传表示手动 stop.
+        /// 例: `--duration 30s` / `--duration 1.5m` / `--duration 1h`.
+        /// Rust 字段名直接是 `duration` (不是 `duration_ms`), 让 clap 自动产生
+        /// `--duration` flag; 类型 `Option<u64>` 表示毫秒。
+        #[clap(long, value_parser = crate::control_recording::humantime::parse_humantime)]
+        duration: Option<u64>,
     },
     /// `@record-status` - 查询当前 session 状态
     Status,

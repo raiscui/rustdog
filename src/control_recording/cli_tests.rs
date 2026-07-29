@@ -6,13 +6,13 @@ use super::cli::{RecordCommand, render_line};
 
 #[test]
 fn start_default_profile_emits_semantic() {
-    let line = render_line(&RecordCommand::Start { profile: "semantic".to_owned() }).unwrap();
+    let line = render_line(&RecordCommand::Start { profile: "semantic".to_owned(), duration_ms: None }).unwrap();
     assert_eq!(line, "@record-start:{\"profile\":\"semantic\"}");
 }
 
 #[test]
 fn start_rejects_unknown_profile() {
-    let err = render_line(&RecordCommand::Start { profile: "x".to_owned() }).unwrap_err();
+    let err = render_line(&RecordCommand::Start { profile: "x".to_owned(), duration_ms: None }).unwrap_err();
     assert!(err.contains("profile"));
 }
 
@@ -44,4 +44,22 @@ fn mark_escapes_quote_in_label() {
 fn stop_and_cancel_emit_empty_object() {
     assert_eq!(render_line(&RecordCommand::Stop).unwrap(), "@record-stop:{}");
     assert_eq!(render_line(&RecordCommand::Cancel).unwrap(), "@record-cancel:{}");
+}
+
+#[test]
+fn start_with_duration_emits_duration_ms_field() {
+    let line = render_line(&RecordCommand::Start { profile: "semantic".to_owned(), duration_ms: Some(30_000) }).unwrap();
+    assert_eq!(line, "@record-start:{\"profile\":\"semantic\",\"duration_ms\":30000}");
+}
+
+#[test]
+fn start_without_duration_omits_field() {
+    let line = render_line(&RecordCommand::Start { profile: "semantic".to_owned(), duration_ms: None }).unwrap();
+    assert_eq!(line, "@record-start:{\"profile\":\"semantic\"}");
+}
+
+#[test]
+fn start_with_zero_duration_emits_zero_field() {
+    let line = render_line(&RecordCommand::Start { profile: "physical".to_owned(), duration_ms: Some(0) }).unwrap();
+    assert_eq!(line, "@record-start:{\"profile\":\"physical\",\"duration_ms\":0}");
 }

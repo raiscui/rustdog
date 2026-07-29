@@ -35,7 +35,7 @@ pub const RECORD_CONTROL_SCHEMA: &str = "rdog.record-control.v1";
 /// line-control 一侧的 recording 请求。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RecordRequest {
-    Start { profile: Profile },
+    Start { profile: Profile, duration_ms: Option<u64> },
     Status,
     Mark { label: Option<String>, redaction_active: bool },
     Stop,
@@ -90,7 +90,7 @@ impl RecordingHandler {
         request: RecordRequest,
     ) -> ControlExecutionOutcome {
         match request {
-            RecordRequest::Start { profile } => self.start(request_id, connection, profile),
+            RecordRequest::Start { profile, duration_ms } => self.start(request_id, connection, profile, duration_ms),
             RecordRequest::Status => self.status(request_id),
             RecordRequest::Mark { label, redaction_active } => {
                 self.mark(request_id, connection, label, redaction_active)
@@ -100,7 +100,9 @@ impl RecordingHandler {
         }
     }
 
-    fn start(&mut self, request_id: Option<u64>, connection: ConnectionId, profile: Profile) -> ControlExecutionOutcome {
+    fn start(&mut self, request_id: Option<u64>, connection: ConnectionId, profile: Profile, duration_ms: Option<u64>) -> ControlExecutionOutcome {
+        // `duration_ms` 在 #23 才用于起 timer 线程; 本 ticket 只把它透传。
+        let _ = duration_ms;
         if let Some(active) = self.lifecycle.current() {
             return protocol_error(request_id, 4101, json!({
                 "schema": RECORD_CONTROL_SCHEMA,

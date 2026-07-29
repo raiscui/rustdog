@@ -535,3 +535,15 @@ handle_daemon_control_query (zenoh_control.rs:240)
 - [x] 阶段D: 7 条 unit test 覆盖 5 个 subcommand 的 line 构造 + label escape + profile validation。
 - [x] 阶段E: 全量 637 pass, 1 ignored; `rdog record --help` 展示 5 个子命令,`record start --help` / `record mark --help` 验证 clap options。
 - [ ] 阶段F: 提交 + 推送 + 关闭 #15。
+
+## [2026-07-29 02:00:00] [Session ID: omx-1784512435044-92wxat] [阶段完成]: issue #22 --duration CLI + protocol 字段落地
+
+- [x] humantime parser: 11 unit test 覆盖 (s/m/h / 1.5m / optional whitespace / invalid / validate bounds).
+- [x] `RecordRequest::Start { profile, duration_ms }` 协议字段.
+- [x] `parse_record_start_payload` 直接 `serde_json::from_str(input.trim())` (不依赖 `object_inner` 错误设计).
+- [x] `RecordSubcommand::Start` clap 字段名 `duration` (kebab-case 自动产生 `--duration`).
+- [x] `RecordCommand::Start` 透传 `duration_ms`.
+- [x] `render_line` 输出 `duration_ms` 字段.
+- [x] 5+3+5 = 13 new tests (humantime + cli + protocol); 690 全过, 1 ignored.
+- [x] 实际 `rdog record start --duration 1.5m self` 走通 (clap 接受 humantime, 后端 daemon 找不到是预期).
+- [ ] commit + push + close #22.

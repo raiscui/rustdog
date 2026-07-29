@@ -987,3 +987,21 @@
 ### 总结感悟
 - 5 个 subcommand 的 line-control 文本由 `render_line` 纯函数生成,无 daemon 也能 100% 覆盖,大幅降低测试成本。
 - clap 长选项名 `--redaction-active` 自动 kebab-case,不用手写 rename。
+
+## [2026-07-29 02:00:00] [Session ID: omx-1784512435044-92wxat] 任务名称: Wayfinder issue #22 --duration CLI + 协议字段
+
+### 任务内容
+- humantime parser 自写 (~150 行, 不引入新 dep).
+- 协议层 `RecordRequest::Start { profile, duration_ms }` 字段.
+- `RecordSubcommand::Start` clap flag `--duration` (Rust 字段名 `duration` 走 kebab-case 自动).
+- `RecordCommand::Start` 透传.
+- 13 new tests, 全部覆盖 100% 边界.
+
+### 完成过程
+- `object_inner` 在 `parse_record_start_payload` 里会双重 strip `{` `}`, 实际有 bug. 改用 `serde_json::from_str(input.trim())` 直接 parse, 跟现有协议一致.
+- clap 字段名不能用 `duration_ms` (自动产生 `--duration-ms`), 用 `duration` 才能产生 `--duration`.
+- 0 ms 路径: ADR §6 接受, validate 函数走 shortcut 返回 Ok.
+
+### 总结感悟
+- 单引号 vs 双引号在 heredoc Python 转义非常容易出错, 改用 `cat <<'PY'` 安全。
+- 调试 `serde_json::from_str` 列号错误时, 一定要先 print inner 字符串看实际值, 不要只信错误消息。
