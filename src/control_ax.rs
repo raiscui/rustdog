@@ -46,6 +46,11 @@ use self::tree::{
     collect_matching_element_ids, find_ax_element_by_id, ax_snapshot_status_error,
 };
 pub use self::types::*;
+pub use crate::control_protocol::parsers::ax::{
+    parse_ax_action_payload, parse_ax_focus_payload, parse_ax_press_payload,
+    parse_ax_press_sequence_payload, parse_ax_scroll_payload, parse_ax_set_value_payload,
+    parse_ax_tree_payload, parse_type_text_payload,
+};
 
 
 impl AxMode {
@@ -163,7 +168,7 @@ impl ClipboardRestoreStatus {
 
 
 impl AxTarget {
-    fn validate(&self) -> io::Result<()> {
+    pub(crate) fn validate(&self) -> io::Result<()> {
         let has_ref = self.ref_id.is_some();
         let has_observation_id = self.observation_id.is_some();
         let has_semantic = self.window_id.is_some()
@@ -774,446 +779,19 @@ impl AxBackend for SystemAxBackend {
 
 
 
-pub fn parse_ax_tree_payload(input: &str) -> io::Result<AxTreeRequest> {
-    let inner = object_inner(input, "@ax-tree")?;
-    if inner.is_empty() {
-        return Ok(AxTreeRequest::default());
-    }
-
-    let mut scope = None::<AxTreeScope>;
-    let mut mode = None::<AxMode>;
-    let mut depth = None::<u8>;
-    let mut max_elements = None::<u16>;
-    let mut include_values = None::<bool>;
-
-    for field in split_object_fields(inner)? {
-        let (field_name, raw_value) = split_object_field(field)?;
-        let field_name = normalize_object_field_name(field_name)?;
-        let raw_value = raw_value.trim();
-
-        match field_name.as_str() {
-            "scope" => assign_once(
-                &mut scope,
-                "scope",
-                "@ax-tree",
-                parse_ax_tree_scope(raw_value)?,
-            )?,
-            "mode" => assign_once(
-                &mut mode,
-                "mode",
-                "@ax-tree",
-                parse_ax_mode_payload("@ax-tree", raw_value)?,
-            )?,
-            "depth" => assign_once(&mut depth, "depth", "@ax-tree", parse_ax_depth(raw_value)?)?,
-            "max_elements" => assign_once(
-                &mut max_elements,
-                "max_elements",
-                "@ax-tree",
-                parse_ax_max_elements(raw_value)?,
-            )?,
-            "include_values" => assign_once(
-                &mut include_values,
-                "include_values",
-                "@ax-tree",
-                parse_bool_literal("@ax-tree", "include_values", raw_value)?,
-            )?,
-            _ => {
-                return Err(invalid_data(format!(
-                    "@ax-tree 对象 payload 包含未知字段: {field_name}"
-                )))
-            }
-        }
-    }
-
-    let preset = mode.unwrap_or(AxMode::Full).preset();
-    Ok(AxTreeRequest {
-        scope: scope.unwrap_or(AxTreeScope::Windows),
-        depth: depth.unwrap_or(preset.depth),
-        max_elements: max_elements.unwrap_or(preset.max_elements),
-        include_values: include_values.unwrap_or(preset.include_values),
-    })
-}
-
-pub fn parse_ax_press_payload(input: &str) -> io::Result<AxPressRequest> {
-    let trimmed = input.trim();
-    if !trimmed.starts_with('{') {
-        let fields = trimmed.split(',').collect::<Vec<_>>();
-        let (window_selector, description, postcondition) = match fields.as_slice() {
-            [_, _] => {
-                let (window_selector, description) =
-                    parse_compact_window_pair("@ax-press", trimmed)?;
-                (window_selector, description, None)
-            }
-            [selector, description, role, expected_value, max_attempts] => {
-                let window_selector =
-                    parse_compact_window_selector("@ax-press", selector)?;
-                let description = parse_compact_atom("@ax-press", description)?;
-                let role = parse_compact_atom("@ax-press", role)?;
-                let expected_value = parse_compact_atom("@ax-press", expected_value)?;
-                let max_attempts = parse_compact_atom("@ax-press", max_attempts)?
-                    .parse::<usize>()
-                    .ok()
-                    .filter(|attempts| (1..=3).contains(attempts))
-                    .ok_or_else(|| {
-                        invalid_data("@ax-press postcondition max_attempts 必须是1到3")
-                    })?;
-                (
-                    window_selector,
-                    description,
-                    Some(AxPressPostcondition {
-                        role,
-                        expected_value,
-                        max_attempts,
-                    }),
-                )
-            }
-            _ => {
-                return Err(invalid_data(
-                    "@ax-press 短格式必须是selector,description或selector,description,role,expected_value,max_attempts",
-                ))
-            }
-        };
-        let mut target = AxTarget {
-            role: Some("AXButton".to_owned()),
-            description: Some(description),
-            ..AxTarget::default()
-        };
-        match window_selector {
-            CompactWindowSelector::WindowId(window_id) => target.window_id = Some(window_id),
-            CompactWindowSelector::App(app) => target.app = Some(app),
-        }
-        target.validate()?;
-        return Ok(AxPressRequest {
-            target,
-            postcondition,
-        });
-    }
-
-    let inner = object_inner(input, "@ax-press")?;
-    if inner.is_empty() {
-        return Err(invalid_data("@ax-press 对象 payload 不能为空"));
-    }
-
-    let mut target = None::<AxTarget>;
-    for field in split_object_fields(inner)? {
-        let (field_name, raw_value) = split_object_field(field)?;
-        let field_name = normalize_object_field_name(field_name)?;
-        let raw_value = raw_value.trim();
-
-        match field_name.as_str() {
-            "target" => assign_once(
-                &mut target,
-                "target",
-                "@ax-press",
-                parse_ax_target(raw_value)?,
-            )?,
-            _ => {
-                return Err(invalid_data(format!(
-                    "@ax-press 对象 payload 包含未知字段: {field_name}"
-                )))
-            }
-        }
-    }
-
-    Ok(AxPressRequest {
-        target: required_field(target, "@ax-press", "target")?,
-        postcondition: None,
-    })
-}
-
-pub fn parse_ax_press_sequence_payload(input: &str) -> io::Result<AxPressSequenceRequest> {
-    let trimmed = input.trim();
-    if trimmed.starts_with('{') {
-        return Err(invalid_data(
-            "@ax-press-sequence 当前只接受 shell-safe 短格式",
-        ));
-    }
-
-    let (window_selector, descriptions) =
-        parse_compact_ax_button_sequence("@ax-press-sequence", trimmed)?;
-    let targets = descriptions
-        .into_iter()
-        .map(|description| {
-            let mut target = AxTarget {
-                role: Some("AXButton".to_owned()),
-                description: Some(description),
-                ..AxTarget::default()
-            };
-            match &window_selector {
-                CompactWindowSelector::WindowId(window_id) => {
-                    target.window_id = Some(window_id.clone());
-                }
-                CompactWindowSelector::App(app) => target.app = Some(app.clone()),
-            }
-            target.validate()?;
-            Ok(target)
-        })
-        .collect::<io::Result<Vec<_>>>()?;
-    Ok(AxPressSequenceRequest { targets })
-}
-
-pub fn parse_ax_action_payload(input: &str) -> io::Result<AxActionRequest> {
-    let inner = object_inner(input, "@ax-action")?;
-    if inner.is_empty() {
-        return Err(invalid_data("@ax-action 对象 payload 不能为空"));
-    }
-
-    let mut target = None::<AxTarget>;
-    let mut action = None::<AxActionName>;
-    for field in split_object_fields(inner)? {
-        let (field_name, raw_value) = split_object_field(field)?;
-        let field_name = normalize_object_field_name(field_name)?;
-        let raw_value = raw_value.trim();
-
-        match field_name.as_str() {
-            "target" => assign_once(
-                &mut target,
-                "target",
-                "@ax-action",
-                parse_ax_target(raw_value)?,
-            )?,
-            "action" => assign_once(
-                &mut action,
-                "action",
-                "@ax-action",
-                parse_ax_action_name(raw_value)?,
-            )?,
-            _ => {
-                return Err(invalid_data(format!(
-                    "@ax-action 对象 payload 包含未知字段: {field_name}"
-                )))
-            }
-        }
-    }
-
-    Ok(AxActionRequest {
-        target: required_field(target, "@ax-action", "target")?,
-        action: required_field(action, "@ax-action", "action")?,
-    })
-}
-
-pub fn parse_ax_set_value_payload(input: &str) -> io::Result<AxSetValueRequest> {
-    let inner = object_inner(input, "@ax-set-value")?;
-    if inner.is_empty() {
-        return Err(invalid_data("@ax-set-value 对象 payload 不能为空"));
-    }
-
-    let mut target = None::<AxTarget>;
-    let mut value = None::<String>;
-    let mut mode = None::<AxValueSetMode>;
-    for field in split_object_fields(inner)? {
-        let (field_name, raw_value) = split_object_field(field)?;
-        let field_name = normalize_object_field_name(field_name)?;
-        let raw_value = raw_value.trim();
-
-        match field_name.as_str() {
-            "target" => assign_once(
-                &mut target,
-                "target",
-                "@ax-set-value",
-                parse_ax_target(raw_value)?,
-            )?,
-            "value" => assign_once(
-                &mut value,
-                "value",
-                "@ax-set-value",
-                parse_quoted_payload(raw_value)?,
-            )?,
-            "mode" => assign_once(
-                &mut mode,
-                "mode",
-                "@ax-set-value",
-                parse_ax_value_mode(raw_value)?,
-            )?,
-            _ => {
-                return Err(invalid_data(format!(
-                    "@ax-set-value 对象 payload 包含未知字段: {field_name}"
-                )))
-            }
-        }
-    }
-
-    Ok(AxSetValueRequest {
-        target: required_field(target, "@ax-set-value", "target")?,
-        value: required_field(value, "@ax-set-value", "value")?,
-        mode: mode.unwrap_or(AxValueSetMode::Replace),
-    })
-}
-
-pub fn parse_ax_focus_payload(input: &str) -> io::Result<AxFocusRequest> {
-    let inner = object_inner(input, "@ax-focus")?;
-    if inner.is_empty() {
-        return Err(invalid_data("@ax-focus 对象 payload 不能为空"));
-    }
-
-    let mut target = None::<AxTarget>;
-    let mut window_id = None::<String>;
-    let mut activate = None::<bool>;
-    for field in split_object_fields(inner)? {
-        let (field_name, raw_value) = split_object_field(field)?;
-        let field_name = normalize_object_field_name(field_name)?;
-        let raw_value = raw_value.trim();
-
-        match field_name.as_str() {
-            "target" => assign_once(
-                &mut target,
-                "target",
-                "@ax-focus",
-                parse_ax_target(raw_value)?,
-            )?,
-            "window_id" => assign_once(
-                &mut window_id,
-                "window_id",
-                "@ax-focus",
-                parse_non_empty_string("@ax-focus.window_id", raw_value)?,
-            )?,
-            "activate" => assign_once(
-                &mut activate,
-                "activate",
-                "@ax-focus",
-                parse_bool_literal("@ax-focus", "activate", raw_value)?,
-            )?,
-            _ => {
-                return Err(invalid_data(format!(
-                    "@ax-focus 对象 payload 包含未知字段: {field_name}"
-                )))
-            }
-        }
-    }
-
-    if target.is_none() && window_id.is_none() {
-        return Err(invalid_data("@ax-focus 至少需要 `target` 或 `window_id`"));
-    }
-    if target.is_some() && window_id.is_some() {
-        return Err(invalid_data(
-            "@ax-focus 不能同时携带 `target` 和 `window_id`",
-        ));
-    }
-
-    Ok(AxFocusRequest {
-        target,
-        window_id,
-        activate: activate.unwrap_or(false),
-    })
-}
-
-pub fn parse_ax_scroll_payload(input: &str) -> io::Result<AxScrollRequest> {
-    let inner = object_inner(input, "@ax-scroll")?;
-    if inner.is_empty() {
-        return Err(invalid_data("@ax-scroll 对象 payload 不能为空"));
-    }
-
-    let mut target = None::<AxTarget>;
-    let mut direction = None::<AxScrollDirection>;
-    let mut pages = None::<u16>;
-    for field in split_object_fields(inner)? {
-        let (field_name, raw_value) = split_object_field(field)?;
-        let field_name = normalize_object_field_name(field_name)?;
-        let raw_value = raw_value.trim();
-
-        match field_name.as_str() {
-            "target" => assign_once(
-                &mut target,
-                "target",
-                "@ax-scroll",
-                parse_ax_target(raw_value)?,
-            )?,
-            "direction" => assign_once(
-                &mut direction,
-                "direction",
-                "@ax-scroll",
-                parse_ax_scroll_direction(raw_value)?,
-            )?,
-            "pages" => assign_once(
-                &mut pages,
-                "pages",
-                "@ax-scroll",
-                parse_ax_scroll_pages(raw_value)?,
-            )?,
-            _ => {
-                return Err(invalid_data(format!(
-                    "@ax-scroll 对象 payload 包含未知字段: {field_name}"
-                )))
-            }
-        }
-    }
-
-    Ok(AxScrollRequest {
-        target: required_field(target, "@ax-scroll", "target")?,
-        direction: required_field(direction, "@ax-scroll", "direction")?,
-        pages: pages.unwrap_or(1),
-    })
-}
-
-pub fn parse_type_text_payload(input: &str) -> io::Result<TypeTextRequest> {
-    let inner = object_inner(input, "@type-text")?;
-    if inner.is_empty() {
-        return Err(invalid_data("@type-text 对象 payload 不能为空"));
-    }
-
-    let mut target = None::<AxTarget>;
-    let mut text = None::<String>;
-    let mut mode = None::<TypeTextMode>;
-    let mut allow_clipboard = None::<bool>;
-    for field in split_object_fields(inner)? {
-        let (field_name, raw_value) = split_object_field(field)?;
-        let field_name = normalize_object_field_name(field_name)?;
-        let raw_value = raw_value.trim();
-
-        match field_name.as_str() {
-            "target" => assign_once(
-                &mut target,
-                "target",
-                "@type-text",
-                parse_ax_target(raw_value)?,
-            )?,
-            "text" => assign_once(
-                &mut text,
-                "text",
-                "@type-text",
-                parse_quoted_payload(raw_value)?,
-            )?,
-            "mode" => assign_once(
-                &mut mode,
-                "mode",
-                "@type-text",
-                parse_type_text_mode(raw_value)?,
-            )?,
-            "allow_clipboard" => assign_once(
-                &mut allow_clipboard,
-                "allow_clipboard",
-                "@type-text",
-                parse_bool_literal("@type-text", "allow_clipboard", raw_value)?,
-            )?,
-            _ => {
-                return Err(invalid_data(format!(
-                    "@type-text 对象 payload 包含未知字段: {field_name}"
-                )))
-            }
-        }
-    }
-
-    let mode = mode.unwrap_or(TypeTextMode::Auto);
-    let allow_clipboard = allow_clipboard.unwrap_or(false);
-    if matches!(mode, TypeTextMode::Clipboard) && !allow_clipboard {
-        return Err(invalid_data(
-            "@type-text mode:\"clipboard\" 需要显式 `allow_clipboard:true`",
-        ));
-    }
-
-    Ok(TypeTextRequest {
-        target: required_field(target, "@type-text", "target")?,
-        text: required_field(text, "@type-text", "text")?,
-        mode,
-        allow_clipboard,
-    })
-}
 
 
 
 
 
-fn parse_ax_target(input: &str) -> io::Result<AxTarget> {
+
+
+
+
+
+
+
+pub(crate) fn parse_ax_target(input: &str) -> io::Result<AxTarget> {
     let inner = object_inner(input, "AX target")?;
     if inner.is_empty() {
         return Err(invalid_data("AX target 不能为空"));
@@ -1294,7 +872,7 @@ fn parse_ax_target(input: &str) -> io::Result<AxTarget> {
     Ok(target)
 }
 
-fn parse_ax_action_name(input: &str) -> io::Result<AxActionName> {
+pub(crate) fn parse_ax_action_name(input: &str) -> io::Result<AxActionName> {
     let value = parse_quoted_payload(input)?;
     match value.to_ascii_lowercase().as_str() {
         "axpress" | "press" => Ok(AxActionName::Press),
@@ -1311,7 +889,7 @@ fn parse_ax_action_name(input: &str) -> io::Result<AxActionName> {
     }
 }
 
-fn parse_ax_value_mode(input: &str) -> io::Result<AxValueSetMode> {
+pub(crate) fn parse_ax_value_mode(input: &str) -> io::Result<AxValueSetMode> {
     let value = parse_quoted_payload(input)?;
     match value.to_ascii_lowercase().as_str() {
         "replace" => Ok(AxValueSetMode::Replace),
@@ -1322,7 +900,7 @@ fn parse_ax_value_mode(input: &str) -> io::Result<AxValueSetMode> {
     }
 }
 
-fn parse_type_text_mode(input: &str) -> io::Result<TypeTextMode> {
+pub(crate) fn parse_type_text_mode(input: &str) -> io::Result<TypeTextMode> {
     let value = parse_quoted_payload(input)?;
     match value.to_ascii_lowercase().as_str() {
         "auto" => Ok(TypeTextMode::Auto),
@@ -1335,7 +913,7 @@ fn parse_type_text_mode(input: &str) -> io::Result<TypeTextMode> {
     }
 }
 
-fn parse_ax_scroll_direction(input: &str) -> io::Result<AxScrollDirection> {
+pub(crate) fn parse_ax_scroll_direction(input: &str) -> io::Result<AxScrollDirection> {
     let value = parse_quoted_payload(input)?;
     match value.to_ascii_lowercase().as_str() {
         "up" => Ok(AxScrollDirection::Up),
@@ -1348,7 +926,7 @@ fn parse_ax_scroll_direction(input: &str) -> io::Result<AxScrollDirection> {
     }
 }
 
-fn parse_ax_scroll_pages(input: &str) -> io::Result<u16> {
+pub(crate) fn parse_ax_scroll_pages(input: &str) -> io::Result<u16> {
     let pages = input
         .parse::<u16>()
         .map_err(|_| invalid_data(format!("@ax-scroll 的 `pages` 必须是正整数: {input}")))?;
@@ -1360,7 +938,7 @@ fn parse_ax_scroll_pages(input: &str) -> io::Result<u16> {
 
 
 
-fn key_mode_as_str(mode: KeyMode) -> &'static str {
+pub(crate) fn key_mode_as_str(mode: KeyMode) -> &'static str {
     match mode {
         KeyMode::PressRelease => "press_release",
         KeyMode::Press => "press",
@@ -1368,7 +946,7 @@ fn key_mode_as_str(mode: KeyMode) -> &'static str {
     }
 }
 
-fn parse_ax_tree_scope(input: &str) -> io::Result<AxTreeScope> {
+pub(crate) fn parse_ax_tree_scope(input: &str) -> io::Result<AxTreeScope> {
     let scope = parse_quoted_payload(input)?;
     match scope.to_ascii_lowercase().as_str() {
         "windows" => Ok(AxTreeScope::Windows),
@@ -1422,7 +1000,7 @@ pub(crate) fn parse_bool_literal(kind: &str, field_name: &str, input: &str) -> i
     }
 }
 
-fn parse_non_empty_string(kind: &str, input: &str) -> io::Result<String> {
+pub(crate) fn parse_non_empty_string(kind: &str, input: &str) -> io::Result<String> {
     let value = parse_quoted_payload(input)?;
     if value.is_empty() {
         return Err(invalid_data(format!("{kind} 不能为空")));
@@ -1430,14 +1008,14 @@ fn parse_non_empty_string(kind: &str, input: &str) -> io::Result<String> {
     Ok(value)
 }
 
-fn matches_optional(expected: &Option<String>, actual: Option<&str>) -> bool {
+pub(crate) fn matches_optional(expected: &Option<String>, actual: Option<&str>) -> bool {
     match expected {
         Some(expected) => actual == Some(expected.as_str()),
         None => true,
     }
 }
 
-fn assign_once<T>(slot: &mut Option<T>, field_name: &str, kind: &str, value: T) -> io::Result<()> {
+pub(crate) fn assign_once<T>(slot: &mut Option<T>, field_name: &str, kind: &str, value: T) -> io::Result<()> {
     if slot.is_some() {
         return Err(invalid_data(format!(
             "{kind} 对象 payload 的 `{field_name}` 字段重复"
@@ -1447,7 +1025,7 @@ fn assign_once<T>(slot: &mut Option<T>, field_name: &str, kind: &str, value: T) 
     Ok(())
 }
 
-fn reject_duplicate(seen: &mut bool, kind: &str, field_name: &str) -> io::Result<()> {
+pub(crate) fn reject_duplicate(seen: &mut bool, kind: &str, field_name: &str) -> io::Result<()> {
     if *seen {
         return Err(invalid_data(format!("{kind} 的 `{field_name}` 字段重复")));
     }
@@ -1455,7 +1033,7 @@ fn reject_duplicate(seen: &mut bool, kind: &str, field_name: &str) -> io::Result
     Ok(())
 }
 
-fn required_field<T>(value: Option<T>, kind: &str, field_name: &str) -> io::Result<T> {
+pub(crate) fn required_field<T>(value: Option<T>, kind: &str, field_name: &str) -> io::Result<T> {
     value.ok_or_else(|| invalid_data(format!("{kind} 对象 payload 缺少必填字段 `{field_name}`")))
 }
 

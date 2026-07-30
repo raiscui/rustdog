@@ -1,5 +1,6 @@
 use std::io;
 
+pub mod ax;
 mod cancel_seq;
 mod computer_act;
 mod key;
@@ -8,6 +9,11 @@ mod pty;
 mod screenshot;
 mod wait;
 
+pub(super) use self::ax::{
+    parse_ax_action_payload, parse_ax_focus_payload, parse_ax_press_payload,
+    parse_ax_press_sequence_payload, parse_ax_scroll_payload, parse_ax_set_value_payload,
+    parse_ax_tree_payload, parse_type_text_payload,
+};
 pub(super) use self::cancel_seq::parse_cancel_payload;
 pub(super) use self::computer_act::parse_computer_act_payload;
 pub(super) use self::key::parse_key_payload;
