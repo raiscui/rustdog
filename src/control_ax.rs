@@ -20,6 +20,8 @@ use std::io;
 
 
 pub mod types;
+pub mod tree;
+pub use self::tree::{capture_current_ax_subtree, capture_default_ax_snapshot, current_ax_platform};
 pub use self::types::*;
 
 
@@ -843,9 +845,6 @@ impl AxBackend for SystemAxBackend {
     }
 }
 
-pub fn capture_default_ax_snapshot(request: &AxTreeRequest) -> io::Result<AxSnapshot> {
-    SystemAxBackend.snapshot(request)
-}
 
 pub fn capture_ax_find_snapshot(request: &AxFindRequest) -> io::Result<AxSnapshot> {
     capture_ax_find_snapshot_with(
@@ -900,12 +899,6 @@ fn capture_semantic_target_snapshot_with(
     }
 }
 
-pub fn capture_current_ax_subtree(
-    target_id: &str,
-    request: &AxTreeRequest,
-) -> io::Result<AxCapturedSubtree> {
-    platform_capture_current_subtree(target_id, request)
-}
 
 pub fn resolve_current_ax_target_rect(target: &AxTarget) -> io::Result<AxResolvedTargetRect> {
     let target = materialize_app_window_target(target)?;
@@ -1336,17 +1329,6 @@ pub fn perform_default_ax_scroll(request: &AxScrollRequest) -> io::Result<AxScro
 
 pub fn perform_default_type_text(request: &TypeTextRequest) -> io::Result<TypeTextReport> {
     SystemAxBackend.type_text(request)
-}
-
-pub fn current_ax_platform() -> &'static str {
-    #[cfg(target_os = "macos")]
-    {
-        "macos"
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        "unsupported"
-    }
 }
 
 pub fn parse_ax_tree_payload(input: &str) -> io::Result<AxTreeRequest> {
@@ -2172,7 +2154,7 @@ fn platform_snapshot(request: &AxTreeRequest) -> io::Result<AxSnapshot> {
 }
 
 #[cfg(target_os = "macos")]
-fn platform_capture_current_subtree(
+pub(crate) fn platform_capture_current_subtree(
     target_id: &str,
     request: &AxTreeRequest,
 ) -> io::Result<AxCapturedSubtree> {
