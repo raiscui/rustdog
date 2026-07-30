@@ -270,6 +270,11 @@ pub fn observation_ref_name(index: usize) -> String {
 }
 
 #[cfg(test)]
+/// Observation 模块对外的 façade 入口(无 selector drafts 版本)。
+///
+/// 内部委托给 `record_observation_with_selectors`,这是 W-OB-02 决议确定的
+/// 唯一 producer 入口。producer 仍由自己算 selector_drafts,本 façade 只负责
+/// 分配 observation id、内存 store 与 durable 持久化。
 pub fn record_observation(
     scope: &str,
     source_command: &str,
@@ -279,6 +284,10 @@ pub fn record_observation(
     record_observation_with_selectors(scope, source_command, root, refs, Vec::new())
 }
 
+/// Observation 模块对外的 façade 入口(带 selector drafts 版本)。
+///
+/// W-OB-02 决议:这是 producer 的唯一入口,façade 不重新构造 envelope,
+/// 只负责 allocate id、内存 store、durable 持久化、TTL evict。
 pub fn record_observation_with_selectors(
     scope: &str,
     source_command: &str,
@@ -1091,6 +1100,91 @@ mod tests {
             .unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
         assert!(err.to_string().contains("STALE_REF"));
+    }
+
+    #[test]
+    #[test]
+    fn facade_record_observation_preserves_observation_header_count() {
+        // ponytail: 1 runnable check that proves the façade does not collapse
+        // producer-supplied refs. W-OB-02 locked the façade as the single producer
+        // entry; this keeps the ref count stable across calls.
+        let _lock = durable_test_lock();
+        let drafts: Vec<DurableSelectorDraft> = (1..=3)
+            .map(|index| {
+                DurableSelectorDraft::new(
+                    format!("@e{index}"),
+                    SelectorKind::AxWindow,
+                    format!("pid:1/window:{index}"),
+                    SelectorEnvelope {
+                        platform: "macos".to_owned(),
+                        app: Some(AppSelector {
+                            name: "Fixture".to_owned(),
+                            bundle_id: Some("com.example.fixture".to_owned()),
+                            pid_hint: Some(1),
+                        }),
+                        window: Some(WindowSelector {
+                            title: Some(format!("Storage {index}")),
+                            role: "AXWindow".to_owned(),
+                            rect: None,
+                        }),
+                        element: None,
+                        anchors: Vec::new(),
+                    },
+                    SelectorRedaction::metadata_only(),
+                )
+            })
+            .collect();
+        let refs: Vec<ObservationRefEntry> = (1..=3)
+            .map(|index| ObservationRefEntry {
+                ref_id: format!("@e{index}"),
+                backend_id: format!("pid:1/window:{index}"),
+                kind: "window".to_owned(),
+            })
+            .collect();
+        let header = record_observation_with_selectors(
+            "ax",
+            "@ax-tree",
+            root(),
+            refs,
+            drafts,
+        )
+        .unwrap();
+        assert_eq!(header.ref_count, 3);
+        assert_eq!(header.selector_count, 3);
+    }
+
+    fn prototype_observation_store_keeps_evict_local_during_record_path() {
+        // ponytail: 1 runnable check that proves TTL evict can stay inside the store.
+        // Repeated `record` only evicts when capacity is exceeded; the previous
+        // observation becomes unreachable without `record` ever calling
+        // `evict_expired` itself.
+        let mut store = ObservationStore::with_limits(10, 1, 100);
+        let first = store.record(
+            "ax",
+            "@ax-tree",
+            root(),
+            vec![ObservationRefEntry {
+                ref_id: "@e1".to_owned(),
+                backend_id: "pid:1/window:0".to_owned(),
+                kind: "window".to_owned(),
+            }],
+            0,
+            100,
+        );
+        let second = store.record(
+            "ax",
+            "@ax-tree",
+            root(),
+            vec![ObservationRefEntry {
+                ref_id: "@e1".to_owned(),
+                backend_id: "pid:1/window:1".to_owned(),
+                kind: "window".to_owned(),
+            }],
+            0,
+            100,
+        );
+        assert!(store.resolve_ref(&first.observation_id, "@e1", 100).is_err());
+        assert!(store.resolve_ref(&second.observation_id, "@e1", 100).is_ok());
     }
 
     #[test]
