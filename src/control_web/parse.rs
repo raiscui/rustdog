@@ -197,6 +197,7 @@ pub(crate) fn parse_web_find_match(input: &str) -> io::Result<WebFindQuery> {
     }
 
     let mut text = None::<String>;
+    let mut mode = None::<WebTextMatchMode>;
     for field in split_object_fields(inner)? {
         let (field_name, raw_value) = split_object_field(field)?;
         let field_name = normalize_object_field_name(field_name)?;
@@ -209,6 +210,12 @@ pub(crate) fn parse_web_find_match(input: &str) -> io::Result<WebFindQuery> {
                 "@web-find.match",
                 parse_non_empty_string("@web-find.match.text", raw_value)?,
             )?,
+            "mode" => assign_once(
+                &mut mode,
+                "mode",
+                "@web-find.match",
+                parse_web_text_match_mode(raw_value)?,
+            )?,
             _ => {
                 return Err(invalid_data(format!(
                     "@web-find.match 不支持字段: {field_name}"
@@ -219,7 +226,19 @@ pub(crate) fn parse_web_find_match(input: &str) -> io::Result<WebFindQuery> {
 
     Ok(WebFindQuery {
         text: required_field(text, "@web-find.match", "text")?,
+        mode: mode.unwrap_or_default(),
     })
+}
+
+fn parse_web_text_match_mode(input: &str) -> io::Result<WebTextMatchMode> {
+    let value = parse_non_empty_string("@web-find.match.mode", input)?;
+    match value.to_ascii_lowercase().as_str() {
+        "exact" => Ok(WebTextMatchMode::Exact),
+        "contains" => Ok(WebTextMatchMode::Contains),
+        _ => Err(invalid_data(format!(
+            "@web-find.match.mode 仅支持 exact 或 contains,实际为: {value}"
+        ))),
+    }
 }
 
 fn parse_browser_target(input: &str) -> io::Result<WebFindBrowserTarget> {

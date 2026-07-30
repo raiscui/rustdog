@@ -3,22 +3,25 @@ use std::io;
 mod parsers;
 
 pub(crate) use self::parsers::{
-    normalize_object_field_name, object_inner, parse_quoted_payload, split_object_field,
-    split_object_fields,
+    normalize_object_field_name, object_inner, parse_compact_atom,
+    parse_compact_ax_button_sequence, parse_compact_window_pair, parse_compact_window_selector,
+    parse_quoted_payload, split_object_field, split_object_fields, CompactWindowSelector,
 };
 
 use self::parsers::{
-    parse_cancel_payload, parse_computer_act_payload, parse_control_header, parse_key_payload, parse_open_app_payload, parse_wait_payload, parse_pty_attach_payload, parse_pty_close_payload,
-    parse_pty_detach_payload, parse_pty_payload, parse_screenshot_payload,
+    parse_cancel_payload, parse_computer_act_payload, parse_control_header, parse_key_payload,
+    parse_open_app_payload, parse_pty_attach_payload, parse_pty_close_payload,
+    parse_pty_detach_payload, parse_pty_payload, parse_screenshot_payload, parse_wait_payload,
     require_non_empty_payload,
 };
 
 use crate::control_ax::{
     parse_ax_action_payload, parse_ax_find_payload, parse_ax_focus_payload, parse_ax_get_payload,
-    parse_ax_press_payload, parse_ax_scroll_payload, parse_ax_set_value_payload,
-    parse_ax_tree_payload, parse_type_text_payload, AxActionRequest, AxFindRequest, AxFocusRequest,
-    AxGetRequest, AxMode, AxPressRequest, AxScrollRequest, AxSetValueRequest, AxTreeRequest,
-    TypeTextRequest, DEFAULT_AX_DEPTH, DEFAULT_AX_INCLUDE_VALUES, DEFAULT_AX_MAX_ELEMENTS,
+    parse_ax_press_payload, parse_ax_press_sequence_payload, parse_ax_scroll_payload,
+    parse_ax_set_value_payload, parse_ax_tree_payload, parse_type_text_payload, AxActionRequest,
+    AxFindRequest, AxFocusRequest, AxGetRequest, AxMode, AxPressRequest, AxPressSequenceRequest,
+    AxScrollRequest, AxSetValueRequest, AxTreeRequest, TypeTextRequest, DEFAULT_AX_DEPTH,
+    DEFAULT_AX_INCLUDE_VALUES, DEFAULT_AX_MAX_ELEMENTS,
 };
 use crate::control_bootstrap::{parse_bootstrap_payload, BootstrapRequest};
 use crate::control_flow::{parse_flow_payload, FlowRequest};
@@ -78,6 +81,7 @@ pub enum ControlCommand {
     AxScroll(AxScrollRequest),
     AxAction(AxActionRequest),
     AxPress(AxPressRequest),
+    AxPressSequence(AxPressSequenceRequest),
     AxSetValue(AxSetValueRequest),
     TypeText(TypeTextRequest),
     WindowFind(WindowFindRequest),
@@ -107,7 +111,6 @@ pub enum ControlCommand {
 pub const DEFAULT_KEY_HOLD_MS: u64 = 200;
 pub const DEFAULT_SCREENSHOT_QUALITY: u8 = 75;
 
-
 /// `@wait` 的结构化请求。
 ///
 /// 让 daemon 端 worker 线程 sleep 一段毫秒数,主要用于:
@@ -122,7 +125,6 @@ pub struct WaitRequest {
     pub duration_ms: u64,
 }
 
-
 /// `@open-app` 的结构化请求。
 ///
 /// macOS 上由 daemon 走 `open -a <app_name>`;其他平台返回
@@ -136,7 +138,6 @@ pub struct OpenAppRequest {
     pub wait_ms: u64,
 }
 
-
 /// `@cancel#seq` 的结构化请求。
 ///
 /// 让 in-flight 命令 `target_seq` 被取消。被取消命令的 response
@@ -149,7 +150,6 @@ pub struct OpenAppRequest {
 pub struct CancelRequest {
     pub target_seq: u64,
 }
-
 
 /// `@computer-act` 的结构化请求 (rdog 适配 Mano-CUA 16 动作中的 13 个 daemon-side action)。
 ///
@@ -168,9 +168,6 @@ pub struct ComputerActRequest {
     pub timeout_ms: Option<u64>,
     pub trace: Option<String>,
 }
-
-
-
 
 /// `@paste` 的结构化请求。
 ///
@@ -466,6 +463,9 @@ pub fn parse_control_line(line: &str) -> io::Result<ControlParseResult> {
         "ax-scroll" => ControlCommand::AxScroll(parse_ax_scroll_payload(payload)?),
         "ax-action" => ControlCommand::AxAction(parse_ax_action_payload(payload)?),
         "ax-press" => ControlCommand::AxPress(parse_ax_press_payload(payload)?),
+        "ax-press-sequence" => {
+            ControlCommand::AxPressSequence(parse_ax_press_sequence_payload(payload)?)
+        }
         "ax-set-value" => ControlCommand::AxSetValue(parse_ax_set_value_payload(payload)?),
         "type-text" => ControlCommand::TypeText(parse_type_text_payload(payload)?),
         "window-find" => ControlCommand::WindowFind(parse_window_find_payload(payload)?),

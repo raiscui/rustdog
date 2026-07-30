@@ -108,13 +108,21 @@ impl ComputerActErrorCode {
     /// 默认 retry hint (按 error_code 给出可读建议)。
     pub fn default_hint(self) -> &'static str {
         match self {
-            Self::PermissionDenied => "请在系统设置授予缺失的能力 (accessibility / screen_recording / window_server)",
+            Self::PermissionDenied => {
+                "请在系统设置授予缺失的能力 (accessibility / screen_recording / window_server)"
+            }
             Self::ObservationExpired => "重新调 @observe 拿新 observation_id, 然后重试同一动作",
-            Self::TargetNotFound => "改用更宽的 selector 或换坐标定位 (e.g., 从 start_box 改 target.ref)",
-            Self::VerifyFailed => "动作执行成功但 GUI 未变化, 检查 selector / 改用 verify=always 看截图",
+            Self::TargetNotFound => {
+                "改用更宽的 selector 或换坐标定位 (e.g., 从 start_box 改 target.ref)"
+            }
+            Self::VerifyFailed => {
+                "动作执行成功但 GUI 未变化, 检查 selector / 改用 verify=always 看截图"
+            }
             Self::InvalidArgs => "检查 args 字段 (类型 / 必填 / 数值范围), 跟 schema 对齐",
             Self::PlatformUnsupported => "当前 OS 不支持该动作, 升级到支持平台或换替代动作",
-            Self::UnknownAction => "检查 action 字段是否是 13 闭集之一 (open_app / click / type 等)",
+            Self::UnknownAction => {
+                "检查 action 字段是否是 13 闭集之一 (open_app / click / type 等)"
+            }
             Self::Infrastructure => "daemon 可能短暂不可用, 重连 (kill+restart) 后重试",
             Self::Cancelled => "请求已被 @cancel#seq 取消, 不需要重试",
             Self::Timeout => "等一小段时间后重试, 或调高 timeout_ms",
@@ -184,9 +192,7 @@ pub(crate) fn error_envelope(
 pub(crate) fn cancelled_envelope_json(requested_duration_ms: u64) -> String {
     error_envelope(
         ComputerActErrorCode::Cancelled,
-        format!(
-            "@wait 被 @cancel#seq 取消 (requested_duration_ms={requested_duration_ms})"
-        ),
+        format!("@wait 被 @cancel#seq 取消 (requested_duration_ms={requested_duration_ms})"),
         Some(json!({
             "cancelled_at_step": "sleep_cancellable",
             "requested_duration_ms": requested_duration_ms,
@@ -203,10 +209,7 @@ pub(crate) fn cancelled_envelope_json(requested_duration_ms: u64) -> String {
 /// 分支被排除, helper 没有 live caller; 但单测 platform_unsupported_envelope_json_matches_e2_shape
 /// 还在用, 不能删。
 #[allow(dead_code)]
-pub(crate) fn platform_unsupported_envelope_json(
-    target_os: &str,
-    app_name: &str,
-) -> String {
+pub(crate) fn platform_unsupported_envelope_json(target_os: &str, app_name: &str) -> String {
     error_envelope(
         ComputerActErrorCode::PlatformUnsupported,
         format!("@open-app 是 macOS-only 的本轮实现;当前平台 {target_os} 不支持"),
@@ -245,7 +248,10 @@ pub(crate) fn verify_failed_envelope_json(
 ) -> String {
     let mut evidence = serde_json::Map::new();
     evidence.insert("action".into(), Value::String(action.to_owned()));
-    evidence.insert("verify_method".into(), Value::String(verify_method.to_owned()));
+    evidence.insert(
+        "verify_method".into(),
+        Value::String(verify_method.to_owned()),
+    );
     if let Some(summary) = ax_diff_summary {
         let ax_diff = json!({
             "windows_added": summary.windows_added,
@@ -271,41 +277,121 @@ mod tests {
 
     #[test]
     fn error_codes_have_correct_strings() {
-        assert_eq!(ComputerActErrorCode::PermissionDenied.as_str(), "permission_denied");
-        assert_eq!(ComputerActErrorCode::ObservationExpired.as_str(), "observation_expired");
+        assert_eq!(
+            ComputerActErrorCode::PermissionDenied.as_str(),
+            "permission_denied"
+        );
+        assert_eq!(
+            ComputerActErrorCode::ObservationExpired.as_str(),
+            "observation_expired"
+        );
         assert_eq!(ComputerActErrorCode::VerifyFailed.as_str(), "verify_failed");
         assert_eq!(ComputerActErrorCode::Timeout.as_str(), "timeout");
-        assert_eq!(ComputerActErrorCode::InvalidVerify.as_str(), "invalid_verify");
+        assert_eq!(
+            ComputerActErrorCode::InvalidVerify.as_str(),
+            "invalid_verify"
+        );
     }
 
     #[test]
     fn retry_strategies_match_adr_0004_e2() {
         // 5 档策略 (ADR-0004 E2): never / re_observe_then_retry / change_locator /
         // reconnect_then_retry / manual_only + ticket 16 加的 wait_and_retry
-        assert_eq!(ComputerActErrorCode::PermissionDenied.default_retry_strategy().as_str(), "never");
-        assert_eq!(ComputerActErrorCode::ObservationExpired.default_retry_strategy().as_str(), "re_observe_then_retry");
-        assert_eq!(ComputerActErrorCode::TargetNotFound.default_retry_strategy().as_str(), "change_locator");
-        assert_eq!(ComputerActErrorCode::VerifyFailed.default_retry_strategy().as_str(), "manual_only");
-        assert_eq!(ComputerActErrorCode::InvalidArgs.default_retry_strategy().as_str(), "never");
-        assert_eq!(ComputerActErrorCode::PlatformUnsupported.default_retry_strategy().as_str(), "manual_only");
-        assert_eq!(ComputerActErrorCode::UnknownAction.default_retry_strategy().as_str(), "never");
-        assert_eq!(ComputerActErrorCode::Infrastructure.default_retry_strategy().as_str(), "reconnect_then_retry");
-        assert_eq!(ComputerActErrorCode::Cancelled.default_retry_strategy().as_str(), "never");
-        assert_eq!(ComputerActErrorCode::Timeout.default_retry_strategy().as_str(), "wait_and_retry");
-        assert_eq!(ComputerActErrorCode::InvalidVerify.default_retry_strategy().as_str(), "never");
+        assert_eq!(
+            ComputerActErrorCode::PermissionDenied
+                .default_retry_strategy()
+                .as_str(),
+            "never"
+        );
+        assert_eq!(
+            ComputerActErrorCode::ObservationExpired
+                .default_retry_strategy()
+                .as_str(),
+            "re_observe_then_retry"
+        );
+        assert_eq!(
+            ComputerActErrorCode::TargetNotFound
+                .default_retry_strategy()
+                .as_str(),
+            "change_locator"
+        );
+        assert_eq!(
+            ComputerActErrorCode::VerifyFailed
+                .default_retry_strategy()
+                .as_str(),
+            "manual_only"
+        );
+        assert_eq!(
+            ComputerActErrorCode::InvalidArgs
+                .default_retry_strategy()
+                .as_str(),
+            "never"
+        );
+        assert_eq!(
+            ComputerActErrorCode::PlatformUnsupported
+                .default_retry_strategy()
+                .as_str(),
+            "manual_only"
+        );
+        assert_eq!(
+            ComputerActErrorCode::UnknownAction
+                .default_retry_strategy()
+                .as_str(),
+            "never"
+        );
+        assert_eq!(
+            ComputerActErrorCode::Infrastructure
+                .default_retry_strategy()
+                .as_str(),
+            "reconnect_then_retry"
+        );
+        assert_eq!(
+            ComputerActErrorCode::Cancelled
+                .default_retry_strategy()
+                .as_str(),
+            "never"
+        );
+        assert_eq!(
+            ComputerActErrorCode::Timeout
+                .default_retry_strategy()
+                .as_str(),
+            "wait_and_retry"
+        );
+        assert_eq!(
+            ComputerActErrorCode::InvalidVerify
+                .default_retry_strategy()
+                .as_str(),
+            "never"
+        );
     }
 
     #[test]
     fn default_evidence_key_present_for_special_codes() {
-        assert_eq!(ComputerActErrorCode::PermissionDenied.default_evidence_key(), Some("missing_capability"));
-        assert_eq!(ComputerActErrorCode::VerifyFailed.default_evidence_key(), Some("verification"));
-        assert_eq!(ComputerActErrorCode::Timeout.default_evidence_key(), Some("last_step"));
-        assert_eq!(ComputerActErrorCode::UnknownAction.default_evidence_key(), None);
+        assert_eq!(
+            ComputerActErrorCode::PermissionDenied.default_evidence_key(),
+            Some("missing_capability")
+        );
+        assert_eq!(
+            ComputerActErrorCode::VerifyFailed.default_evidence_key(),
+            Some("verification")
+        );
+        assert_eq!(
+            ComputerActErrorCode::Timeout.default_evidence_key(),
+            Some("last_step")
+        );
+        assert_eq!(
+            ComputerActErrorCode::UnknownAction.default_evidence_key(),
+            None
+        );
     }
 
     #[test]
     fn error_envelope_shape() {
-        let env = error_envelope(ComputerActErrorCode::PermissionDenied, "ax permission denied", None);
+        let env = error_envelope(
+            ComputerActErrorCode::PermissionDenied,
+            "ax permission denied",
+            None,
+        );
         assert_eq!(env["ok"], false);
         assert_eq!(env["error_code"], "permission_denied");
         assert_eq!(env["error_message"], "ax permission denied");
@@ -331,8 +417,10 @@ mod tests {
     fn error_envelope_without_evidence_omits_field_when_no_default_key() {
         // unknown_action 没有默认 evidence key, caller 也没传 → evidence 整个字段 omit
         let env = error_envelope(ComputerActErrorCode::UnknownAction, "no such action", None);
-        assert!(env.get("evidence").is_none(),
-            "evidence field omitted when no default key + caller didn't provide");
+        assert!(
+            env.get("evidence").is_none(),
+            "evidence field omitted when no default key + caller didn't provide"
+        );
     }
 
     #[test]
@@ -447,7 +535,10 @@ mod tests {
         assert_eq!(env["evidence"]["missing_capability"], Value::Null);
         assert_eq!(env["evidence"]["app_name"], "Calculator");
         assert!(
-            env["evidence"]["io_error"].as_str().unwrap().contains("No such file"),
+            env["evidence"]["io_error"]
+                .as_str()
+                .unwrap()
+                .contains("No such file"),
             "io_error 字段应保留具体错误描述"
         );
     }
