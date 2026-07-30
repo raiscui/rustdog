@@ -21,7 +21,20 @@ use std::io;
 
 pub mod types;
 pub mod tree;
-pub use self::tree::{capture_current_ax_subtree, capture_default_ax_snapshot, current_ax_platform};
+pub use self::tree::{
+    capture_ax_find_snapshot, capture_current_ax_subtree, capture_current_ax_window_snapshot,
+    capture_default_ax_snapshot, current_ax_platform,
+    resolve_current_ax_target_rect, resolve_target_id_in_snapshot,
+};
+use self::tree::{
+    collect_element_refs, window_selector_draft, element_selector_draft,
+    app_selector_for_window, window_selector_for_ax_window, selector_rect_from_ax_rect,
+    reserve_existing_ref_index, capture_ax_find_snapshot_with,
+    capture_semantic_target_snapshot,
+    capture_semantic_target_snapshot_with, direct_ax_target_id,
+    materialize_app_window_target, materialize_app_window_target_with,
+    collect_matching_element_ids, find_ax_element_by_id, ax_snapshot_status_error,
+};
 pub use self::types::*;
 
 
@@ -375,134 +388,12 @@ impl AxElement {
 }
 
 
-fn collect_element_refs(
-    platform: &str,
-    app_selector: &AppSelector,
-    window_selector: &WindowSelector,
-    next_ref_index: &mut usize,
-    elements: &mut [AxElement],
-    refs: &mut Vec<ObservationRefEntry>,
-    selector_drafts: &mut Vec<DurableSelectorDraft>,
-) {
-    for element in elements {
-        let ref_id = match &element.ref_id {
-            Some(ref_id) => {
-                reserve_existing_ref_index(ref_id, next_ref_index);
-                ref_id.clone()
-            }
-            None => {
-                let ref_id = observation_ref_name(*next_ref_index);
-                *next_ref_index += 1;
-                element.ref_id = Some(ref_id.clone());
-                ref_id
-            }
-        };
-        refs.push(ObservationRefEntry {
-            ref_id: ref_id.clone(),
-            backend_id: element.id.clone(),
-            kind: "element".to_owned(),
-        });
-        selector_drafts.push(element_selector_draft(
-            platform,
-            app_selector,
-            window_selector,
-            element,
-            &ref_id,
-        ));
 
-        if !element.children.is_empty() {
-            collect_element_refs(
-                platform,
-                app_selector,
-                window_selector,
-                next_ref_index,
-                &mut element.children,
-                refs,
-                selector_drafts,
-            );
-        }
-    }
-}
 
-fn window_selector_draft(platform: &str, window: &AxWindow, ref_id: &str) -> DurableSelectorDraft {
-    DurableSelectorDraft::new(
-        ref_id.to_owned(),
-        SelectorKind::AxWindow,
-        window.id.clone(),
-        SelectorEnvelope {
-            platform: platform.to_owned(),
-            app: Some(app_selector_for_window(window)),
-            window: Some(window_selector_for_ax_window(window)),
-            element: None,
-            anchors: Vec::new(),
-        },
-        SelectorRedaction::metadata_only(),
-    )
-}
 
-fn element_selector_draft(
-    platform: &str,
-    app_selector: &AppSelector,
-    window_selector: &WindowSelector,
-    element: &AxElement,
-    ref_id: &str,
-) -> DurableSelectorDraft {
-    DurableSelectorDraft::new(
-        ref_id.to_owned(),
-        SelectorKind::AxElement,
-        element.id.clone(),
-        SelectorEnvelope {
-            platform: platform.to_owned(),
-            app: Some(app_selector.clone()),
-            window: Some(window_selector.clone()),
-            element: Some(ElementSelector {
-                role: element.role.clone(),
-                subrole: element.subrole.clone(),
-                name: element.name.clone(),
-                description: element.description.clone(),
-                actions: element.actions.clone(),
-                ax_path: element.ax_path.clone(),
-            }),
-            anchors: Vec::new(),
-        },
-        SelectorRedaction::metadata_only(),
-    )
-}
 
-fn app_selector_for_window(window: &AxWindow) -> AppSelector {
-    AppSelector {
-        name: window.process_name.clone(),
-        bundle_id: None,
-        pid_hint: Some(window.pid),
-    }
-}
 
-fn window_selector_for_ax_window(window: &AxWindow) -> WindowSelector {
-    WindowSelector {
-        title: window.title.clone(),
-        role: window.role.clone(),
-        rect: window.rect.map(selector_rect_from_ax_rect),
-    }
-}
 
-fn selector_rect_from_ax_rect(rect: AxRect) -> SelectorRect {
-    SelectorRect {
-        x: rect.x,
-        y: rect.y,
-        width: rect.width,
-        height: rect.height,
-    }
-}
-
-fn reserve_existing_ref_index(ref_id: &str, next_ref_index: &mut usize) {
-    let Some(index) = ref_id
-        .strip_prefix("@e")
-        .and_then(|value| value.parse::<usize>().ok())
-    else {
-        return;
-    };
-    *next_ref_index = (*next_ref_index).max(index.saturating_add(1));
-}
 
 
 impl AxActionReport {
@@ -803,7 +694,7 @@ impl AxScrollReport {
     }
 }
 
-mod query;
+pub mod query;
 
 pub use query::{
     build_ax_find_response_json, build_ax_get_response_json, parse_ax_find_payload,
@@ -846,143 +737,15 @@ impl AxBackend for SystemAxBackend {
 }
 
 
-pub fn capture_ax_find_snapshot(request: &AxFindRequest) -> io::Result<AxSnapshot> {
-    capture_ax_find_snapshot_with(
-        request,
-        capture_default_ax_snapshot,
-        capture_current_ax_window_snapshot,
-    )
-}
-
-fn capture_ax_find_snapshot_with(
-    request: &AxFindRequest,
-    capture_global: impl FnOnce(&AxTreeRequest) -> io::Result<AxSnapshot>,
-    capture_window: impl FnOnce(&str, &AxTreeRequest) -> io::Result<AxSnapshot>,
-) -> io::Result<AxSnapshot> {
-    let Some(window) = request.window.as_ref() else {
-        return capture_global(&request.tree);
-    };
-    let window_id = window.resolve_window_id()?;
-    capture_window(&window_id, &request.tree)
-}
-
-pub(crate) fn capture_current_ax_window_snapshot(
-    window_id: &str,
-    request: &AxTreeRequest,
-) -> io::Result<AxSnapshot> {
-    platform_capture_current_window(window_id, request)
-}
-
-fn capture_semantic_target_snapshot(
-    target: &AxTarget,
-    request: &AxTreeRequest,
-) -> io::Result<AxSnapshot> {
-    capture_semantic_target_snapshot_with(
-        target,
-        request,
-        capture_default_ax_snapshot,
-        capture_current_ax_window_snapshot,
-    )
-}
-
-fn capture_semantic_target_snapshot_with(
-    target: &AxTarget,
-    request: &AxTreeRequest,
-    capture_global: impl FnOnce(&AxTreeRequest) -> io::Result<AxSnapshot>,
-    capture_window: impl FnOnce(&str, &AxTreeRequest) -> io::Result<AxSnapshot>,
-) -> io::Result<AxSnapshot> {
-    match target.window_id.as_deref() {
-        // 已解析的 window_id 是本次动作的归属边界.只读取目标窗口,
-        // 避免无关应用的 AX 状态干扰 semantic match.
-        Some(window_id) => capture_window(window_id, request),
-        None => capture_global(request),
-    }
-}
 
 
-pub fn resolve_current_ax_target_rect(target: &AxTarget) -> io::Result<AxResolvedTargetRect> {
-    let target = materialize_app_window_target(target)?;
-    if let Some(target_id) = direct_ax_target_id(&target)? {
-        return platform_resolve_current_target_rect(&target_id);
-    }
 
-    let request = AxTreeRequest {
-        depth: 8,
-        max_elements: 5000,
-        include_values: false,
-        ..AxTreeRequest::default()
-    };
-    let snapshot = capture_semantic_target_snapshot(&target, &request)?;
-    if snapshot.capture_status != "complete" {
-        return Err(ax_snapshot_status_error(&snapshot));
-    }
 
-    let target_id = resolve_target_id_in_snapshot(&snapshot, &target)?;
-    for window in &snapshot.windows {
-        if window.id == target_id {
-            return Ok(AxResolvedTargetRect {
-                target_id,
-                target_type: "window",
-                window_id: Some(window.id.clone()),
-                rect: window.rect,
-            });
-        }
 
-        if let Some(element) = find_ax_element_by_id(&window.elements, &target_id) {
-            return Ok(AxResolvedTargetRect {
-                target_id,
-                target_type: "element",
-                window_id: Some(window.id.clone()),
-                rect: element.rect,
-            });
-        }
-    }
 
-    Err(io::Error::new(
-        io::ErrorKind::InvalidInput,
-        format!("AX target id 已失效或不存在: {target_id}"),
-    ))
-}
 
-fn direct_ax_target_id(target: &AxTarget) -> io::Result<Option<String>> {
-    target.validate()?;
 
-    if let Some(id) = target.id.as_deref() {
-        return Ok(Some(id.to_owned()));
-    }
 
-    if let (Some(observation_id), Some(ref_id)) =
-        (target.observation_id.as_deref(), target.ref_id.as_deref())
-    {
-        return resolve_observation_ref(observation_id, ref_id).map(|entry| Some(entry.backend_id));
-    }
-
-    Ok(None)
-}
-
-/// 将 Window API 的 app selector 转换为 AX 可直接消费的 canonical window ID.
-///
-/// app 名和 AX process 名可能因系统本地化而不同.因此 app 只在 Window API
-/// 命名域中解析一次,随后必须清除,避免对正确 AX snapshot 做第二次异域字符串比较.
-fn materialize_app_window_target(target: &AxTarget) -> io::Result<AxTarget> {
-    materialize_app_window_target_with(target, resolve_unique_app_window_id)
-}
-
-fn materialize_app_window_target_with(
-    target: &AxTarget,
-    resolve_app: impl FnOnce(&str) -> io::Result<String>,
-) -> io::Result<AxTarget> {
-    target.validate()?;
-    let Some(app) = target.app.as_deref() else {
-        return Ok(target.clone());
-    };
-
-    let mut materialized = target.clone();
-    materialized.window_id = Some(resolve_app(app)?);
-    materialized.app = None;
-    materialized.validate()?;
-    Ok(materialized)
-}
 
 pub fn perform_default_ax_press(request: &AxPressRequest) -> io::Result<AxActionReport> {
     let report = SystemAxBackend.perform_action(&AxActionRequest {
@@ -1766,93 +1529,9 @@ pub fn parse_type_text_payload(input: &str) -> io::Result<TypeTextRequest> {
     })
 }
 
-pub fn resolve_target_id_in_snapshot(
-    snapshot: &AxSnapshot,
-    target: &AxTarget,
-) -> io::Result<String> {
-    target.validate().map_err(to_invalid_input)?;
 
-    if let Some(id) = &target.id {
-        if snapshot.contains_element_id(id) {
-            return Ok(id.clone());
-        }
-        return Err(invalid_input(format!("AX target id 已失效或不存在: {id}")));
-    }
 
-    if let (Some(observation_id), Some(ref_id)) =
-        (target.observation_id.as_deref(), target.ref_id.as_deref())
-    {
-        let entry = resolve_observation_ref(observation_id, ref_id)?;
-        if snapshot.contains_element_id(&entry.backend_id) {
-            return Ok(entry.backend_id);
-        }
-        return Err(stale_observation_ref_error(
-            observation_id,
-            ref_id,
-            format!("backend id 已不在当前 AX snapshot 中: {}", entry.backend_id),
-        ));
-    }
 
-    let mut matches = Vec::<String>::new();
-
-    for window in &snapshot.windows {
-        if !target.matches_window(window) {
-            continue;
-        }
-        collect_matching_element_ids(target, &window.elements, &mut matches);
-        if matches.len() > 1 {
-            return Err(invalid_input("AX semantic target 匹配到多个元素"));
-        }
-    }
-
-    match matches.as_slice() {
-        [id] => Ok(id.clone()),
-        [] => Err(invalid_input("AX semantic target 未匹配到元素")),
-        _ => Err(invalid_input("AX semantic target 匹配到多个元素")),
-    }
-}
-
-fn collect_matching_element_ids(
-    target: &AxTarget,
-    elements: &[AxElement],
-    matches: &mut Vec<String>,
-) {
-    for element in elements {
-        if target.matches_element(element) {
-            matches.push(element.id.clone());
-        }
-        collect_matching_element_ids(target, &element.children, matches);
-    }
-}
-
-fn find_ax_element_by_id<'a>(elements: &'a [AxElement], target_id: &str) -> Option<&'a AxElement> {
-    for element in elements {
-        if element.id == target_id {
-            return Some(element);
-        }
-        if let Some(found) = find_ax_element_by_id(&element.children, target_id) {
-            return Some(found);
-        }
-    }
-    None
-}
-
-fn ax_snapshot_status_error(snapshot: &AxSnapshot) -> io::Error {
-    let kind = match snapshot.capture_status.as_str() {
-        "permission_denied" => io::ErrorKind::PermissionDenied,
-        "unsupported" => io::ErrorKind::Unsupported,
-        _ => io::ErrorKind::Other,
-    };
-    let value = json!({
-        "kind": "ax-target-resolution",
-        "error_code": "AX_SNAPSHOT_UNAVAILABLE",
-        "capture_status": snapshot.capture_status.as_str(),
-        "permission_status": snapshot.permission_status.as_str(),
-        "platform": snapshot.platform.as_str(),
-        "message": "AX snapshot 不可用,无法解析 mouse target rect",
-    });
-    io::Error::new(kind, value.to_string())
-}
 
 fn parse_ax_target(input: &str) -> io::Result<AxTarget> {
     let inner = object_inner(input, "AX target")?;
@@ -2136,20 +1815,20 @@ fn required_field<T>(value: Option<T>, kind: &str, field_name: &str) -> io::Resu
     value.ok_or_else(|| invalid_data(format!("{kind} 对象 payload 缺少必填字段 `{field_name}`")))
 }
 
-fn to_invalid_input(err: io::Error) -> io::Error {
+pub(crate) fn to_invalid_input(err: io::Error) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidInput, err.to_string())
 }
 
-fn invalid_data(message: impl Into<String>) -> io::Error {
+pub(crate) fn invalid_data(message: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message.into())
 }
 
-fn invalid_input(message: impl Into<String>) -> io::Error {
+pub(crate) fn invalid_input(message: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidInput, message.into())
 }
 
 #[cfg(target_os = "macos")]
-fn platform_snapshot(request: &AxTreeRequest) -> io::Result<AxSnapshot> {
+pub(crate) fn platform_snapshot(request: &AxTreeRequest) -> io::Result<AxSnapshot> {
     macos::snapshot(request)
 }
 
@@ -2162,7 +1841,7 @@ pub(crate) fn platform_capture_current_subtree(
 }
 
 #[cfg(target_os = "macos")]
-fn platform_capture_current_window(
+pub(crate) fn platform_capture_current_window(
     window_id: &str,
     request: &AxTreeRequest,
 ) -> io::Result<AxSnapshot> {
@@ -2170,7 +1849,7 @@ fn platform_capture_current_window(
 }
 
 #[cfg(not(target_os = "macos"))]
-fn platform_capture_current_window(
+pub(crate) fn platform_capture_current_window(
     _window_id: &str,
     _request: &AxTreeRequest,
 ) -> io::Result<AxSnapshot> {
@@ -2181,7 +1860,7 @@ fn platform_capture_current_window(
 }
 
 #[cfg(not(target_os = "macos"))]
-fn platform_capture_current_subtree(
+pub(crate) fn platform_capture_current_subtree(
     _target_id: &str,
     _request: &AxTreeRequest,
 ) -> io::Result<AxCapturedSubtree> {
@@ -2192,12 +1871,12 @@ fn platform_capture_current_subtree(
 }
 
 #[cfg(target_os = "macos")]
-fn platform_resolve_current_target_rect(target_id: &str) -> io::Result<AxResolvedTargetRect> {
+pub(crate) fn platform_resolve_current_target_rect(target_id: &str) -> io::Result<AxResolvedTargetRect> {
     macos::resolve_current_target_rect(target_id)
 }
 
 #[cfg(not(target_os = "macos"))]
-fn platform_resolve_current_target_rect(_target_id: &str) -> io::Result<AxResolvedTargetRect> {
+pub(crate) fn platform_resolve_current_target_rect(_target_id: &str) -> io::Result<AxResolvedTargetRect> {
     Err(io::Error::new(
         io::ErrorKind::Unsupported,
         "AX target rect 当前只支持 macOS",
@@ -2205,7 +1884,7 @@ fn platform_resolve_current_target_rect(_target_id: &str) -> io::Result<AxResolv
 }
 
 #[cfg(not(target_os = "macos"))]
-fn platform_snapshot(_request: &AxTreeRequest) -> io::Result<AxSnapshot> {
+pub(crate) fn platform_snapshot(_request: &AxTreeRequest) -> io::Result<AxSnapshot> {
     Err(io::Error::new(
         io::ErrorKind::Unsupported,
         "AX snapshot 当前只支持 macOS",
@@ -2213,12 +1892,12 @@ fn platform_snapshot(_request: &AxTreeRequest) -> io::Result<AxSnapshot> {
 }
 
 #[cfg(target_os = "macos")]
-fn platform_perform_action(request: &AxActionRequest) -> io::Result<AxPerformedActionReport> {
+pub(crate) fn platform_perform_action(request: &AxActionRequest) -> io::Result<AxPerformedActionReport> {
     macos::perform_action(request)
 }
 
 #[cfg(not(target_os = "macos"))]
-fn platform_perform_action(_request: &AxActionRequest) -> io::Result<AxPerformedActionReport> {
+pub(crate) fn platform_perform_action(_request: &AxActionRequest) -> io::Result<AxPerformedActionReport> {
     Err(io::Error::new(
         io::ErrorKind::Unsupported,
         "AX action 当前只支持 macOS",
@@ -2226,12 +1905,12 @@ fn platform_perform_action(_request: &AxActionRequest) -> io::Result<AxPerformed
 }
 
 #[cfg(target_os = "macos")]
-fn platform_set_value(request: &AxSetValueRequest) -> io::Result<AxSetValueReport> {
+pub(crate) fn platform_set_value(request: &AxSetValueRequest) -> io::Result<AxSetValueReport> {
     macos::set_value(request)
 }
 
 #[cfg(not(target_os = "macos"))]
-fn platform_set_value(_request: &AxSetValueRequest) -> io::Result<AxSetValueReport> {
+pub(crate) fn platform_set_value(_request: &AxSetValueRequest) -> io::Result<AxSetValueReport> {
     Err(io::Error::new(
         io::ErrorKind::Unsupported,
         "AX set value 当前只支持 macOS",
@@ -2239,12 +1918,12 @@ fn platform_set_value(_request: &AxSetValueRequest) -> io::Result<AxSetValueRepo
 }
 
 #[cfg(target_os = "macos")]
-fn platform_key_delivery(request: &KeyRequest) -> io::Result<KeyDeliveryReport> {
+pub(crate) fn platform_key_delivery(request: &KeyRequest) -> io::Result<KeyDeliveryReport> {
     macos::deliver_key(request)
 }
 
 #[cfg(not(target_os = "macos"))]
-fn platform_key_delivery(request: &KeyRequest) -> io::Result<KeyDeliveryReport> {
+pub(crate) fn platform_key_delivery(request: &KeyRequest) -> io::Result<KeyDeliveryReport> {
     Err(io::Error::new(
         io::ErrorKind::Unsupported,
         format!("key delivery {:?} 当前只支持 macOS", request.delivery),
@@ -2252,12 +1931,12 @@ fn platform_key_delivery(request: &KeyRequest) -> io::Result<KeyDeliveryReport> 
 }
 
 #[cfg(target_os = "macos")]
-fn platform_focus(request: &AxFocusRequest) -> io::Result<AxFocusReport> {
+pub(crate) fn platform_focus(request: &AxFocusRequest) -> io::Result<AxFocusReport> {
     macos::focus(request)
 }
 
 #[cfg(not(target_os = "macos"))]
-fn platform_focus(_request: &AxFocusRequest) -> io::Result<AxFocusReport> {
+pub(crate) fn platform_focus(_request: &AxFocusRequest) -> io::Result<AxFocusReport> {
     Err(io::Error::new(
         io::ErrorKind::Unsupported,
         "AX focus 当前只支持 macOS",
@@ -2265,12 +1944,12 @@ fn platform_focus(_request: &AxFocusRequest) -> io::Result<AxFocusReport> {
 }
 
 #[cfg(target_os = "macos")]
-fn platform_scroll(request: &AxScrollRequest) -> io::Result<AxScrollReport> {
+pub(crate) fn platform_scroll(request: &AxScrollRequest) -> io::Result<AxScrollReport> {
     macos::scroll(request)
 }
 
 #[cfg(not(target_os = "macos"))]
-fn platform_scroll(_request: &AxScrollRequest) -> io::Result<AxScrollReport> {
+pub(crate) fn platform_scroll(_request: &AxScrollRequest) -> io::Result<AxScrollReport> {
     Err(io::Error::new(
         io::ErrorKind::Unsupported,
         "AX scroll 当前只支持 macOS",
@@ -2278,12 +1957,12 @@ fn platform_scroll(_request: &AxScrollRequest) -> io::Result<AxScrollReport> {
 }
 
 #[cfg(target_os = "macos")]
-fn platform_type_text(request: &TypeTextRequest) -> io::Result<TypeTextReport> {
+pub(crate) fn platform_type_text(request: &TypeTextRequest) -> io::Result<TypeTextReport> {
     macos::type_text(request)
 }
 
 #[cfg(not(target_os = "macos"))]
-fn platform_type_text(request: &TypeTextRequest) -> io::Result<TypeTextReport> {
+pub(crate) fn platform_type_text(request: &TypeTextRequest) -> io::Result<TypeTextReport> {
     let detail = match request.mode {
         TypeTextMode::Auto | TypeTextMode::AxValue => "macOS AXValue 路径",
         TypeTextMode::TargetedKeyboard => "macOS targeted keyboard 路径",
