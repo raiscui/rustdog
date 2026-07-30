@@ -26,6 +26,9 @@ pub use self::tree::{
     capture_default_ax_snapshot, current_ax_platform,
     resolve_current_ax_target_rect, resolve_target_id_in_snapshot,
 };
+pub mod input;
+pub use self::input::{perform_default_key_delivery, perform_default_type_text};
+use self::input::{remap_type_text_ax_value_error, remap_type_text_targeted_keyboard_error};
 use self::tree::{
     collect_element_refs, window_selector_draft, element_selector_draft,
     app_selector_for_window, window_selector_for_ax_window, selector_rect_from_ax_rect,
@@ -1073,14 +1076,6 @@ pub fn perform_default_ax_set_value(request: &AxSetValueRequest) -> io::Result<A
     SystemAxBackend.set_value(request)
 }
 
-pub fn perform_default_key_delivery(request: &KeyRequest) -> io::Result<Option<KeyDeliveryReport>> {
-    match request.delivery {
-        KeyDelivery::Global => Ok(None),
-        KeyDelivery::PidTargeted | KeyDelivery::WindowTargeted => {
-            platform_key_delivery(request).map(Some)
-        }
-    }
-}
 
 pub fn perform_default_ax_focus(request: &AxFocusRequest) -> io::Result<AxFocusReport> {
     SystemAxBackend.focus(request)
@@ -1090,9 +1085,6 @@ pub fn perform_default_ax_scroll(request: &AxScrollRequest) -> io::Result<AxScro
     SystemAxBackend.scroll(request)
 }
 
-pub fn perform_default_type_text(request: &TypeTextRequest) -> io::Result<TypeTextReport> {
-    SystemAxBackend.type_text(request)
-}
 
 pub fn parse_ax_tree_payload(input: &str) -> io::Result<AxTreeRequest> {
     let inner = object_inner(input, "@ax-tree")?;
@@ -1678,43 +1670,7 @@ fn parse_ax_scroll_pages(input: &str) -> io::Result<u16> {
     Ok(pages)
 }
 
-fn remap_type_text_ax_value_error(err: io::Error) -> io::Error {
-    let message = err.to_string();
-    match err.kind() {
-        io::ErrorKind::Unsupported => io::Error::new(
-            io::ErrorKind::Unsupported,
-            "type-text 当前只支持 macOS AXValue 路径",
-        ),
-        io::ErrorKind::InvalidInput => io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!("type-text AXValue 路径失败: {message}"),
-        ),
-        io::ErrorKind::PermissionDenied => io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            format!("type-text AXValue 路径失败: {message}"),
-        ),
-        _ => io::Error::other(format!("type-text AXValue 路径失败: {message}")),
-    }
-}
 
-fn remap_type_text_targeted_keyboard_error(err: io::Error) -> io::Error {
-    let message = err.to_string();
-    match err.kind() {
-        io::ErrorKind::Unsupported => io::Error::new(
-            io::ErrorKind::Unsupported,
-            "type-text 当前只支持 macOS targeted keyboard 路径",
-        ),
-        io::ErrorKind::InvalidInput => io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!("type-text targeted keyboard 路径失败: {message}"),
-        ),
-        io::ErrorKind::PermissionDenied => io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            format!("type-text targeted keyboard 路径失败: {message}"),
-        ),
-        _ => io::Error::other(format!("type-text targeted keyboard 路径失败: {message}")),
-    }
-}
 
 fn key_mode_as_str(mode: KeyMode) -> &'static str {
     match mode {
