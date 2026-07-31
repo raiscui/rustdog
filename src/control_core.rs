@@ -66,71 +66,40 @@ pub fn execute_explicit_control_request<E: ControlActionExecutor>(
             }
         }
         ControlCommand::Screenshot(screenshot_request) => {
-            match execute_screenshot_request(request.request_id, screenshot_request) {
-                Ok(outcome) => outcome,
-                Err(err) => ControlExecutionOutcome::from_response_line(
-                    render_control_action_error_response(request.request_id, &err),
-                ),
-            }
+            outcome_or_error(request.request_id, || {
+                execute_screenshot_request(request.request_id, screenshot_request)
+            })
         }
-        ControlCommand::Capabilities => match current_capabilities_report_json() {
-            Ok(report_json) => ControlExecutionOutcome::from_response_line(
-                render_structured_success_response(request.request_id, &report_json),
-            ),
-            Err(err) => ControlExecutionOutcome::from_response_line(
-                render_control_action_error_response(request.request_id, &err),
-            ),
+        ControlCommand::Capabilities => {
+            structured_or_error(request.request_id, current_capabilities_report_json)
         },
-        ControlCommand::Observe(observe_request) => {
-            match build_observe_outcome(request.request_id, observe_request) {
-                Ok(outcome) => outcome,
-                Err(err) => ControlExecutionOutcome::from_response_line(
-                    render_control_action_error_response(request.request_id, &err),
-                ),
-            }
-        }
-        ControlCommand::Bootstrap(bootstrap_request) => {
-            match build_bootstrap_outcome(request.request_id, bootstrap_request) {
-                Ok(outcome) => outcome,
-                Err(err) => ControlExecutionOutcome::from_response_line(
-                    render_control_action_error_response(request.request_id, &err),
-                ),
-            }
-        }
+        ControlCommand::Observe(observe_request) => outcome_or_error(
+            request.request_id,
+            || build_observe_outcome(request.request_id, observe_request),
+        ),
+        ControlCommand::Bootstrap(bootstrap_request) => outcome_or_error(
+            request.request_id,
+            || build_bootstrap_outcome(request.request_id, bootstrap_request),
+        ),
         ControlCommand::Flow(flow_request) => {
             execute_flow_request(request.request_id, flow_request, shell, |line| {
                 parse_and_execute_control_line(line, shell, executor, &cancel_registry)
             })
         }
         ControlCommand::SelectorGet(selector_request) => {
-            match build_selector_get_response_json(selector_request) {
-                Ok(value_json) => ControlExecutionOutcome::from_response_line(
-                    render_structured_success_response(request.request_id, &value_json),
-                ),
-                Err(err) => ControlExecutionOutcome::from_response_line(
-                    render_control_action_error_response(request.request_id, &err),
-                ),
-            }
+            structured_or_error(request.request_id, || {
+                build_selector_get_response_json(selector_request)
+            })
         }
         ControlCommand::SelectorResolve(selector_request) => {
-            match build_selector_resolve_response_json(selector_request) {
-                Ok(value_json) => ControlExecutionOutcome::from_response_line(
-                    render_structured_success_response(request.request_id, &value_json),
-                ),
-                Err(err) => ControlExecutionOutcome::from_response_line(
-                    render_control_action_error_response(request.request_id, &err),
-                ),
-            }
+            structured_or_error(request.request_id, || {
+                build_selector_resolve_response_json(selector_request)
+            })
         }
         ControlCommand::SelectorRefind(selector_request) => {
-            match build_selector_refind_response_json(selector_request) {
-                Ok(value_json) => ControlExecutionOutcome::from_response_line(
-                    render_structured_success_response(request.request_id, &value_json),
-                ),
-                Err(err) => ControlExecutionOutcome::from_response_line(
-                    render_control_action_error_response(request.request_id, &err),
-                ),
-            }
+            structured_or_error(request.request_id, || {
+                build_selector_refind_response_json(selector_request)
+            })
         }
         command => {
             // ADR-0005 ticket 03: in-flight 命令走 cancel registry。
@@ -361,6 +330,36 @@ fn render_response_error_object(request_id: Option<u64>, code: i32, error: &str)
         None => format!("{{\"code\":{code},\"error\":\"{escaped}\"}}"),
     };
     render_response_value(&value)
+}
+
+/// 包装 verb 模块返回的 `io::Result<ControlExecutionOutcome>`,
+/// 失败时统一转为 `render_control_action_error_response` 的 fallback。
+fn outcome_or_error<F>(request_id: Option<u64>, f: F) -> ControlExecutionOutcome
+where
+    F: FnOnce() -> io::Result<ControlExecutionOutcome>,
+{
+    match f() {
+        Ok(outcome) => outcome,
+        Err(err) => ControlExecutionOutcome::from_response_line(
+            render_control_action_error_response(request_id, &err),
+        ),
+    }
+}
+
+/// 包装 verb 模块返回的 `io::Result<String>` JSON 字符串,
+/// 成功时用 `render_structured_success_response` 包,失败时统一 fallback。
+fn structured_or_error<F>(request_id: Option<u64>, f: F) -> ControlExecutionOutcome
+where
+    F: FnOnce() -> io::Result<String>,
+{
+    match f() {
+        Ok(value_json) => ControlExecutionOutcome::from_response_line(
+            render_structured_success_response(request_id, &value_json),
+        ),
+        Err(err) => ControlExecutionOutcome::from_response_line(
+            render_control_action_error_response(request_id, &err),
+        ),
+    }
 }
 
 fn escape_json_string(input: &str) -> String {
