@@ -180,16 +180,6 @@ pub(crate) fn window_selector_for_ax_window(window: &AxWindow) -> WindowSelector
     }
 }
 
-// ---- selector_rect_from_ax_rect (was lines 488-495) ----
-pub(crate) fn selector_rect_from_ax_rect(rect: AxRect) -> SelectorRect {
-    SelectorRect {
-        x: rect.x,
-        y: rect.y,
-        width: rect.width,
-        height: rect.height,
-    }
-}
-
 // ---- reserve_existing_ref_index (was lines 497-505) ----
 pub(crate) fn reserve_existing_ref_index(ref_id: &str, next_ref_index: &mut usize) {
     let Some(index) = ref_id

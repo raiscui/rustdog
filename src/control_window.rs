@@ -1,5 +1,5 @@
 use crate::{
-    control_ax::AxRect,
+    control_ax::{selector_rect_from_ax_rect, AxRect},
     control_display_scope::{parse_display_scope, DisplayScope},
     control_observation::selector::{
         AppSelector, DurableSelectorDraft, SelectorEnvelope, SelectorKind, SelectorRect,
@@ -1208,15 +1208,6 @@ fn window_candidate_selector_draft(
         },
         SelectorRedaction::metadata_only(),
     )
-}
-
-fn selector_rect_from_ax_rect(rect: AxRect) -> SelectorRect {
-    SelectorRect {
-        x: rect.x,
-        y: rect.y,
-        width: rect.width,
-        height: rect.height,
-    }
 }
 
 fn parse_window_target_payload(input: &str, kind: &str) -> io::Result<WindowCommandTarget> {

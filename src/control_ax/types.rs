@@ -9,6 +9,7 @@
 //! 等后续 commit 把 `tree / press / input / postcondition` 拆出独立子模块时,
 //! 与 verb 对应的 impl 块再随之搬走。
 
+use crate::control_observation::selector::SelectorRect;
 use serde::Serialize;
 
 use crate::{
@@ -445,3 +446,19 @@ pub struct AxScrollReport {
 
 #[derive(Debug, Copy, Clone, Default)]
 pub struct SystemAxBackend;
+
+/// 将 `AxRect` (control_ax 内部坐标系) 转换为 `SelectorRect`
+/// (control_observation::selector 标准 selector 坐标)。
+///
+/// 之前在 `control_ax/tree.rs` 和 `control_window.rs` 各定义一份,
+/// 字面重复 7 行,本 commit 统一到 types.rs (AxRect 老家) 作为
+/// canonical 实现。两处 caller 改用 `super::types::` 或
+/// `crate::control_ax::` 引用。
+pub(crate) fn selector_rect_from_ax_rect(rect: AxRect) -> SelectorRect {
+    SelectorRect {
+        x: rect.x,
+        y: rect.y,
+        width: rect.width,
+        height: rect.height,
+    }
+}

@@ -39,7 +39,7 @@ pub use self::press::{
 };
 use self::tree::{
     collect_element_refs, window_selector_draft, element_selector_draft,
-    app_selector_for_window, window_selector_for_ax_window, selector_rect_from_ax_rect,
+    app_selector_for_window, window_selector_for_ax_window,
     reserve_existing_ref_index, capture_ax_find_snapshot_with,
     capture_semantic_target_snapshot,
     capture_semantic_target_snapshot_with, direct_ax_target_id,
