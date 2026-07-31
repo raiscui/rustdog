@@ -27,6 +27,7 @@ pub use self::tree::{
     resolve_current_ax_target_rect, resolve_target_id_in_snapshot,
 };
 pub mod input;
+pub mod postcondition;
 pub use self::input::{perform_default_key_delivery, perform_default_type_text};
 use self::input::{remap_type_text_ax_value_error, remap_type_text_targeted_keyboard_error};
 pub mod press;
@@ -1202,9 +1203,11 @@ mod macos;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::control_ax::postcondition::{
+        normalize_ax_verification_value, observe_current_ax_values_with,
+    };
     use crate::control_ax::press::{
-        materialize_press_sequence_request_with, normalize_ax_verification_value,
-        observe_current_ax_values_with, perform_ax_press_sequence_with,
+        materialize_press_sequence_request_with, perform_ax_press_sequence_with,
         perform_ax_press_with_postcondition_with,
     };
     use std::cell::Cell;
