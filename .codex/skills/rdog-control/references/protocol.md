@@ -78,9 +78,6 @@ Bare shell lines do not have request ids.
 @web-act#41:{target:{browser:"active"},match:{text:"首页"},action:"press",verify:true}
 @web-act#401:{target:{window_id:"pid:96405/window:3"},match:{text:"首页"},action:"press",verify:true}
 @web-act#403:{target:{window_ref:"@e1",observation_id:"obs-123"},match:{text:"首页"},action:"press",verify:true}
-@gui-bench#42:{suite:"computer-use-density",case:"xhs-left-nav-home",variant:"baseline-low-level"}
-@gui-bench#43:{suite:"computer-use-density",case:"xhs-left-nav-home",variant:"all",write_artifact:true}
-@gui-bench#44:{suite:"computer-use-density",case:"xhs-left-nav-home",variant:"dense-web-act",runner:"live",allow_side_effects:true}
 @pty:"codex"
 @pty:{cmd:"codex",args:["resume","019e..."],cols:120,rows:40}
 @pty-close:{session_id:"..."}
@@ -148,31 +145,6 @@ It does not click, type, scroll, focus, activate, or move the mouse.
 `capability_policy:"cached"` is reserved for a future TTL cache and currently returns `BOOTSTRAP_CAPABILITY_CACHE_UNIMPLEMENTED`.
 All `@bootstrap` requests are Zenoh session-channel-only, including `mode:"basic"`.
 For older daemons, fall back to `@ping`, `@capabilities`, and `@observe` in one control session.
-
-`@gui-bench` returns a structured fixture-runner report:
-
-- `kind:"gui-bench"`
-- `schema:"rdog.gui-bench.v1"`
-- `runner:"fixture"`
-- `metrics`
-- `thresholds`
-- `checks`
-- `threshold_failures`
-- `steps_summary`
-- `runs`
-- `dense_target_passed`
-- optional `artifact`
-
-Phase 3B supports `suite:"computer-use-density"`, `case:"xhs-left-nav-home"`, and variants `baseline-low-level`, `dense-web-find`, `dense-web-act`, or `all`.
-It is read-only and does not touch the live GUI.
-For this baseline, `status:"complete"` with `dense_target_passed:false` is expected.
-It means the runner completed and the old low-level flow failed the density target.
-For `variant:"all"`, compare `runs[]`; top-level `metrics` is omitted because there is no single selected variant.
-`write_artifact:true` writes the same report under `target/rdog-bench/`; the default is false.
-Phase 3D adds live replay opt-in: `runner:"live"` must be paired with `allow_side_effects:true`.
-Live replay rejects `variant:"all"` and only replays one selected dense variant.
-For `dense-web-act`, `runs[].live_replay.performed` and `runs[].live_replay.verified` must be true before treating the replay as passing.
-The default remains `runner:"fixture"`, which never touches the live GUI.
 
 When stdin or stdout is not a real TTY, `rdog control` preserves raw protocol lines.
 This is the preferred mode for code agents.

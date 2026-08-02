@@ -22,10 +22,15 @@ Use the local fast path when agent and daemon share one machine:
 ```bash
 rdog control @ping
 rdog control @ping @capabilities#1 @observe#2
+rdog control @help            # 运行时语法自文档化 (45 条命令)
+rdog control @help:key        # 单命令详情, 省 token
 ```
 
 Put `TARGET` after `control` only for a named or remote daemon. Permission and
 capability errors are final results.
+
+Unknown syntax? Run `@help` / `@help:<command>` first — the protocol documents
+its own syntax at runtime; do not guess formats.
 
 ## Native App Lane
 
@@ -172,7 +177,7 @@ None of these are valid tactics.
 | Retry the same `@ax-press` more than three times with the same description | If the description still does not resolve, the locator is wrong. Re-query the role or change lane; do not throw the same payload at the daemon. |
 | Pre-emptively press a clear / reset button on a fresh app | A reset before reading state is a protocol violation, not a safety measure. The fresh read tells you whether the app already starts at the target baseline. |
 | Use `@cmd` to compute math, parse JSON, or evaluate expressions | Shell math has nothing to do with the GUI task. `@cmd` is for legitimate system commands; bypassing semantic actions defeats all rdog-control evidence. |
-| Pass `app:计算器`, `app:計算機`, or any non-ASCII app name | `@window-find` only resolves ASCII app names. Non-ASCII names return 0 matches and will never succeed. |
+| Pass `app:备忘录`, `app:備忘錄`, or any non-ASCII app name | `@window-find` only resolves ASCII app names. Non-ASCII names return 0 matches and will never succeed. |
 | Mix `app:APP` with `pid:PID/window:INDEX`, `process:`, or `window_title:` in the same target | The target validator rejects the request. Pick exactly one ownership channel. |
 | Reuse `@eN` ref across daemon restarts or turn boundaries | Observation refs are short-lived. A ref that resolved in the previous turn may resolve to a different element today. Re-query via `@ax-find`. |
 | Skip the fresh read between consecutive `@ax-press` calls | Every press must prove `performed:true` AND that the press changed the visible state for the value role. Sequential presses without reads cannot tell which press had which effect. |
