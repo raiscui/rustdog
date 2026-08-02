@@ -40,6 +40,25 @@ rdog control @ax-press:app:APP,DESCRIPTION
 rdog control @ax-press-sequence:app:APP,DESCRIPTION_1,DESCRIPTION_2
 ```
 
+### Text Input (文字输入)
+
+向文本框 / 文本区 / 地址栏输入文字时,默认使用 AXValue 直写,不依赖
+键盘模拟或剪贴板。`@type-text` 的 `ax-value` 模式直接设置目标控件的
+AXValue,不受输入法状态、macOS 自动大写句首、用户正在输入或焦点时序影响。
+
+```bash
+rdog control '@ax-find:{window:{window_id:"pid:123/window:0"},role:"AXTextArea",limit:5}'
+rdog control '@type-text:{target:{id:"pid:123/window:0/path:0.0"},text:"hello rdog 42",mode:"ax-value"}'
+rdog control '@ax-find:{window:{window_id:"pid:123/window:0"},role:"AXTextArea",include_values:true,limit:5}'
+```
+
+三步流程:先 `@ax-find` 拿到文本控件的 AX id → `@type-text` 以
+`mode:"ax-value"` 写入 → 再独立 `@ax-find` 读回 value 证明输入生效。
+
+`@type-text` 的 mode 优先级:`ax-value`(默认推荐) → `targeted-keyboard` →
+`clipboard`。`@paste` 走剪贴板,`@key` 只发按键,都不能替代可写控件的
+AXValue 直写。详细语法见 `references/protocol.md` 的 Text Input 小节。
+
 The 5-field `@ax-press:app:APP,DESCRIPTION,RESULT_ROLE,EXPECTED_VALUE,MAX_ATTEMPTS`
 form is intentionally not in this primary list. Read the GUARDED PRESS section
 below before considering it; most tasks do not need it.

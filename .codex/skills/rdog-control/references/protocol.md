@@ -28,6 +28,7 @@ Bare shell lines do not have request ids.
 @cmd:"printf READY"
 @cmd#42:"printf READY"
 @script:"git status --short"
+@type-text#10:{target:{id:"pid:123/window:0/path:0.0"},text:"hello",mode:"ax-value"}
 @paste:"hello"
 @key:"F11"
 @key#7:{key:"right-control",hold_ms:200,mode:"press_release"}
@@ -430,6 +431,44 @@ All AX rectangles use `coordinate_space:"os-logical"`, same as the screenshot ma
 Compact `@ax-find` and `@ax-press` accept `app:APP,value` or `pid:PID/window:INDEX,value`. `app:APP` performs a fresh exact window query and proceeds only when one interactable window exists. `@ax-press` fixes the role to `AXButton` and treats `value` as its description.
 
 `@ax-press-sequence` accepts the same selector followed by 1 to 32 button descriptions. Each comma item is one button. Single-item arithmetic aliases `+`, `-`, `*`, `×`, `/`, `÷`, and `=` normalize to the current macOS AX descriptions; a numeric expression cannot be one item. One trailing comma is ignored, while interior empty items remain invalid. The command resolves `app:APP` once before the first side effect, binds every step to that `window_id`, preserves order, and stops at the first failure. Its response includes a compact `steps` timeline with `performed` on every attempted step and `failed_index` on failure. Run post-action `@ax-find` separately for fresh result evidence.
+
+### Text Input (文字输入)
+
+输入文字到可编辑控件(文本框 / 文本区 / 地址栏)时,优先使用 AXValue 直写,
+不要优先依赖键盘模拟或剪贴板。
+
+首选 —— `@type-text` 的 `ax-value` 模式(纯 AXValue 写入):
+
+```text
+@type-text#510:{target:{id:"pid:123/window:0/path:0.0"},text:"hello rdog 42",mode:"ax-value"}
+@response {"id":510,"value":{"kind":"type-text","backend":"macos-accessibility","target_id":"pid:123/window:0/path:0.0","mode":"ax-value","delivered_via":"ax-value","text":"hello rdog 42","performed":true,"status":"ok","used_clipboard":false}}
+```
+
+- `target.id` 来自对文本控件的 `@ax-find`(role 通常是 `AXTextArea` / `AXTextField` / `AXComboBox` / `AXStaticText` 等可写控件)。
+- `mode:"ax-value"` 直接设置 AXValue,不产生键盘事件、不使用剪贴板
+  (`used_clipboard:false`)。因此不受以下环境影响:
+  - 系统输入法 / 输入法切换状态
+  - macOS 自动大写句首、拼写改写等文本替换
+  - 用户正在进行的输入、焦点闪烁或快捷键干扰
+- 成功后必须再用一次独立 `@ax-find` 读回目标控件的 value,作为 fresh 验证。
+
+`@type-text` 的 mode 优先级(自上而下):
+
+| mode | 行为 | 何时用 |
+| --- | --- | --- |
+| `ax-value`(默认推荐) | AXValue 直写,零键盘/剪贴板副作用 | 一切可写 AX 控件,首选 |
+| `targeted-keyboard` | 定向到目标控件的键盘事件模拟 | AXValue 不可写时的备选 |
+| `clipboard` | 剪贴板粘贴 | 仅当 AX 与定向键盘都不支持 |
+| `auto` | daemon 自动选择 | 不显式指定时;需要 ax-value 语义时应显式写 `ax-value` |
+
+`@ax-set-value` 是同类 AXValue 直写命令,适合"覆盖整个值"或追加场景:
+
+```text
+@ax-set-value#511:{target:{id:"pid:123/window:0/path:0.0"},value:"hello",mode:"append"}
+```
+
+`@paste:"text"` 走剪贴板路径,`@key` 只发送按键(不能输入任意文本)。
+除非目标控件没有可写 AXValue,否则不要用它们替代 `@type-text ax-value`。
 
 For `@ax-focus` with `activate:true`, inspect the nested `activation` report. AX focus is not performed unless `activation.verify.status` is `passed`; activation failure returns `performed:false` and preserves the `WINDOW_*` error code.
 
