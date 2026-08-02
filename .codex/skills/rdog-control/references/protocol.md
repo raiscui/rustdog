@@ -52,9 +52,9 @@ Bare shell lines do not have request ids.
 @ax-get#21:{target:{ref:"@e2",observation_id:"obs-123"},depth:2,include_values:false}
 @ax-tree#22:{mode:"interactive"}
 @ax-press#23:{target:{ref:"@e2",observation_id:"obs-123"}}
-@ax-find:app:Calculator,AXStaticText
-@ax-press:app:Calculator,1
-@ax-press-sequence:app:Calculator,1,+,2,=,
+@ax-find:app:APP,ROLE
+@ax-press:app:APP,DESCRIPTION
+@ax-press-sequence:app:APP,DESCRIPTION_1,DESCRIPTION_2
 @selector-get#30:{selector_id:"sel-v1-29b3963a312473d5",include_history:true}
 @selector-resolve#31:{selector_id:"sel-v1-29b3963a312473d5",limit:10,dry_run:true,include_explanations:true}
 @selector-refind#32:{selector_id:"sel-v1-29b3963a312473d5",policy:"safe",min_confidence:0.9,include_explanations:true}
