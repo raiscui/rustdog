@@ -18,28 +18,25 @@ use crate::{
 use serde_json::json;
 use std::io;
 
-
-pub mod types;
 pub mod tree;
+pub mod types;
 pub use self::tree::{
     capture_ax_find_snapshot, capture_current_ax_subtree, capture_current_ax_window_snapshot,
-    capture_default_ax_snapshot, current_ax_platform,
-    resolve_current_ax_target_rect, resolve_target_id_in_snapshot,
+    capture_default_ax_snapshot, current_ax_platform, resolve_current_ax_target_rect,
+    resolve_target_id_in_snapshot,
 };
 pub mod input;
 pub use self::input::{perform_default_key_delivery, perform_default_type_text};
 use self::input::{remap_type_text_ax_value_error, remap_type_text_targeted_keyboard_error};
 use self::tree::{
-    collect_element_refs, window_selector_draft, element_selector_draft,
-    app_selector_for_window, window_selector_for_ax_window, selector_rect_from_ax_rect,
-    reserve_existing_ref_index, capture_ax_find_snapshot_with,
-    capture_semantic_target_snapshot,
-    capture_semantic_target_snapshot_with, direct_ax_target_id,
-    materialize_app_window_target, materialize_app_window_target_with,
-    collect_matching_element_ids, find_ax_element_by_id, ax_snapshot_status_error,
+    app_selector_for_window, ax_snapshot_status_error, capture_ax_find_snapshot_with,
+    capture_semantic_target_snapshot, capture_semantic_target_snapshot_with, collect_element_refs,
+    collect_matching_element_ids, direct_ax_target_id, element_selector_draft,
+    find_ax_element_by_id, materialize_app_window_target, materialize_app_window_target_with,
+    reserve_existing_ref_index, selector_rect_from_ax_rect, window_selector_draft,
+    window_selector_for_ax_window,
 };
 pub use self::types::*;
-
 
 impl AxMode {
     pub fn preset(self) -> AxModePreset {
@@ -63,8 +60,6 @@ impl AxMode {
     }
 }
 
-
-
 impl Default for AxTreeRequest {
     fn default() -> Self {
         Self {
@@ -75,12 +70,6 @@ impl Default for AxTreeRequest {
         }
     }
 }
-
-
-
-
-
-
 
 impl AxActionName {
     pub fn protocol_str(self) -> &'static str {
@@ -99,10 +88,6 @@ impl AxActionName {
     }
 }
 
-
-
-
-
 impl AxScrollDirection {
     pub fn as_str(self) -> &'static str {
         match self {
@@ -114,7 +99,6 @@ impl AxScrollDirection {
     }
 }
 
-
 impl AxValueSetMode {
     pub fn as_str(self) -> &'static str {
         match self {
@@ -123,8 +107,6 @@ impl AxValueSetMode {
         }
     }
 }
-
-
 
 impl TypeTextMode {
     pub fn as_str(self) -> &'static str {
@@ -136,7 +118,6 @@ impl TypeTextMode {
         }
     }
 }
-
 
 impl ClipboardRestoreStatus {
     pub fn restored() -> Self {
@@ -153,7 +134,6 @@ impl ClipboardRestoreStatus {
         }
     }
 }
-
 
 impl AxTarget {
     fn validate(&self) -> io::Result<()> {
@@ -227,8 +207,6 @@ impl AxTarget {
             && matches_optional(&self.description, element.description.as_deref())
     }
 }
-
-
 
 impl AxSnapshot {
     pub fn complete(
@@ -363,14 +341,11 @@ impl AxSnapshot {
     }
 }
 
-
 impl AxWindow {
     fn element_count(&self) -> usize {
         self.elements.iter().map(AxElement::tree_count).sum()
     }
 }
-
-
 
 impl AxElement {
     fn tree_count(&self) -> usize {
@@ -390,15 +365,6 @@ impl AxElement {
     }
 }
 
-
-
-
-
-
-
-
-
-
 impl AxActionReport {
     pub fn press(backend: impl Into<String>, target_id: Option<String>) -> Self {
         Self {
@@ -417,15 +383,12 @@ impl AxActionReport {
     }
 }
 
-
-
 impl AxPressPostconditionReport {
     pub fn to_value_json(&self) -> io::Result<String> {
         serde_json::to_string(self)
             .map_err(|err| io::Error::other(format!("AX guarded press 序列化失败: {err}")))
     }
 }
-
 
 impl AxPressSequenceStepReport {
     fn success(index: usize, description: String, report: AxActionReport) -> Self {
@@ -451,14 +414,12 @@ impl AxPressSequenceStepReport {
     }
 }
 
-
 impl AxPressSequenceReport {
     pub fn to_value_json(&self) -> io::Result<String> {
         serde_json::to_string(self)
             .map_err(|err| io::Error::other(format!("AX press sequence 序列化失败: {err}")))
     }
 }
-
 
 impl AxPerformedActionReport {
     pub fn success(
@@ -481,7 +442,6 @@ impl AxPerformedActionReport {
             .map_err(|err| io::Error::other(format!("AX action response 序列化失败: {err}")))
     }
 }
-
 
 impl AxSetValueReport {
     pub fn success(
@@ -509,7 +469,6 @@ impl AxSetValueReport {
             .map_err(|err| io::Error::other(format!("AX set value response 序列化失败: {err}")))
     }
 }
-
 
 impl TypeTextReport {
     pub fn ax_value_success(
@@ -577,7 +536,6 @@ impl TypeTextReport {
     }
 }
 
-
 impl KeyDeliveryReport {
     pub fn success(
         backend: impl Into<String>,
@@ -603,7 +561,6 @@ impl KeyDeliveryReport {
             .map_err(|err| io::Error::other(format!("key response 序列化失败: {err}")))
     }
 }
-
 
 impl AxFocusReport {
     pub fn success(
@@ -667,7 +624,6 @@ pub fn window_activation_verified(report: &WindowActionReport) -> bool {
                 && !verify.minimized
     )
 }
-
 
 impl AxScrollReport {
     pub fn success(
@@ -738,17 +694,6 @@ impl AxBackend for SystemAxBackend {
         platform_type_text(request)
     }
 }
-
-
-
-
-
-
-
-
-
-
-
 
 pub fn perform_default_ax_press(request: &AxPressRequest) -> io::Result<AxActionReport> {
     let report = SystemAxBackend.perform_action(&AxActionRequest {
@@ -1076,7 +1021,6 @@ pub fn perform_default_ax_set_value(request: &AxSetValueRequest) -> io::Result<A
     SystemAxBackend.set_value(request)
 }
 
-
 pub fn perform_default_ax_focus(request: &AxFocusRequest) -> io::Result<AxFocusReport> {
     SystemAxBackend.focus(request)
 }
@@ -1084,7 +1028,6 @@ pub fn perform_default_ax_focus(request: &AxFocusRequest) -> io::Result<AxFocusR
 pub fn perform_default_ax_scroll(request: &AxScrollRequest) -> io::Result<AxScrollReport> {
     SystemAxBackend.scroll(request)
 }
-
 
 pub fn parse_ax_tree_payload(input: &str) -> io::Result<AxTreeRequest> {
     let inner = object_inner(input, "@ax-tree")?;
@@ -1521,10 +1464,6 @@ pub fn parse_type_text_payload(input: &str) -> io::Result<TypeTextRequest> {
     })
 }
 
-
-
-
-
 fn parse_ax_target(input: &str) -> io::Result<AxTarget> {
     let inner = object_inner(input, "AX target")?;
     if inner.is_empty() {
@@ -1669,8 +1608,6 @@ fn parse_ax_scroll_pages(input: &str) -> io::Result<u16> {
     }
     Ok(pages)
 }
-
-
 
 fn key_mode_as_str(mode: KeyMode) -> &'static str {
     match mode {
@@ -1827,12 +1764,16 @@ pub(crate) fn platform_capture_current_subtree(
 }
 
 #[cfg(target_os = "macos")]
-pub(crate) fn platform_resolve_current_target_rect(target_id: &str) -> io::Result<AxResolvedTargetRect> {
+pub(crate) fn platform_resolve_current_target_rect(
+    target_id: &str,
+) -> io::Result<AxResolvedTargetRect> {
     macos::resolve_current_target_rect(target_id)
 }
 
 #[cfg(not(target_os = "macos"))]
-pub(crate) fn platform_resolve_current_target_rect(_target_id: &str) -> io::Result<AxResolvedTargetRect> {
+pub(crate) fn platform_resolve_current_target_rect(
+    _target_id: &str,
+) -> io::Result<AxResolvedTargetRect> {
     Err(io::Error::new(
         io::ErrorKind::Unsupported,
         "AX target rect 当前只支持 macOS",
@@ -1848,12 +1789,16 @@ pub(crate) fn platform_snapshot(_request: &AxTreeRequest) -> io::Result<AxSnapsh
 }
 
 #[cfg(target_os = "macos")]
-pub(crate) fn platform_perform_action(request: &AxActionRequest) -> io::Result<AxPerformedActionReport> {
+pub(crate) fn platform_perform_action(
+    request: &AxActionRequest,
+) -> io::Result<AxPerformedActionReport> {
     macos::perform_action(request)
 }
 
 #[cfg(not(target_os = "macos"))]
-pub(crate) fn platform_perform_action(_request: &AxActionRequest) -> io::Result<AxPerformedActionReport> {
+pub(crate) fn platform_perform_action(
+    _request: &AxActionRequest,
+) -> io::Result<AxPerformedActionReport> {
     Err(io::Error::new(
         io::ErrorKind::Unsupported,
         "AX action 当前只支持 macOS",

@@ -11,10 +11,7 @@
 
 use serde::Serialize;
 
-use crate::{
-    control_observation::ObservationHeader,
-    control_window::WindowActionReport,
-};
+use crate::{control_observation::ObservationHeader, control_window::WindowActionReport};
 
 // ---- was lines 22-40 ----
 pub const AX_SCHEMA: &str = "rdog.ax.v1";

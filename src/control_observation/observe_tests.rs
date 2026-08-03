@@ -209,10 +209,7 @@ fn parse_observe_payload_should_accept_compact_form() {
     let target_only = parse_observe_payload("app:Calculator").unwrap();
     assert_eq!(target_only.mode, ObserveMode::Hybrid);
     assert_eq!(
-        target_only
-            .target
-            .as_ref()
-            .and_then(|t| t.app.as_deref()),
+        target_only.target.as_ref().and_then(|t| t.app.as_deref()),
         Some("Calculator")
     );
 

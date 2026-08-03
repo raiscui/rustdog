@@ -1010,36 +1010,35 @@ fn parse_should_support_compact_bare_key_payloads() {
     assert!(parse_control_line("@key:Page Down").is_err());
 }
 
-
-    #[test]
-    fn parse_compact_window_selector_should_reject_non_ascii_app_name() -> io::Result<()> {
-        use crate::control_protocol::parsers::parse_compact_window_selector;
-        // ponytail: ASCII gate; macOS Launch Services 0-matches Chinese app names.
-        let chinese_error = parse_compact_window_selector("@ax-find", "app:计算器")
-            .expect_err("non-ASCII app name must be rejected at parser layer");
-        let msg = chinese_error.to_string();
-        assert!(msg.contains("ASCII"), "error must mention ASCII: {msg}");
-        assert!(msg.contains("app:计算器"), "error must echo input: {msg}");
-        // ASCII app name still parses correctly.
-        let ascii = parse_compact_window_selector("@ax-find", "app:Calculator")?;
-        match ascii {
-            crate::control_protocol::parsers::CompactWindowSelector::App(app) => {
-                assert_eq!(app, "Calculator");
-            }
-            other => panic!("expected App variant, got {other:?}"),
+#[test]
+fn parse_compact_window_selector_should_reject_non_ascii_app_name() -> io::Result<()> {
+    use crate::control_protocol::parsers::parse_compact_window_selector;
+    // ponytail: ASCII gate; macOS Launch Services 0-matches Chinese app names.
+    let chinese_error = parse_compact_window_selector("@ax-find", "app:计算器")
+        .expect_err("non-ASCII app name must be rejected at parser layer");
+    let msg = chinese_error.to_string();
+    assert!(msg.contains("ASCII"), "error must mention ASCII: {msg}");
+    assert!(msg.contains("app:计算器"), "error must echo input: {msg}");
+    // ASCII app name still parses correctly.
+    let ascii = parse_compact_window_selector("@ax-find", "app:Calculator")?;
+    match ascii {
+        crate::control_protocol::parsers::CompactWindowSelector::App(app) => {
+            assert_eq!(app, "Calculator");
         }
-        Ok(())
+        other => panic!("expected App variant, got {other:?}"),
     }
+    Ok(())
+}
 
-    #[test]
-    fn parse_compact_window_selector_should_reject_mixed_ascii_app_name() -> io::Result<()> {
-        use crate::control_protocol::parsers::parse_compact_window_selector;
-        // Mixed ASCII + non-ASCII (e.g. Japanese kanji mixed with ASCII) is also non-ASCII.
-        let err = parse_compact_window_selector("@ax-find", "app:電卓App")
-            .expect_err("mixed script app name must be rejected");
-        assert!(err.to_string().contains("ASCII"));
-        Ok(())
-    }
+#[test]
+fn parse_compact_window_selector_should_reject_mixed_ascii_app_name() -> io::Result<()> {
+    use crate::control_protocol::parsers::parse_compact_window_selector;
+    // Mixed ASCII + non-ASCII (e.g. Japanese kanji mixed with ASCII) is also non-ASCII.
+    let err = parse_compact_window_selector("@ax-find", "app:電卓App")
+        .expect_err("mixed script app name must be rejected");
+    assert!(err.to_string().contains("ASCII"));
+    Ok(())
+}
 
 #[test]
 fn parse_should_reject_unknown_or_empty_or_multiline_payloads_or_bad_request_ids() {

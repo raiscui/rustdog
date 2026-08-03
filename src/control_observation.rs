@@ -15,7 +15,9 @@ pub mod observe;
 pub mod refind;
 pub mod selector;
 
-pub use observe::{build_observe_bundle, build_observe_outcome, parse_observe_payload, ObserveRequest};
+pub use observe::{
+    build_observe_bundle, build_observe_outcome, parse_observe_payload, ObserveRequest,
+};
 pub use refind::{
     build_selector_refind_decision, build_selector_refind_response_json, SelectorRefindDecision,
     SelectorRefindPolicy, SelectorRefindRequest, SelectorRefindSource, DEFAULT_REFIND_LIMIT,
@@ -1141,14 +1143,8 @@ mod tests {
                 kind: "window".to_owned(),
             })
             .collect();
-        let header = record_observation_with_selectors(
-            "ax",
-            "@ax-tree",
-            root(),
-            refs,
-            drafts,
-        )
-        .unwrap();
+        let header =
+            record_observation_with_selectors("ax", "@ax-tree", root(), refs, drafts).unwrap();
         assert_eq!(header.ref_count, 3);
         assert_eq!(header.selector_count, 3);
     }
@@ -1183,8 +1179,12 @@ mod tests {
             0,
             100,
         );
-        assert!(store.resolve_ref(&first.observation_id, "@e1", 100).is_err());
-        assert!(store.resolve_ref(&second.observation_id, "@e1", 100).is_ok());
+        assert!(store
+            .resolve_ref(&first.observation_id, "@e1", 100)
+            .is_err());
+        assert!(store
+            .resolve_ref(&second.observation_id, "@e1", 100)
+            .is_ok());
     }
 
     #[test]

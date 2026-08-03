@@ -32,9 +32,8 @@ use std::io;
 use super::query::{AxFindQuery, AxFindRequest, AxGetRequest};
 use super::types::*;
 use super::{
-    invalid_data, invalid_input, to_invalid_input,
-    platform_capture_current_subtree, platform_capture_current_window,
-    platform_resolve_current_target_rect, AxBackend,
+    invalid_data, invalid_input, platform_capture_current_subtree, platform_capture_current_window,
+    platform_resolve_current_target_rect, to_invalid_input, AxBackend,
 };
 
 // ---- commit 2 留下的 capture / platform-info functions ----
@@ -63,7 +62,6 @@ pub fn capture_current_ax_subtree(
 ) -> io::Result<AxCapturedSubtree> {
     super::platform_capture_current_subtree(target_id, request)
 }
-
 
 // ---- collect_element_refs (was lines 378-425) ----
 pub(crate) fn collect_element_refs(
@@ -116,7 +114,11 @@ pub(crate) fn collect_element_refs(
 }
 
 // ---- window_selector_draft (was lines 427-441) ----
-pub(crate) fn window_selector_draft(platform: &str, window: &AxWindow, ref_id: &str) -> DurableSelectorDraft {
+pub(crate) fn window_selector_draft(
+    platform: &str,
+    window: &AxWindow,
+    ref_id: &str,
+) -> DurableSelectorDraft {
     DurableSelectorDraft::new(
         ref_id.to_owned(),
         SelectorKind::AxWindow,
@@ -409,7 +411,10 @@ pub(crate) fn collect_matching_element_ids(
 }
 
 // ---- find_ax_element_by_id (was lines 1828-1838) ----
-pub(crate) fn find_ax_element_by_id<'a>(elements: &'a [AxElement], target_id: &str) -> Option<&'a AxElement> {
+pub(crate) fn find_ax_element_by_id<'a>(
+    elements: &'a [AxElement],
+    target_id: &str,
+) -> Option<&'a AxElement> {
     for element in elements {
         if element.id == target_id {
             return Some(element);

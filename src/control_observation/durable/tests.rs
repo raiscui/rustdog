@@ -361,11 +361,7 @@ fn prototype_observation_durable_selector_history_should_be_filtered_by_visibili
     let mut old = header("obs-old", 1);
     old.created_at_unix_ms = 100;
     store
-        .record_observation(
-            &old,
-            &[ref_entry("@e1")],
-            &[selector("obs-old", "@e1")],
-        )
+        .record_observation(&old, &[ref_entry("@e1")], &[selector("obs-old", "@e1")])
         .unwrap();
     let mut recent = header("obs-recent", 1);
     recent.created_at_unix_ms = 195_000;

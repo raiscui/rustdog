@@ -379,7 +379,9 @@ impl JsonlDurableObservationStore {
             .iter()
             .rev()
             .filter(|selector| selector.selector_id == selector_id)
-            .filter(|selector| self.selector_within_visibility(selector, self.index.updated_at_unix_ms))
+            .filter(|selector| {
+                self.selector_within_visibility(selector, self.index.updated_at_unix_ms)
+            })
             .take(limit)
             .map(DurableSelectorLastSeen::from_index_selector)
             .collect()
@@ -392,11 +394,7 @@ impl JsonlDurableObservationStore {
 
     /// Wayfinder Destination B (W-OS-02): selector is live iff the caller-supplied    /// Wayfinder Destination B (W-OS-02): selector is live iff the caller-supplied
     /// `now_ms` is within `selector_visibility_ms` of its last_seen timestamp.
-    fn selector_within_visibility(
-        &self,
-        selector: &DurableIndexSelector,
-        now_ms: u64,
-    ) -> bool {
+    fn selector_within_visibility(&self, selector: &DurableIndexSelector, now_ms: u64) -> bool {
         now_ms.saturating_sub(selector.last_seen_unix_ms) <= self.selector_visibility_ms
     }
 
