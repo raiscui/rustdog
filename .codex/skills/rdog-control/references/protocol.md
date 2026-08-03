@@ -429,6 +429,31 @@ All AX rectangles use `coordinate_space:"os-logical"`, same as the screenshot ma
 
 Compact `@ax-find` and `@ax-press` accept `app:APP,value` or `pid:PID/window:INDEX,value`. `app:APP` performs a fresh exact window query and proceeds only when one interactable window exists. `@ax-press` fixes the role to `AXButton` and treats `value` as its description.
 
+### Compact 前缀路由 (LLM 兼容)
+
+compact 短格式支持"前缀路由":每个逗号字段可以是 `前缀:值`(按前缀路由到
+对应槽位)或无前缀裸值(按位置回退:第 1 个=窗口选择器,第 2 个=主值)。
+命名与位置混合合法, 同一槽位重复提供时拒绝。
+
+支持的字段前缀:
+
+| 前缀 | 槽位 | 示例 |
+| --- | --- | --- |
+| `app:` / `pid:` | 窗口选择器 | `app:Safari` / `pid:123/window:0` |
+| `role:` | 角色 (AXButton 等) | `@ax-find:app:Safari,role:AXTextField` |
+| `description:` | 按钮/元素描述 | `@ax-press:app:APP,description:删除` |
+| `value:` / `name:` | 值 / 名称匹配 | `@ax-find:app:APP,name:foo` |
+| `include_values:` / `limit:` / `depth:` / `max_elements:` / `mode:` | AX 查询选项 | `@ax-find:app:Safari,AXStaticText,include_values:true,limit:10` |
+| `expected_value:` / `max_attempts:` | guarded press | `@ax-press:app:APP,删除,role:AXStaticText,expected_value:0,max_attempts:3` |
+
+位置等价写法仍然有效: `@ax-find:app:Safari,AXTextField` ≡
+`@ax-find:app:Safari,role:AXTextField`。
+
+对象语法同样接受顶层 `app:` / `window_id:` 字段, 自动归一化为
+`window:`(AX 查询类)或 `target:`(AX 动作类)选择器:
+`@ax-find:{app:"Safari",role:"AXStaticText"}` 与
+`@ax-find:{window:{app:"Safari"},role:"AXStaticText"}` 等价。
+
 `@ax-press-sequence` accepts the same selector followed by 1 to 32 button descriptions. Each comma item is one button. Single-item arithmetic aliases `+`, `-`, `*`, `×`, `/`, `÷`, and `=` normalize to the current macOS AX descriptions; a numeric expression cannot be one item. One trailing comma is ignored, while interior empty items remain invalid. The command resolves `app:APP` once before the first side effect, binds every step to that `window_id`, preserves order, and stops at the first failure. Its response includes a compact `steps` timeline with `performed` on every attempted step and `failed_index` on failure. Run post-action `@ax-find` separately for fresh result evidence.
 
 ### Text Input (文字输入)

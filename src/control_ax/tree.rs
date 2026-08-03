@@ -20,9 +20,8 @@ use crate::{
     },
     control_protocol::{
         normalize_object_field_name, object_inner, parse_compact_atom,
-        parse_compact_ax_button_sequence, parse_compact_window_pair, parse_compact_window_selector,
-        parse_quoted_payload, split_object_field, split_object_fields, CompactWindowSelector,
-        KeyDelivery, KeyMode, KeyRequest,
+        parse_compact_window_selector, parse_quoted_payload, split_object_field, split_object_fields,
+        CompactWindowSelector, KeyDelivery, KeyMode, KeyRequest,
     },
     control_window::{resolve_unique_app_window_id, WindowActionReport, WindowActionVerifyReport},
 };

@@ -8,9 +8,8 @@ use crate::{
         stale_observation_ref_error, ObservationRefEntry, ObservationRoot,
     },
     control_protocol::{
-        normalize_object_field_name, object_inner, parse_compact_atom,
-        parse_compact_ax_button_sequence, parse_compact_window_pair, parse_compact_window_selector,
-        parse_quoted_payload, split_object_field, split_object_fields, CompactWindowSelector,
+        normalize_object_field_name, object_inner, parse_compact_fields, parse_quoted_payload,
+        resolve_compact_selector, split_object_field, split_object_fields, CompactWindowSelector,
         KeyDelivery, KeyMode, KeyRequest,
     },
     control_window::{resolve_unique_app_window_id, WindowActionReport, WindowActionVerifyReport},
@@ -1089,42 +1088,143 @@ pub fn parse_ax_tree_payload(input: &str) -> io::Result<AxTreeRequest> {
     })
 }
 
+/// 把对象语法的顶层字段填充到 target; 与显式 `target:` 的同名字段冲突报错。
+fn fill_ax_target_field(
+    target: &mut AxTarget,
+    explicit_target: bool,
+    kind: &str,
+    field_name: &str,
+    raw_value: &str,
+) -> io::Result<()> {
+    let slot = match field_name {
+        "app" => &mut target.app,
+        "window_id" => &mut target.window_id,
+        "process" => &mut target.process,
+        "window_title" => &mut target.window_title,
+        "role" => &mut target.role,
+        "subrole" => &mut target.subrole,
+        "name" => &mut target.name,
+        "description" => &mut target.description,
+        _ => {
+            return Err(invalid_data(format!(
+                "{kind} 对象 payload 顶层字段 `{field_name}` 不支持"
+            )))
+        }
+    };
+    if explicit_target && slot.is_some() {
+        return Err(invalid_data(format!(
+            "{kind} 对象 payload 的 `{field_name}` 与 `target` 内字段重复"
+        )));
+    }
+    if slot.is_some() {
+        return Err(invalid_data(format!(
+            "{kind} 对象 payload 的 `{field_name}` 字段重复"
+        )));
+    }
+    *slot = Some(parse_non_empty_string(&format!("{kind}.{field_name}"), raw_value)?);
+    Ok(())
+}
+
+/// compact 选项解析: 可选 bool (include_values:true)。
+pub(crate) fn parse_compact_opt_bool(
+    kind: &str,
+    name: &str,
+    value: Option<String>,
+) -> io::Result<Option<bool>> {
+    value
+        .map(|value| parse_bool_literal(kind, name, &value))
+        .transpose()
+}
+
+/// compact 选项解析: 可选 u8 (depth:8)。
+pub(crate) fn parse_compact_opt_u8(
+    kind: &str,
+    name: &str,
+    value: Option<String>,
+) -> io::Result<Option<u8>> {
+    value
+        .map(|value| {
+            value.parse::<u8>().map_err(|_| {
+                invalid_data(format!("{kind} 的 `{name}` 必须是无符号整数: {value}"))
+            })
+        })
+        .transpose()
+}
+
+/// compact 选项解析: 可选 u16 (limit:50 / max_elements:5000)。
+pub(crate) fn parse_compact_opt_u16(
+    kind: &str,
+    name: &str,
+    value: Option<String>,
+) -> io::Result<Option<u16>> {
+    value
+        .map(|value| {
+            value.parse::<u16>().map_err(|_| {
+                invalid_data(format!("{kind} 的 `{name}` 必须是无符号整数: {value}"))
+            })
+        })
+        .transpose()
+}
+
+/// compact 选项解析: 可选 mode (mode:full)。
+pub(crate) fn parse_compact_opt_mode(
+    kind: &str,
+    value: Option<String>,
+) -> io::Result<Option<AxMode>> {
+    // compact 值不带引号 (parse_compact_atom 已校验), 直接按枚举名匹配。
+    value
+        .map(|value| {
+            match value.to_ascii_lowercase().as_str() {
+                "windows" | "summary" | "skeleton" => Ok(AxMode::Windows),
+                "interactive" | "controls" => Ok(AxMode::Interactive),
+                "full" => Ok(AxMode::Full),
+                _ => Err(invalid_data(format!(
+                    "{kind} 的 `mode` 只支持 windows | interactive | full: {value}"
+                ))),
+            }
+        })
+        .transpose()
+}
+
 pub fn parse_ax_press_payload(input: &str) -> io::Result<AxPressRequest> {
     let trimmed = input.trim();
     if !trimmed.starts_with('{') {
-        let fields = trimmed.split(',').collect::<Vec<_>>();
-        let (window_selector, description, postcondition) = match fields.as_slice() {
-            [_, _] => {
-                let (window_selector, description) =
-                    parse_compact_window_pair("@ax-press", trimmed)?;
-                (window_selector, description, None)
-            }
-            [selector, description, role, expected_value, max_attempts] => {
-                let window_selector =
-                    parse_compact_window_selector("@ax-press", selector)?;
-                let description = parse_compact_atom("@ax-press", description)?;
-                let role = parse_compact_atom("@ax-press", role)?;
-                let expected_value = parse_compact_atom("@ax-press", expected_value)?;
-                let max_attempts = parse_compact_atom("@ax-press", max_attempts)?
+        // 2026-08-04 (LLM 兼容, 前缀路由): 支持命名/位置混合, 例如
+        // `app:APP,description:删除` / `app:APP,删除,role:AXStaticText,expected_value:0,max_attempts:3`。
+        let mut fields = parse_compact_fields("@ax-press", trimmed)?;
+        let window_selector = resolve_compact_selector("@ax-press", &mut fields)?;
+        let description =
+            fields.take_named_or_positional("@ax-press", "description", "description")?;
+        // guarded press 三件套: role / expected_value / max_attempts (命名或位置 2-4)。
+        let guarded_role = fields.take_named_or_positional("@ax-press", "role", "role")?;
+        let guarded_expected =
+            fields.take_named_or_positional("@ax-press", "expected_value", "expected_value")?;
+        let guarded_max =
+            fields.take_named_or_positional("@ax-press", "max_attempts", "max_attempts")?;
+        fields.ensure_empty("@ax-press")?;
+
+        let description = description.ok_or_else(|| {
+            invalid_data("@ax-press 短格式缺少按钮描述, 例如 `app:APP,删除`")
+        })?;
+        let postcondition = match (guarded_role, guarded_expected, guarded_max) {
+            (Some(role), Some(expected_value), Some(max_attempts)) => {
+                let max_attempts = max_attempts
                     .parse::<usize>()
                     .ok()
                     .filter(|attempts| (1..=3).contains(attempts))
                     .ok_or_else(|| {
                         invalid_data("@ax-press postcondition max_attempts 必须是1到3")
                     })?;
-                (
-                    window_selector,
-                    description,
-                    Some(AxPressPostcondition {
-                        role,
-                        expected_value,
-                        max_attempts,
-                    }),
-                )
+                Some(AxPressPostcondition {
+                    role,
+                    expected_value,
+                    max_attempts,
+                })
             }
+            (None, None, None) => None,
             _ => {
                 return Err(invalid_data(
-                    "@ax-press 短格式必须是selector,description或selector,description,role,expected_value,max_attempts",
+                    "@ax-press 的 guarded 字段必须一起提供: role, expected_value, max_attempts",
                 ))
             }
         };
@@ -1162,6 +1262,20 @@ pub fn parse_ax_press_payload(input: &str) -> io::Result<AxPressRequest> {
                 "@ax-press",
                 parse_ax_target(raw_value)?,
             )?,
+            // 2026-08-04 (LLM 兼容): 顶层字段自动归一化到 target,
+            // 模型常把 compact 的 `app:APP,description:删除` 思维带进对象。
+            "app" | "window_id" | "process" | "window_title" | "role" | "subrole"
+            | "name" | "description" => {
+                let explicit_target = target.is_some();
+                let slot = target.get_or_insert_with(AxTarget::default);
+                fill_ax_target_field(
+                    slot,
+                    explicit_target,
+                    "@ax-press",
+                    &field_name,
+                    raw_value,
+                )?;
+            }
             _ => {
                 return Err(invalid_data(format!(
                     "@ax-press 对象 payload 包含未知字段: {field_name}"
@@ -1184,8 +1298,32 @@ pub fn parse_ax_press_sequence_payload(input: &str) -> io::Result<AxPressSequenc
         ));
     }
 
-    let (window_selector, descriptions) =
-        parse_compact_ax_button_sequence("@ax-press-sequence", trimmed)?;
+    // 2026-08-04 (LLM 兼容, 前缀路由): 支持 `description:` 前缀追加到序列,
+    // 例如 `app:APP,description:8,description:加` 与位置序列混合。
+    let mut fields = parse_compact_fields("@ax-press-sequence", trimmed)?;
+    let window_selector = resolve_compact_selector("@ax-press-sequence", &mut fields)?;
+    let mut descriptions = Vec::new();
+    while let Some(value) = fields.take_positional("@ax-press-sequence", "description")? {
+        descriptions.push(value);
+    }
+    // description:N 命名字段可以重复出现 (序列语义), 全部追加。
+    fields.named.retain(|(name, value)| {
+        if name == "description" {
+            descriptions.push(value.clone());
+            false
+        } else {
+            true
+        }
+    });
+    fields.ensure_empty("@ax-press-sequence")?;
+    if descriptions.is_empty() {
+        return Err(invalid_data(
+            "@ax-press-sequence 至少需要一个按钮描述, 例如 `app:APP,8,加,等于`",
+        ));
+    }
+    if descriptions.len() > 32 {
+        return Err(invalid_data("@ax-press-sequence 最多允许 32 个按钮描述"));
+    }
     let targets = descriptions
         .into_iter()
         .map(|description| {

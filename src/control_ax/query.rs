@@ -10,8 +10,11 @@ use crate::control_display_scope::{
 };
 use crate::control_observation::ObservationHeader;
 use crate::control_protocol::{
-    normalize_object_field_name, object_inner, parse_compact_window_pair, parse_quoted_payload,
-    split_object_field, split_object_fields, CompactWindowSelector,
+    normalize_object_field_name, object_inner, parse_compact_fields, parse_quoted_payload,
+    resolve_compact_selector, split_object_field, split_object_fields, CompactWindowSelector,
+};
+use crate::control_ax::{
+    parse_compact_opt_bool, parse_compact_opt_mode, parse_compact_opt_u16, parse_compact_opt_u8,
 };
 use crate::control_window::resolve_unique_app_window_id;
 use crate::screenshot::current_display_summaries;
@@ -235,8 +238,42 @@ impl AxGetResponse {
 pub fn parse_ax_find_payload(input: &str) -> io::Result<AxFindRequest> {
     let trimmed = input.trim();
     if !trimmed.starts_with('{') {
-        let (window_selector, role) = parse_compact_window_pair("@ax-find", trimmed)?;
-        let window = match window_selector {
+        // 2026-08-04 (LLM 兼容, 前缀路由): compact 短格式接受命名与位置混合,
+        // 例如 `app:Safari,role:AXTextField`、`app:Safari,AXButton,limit:10`。
+        // 带前缀字段按名路由, 无前缀字段按位置回退 (第1=窗口, 第2=角色)。
+        let mut fields = parse_compact_fields("@ax-find", trimmed)?;
+        let selector = resolve_compact_selector("@ax-find", &mut fields)?;
+        let role = fields.take_named_or_positional("@ax-find", "role", "role")?;
+        let include_values = parse_compact_opt_bool(
+            "@ax-find",
+            "include_values",
+            fields.take_named("@ax-find", "include_values")?,
+        )?;
+        let limit = parse_compact_opt_u16(
+            "@ax-find",
+            "limit",
+            fields.take_named("@ax-find", "limit")?,
+        )?;
+        let depth = parse_compact_opt_u8(
+            "@ax-find",
+            "depth",
+            fields.take_named("@ax-find", "depth")?,
+        )?;
+        let max_elements = parse_compact_opt_u16(
+            "@ax-find",
+            "max_elements",
+            fields.take_named("@ax-find", "max_elements")?,
+        )?;
+        let mode = parse_compact_opt_mode("@ax-find", fields.take_named("@ax-find", "mode")?)?;
+        fields.ensure_empty("@ax-find")?;
+
+        let role = role.ok_or_else(|| {
+            invalid_data(
+                "@ax-find 短格式缺少角色, 例如 `app:APP,AXButton` 或 `app:APP,role:AXButton`",
+            )
+        })?;
+        let preset = mode.map(|mode| mode.preset());
+        let window = match selector {
             CompactWindowSelector::WindowId(window_id) => AxWindowIdentity {
                 window_id: Some(window_id),
                 app: None,
@@ -252,9 +289,24 @@ pub fn parse_ax_find_payload(input: &str) -> io::Result<AxFindRequest> {
         };
         return Ok(AxFindRequest {
             tree: AxTreeRequest {
-                depth: COMPACT_AX_FIND_DEPTH,
-                max_elements: COMPACT_AX_FIND_MAX_ELEMENTS,
-                include_values: true,
+                depth: depth.unwrap_or(
+                    preset
+                        .as_ref()
+                        .map(|preset| preset.depth)
+                        .unwrap_or(COMPACT_AX_FIND_DEPTH),
+                ),
+                max_elements: max_elements.unwrap_or(
+                    preset
+                        .as_ref()
+                        .map(|preset| preset.max_elements)
+                        .unwrap_or(COMPACT_AX_FIND_MAX_ELEMENTS),
+                ),
+                include_values: include_values.unwrap_or(
+                    preset
+                        .as_ref()
+                        .map(|preset| preset.include_values)
+                        .unwrap_or(true),
+                ),
                 ..AxTreeRequest::default()
             },
             query: AxFindQuery {
@@ -263,7 +315,7 @@ pub fn parse_ax_find_payload(input: &str) -> io::Result<AxFindRequest> {
             },
             window: Some(window),
             display_scope: None,
-            limit: COMPACT_AX_FIND_LIMIT,
+            limit: limit.unwrap_or(COMPACT_AX_FIND_LIMIT),
         });
     }
 
@@ -313,6 +365,37 @@ pub fn parse_ax_find_payload(input: &str) -> io::Result<AxFindRequest> {
                 "@ax-find",
                 parse_ax_window_identity(raw_value)?,
             )?,
+            // 2026-08-04 (LLM 兼容): 对象语法接受顶层 app / window_id,
+            // 自动归一化为 window 选择器, 与 compact 的 `app:APP` 语义一致。
+            // 模型常把 compact 思维带进对象 (如 {app:"Safari",role:"AXButton"})。
+            "app" => {
+                let app = parse_non_empty_string("@ax-find.app", raw_value)?;
+                assign_once(
+                    &mut window,
+                    "app",
+                    "@ax-find",
+                    AxWindowIdentity {
+                        window_id: None,
+                        app: Some(app),
+                        ref_id: None,
+                        observation_id: None,
+                    },
+                )?;
+            }
+            "window_id" => {
+                let window_id = parse_non_empty_string("@ax-find.window_id", raw_value)?;
+                assign_once(
+                    &mut window,
+                    "window_id",
+                    "@ax-find",
+                    AxWindowIdentity {
+                        window_id: Some(window_id),
+                        app: None,
+                        ref_id: None,
+                        observation_id: None,
+                    },
+                )?;
+            }
             "scope" => assign_once(
                 &mut display_scope,
                 "scope",

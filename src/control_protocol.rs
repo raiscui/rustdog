@@ -3,9 +3,9 @@ use std::io;
 mod parsers;
 
 pub(crate) use self::parsers::{
-    normalize_object_field_name, object_inner, parse_compact_atom,
-    parse_compact_ax_button_sequence, parse_compact_window_pair, parse_compact_window_selector,
-    parse_quoted_payload, split_object_field, split_object_fields, CompactWindowSelector,
+    normalize_object_field_name, object_inner, parse_compact_atom, parse_compact_fields,
+    parse_compact_window_selector, parse_quoted_payload, resolve_compact_selector,
+    split_object_field, split_object_fields, CompactWindowSelector, ParsedCompactFields,
 };
 
 use self::parsers::{

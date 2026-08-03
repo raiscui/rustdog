@@ -1059,6 +1059,164 @@ fn compact_should_reject_window_suffix_with_actionable_hint() {
 }
 
 #[test]
+fn compact_should_route_named_prefix_fields() {
+    // role: 前缀路由到角色槽位 (模型把对象语法字段名带进 compact)。
+    let result = parse_control_line(r#"@ax-find:app:Calculator,role:AXButton"#).unwrap();
+    let ControlParseResult::Control(ControlRequest {
+        command: ControlCommand::AxFind(request),
+        ..
+    }) = result
+    else {
+        panic!("应解析为 AxFind");
+    };
+    assert_eq!(request.query.role.as_deref(), Some("AXButton"));
+    assert_eq!(
+        request.window.as_ref().and_then(|w| w.app.as_deref()),
+        Some("Calculator")
+    );
+
+    // description: 前缀路由到 @ax-press 的按钮描述。
+    let result = parse_control_line(r#"@ax-press:app:Calculator,description:加"#).unwrap();
+    let ControlParseResult::Control(ControlRequest {
+        command: ControlCommand::AxPress(request),
+        ..
+    }) = result
+    else {
+        panic!("应解析为 AxPress");
+    };
+    assert_eq!(request.target.description.as_deref(), Some("加"));
+    assert_eq!(request.target.app.as_deref(), Some("Calculator"));
+}
+
+#[test]
+fn compact_should_accept_trailing_named_options() {
+    // 模型把对象选项追加到 compact 尾部: include_values/limit/depth/max_elements/mode。
+    let result = parse_control_line(
+        r#"@ax-find:app:Calculator,AXStaticText,include_values:true,limit:10"#,
+    )
+    .unwrap();
+    let ControlParseResult::Control(ControlRequest {
+        command: ControlCommand::AxFind(request),
+        ..
+    }) = result
+    else {
+        panic!("应解析为 AxFind");
+    };
+    assert_eq!(request.query.role.as_deref(), Some("AXStaticText"));
+    assert!(request.tree.include_values);
+    assert_eq!(request.limit, 10);
+
+    // depth / max_elements / mode 也生效。
+    let result = parse_control_line(
+        r#"@ax-find:app:Calculator,AXButton,depth:6,max_elements:100,mode:full"#,
+    )
+    .unwrap();
+    let ControlParseResult::Control(ControlRequest {
+        command: ControlCommand::AxFind(request),
+        ..
+    }) = result
+    else {
+        panic!("应解析为 AxFind");
+    };
+    assert_eq!(request.tree.depth, 6);
+    assert_eq!(request.tree.max_elements, 100);
+}
+
+#[test]
+fn compact_should_reject_unknown_prefix_with_prefix_list() {
+    // 未知前缀必须报错并列出合法前缀, 不能静默 0 匹配。
+    let err = parse_control_line(r#"@ax-find:app:Calculator,roll:AXButton"#)
+        .expect_err("unknown prefix must be rejected");
+    let msg = err.to_string();
+    assert!(msg.contains("未知字段前缀"), "error must mention prefix: {msg}");
+    assert!(msg.contains("role"), "error must list legal prefixes: {msg}");
+}
+
+#[test]
+fn compact_should_reject_conflicting_positional_and_named() {
+    // 位置字段与命名字段同时给同一槽位 -> 报错 (模型二选一)。
+    let err = parse_control_line(r#"@ax-find:app:Calculator,AXButton,role:AXStaticText"#)
+        .expect_err("conflicting role must be rejected");
+    assert!(
+        err.to_string().contains("冲突"),
+        "error must mention conflict: {err}"
+    );
+}
+
+#[test]
+fn object_syntax_should_accept_top_level_app() {
+    // 对象语法顶层 app 归一化为 window 选择器 (模型把 compact 思维带进对象)。
+    let result = parse_control_line(r#"@ax-find:{app:"Calculator",role:"AXStaticText"}"#).unwrap();
+    let ControlParseResult::Control(ControlRequest {
+        command: ControlCommand::AxFind(request),
+        ..
+    }) = result
+    else {
+        panic!("应解析为 AxFind");
+    };
+    assert_eq!(request.query.role.as_deref(), Some("AXStaticText"));
+    assert_eq!(
+        request.window.as_ref().and_then(|w| w.app.as_deref()),
+        Some("Calculator")
+    );
+
+    // @ax-press 对象语法顶层字段归一化到 target。
+    let result = parse_control_line(r#"@ax-press:{app:"Calculator",description:"加"}"#).unwrap();
+    let ControlParseResult::Control(ControlRequest {
+        command: ControlCommand::AxPress(request),
+        ..
+    }) = result
+    else {
+        panic!("应解析为 AxPress");
+    };
+    assert_eq!(request.target.app.as_deref(), Some("Calculator"));
+    assert_eq!(request.target.description.as_deref(), Some("加"));
+}
+
+#[test]
+fn guarded_press_should_accept_named_fields() {
+    // guarded press 5 字段支持命名写法, 与位置式等价。
+    let result = parse_control_line(
+        r#"@ax-press:app:Calculator,description:删除,role:AXStaticText,expected_value:0,max_attempts:3"#,
+    )
+    .unwrap();
+    let ControlParseResult::Control(ControlRequest {
+        command: ControlCommand::AxPress(request),
+        ..
+    }) = result
+    else {
+        panic!("应解析为 AxPress");
+    };
+    assert_eq!(request.target.description.as_deref(), Some("删除"));
+    let postcondition = request.postcondition.expect("guarded fields must set postcondition");
+    assert_eq!(postcondition.role, "AXStaticText");
+    assert_eq!(postcondition.expected_value, "0");
+    assert_eq!(postcondition.max_attempts, 3);
+}
+
+#[test]
+fn press_sequence_should_accept_named_description_fields() {
+    // @ax-press-sequence 支持 description: 前缀追加 (重复出现合法)。
+    let result = parse_control_line(
+        r#"@ax-press-sequence:app:Calculator,description:8,description:加,description:等于"#,
+    )
+    .unwrap();
+    let ControlParseResult::Control(ControlRequest {
+        command: ControlCommand::AxPressSequence(request),
+        ..
+    }) = result
+    else {
+        panic!("应解析为 AxPressSequence");
+    };
+    let descriptions = request
+        .targets
+        .iter()
+        .map(|target| target.description.as_deref().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(descriptions, ["8", "加", "等于"]);
+}
+
+#[test]
 fn parse_should_reject_unknown_or_empty_or_multiline_payloads_or_bad_request_ids() {
     assert!(parse_control_line(r#"@unknown:"x""#).is_err());
     assert!(parse_control_line(r#"@key:"""#).is_err());

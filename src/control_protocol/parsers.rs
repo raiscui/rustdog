@@ -71,6 +71,211 @@ pub(crate) fn parse_compact_atom(kind: &str, input: &str) -> io::Result<String> 
     Ok(value.to_owned())
 }
 
+/// compact 短格式的已知字段前缀(前缀路由模型)。
+///
+/// LLM 会把对象语法的字段名带进 compact 短格式, 例如
+/// `@ax-find:app:Safari,role:AXTextField` 或
+/// `@ax-find:app:Safari,AXStaticText,include_values:true,limit:10`。
+/// parser 按前缀把值路由到正确的字段槽位, 而不是把 `role:AXTextField`
+/// 当作字面角色名 (旧行为会静默 0 匹配, 模型无法自纠)。
+///
+/// 这是 rdog 兼容 LLM 多样化写法的核心机制 (AI-native 优先)。
+const KNOWN_COMPACT_PREFIXES: &[&str] = &[
+    "app",
+    "pid",
+    "role",
+    "description",
+    "value",
+    "name",
+    "include_values",
+    "limit",
+    "depth",
+    "max_elements",
+    "mode",
+    "expected_value",
+    "max_attempts",
+];
+
+/// 解析后的 compact 字段集合: 位置字段 + 命名字段(前缀路由)。
+///
+/// - `positional`: 无前缀的裸值, 按位置回退到各命令的槽位
+///   (第 1 个通常是窗口选择器, 第 2 个是主值)。
+/// - `named`: 带已知前缀的字段, 按名路由到对应槽位。
+///   保持出现顺序, 重复前缀由调用方检测报错。
+#[derive(Debug, Default)]
+pub(crate) struct ParsedCompactFields {
+    pub positional: Vec<String>,
+    pub named: Vec<(String, String)>,
+}
+
+/// 解析逗号分隔的 compact 字段列表, 识别已知前缀并拒绝未知前缀。
+pub(crate) fn parse_compact_fields(kind: &str, input: &str) -> io::Result<ParsedCompactFields> {
+    let mut fields = ParsedCompactFields::default();
+    // 单个尾部逗号兼容旧 parse_compact_ax_button_sequence 行为;
+    // 多个尾部逗号或中间空字段仍然报错。
+    let fields_input = input.strip_suffix(',').unwrap_or(input);
+    for raw in fields_input.split(',') {
+        let raw = raw.trim();
+        if raw.is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("{kind} 短格式字段不能为空: {input}"),
+            ));
+        }
+        match raw.split_once(':') {
+            Some((name, value)) if KNOWN_COMPACT_PREFIXES.contains(&name) => {
+                let value = parse_compact_atom(kind, value)?;
+                fields.named.push((name.to_owned(), value));
+            }
+            Some((name, _)) => {
+                if raw.contains("@window:") {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!(
+                            "{kind} 短格式不支持 `@window:` 后缀: {input}; 请用 `app:APP,ROLE` 或 `pid:PID/window:N,ROLE` 选择窗口"
+                        ),
+                    ));
+                }
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "{kind} 短格式未知字段前缀 `{name}:`; 支持的前缀: {}; 无前缀字段按位置解析: {input}",
+                        KNOWN_COMPACT_PREFIXES.join(" / ")
+                    ),
+                ));
+            }
+            None => {
+                let value = parse_compact_atom(kind, raw)?;
+                fields.positional.push(value);
+            }
+        }
+    }
+    Ok(fields)
+}
+
+impl ParsedCompactFields {
+    /// 按名取一个字段值; 重复出现报错 (模型二选一)。
+    pub(crate) fn take_named(&mut self, kind: &str, name: &str) -> io::Result<Option<String>> {
+        let mut found = None::<String>;
+        let mut duplicate = false;
+        self.named.retain(|(n, value)| {
+            if n == name {
+                if found.is_some() {
+                    duplicate = true;
+                }
+                found = Some(value.clone());
+                false
+            } else {
+                true
+            }
+        });
+        if duplicate {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("{kind} 短格式 `{name}:` 字段重复, 请只写一次"),
+            ));
+        }
+        Ok(found)
+    }
+
+    /// 按位置顺序取一个无前缀字段值。
+    pub(crate) fn take_positional(&mut self, kind: &str, what: &str) -> io::Result<Option<String>> {
+        if self.positional.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(self.positional.remove(0)))
+    }
+
+    /// 命名优先取字段; 命名与位置同槽位都提供时 -> 冲突报错。
+    ///
+    /// 注意不能写成 `take_named()?.or(take_positional()?)`:
+    /// `Option::or` 的参数是 eager 求值, 会静默消费位置字段,
+    /// 导致 `app:APP,AXButton,role:AXStaticText` 这类冲突被吞掉。
+    pub(crate) fn take_named_or_positional(
+        &mut self,
+        kind: &str,
+        name: &str,
+        slot: &str,
+    ) -> io::Result<Option<String>> {
+        match self.take_named(kind, name)? {
+            Some(named) => {
+                if self.take_positional(kind, slot)?.is_some() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!(
+                            "{kind} 短格式 `{slot}` 字段冲突: 位置字段与 `{name}:` 同时提供, 请只写一种"
+                        ),
+                    ));
+                }
+                Ok(Some(named))
+            }
+            None => self.take_positional(kind, slot),
+        }
+    }
+
+    /// 剩余未消费字段(位置或命名)统一报错, 提示字段放错位置。
+    pub(crate) fn ensure_empty(&self, kind: &str) -> io::Result<()> {
+        if !self.positional.is_empty() || !self.named.is_empty() {
+            let mut leftovers = self.positional.clone();
+            leftovers.extend(self.named.iter().map(|(n, v)| format!("{n}:{v}")));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("{kind} 短格式存在无法识别的多余字段: {}", leftovers.join(", ")),
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// 从 compact 字段中解析窗口选择器。
+///
+/// 支持三种来源(互斥, 重复报错):
+/// - 命名 `app:APP`
+/// - 命名 `pid:PID/window:INDEX`
+/// - 位置第 1 个无前缀字段 (兼容旧写法, 如 `pid:123/window:0,AXButton`)
+pub(crate) fn resolve_compact_selector(
+    kind: &str,
+    fields: &mut ParsedCompactFields,
+) -> io::Result<CompactWindowSelector> {
+    let named_app = fields.take_named(kind, "app")?;
+    let named_pid = fields.take_named(kind, "pid")?;
+    match (named_app, named_pid) {
+        (Some(app), None) => {
+            if app.is_empty() {
+                return Err(invalid_compact_window_id(kind, &format!("app:{app}")));
+            }
+            if !app.is_ascii() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "{kind} 短格式 app:APP 必须是 ASCII 名称(macOS Launch Services 不支持非 ASCII);received: {app};请改用 Launch Services 英文名称"
+                    ),
+                ));
+            }
+            Ok(CompactWindowSelector::App(app))
+        }
+        (None, Some(pid)) => {
+            let window_id = parse_compact_window_id(kind, &format!("pid:{pid}"))?;
+            Ok(CompactWindowSelector::WindowId(window_id))
+        }
+        (Some(_), Some(_)) => Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("{kind} 短格式窗口选择器冲突: `app:` 与 `pid:` 只能写一个"),
+        )),
+        (None, None) => {
+            // 无命名 selector 时, 位置第 1 个字段按旧语义尝试解析
+            // (如 `pid:123/window:0,AXButton` 的位置式写法)。
+            match fields.take_positional(kind, "window selector")? {
+                Some(selector) => parse_compact_window_selector(kind, &selector),
+                None => Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("{kind} 短格式缺少窗口选择器 (app:APP 或 pid:PID/window:INDEX)"),
+                )),
+            }
+        }
+    }
+}
+
 /// 短格式 AX 命令允许的窗口选择器.
 ///
 /// `WindowId` 保留现有 canonical identity 合同.`App` 只表达应用名,
@@ -79,68 +284,6 @@ pub(crate) fn parse_compact_atom(kind: &str, input: &str) -> io::Result<String> 
 pub(crate) enum CompactWindowSelector {
     WindowId(String),
     App(String),
-}
-
-/// 解析 `window_selector,value` 两字段短格式.
-pub(crate) fn parse_compact_window_pair(
-    kind: &str,
-    input: &str,
-) -> io::Result<(CompactWindowSelector, String)> {
-    let mut fields = input.split(',');
-    let selector = fields.next().unwrap_or_default();
-    let value = fields.next().ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("{kind} 短格式必须是 window_selector,value: {input}"),
-        )
-    })?;
-
-    if fields.next().is_some() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("{kind} 短格式只允许两个字段: {input}"),
-        ));
-    }
-
-    Ok((
-        parse_compact_window_selector(kind, selector)?,
-        parse_compact_atom(kind, value)?,
-    ))
-}
-
-/// 解析 `window_selector,button...` AXButton有序短格式.
-pub(crate) fn parse_compact_ax_button_sequence(
-    kind: &str,
-    input: &str,
-) -> io::Result<(CompactWindowSelector, Vec<String>)> {
-    let mut fields = input.split(',');
-    let selector = parse_compact_window_selector(kind, fields.next().unwrap_or_default())?;
-    let mut raw_values = fields.collect::<Vec<_>>();
-    if raw_values
-        .last()
-        .is_some_and(|value| value.trim().is_empty())
-    {
-        raw_values.pop();
-    }
-    let values = raw_values
-        .into_iter()
-        .map(|value| parse_compact_atom(kind, value))
-        .collect::<io::Result<Vec<_>>>()?;
-
-    if values.is_empty() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("{kind} 至少需要一个 value: {input}"),
-        ));
-    }
-    if values.len() > 32 {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("{kind} 最多允许 32 个 value"),
-        ));
-    }
-
-    Ok((selector, values))
 }
 
 pub(crate) fn parse_compact_window_selector(
