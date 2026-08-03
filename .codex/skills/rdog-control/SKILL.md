@@ -22,15 +22,10 @@ Use the local fast path when agent and daemon share one machine:
 ```bash
 rdog control @ping
 rdog control @ping @capabilities#1 @observe#2
-rdog control @help            # 运行时语法自文档化 (45 条命令)
-rdog control @help:key        # 单命令详情, 省 token
 ```
 
 Put `TARGET` after `control` only for a named or remote daemon. Permission and
 capability errors are final results.
-
-Unknown syntax? Run `@help` / `@help:<command>` first — the protocol documents
-its own syntax at runtime; do not guess formats.
 
 ## Native App Lane
 
@@ -44,56 +39,6 @@ rdog control @ax-find:app:APP,ROLE
 rdog control @ax-press:app:APP,DESCRIPTION
 rdog control @ax-press-sequence:app:APP,DESCRIPTION_1,DESCRIPTION_2
 ```
-
-**按钮/控件应用必须走 `@ax-press`(语义按钮), 不要用 `@key` 输入符号。**
-计算器、键盘驱动的工具栏、游戏等应用只响应真实按键事件, `@key` 的
-unicode 字符注入不会触发按钮。先 `@ax-find` 枚举按钮 description,
-再按 description 用 `@ax-press` / `@ax-press-sequence` 按下。
-`@key` 只用于: 任务明确要求的热键 (Cmd+T 新建标签) / 无 AX 语义的全局按键。
-清理旧内容、清除状态、确认按钮等一切可见控件操作都是 `@ax-press` 的职责,
-不要用 Esc / Delete / Cmd+A 等键盘快捷键代替按钮按压。
-
-按钮按压三步流程 (与 Text Input 的三步流程对称):
-1. `@ax-find` 枚举按钮 description (role 用 `AXButton` / `AXMenuItem`, 一次拿全列表)
-2. 按 description 用 `@ax-press` / `@ax-press-sequence` 按下目标按钮
-3. 独立 `@ax-find` 读结果角色 (常用 `AXStaticText`) 证明 GUI 已变化
-
-枚举之后必须立即执行按下 (步骤 2), 不要先去查语法或截图 ——
-`@ax-find` 返回的 description 就是 `@ax-press` 的输入。
-
-### Verify (动作后验证)
-
-动作类命令支持 `verify` 字段 (窗口命令用 `post_verify`):
-
-```bash
-rdog control '@ax-press:{target:{id:"pid:1/window:0/path:0"},verify:"best_effort"}'
-rdog control '@window-close:{target:{app:"TextEdit"},post_verify:"best_effort"}'
-```
-
-`best_effort` 返回 `verification:{method:"ax_diff",...}` 动作前后 AX diff。
-动作成功且 GUI 变化符合预期 = 完成; 不要重做动作来"验证"。
-Verify 是动作后的验证字段, 不是新的输入方式: 它跟在 `@ax-press` /
-`@ax-press-sequence` 这类按钮动作后面, 不改变"按钮应用用 @ax-press"
-的输入规则。
-
-### Text Input (文字输入)
-
-向文本框 / 文本区 / 地址栏输入文字时,默认使用 AXValue 直写,不依赖
-键盘模拟或剪贴板。`@type-text` 的 `ax-value` 模式直接设置目标控件的
-AXValue,不受输入法状态、macOS 自动大写句首、用户正在输入或焦点时序影响。
-
-```bash
-rdog control '@ax-find:{window:{window_id:"pid:123/window:0"},role:"AXTextArea",limit:5}'
-rdog control '@type-text:{target:{id:"pid:123/window:0/path:0.0"},text:"hello rdog 42",mode:"ax-value"}'
-rdog control '@ax-find:{window:{window_id:"pid:123/window:0"},role:"AXTextArea",include_values:true,limit:5}'
-```
-
-三步流程:先 `@ax-find` 拿到文本控件的 AX id → `@type-text` 以
-`mode:"ax-value"` 写入 → 再独立 `@ax-find` 读回 value 证明输入生效。
-
-`@type-text` 的 mode 优先级:`ax-value`(默认推荐) → `targeted-keyboard` →
-`clipboard`。`@paste` 走剪贴板,`@key` 只发按键,都不能替代可写控件的
-AXValue 直写。详细语法见 `references/protocol.md` 的 Text Input 小节。
 
 The 5-field `@ax-press:app:APP,DESCRIPTION,RESULT_ROLE,EXPECTED_VALUE,MAX_ATTEMPTS`
 form is intentionally not in this primary list. Read the GUARDED PRESS section
@@ -142,10 +87,8 @@ After a guarded press, regardless of `verified`, take a separate fresh
 `@ax-find` for the result role before issuing the next input step. The
 fresh read is the only proof the reset actually took effect.
 
-Use `@key` only for explicit shortcuts (Cmd+T, Esc) or when the target has no
-AX button to press. Prefer `@ax-press` / `@ax-press-sequence` for any visible
-button — @key unicode injection does not trigger button-driven apps.
-Use guarded screenshot coordinates only after semantic lookup fails.
+Use `@key` for an explicit shortcut request or when no semantic action can express
+the operation. Use guarded screenshot coordinates only after semantic lookup fails.
 
 ## Browser Lane
 
@@ -184,8 +127,8 @@ the change actually took effect on the relevant subtree.
 | Trigger (observable evidence) | First repair | Still failing |
 | --- | --- | --- |
 | `@window-find` matches 0 windows | Verify the app is open (`@open-app` first); check `app:APP` spelling — ASCII case-insensitive after v2.18, but Chinese names do not resolve | Take a `@screenshot` to confirm visual state; do not guess window state blind |
-| `@ax-find` returns 0 elements for a role | Verify role spelling; re-query the parent role (e.g. `AXWindow`) to find the right subtree first | Drop to `@ax-press` on a sibling button, or `@key` shortcut only if the target has no AX button at all |
-| `@ax-press` returns `performed:false` | Re-`@ax-find` for the role; the button may have been renamed, moved, or disabled | Switch to a sibling description first; `@key` only for explicit shortcuts, never to type symbols |
+| `@ax-find` returns 0 elements for a role | Verify role spelling; re-query the parent role (e.g. `AXWindow`) to find the right subtree first | Drop to `@key` keyboard shortcut if the role has no children |
+| `@ax-press` returns `performed:false` | Re-`@ax-find` for the role; the button may have been renamed, moved, or disabled | Switch to a sibling description or `@key` |
 | `@ax-press-sequence` stops mid-way | The failed step's `target_id` is in the response; re-query just that role and continue from the failing step | Restart the sequence from a known fresh state (`@ax-find` first) |
 | Fresh AX read returns a different value than expected | You may have read the wrong subtree; re-query with the correct value role (commonly `AXStaticText` or `AXValue`) | Use `@screenshot` for visual confirmation |
 | Window ownership is ambiguous (≥2 matching interactive windows) | Disambiguate via fresh `@window-find` and pass `pid:PID/window:INDEX` instead of `app:APP` | Stop; ask the user which window is the target |
@@ -210,9 +153,7 @@ None of these are valid tactics.
 | Retry the same `@ax-press` more than three times with the same description | If the description still does not resolve, the locator is wrong. Re-query the role or change lane; do not throw the same payload at the daemon. |
 | Pre-emptively press a clear / reset button on a fresh app | A reset before reading state is a protocol violation, not a safety measure. The fresh read tells you whether the app already starts at the target baseline. |
 | Use `@cmd` to compute math, parse JSON, or evaluate expressions | Shell math has nothing to do with the GUI task. `@cmd` is for legitimate system commands; bypassing semantic actions defeats all rdog-control evidence. |
-| 🔴 Use `@key` to type operator symbols into a button-driven app | Button-driven apps (keypad-style tools, toolbars, games) respond to real key events, not unicode injection. Operator symbols typed via `@key` are silently ignored by the app, producing wrong results. Press the operator button via `@ax-press` instead. |
-| 🔴 Use Esc / Delete / Cmd+A keyboard shortcuts to clear or reset app state | Clearing stale content, dismissing dialogs, or selecting all are visible control operations. They must be done with `@ax-press` on the actual button (e.g. a clear button). Keyboard shortcuts are not a substitute and will not be counted as performed button actions. |
-| Pass `app:备忘录`, `app:備忘錄`, or any non-ASCII app name | `@window-find` only resolves ASCII app names. Non-ASCII names return 0 matches and will never succeed. |
+| Pass `app:计算器`, `app:計算機`, or any non-ASCII app name | `@window-find` only resolves ASCII app names. Non-ASCII names return 0 matches and will never succeed. |
 | Mix `app:APP` with `pid:PID/window:INDEX`, `process:`, or `window_title:` in the same target | The target validator rejects the request. Pick exactly one ownership channel. |
 | Reuse `@eN` ref across daemon restarts or turn boundaries | Observation refs are short-lived. A ref that resolved in the previous turn may resolve to a different element today. Re-query via `@ax-find`. |
 | Skip the fresh read between consecutive `@ax-press` calls | Every press must prove `performed:true` AND that the press changed the visible state for the value role. Sequential presses without reads cannot tell which press had which effect. |

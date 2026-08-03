@@ -28,7 +28,6 @@ Bare shell lines do not have request ids.
 @cmd:"printf READY"
 @cmd#42:"printf READY"
 @script:"git status --short"
-@type-text#10:{target:{id:"pid:123/window:0/path:0.0"},text:"hello",mode:"ax-value"}
 @paste:"hello"
 @key:"F11"
 @key#7:{key:"right-control",hold_ms:200,mode:"press_release"}
@@ -52,9 +51,9 @@ Bare shell lines do not have request ids.
 @ax-get#21:{target:{ref:"@e2",observation_id:"obs-123"},depth:2,include_values:false}
 @ax-tree#22:{mode:"interactive"}
 @ax-press#23:{target:{ref:"@e2",observation_id:"obs-123"}}
-@ax-find:app:APP,ROLE
-@ax-press:app:APP,DESCRIPTION
-@ax-press-sequence:app:APP,DESCRIPTION_1,DESCRIPTION_2
+@ax-find:app:Calculator,AXStaticText
+@ax-press:app:Calculator,1
+@ax-press-sequence:app:Calculator,1,+,2,=,
 @selector-get#30:{selector_id:"sel-v1-29b3963a312473d5",include_history:true}
 @selector-resolve#31:{selector_id:"sel-v1-29b3963a312473d5",limit:10,dry_run:true,include_explanations:true}
 @selector-refind#32:{selector_id:"sel-v1-29b3963a312473d5",policy:"safe",min_confidence:0.9,include_explanations:true}
@@ -78,6 +77,9 @@ Bare shell lines do not have request ids.
 @web-act#41:{target:{browser:"active"},match:{text:"首页"},action:"press",verify:true}
 @web-act#401:{target:{window_id:"pid:96405/window:3"},match:{text:"首页"},action:"press",verify:true}
 @web-act#403:{target:{window_ref:"@e1",observation_id:"obs-123"},match:{text:"首页"},action:"press",verify:true}
+@gui-bench#42:{suite:"computer-use-density",case:"xhs-left-nav-home",variant:"baseline-low-level"}
+@gui-bench#43:{suite:"computer-use-density",case:"xhs-left-nav-home",variant:"all",write_artifact:true}
+@gui-bench#44:{suite:"computer-use-density",case:"xhs-left-nav-home",variant:"dense-web-act",runner:"live",allow_side_effects:true}
 @pty:"codex"
 @pty:{cmd:"codex",args:["resume","019e..."],cols:120,rows:40}
 @pty-close:{session_id:"..."}
@@ -145,6 +147,31 @@ It does not click, type, scroll, focus, activate, or move the mouse.
 `capability_policy:"cached"` is reserved for a future TTL cache and currently returns `BOOTSTRAP_CAPABILITY_CACHE_UNIMPLEMENTED`.
 All `@bootstrap` requests are Zenoh session-channel-only, including `mode:"basic"`.
 For older daemons, fall back to `@ping`, `@capabilities`, and `@observe` in one control session.
+
+`@gui-bench` returns a structured fixture-runner report:
+
+- `kind:"gui-bench"`
+- `schema:"rdog.gui-bench.v1"`
+- `runner:"fixture"`
+- `metrics`
+- `thresholds`
+- `checks`
+- `threshold_failures`
+- `steps_summary`
+- `runs`
+- `dense_target_passed`
+- optional `artifact`
+
+Phase 3B supports `suite:"computer-use-density"`, `case:"xhs-left-nav-home"`, and variants `baseline-low-level`, `dense-web-find`, `dense-web-act`, or `all`.
+It is read-only and does not touch the live GUI.
+For this baseline, `status:"complete"` with `dense_target_passed:false` is expected.
+It means the runner completed and the old low-level flow failed the density target.
+For `variant:"all"`, compare `runs[]`; top-level `metrics` is omitted because there is no single selected variant.
+`write_artifact:true` writes the same report under `target/rdog-bench/`; the default is false.
+Phase 3D adds live replay opt-in: `runner:"live"` must be paired with `allow_side_effects:true`.
+Live replay rejects `variant:"all"` and only replays one selected dense variant.
+For `dense-web-act`, `runs[].live_replay.performed` and `runs[].live_replay.verified` must be true before treating the replay as passing.
+The default remains `runner:"fixture"`, which never touches the live GUI.
 
 When stdin or stdout is not a real TTY, `rdog control` preserves raw protocol lines.
 This is the preferred mode for code agents.
@@ -403,44 +430,6 @@ All AX rectangles use `coordinate_space:"os-logical"`, same as the screenshot ma
 Compact `@ax-find` and `@ax-press` accept `app:APP,value` or `pid:PID/window:INDEX,value`. `app:APP` performs a fresh exact window query and proceeds only when one interactable window exists. `@ax-press` fixes the role to `AXButton` and treats `value` as its description.
 
 `@ax-press-sequence` accepts the same selector followed by 1 to 32 button descriptions. Each comma item is one button. Single-item arithmetic aliases `+`, `-`, `*`, `×`, `/`, `÷`, and `=` normalize to the current macOS AX descriptions; a numeric expression cannot be one item. One trailing comma is ignored, while interior empty items remain invalid. The command resolves `app:APP` once before the first side effect, binds every step to that `window_id`, preserves order, and stops at the first failure. Its response includes a compact `steps` timeline with `performed` on every attempted step and `failed_index` on failure. Run post-action `@ax-find` separately for fresh result evidence.
-
-### Text Input (文字输入)
-
-输入文字到可编辑控件(文本框 / 文本区 / 地址栏)时,优先使用 AXValue 直写,
-不要优先依赖键盘模拟或剪贴板。
-
-首选 —— `@type-text` 的 `ax-value` 模式(纯 AXValue 写入):
-
-```text
-@type-text#510:{target:{id:"pid:123/window:0/path:0.0"},text:"hello rdog 42",mode:"ax-value"}
-@response {"id":510,"value":{"kind":"type-text","backend":"macos-accessibility","target_id":"pid:123/window:0/path:0.0","mode":"ax-value","delivered_via":"ax-value","text":"hello rdog 42","performed":true,"status":"ok","used_clipboard":false}}
-```
-
-- `target.id` 来自对文本控件的 `@ax-find`(role 通常是 `AXTextArea` / `AXTextField` / `AXComboBox` / `AXStaticText` 等可写控件)。
-- `mode:"ax-value"` 直接设置 AXValue,不产生键盘事件、不使用剪贴板
-  (`used_clipboard:false`)。因此不受以下环境影响:
-  - 系统输入法 / 输入法切换状态
-  - macOS 自动大写句首、拼写改写等文本替换
-  - 用户正在进行的输入、焦点闪烁或快捷键干扰
-- 成功后必须再用一次独立 `@ax-find` 读回目标控件的 value,作为 fresh 验证。
-
-`@type-text` 的 mode 优先级(自上而下):
-
-| mode | 行为 | 何时用 |
-| --- | --- | --- |
-| `ax-value`(默认推荐) | AXValue 直写,零键盘/剪贴板副作用 | 一切可写 AX 控件,首选 |
-| `targeted-keyboard` | 定向到目标控件的键盘事件模拟 | AXValue 不可写时的备选 |
-| `clipboard` | 剪贴板粘贴 | 仅当 AX 与定向键盘都不支持 |
-| `auto` | daemon 自动选择 | 不显式指定时;需要 ax-value 语义时应显式写 `ax-value` |
-
-`@ax-set-value` 是同类 AXValue 直写命令,适合"覆盖整个值"或追加场景:
-
-```text
-@ax-set-value#511:{target:{id:"pid:123/window:0/path:0.0"},value:"hello",mode:"append"}
-```
-
-`@paste:"text"` 走剪贴板路径,`@key` 只发送按键(不能输入任意文本)。
-除非目标控件没有可写 AXValue,否则不要用它们替代 `@type-text ax-value`。
 
 For `@ax-focus` with `activate:true`, inspect the nested `activation` report. AX focus is not performed unless `activation.verify.status` is `passed`; activation failure returns `performed:false` and preserves the `WINDOW_*` error code.
 
