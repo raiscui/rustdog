@@ -1,6 +1,6 @@
 ---
 name: rdog-control
-version: "2.23-darwin-dim3+dim9+dim4"  # 2026-07-28:加 When to Defer + 视觉标记
+version: "2.24-darwin-dim3+dim9+dim4+clear-continue"  # 2026-08-03:清除旧状态后必须继续完成整个输入序列
 description: "Use for rdog control on a local or named machine: health, shell, GUI, browser, window, AX, PTY, flow, verification, and safety."
 ---
 
@@ -86,6 +86,12 @@ or unknown content.
 After a guarded press, regardless of `verified`, take a separate fresh
 `@ax-find` for the result role before issuing the next input step. The
 fresh read is the only proof the reset actually took effect.
+
+Clearing stale content is a step, never the end of a task: after the fresh
+read proves the clear took effect, continue with the remaining input steps
+and finish with the final confirm action. Do not stop after a reset, and do
+not use shortcut keys (for example Esc) to clear — use the app's semantic
+clear button and keep going until the full sequence is done.
 
 Use `@key` for an explicit shortcut request or when no semantic action can express
 the operation. Use guarded screenshot coordinates only after semantic lookup fails.
