@@ -571,3 +571,21 @@ deepseek 3/3(历史一致) | minimax 2/3 | qwen36 2/3 | qwen37 1/3(历史 2/3) |
 ### 结论
 - SKILL 流程强调对"清除后停止"类失败有效 (qwen36 收复)
 - 剩余失败多为模型验证习惯 (过度验证/单轮), 需模型侧或多轮取最优消化
+
+## [2026-08-03 21:15:00] [Session ID: omx-1785634372447-ezls0t] [记录类型]: macos-ops 第 3 轮 27/30
+
+### 发现并修复 2 个 SKILL/rdog 版本漂移问题
+1. SKILL 版本漂移: restore 分支丢 main 的 Text Input 小节 (b951b45) + Esc/Delete 规则 (de44c58) → macos-ops textedit 3 模型全挂
+   - 修复: v2.25 补回 (commit 207bcc7)
+2. rdog bug: 对象语法 @ax-find 默认 depth=2 (Interactive) 抓不到 Safari 地址栏 (depth 3) → safari 3 模型全挂
+   - 修复: 默认 mode Interactive -> Full (depth 4, commit cd070b3)
+
+### 第 3 轮结果 (27/30, 基线 26/30)
+- 5/5: deepseek, minimax, m27hs, qwen36 (safari 也过)
+- 4/5: qwen37 (safari 模型语法混乱)
+- 3/5: qwen-plus (safari 语法 + preview 随机)
+- textedit 6/6 全过恢复
+
+### 关键经验
+- restore 分支回滚会把 main 上的 SKILL 优化一起丢掉, 评测前必须核对 SKILL 版本
+- 对象语法 @ax-find 默认 depth 2 太浅, 常见控件在 depth 3; 与 compact (depth 8) 行为不一致是隐患
