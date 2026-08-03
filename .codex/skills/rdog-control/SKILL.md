@@ -1,6 +1,6 @@
 ---
 name: rdog-control
-version: "2.24-darwin-dim3+dim9+dim4+clear-continue"  # 2026-08-03:清除旧状态后必须继续完成整个输入序列
+version: "2.25-darwin-dim3+dim9+dim4+clear-continue+text-input"  # 2026-08-03:补回 Text Input 小节 + Esc/Delete 清除规则
 description: "Use for rdog control on a local or named machine: health, shell, GUI, browser, window, AX, PTY, flow, verification, and safety."
 ---
 
@@ -39,6 +39,25 @@ rdog control @ax-find:app:APP,ROLE
 rdog control @ax-press:app:APP,DESCRIPTION
 rdog control @ax-press-sequence:app:APP,DESCRIPTION_1,DESCRIPTION_2
 ```
+
+### Text Input (文字输入)
+
+向文本框 / 文本区 / 地址栏输入文字时,默认使用 AXValue 直写,不依赖
+键盘模拟或剪贴板。`@type-text` 的 `ax-value` 模式直接设置目标控件的
+AXValue,不受输入法状态、macOS 自动大写句首、用户正在输入或焦点时序影响。
+
+```bash
+rdog control '@ax-find:{window:{window_id:"pid:123/window:0"},role:"AXTextArea",limit:5}'
+rdog control '@type-text:{target:{id:"pid:123/window:0/path:0.0"},text:"hello rdog 42",mode:"ax-value"}'
+rdog control '@ax-find:{window:{window_id:"pid:123/window:0"},role:"AXTextArea",include_values:true,limit:5}'
+```
+
+三步流程:先 `@ax-find` 拿到文本控件的 AX id → `@type-text` 以
+`mode:"ax-value"` 写入 → 再独立 `@ax-find` 读回 value 证明输入生效。
+
+`@type-text` 的 mode 优先级:`ax-value`(默认推荐) → `targeted-keyboard` →
+`clipboard`。`@paste` 走剪贴板,`@key` 只发按键,都不能替代可写控件的
+AXValue 直写。详细语法见 `references/protocol.md` 的 Text Input 小节。
 
 The 5-field `@ax-press:app:APP,DESCRIPTION,RESULT_ROLE,EXPECTED_VALUE,MAX_ATTEMPTS`
 form is intentionally not in this primary list. Read the GUARDED PRESS section
@@ -94,7 +113,11 @@ not use shortcut keys (for example Esc) to clear — use the app's semantic
 clear button and keep going until the full sequence is done.
 
 Use `@key` for an explicit shortcut request or when no semantic action can express
-the operation. Use guarded screenshot coordinates only after semantic lookup fails.
+the operation. `@key` covers explicit hotkeys (Cmd+T new tab) and global keys with
+no AX semantics; clearing stale content, resetting state, and confirming buttons
+are `@ax-press` responsibilities — do not use Esc / Delete / Cmd+A keyboard
+shortcuts instead of pressing the actual button. Use guarded screenshot
+coordinates only after semantic lookup fails.
 
 ## Browser Lane
 
@@ -159,6 +182,7 @@ None of these are valid tactics.
 | Retry the same `@ax-press` more than three times with the same description | If the description still does not resolve, the locator is wrong. Re-query the role or change lane; do not throw the same payload at the daemon. |
 | Pre-emptively press a clear / reset button on a fresh app | A reset before reading state is a protocol violation, not a safety measure. The fresh read tells you whether the app already starts at the target baseline. |
 | Use `@cmd` to compute math, parse JSON, or evaluate expressions | Shell math has nothing to do with the GUI task. `@cmd` is for legitimate system commands; bypassing semantic actions defeats all rdog-control evidence. |
+| 🔴 Use Esc / Delete / Cmd+A keyboard shortcuts to clear or reset app state | Clearing stale content, dismissing dialogs, or selecting all are visible control operations. They must be done with `@ax-press` on the actual button (e.g. a clear button). Keyboard shortcuts are not a substitute and will not be counted as performed button actions. |
 | Pass `app:计算器`, `app:計算機`, or any non-ASCII app name | `@window-find` only resolves ASCII app names. Non-ASCII names return 0 matches and will never succeed. |
 | Mix `app:APP` with `pid:PID/window:INDEX`, `process:`, or `window_title:` in the same target | The target validator rejects the request. Pick exactly one ownership channel. |
 | Reuse `@eN` ref across daemon restarts or turn boundaries | Observation refs are short-lived. A ref that resolved in the previous turn may resolve to a different element today. Re-query via `@ax-find`. |
