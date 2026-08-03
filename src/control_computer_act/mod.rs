@@ -837,7 +837,7 @@ fn dispatch_underlying(
             prepare_mouse_move_request(&req)?,
             crate::control_mouse::build_mouse_move_plan,
         ),
-        ControlCommand::Key(req) => execute_key(&req, None),
+        ControlCommand::Key(req) => execute_key(&req, None, None),
         ControlCommand::Paste(req) => execute_paste(&req),
         ControlCommand::TypeText(req) => execute_type_text(&req),
         ControlCommand::Wait(req) => execute_wait(&req, cancel),

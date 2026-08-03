@@ -164,7 +164,11 @@ impl ControlActionExecutor for SystemControlActionExecutor {
     ) -> io::Result<ActionExecutionResult> {
         match command {
             ControlCommand::Key(request) => {
-                execute_key(request, self.key_input_event_sink.as_deref())
+                execute_key(
+                    request,
+                    self.key_input_event_sink.as_deref(),
+                    Some(self.key_delivery_backend),
+                )
             }
             ControlCommand::Cancel(request) => execute_cancel(request, &self.cancel_registry),
             ControlCommand::ComputerAct(request) => crate::control_computer_act::execute_computer_act(request, cancel),
@@ -536,6 +540,7 @@ pub(crate) fn shell_program_name(shell: &str) -> Option<String> {
 pub(crate) fn execute_key(
     request: &KeyRequest,
     key_input_event_sink: Option<&dyn KeyInputEventSink>,
+    delivery_backend: Option<crate::config::KeyDeliveryBackend>,
 ) -> io::Result<ActionExecutionResult> {
     if let Some(report) = perform_default_key_delivery(request)? {
         if let Some(key_input_event_sink) = key_input_event_sink {
@@ -547,6 +552,26 @@ pub(crate) fn execute_key(
             stderr: Vec::new(),
             response_value_json: Some(report.to_value_json()?),
         });
+    }
+
+    // 2026-08-03 (wayfinder #38): 配置为 ax_press 且是单字符按键时,
+    // 先尝试在当前聚焦窗口 AX 树中找匹配按钮并按它; 找不到匹配按钮时
+    // fallback 到 enigo 模拟按键 (历史行为)。
+    if matches!(
+        delivery_backend,
+        Some(crate::config::KeyDeliveryBackend::AxPress)
+    ) {
+        if let Some(report) = try_ax_press_single_char(request)? {
+            if let Some(key_input_event_sink) = key_input_event_sink {
+                key_input_event_sink.publish_key_event(request)?;
+            }
+            return Ok(ActionExecutionResult {
+                exit_code: 0,
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+                response_value_json: Some(report.to_value_json()?),
+            });
+        }
     }
 
     let mut result = execute_key_with_dependencies(
@@ -562,6 +587,150 @@ pub(crate) fn execute_key(
     result.response_value_json = structured_global_key_success_response(request)?;
 
     Ok(result)
+}
+
+/// 尝试用 AX press 执行一个单字符按键。
+///
+/// 2026-08-03 (wayfinder #38): 当 `@key` 配置为 ax_press 且按键是单字符
+/// (数字 / 运算符 / 字母, 无修饰键组合)时, 在当前前台应用 (frontmost app)
+/// 的 AX 树中查找 description/name 匹配该字符的 AXButton 并按它。
+///
+/// 返回 `Ok(None)` 表示没有匹配按钮或无法定位, 调用方应 fallback 到
+/// enigo 模拟按键; 返回 `Ok(Some(report))` 表示 AX press 成功。
+fn try_ax_press_single_char(
+    request: &KeyRequest,
+) -> io::Result<Option<crate::control_ax::KeyDeliveryReport>> {
+    // 仅处理 Global 送达的单字符按键; 快捷键/修饰键组合不适用 AX press。
+    if request.delivery != crate::control_protocol::KeyDelivery::Global {
+        return Ok(None);
+    }
+    if !is_single_char_key(&request.key) {
+        return Ok(None);
+    }
+
+    // 定位当前前台应用, 拿不到焦点时直接 fallback (不报错)。
+    let Ok(pid) = crate::control_window::frontmost_pid() else {
+        return Ok(None);
+    };
+
+    // 抓取前台应用的 AX 树 (含按钮 description/name)。
+    let snapshot = match crate::control_ax::platform_capture_current_window(
+        &format!("pid:{pid}/window:0"),
+        &crate::control_ax::AxTreeRequest {
+            depth: 8,
+            max_elements: 2000,
+            include_values: true,
+            ..crate::control_ax::AxTreeRequest::default()
+        },
+    ) {
+        Ok(snapshot) => snapshot,
+        Err(_) => return Ok(None),
+    };
+
+    // 在当前窗口 AX 树中匹配 AXButton 且 description/name == key。
+    let mut matched: Option<String> = None;
+    for window in &snapshot.windows {
+        find_button_matching_key(&window.elements, &request.key, &mut matched);
+        if matched.is_some() {
+            break;
+        }
+    }
+
+    let Some(element_id) = matched else {
+        return Ok(None);
+    };
+
+    // 找到匹配按钮, 用 AX press 按下。
+    let press_request = crate::control_ax::AxPressRequest {
+        target: crate::control_ax::AxTarget {
+            id: Some(element_id),
+            ..crate::control_ax::AxTarget::default()
+        },
+        postcondition: None,
+    };
+    let report = crate::control_ax::perform_default_ax_press(&press_request)?;
+    if !report.performed {
+        return Ok(None);
+    }
+
+    Ok(Some(crate::control_ax::KeyDeliveryReport::success(
+        "ax-press",
+        request,
+        Some(pid),
+        None,
+    )))
+}
+
+/// 判断按键是否为"单字符按键" (数字 / 字母 / 单个运算符字符)。
+///
+/// 排除修饰键组合 (Cmd+T, Shift+8 等含 `+` 的) 与命名键 (Esc, Return 等)。
+fn is_single_char_key(key: &str) -> bool {
+    let mut chars = key.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if chars.next().is_some() {
+        return false;
+    }
+    // 单字符 `+` 是加号键 (AX press 可匹配"加"按钮), 不是组合分隔符。
+    // 组合键 (Cmd+T 等) 长度 > 1 已在上面的多字符分支排除。
+    true
+}
+
+/// 在 AX 元素树中递归查找 description 或 name 等于按键字符的按钮。
+fn find_button_matching_key(
+    elements: &[crate::control_ax::AxElement],
+    key: &str,
+    matched: &mut Option<String>,
+) {
+    for element in elements {
+        if element.role == "AXButton" {
+            let desc_matches = element
+                .description
+                .as_deref()
+                .map(|value| button_text_matches_key(value, key))
+                .unwrap_or(false);
+            let name_matches = element
+                .name
+                .as_deref()
+                .map(|value| button_text_matches_key(value, key))
+                .unwrap_or(false);
+            if desc_matches || name_matches {
+                *matched = Some(element.id.clone());
+                return;
+            }
+        }
+        find_button_matching_key(&element.children, key, matched);
+        if matched.is_some() {
+            return;
+        }
+    }
+}
+
+/// 判断按钮文本是否匹配目标按键字符。
+///
+/// 数字 / 字母走精确匹配 (`5` 匹配 "5"); 单字符运算符额外做语义别名匹配,
+/// 因为本地化计算器 / 键盘类 App 的按钮描述可能是 "加" / "add" / "plus"
+/// 而不是字面 "+"。只覆盖常见中英文别名, 避免误匹配其他含义的按钮。
+fn button_text_matches_key(text: &str, key: &str) -> bool {
+    if text == key {
+        return true;
+    }
+    operator_alias_matches(text, key)
+}
+
+/// 单字符运算符的语义别名匹配 (中英文常见说法)。
+fn operator_alias_matches(text: &str, key: &str) -> bool {
+    match key {
+        "+" => matches!(text, "加" | "加号" | "add" | "plus"),
+        "-" => matches!(text, "减" | "减号" | "subtract" | "minus"),
+        "*" | "×" => matches!(text, "乘" | "乘号" | "multiply" | "times"),
+        "/" | "÷" => matches!(text, "除" | "除号" | "divide"),
+        "=" => matches!(text, "等于" | "等号" | "equals" | "equal"),
+        "." => matches!(text, "点" | "小数点" | "decimal" | "period"),
+        "%" => matches!(text, "百分比" | "percent" | "mod"),
+        _ => false,
+    }
 }
 
 fn structured_global_key_success_response(request: &KeyRequest) -> io::Result<Option<String>> {
@@ -1074,37 +1243,52 @@ enum KeyPlanStep {
 }
 
 fn parse_key_action(chord: &str) -> io::Result<KeyAction> {
+    // 主键可能是字面 `+` (`@key:"+"` / `@key:"Cmd++"`)。
+    // 此时 chord 以 `+` 结尾, 先把结尾的 `+` 切出来作为主键,
+    // 剩余部分只解析修饰符, 避免 `split('+')` 把纯 `+` 拆成空 token。
+    let (rest, literal_plus) = match chord.strip_suffix('+') {
+        Some(rest) => (rest, true),
+        None => (chord, false),
+    };
+
     let mut modifiers = Vec::new();
-    let mut tokens = chord
+    let mut tokens = rest
         .split('+')
         .map(str::trim)
         .filter(|part| !part.is_empty())
         .collect::<Vec<_>>();
 
-    let Some(key) = tokens.pop() else {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "@key payload 不能为空",
-        ));
-    };
-
-    for token in tokens {
-        modifiers.push(parse_modifier_key(token)?);
-    }
-
-    let main_key = parse_named_key(key).or_else(|| {
-        if key.chars().count() == 1 {
-            key.chars().next().map(Key::Unicode)
-        } else {
-            None
+    let main_key = if literal_plus {
+        // 字面 `+` 主键: 剩余 token 全部是修饰符 (`Cmd++` -> Cmd + `+`)
+        for token in tokens {
+            modifiers.push(parse_modifier_key(token)?);
         }
-    });
+        Key::Unicode('+')
+    } else {
+        let Some(key) = tokens.pop() else {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "@key payload 不能为空",
+            ));
+        };
 
-    let Some(main_key) = main_key else {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!("首版不支持的 @key 按键: {key}"),
-        ));
+        for token in tokens {
+            modifiers.push(parse_modifier_key(token)?);
+        }
+
+        parse_named_key(key).or_else(|| {
+            if key.chars().count() == 1 {
+                key.chars().next().map(Key::Unicode)
+            } else {
+                None
+            }
+        })
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("首版不支持的 @key 按键: {key}"),
+            )
+        })?
     };
 
     Ok(KeyAction {

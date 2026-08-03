@@ -1211,7 +1211,11 @@ fn read_window_activation_state(
     })
 }
 
-fn frontmost_pid() -> io::Result<i32> {
+/// 当前前台应用 (frontmost app) 的 pid。
+///
+/// 2026-08-03 (wayfinder #38): @key AX press backend 需要定位"当前聚焦窗口",
+/// 从 macOS NSWorkspace frontmostApplication 取 pid。
+pub(crate) fn frontmost_pid() -> io::Result<i32> {
     let output = run_jxa_script(
         "ObjC.import('AppKit');\
          var app = $.NSWorkspace.sharedWorkspace.frontmostApplication;\

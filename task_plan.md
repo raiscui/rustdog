@@ -397,3 +397,109 @@ handle_daemon_control_query (zenoh_control.rs:240)
 - 全bin 612 passed / 1 ignored,runtime 38 passed,unixpipe e2e 12 passed,router-client 26 passed / 2 ignored;check与release build为0 error.
 - 安装版和release hash一致,正式daemon PID 82774的bare/self/显式target ping均返回pong,重复daemon正确拒绝.
 - 详细记录:`task_plan__zenoh_runtime_split.md`、`notes__zenoh_runtime_split.md`、`WORKLOG__zenoh_runtime_split.md`、`ERRORFIX__zenoh_runtime_split.md`.
+
+## [2026-08-03 14:30:00] [Session ID: omx-1785584880574-cz5d0k] [记录类型]: 恢复到 16/18 状态完成
+
+### 恢复操作
+1. 备份: 8-03 协议改进已 stash(stash@{0}), 可随时恢复
+2. rustdog 代码恢复到 0502231(07-30 23:50, 可编译 + bare @key + SKILL v2.23 a8cdb9dc)
+   - 验证: e742419(07-31 release 3.1.0)编译失败(deda434 parser 搬迁引入 mod parsers 私有 bug)
+   - 0502231 是 deda434 之前最后一个可编译且 SKILL 匹配的 commit
+3. SKILL = v2.23(sha256 a8cdb9dc 与评测结果一致)
+4. 评测 runner 恢复到 a0ec662 + test-prompts 3 case
+5. 构建 + 重启 daemon + 全量 6 模型复跑
+
+### 恢复后基线: 12/18
+deepseek 3/3(历史一致) | minimax 2/3 | qwen36 2/3 | qwen37 1/3(历史 2/3) | qwen-plus 2/3(历史一致) | m27hs 2/3
+
+### 与历史 16/18 差距
+- 代码/SKILL/runner 已完全回到 16/18 时代
+- deepseek/qwen-plus 与历史完全一致
+- 剩余差异是模型 provider 行为波动(qwen37 历史即 2/3 随机)
+
+### 恢复点
+- 分支 restore-point-20260803-1300(commit 9f013c5)
+- 8-03 协议改进在 stash@{0}(rustdog) + stash@{0}(评测 runner)
+
+## [2026-08-03 15:00:00] [Session ID: omx-1785584880574-cz5d0k] [记录类型]: Wayfinder 地图 chart 完成
+
+### 地图
+- Map: https://github.com/raiscui/rustdog/issues/34
+  "Wayfinder: @key AX press backend(配置化, macOS 默认)"
+
+### Destination(grilling 5 问确认)
+- [key] delivery_backend 配置(daemon 侧全局): ax_press / simulated
+- macOS 默认 ax_press, Linux/Windows 默认 simulated
+- 单字符按键(数字/运算符/字母)走 AX press(焦点窗口 AX 树找匹配按钮), 找不到 fallback simulated
+- 快捷键/修饰键组合直接 simulated
+- 响应不新增字段: Legacy 裸 0 不变, backend 走 KeyDeliveryReport 既有字段
+- 在 0502231 工作区实施, 评测验证(目标回到 16/18)
+- 约束: @key 协议不改 / SKILL 不改 / 8-03 stash 保持
+
+### Tickets
+- #35 Research: @key 执行路径与 macOS AX press 能力盘点 (AFK)
+- #36 Grilling: [key] delivery_backend 配置语义 (HITL)
+- #37 Task: 配置加载与平台模板 (阻塞 #36)
+- #38 Task: execute_key 接入 AX press backend (阻塞 #35, #37)
+- #39 Task: 评测验证 6 模型复跑 (阻塞 #38)
+
+### Frontier(当前可取)
+#35 (research, AFK) 与 #36 (grilling, HITL) 均未阻塞
+
+### 状态
+**chart 完成** - 按 wayfinder 规则本 session 不 resolve, 等待用户选择 ticket
+
+## [2026-08-03 15:30:00] [Session ID: omx-1785584880574-cz5d0k] [记录类型]: Wayfinder #36 配置语义 grilling 完成
+
+### 决策记录(6 问全确认)
+1. 非法值: validate_daemon_config 报错拒绝启动
+2. 默认值: KeyConfig::default() 编译期平台默认(macOS=ax_press, 其他=simulated)
+3. 加载时机: 启动时加载, 注入 SystemControlActionExecutor.key_delivery_backend
+4. 单字符判定: 执行层按 request.key 判定(无 + 组合符 + 单字符), 不新增配置
+5. fallback: 静默 enigo + KeyDeliveryReport.backend 标注("ax-press"/"global-input-simulation"), Legacy 裸 0 不变
+6. 扩展: enum KeyDeliveryBackend { AxPress, Simulated } + snake_case
+
+### 下游影响
+- #37: DaemonConfig.key + KeyConfig + validate + 平台模板 + executor 注入
+- #38: 单字符判定 + frontmost_pid AX 定位 + backend 标注
+
+### Map 状态
+- 已关闭 #35, #36
+- frontier: #37(配置加载, 阻塞 #36 已解除)
+
+## [2026-08-03 16:00:00] [Session ID: omx-1785584880574-cz5d0k] [记录类型]: Wayfinder #37 配置加载实施完成
+
+### 实施内容
+- config.rs: KeyConfig { delivery_backend } + KeyDeliveryBackend enum(AxPress/Simulated, snake_case, default_for_platform cfg!(macos))
+- DaemonConfig 加 key 字段; validate_daemon_config 加 validate_key_config
+- rdog_macos.toml: [key] delivery_backend = "ax_press"; rdog_linux.toml: "simulated"
+- control_actions.rs: SystemControlActionExecutor 加 key_delivery_backend 字段 + with_key_delivery_backend + accessor
+- zenoh_control.rs: ZenohDaemonRuntimeConfig 加 key_delivery_backend; build_router_control_executor 注入
+- daemon.rs: 构造点传 config.key.delivery_backend
+
+### 验证
+- config 测试 36 过(新增 3 个: 平台默认/TOML 覆盖/非法值拒绝)
+- 全量 655 passed
+- daemon 启动正常, @key 协议行为不变(裸 0)
+- 非法配置拒绝启动: "unknown variant: found invalid-backend, expected ax_press or simulated"
+
+### 状态
+**#37 完成** - 等待关闭 ticket + 下一 frontier
+
+## [2026-08-03 16:45:00] [Session ID: omx-1785634372447-ezls0t] [记录类型]: Wayfinder #38 execute_key 接入 AX press 完成
+
+### 实施内容
+- control_window: frontmost_pid 改 pub(crate) + 非 macOS stub
+- control_actions: execute_key 加 delivery_backend 参数; try_ax_press_single_char(单字符 + Global delivery 才 AX 候选); find_button_matching_key(递归 AXButton description/name 匹配)
+- 修复 parse_key_action 字面 `+` 主键: split('+') 把纯 `+` 拆空导致 "@key payload 不能为空"; 新增 strip_suffix 字面加号处理(`+` / `Cmd++`)
+- 新增运算符语义别名匹配: 计算器按钮 AX description 是本地化文本(加/乘/除/等于/add/plus...), 单字符运算符按语义别名匹配按钮
+- computer_act: execute_key 签名适配(传 None, 不走 AX press)
+
+### 验证
+- 新增 4 测试(单字符判定/非单字符 fallback/字面+解析/语义别名匹配), 全量 660 passed
+- 端到端: @key:"6"+"+4"+"=" 全 backend:"ax-press" performed:true (target_pid 计算器)
+- 端到端: @key:"7"+"*"+"8"+"=" / "9"+"3"+"-"+"2"+"=" 全 ax-press
+- recording_e2e 5 失败为基线问题(record-start 协议未接入 restore 分支), 与 #38 无关
+
+### 状态
+**#38 完成** - 提交后关闭 ticket

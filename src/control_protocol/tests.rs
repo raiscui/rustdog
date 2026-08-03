@@ -1085,3 +1085,26 @@ fn parse_should_reject_unknown_or_empty_or_multiline_payloads_or_bad_request_ids
     assert!(parse_control_line(r#"@ax-get:{target:{}}"#).is_err());
     assert!(parse_control_line(r#"@ax-press:{target:{}}"#).is_err());
 }
+
+#[test]
+fn parse_should_handle_single_char_operator_keys() {
+    // 运算符单字符(+,*,/,=)是 AX press 的主要候选,必须能被 @key 解析
+    for (line, expected) in [
+        (r#"@key:"+""#, "+"),
+        (r#"@key:{key:"+"}"#, "+"),
+        (r#"@key:"*""#, "*"),
+        (r#"@key:"/""#, "/"),
+        (r#"@key:"=""#, "="),
+        (r#"@key:{key:"-"}"#, "-"),
+    ] {
+        let result = parse_control_line(line).unwrap();
+        let ControlParseResult::Control(ControlRequest {
+            command: ControlCommand::Key(request),
+            ..
+        }) = result
+        else {
+            panic!("@{line} 应解析为 Key 控制指令");
+        };
+        assert_eq!(request.key, expected, "line={line}");
+    }
+}

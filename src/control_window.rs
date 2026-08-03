@@ -1739,6 +1739,17 @@ fn platform_resolve_target_rect(
 #[cfg(target_os = "macos")]
 mod macos;
 
+#[cfg(target_os = "macos")]
+pub(crate) use self::macos::frontmost_pid;
+
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn frontmost_pid() -> io::Result<i32> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "frontmost pid 只支持 macOS (AX press backend 非 macOS 默认 simulated)",
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

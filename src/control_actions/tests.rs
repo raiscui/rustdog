@@ -306,6 +306,38 @@ fn execute_key_should_publish_event_after_successful_key_plan() {
 }
 
 #[test]
+fn is_single_char_key_should_accept_chars_and_reject_combos() {
+    // 单字符: 数字/字母/运算符 都是 AX press 候选。
+    assert!(is_single_char_key("1"));
+    assert!(is_single_char_key("a"));
+    assert!(is_single_char_key("+"));
+    assert!(is_single_char_key("*"));
+    assert!(is_single_char_key("/"));
+    assert!(is_single_char_key("="));
+
+    // 修饰键组合 / 命名键 / 空 不适用 AX press。
+    assert!(!is_single_char_key("Cmd+T"));
+    assert!(!is_single_char_key("Shift+8"));
+    assert!(!is_single_char_key("Esc"));
+    assert!(!is_single_char_key("Return"));
+    assert!(!is_single_char_key(""));
+}
+
+#[test]
+fn try_ax_press_single_char_should_fallback_when_not_single_char() {
+    // 快捷键/命名键不进入 AX press, 直接返回 None (fallback 到 enigo)。
+    let combo = KeyRequest::legacy("Cmd+T", 200, KeyMode::PressRelease);
+    assert!(try_ax_press_single_char(&combo)
+        .expect("fallback 不是错误")
+        .is_none());
+
+    let named = KeyRequest::legacy("Esc", 200, KeyMode::PressRelease);
+    assert!(try_ax_press_single_char(&named)
+        .expect("fallback 不是错误")
+        .is_none());
+}
+
+#[test]
 fn execute_key_should_not_publish_event_when_key_plan_fails() {
     let sink = RecordingKeyInputEventSink::default();
     let err = execute_key_with_dependencies(
@@ -495,6 +527,70 @@ fn parse_key_action_should_reject_unsupported_key_names() {
     let err = parse_key_action("ctrl+hyper").unwrap_err();
 
     assert!(err.to_string().contains("首版不支持的 @key 按键"));
+}
+
+#[test]
+fn parse_key_action_should_support_literal_plus_as_main_key() {
+    // 纯 `+` 是字面加号, 不能因为 split('+') 而被当作空和弦
+    let action = parse_key_action("+").unwrap();
+    assert_eq!(
+        action,
+        KeyAction {
+            modifiers: Vec::new(),
+            main_key: Key::Unicode('+'),
+        }
+    );
+
+    // `Cmd++` = Cmd 修饰 + 字面 `+` 主键
+    let action = parse_key_action("cmd++").unwrap();
+    assert_eq!(
+        action,
+        KeyAction {
+            modifiers: vec![Key::Meta],
+            main_key: Key::Unicode('+'),
+        }
+    );
+
+    // 常规和弦不受影响: Shift+= 仍是修饰键 + `=`
+    let action = parse_key_action("shift+=").unwrap();
+    assert_eq!(
+        action,
+        KeyAction {
+            modifiers: vec![Key::Shift],
+            main_key: Key::Unicode('='),
+        }
+    );
+}
+
+#[test]
+fn button_text_should_match_operator_semantic_aliases() {
+    // 数字/字母精确匹配
+    assert!(button_text_matches_key("5", "5"));
+    assert!(!button_text_matches_key("55", "5"));
+    assert!(!button_text_matches_key("5", "6"));
+
+    // 运算符与本地化按钮描述 (计算器) 的语义别名匹配
+    for (key, texts) in [
+        ("+", &["加", "加号", "add", "plus"][..]),
+        ("-", &["减", "减号", "subtract", "minus"][..]),
+        ("*", &["乘", "乘号", "multiply", "times"][..]),
+        ("/", &["除", "除号", "divide"][..]),
+        ("=", &["等于", "等号", "equals", "equal"][..]),
+        (".", &["点", "小数点", "decimal", "period"][..]),
+        ("%", &["百分比", "percent"][..]),
+    ] {
+        for text in texts {
+            assert!(
+                button_text_matches_key(text, key),
+                "{key} 应匹配按钮文本 {text}"
+            );
+        }
+    }
+
+    // 不相关的按钮文本不应误匹配
+    assert!(!button_text_matches_key("全部清除", "+"));
+    assert!(!button_text_matches_key("7", "+"));
+    assert!(!button_text_matches_key("更改正负号", "-"));
 }
 
 #[test]

@@ -917,3 +917,40 @@
 
 - 资源清理权限必须由资源自己的 canonical identity guard证明.
 - 支线详细证据和延期项见后缀 `local_default_registry_recovery` 的六文件上下文.
+
+## [2026-08-03 14:35:00] [Session ID: omx-1785584880574-cz5d0k] 任务: 恢复到 16/18 评测时状态
+
+### 任务内容
+- 用户要求恢复到 16/18 时的状态, 放弃 8-02/8-03 的协议改进与 SKILL 优化
+- 回滚 rustdog 代码 + SKILL + 评测 runner
+
+### 完成过程
+1. 定位 16/18 评测点: SKILL sha256 a8cdb9dc(v2.23), runner a0ec662(8-01 20:54)
+2. 发现 e742419(7-31 release 3.1.0)编译失败: deda434 把 ax parser 搬到
+   control_protocol/parsers/ax.rs 但 mod parsers 保持私有 -> 7-31 全天提交均坏
+3. 验证 0502231(07-30 23:50)为最后一个可编译 + bare @key + SKILL 匹配的 commit
+4. 恢复: rustdog -> 0502231, SKILL -> v2.23, runner -> a0ec662, test-prompts 3 case
+5. 全量复跑: 12/18(deepseek/qwen-plus 与历史一致, 其余差 1)
+
+### 总结感悟
+- 16/18 评测时的 rdog 二进制 = 0502231 构建(而非 e742419, 那个 commit 是坏的)
+- 恢复验证法: 先确认评测结果里的 SKILL sha, 再找匹配且可编译的 commit
+- 8-03 协议改进全部在 stash, 可随时恢复
+
+## [2026-08-03 16:45:00] [Session ID: omx-1785634372447-ezls0t] 任务名称: Wayfinder #38 execute_key 接入 AX press
+
+### 任务内容
+- 完成 #38: @key 配置为 ax_press 时, 单字符按键优先在当前前台窗口 AX 树找匹配按钮 AXPress
+- 修复 parse_key_action 对字面 `+` 主键的解析 bug (split('+') 拆空)
+- 新增运算符语义别名匹配 (计算器本地化按钮: 加/乘/除/等于/add/plus...)
+
+### 完成过程
+- 根因定位: 传输层 raw bytes 证明 `@key:"+"` 原样到达 daemon; parse 层单测通过; 最终定位到执行层 parse_key_action 的 split('+') 把纯 `+` 拆成空 token
+- 修复: strip_suffix('+') 切出字面主键, 剩余 token 全部当修饰符
+- 语义匹配: button_text_matches_key + operator_alias_matches (中英文别名, 克制覆盖)
+- 端到端验证: 6+4= / 7*8= / 9/3-2= 全 backend:"ax-press" performed:true
+
+### 总结感悟
+- @key:"+" 的"payload 不能为空"是执行层 bug 不是协议层: 协议解析成功, 执行层把 `+` 当和弦分隔符
+- 本地化 GUI 的 AX 按钮 description 是语义文本(加/Add), 精确字符匹配会 fallback 到 enigo; 语义别名匹配让 AX press 真正覆盖运算符
+- daemon 调试用 RDOG_LOG_LEVEL(不是 RUST_LOG); 起 daemon 用 tmux 持久, 路径务必用 $HOME 防拼写错误
