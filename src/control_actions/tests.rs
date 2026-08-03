@@ -20,12 +20,7 @@ struct FakeExecutor {
 }
 
 impl ControlActionExecutor for FakeExecutor {
-    fn execute(
-        &self,
-        command: &ControlCommand,
-        _shell: &str,
-        _cancel: Option<&crate::cancellation::CancellationToken>,
-    ) -> io::Result<ActionExecutionResult> {
+    fn execute(&self, command: &ControlCommand, _shell: &str, _cancel: Option<&crate::cancellation::CancellationToken>) -> io::Result<ActionExecutionResult> {
         self.calls
             .lock()
             .expect("fake executor lock should work")
@@ -94,7 +89,7 @@ fn execute_control_command_should_run_script_via_shell() {
     let executor = SystemControlActionExecutor::default();
     let (shell, script, expected_stdout) = script_test_case();
     let output = executor
-        .execute(&ControlCommand::Script(script.to_owned()), shell, None)
+        .execute(&ControlCommand::Script(script.to_owned()),shell, None)
         .unwrap();
 
     assert_eq!(output.exit_code, 0);
@@ -569,6 +564,7 @@ fn to_io_error_should_upgrade_macos_accessibility_failures_to_permission_denied(
     assert!(err.to_string().contains("重启该进程"));
 }
 
+
 // ============================================================================
 // Phase F-3.5: `@open-app` PermissionDenied / app_not_found / ok error envelope
 // 注入 mock (PermissionDenied live trigger 验证 trait 注入路径)
@@ -582,6 +578,8 @@ fn fake_exit_status(code: u8) -> std::process::ExitStatus {
     use std::os::unix::process::ExitStatusExt;
     std::process::ExitStatus::from_raw(i32::from(code) << 8)
 }
+
+
 
 /// Mock: 模拟 `Command::new("open")` 进程 spawn 失败 (PATH 缺失或不存在的 binary),
 /// 这是 daemon 真实环境触发 PermissionDenied 的路径。
@@ -607,8 +605,7 @@ impl OpenAppCommand for MockOpenAppAppNotFound {
             status,
             stdout: Vec::new(),
             stderr: b"Unable to find application
-"
-            .to_vec(),
+".to_vec(),
         })
     }
 }
@@ -763,6 +760,7 @@ fn execute_open_app_emits_ok_envelope_when_open_succeeds() {
     assert!(payload.get("evidence").is_none());
 }
 
+
 // ============================================================================
 // Phase F-3.5 follow-up: `@cancel#seq` self-target bug fix unit tests
 //
@@ -809,7 +807,10 @@ fn execute_cancel_emits_unknown_target_seq_when_target_not_in_registry() {
         payload.get("dispatched_to"),
         Some(&serde_json::json!("@cancel#seq"))
     );
-    assert_eq!(payload.get("target_seq"), Some(&serde_json::json!(999)));
+    assert_eq!(
+        payload.get("target_seq"),
+        Some(&serde_json::json!(999))
+    );
 
     // evidence 字段必须说明 registry state (设计区别于其它 error_code)
     let evidence = payload
@@ -835,8 +836,8 @@ fn execute_cancel_emits_ok_when_target_signal_succeeds() {
     let _token = registry.register(42);
 
     let request = CancelRequest { target_seq: 42 };
-    let result =
-        execute_cancel(&request, &registry).expect("executor itself should not error on success");
+    let result = execute_cancel(&request, &registry)
+        .expect("executor itself should not error on success");
 
     assert_eq!(result.exit_code, 0);
 

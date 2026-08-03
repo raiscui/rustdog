@@ -45,18 +45,23 @@ fn parse_should_reject_cancel_seq_with_negative_target_seq() {
 
 #[test]
 fn parse_should_reject_cancel_seq_with_non_numeric_target_seq() {
-    let err = parse_control_line("@cancel#seq#5:{target_seq:\"abc\"}").unwrap_err();
+    let err =
+        parse_control_line("@cancel#seq#5:{target_seq:\"abc\"}").unwrap_err();
     assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
 }
 
 #[test]
 fn parse_should_reject_cancel_seq_with_duplicate_target_seq_field() {
-    let err = parse_control_line("@cancel#seq#5:{target_seq:1,target_seq:2}").unwrap_err();
+    let err = parse_control_line(
+        "@cancel#seq#5:{target_seq:1,target_seq:2}",
+    )
+    .unwrap_err();
     assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
 }
 
 #[test]
 fn parse_should_reject_cancel_seq_with_unknown_field() {
-    let err = parse_control_line("@cancel#seq#5:{target_seq:1,foo:\"bar\"}").unwrap_err();
+    let err =
+        parse_control_line("@cancel#seq#5:{target_seq:1,foo:\"bar\"}").unwrap_err();
     assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
 }

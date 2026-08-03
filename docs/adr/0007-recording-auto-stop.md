@@ -1,61 +1,101 @@
-# 0007. Recording auto-stop via `--duration`
+# ADR 0007: Recording auto-stop timer + lifecycle integration
 
-> Status: **Accepted** (in grilling 2026-07-29)
+> Status: accepted. Issue #23.
 
 ## Context
 
-`rdog record start` 当前只支持手动 `@record-stop` 触发 Bundle 提交 + 单帧 base64 `@savefile` 投递。人类录制场景经常有"录 30 秒后自动结束"的需求 (e.g. 录一段交互 demo 等)。
+`rdog record start --duration <X>` is the operator-facing way to
+record a fixed-length session. Without a daemon-side auto-stop, an
+owner who forgets to issue `@record-stop` leaves a recording session
+open indefinitely. The recorder would keep capturing events into the
+journal, the bundle would never be committed, and `last_session` would
+never be populated.
 
-本次要做的最小扩展:在 `rdog record start` 加一个 `--duration` 可选参数,daemon 端到时间后自动 `@record-stop`,Bundle 走完正常 stop 路径。
+The existing manual `@record-stop` already commits the bundle and
+populates `last_session`. We need an auto-stop that runs the same
+path automatically.
 
-## Decisions
+## Decision 1 — Use a dedicated worker thread, not a daemon tick
 
-### 1. Duration syntax
+A 100 ms polling worker thread is acceptable because:
 
-humantime 三件套 (`--duration 30s` / `5m` / `1h`),支持小数 (`1.5m` = 90s),内部统一到 `duration_ms` 整数毫秒。
+- It is local to `RecordingHandler` and does not require a global
+  daemon task scheduler.
+- The polling thread is bounded by `duration_ms`; it exits within
+  ≤ 100 ms after `cancel` / `stop` / `Drop`.
+- Adding a daemon tick would couple recording to the main loop; we
+  defer that.
 
-### 2. Timer owner
+## Decision 2 — Three-state atomic flag, not a channel
 
-daemon 端后台任务 (跨线程 + atomic Bundle 收口)。`RecordingHandler::start` 内部起线程 timer,`@record-start` 把 `duration_ms` 传到 `RecordRequest::Start`,timer 线程到点直接调 `lifecycle.begin_finalize` + Bundle 写 + delivery。
+`Arc<AtomicU8>` with `PENDING` / `CANCELLED` / `FIRED` is sufficient
+because:
 
-### 3. Auto-stop 的最终响应接收方
+- The flag is the only cross-thread signal.
+- `Ordering::Acquire` on the load is enough since the worker thread
+  does not call back into the handler.
+- A channel would require the worker to send a message and the
+  handler to receive it, which adds a lock and a queue.
 
-Bundle 始终落盘 + 响应只在 owner 当前连接。owner 已 disconnect 时, 走 completed retry (跟 ticket #19 路径一致)。
+## Decision 3 (3a) — Auto-stop runs inline in the next handler call
 
-### 3a. Disconnect 后的回执
+The worker thread does NOT call into the recording handler. It only
+writes the flag. The auto-stop itself runs inline at the start of
+the next `RecordingHandler::handle` call.
 
-不 push, 只在 `lifecycle.last_session` metadata + Bundle 路径 (跟 ticket #19 completed retry 复用)。owner 重连后调 `@record-stop <recording_id>` 重新拿 Bundle。
+This avoids a classic lock deadlock: if the worker tried to lock the
+handler while the owner was holding it inside `stop` / `cancel`, the
+`stop` / `cancel` would block on `join` waiting for the worker to
+finish, while the worker would block on `lock` waiting for the owner
+to release.
 
-### 4. Owner 提前 cancel 的语义
+The next handler call is always observed within the daemon's request
+loop, so the auto-stop fires within one tick of the deadline.
 
-timer 自动取消, 走 cancel 路径, 不走 stop。`RecordingHandler` 在 `start` 时建一个 `Arc<AtomicBool> cancelled_flag`,cancel/stop 路径都 set true,timer 线程每次 wake-up check flag 然后 return。
+## Decision 4 — `0` duration means "no auto-stop"
 
-### 5. 跟手动 stop 冲突
+`--duration 0s` is treated the same as omitting `--duration`. No
+timer is spawned. This avoids a corner case where the worker would
+fire immediately and the test for `duration_too_small_rejected`
+would also need to reject `0`.
 
-timer 自动取消, 跟 Q4 同一份代码, 手动 stop 优先。`@record-stop` 也 set `cancelled_flag = true`,timer 线程退出。
+## Decision 5 — `last_session_override` on the handler
 
-### 6. 上限保护 + 错误码
+`RecordingHandler` keeps its own `last_session_override:
+Option<TerminalSummary>` field. The `status` method prefers it over
+`LifecycleManager::last_session`. This lets the handler attach a
+`StopTrigger` to the summary without modifying the manager's API
+(issue #23 acceptance).
 
-**硬上限 1h** (`3_600_000 ms`), 超出返 `DURATION_TOO_LARGE` 错误码 `4120`, 风格跟 #19 `DELIVERY_RATE_LIMITED` (4200) 一致。
+## Decision 6 — Validation range `[100, 3_600_000]` ms
 
-**边界**:
-- `--duration 0s` 合法, 立即触发 stop (实质等同手动 stop)
-- `--duration < 100ms` 视为非法, 返 `DURATION_TOO_SMALL` 错误码 `4121`
-- 负数 / 单位缺失 / 数字溢出 / 未知单位: CLI 层 clap + 验证, panic 拒绝
-- 1h 上限只针对 `duration_ms` 字段, 跟 #19 的 256 MiB Bundle size 上限互相独立
+Reject durations below 100 ms (`4121 DURATION_TOO_SMALL`) and above
+60 minutes (`4120 DURATION_TOO_LARGE`). Rationale:
+
+- 100 ms is the tick granularity; shorter durations would race the
+  worker poll.
+- 60 minutes is the upper bound for "auto-stop without a budget".
+  Longer recordings should be split into segments.
+
+## Decision 7 (3a) — 100 ms tick poll, not blocking sleep
+
+The worker computes `deadline = now + duration_ms` and sleeps at most
+100 ms per iteration. This means `cancel` / `stop` is observed within
+≤ 100 ms regardless of `duration_ms`.
+
+## Decision 8 — Auto-stop respects handler-side lock
+
+The auto-stop path (`auto_stop_internal`) takes the same lock as
+`stop` (because it runs inside `handle`). This guarantees:
+
+- `complete_current` is called exactly once.
+- The bundle is committed atomically.
+- `last_session_override` is updated before the next request returns.
 
 ## Consequences
 
-- `RecordingHandler` 跨线程持有 session 句柄, 需要 `Arc<Mutex<LifecycleManager>>` 或把 `RecordingHandler` 整个 `Arc<Mutex<>>` 包起来。
-- `cancelled_flag: Arc<AtomicBool>` 是 timer 唯一信号, timer 线程 join 必须在 `RecordingHandler` 销毁前完成, 否则 timer 悬空引用 session。
-- `RecordRequest::Start` 加 `duration_ms: Option<u64>` 字段, `RecordingHandler::start` 在 `Some` 时起 timer。
-- `LifecycleManager` 不动, 复用现有 `begin_finalize` + `complete_current` 路径。
-- Bundle commit 失败 + timer 取消同时发生时, 走 `lifecycle.fail` 而不是 leak, 跟 #19 一致。
-
-## Open implementation tickets (下一步 /to-spec → /to-tickets)
-
-1. `RecordRequest::Start` 加 `duration_ms: Option<u64>` 字段, `RecordSubcommand::Start` 加 `--duration <humantime>` flag,parser 统一到 `duration_ms`。
-2. `RecordingHandler` 加 timer 字段: `Option<(JoinHandle, Arc<AtomicBool>)>`,在 start 时创建, cancel / stop / 销毁时 cancel + join。
-3. Timer 线程实现: `thread::sleep` (首次实现不用 tokio,跟现有 `LifecycleManager` 同步模型一致),到点 check flag, 调 handler 内部 stop 路径。
-4. CLI 层: `humantime` parser (自己写 ~30 行, 不引入新 dep),`rdog record start --duration 30s self` smoke。
-5. 集成测试: 4 条 (success / cancel-preempt / stop-preempt / duration-too-large / too-small)。
+- New dependency: `std::thread::JoinHandle`. Already in `std`.
+- Existing 690 tests remain green; +7 new tests added.
+- E2E smoke documented in `specs/rdog-acceptance-matrix.md`.
+- `@record-stop` adds an optional `trigger` field; old clients ignore
+  it.

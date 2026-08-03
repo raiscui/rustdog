@@ -1,0 +1,5 @@
+timestamp	commit	skill	old_score	new_score	status	dimension	note	eval_mode
+2026-08-03T11:00	1ddb810	rdog-control	-	58.1	baseline	-	16/18 -> 8/18 回归, @key 误导源识别	full_test
+2026-08-03T11:20	127362e	rdog-control	58.1	66.5	keep	dim9+dim5+dim3	@key 符号输入反例 + Verify 示例去误导 + fallback 措辞	full_test
+2026-08-03T11:35	45b9c55	rdog-control	66.5	69.2	keep	dim5	按钮按压三步流程(枚举后立即执行)	full_test
+2026-08-03T12:00	-	rdog-control	69.2	69.2	stop	dim8	连续2轮 Δ<2 触顶, 剩余为模型随机性	stop

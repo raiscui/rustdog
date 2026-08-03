@@ -157,7 +157,6 @@ printf 'PLAIN_OK'
 - `ax-scroll`
 - `ax-action`
 - `ax-press`
-- `ax-press-sequence`
 - `ax-set-value`
 - `type-text`
 - `window-find`
@@ -542,11 +541,7 @@ Phase 1 返回 structured `@response`,不走 `@savefile`:
 ```text
 @ax-press#31:{target:{id:"pid:123/window:0/path:3.2"}}
 @ax-press#32:{target:{process:"System Information",window_title:"关于本机",role:"AXButton",description:"关闭按钮"}}
-@ax-press:app:Calculator,1
-@ax-press-sequence:app:Calculator,1,+,2,=,
 ```
-
-compact `app:APP` 必须通过 fresh exact window query 解析为唯一且可交互的 `window_id`. `@ax-press-sequence` 的每个逗号 item 只描述一个按钮;单 item 的 `+`, `-`, `*`, `×`, `/`, `÷`, `=` 会归一化为当前 macOS AX description,数字表达式不能作为一个 item.允许忽略一个尾随逗号,中间空 item 仍拒绝.命令在第一个 side effect 前只解析一次 app,随后所有步骤固定在该窗口内;最多 32 步,遇到首个失败立即停止,并在 response 的 `steps` timeline 中记录每个已尝试步骤的 `performed`.
 
 成功响应:
 

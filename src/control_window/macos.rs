@@ -1688,18 +1688,10 @@ fn resolve_window_ref(pid: i32, window_index: usize) -> io::Result<CfOwned> {
 
 fn list_running_apps() -> io::Result<Vec<RunningApp>> {
     let output = run_jxa_script(
-        "ObjC.import('AppKit');\
-         function bundleIdForPid(pid){\
-           try {\
-             var app = $.NSRunningApplication.runningApplicationWithProcessIdentifier(pid);\
-             return app ? (ObjC.unwrap(app.bundleIdentifier) || null) : null;\
-           } catch (_) { return null; }\
-         }\
-         var se = Application('System Events');\
+        "var se = Application('System Events');\
          var apps = se.applicationProcesses.whose({backgroundOnly:false})();\
          JSON.stringify(apps.map(function(p){\
-           var pid = p.unixId();\
-           return {pid:pid,name:p.name(),bundle_id:bundleIdForPid(pid),hidden:!p.visible(),frontmost:p.frontmost()};\
+           return {pid:p.unixId(),name:p.name(),hidden:!p.visible(),frontmost:p.frontmost()};\
          }));",
     )?;
     let values = serde_json::from_str::<Vec<serde_json::Value>>(&output).map_err(|err| {
@@ -1715,18 +1707,11 @@ fn list_running_apps() -> io::Result<Vec<RunningApp>> {
 
 fn running_app_for_pid(pid: i32) -> io::Result<Option<RunningApp>> {
     let script = format!(
-        "ObjC.import('AppKit');\
-         function bundleIdForPid(pid){{\
-           try {{\
-             var app = $.NSRunningApplication.runningApplicationWithProcessIdentifier(pid);\
-             return app ? (ObjC.unwrap(app.bundleIdentifier) || null) : null;\
-           }} catch (_) {{ return null; }}\
-         }}\
-         var se = Application('System Events');\
+        "var se = Application('System Events');\
          var matches = se.applicationProcesses.whose({{unixId:{pid}}})();\
          if (matches.length === 0) {{ '' }} else {{\
            var p = matches[0];\
-           JSON.stringify({{pid:p.unixId(),name:p.name(),bundle_id:bundleIdForPid(p.unixId()),hidden:!p.visible(),frontmost:p.frontmost()}});\
+           JSON.stringify({{pid:p.unixId(),name:p.name(),hidden:!p.visible(),frontmost:p.frontmost()}});\
          }}"
     );
     let output = run_jxa_script(&script)?;
@@ -1753,13 +1738,7 @@ fn running_app_from_value(value: &serde_json::Value, context: &str) -> io::Resul
             .and_then(serde_json::Value::as_str)
             .unwrap_or_default()
             .to_owned(),
-        // bundle id 已经和 app 列表一起返回。单个 app 读取失败时 JXA 写 null,
-        // 保留原先“bundle id 不可用但 window discovery 继续”的降级语义。
-        bundle_id: value
-            .get("bundle_id")
-            .and_then(serde_json::Value::as_str)
-            .filter(|bundle_id| !bundle_id.is_empty())
-            .map(str::to_owned),
+        bundle_id: bundle_id_for_pid(pid),
         hidden: value
             .get("hidden")
             .and_then(serde_json::Value::as_bool)
@@ -1769,6 +1748,18 @@ fn running_app_from_value(value: &serde_json::Value, context: &str) -> io::Resul
             .and_then(serde_json::Value::as_bool)
             .unwrap_or(false),
     })
+}
+
+fn bundle_id_for_pid(pid: i32) -> Option<String> {
+    let script = format!(
+        "ObjC.import('AppKit');\
+         var app = $.NSRunningApplication.runningApplicationWithProcessIdentifier({pid});\
+         if (!app) {{ '' }} else {{ ObjC.unwrap(app.bundleIdentifier) || '' }};"
+    );
+    run_jxa_script(&script)
+        .ok()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
 }
 
 fn visible_windows() -> io::Result<Vec<VisibleWindowInfo>> {
@@ -2182,37 +2173,6 @@ mod tests {
             observed_at_unix_ms: 42,
             display_scope: None,
             matches,
-        }
-    }
-
-    #[test]
-    fn running_app_should_use_batched_bundle_id() {
-        let value = serde_json::json!({
-            "pid": 42,
-            "name": "Fixture",
-            "bundle_id": "com.example.Fixture",
-            "hidden": false,
-            "frontmost": true,
-        });
-
-        let app = running_app_from_value(&value, "fixture").unwrap();
-
-        assert_eq!(app.pid, 42);
-        assert_eq!(app.bundle_id.as_deref(), Some("com.example.Fixture"));
-        assert!(app.frontmost);
-    }
-
-    #[test]
-    fn running_app_should_treat_missing_or_empty_bundle_id_as_unavailable() {
-        for bundle_id in [serde_json::Value::Null, serde_json::json!("")] {
-            let value = serde_json::json!({
-                "pid": 42,
-                "name": "Fixture",
-                "bundle_id": bundle_id,
-            });
-
-            let app = running_app_from_value(&value, "fixture").unwrap();
-            assert_eq!(app.bundle_id, None);
         }
     }
 

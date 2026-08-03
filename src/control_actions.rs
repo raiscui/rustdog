@@ -1,12 +1,10 @@
 use crate::{
-    cancellation::CancellationToken,
     control_ax::{
         build_ax_find_response_json, build_ax_get_response_json, capture_ax_find_snapshot,
         capture_default_ax_snapshot, perform_default_ax_action, perform_default_ax_focus,
-        perform_default_ax_press, perform_default_ax_press_sequence,
-        perform_default_ax_press_with_postcondition, perform_default_ax_scroll,
-        perform_default_ax_set_value, perform_default_key_delivery, perform_default_type_text,
-        window_activation_verified, AxFocusReport,
+        perform_default_ax_press, perform_default_ax_scroll, perform_default_ax_set_value,
+        perform_default_key_delivery, perform_default_type_text, window_activation_verified,
+        AxFocusReport,
     },
     // Phase F-1: 三个 error_envelope wrapper helper (Cancelled / PlatformUnsupported /
     // PermissionDenied), 让手写 JSON payload 跟其它 error_code 走同一 envelope 形状。
@@ -23,6 +21,7 @@ use crate::{
         PreparedMouseRequest,
     },
     control_observation::resolve_observation_ref,
+    cancellation::CancellationToken,
     control_protocol::{
         CancelRequest, ControlCommand, KeyMode, KeyRequest, KeyResponseMode, OpenAppRequest,
         PasteRequest, PasteRequestKind, WaitRequest, DEFAULT_KEY_HOLD_MS,
@@ -181,7 +180,6 @@ impl ControlActionExecutor for SystemControlActionExecutor {
             ControlCommand::AxScroll(request) => execute_ax_scroll(request),
             ControlCommand::AxAction(request) => execute_ax_action(request),
             ControlCommand::AxPress(request) => execute_ax_press(request),
-            ControlCommand::AxPressSequence(request) => execute_ax_press_sequence(request),
             ControlCommand::AxSetValue(request) => execute_ax_set_value(request),
             ControlCommand::TypeText(request) => execute_type_text(request),
             ControlCommand::WindowFind(request) => execute_window_find(request),
@@ -198,6 +196,10 @@ impl ControlActionExecutor for SystemControlActionExecutor {
             ControlCommand::Flow(_) => Err(io::Error::new(
                 io::ErrorKind::Unsupported,
                 "@flow 由 control_core 直接返回多 frame outcome,不应进入默认 executor 分支",
+            )),
+            ControlCommand::Record(_) => Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "@record-* 由 control_core 直接走 RecordingHandler,不应进入默认 executor 分支",
             )),
             ControlCommand::Capabilities => Err(io::Error::new(
                 io::ErrorKind::Unsupported,
@@ -779,22 +781,7 @@ fn execute_ax_get(request: &crate::control_ax::AxGetRequest) -> io::Result<Actio
 fn execute_ax_press(
     request: &crate::control_ax::AxPressRequest,
 ) -> io::Result<ActionExecutionResult> {
-    let response_value_json = match request.postcondition {
-        Some(_) => perform_default_ax_press_with_postcondition(request)?.to_value_json()?,
-        None => perform_default_ax_press(request)?.to_value_json()?,
-    };
-    Ok(ActionExecutionResult {
-        exit_code: 0,
-        stdout: Vec::new(),
-        stderr: Vec::new(),
-        response_value_json: Some(response_value_json),
-    })
-}
-
-fn execute_ax_press_sequence(
-    request: &crate::control_ax::AxPressSequenceRequest,
-) -> io::Result<ActionExecutionResult> {
-    let report = perform_default_ax_press_sequence(request);
+    let report = perform_default_ax_press(request)?;
     Ok(ActionExecutionResult {
         exit_code: 0,
         stdout: Vec::new(),

@@ -1,5 +1,7 @@
 use std::io;
 
+use crate::control_recording::control_handler::{with_recording_handler, RecordRequest};
+use crate::control_recording::session::ConnectionId;
 use crate::{
     control_actions::{build_shell_command, ControlActionExecutor},
     control_bootstrap::build_bootstrap_outcome,
@@ -31,6 +33,7 @@ pub fn execute_explicit_control_request<E: ControlActionExecutor>(
         ControlCommand::Ping => ControlExecutionOutcome::from_response_line(
             render_response_string(request.request_id, "pong"),
         ),
+        ControlCommand::Record(record_request) => handle_record_command(record_request, request.request_id),
         ControlCommand::PtyClose(pty_close) => {
             match crate::pty_control::close_active_pty_session(&pty_close.session_id) {
                 Ok(true) => ControlExecutionOutcome::from_response_line(
@@ -66,40 +69,71 @@ pub fn execute_explicit_control_request<E: ControlActionExecutor>(
             }
         }
         ControlCommand::Screenshot(screenshot_request) => {
-            outcome_or_error(request.request_id, || {
-                execute_screenshot_request(request.request_id, screenshot_request)
-            })
+            match execute_screenshot_request(request.request_id, screenshot_request) {
+                Ok(outcome) => outcome,
+                Err(err) => ControlExecutionOutcome::from_response_line(
+                    render_control_action_error_response(request.request_id, &err),
+                ),
+            }
         }
-        ControlCommand::Capabilities => {
-            structured_or_error(request.request_id, current_capabilities_report_json)
+        ControlCommand::Capabilities => match current_capabilities_report_json() {
+            Ok(report_json) => ControlExecutionOutcome::from_response_line(
+                render_structured_success_response(request.request_id, &report_json),
+            ),
+            Err(err) => ControlExecutionOutcome::from_response_line(
+                render_control_action_error_response(request.request_id, &err),
+            ),
         },
-        ControlCommand::Observe(observe_request) => outcome_or_error(
-            request.request_id,
-            || build_observe_outcome(request.request_id, observe_request),
-        ),
-        ControlCommand::Bootstrap(bootstrap_request) => outcome_or_error(
-            request.request_id,
-            || build_bootstrap_outcome(request.request_id, bootstrap_request),
-        ),
+        ControlCommand::Observe(observe_request) => {
+            match build_observe_outcome(request.request_id, observe_request) {
+                Ok(outcome) => outcome,
+                Err(err) => ControlExecutionOutcome::from_response_line(
+                    render_control_action_error_response(request.request_id, &err),
+                ),
+            }
+        }
+        ControlCommand::Bootstrap(bootstrap_request) => {
+            match build_bootstrap_outcome(request.request_id, bootstrap_request) {
+                Ok(outcome) => outcome,
+                Err(err) => ControlExecutionOutcome::from_response_line(
+                    render_control_action_error_response(request.request_id, &err),
+                ),
+            }
+        }
         ControlCommand::Flow(flow_request) => {
             execute_flow_request(request.request_id, flow_request, shell, |line| {
                 parse_and_execute_control_line(line, shell, executor, &cancel_registry)
             })
         }
         ControlCommand::SelectorGet(selector_request) => {
-            structured_or_error(request.request_id, || {
-                build_selector_get_response_json(selector_request)
-            })
+            match build_selector_get_response_json(selector_request) {
+                Ok(value_json) => ControlExecutionOutcome::from_response_line(
+                    render_structured_success_response(request.request_id, &value_json),
+                ),
+                Err(err) => ControlExecutionOutcome::from_response_line(
+                    render_control_action_error_response(request.request_id, &err),
+                ),
+            }
         }
         ControlCommand::SelectorResolve(selector_request) => {
-            structured_or_error(request.request_id, || {
-                build_selector_resolve_response_json(selector_request)
-            })
+            match build_selector_resolve_response_json(selector_request) {
+                Ok(value_json) => ControlExecutionOutcome::from_response_line(
+                    render_structured_success_response(request.request_id, &value_json),
+                ),
+                Err(err) => ControlExecutionOutcome::from_response_line(
+                    render_control_action_error_response(request.request_id, &err),
+                ),
+            }
         }
         ControlCommand::SelectorRefind(selector_request) => {
-            structured_or_error(request.request_id, || {
-                build_selector_refind_response_json(selector_request)
-            })
+            match build_selector_refind_response_json(selector_request) {
+                Ok(value_json) => ControlExecutionOutcome::from_response_line(
+                    render_structured_success_response(request.request_id, &value_json),
+                ),
+                Err(err) => ControlExecutionOutcome::from_response_line(
+                    render_control_action_error_response(request.request_id, &err),
+                ),
+            }
         }
         command => {
             // ADR-0005 ticket 03: in-flight 命令走 cancel registry。
@@ -116,7 +150,9 @@ pub fn execute_explicit_control_request<E: ControlActionExecutor>(
             let token = if is_cancel_command {
                 None
             } else {
-                request.request_id.map(|seq| cancel_registry.register(seq))
+                request
+                    .request_id
+                    .map(|seq| cancel_registry.register(seq))
             };
             let result = executor.execute(command, shell, token.as_ref());
             if !is_cancel_command {
@@ -332,36 +368,6 @@ fn render_response_error_object(request_id: Option<u64>, code: i32, error: &str)
     render_response_value(&value)
 }
 
-/// 包装 verb 模块返回的 `io::Result<ControlExecutionOutcome>`,
-/// 失败时统一转为 `render_control_action_error_response` 的 fallback。
-fn outcome_or_error<F>(request_id: Option<u64>, f: F) -> ControlExecutionOutcome
-where
-    F: FnOnce() -> io::Result<ControlExecutionOutcome>,
-{
-    match f() {
-        Ok(outcome) => outcome,
-        Err(err) => ControlExecutionOutcome::from_response_line(
-            render_control_action_error_response(request_id, &err),
-        ),
-    }
-}
-
-/// 包装 verb 模块返回的 `io::Result<String>` JSON 字符串,
-/// 成功时用 `render_structured_success_response` 包,失败时统一 fallback。
-fn structured_or_error<F>(request_id: Option<u64>, f: F) -> ControlExecutionOutcome
-where
-    F: FnOnce() -> io::Result<String>,
-{
-    match f() {
-        Ok(value_json) => ControlExecutionOutcome::from_response_line(
-            render_structured_success_response(request_id, &value_json),
-        ),
-        Err(err) => ControlExecutionOutcome::from_response_line(
-            render_control_action_error_response(request_id, &err),
-        ),
-    }
-}
-
 fn escape_json_string(input: &str) -> String {
     let mut escaped = String::with_capacity(input.len());
 
@@ -383,6 +389,22 @@ fn escape_json_string(input: &str) -> String {
     }
 
     escaped
+}
+
+
+/// `ControlCommand::Record` 不走默认 executor,直接派发到
+/// `RecordingHandler`(由 daemon 启动时 install)。未 install 时返回
+/// 结构化 4111 错误,而不是 panic,这样 control plane 测试可以走完。
+fn handle_record_command(request: &RecordRequest, request_id: Option<u64>) -> ControlExecutionOutcome {
+    let connection = ConnectionId(request_id.unwrap_or(0));
+    match with_recording_handler(|handler| handler.handle(request_id, connection, request.clone())) {
+        Some(outcome) => outcome,
+        None => ControlExecutionOutcome::from_response_line(render_protocol_error_response(
+            request_id,
+            4111,
+            &format!("{{\"schema\":\"{}\",\"error_code\":\"RECORDING_NOT_INITIALIZED\"}}", "rdog.record-control.v1"),
+        )),
+    }
 }
 
 #[cfg(test)]
@@ -538,13 +560,8 @@ mod tests {
         let executor = FakeExecutor::default();
         let recorded = Arc::clone(&executor.commands);
 
-        let response = parse_and_execute_control_line(
-            r#"@key#9:"F11""#,
-            "/bin/sh",
-            &executor,
-            &cancel_registry,
-        )
-        .into_single_response_line();
+        let response = parse_and_execute_control_line(r#"@key#9:"F11""#, "/bin/sh", &executor, &cancel_registry)
+            .into_single_response_line();
 
         assert_eq!(response, r#"@response {"id":9,"value":"EXEC_OK"}"#);
         assert_eq!(
@@ -566,13 +583,8 @@ mod tests {
         let executor = FakeExecutor::default();
         let recorded = Arc::clone(&executor.commands);
 
-        let response = parse_and_execute_control_line(
-            r#"@paste:"hello""#,
-            "/bin/sh",
-            &executor,
-            &cancel_registry,
-        )
-        .into_single_response_line();
+        let response = parse_and_execute_control_line(r#"@paste:"hello""#, "/bin/sh", &executor, &cancel_registry)
+            .into_single_response_line();
 
         assert_eq!(response, r#"@response "EXEC_OK""#);
         assert_eq!(
@@ -590,9 +602,8 @@ mod tests {
         let executor = FakeExecutor::default();
         let recorded = Arc::clone(&executor.commands);
 
-        let response =
-            parse_and_execute_control_line(r#"@paste#12"#, "/bin/sh", &executor, &cancel_registry)
-                .into_single_response_line();
+        let response = parse_and_execute_control_line(r#"@paste#12"#, "/bin/sh", &executor, &cancel_registry)
+            .into_single_response_line();
 
         assert_eq!(response, r#"@response {"id":12,"value":"EXEC_OK"}"#);
         assert_eq!(
@@ -612,13 +623,8 @@ mod tests {
         #[cfg(not(windows))]
         let (shell, command) = ("/bin/sh", "printf LITERAL_OK");
 
-        let response = parse_and_execute_control_line(
-            command,
-            shell,
-            &FakeExecutor::default(),
-            &cancel_registry,
-        )
-        .into_single_response_line();
+        let response = parse_and_execute_control_line(command, shell, &FakeExecutor::default(), &cancel_registry)
+            .into_single_response_line();
 
         assert!(
             response.contains("LITERAL_OK"),
@@ -632,9 +638,7 @@ mod tests {
         let response = parse_and_execute_control_line(
             r#"@key:"F11""#,
             "/bin/sh",
-            &FakePermissionDeniedExecutor,
-            &cancel_registry,
-        )
+            &FakePermissionDeniedExecutor, &cancel_registry)
         .into_single_response_line();
 
         assert!(response.contains(r#""code":77"#));
@@ -664,9 +668,7 @@ mod tests {
         let response = parse_and_execute_control_line(
             r#"@window-close:{app:"Terminal",title_contains:"rdog"}"#,
             "/bin/sh",
-            &StructuredInvalidInputExecutor,
-            &cancel_registry,
-        )
+            &StructuredInvalidInputExecutor, &cancel_registry)
         .into_single_response_line();
 
         assert_eq!(
@@ -694,13 +696,9 @@ mod tests {
             }
         }
 
-        let response = parse_and_execute_control_line(
-            r#"@key#17:"F11""#,
-            "/bin/sh",
-            &StructuredOtherExecutor,
-            &cancel_registry,
-        )
-        .into_single_response_line();
+        let response =
+            parse_and_execute_control_line(r#"@key#17:"F11""#, "/bin/sh", &StructuredOtherExecutor, &cancel_registry)
+                .into_single_response_line();
 
         assert_eq!(
             response,
@@ -808,15 +806,6 @@ mod tests {
                             r#"{"kind":"ax","action":"press","performed":true}"#.to_owned(),
                         ),
                     }),
-                    ControlCommand::AxPressSequence(_) => Ok(ActionExecutionResult {
-                        exit_code: 0,
-                        stdout: Vec::new(),
-                        stderr: Vec::new(),
-                        response_value_json: Some(
-                            r#"{"kind":"ax-press-sequence","performed":true,"step_count":2}"#
-                                .to_owned(),
-                        ),
-                    }),
                     ControlCommand::AxSetValue(_) => Ok(ActionExecutionResult {
                         exit_code: 0,
                         stdout: Vec::new(),
@@ -846,37 +835,27 @@ mod tests {
         let tree_response = parse_and_execute_control_line(
             r#"@ax-tree#9:{scope:"windows"}"#,
             "/bin/sh",
-            &StructuredAxExecutor,
-            &cancel_registry,
-        )
+            &StructuredAxExecutor, &cancel_registry)
         .into_single_response_line();
         let press_response = parse_and_execute_control_line(
             r#"@ax-press#10:{target:{id:"pid:1/window:0/path:0"}}"#,
             "/bin/sh",
-            &StructuredAxExecutor,
-            &cancel_registry,
-        )
+            &StructuredAxExecutor, &cancel_registry)
         .into_single_response_line();
         let action_response = parse_and_execute_control_line(
             r#"@ax-action#11:{target:{id:"pid:1/window:0/path:0"},action:"AXShowMenu"}"#,
             "/bin/sh",
-            &StructuredAxExecutor,
-            &cancel_registry,
-        )
+            &StructuredAxExecutor, &cancel_registry)
         .into_single_response_line();
         let set_value_response = parse_and_execute_control_line(
             r#"@ax-set-value#12:{target:{id:"pid:1/window:0/path:0"},value:"hello",mode:"append"}"#,
             "/bin/sh",
-            &StructuredAxExecutor,
-            &cancel_registry,
-        )
+            &StructuredAxExecutor, &cancel_registry)
         .into_single_response_line();
         let type_text_response = parse_and_execute_control_line(
             r#"@type-text#13:{target:{id:"pid:1/window:0/path:0"},text:"hello",mode:"ax-value"}"#,
             "/bin/sh",
-            &StructuredAxExecutor,
-            &cancel_registry,
-        )
+            &StructuredAxExecutor, &cancel_registry)
         .into_single_response_line();
 
         assert_eq!(
@@ -920,13 +899,9 @@ mod tests {
     #[test]
     fn explicit_request_should_render_capabilities_report() {
         let cancel_registry = crate::cancellation::CancelRegistry::new();
-        let response = parse_and_execute_control_line(
-            "@capabilities#12",
-            "/bin/sh",
-            &FakeExecutor::default(),
-            &cancel_registry,
-        )
-        .into_single_response_line();
+        let response =
+            parse_and_execute_control_line("@capabilities#12", "/bin/sh", &FakeExecutor::default(), &cancel_registry)
+                .into_single_response_line();
         let parsed: Value = serde_json::from_str(
             response
                 .strip_prefix("@response ")
@@ -1065,13 +1040,9 @@ mod tests {
     fn explicit_request_should_render_observe_without_action_executor() {
         let cancel_registry = crate::cancellation::CancelRegistry::new();
         let executor = FakeExecutor::default();
-        let response = parse_and_execute_control_line(
-            r#"@observe#77:{mode:"window"}"#,
-            "/bin/sh",
-            &executor,
-            &cancel_registry,
-        )
-        .into_single_response_line();
+        let response =
+            parse_and_execute_control_line(r#"@observe#77:{mode:"window"}"#, "/bin/sh", &executor, &cancel_registry)
+                .into_single_response_line();
         let parsed: Value = serde_json::from_str(
             response
                 .strip_prefix("@response ")
@@ -1095,9 +1066,8 @@ mod tests {
     fn explicit_request_should_render_basic_bootstrap_without_action_executor() {
         let cancel_registry = crate::cancellation::CancelRegistry::new();
         let executor = FakeExecutor::default();
-        let response =
-            parse_and_execute_control_line("@bootstrap#21", "/bin/sh", &executor, &cancel_registry)
-                .into_single_response_line();
+        let response = parse_and_execute_control_line("@bootstrap#21", "/bin/sh", &executor, &cancel_registry)
+            .into_single_response_line();
         let parsed: Value = serde_json::from_str(
             response
                 .strip_prefix("@response ")
@@ -1267,10 +1237,7 @@ mod tests {
 
         // 通过 executor.cancel_registry() 拿同一 Arc 再 signal
         let signaled = executor.cancel_registry().signal(7);
-        assert!(
-            signaled,
-            "executor.cancel_registry() 必须跟 registry_arc 是同一实例"
-        );
+        assert!(signaled, "executor.cancel_registry() 必须跟 registry_arc 是同一实例");
         assert!(token.is_cancelled());
     }
 }

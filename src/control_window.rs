@@ -1,5 +1,5 @@
 use crate::{
-    control_ax::{selector_rect_from_ax_rect, AxRect},
+    control_ax::AxRect,
     control_display_scope::{parse_display_scope, DisplayScope},
     control_observation::selector::{
         AppSelector, DurableSelectorDraft, SelectorEnvelope, SelectorKind, SelectorRect,
@@ -396,7 +396,7 @@ impl WindowQuery {
     }
 
     pub fn matches_candidate(&self, candidate: &WindowCandidate) -> bool {
-        matches_app_name(self.app.as_ref(), Some(candidate.app.name.as_str()))
+        matches_optional(self.app.as_ref(), Some(candidate.app.name.as_str()))
             && matches_contains(
                 self.app_contains.as_ref(),
                 Some(candidate.app.name.as_str()),
@@ -709,54 +709,6 @@ impl WindowBackend for SystemWindowBackend {
 
 pub fn execute_default_window_find(request: &WindowFindRequest) -> io::Result<WindowFindResponse> {
     SystemWindowBackend.find(request)
-}
-
-/// 从 fresh exact-app 查询中选择唯一且可交互的窗口.
-///
-/// `match_count` 是未受 limit 影响的总匹配数.因此即使 backend 只返回一项,
-/// 只要总数不是 1,也绝不能把第一项当成唯一窗口执行动作.
-pub fn select_unique_interactable_window_id(
-    app: &str,
-    match_count: usize,
-    matches: &[WindowCandidate],
-) -> io::Result<String> {
-    if match_count != 1 || matches.len() != 1 {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!("app selector `{app}` 需要唯一窗口,实际匹配 {match_count} 个"),
-        ));
-    }
-
-    let candidate = &matches[0];
-    let interactable = candidate
-        .state
-        .as_ref()
-        .map(|state| state.interactable)
-        .unwrap_or(false);
-    if !interactable {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!("app selector `{app}` 的唯一窗口当前不可交互"),
-        ));
-    }
-
-    Ok(candidate.window_id.clone())
-}
-
-/// 对应用名执行 fresh exact query,并返回唯一可交互窗口的 canonical ID.
-pub fn resolve_unique_app_window_id(app: &str) -> io::Result<String> {
-    let response = execute_default_window_find(&WindowFindRequest {
-        query: WindowQuery {
-            app: Some(app.to_owned()),
-            ..WindowQuery::default()
-        },
-        display_scope: None,
-        // 只需知道是否存在第二项.match_count 仍保留完整总数.
-        limit: 2,
-        include_state: true,
-        include_recipes: false,
-    })?;
-    select_unique_interactable_window_id(app, response.match_count, &response.matches)
 }
 
 pub fn execute_default_window_activate(
@@ -1210,6 +1162,15 @@ fn window_candidate_selector_draft(
     )
 }
 
+fn selector_rect_from_ax_rect(rect: AxRect) -> SelectorRect {
+    SelectorRect {
+        x: rect.x,
+        y: rect.y,
+        width: rect.width,
+        height: rect.height,
+    }
+}
+
 fn parse_window_target_payload(input: &str, kind: &str) -> io::Result<WindowCommandTarget> {
     let inner = object_inner(input, "window target")?;
     if inner.is_empty() {
@@ -1639,17 +1600,6 @@ fn matches_optional(expected: Option<&String>, actual: Option<&str>) -> bool {
     }
 }
 
-fn matches_app_name(expected: Option<&String>, actual: Option<&str>) -> bool {
-    match expected {
-        // macOS Launch Services的应用名解析不区分ASCII大小写。窗口查询保持
-        // 相同语义,但仍由上层唯一窗口门禁阻止模糊目标被执行。
-        Some(expected) => actual
-            .map(|actual| actual.eq_ignore_ascii_case(expected))
-            .unwrap_or(false),
-        None => true,
-    }
-}
-
 fn matches_contains(expected: Option<&String>, actual: Option<&str>) -> bool {
     match expected {
         Some(expected) => actual
@@ -1733,40 +1683,6 @@ mod macos;
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn window_query_app_should_match_ascii_case_without_relaxing_title() {
-        let candidate = WindowCandidate {
-            window_id: "pid:1/window:0".to_owned(),
-            ref_id: None,
-            locator_lifetime: "short_lived",
-            app: WindowAppDescriptor {
-                name: "Calculator".to_owned(),
-                pid: 1,
-                bundle_id: Some("com.apple.calculator".to_owned()),
-                hidden: false,
-                frontmost: true,
-            },
-            title: Some("Calculator".to_owned()),
-            rect: None,
-            coordinate_space: WINDOW_COORDINATE_SPACE,
-            state: None,
-            recipes: None,
-        };
-
-        let app_only = WindowQuery {
-            app: Some("calculator".to_owned()),
-            ..WindowQuery::default()
-        };
-        assert!(app_only.matches_candidate(&candidate));
-
-        let different_title_case = WindowQuery {
-            app: Some("calculator".to_owned()),
-            title: Some("calculator".to_owned()),
-            ..WindowQuery::default()
-        };
-        assert!(!different_title_case.matches_candidate(&candidate));
-    }
 
     #[test]
     fn parse_window_find_should_accept_common_query_fields() {
@@ -2079,60 +1995,5 @@ mod tests {
         assert!(json.contains("\"source_command\":\"@window-find\""));
         assert!(json.contains("\"selector_count\":1"));
         assert!(json.contains("\"ref\":\"@e1\""));
-    }
-
-    #[test]
-    fn unique_interactable_window_selector_should_fail_closed() {
-        let candidate = |window_id: &str, interactable: bool| WindowCandidate {
-            window_id: window_id.to_owned(),
-            ref_id: None,
-            locator_lifetime: "short_lived",
-            app: WindowAppDescriptor {
-                name: "TestApp".to_owned(),
-                pid: 123,
-                bundle_id: None,
-                hidden: false,
-                frontmost: true,
-            },
-            title: Some("Test Window".to_owned()),
-            rect: None,
-            coordinate_space: WINDOW_COORDINATE_SPACE,
-            state: Some(WindowState {
-                occluded: false,
-                minimized: false,
-                app_hidden: false,
-                current_space: true,
-                fullscreen_space: false,
-                interactable,
-                confidence: "best_effort".to_owned(),
-            }),
-            recipes: None,
-        };
-
-        assert_eq!(
-            select_unique_interactable_window_id(
-                "TestApp",
-                1,
-                &[candidate("pid:123/window:0", true)],
-            )
-            .unwrap(),
-            "pid:123/window:0"
-        );
-        assert!(select_unique_interactable_window_id("TestApp", 0, &[]).is_err());
-        assert!(select_unique_interactable_window_id(
-            "TestApp",
-            2,
-            &[
-                candidate("pid:123/window:0", true),
-                candidate("pid:123/window:1", true),
-            ],
-        )
-        .is_err());
-        assert!(select_unique_interactable_window_id(
-            "TestApp",
-            1,
-            &[candidate("pid:123/window:0", false)],
-        )
-        .is_err());
     }
 }

@@ -44,7 +44,9 @@ impl VerifyPolicy {
             "always" => Ok(Self::Always),
             other => Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                format!("@computer-act.verify 不支持: {other}; 必须是 none / best_effort / always"),
+                format!(
+                    "@computer-act.verify 不支持: {other}; 必须是 none / best_effort / always"
+                ),
             )),
         }
     }
@@ -125,7 +127,9 @@ impl AxDiffSummary {
 ///
 /// 任意一步 IO 失败不会 panic,而是 fallback 到 empty summary + `verify_unavailable` 标记。
 /// 这是为了不让 verify 错误污染 `ok:true` 的 dispatch 结果 (跟 dispatch 错误分离)。
-pub(crate) fn run_best_effort_verify(dispatch_ms: u64) -> AxDiffSummary {
+pub(crate) fn run_best_effort_verify(
+    dispatch_ms: u64,
+) -> AxDiffSummary {
     let verify_start = Instant::now();
 
     // pre-AX: 用默认 AxTreeRequest (Windows scope / depth / max_elements 默认值)
@@ -206,7 +210,9 @@ pub(crate) struct AlwaysVerifySummary {
 /// 6. 返回 `AlwaysVerifySummary`
 ///
 /// 任意一步失败 fallback 到 empty summary (verify 错误不污染 dispatch 结果)。
-pub(crate) fn run_always_verify(dispatch_ms: u64) -> AlwaysVerifySummary {
+pub(crate) fn run_always_verify(
+    dispatch_ms: u64,
+) -> AlwaysVerifySummary {
     use std::time::Instant;
     let verify_start = Instant::now();
 
@@ -492,17 +498,14 @@ mod tests {
     fn render_verification_none_returns_none() {
         // ticket 12 acceptance: None policy 不写 verification 字段。
         assert!(render_verification(VerifyPolicy::None, None, None).is_none());
-        assert!(
-            render_verification(VerifyPolicy::None, Some(&AxDiffSummary::empty(0, 0)), None)
-                .is_none()
-        );
+        assert!(render_verification(VerifyPolicy::None, Some(&AxDiffSummary::empty(0, 0)), None).is_none());
     }
 
     #[test]
     fn render_verification_best_effort_emits_method_and_summary() {
         let summary = AxDiffSummary::empty(100, 30);
-        let rendered = render_verification(VerifyPolicy::BestEffort, Some(&summary), None)
-            .expect("must produce value");
+        let rendered =
+            render_verification(VerifyPolicy::BestEffort, Some(&summary), None).expect("must produce value");
         assert_eq!(rendered["method"], "ax_diff");
         assert_eq!(rendered["ax_diff"]["windows_added"], 0);
         assert_eq!(rendered["ax_diff"]["elements_added"], 0);
@@ -585,12 +588,7 @@ mod tests {
     fn render_verification_always_without_summary_returns_none() {
         // 防御:caller 漏传 always_summary 时不要 panic
         assert!(render_verification(VerifyPolicy::Always, None, None).is_none());
-        assert!(render_verification(
-            VerifyPolicy::Always,
-            Some(&AxDiffSummary::empty(0, 0)),
-            None
-        )
-        .is_none());
+        assert!(render_verification(VerifyPolicy::Always, Some(&AxDiffSummary::empty(0, 0)), None).is_none());
     }
 
     #[test]

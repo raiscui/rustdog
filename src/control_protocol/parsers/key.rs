@@ -20,15 +20,9 @@ pub(crate) fn parse_key_payload(input: &str) -> io::Result<KeyRequest> {
         return parse_key_object_payload(trimmed);
     }
 
-    // 为shell/小模型提供不需要嵌套引号的紧凑语法,例如`@key:Cmd+T`。
-    // 含空白的复杂key名称继续要求quoted/object语法,避免payload边界歧义。
-    if !trimmed.is_empty() && !trimmed.chars().any(char::is_whitespace) {
-        return default_key_request(trimmed.to_owned());
-    }
-
     Err(io::Error::new(
         io::ErrorKind::InvalidData,
-        format!("控制指令 payload 必须是紧凑key、字符串或对象: {input}"),
+        format!("控制指令 payload 必须是字符串或对象: {input}"),
     ))
 }
 

@@ -1,6 +1,9 @@
 use crate::{
     config::{DaemonConfig, EndpointMode, InboundConfig, OutboundConfig},
     control_observation::initialize_durable_observation_state,
+    control_recording::control_handler::{
+        install_recording_handler, RecordingHandler,
+    },
     control_transport::ControlTransportKind,
     shell::{self, ShellMode},
 };
@@ -20,6 +23,7 @@ const ACCEPT_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
 /// 启动 daemon 模式并监督所有启用的 worker。
 pub fn run(config: DaemonConfig) -> io::Result<()> {
+    install_recording_stack();
     let retry_interval = config.retry_interval();
     let observation_daemon_name = tcp_observation_daemon_name(&config);
     initialize_durable_observation_state(&config.observation, None, &observation_daemon_name)?;
@@ -57,6 +61,7 @@ pub fn run_zenoh_router(
     daemon_name_override: Option<String>,
     entry_point_override: Vec<String>,
 ) -> io::Result<()> {
+    install_recording_stack();
     if let Some(daemon_name) = daemon_name_override {
         config.zenoh.daemon_name = Some(daemon_name);
     }
@@ -589,4 +594,30 @@ mod tests {
 
         panic!("condition was not satisfied before timeout");
     }
+}
+
+/// Install the global `RecordingHandler` so the daemon can accept
+/// `@record-*` line-control commands. Idempotent: only the first call
+/// takes effect; subsequent calls are no-ops. Per issue #23 E2E smoke.
+fn install_recording_stack() {
+    let journal = default_recording_dir("journal");
+    let bundle = default_recording_dir("bundle");
+    let _ = std::fs::create_dir_all(&journal);
+    let _ = std::fs::create_dir_all(&bundle);
+    let handler = RecordingHandler::new(journal, bundle);
+    let _ = install_recording_handler(handler);
+}
+
+fn default_recording_dir(sub: &str) -> std::path::PathBuf {
+    // Per XDG / macOS conventions; override via `RDOG__RECORDING__DIR`
+    // (not yet implemented) if a deployment needs a different path.
+    let base = std::env::var_os("RDOG_RECORDING_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| {
+            std::env::var_os("HOME")
+                .map(std::path::PathBuf::from)
+                .map(|p| p.join(".cache").join("rdog").join("recording"))
+                .unwrap_or_else(|| std::path::PathBuf::from("/tmp/rdog-recording"))
+        });
+    base.join(sub)
 }

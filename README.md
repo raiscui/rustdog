@@ -247,7 +247,7 @@ The usual shape is:
 | Screenshot | `@screenshot#7` | image `@savefile` + manifest `@savefile` + `@response ...screenshot-bundle...` | Remote visual evidence |
 | Selector inspect / re-find | `@selector-get#20:{selector_id:"sel-v1-..."}` / `@selector-refind#21:{selector_id:"sel-v1-...",policy:"safe"}` | structured selector `@response` | Recover from stale refs without reviving old `@eN` refs |
 | Save file | `@savefile:{...}` | local file in `./rdog_downloads/` | Transfer generated artifacts |
-| Key input | `@key:F11` or `@key:{key:"F11",...}` | `@response 0` or permission error | GUI shortcut / desktop control |
+| Key input | `@key:"F11"` | `@response 0` or permission error | GUI shortcut / desktop control |
 | Paste text | `@paste:"hello"` | `@response 0` or permission error | Text injection into focused UI |
 | Mouse move | `@mouse-move#8:{target:{ref:"@e9",observation_id:"obs-..."}}` or `{x:1200,y:540}` | structured mouse `@response` or permission error | Move by latest observation ref; raw coordinates are fallback |
 | Mouse button | `@mouse-button#9:{button:"left",mode:"press"}` | structured mouse `@response` or permission error | Press, release, or click a mouse button |
@@ -274,7 +274,6 @@ Important behavior:
 - `@observe` with `scope.display` emits a real `single-display` visual bundle. Its manifest keeps global `os_rect` coordinates and uses a zero-origin `image_rect`.
 - `@window-activate` accepts `guard.display` and verifies fresh `frontmost` / focused-window state before returning `status:"ok"`.
 - `@ax-find.window` accepts a direct window id or observation window ref and captures only that AXWindow subtree before querying.
-- Compact AX selectors accept a unique interactable `app:APP` or canonical `pid:PID/window:INDEX`; `@ax-press-sequence` binds all ordered button presses to that window, accepts single-item arithmetic aliases, and stops on the first failure.
 - `@observe mode:"hybrid"` does not merge all refs into one namespace. Use each `refs.sample[]` item with its own `section`, `observation_id`, and `ref`.
 - Short refs such as `@e4` are observation-scoped. A stale or expired ref must be recovered by re-observing or by `@selector-get -> @selector-refind -> verify_hint`; never treat the old short ref as revived.
 - Mouse is a fallback lane. Prefer semantic AX/window commands first, then observation refs such as `target:{ref:"@e4",observation_id:"obs-..."}`, then raw coordinates.

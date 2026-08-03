@@ -51,9 +51,6 @@ Bare shell lines do not have request ids.
 @ax-get#21:{target:{ref:"@e2",observation_id:"obs-123"},depth:2,include_values:false}
 @ax-tree#22:{mode:"interactive"}
 @ax-press#23:{target:{ref:"@e2",observation_id:"obs-123"}}
-@ax-find:app:Calculator,AXStaticText
-@ax-press:app:Calculator,1
-@ax-press-sequence:app:Calculator,1,+,2,=,
 @selector-get#30:{selector_id:"sel-v1-29b3963a312473d5",include_history:true}
 @selector-resolve#31:{selector_id:"sel-v1-29b3963a312473d5",limit:10,dry_run:true,include_explanations:true}
 @selector-refind#32:{selector_id:"sel-v1-29b3963a312473d5",policy:"safe",min_confidence:0.9,include_explanations:true}
@@ -427,10 +424,6 @@ Use `mode` on AX-only commands such as `@ax-tree`, `@ax-find`, and `@ax-get`.
 All AX rectangles use `coordinate_space:"os-logical"`, same as the screenshot manifest.
 `@ax-find.window` is optional. When present, it accepts either `window_id` or `ref + observation_id` and captures only that AXWindow subtree before applying display scope and query filters.
 
-Compact `@ax-find` and `@ax-press` accept `app:APP,value` or `pid:PID/window:INDEX,value`. `app:APP` performs a fresh exact window query and proceeds only when one interactable window exists. `@ax-press` fixes the role to `AXButton` and treats `value` as its description.
-
-`@ax-press-sequence` accepts the same selector followed by 1 to 32 button descriptions. Each comma item is one button. Single-item arithmetic aliases `+`, `-`, `*`, `×`, `/`, `÷`, and `=` normalize to the current macOS AX descriptions; a numeric expression cannot be one item. One trailing comma is ignored, while interior empty items remain invalid. The command resolves `app:APP` once before the first side effect, binds every step to that `window_id`, preserves order, and stops at the first failure. Its response includes a compact `steps` timeline with `performed` on every attempted step and `failed_index` on failure. Run post-action `@ax-find` separately for fresh result evidence.
-
 For `@ax-focus` with `activate:true`, inspect the nested `activation` report. AX focus is not performed unless `activation.verify.status` is `passed`; activation failure returns `performed:false` and preserves the `WINDOW_*` error code.
 
 AX permission failure uses the same first-class error style:
@@ -566,11 +559,9 @@ During PTY streaming, input bytes are transparent:
 - Inside a `@pty` session, `@key` and `@script` are streamed as remote stdin text
   (the bytes go to the running program, not to the local OS).
 - Outside a `@pty` session, `@key` is a **local** control action that supports key
-  chords via `+` syntax, e.g. `@key:Cmd+R` triggers a Cmd+R keystroke on the
+  chords via `+` syntax, e.g. `@key:"Cmd+R"` triggers a Cmd+R keystroke on the
   local machine. See the "Local Key Chords" section in `SKILL.md` for the
   full modifier / main-key grammar and examples.
-- Compact bare payloads accept non-empty key names without whitespace. Quoted string
-  and object payloads remain supported; use them for whitespace or delivery options.
 - `~.` is not intercepted
 - `Ctrl-C` and `Ctrl-D` go to the remote PTY program
 

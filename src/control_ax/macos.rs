@@ -778,13 +778,12 @@ fn build_element(
 }
 
 fn resolve_live_target_id(target: &AxTarget) -> io::Result<String> {
-    let target = materialize_app_window_target(target)?;
     // -------------------------------------------------------------------------
     // 显式 id 和 fresh observation ref 已经携带完整 backend path。
     // 这两类 identity 必须直达目标,不能再依赖全桌面 snapshot 是否恰好包含该 path。
     // 实际 path 的新鲜度由后续 retain_target_element 在 side effect 前验证。
     // -------------------------------------------------------------------------
-    if let Some(target_id) = direct_ax_target_id(&target)? {
+    if let Some(target_id) = direct_ax_target_id(target)? {
         return Ok(target_id);
     }
 
@@ -794,8 +793,8 @@ fn resolve_live_target_id(target: &AxTarget) -> io::Result<String> {
         include_values: false,
         ..AxTreeRequest::default()
     };
-    let snapshot = capture_semantic_target_snapshot(&target, &lookup_request)?;
-    resolve_target_id_in_snapshot(&snapshot, &target)
+    let snapshot = snapshot(&lookup_request)?;
+    resolve_target_id_in_snapshot(&snapshot, target)
 }
 
 pub(super) fn resolve_current_target_rect(target_id: &str) -> io::Result<AxResolvedTargetRect> {

@@ -94,27 +94,33 @@ fn wait_for_pty_ready_over_session_bridge(
         .wait()
         .map_err(to_io_error)?;
 
-    let sample = session_bridge
-        .subscriber
-        .recv_timeout(Duration::from_secs(3600))
-        .map_err(|err| io::Error::new(io::ErrorKind::TimedOut, err.to_string()))?
-        .ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::UnexpectedEof,
-                "Zenoh PTY subscriber 在 ready 前关闭",
-            )
-        })?;
-    let payload = sample.payload().try_to_string().map_err(to_io_error)?;
-    match ControlFrame::parse_inbound_result_message(payload.as_ref())? {
-        ControlFrame::PtyReady(frame) => Ok(frame),
-        ControlFrame::ResponseLine(response) => Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("Zenoh PTY open 返回了普通响应而不是 @pty-ready: {response}"),
-        )),
-        frame => Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("Zenoh PTY open 收到意外 frame: {}", frame.to_wire_message()),
-        )),
+    loop {
+        let sample = session_bridge
+            .subscriber
+            .recv_timeout(Duration::from_secs(3600))
+            .map_err(|err| io::Error::new(io::ErrorKind::TimedOut, err.to_string()))?
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "Zenoh PTY subscriber 在 ready 前关闭",
+                )
+            })?;
+        let payload = sample.payload().try_to_string().map_err(to_io_error)?;
+        match ControlFrame::parse_inbound_result_message(payload.as_ref())? {
+            ControlFrame::PtyReady(frame) => return Ok(frame),
+            ControlFrame::ResponseLine(response) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("Zenoh PTY open 返回了普通响应而不是 @pty-ready: {response}"),
+                ));
+            }
+            frame => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("Zenoh PTY open 收到意外 frame: {}", frame.to_wire_message()),
+                ));
+            }
+        }
     }
 }
 
@@ -128,30 +134,36 @@ fn wait_for_pty_attached_over_session_bridge(
         .wait()
         .map_err(to_io_error)?;
 
-    let sample = session_bridge
-        .subscriber
-        .recv_timeout(Duration::from_secs(3600))
-        .map_err(|err| io::Error::new(io::ErrorKind::TimedOut, err.to_string()))?
-        .ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::UnexpectedEof,
-                "Zenoh PTY subscriber 在 attach 前关闭",
-            )
-        })?;
-    let payload = sample.payload().try_to_string().map_err(to_io_error)?;
-    match ControlFrame::parse_inbound_result_message(payload.as_ref())? {
-        ControlFrame::PtyAttached(frame) => Ok(frame),
-        ControlFrame::ResponseLine(response) => Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("Zenoh PTY attach 返回了普通响应而不是 @pty-attached: {response}"),
-        )),
-        frame => Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!(
-                "Zenoh PTY attach 收到意外 frame: {}",
-                frame.to_wire_message()
-            ),
-        )),
+    loop {
+        let sample = session_bridge
+            .subscriber
+            .recv_timeout(Duration::from_secs(3600))
+            .map_err(|err| io::Error::new(io::ErrorKind::TimedOut, err.to_string()))?
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "Zenoh PTY subscriber 在 attach 前关闭",
+                )
+            })?;
+        let payload = sample.payload().try_to_string().map_err(to_io_error)?;
+        match ControlFrame::parse_inbound_result_message(payload.as_ref())? {
+            ControlFrame::PtyAttached(frame) => return Ok(frame),
+            ControlFrame::ResponseLine(response) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("Zenoh PTY attach 返回了普通响应而不是 @pty-attached: {response}"),
+                ));
+            }
+            frame => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "Zenoh PTY attach 收到意外 frame: {}",
+                        frame.to_wire_message()
+                    ),
+                ));
+            }
+        }
     }
 }
 

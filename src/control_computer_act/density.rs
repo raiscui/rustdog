@@ -155,10 +155,8 @@ mod tests {
     fn render_density_omits_verify_ms_when_verify_none() {
         let d = ComputerActDensity::new(100, 5, false, None, false, 4);
         let rendered = render_density(&d);
-        assert!(
-            rendered.get("verify_ms").is_none(),
-            "verify_ms omitted when verify=none (vs null placeholder)"
-        );
+        assert!(rendered.get("verify_ms").is_none(),
+            "verify_ms omitted when verify=none (vs null placeholder)");
     }
 
     #[test]
@@ -182,27 +180,15 @@ mod tests {
     fn verification_passed_false_for_empty_diff() {
         // best_effort 但 diff 全 0 → false (GUI 没变, verify 不算通过)
         let summary = AxDiffSummary::empty(100, 50);
-        assert!(!compute_verification_passed(
-            VerifyPolicy::BestEffort,
-            Some(&summary)
-        ));
-        assert!(!compute_verification_passed(
-            VerifyPolicy::Always,
-            Some(&summary)
-        ));
+        assert!(!compute_verification_passed(VerifyPolicy::BestEffort, Some(&summary)));
+        assert!(!compute_verification_passed(VerifyPolicy::Always, Some(&summary)));
     }
 
     #[test]
     fn verification_passed_true_when_diff_has_any_change() {
         let mut summary = AxDiffSummary::empty(100, 50);
         summary.elements_added = 1; // 至少 1 个 element added
-        assert!(compute_verification_passed(
-            VerifyPolicy::BestEffort,
-            Some(&summary)
-        ));
-        assert!(compute_verification_passed(
-            VerifyPolicy::Always,
-            Some(&summary)
-        ));
+        assert!(compute_verification_passed(VerifyPolicy::BestEffort, Some(&summary)));
+        assert!(compute_verification_passed(VerifyPolicy::Always, Some(&summary)));
     }
 }

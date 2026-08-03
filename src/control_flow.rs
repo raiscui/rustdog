@@ -782,15 +782,19 @@ impl FlowRuntimeState {
                     .value
                     .as_ref()
                     .ok_or_else(|| format!("@flow.steps[{index}].Expect.value 缺失"))?;
-                let value = self.response_values.last().ok_or_else(|| {
-                    "还没有可用于 response_field_equals 的 ControlLine response".to_owned()
+                let value = self
+                    .response_values
+                    .last()
+                    .ok_or_else(|| "还没有可用于 response_field_equals 的 ControlLine response".to_owned())?;
+                let actual = json_pointer_lookup(value, path).ok_or_else(|| {
+                    format!("path `{path}` 在最新 response 中不存在")
                 })?;
-                let actual = json_pointer_lookup(value, path)
-                    .ok_or_else(|| format!("path `{path}` 在最新 response 中不存在"))?;
                 if &actual == expected {
                     Ok(())
                 } else {
-                    Err(format!("path `{path}` 期望 {expected}, 实际 {actual}"))
+                    Err(format!(
+                        "path `{path}` 期望 {expected}, 实际 {actual}"
+                    ))
                 }
             }
             FlowExpectKind::ResponsePathContains => {
@@ -802,9 +806,10 @@ impl FlowRuntimeState {
                     .contains
                     .as_deref()
                     .ok_or_else(|| format!("@flow.steps[{index}].Expect.contains 缺失"))?;
-                let value = self.response_values.last().ok_or_else(|| {
-                    "还没有可用于 response_path_contains 的 ControlLine response".to_owned()
-                })?;
+                let value = self
+                    .response_values
+                    .last()
+                    .ok_or_else(|| "还没有可用于 response_path_contains 的 ControlLine response".to_owned())?;
                 let actual = json_pointer_lookup(value, path)
                     .ok_or_else(|| format!("path `{path}` 在最新 response 中不存在"))?;
                 let actual_str = json_value_to_string(&actual);

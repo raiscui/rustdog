@@ -1,7 +1,7 @@
 use std::io;
 
 use super::{
-    object_inner, parse_compact_atom, parse_quoted_payload, split_object_field, split_object_fields,
+    object_inner, parse_quoted_payload, split_object_field, split_object_fields,
 };
 use crate::control_protocol::OpenAppRequest;
 
@@ -13,13 +13,12 @@ pub(crate) const DEFAULT_OPEN_APP_WAIT_MS: u64 = 1500;
 pub(crate) fn parse_open_app_payload(input: &str) -> io::Result<OpenAppRequest> {
     let trimmed = input.trim();
 
-    // 裸短格式复用全局 compact atom 安全集.复杂 app 名或自定义 wait_ms
-    // 继续走对象格式,避免为同一命令维护两套字符串转义规则.
+    // `@open-app` 只接受对象 payload;字符串 payload 直接报错。
     if !trimmed.starts_with('{') {
-        return Ok(OpenAppRequest {
-            app_name: parse_compact_atom("@open-app.app_name", trimmed)?,
-            wait_ms: DEFAULT_OPEN_APP_WAIT_MS,
-        });
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("@open-app payload 必须是对象,实际收到: {input}"),
+        ));
     }
 
     let inner = object_inner(trimmed, "@open-app")?;

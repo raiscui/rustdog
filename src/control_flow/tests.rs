@@ -123,36 +123,21 @@ fn json_pointer_lookup_root_returns_full_value() {
 #[test]
 fn json_pointer_lookup_simple_path() {
     let v = serde_json::json!({"a": {"b": {"c": 42}}});
-    assert_eq!(
-        json_pointer_lookup(&v, "$.a.b.c").unwrap(),
-        serde_json::json!(42)
-    );
-    assert_eq!(
-        json_pointer_lookup(&v, "a.b.c").unwrap(),
-        serde_json::json!(42)
-    );
+    assert_eq!(json_pointer_lookup(&v, "$.a.b.c").unwrap(), serde_json::json!(42));
+    assert_eq!(json_pointer_lookup(&v, "a.b.c").unwrap(), serde_json::json!(42));
 }
 
 #[test]
 fn json_pointer_lookup_array_index() {
     let v = serde_json::json!({"items": [10, 20, 30]});
-    assert_eq!(
-        json_pointer_lookup(&v, "$.items[1]").unwrap(),
-        serde_json::json!(20)
-    );
-    assert_eq!(
-        json_pointer_lookup(&v, "$.items[0]").unwrap(),
-        serde_json::json!(10)
-    );
+    assert_eq!(json_pointer_lookup(&v, "$.items[1]").unwrap(), serde_json::json!(20));
+    assert_eq!(json_pointer_lookup(&v, "$.items[0]").unwrap(), serde_json::json!(10));
 }
 
 #[test]
 fn json_pointer_lookup_mixed_path_and_index() {
     let v = serde_json::json!({"a": [{"b": 1}, {"b": 2}]});
-    assert_eq!(
-        json_pointer_lookup(&v, "$.a[1].b").unwrap(),
-        serde_json::json!(2)
-    );
+    assert_eq!(json_pointer_lookup(&v, "$.a[1].b").unwrap(), serde_json::json!(2));
 }
 
 #[test]
@@ -178,9 +163,9 @@ fn json_value_to_string_for_various_types() {
 
 #[test]
 fn flow_expect_step_deserializes_new_field() {
-    let step: FlowExpectStep =
-        serde_json::from_str(r#"{"kind": "response_field_equals", "path": "$.ok", "value": true}"#)
-            .unwrap();
+    let step: FlowExpectStep = serde_json::from_str(
+        r#"{"kind": "response_field_equals", "path": "$.ok", "value": true}"#,
+    ).unwrap();
     assert_eq!(step.kind, FlowExpectKind::ResponseFieldEquals);
     assert_eq!(step.path.as_deref(), Some("$.ok"));
     assert_eq!(step.value, Some(serde_json::json!(true)));
@@ -188,8 +173,9 @@ fn flow_expect_step_deserializes_new_field() {
 
 #[test]
 fn flow_expect_step_value_omitted_defaults_to_none() {
-    let step: FlowExpectStep =
-        serde_json::from_str(r#"{"kind": "cmd_exit_code", "capture": "c1", "code": 0}"#).unwrap();
+    let step: FlowExpectStep = serde_json::from_str(
+        r#"{"kind": "cmd_exit_code", "capture": "c1", "code": 0}"#,
+    ).unwrap();
     assert_eq!(step.kind, FlowExpectKind::CmdExitCode);
     assert!(step.value.is_none());
 }

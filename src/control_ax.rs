@@ -5,54 +5,35 @@ use crate::{
     },
     control_observation::{
         observation_ref_name, record_observation_with_selectors, resolve_observation_ref,
-        stale_observation_ref_error, ObservationRefEntry, ObservationRoot,
+        stale_observation_ref_error, ObservationHeader, ObservationRefEntry, ObservationRoot,
     },
     control_protocol::{
-        normalize_object_field_name, object_inner, parse_compact_atom,
-        parse_compact_ax_button_sequence, parse_compact_window_pair, parse_compact_window_selector,
-        parse_quoted_payload, split_object_field, split_object_fields, CompactWindowSelector,
-        KeyDelivery, KeyMode, KeyRequest,
+        normalize_object_field_name, object_inner, parse_quoted_payload, split_object_field,
+        split_object_fields, KeyDelivery, KeyMode, KeyRequest,
     },
-    control_window::{resolve_unique_app_window_id, WindowActionReport, WindowActionVerifyReport},
+    control_window::{WindowActionReport, WindowActionVerifyReport},
 };
+use serde::Serialize;
 use serde_json::json;
 use std::io;
 
+pub const AX_SCHEMA: &str = "rdog.ax.v1";
+pub const AX_WINDOWS_DEPTH: u8 = 1;
+pub const AX_WINDOWS_MAX_ELEMENTS: u16 = 80;
+pub const AX_WINDOWS_INCLUDE_VALUES: bool = false;
+pub const AX_INTERACTIVE_DEPTH: u8 = 2;
+pub const AX_INTERACTIVE_MAX_ELEMENTS: u16 = 200;
+pub const AX_INTERACTIVE_INCLUDE_VALUES: bool = false;
+pub const DEFAULT_AX_DEPTH: u8 = 4;
+pub const DEFAULT_AX_MAX_ELEMENTS: u16 = 1000;
+pub const DEFAULT_AX_INCLUDE_VALUES: bool = true;
 
-pub mod types;
-pub mod tree;
-pub use self::tree::{
-    capture_ax_find_snapshot, capture_current_ax_subtree, capture_current_ax_window_snapshot,
-    capture_default_ax_snapshot, current_ax_platform,
-    resolve_current_ax_target_rect, resolve_target_id_in_snapshot,
-};
-pub mod input;
-pub mod postcondition;
-pub use self::input::{perform_default_key_delivery, perform_default_type_text};
-use self::input::{remap_type_text_ax_value_error, remap_type_text_targeted_keyboard_error};
-pub mod press;
-pub use self::press::{
-    perform_default_ax_action, perform_default_ax_focus,
-    perform_default_ax_press, perform_default_ax_press_sequence,
-    perform_default_ax_press_with_postcondition,
-    perform_default_ax_scroll, perform_default_ax_set_value,
-};
-use self::tree::{
-    collect_element_refs, window_selector_draft, element_selector_draft,
-    app_selector_for_window, window_selector_for_ax_window,
-    reserve_existing_ref_index, capture_ax_find_snapshot_with,
-    capture_semantic_target_snapshot,
-    capture_semantic_target_snapshot_with, direct_ax_target_id,
-    materialize_app_window_target, materialize_app_window_target_with,
-    collect_matching_element_ids, find_ax_element_by_id, ax_snapshot_status_error,
-};
-pub use self::types::*;
-pub use crate::control_protocol::parsers::ax::{
-    parse_ax_action_payload, parse_ax_focus_payload, parse_ax_press_payload,
-    parse_ax_press_sequence_payload, parse_ax_scroll_payload, parse_ax_set_value_payload,
-    parse_ax_tree_payload, parse_type_text_payload,
-};
-
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum AxMode {
+    Windows,
+    Interactive,
+    Full,
+}
 
 impl AxMode {
     pub fn preset(self) -> AxModePreset {
@@ -76,7 +57,20 @@ impl AxMode {
     }
 }
 
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub struct AxModePreset {
+    pub depth: u8,
+    pub max_elements: u16,
+    pub include_values: bool,
+}
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AxTreeRequest {
+    pub scope: AxTreeScope,
+    pub depth: u8,
+    pub max_elements: u16,
+    pub include_values: bool,
+}
 
 impl Default for AxTreeRequest {
     fn default() -> Self {
@@ -89,11 +83,31 @@ impl Default for AxTreeRequest {
     }
 }
 
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum AxTreeScope {
+    Windows,
+}
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AxPressRequest {
+    pub target: AxTarget,
+}
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AxActionRequest {
+    pub target: AxTarget,
+    pub action: AxActionName,
+}
 
-
-
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum AxActionName {
+    Press,
+    Open,
+    Confirm,
+    Cancel,
+    ShowMenu,
+    ScrollToVisible,
+}
 
 impl AxActionName {
     pub fn protocol_str(self) -> &'static str {
@@ -112,9 +126,34 @@ impl AxActionName {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AxSetValueRequest {
+    pub target: AxTarget,
+    pub value: String,
+    pub mode: AxValueSetMode,
+}
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AxFocusRequest {
+    pub target: Option<AxTarget>,
+    pub window_id: Option<String>,
+    pub activate: bool,
+}
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AxScrollRequest {
+    pub target: AxTarget,
+    pub direction: AxScrollDirection,
+    pub pages: u16,
+}
 
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum AxScrollDirection {
+    Up,
+    Down,
+    Left,
+    Right,
+}
 
 impl AxScrollDirection {
     pub fn as_str(self) -> &'static str {
@@ -127,6 +166,11 @@ impl AxScrollDirection {
     }
 }
 
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum AxValueSetMode {
+    Replace,
+    Append,
+}
 
 impl AxValueSetMode {
     pub fn as_str(self) -> &'static str {
@@ -137,7 +181,21 @@ impl AxValueSetMode {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TypeTextRequest {
+    pub target: AxTarget,
+    pub text: String,
+    pub mode: TypeTextMode,
+    pub allow_clipboard: bool,
+}
 
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum TypeTextMode {
+    Auto,
+    AxValue,
+    TargetedKeyboard,
+    Clipboard,
+}
 
 impl TypeTextMode {
     pub fn as_str(self) -> &'static str {
@@ -150,6 +208,11 @@ impl TypeTextMode {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ClipboardRestoreStatus {
+    pub restored: bool,
+    pub skipped_reason: Option<&'static str>,
+}
 
 impl ClipboardRestoreStatus {
     pub fn restored() -> Self {
@@ -167,14 +230,24 @@ impl ClipboardRestoreStatus {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct AxTarget {
+    pub id: Option<String>,
+    pub ref_id: Option<String>,
+    pub observation_id: Option<String>,
+    pub process: Option<String>,
+    pub window_title: Option<String>,
+    pub role: Option<String>,
+    pub subrole: Option<String>,
+    pub name: Option<String>,
+    pub description: Option<String>,
+}
 
 impl AxTarget {
-    pub(crate) fn validate(&self) -> io::Result<()> {
+    fn validate(&self) -> io::Result<()> {
         let has_ref = self.ref_id.is_some();
         let has_observation_id = self.observation_id.is_some();
-        let has_semantic = self.window_id.is_some()
-            || self.app.is_some()
-            || self.process.is_some()
+        let has_semantic = self.process.is_some()
             || self.window_title.is_some()
             || self.role.is_some()
             || self.subrole.is_some()
@@ -204,14 +277,6 @@ impl AxTarget {
             return Err(invalid_data("AX target 不能为空"));
         }
 
-        if self.app.is_some()
-            && (self.window_id.is_some() || self.process.is_some() || self.window_title.is_some())
-        {
-            return Err(invalid_data(
-                "AX target.app 不能与 window_id / process / window_title 混用",
-            ));
-        }
-
         if self.role.is_none()
             && self.subrole.is_none()
             && self.name.is_none()
@@ -226,10 +291,7 @@ impl AxTarget {
     }
 
     fn matches_window(&self, window: &AxWindow) -> bool {
-        // window_id、进程名和标题是并列约束.任一条件冲突都必须拒绝该窗口,
-        // 避免调用方提供的归属边界被较宽的语义字段覆盖.
-        matches_optional(&self.window_id, Some(window.id.as_str()))
-            && matches_optional(&self.process, Some(window.process_name.as_str()))
+        matches_optional(&self.process, Some(window.process_name.as_str()))
             && matches_optional(&self.window_title, window.title.as_deref())
     }
 
@@ -241,7 +303,28 @@ impl AxTarget {
     }
 }
 
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Serialize)]
+pub struct AxRect {
+    pub x: i32,
+    pub y: i32,
+    pub width: u32,
+    pub height: u32,
+}
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct AxSnapshot {
+    pub schema: &'static str,
+    pub platform: String,
+    pub capture_status: String,
+    pub permission_status: String,
+    pub coordinate_space: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub observation: Option<ObservationHeader>,
+    pub window_count: usize,
+    pub element_count: usize,
+    pub truncated: bool,
+    pub windows: Vec<AxWindow>,
+}
 
 impl AxSnapshot {
     pub fn complete(
@@ -376,6 +459,24 @@ impl AxSnapshot {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct AxWindow {
+    pub id: String,
+    #[serde(skip_serializing_if = "Option::is_none", rename = "ref")]
+    pub ref_id: Option<String>,
+    pub pid: i32,
+    pub process_name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    pub role: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub subrole: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rect: Option<AxRect>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub focused: Option<bool>,
+    pub elements: Vec<AxElement>,
+}
 
 impl AxWindow {
     fn element_count(&self) -> usize {
@@ -383,7 +484,36 @@ impl AxWindow {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct AxElement {
+    pub id: String,
+    #[serde(skip_serializing_if = "Option::is_none", rename = "ref")]
+    pub ref_id: Option<String>,
+    pub role: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub subrole: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub value: Option<String>,
+    pub value_redacted: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rect: Option<AxRect>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+    pub actions: Vec<String>,
+    pub ax_path: Vec<usize>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub children: Vec<AxElement>,
+}
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AxCapturedSubtree {
+    pub element: AxElement,
+    pub truncated: bool,
+}
 
 impl AxElement {
     fn tree_count(&self) -> usize {
@@ -403,14 +533,153 @@ impl AxElement {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AxResolvedTargetRect {
+    pub target_id: String,
+    pub target_type: &'static str,
+    pub window_id: Option<String>,
+    pub rect: Option<AxRect>,
+}
 
+fn collect_element_refs(
+    platform: &str,
+    app_selector: &AppSelector,
+    window_selector: &WindowSelector,
+    next_ref_index: &mut usize,
+    elements: &mut [AxElement],
+    refs: &mut Vec<ObservationRefEntry>,
+    selector_drafts: &mut Vec<DurableSelectorDraft>,
+) {
+    for element in elements {
+        let ref_id = match &element.ref_id {
+            Some(ref_id) => {
+                reserve_existing_ref_index(ref_id, next_ref_index);
+                ref_id.clone()
+            }
+            None => {
+                let ref_id = observation_ref_name(*next_ref_index);
+                *next_ref_index += 1;
+                element.ref_id = Some(ref_id.clone());
+                ref_id
+            }
+        };
+        refs.push(ObservationRefEntry {
+            ref_id: ref_id.clone(),
+            backend_id: element.id.clone(),
+            kind: "element".to_owned(),
+        });
+        selector_drafts.push(element_selector_draft(
+            platform,
+            app_selector,
+            window_selector,
+            element,
+            &ref_id,
+        ));
 
+        if !element.children.is_empty() {
+            collect_element_refs(
+                platform,
+                app_selector,
+                window_selector,
+                next_ref_index,
+                &mut element.children,
+                refs,
+                selector_drafts,
+            );
+        }
+    }
+}
 
+fn window_selector_draft(platform: &str, window: &AxWindow, ref_id: &str) -> DurableSelectorDraft {
+    DurableSelectorDraft::new(
+        ref_id.to_owned(),
+        SelectorKind::AxWindow,
+        window.id.clone(),
+        SelectorEnvelope {
+            platform: platform.to_owned(),
+            app: Some(app_selector_for_window(window)),
+            window: Some(window_selector_for_ax_window(window)),
+            element: None,
+            anchors: Vec::new(),
+        },
+        SelectorRedaction::metadata_only(),
+    )
+}
 
+fn element_selector_draft(
+    platform: &str,
+    app_selector: &AppSelector,
+    window_selector: &WindowSelector,
+    element: &AxElement,
+    ref_id: &str,
+) -> DurableSelectorDraft {
+    DurableSelectorDraft::new(
+        ref_id.to_owned(),
+        SelectorKind::AxElement,
+        element.id.clone(),
+        SelectorEnvelope {
+            platform: platform.to_owned(),
+            app: Some(app_selector.clone()),
+            window: Some(window_selector.clone()),
+            element: Some(ElementSelector {
+                role: element.role.clone(),
+                subrole: element.subrole.clone(),
+                name: element.name.clone(),
+                description: element.description.clone(),
+                actions: element.actions.clone(),
+                ax_path: element.ax_path.clone(),
+            }),
+            anchors: Vec::new(),
+        },
+        SelectorRedaction::metadata_only(),
+    )
+}
 
+fn app_selector_for_window(window: &AxWindow) -> AppSelector {
+    AppSelector {
+        name: window.process_name.clone(),
+        bundle_id: None,
+        pid_hint: Some(window.pid),
+    }
+}
 
+fn window_selector_for_ax_window(window: &AxWindow) -> WindowSelector {
+    WindowSelector {
+        title: window.title.clone(),
+        role: window.role.clone(),
+        rect: window.rect.map(selector_rect_from_ax_rect),
+    }
+}
 
+fn selector_rect_from_ax_rect(rect: AxRect) -> SelectorRect {
+    SelectorRect {
+        x: rect.x,
+        y: rect.y,
+        width: rect.width,
+        height: rect.height,
+    }
+}
 
+fn reserve_existing_ref_index(ref_id: &str, next_ref_index: &mut usize) {
+    let Some(index) = ref_id
+        .strip_prefix("@e")
+        .and_then(|value| value.parse::<usize>().ok())
+    else {
+        return;
+    };
+    *next_ref_index = (*next_ref_index).max(index.saturating_add(1));
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct AxActionReport {
+    pub kind: &'static str,
+    pub action: String,
+    pub backend: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_id: Option<String>,
+    pub performed: bool,
+    pub status: &'static str,
+}
 
 impl AxActionReport {
     pub fn press(backend: impl Into<String>, target_id: Option<String>) -> Self {
@@ -430,48 +699,16 @@ impl AxActionReport {
     }
 }
 
-
-
-impl AxPressPostconditionReport {
-    pub fn to_value_json(&self) -> io::Result<String> {
-        serde_json::to_string(self)
-            .map_err(|err| io::Error::other(format!("AX guarded press 序列化失败: {err}")))
-    }
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct AxPerformedActionReport {
+    pub kind: &'static str,
+    pub action: String,
+    pub backend: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_id: Option<String>,
+    pub performed: bool,
+    pub status: &'static str,
 }
-
-
-impl AxPressSequenceStepReport {
-    fn success(index: usize, description: String, report: AxActionReport) -> Self {
-        Self {
-            index,
-            description,
-            performed: report.performed,
-            status: report.status,
-            target_id: report.target_id,
-            error: None,
-        }
-    }
-
-    fn failed(index: usize, description: String, error: String) -> Self {
-        Self {
-            index,
-            description,
-            performed: false,
-            status: "failed",
-            target_id: None,
-            error: Some(error),
-        }
-    }
-}
-
-
-impl AxPressSequenceReport {
-    pub fn to_value_json(&self) -> io::Result<String> {
-        serde_json::to_string(self)
-            .map_err(|err| io::Error::other(format!("AX press sequence 序列化失败: {err}")))
-    }
-}
-
 
 impl AxPerformedActionReport {
     pub fn success(
@@ -495,6 +732,19 @@ impl AxPerformedActionReport {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct AxSetValueReport {
+    pub kind: &'static str,
+    pub backend: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_id: Option<String>,
+    pub mode: &'static str,
+    pub performed: bool,
+    pub status: &'static str,
+    pub settable: bool,
+    pub old_value_redacted: bool,
+    pub new_value_redacted: bool,
+}
 
 impl AxSetValueReport {
     pub fn success(
@@ -523,6 +773,24 @@ impl AxSetValueReport {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct TypeTextReport {
+    pub kind: &'static str,
+    pub backend: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_id: Option<String>,
+    pub mode: &'static str,
+    pub delivered_via: &'static str,
+    pub performed: bool,
+    pub status: &'static str,
+    pub used_clipboard: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub clipboard_restore_policy: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub clipboard_restored: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub clipboard_restore_skipped_reason: Option<&'static str>,
+}
 
 impl TypeTextReport {
     pub fn ax_value_success(
@@ -590,6 +858,20 @@ impl TypeTextReport {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct KeyDeliveryReport {
+    pub kind: &'static str,
+    pub backend: String,
+    pub key: String,
+    pub mode: &'static str,
+    pub delivery: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_pid: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub window_id: Option<String>,
+    pub performed: bool,
+    pub status: &'static str,
+}
 
 impl KeyDeliveryReport {
     pub fn success(
@@ -617,6 +899,22 @@ impl KeyDeliveryReport {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct AxFocusReport {
+    pub kind: &'static str,
+    pub backend: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub window_id: Option<String>,
+    pub activated: bool,
+    pub performed: bool,
+    pub status: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_code: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub activation: Option<WindowActionReport>,
+}
 
 impl AxFocusReport {
     pub fn success(
@@ -681,6 +979,19 @@ pub fn window_activation_verified(report: &WindowActionReport) -> bool {
     )
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct AxScrollReport {
+    pub kind: &'static str,
+    pub backend: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_id: Option<String>,
+    pub direction: &'static str,
+    pub pages: u16,
+    pub line_steps: i32,
+    pub delivered_via: &'static str,
+    pub performed: bool,
+    pub status: &'static str,
+}
 
 impl AxScrollReport {
     pub fn success(
@@ -710,7 +1021,7 @@ impl AxScrollReport {
     }
 }
 
-pub mod query;
+mod query;
 
 pub use query::{
     build_ax_find_response_json, build_ax_get_response_json, parse_ax_find_payload,
@@ -725,6 +1036,9 @@ pub trait AxBackend {
     fn scroll(&self, request: &AxScrollRequest) -> io::Result<AxScrollReport>;
     fn type_text(&self, request: &TypeTextRequest) -> io::Result<TypeTextReport>;
 }
+
+#[derive(Debug, Copy, Clone, Default)]
+pub struct SystemAxBackend;
 
 impl AxBackend for SystemAxBackend {
     fn snapshot(&self, request: &AxTreeRequest) -> io::Result<AxSnapshot> {
@@ -752,47 +1066,589 @@ impl AxBackend for SystemAxBackend {
     }
 }
 
+pub fn capture_default_ax_snapshot(request: &AxTreeRequest) -> io::Result<AxSnapshot> {
+    SystemAxBackend.snapshot(request)
+}
 
+pub fn capture_ax_find_snapshot(request: &AxFindRequest) -> io::Result<AxSnapshot> {
+    capture_ax_find_snapshot_with(
+        request,
+        capture_default_ax_snapshot,
+        capture_current_ax_window_snapshot,
+    )
+}
 
+fn capture_ax_find_snapshot_with(
+    request: &AxFindRequest,
+    capture_global: impl FnOnce(&AxTreeRequest) -> io::Result<AxSnapshot>,
+    capture_window: impl FnOnce(&str, &AxTreeRequest) -> io::Result<AxSnapshot>,
+) -> io::Result<AxSnapshot> {
+    let Some(window) = request.window.as_ref() else {
+        return capture_global(&request.tree);
+    };
+    let window_id = window.resolve_window_id()?;
+    capture_window(&window_id, &request.tree)
+}
 
+fn capture_current_ax_window_snapshot(
+    window_id: &str,
+    request: &AxTreeRequest,
+) -> io::Result<AxSnapshot> {
+    platform_capture_current_window(window_id, request)
+}
 
+pub fn capture_current_ax_subtree(
+    target_id: &str,
+    request: &AxTreeRequest,
+) -> io::Result<AxCapturedSubtree> {
+    platform_capture_current_subtree(target_id, request)
+}
 
+pub fn resolve_current_ax_target_rect(target: &AxTarget) -> io::Result<AxResolvedTargetRect> {
+    if let Some(target_id) = direct_ax_target_id(target)? {
+        return platform_resolve_current_target_rect(&target_id);
+    }
 
+    let request = AxTreeRequest {
+        depth: 8,
+        max_elements: 5000,
+        include_values: false,
+        ..AxTreeRequest::default()
+    };
+    let snapshot = capture_default_ax_snapshot(&request)?;
+    if snapshot.capture_status != "complete" {
+        return Err(ax_snapshot_status_error(&snapshot));
+    }
 
+    let target_id = resolve_target_id_in_snapshot(&snapshot, target)?;
+    for window in &snapshot.windows {
+        if window.id == target_id {
+            return Ok(AxResolvedTargetRect {
+                target_id,
+                target_type: "window",
+                window_id: Some(window.id.clone()),
+                rect: window.rect,
+            });
+        }
 
+        if let Some(element) = find_ax_element_by_id(&window.elements, &target_id) {
+            return Ok(AxResolvedTargetRect {
+                target_id,
+                target_type: "element",
+                window_id: Some(window.id.clone()),
+                rect: element.rect,
+            });
+        }
+    }
 
+    Err(io::Error::new(
+        io::ErrorKind::InvalidInput,
+        format!("AX target id 已失效或不存在: {target_id}"),
+    ))
+}
 
+fn direct_ax_target_id(target: &AxTarget) -> io::Result<Option<String>> {
+    target.validate()?;
 
+    if let Some(id) = target.id.as_deref() {
+        return Ok(Some(id.to_owned()));
+    }
 
+    if let (Some(observation_id), Some(ref_id)) =
+        (target.observation_id.as_deref(), target.ref_id.as_deref())
+    {
+        return resolve_observation_ref(observation_id, ref_id).map(|entry| Some(entry.backend_id));
+    }
 
+    Ok(None)
+}
 
+pub fn perform_default_ax_press(request: &AxPressRequest) -> io::Result<AxActionReport> {
+    let report = SystemAxBackend.perform_action(&AxActionRequest {
+        target: request.target.clone(),
+        action: AxActionName::Press,
+    })?;
+    Ok(AxActionReport::press(report.backend, report.target_id))
+}
 
+pub fn perform_default_ax_action(request: &AxActionRequest) -> io::Result<AxPerformedActionReport> {
+    SystemAxBackend.perform_action(request)
+}
 
+pub fn perform_default_ax_set_value(request: &AxSetValueRequest) -> io::Result<AxSetValueReport> {
+    SystemAxBackend.set_value(request)
+}
 
+pub fn perform_default_key_delivery(request: &KeyRequest) -> io::Result<Option<KeyDeliveryReport>> {
+    match request.delivery {
+        KeyDelivery::Global => Ok(None),
+        KeyDelivery::PidTargeted | KeyDelivery::WindowTargeted => {
+            platform_key_delivery(request).map(Some)
+        }
+    }
+}
 
+pub fn perform_default_ax_focus(request: &AxFocusRequest) -> io::Result<AxFocusReport> {
+    SystemAxBackend.focus(request)
+}
 
+pub fn perform_default_ax_scroll(request: &AxScrollRequest) -> io::Result<AxScrollReport> {
+    SystemAxBackend.scroll(request)
+}
 
+pub fn perform_default_type_text(request: &TypeTextRequest) -> io::Result<TypeTextReport> {
+    SystemAxBackend.type_text(request)
+}
 
+pub fn current_ax_platform() -> &'static str {
+    #[cfg(target_os = "macos")]
+    {
+        "macos"
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        "unsupported"
+    }
+}
 
+pub fn parse_ax_tree_payload(input: &str) -> io::Result<AxTreeRequest> {
+    let inner = object_inner(input, "@ax-tree")?;
+    if inner.is_empty() {
+        return Ok(AxTreeRequest::default());
+    }
 
+    let mut scope = None::<AxTreeScope>;
+    let mut mode = None::<AxMode>;
+    let mut depth = None::<u8>;
+    let mut max_elements = None::<u16>;
+    let mut include_values = None::<bool>;
 
+    for field in split_object_fields(inner)? {
+        let (field_name, raw_value) = split_object_field(field)?;
+        let field_name = normalize_object_field_name(field_name)?;
+        let raw_value = raw_value.trim();
 
+        match field_name.as_str() {
+            "scope" => assign_once(
+                &mut scope,
+                "scope",
+                "@ax-tree",
+                parse_ax_tree_scope(raw_value)?,
+            )?,
+            "mode" => assign_once(
+                &mut mode,
+                "mode",
+                "@ax-tree",
+                parse_ax_mode_payload("@ax-tree", raw_value)?,
+            )?,
+            "depth" => assign_once(&mut depth, "depth", "@ax-tree", parse_ax_depth(raw_value)?)?,
+            "max_elements" => assign_once(
+                &mut max_elements,
+                "max_elements",
+                "@ax-tree",
+                parse_ax_max_elements(raw_value)?,
+            )?,
+            "include_values" => assign_once(
+                &mut include_values,
+                "include_values",
+                "@ax-tree",
+                parse_bool_literal("@ax-tree", "include_values", raw_value)?,
+            )?,
+            _ => {
+                return Err(invalid_data(format!(
+                    "@ax-tree 对象 payload 包含未知字段: {field_name}"
+                )))
+            }
+        }
+    }
 
+    let preset = mode.unwrap_or(AxMode::Full).preset();
+    Ok(AxTreeRequest {
+        scope: scope.unwrap_or(AxTreeScope::Windows),
+        depth: depth.unwrap_or(preset.depth),
+        max_elements: max_elements.unwrap_or(preset.max_elements),
+        include_values: include_values.unwrap_or(preset.include_values),
+    })
+}
 
+pub fn parse_ax_press_payload(input: &str) -> io::Result<AxPressRequest> {
+    let inner = object_inner(input, "@ax-press")?;
+    if inner.is_empty() {
+        return Err(invalid_data("@ax-press 对象 payload 不能为空"));
+    }
 
+    let mut target = None::<AxTarget>;
+    for field in split_object_fields(inner)? {
+        let (field_name, raw_value) = split_object_field(field)?;
+        let field_name = normalize_object_field_name(field_name)?;
+        let raw_value = raw_value.trim();
 
+        match field_name.as_str() {
+            "target" => assign_once(
+                &mut target,
+                "target",
+                "@ax-press",
+                parse_ax_target(raw_value)?,
+            )?,
+            _ => {
+                return Err(invalid_data(format!(
+                    "@ax-press 对象 payload 包含未知字段: {field_name}"
+                )))
+            }
+        }
+    }
 
+    Ok(AxPressRequest {
+        target: required_field(target, "@ax-press", "target")?,
+    })
+}
 
+pub fn parse_ax_action_payload(input: &str) -> io::Result<AxActionRequest> {
+    let inner = object_inner(input, "@ax-action")?;
+    if inner.is_empty() {
+        return Err(invalid_data("@ax-action 对象 payload 不能为空"));
+    }
 
+    let mut target = None::<AxTarget>;
+    let mut action = None::<AxActionName>;
+    for field in split_object_fields(inner)? {
+        let (field_name, raw_value) = split_object_field(field)?;
+        let field_name = normalize_object_field_name(field_name)?;
+        let raw_value = raw_value.trim();
 
+        match field_name.as_str() {
+            "target" => assign_once(
+                &mut target,
+                "target",
+                "@ax-action",
+                parse_ax_target(raw_value)?,
+            )?,
+            "action" => assign_once(
+                &mut action,
+                "action",
+                "@ax-action",
+                parse_ax_action_name(raw_value)?,
+            )?,
+            _ => {
+                return Err(invalid_data(format!(
+                    "@ax-action 对象 payload 包含未知字段: {field_name}"
+                )))
+            }
+        }
+    }
 
+    Ok(AxActionRequest {
+        target: required_field(target, "@ax-action", "target")?,
+        action: required_field(action, "@ax-action", "action")?,
+    })
+}
 
+pub fn parse_ax_set_value_payload(input: &str) -> io::Result<AxSetValueRequest> {
+    let inner = object_inner(input, "@ax-set-value")?;
+    if inner.is_empty() {
+        return Err(invalid_data("@ax-set-value 对象 payload 不能为空"));
+    }
 
+    let mut target = None::<AxTarget>;
+    let mut value = None::<String>;
+    let mut mode = None::<AxValueSetMode>;
+    for field in split_object_fields(inner)? {
+        let (field_name, raw_value) = split_object_field(field)?;
+        let field_name = normalize_object_field_name(field_name)?;
+        let raw_value = raw_value.trim();
 
+        match field_name.as_str() {
+            "target" => assign_once(
+                &mut target,
+                "target",
+                "@ax-set-value",
+                parse_ax_target(raw_value)?,
+            )?,
+            "value" => assign_once(
+                &mut value,
+                "value",
+                "@ax-set-value",
+                parse_quoted_payload(raw_value)?,
+            )?,
+            "mode" => assign_once(
+                &mut mode,
+                "mode",
+                "@ax-set-value",
+                parse_ax_value_mode(raw_value)?,
+            )?,
+            _ => {
+                return Err(invalid_data(format!(
+                    "@ax-set-value 对象 payload 包含未知字段: {field_name}"
+                )))
+            }
+        }
+    }
 
+    Ok(AxSetValueRequest {
+        target: required_field(target, "@ax-set-value", "target")?,
+        value: required_field(value, "@ax-set-value", "value")?,
+        mode: mode.unwrap_or(AxValueSetMode::Replace),
+    })
+}
 
+pub fn parse_ax_focus_payload(input: &str) -> io::Result<AxFocusRequest> {
+    let inner = object_inner(input, "@ax-focus")?;
+    if inner.is_empty() {
+        return Err(invalid_data("@ax-focus 对象 payload 不能为空"));
+    }
 
-pub(crate) fn parse_ax_target(input: &str) -> io::Result<AxTarget> {
+    let mut target = None::<AxTarget>;
+    let mut window_id = None::<String>;
+    let mut activate = None::<bool>;
+    for field in split_object_fields(inner)? {
+        let (field_name, raw_value) = split_object_field(field)?;
+        let field_name = normalize_object_field_name(field_name)?;
+        let raw_value = raw_value.trim();
+
+        match field_name.as_str() {
+            "target" => assign_once(
+                &mut target,
+                "target",
+                "@ax-focus",
+                parse_ax_target(raw_value)?,
+            )?,
+            "window_id" => assign_once(
+                &mut window_id,
+                "window_id",
+                "@ax-focus",
+                parse_non_empty_string("@ax-focus.window_id", raw_value)?,
+            )?,
+            "activate" => assign_once(
+                &mut activate,
+                "activate",
+                "@ax-focus",
+                parse_bool_literal("@ax-focus", "activate", raw_value)?,
+            )?,
+            _ => {
+                return Err(invalid_data(format!(
+                    "@ax-focus 对象 payload 包含未知字段: {field_name}"
+                )))
+            }
+        }
+    }
+
+    if target.is_none() && window_id.is_none() {
+        return Err(invalid_data("@ax-focus 至少需要 `target` 或 `window_id`"));
+    }
+    if target.is_some() && window_id.is_some() {
+        return Err(invalid_data(
+            "@ax-focus 不能同时携带 `target` 和 `window_id`",
+        ));
+    }
+
+    Ok(AxFocusRequest {
+        target,
+        window_id,
+        activate: activate.unwrap_or(false),
+    })
+}
+
+pub fn parse_ax_scroll_payload(input: &str) -> io::Result<AxScrollRequest> {
+    let inner = object_inner(input, "@ax-scroll")?;
+    if inner.is_empty() {
+        return Err(invalid_data("@ax-scroll 对象 payload 不能为空"));
+    }
+
+    let mut target = None::<AxTarget>;
+    let mut direction = None::<AxScrollDirection>;
+    let mut pages = None::<u16>;
+    for field in split_object_fields(inner)? {
+        let (field_name, raw_value) = split_object_field(field)?;
+        let field_name = normalize_object_field_name(field_name)?;
+        let raw_value = raw_value.trim();
+
+        match field_name.as_str() {
+            "target" => assign_once(
+                &mut target,
+                "target",
+                "@ax-scroll",
+                parse_ax_target(raw_value)?,
+            )?,
+            "direction" => assign_once(
+                &mut direction,
+                "direction",
+                "@ax-scroll",
+                parse_ax_scroll_direction(raw_value)?,
+            )?,
+            "pages" => assign_once(
+                &mut pages,
+                "pages",
+                "@ax-scroll",
+                parse_ax_scroll_pages(raw_value)?,
+            )?,
+            _ => {
+                return Err(invalid_data(format!(
+                    "@ax-scroll 对象 payload 包含未知字段: {field_name}"
+                )))
+            }
+        }
+    }
+
+    Ok(AxScrollRequest {
+        target: required_field(target, "@ax-scroll", "target")?,
+        direction: required_field(direction, "@ax-scroll", "direction")?,
+        pages: pages.unwrap_or(1),
+    })
+}
+
+pub fn parse_type_text_payload(input: &str) -> io::Result<TypeTextRequest> {
+    let inner = object_inner(input, "@type-text")?;
+    if inner.is_empty() {
+        return Err(invalid_data("@type-text 对象 payload 不能为空"));
+    }
+
+    let mut target = None::<AxTarget>;
+    let mut text = None::<String>;
+    let mut mode = None::<TypeTextMode>;
+    let mut allow_clipboard = None::<bool>;
+    for field in split_object_fields(inner)? {
+        let (field_name, raw_value) = split_object_field(field)?;
+        let field_name = normalize_object_field_name(field_name)?;
+        let raw_value = raw_value.trim();
+
+        match field_name.as_str() {
+            "target" => assign_once(
+                &mut target,
+                "target",
+                "@type-text",
+                parse_ax_target(raw_value)?,
+            )?,
+            "text" => assign_once(
+                &mut text,
+                "text",
+                "@type-text",
+                parse_quoted_payload(raw_value)?,
+            )?,
+            "mode" => assign_once(
+                &mut mode,
+                "mode",
+                "@type-text",
+                parse_type_text_mode(raw_value)?,
+            )?,
+            "allow_clipboard" => assign_once(
+                &mut allow_clipboard,
+                "allow_clipboard",
+                "@type-text",
+                parse_bool_literal("@type-text", "allow_clipboard", raw_value)?,
+            )?,
+            _ => {
+                return Err(invalid_data(format!(
+                    "@type-text 对象 payload 包含未知字段: {field_name}"
+                )))
+            }
+        }
+    }
+
+    let mode = mode.unwrap_or(TypeTextMode::Auto);
+    let allow_clipboard = allow_clipboard.unwrap_or(false);
+    if matches!(mode, TypeTextMode::Clipboard) && !allow_clipboard {
+        return Err(invalid_data(
+            "@type-text mode:\"clipboard\" 需要显式 `allow_clipboard:true`",
+        ));
+    }
+
+    Ok(TypeTextRequest {
+        target: required_field(target, "@type-text", "target")?,
+        text: required_field(text, "@type-text", "text")?,
+        mode,
+        allow_clipboard,
+    })
+}
+
+pub fn resolve_target_id_in_snapshot(
+    snapshot: &AxSnapshot,
+    target: &AxTarget,
+) -> io::Result<String> {
+    target.validate().map_err(to_invalid_input)?;
+
+    if let Some(id) = &target.id {
+        if snapshot.contains_element_id(id) {
+            return Ok(id.clone());
+        }
+        return Err(invalid_input(format!("AX target id 已失效或不存在: {id}")));
+    }
+
+    if let (Some(observation_id), Some(ref_id)) =
+        (target.observation_id.as_deref(), target.ref_id.as_deref())
+    {
+        let entry = resolve_observation_ref(observation_id, ref_id)?;
+        if snapshot.contains_element_id(&entry.backend_id) {
+            return Ok(entry.backend_id);
+        }
+        return Err(stale_observation_ref_error(
+            observation_id,
+            ref_id,
+            format!("backend id 已不在当前 AX snapshot 中: {}", entry.backend_id),
+        ));
+    }
+
+    let mut matches = Vec::<String>::new();
+
+    for window in &snapshot.windows {
+        if !target.matches_window(window) {
+            continue;
+        }
+        collect_matching_element_ids(target, &window.elements, &mut matches);
+        if matches.len() > 1 {
+            return Err(invalid_input("AX semantic target 匹配到多个元素"));
+        }
+    }
+
+    match matches.as_slice() {
+        [id] => Ok(id.clone()),
+        [] => Err(invalid_input("AX semantic target 未匹配到元素")),
+        _ => Err(invalid_input("AX semantic target 匹配到多个元素")),
+    }
+}
+
+fn collect_matching_element_ids(
+    target: &AxTarget,
+    elements: &[AxElement],
+    matches: &mut Vec<String>,
+) {
+    for element in elements {
+        if target.matches_element(element) {
+            matches.push(element.id.clone());
+        }
+        collect_matching_element_ids(target, &element.children, matches);
+    }
+}
+
+fn find_ax_element_by_id<'a>(elements: &'a [AxElement], target_id: &str) -> Option<&'a AxElement> {
+    for element in elements {
+        if element.id == target_id {
+            return Some(element);
+        }
+        if let Some(found) = find_ax_element_by_id(&element.children, target_id) {
+            return Some(found);
+        }
+    }
+    None
+}
+
+fn ax_snapshot_status_error(snapshot: &AxSnapshot) -> io::Error {
+    let kind = match snapshot.capture_status.as_str() {
+        "permission_denied" => io::ErrorKind::PermissionDenied,
+        "unsupported" => io::ErrorKind::Unsupported,
+        _ => io::ErrorKind::Other,
+    };
+    let value = json!({
+        "kind": "ax-target-resolution",
+        "error_code": "AX_SNAPSHOT_UNAVAILABLE",
+        "capture_status": snapshot.capture_status.as_str(),
+        "permission_status": snapshot.permission_status.as_str(),
+        "platform": snapshot.platform.as_str(),
+        "message": "AX snapshot 不可用,无法解析 mouse target rect",
+    });
+    io::Error::new(kind, value.to_string())
+}
+
+fn parse_ax_target(input: &str) -> io::Result<AxTarget> {
     let inner = object_inner(input, "AX target")?;
     if inner.is_empty() {
         return Err(invalid_data("AX target 不能为空"));
@@ -802,7 +1658,6 @@ pub(crate) fn parse_ax_target(input: &str) -> io::Result<AxTarget> {
     let mut id_seen = false;
     let mut ref_seen = false;
     let mut observation_id_seen = false;
-    let mut window_id_seen = false;
     let mut process_seen = false;
     let mut window_title_seen = false;
     let mut role_seen = false;
@@ -830,10 +1685,6 @@ pub(crate) fn parse_ax_target(input: &str) -> io::Result<AxTarget> {
                     "AX target.observation_id",
                     raw_value,
                 )?);
-            }
-            "window_id" => {
-                reject_duplicate(&mut window_id_seen, "AX target", "window_id")?;
-                target.window_id = Some(parse_non_empty_string("AX target.window_id", raw_value)?);
             }
             "process" | "process_name" => {
                 reject_duplicate(&mut process_seen, "AX target", "process")?;
@@ -873,7 +1724,7 @@ pub(crate) fn parse_ax_target(input: &str) -> io::Result<AxTarget> {
     Ok(target)
 }
 
-pub(crate) fn parse_ax_action_name(input: &str) -> io::Result<AxActionName> {
+fn parse_ax_action_name(input: &str) -> io::Result<AxActionName> {
     let value = parse_quoted_payload(input)?;
     match value.to_ascii_lowercase().as_str() {
         "axpress" | "press" => Ok(AxActionName::Press),
@@ -890,7 +1741,7 @@ pub(crate) fn parse_ax_action_name(input: &str) -> io::Result<AxActionName> {
     }
 }
 
-pub(crate) fn parse_ax_value_mode(input: &str) -> io::Result<AxValueSetMode> {
+fn parse_ax_value_mode(input: &str) -> io::Result<AxValueSetMode> {
     let value = parse_quoted_payload(input)?;
     match value.to_ascii_lowercase().as_str() {
         "replace" => Ok(AxValueSetMode::Replace),
@@ -901,7 +1752,7 @@ pub(crate) fn parse_ax_value_mode(input: &str) -> io::Result<AxValueSetMode> {
     }
 }
 
-pub(crate) fn parse_type_text_mode(input: &str) -> io::Result<TypeTextMode> {
+fn parse_type_text_mode(input: &str) -> io::Result<TypeTextMode> {
     let value = parse_quoted_payload(input)?;
     match value.to_ascii_lowercase().as_str() {
         "auto" => Ok(TypeTextMode::Auto),
@@ -914,7 +1765,7 @@ pub(crate) fn parse_type_text_mode(input: &str) -> io::Result<TypeTextMode> {
     }
 }
 
-pub(crate) fn parse_ax_scroll_direction(input: &str) -> io::Result<AxScrollDirection> {
+fn parse_ax_scroll_direction(input: &str) -> io::Result<AxScrollDirection> {
     let value = parse_quoted_payload(input)?;
     match value.to_ascii_lowercase().as_str() {
         "up" => Ok(AxScrollDirection::Up),
@@ -927,7 +1778,7 @@ pub(crate) fn parse_ax_scroll_direction(input: &str) -> io::Result<AxScrollDirec
     }
 }
 
-pub(crate) fn parse_ax_scroll_pages(input: &str) -> io::Result<u16> {
+fn parse_ax_scroll_pages(input: &str) -> io::Result<u16> {
     let pages = input
         .parse::<u16>()
         .map_err(|_| invalid_data(format!("@ax-scroll 的 `pages` 必须是正整数: {input}")))?;
@@ -937,9 +1788,45 @@ pub(crate) fn parse_ax_scroll_pages(input: &str) -> io::Result<u16> {
     Ok(pages)
 }
 
+fn remap_type_text_ax_value_error(err: io::Error) -> io::Error {
+    let message = err.to_string();
+    match err.kind() {
+        io::ErrorKind::Unsupported => io::Error::new(
+            io::ErrorKind::Unsupported,
+            "type-text 当前只支持 macOS AXValue 路径",
+        ),
+        io::ErrorKind::InvalidInput => io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("type-text AXValue 路径失败: {message}"),
+        ),
+        io::ErrorKind::PermissionDenied => io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!("type-text AXValue 路径失败: {message}"),
+        ),
+        _ => io::Error::other(format!("type-text AXValue 路径失败: {message}")),
+    }
+}
 
+fn remap_type_text_targeted_keyboard_error(err: io::Error) -> io::Error {
+    let message = err.to_string();
+    match err.kind() {
+        io::ErrorKind::Unsupported => io::Error::new(
+            io::ErrorKind::Unsupported,
+            "type-text 当前只支持 macOS targeted keyboard 路径",
+        ),
+        io::ErrorKind::InvalidInput => io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("type-text targeted keyboard 路径失败: {message}"),
+        ),
+        io::ErrorKind::PermissionDenied => io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!("type-text targeted keyboard 路径失败: {message}"),
+        ),
+        _ => io::Error::other(format!("type-text targeted keyboard 路径失败: {message}")),
+    }
+}
 
-pub(crate) fn key_mode_as_str(mode: KeyMode) -> &'static str {
+fn key_mode_as_str(mode: KeyMode) -> &'static str {
     match mode {
         KeyMode::PressRelease => "press_release",
         KeyMode::Press => "press",
@@ -947,7 +1834,7 @@ pub(crate) fn key_mode_as_str(mode: KeyMode) -> &'static str {
     }
 }
 
-pub(crate) fn parse_ax_tree_scope(input: &str) -> io::Result<AxTreeScope> {
+fn parse_ax_tree_scope(input: &str) -> io::Result<AxTreeScope> {
     let scope = parse_quoted_payload(input)?;
     match scope.to_ascii_lowercase().as_str() {
         "windows" => Ok(AxTreeScope::Windows),
@@ -1001,7 +1888,7 @@ pub(crate) fn parse_bool_literal(kind: &str, field_name: &str, input: &str) -> i
     }
 }
 
-pub(crate) fn parse_non_empty_string(kind: &str, input: &str) -> io::Result<String> {
+fn parse_non_empty_string(kind: &str, input: &str) -> io::Result<String> {
     let value = parse_quoted_payload(input)?;
     if value.is_empty() {
         return Err(invalid_data(format!("{kind} 不能为空")));
@@ -1009,14 +1896,14 @@ pub(crate) fn parse_non_empty_string(kind: &str, input: &str) -> io::Result<Stri
     Ok(value)
 }
 
-pub(crate) fn matches_optional(expected: &Option<String>, actual: Option<&str>) -> bool {
+fn matches_optional(expected: &Option<String>, actual: Option<&str>) -> bool {
     match expected {
         Some(expected) => actual == Some(expected.as_str()),
         None => true,
     }
 }
 
-pub(crate) fn assign_once<T>(slot: &mut Option<T>, field_name: &str, kind: &str, value: T) -> io::Result<()> {
+fn assign_once<T>(slot: &mut Option<T>, field_name: &str, kind: &str, value: T) -> io::Result<()> {
     if slot.is_some() {
         return Err(invalid_data(format!(
             "{kind} 对象 payload 的 `{field_name}` 字段重复"
@@ -1026,7 +1913,7 @@ pub(crate) fn assign_once<T>(slot: &mut Option<T>, field_name: &str, kind: &str,
     Ok(())
 }
 
-pub(crate) fn reject_duplicate(seen: &mut bool, kind: &str, field_name: &str) -> io::Result<()> {
+fn reject_duplicate(seen: &mut bool, kind: &str, field_name: &str) -> io::Result<()> {
     if *seen {
         return Err(invalid_data(format!("{kind} 的 `{field_name}` 字段重复")));
     }
@@ -1034,29 +1921,29 @@ pub(crate) fn reject_duplicate(seen: &mut bool, kind: &str, field_name: &str) ->
     Ok(())
 }
 
-pub(crate) fn required_field<T>(value: Option<T>, kind: &str, field_name: &str) -> io::Result<T> {
+fn required_field<T>(value: Option<T>, kind: &str, field_name: &str) -> io::Result<T> {
     value.ok_or_else(|| invalid_data(format!("{kind} 对象 payload 缺少必填字段 `{field_name}`")))
 }
 
-pub(crate) fn to_invalid_input(err: io::Error) -> io::Error {
+fn to_invalid_input(err: io::Error) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidInput, err.to_string())
 }
 
-pub(crate) fn invalid_data(message: impl Into<String>) -> io::Error {
+fn invalid_data(message: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message.into())
 }
 
-pub(crate) fn invalid_input(message: impl Into<String>) -> io::Error {
+fn invalid_input(message: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidInput, message.into())
 }
 
 #[cfg(target_os = "macos")]
-pub(crate) fn platform_snapshot(request: &AxTreeRequest) -> io::Result<AxSnapshot> {
+fn platform_snapshot(request: &AxTreeRequest) -> io::Result<AxSnapshot> {
     macos::snapshot(request)
 }
 
 #[cfg(target_os = "macos")]
-pub(crate) fn platform_capture_current_subtree(
+fn platform_capture_current_subtree(
     target_id: &str,
     request: &AxTreeRequest,
 ) -> io::Result<AxCapturedSubtree> {
@@ -1064,7 +1951,7 @@ pub(crate) fn platform_capture_current_subtree(
 }
 
 #[cfg(target_os = "macos")]
-pub(crate) fn platform_capture_current_window(
+fn platform_capture_current_window(
     window_id: &str,
     request: &AxTreeRequest,
 ) -> io::Result<AxSnapshot> {
@@ -1072,7 +1959,7 @@ pub(crate) fn platform_capture_current_window(
 }
 
 #[cfg(not(target_os = "macos"))]
-pub(crate) fn platform_capture_current_window(
+fn platform_capture_current_window(
     _window_id: &str,
     _request: &AxTreeRequest,
 ) -> io::Result<AxSnapshot> {
@@ -1083,7 +1970,7 @@ pub(crate) fn platform_capture_current_window(
 }
 
 #[cfg(not(target_os = "macos"))]
-pub(crate) fn platform_capture_current_subtree(
+fn platform_capture_current_subtree(
     _target_id: &str,
     _request: &AxTreeRequest,
 ) -> io::Result<AxCapturedSubtree> {
@@ -1094,12 +1981,12 @@ pub(crate) fn platform_capture_current_subtree(
 }
 
 #[cfg(target_os = "macos")]
-pub(crate) fn platform_resolve_current_target_rect(target_id: &str) -> io::Result<AxResolvedTargetRect> {
+fn platform_resolve_current_target_rect(target_id: &str) -> io::Result<AxResolvedTargetRect> {
     macos::resolve_current_target_rect(target_id)
 }
 
 #[cfg(not(target_os = "macos"))]
-pub(crate) fn platform_resolve_current_target_rect(_target_id: &str) -> io::Result<AxResolvedTargetRect> {
+fn platform_resolve_current_target_rect(_target_id: &str) -> io::Result<AxResolvedTargetRect> {
     Err(io::Error::new(
         io::ErrorKind::Unsupported,
         "AX target rect 当前只支持 macOS",
@@ -1107,7 +1994,7 @@ pub(crate) fn platform_resolve_current_target_rect(_target_id: &str) -> io::Resu
 }
 
 #[cfg(not(target_os = "macos"))]
-pub(crate) fn platform_snapshot(_request: &AxTreeRequest) -> io::Result<AxSnapshot> {
+fn platform_snapshot(_request: &AxTreeRequest) -> io::Result<AxSnapshot> {
     Err(io::Error::new(
         io::ErrorKind::Unsupported,
         "AX snapshot 当前只支持 macOS",
@@ -1115,12 +2002,12 @@ pub(crate) fn platform_snapshot(_request: &AxTreeRequest) -> io::Result<AxSnapsh
 }
 
 #[cfg(target_os = "macos")]
-pub(crate) fn platform_perform_action(request: &AxActionRequest) -> io::Result<AxPerformedActionReport> {
+fn platform_perform_action(request: &AxActionRequest) -> io::Result<AxPerformedActionReport> {
     macos::perform_action(request)
 }
 
 #[cfg(not(target_os = "macos"))]
-pub(crate) fn platform_perform_action(_request: &AxActionRequest) -> io::Result<AxPerformedActionReport> {
+fn platform_perform_action(_request: &AxActionRequest) -> io::Result<AxPerformedActionReport> {
     Err(io::Error::new(
         io::ErrorKind::Unsupported,
         "AX action 当前只支持 macOS",
@@ -1128,12 +2015,12 @@ pub(crate) fn platform_perform_action(_request: &AxActionRequest) -> io::Result<
 }
 
 #[cfg(target_os = "macos")]
-pub(crate) fn platform_set_value(request: &AxSetValueRequest) -> io::Result<AxSetValueReport> {
+fn platform_set_value(request: &AxSetValueRequest) -> io::Result<AxSetValueReport> {
     macos::set_value(request)
 }
 
 #[cfg(not(target_os = "macos"))]
-pub(crate) fn platform_set_value(_request: &AxSetValueRequest) -> io::Result<AxSetValueReport> {
+fn platform_set_value(_request: &AxSetValueRequest) -> io::Result<AxSetValueReport> {
     Err(io::Error::new(
         io::ErrorKind::Unsupported,
         "AX set value 当前只支持 macOS",
@@ -1141,12 +2028,12 @@ pub(crate) fn platform_set_value(_request: &AxSetValueRequest) -> io::Result<AxS
 }
 
 #[cfg(target_os = "macos")]
-pub(crate) fn platform_key_delivery(request: &KeyRequest) -> io::Result<KeyDeliveryReport> {
+fn platform_key_delivery(request: &KeyRequest) -> io::Result<KeyDeliveryReport> {
     macos::deliver_key(request)
 }
 
 #[cfg(not(target_os = "macos"))]
-pub(crate) fn platform_key_delivery(request: &KeyRequest) -> io::Result<KeyDeliveryReport> {
+fn platform_key_delivery(request: &KeyRequest) -> io::Result<KeyDeliveryReport> {
     Err(io::Error::new(
         io::ErrorKind::Unsupported,
         format!("key delivery {:?} 当前只支持 macOS", request.delivery),
@@ -1154,12 +2041,12 @@ pub(crate) fn platform_key_delivery(request: &KeyRequest) -> io::Result<KeyDeliv
 }
 
 #[cfg(target_os = "macos")]
-pub(crate) fn platform_focus(request: &AxFocusRequest) -> io::Result<AxFocusReport> {
+fn platform_focus(request: &AxFocusRequest) -> io::Result<AxFocusReport> {
     macos::focus(request)
 }
 
 #[cfg(not(target_os = "macos"))]
-pub(crate) fn platform_focus(_request: &AxFocusRequest) -> io::Result<AxFocusReport> {
+fn platform_focus(_request: &AxFocusRequest) -> io::Result<AxFocusReport> {
     Err(io::Error::new(
         io::ErrorKind::Unsupported,
         "AX focus 当前只支持 macOS",
@@ -1167,12 +2054,12 @@ pub(crate) fn platform_focus(_request: &AxFocusRequest) -> io::Result<AxFocusRep
 }
 
 #[cfg(target_os = "macos")]
-pub(crate) fn platform_scroll(request: &AxScrollRequest) -> io::Result<AxScrollReport> {
+fn platform_scroll(request: &AxScrollRequest) -> io::Result<AxScrollReport> {
     macos::scroll(request)
 }
 
 #[cfg(not(target_os = "macos"))]
-pub(crate) fn platform_scroll(_request: &AxScrollRequest) -> io::Result<AxScrollReport> {
+fn platform_scroll(_request: &AxScrollRequest) -> io::Result<AxScrollReport> {
     Err(io::Error::new(
         io::ErrorKind::Unsupported,
         "AX scroll 当前只支持 macOS",
@@ -1180,12 +2067,12 @@ pub(crate) fn platform_scroll(_request: &AxScrollRequest) -> io::Result<AxScroll
 }
 
 #[cfg(target_os = "macos")]
-pub(crate) fn platform_type_text(request: &TypeTextRequest) -> io::Result<TypeTextReport> {
+fn platform_type_text(request: &TypeTextRequest) -> io::Result<TypeTextReport> {
     macos::type_text(request)
 }
 
 #[cfg(not(target_os = "macos"))]
-pub(crate) fn platform_type_text(request: &TypeTextRequest) -> io::Result<TypeTextReport> {
+fn platform_type_text(request: &TypeTextRequest) -> io::Result<TypeTextReport> {
     let detail = match request.mode {
         TypeTextMode::Auto | TypeTextMode::AxValue => "macOS AXValue 路径",
         TypeTextMode::TargetedKeyboard => "macOS targeted keyboard 路径",
@@ -1203,13 +2090,6 @@ mod macos;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::control_ax::postcondition::{
-        normalize_ax_verification_value, observe_current_ax_values_with,
-    };
-    use crate::control_ax::press::{
-        materialize_press_sequence_request_with, perform_ax_press_sequence_with,
-        perform_ax_press_with_postcondition_with,
-    };
     use std::cell::Cell;
 
     #[test]
@@ -1431,7 +2311,6 @@ mod tests {
                     id: Some("pid:1/window:0/path:0".to_owned()),
                     ..AxTarget::default()
                 },
-                postcondition: None,
             }
         );
         assert!(parse_ax_press_payload(r#"{target:{}}"#).is_err());
@@ -1447,318 +2326,6 @@ mod tests {
             r#"{target:{ref:"@e2",observation_id:"obs-1",role:"AXButton"}}"#
         )
         .is_err());
-    }
-
-    #[test]
-    fn parse_ax_press_payload_should_accept_window_scoped_targets() {
-        assert_eq!(
-            parse_ax_press_payload("pid:123/window:0,1").unwrap(),
-            AxPressRequest {
-                target: AxTarget {
-                    window_id: Some("pid:123/window:0".to_owned()),
-                    role: Some("AXButton".to_owned()),
-                    description: Some("1".to_owned()),
-                    ..AxTarget::default()
-                },
-                postcondition: None,
-            }
-        );
-
-        let compact_app = parse_ax_press_payload("app:Calculator,1").unwrap();
-        assert_eq!(compact_app.target.app.as_deref(), Some("Calculator"));
-        assert!(compact_app.target.window_id.is_none());
-
-        let object = parse_ax_press_payload(
-            r#"{target:{window_id:"pid:123/window:0",role:"AXButton",description:"1"}}"#,
-        )
-        .unwrap();
-        assert_eq!(object.target.window_id.as_deref(), Some("pid:123/window:0"));
-    }
-
-    #[test]
-    fn parse_ax_press_sequence_should_keep_order_and_reject_unsafe_fields() {
-        let request =
-            parse_ax_press_sequence_payload("app:Calculator,8,加,4,等于,乘,5,等于").unwrap();
-        let descriptions = request
-            .targets
-            .iter()
-            .map(|target| target.description.as_deref().unwrap())
-            .collect::<Vec<_>>();
-        assert_eq!(descriptions, ["8", "加", "4", "等于", "乘", "5", "等于"]);
-
-        assert!(parse_ax_press_sequence_payload("app:Calculator").is_err());
-        assert!(parse_ax_press_sequence_payload("app:,1").is_err());
-        assert!(parse_ax_press_sequence_payload("app:Calculator App,1").is_err());
-        let too_many = format!("app:Calculator,{}", vec!["1"; 33].join(","));
-        assert!(parse_ax_press_sequence_payload(&too_many).is_err());
-    }
-
-    #[test]
-    fn parse_ax_press_sequence_should_preserve_observed_descriptions() {
-        // 通用AX协议只传递模型fresh观察到的按钮描述,不得按应用知识改写字段.
-        let request = parse_ax_press_sequence_payload("app:Demo,+,减,确认").unwrap();
-        let descriptions = request
-            .targets
-            .iter()
-            .map(|target| target.description.as_deref().unwrap())
-            .collect::<Vec<_>>();
-        assert_eq!(descriptions, ["+", "减", "确认"]);
-
-        // 通用compact atom继续拒绝不安全字符,但错误不能包含任务专用拆分hint.
-        let error = parse_ax_press_sequence_payload("app:Demo,1*2")
-            .unwrap_err()
-            .to_string();
-        assert!(!error.contains("逐按钮"));
-
-        let trailing = parse_ax_press_sequence_payload("app:Demo,继续,确认,").unwrap();
-        let trailing_descriptions = trailing
-            .targets
-            .iter()
-            .map(|target| target.description.as_deref().unwrap())
-            .collect::<Vec<_>>();
-        assert_eq!(trailing_descriptions, ["继续", "确认"]);
-
-        for empty_item in ["app:Demo,继续,,确认", "app:Demo,继续,确认,,"] {
-            assert!(parse_ax_press_sequence_payload(empty_item).is_err());
-        }
-    }
-
-    #[test]
-    fn parse_ax_press_payload_should_accept_generic_postcondition() {
-        let request = parse_ax_press_payload("app:Demo,重置,AXStaticText,ready,3").unwrap();
-        assert_eq!(request.target.app.as_deref(), Some("Demo"));
-        assert_eq!(request.target.description.as_deref(), Some("重置"));
-        assert_eq!(
-            request.postcondition,
-            Some(AxPressPostcondition {
-                role: "AXStaticText".to_owned(),
-                expected_value: "ready".to_owned(),
-                max_attempts: 3,
-            })
-        );
-
-        for invalid_attempts in ["0", "4", "many"] {
-            assert!(parse_ax_press_payload(&format!(
-                "app:Demo,重置,AXStaticText,ready,{invalid_attempts}"
-            ))
-            .is_err());
-        }
-    }
-
-    #[test]
-    fn guarded_ax_press_should_stop_when_fresh_postcondition_matches() {
-        let request = parse_ax_press_payload("app:Demo,重置,AXStaticText,ready,3").unwrap();
-        let resolve_calls = Cell::new(0usize);
-        let press_calls = Cell::new(0usize);
-        let observe_calls = Cell::new(0usize);
-
-        let report = perform_ax_press_with_postcondition_with(
-            &request,
-            |app| {
-                resolve_calls.set(resolve_calls.get() + 1);
-                assert_eq!(app, "Demo");
-                Ok("pid:321/window:0".to_owned())
-            },
-            |_| {
-                press_calls.set(press_calls.get() + 1);
-                Ok(AxActionReport::press(
-                    "test",
-                    Some(format!("pid:321/window:0/path:{}", press_calls.get())),
-                ))
-            },
-            |window_id, role| {
-                observe_calls.set(observe_calls.get() + 1);
-                assert_eq!(window_id, "pid:321/window:0");
-                assert_eq!(role, "AXStaticText");
-                Ok(if observe_calls.get() == 1 {
-                    vec!["pending".to_owned()]
-                } else {
-                    vec!["ready".to_owned()]
-                })
-            },
-        )
-        .unwrap();
-
-        assert_eq!(resolve_calls.get(), 1);
-        assert_eq!(press_calls.get(), 2);
-        assert_eq!(observe_calls.get(), 2);
-        assert!(report.performed);
-        assert!(report.verified);
-        assert_eq!(report.status, "ok");
-        assert_eq!(report.attempt_count, 2);
-        assert_eq!(report.steps.len(), 2);
-        assert!(report.steps.iter().all(|step| step.performed));
-        assert!(!report.steps[0].verified);
-        assert!(report.steps[1].verified);
-    }
-
-    #[test]
-    fn guarded_ax_press_should_fail_closed_at_attempt_limit() {
-        let request = parse_ax_press_payload("pid:321/window:0,重置,AXStaticText,ready,3").unwrap();
-        let press_calls = Cell::new(0usize);
-
-        let report = perform_ax_press_with_postcondition_with(
-            &request,
-            |_| panic!("window_id target不应解析app"),
-            |_| {
-                press_calls.set(press_calls.get() + 1);
-                Ok(AxActionReport::press(
-                    "test",
-                    Some("pid:321/window:0/path:1".to_owned()),
-                ))
-            },
-            |_, _| Ok(vec!["pending".to_owned()]),
-        )
-        .unwrap();
-
-        assert_eq!(press_calls.get(), 3);
-        assert!(report.performed);
-        assert!(!report.verified);
-        assert_eq!(report.status, "failed");
-        assert_eq!(report.attempt_count, 3);
-        assert_eq!(report.steps.len(), 3);
-        assert!(report
-            .error
-            .as_deref()
-            .is_some_and(|error| { error.contains("未在3次动作内满足") }));
-    }
-
-    #[test]
-    fn ax_postcondition_comparison_should_remove_bidi_controls() {
-        assert_eq!(normalize_ax_verification_value("\u{200e}0\u{200f}"), "0");
-        assert_eq!(
-            normalize_ax_verification_value("\u{2066}ready\u{2069}"),
-            "ready"
-        );
-    }
-
-    #[test]
-    fn observe_current_ax_values_should_reach_deeply_nested_static_text() {
-        // Calculator 等应用的 AXStaticText result value 常位于 depth >= 5。
-        // 这里手工构造一个 depth=6 的 snapshot,验证通用 fresh 观察能取到。
-        fn leaf(role: &str, value: &str) -> AxElement {
-            AxElement {
-                id: format!("id-{role}"),
-                ref_id: None,
-                role: role.to_owned(),
-                subrole: None,
-                name: None,
-                value: Some(value.to_owned()),
-                value_redacted: false,
-                description: None,
-                rect: None,
-                enabled: Some(true),
-                actions: Vec::new(),
-                ax_path: Vec::new(),
-                children: Vec::new(),
-            }
-        }
-
-        let mut nested = leaf("AXStaticText", "0");
-        for index in 1..=6 {
-            nested = AxElement {
-                id: format!("id-group-{index}"),
-                ref_id: None,
-                role: "AXGroup".to_owned(),
-                subrole: None,
-                name: None,
-                value: None,
-                value_redacted: false,
-                description: None,
-                rect: None,
-                enabled: Some(true),
-                actions: Vec::new(),
-                ax_path: Vec::new(),
-                children: vec![nested],
-            };
-        }
-        let window = AxWindow {
-            id: "pid:7/window:0".to_owned(),
-            ref_id: None,
-            pid: 7,
-            process_name: "Calculator".to_owned(),
-            title: Some("Calculator".to_owned()),
-            role: "AXWindow".to_owned(),
-            subrole: None,
-            rect: None,
-            focused: Some(true),
-            elements: vec![nested],
-        };
-        let snapshot = AxSnapshot::complete("test", vec![window], false);
-
-        let captured_request_depth = Cell::new(0u8);
-        let values = observe_current_ax_values_with("pid:7/window:0", "AXStaticText", |_, req| {
-            captured_request_depth.set(req.depth);
-            Ok(snapshot.clone())
-        })
-        .unwrap();
-
-        assert_eq!(captured_request_depth.get(), AX_POSTCONDITION_DEPTH);
-        assert!(captured_request_depth.get() >= 6);
-        assert_eq!(values, vec!["0".to_owned()]);
-    }
-
-    #[test]
-    fn press_sequence_should_resolve_app_once_and_preserve_partial_failure() {
-        let request = parse_ax_press_sequence_payload("app:Calculator,1,加,2").unwrap();
-        let resolve_calls = Cell::new(0usize);
-        let request = materialize_press_sequence_request_with(&request, |app| {
-            resolve_calls.set(resolve_calls.get() + 1);
-            assert_eq!(app, "Calculator");
-            Ok("pid:123/window:0".to_owned())
-        })
-        .unwrap();
-
-        assert_eq!(resolve_calls.get(), 1);
-        assert!(request.targets.iter().all(|target| {
-            target.app.is_none() && target.window_id.as_deref() == Some("pid:123/window:0")
-        }));
-
-        let mut call_index = 0usize;
-        let report = perform_ax_press_sequence_with(&request, |_| {
-            let index = call_index;
-            call_index += 1;
-            if index == 1 {
-                return Err(io::Error::new(io::ErrorKind::InvalidInput, "目标歧义"));
-            }
-            Ok(AxActionReport::press(
-                "test",
-                Some(format!("pid:123/window:0/path:{index}")),
-            ))
-        });
-
-        assert!(!report.performed);
-        assert_eq!(report.status, "failed");
-        assert_eq!(report.step_count, 3);
-        assert_eq!(report.steps.len(), 2);
-        assert!(report.steps[0].performed);
-        assert!(!report.steps[1].performed);
-        assert_eq!(report.steps[1].description, "加");
-        assert_eq!(report.steps[1].error.as_deref(), Some("目标歧义"));
-        assert_eq!(report.failed_index, Some(1));
-        assert_eq!(report.error.as_deref(), Some("目标歧义"));
-        assert_eq!(call_index, 2);
-    }
-
-    #[test]
-    fn ax_target_window_ownership_should_fail_closed() {
-        let direct_id_with_window = parse_ax_press_payload(
-            r#"{target:{id:"pid:123/window:0/path:0",window_id:"pid:123/window:0"}}"#,
-        );
-        assert!(direct_id_with_window.is_err());
-
-        let ref_with_window = parse_ax_press_payload(
-            r#"{target:{ref:"@e1",observation_id:"obs-1",window_id:"pid:123/window:0"}}"#,
-        );
-        assert!(ref_with_window.is_err());
-
-        let mixed_app = AxTarget {
-            app: Some("Calculator".to_owned()),
-            window_id: Some("pid:123/window:0".to_owned()),
-            role: Some("AXButton".to_owned()),
-            ..AxTarget::default()
-        };
-        assert!(mixed_app.validate().is_err());
     }
 
     #[test]
@@ -2026,66 +2593,6 @@ mod tests {
         assert_eq!(snapshot.platform, "targeted");
         assert_eq!(global_calls.get(), 0);
         assert_eq!(targeted_calls.get(), 1);
-    }
-
-    #[test]
-    fn semantic_target_window_id_should_route_only_to_targeted_capture() {
-        let global_calls = Cell::new(0);
-        let targeted_calls = Cell::new(0);
-        let target = AxTarget {
-            window_id: Some("pid:7/window:1".to_owned()),
-            role: Some("AXButton".to_owned()),
-            description: Some("1".to_owned()),
-            ..AxTarget::default()
-        };
-
-        let snapshot = capture_semantic_target_snapshot_with(
-            &target,
-            &AxTreeRequest::default(),
-            |_| {
-                global_calls.set(global_calls.get() + 1);
-                Ok(AxSnapshot::complete("global", Vec::new(), false))
-            },
-            |window_id, _| {
-                targeted_calls.set(targeted_calls.get() + 1);
-                assert_eq!(window_id, "pid:7/window:1");
-                Ok(AxSnapshot::complete("targeted", Vec::new(), false))
-            },
-        )
-        .unwrap();
-
-        assert_eq!(snapshot.platform, "targeted");
-        assert_eq!(global_calls.get(), 0);
-        assert_eq!(targeted_calls.get(), 1);
-    }
-
-    #[test]
-    fn semantic_target_without_window_id_should_keep_global_capture() {
-        let global_calls = Cell::new(0);
-        let targeted_calls = Cell::new(0);
-        let target = AxTarget {
-            role: Some("AXButton".to_owned()),
-            description: Some("1".to_owned()),
-            ..AxTarget::default()
-        };
-
-        let snapshot = capture_semantic_target_snapshot_with(
-            &target,
-            &AxTreeRequest::default(),
-            |_| {
-                global_calls.set(global_calls.get() + 1);
-                Ok(AxSnapshot::complete("global", Vec::new(), false))
-            },
-            |_, _| {
-                targeted_calls.set(targeted_calls.get() + 1);
-                Ok(AxSnapshot::complete("targeted", Vec::new(), false))
-            },
-        )
-        .unwrap();
-
-        assert_eq!(snapshot.platform, "global");
-        assert_eq!(global_calls.get(), 1);
-        assert_eq!(targeted_calls.get(), 0);
     }
 
     #[test]

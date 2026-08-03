@@ -1,8 +1,7 @@
 use super::*;
 use crate::control_ax::{
-    capture_current_ax_subtree, capture_current_ax_window_snapshot, capture_default_ax_snapshot,
-    perform_default_ax_action, AxActionName, AxActionRequest, AxCapturedSubtree,
-    AxPerformedActionReport, AxTarget,
+    capture_current_ax_subtree, capture_default_ax_snapshot, perform_default_ax_action,
+    AxActionName, AxActionRequest, AxCapturedSubtree, AxPerformedActionReport, AxTarget,
 };
 
 const WEB_ACT_SCHEMA: &str = "rdog.web-act.v1";
@@ -213,45 +212,13 @@ pub fn parse_web_act_payload(input: &str) -> io::Result<WebActRequest> {
 }
 
 pub fn build_default_web_act_response_json(request: &WebActRequest) -> io::Result<String> {
-    build_default_web_act_response_json_with_captures(
-        request,
-        capture_default_ax_snapshot,
-        capture_current_ax_window_snapshot,
-        perform_default_ax_action,
-        |target_id, tree_request| capture_current_ax_subtree(target_id, tree_request).map(Some),
-    )
-}
-
-pub(super) fn build_default_web_act_response_json_with_captures<G, W, A, R>(
-    request: &WebActRequest,
-    mut capture_global: G,
-    mut capture_window: W,
-    perform_action: A,
-    refresh_web_area: R,
-) -> io::Result<String>
-where
-    G: FnMut(&AxTreeRequest) -> io::Result<AxSnapshot>,
-    W: FnMut(&str, &AxTreeRequest) -> io::Result<AxSnapshot>,
-    A: FnMut(&AxActionRequest) -> io::Result<AxPerformedActionReport>,
-    R: FnMut(&str, &AxTreeRequest) -> io::Result<Option<AxCapturedSubtree>>,
-{
-    let snapshot = capture::capture_web_snapshot_with(
-        &request.find,
-        &mut capture_global,
-        &mut capture_window,
-    )?;
+    let snapshot = capture_default_ax_snapshot(&request.find.tree_request())?;
     build_web_act_response_json_with(
         &snapshot,
         request,
-        perform_action,
-        || {
-            capture::capture_web_snapshot_with(
-                &request.find,
-                &mut capture_global,
-                &mut capture_window,
-            )
-        },
-        refresh_web_area,
+        perform_default_ax_action,
+        || capture_default_ax_snapshot(&request.find.tree_request()),
+        |target_id, tree_request| capture_current_ax_subtree(target_id, tree_request).map(Some),
     )
 }
 

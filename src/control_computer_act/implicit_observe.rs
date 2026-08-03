@@ -125,11 +125,7 @@ impl ComputerActObservationCache {
     /// 返回:
     /// - `Ok(record)` → 在 TTL 内,可复用
     /// - `Err(NotFoundOrExpired)` → 不存在或已过期; 调用方决定 re-observe 还是 fallback
-    pub fn resolve(
-        &mut self,
-        observation_id: &str,
-        now_ms: u64,
-    ) -> Result<ImplicitObservationRecord, ()> {
+    pub fn resolve(&mut self, observation_id: &str, now_ms: u64) -> Result<ImplicitObservationRecord, ()> {
         self.evict_expired(now_ms);
         match self.records.get(observation_id) {
             Some(record) => Ok(record.clone()),
@@ -147,14 +143,15 @@ impl ComputerActObservationCache {
     /// - 返回 outcome + 修改后的 `args` (若 start_box 路径,args 不变; 若 stale 路径,
     ///   把新的 `observation_id` 透传给底层 dispatcher,后续 ticket 18 真实 observe
     ///   接入后,这里再把 `start_box` 替换为 `target.ref`)
-    pub fn resolve_or_re_observe(&mut self, args: &Value, now_ms: u64) -> ImplicitObserveOutcome {
+    pub fn resolve_or_re_observe(
+        &mut self,
+        args: &Value,
+        now_ms: u64,
+    ) -> ImplicitObserveOutcome {
         // 1. 看 caller 是否给了 `target.ref + target.observation_id`
         let target = args.get("target").and_then(|v| v.as_object());
         if let Some(target) = target {
-            let ref_id = target
-                .get("ref")
-                .and_then(|v| v.as_str())
-                .map(str::to_owned);
+            let ref_id = target.get("ref").and_then(|v| v.as_str()).map(str::to_owned);
             let observation_id = target
                 .get("observation_id")
                 .and_then(|v| v.as_str())
@@ -206,7 +203,8 @@ impl ComputerActObservationCache {
         // 返回 Fallback 占位 (caller 看到 `StaleFallbackToCoords` 时,不要写
         // observation_id 到 response)
         ImplicitObserveOutcome::StaleFallbackToCoords {
-            reason: "non-mouse action without target ref; no implicit_observe needed".to_string(),
+            reason: "non-mouse action without target ref; no implicit_observe needed"
+                .to_string(),
             last_known_observation_id: None,
         }
     }
@@ -263,8 +261,7 @@ fn global_cache() -> &'static Mutex<ComputerActObservationCache> {
 /// 跟 `initialize_durable_observation_state` 同模式;幂等。
 #[cfg_attr(not(test), allow(dead_code))]
 pub fn initialize_computer_act_observation_state() {
-    let _ = COMPUTER_ACT_OBSERVATION_CACHE
-        .get_or_init(|| Mutex::new(ComputerActObservationCache::new()));
+    let _ = COMPUTER_ACT_OBSERVATION_CACHE.get_or_init(|| Mutex::new(ComputerActObservationCache::new()));
 }
 
 /// 测试用:替换 cache 为可注入时钟的实例。
@@ -276,18 +273,15 @@ pub(crate) fn initialize_computer_act_observation_state_for_tests(
     // 模式一致。如果需要锁住后续调用,测试应在 `lock()` 之后 hold MutexGuard。
     let cache_for_init = cache.clone();
     let slot = COMPUTER_ACT_OBSERVATION_CACHE.get_or_init(|| Mutex::new(cache_for_init));
-    *slot
-        .lock()
-        .expect("computer-act observation cache poisoned") = cache;
+    *slot.lock().expect("computer-act observation cache poisoned") = cache;
 }
 
 /// 测试用:清空 cache,避免下一个测试看到上一次的 observation。
 #[cfg(test)]
 pub(crate) fn reset_computer_act_observation_state_for_tests() {
     if let Some(slot) = COMPUTER_ACT_OBSERVATION_CACHE.get() {
-        *slot
-            .lock()
-            .expect("computer-act observation cache poisoned") = ComputerActObservationCache::new();
+        *slot.lock().expect("computer-act observation cache poisoned") =
+            ComputerActObservationCache::new();
     }
 }
 
@@ -380,6 +374,8 @@ pub(crate) fn apply_implicit_observe_to_args(
     Ok(())
 }
 
+
+
 #[cfg(test)]
 mod tests {
     //! ticket 11 implicit_observe plumbing 单测。
@@ -438,10 +434,7 @@ mod tests {
         let r2 = cache.record_implicit(1_001);
         let r3 = cache.record_implicit(1_002);
         let r4 = cache.record_implicit(1_003);
-        assert!(
-            cache.resolve(&r1.observation_id, 1_010).is_err(),
-            "r1 evicted"
-        );
+        assert!(cache.resolve(&r1.observation_id, 1_010).is_err(), "r1 evicted");
         assert!(cache.resolve(&r2.observation_id, 1_010).is_ok(), "r2 kept");
         assert!(cache.resolve(&r3.observation_id, 1_010).is_ok(), "r3 kept");
         assert!(cache.resolve(&r4.observation_id, 1_010).is_ok(), "r4 kept");
@@ -497,10 +490,7 @@ mod tests {
         });
         let outcome = cache.resolve_or_re_observe(&args, 1_000 + 6_000);
         match outcome {
-            ImplicitObserveOutcome::StaleReObserved {
-                previous_observation_id,
-                record,
-            } => {
+            ImplicitObserveOutcome::StaleReObserved { previous_observation_id, record } => {
                 assert_eq!(previous_observation_id, Some(prior_obs_id.clone()));
                 assert_eq!(record.ref_id, "@e1");
                 assert_ne!(record.observation_id, prior_obs_id);
@@ -515,10 +505,7 @@ mod tests {
         let args = json!({"target": {"ref": "@e99"}});
         let outcome = cache.resolve_or_re_observe(&args, 1_000);
         match outcome {
-            ImplicitObserveOutcome::StaleReObserved {
-                previous_observation_id,
-                record,
-            } => {
+            ImplicitObserveOutcome::StaleReObserved { previous_observation_id, record } => {
                 assert_eq!(previous_observation_id, None);
                 assert_eq!(record.ref_id, "@e99", "client 提供的 ref 应该保留");
                 assert!(record.observation_id.contains("computer-act-obs-1000-"));
@@ -531,10 +518,7 @@ mod tests {
     fn non_mouse_action_without_target_or_start_box_returns_fallback() {
         let mut cache = ComputerActObservationCache::new();
         let outcome = cache.resolve_or_re_observe(&json!({"duration_ms": 500}), 1_000);
-        assert!(matches!(
-            outcome,
-            ImplicitObserveOutcome::StaleFallbackToCoords { .. }
-        ));
+        assert!(matches!(outcome, ImplicitObserveOutcome::StaleFallbackToCoords { .. }));
     }
 
     #[test]
@@ -544,10 +528,7 @@ mod tests {
             "target": {"ref": "@e1", "observation_id": "computer-act-obs-0-0"}
         });
         let outcome = cache.resolve_or_re_observe(&args, 1_000);
-        assert!(matches!(
-            outcome,
-            ImplicitObserveOutcome::StaleReObserved { .. }
-        ));
+        assert!(matches!(outcome, ImplicitObserveOutcome::StaleReObserved { .. }));
     }
 
     // --- response envelope helpers ---
@@ -585,23 +566,18 @@ mod tests {
     fn render_observation_used_stale_without_previous_obs_id_omits_field() {
         let mut cache = ComputerActObservationCache::new();
         let outcome = cache.resolve_or_re_observe(&json!({"target": {"ref": "@e1"}}), 1_000);
-        let rendered =
-            render_observation_used(&outcome).expect("stale ref-only must produce value");
+        let rendered = render_observation_used(&outcome).expect("stale ref-only must produce value");
         assert_eq!(rendered["freshness"], "stale_re_observed");
-        assert!(
-            rendered.get("previous_observation_id").is_none(),
-            "no previous obs_id means omit field, not null"
-        );
+        assert!(rendered.get("previous_observation_id").is_none(),
+            "no previous obs_id means omit field, not null");
     }
 
     #[test]
     fn render_observation_used_fallback_returns_none() {
         let mut cache = ComputerActObservationCache::new();
         let outcome = cache.resolve_or_re_observe(&json!({"duration_ms": 100}), 1_000);
-        assert!(
-            render_observation_used(&outcome).is_none(),
-            "non-mouse fallback should not write observation_used field"
-        );
+        assert!(render_observation_used(&outcome).is_none(),
+            "non-mouse fallback should not write observation_used field");
     }
 
     #[test]
@@ -611,10 +587,7 @@ mod tests {
         let id1 = render_top_level_observation_id(&fresh).expect("fresh has id");
         let args = json!({"target": {"ref": "@e1", "observation_id": id1.clone()}});
         let still_fresh = cache.resolve_or_re_observe(&args, 4_000);
-        assert_eq!(
-            render_top_level_observation_id(&still_fresh),
-            Some(id1.clone())
-        );
+        assert_eq!(render_top_level_observation_id(&still_fresh), Some(id1.clone()));
         let stale = cache.resolve_or_re_observe(&args, 8_000);
         let id2 = render_top_level_observation_id(&stale).expect("stale has new id");
         assert_ne!(id1, id2, "stale re-observe must produce fresh id");
@@ -629,9 +602,7 @@ mod tests {
 
     #[test]
     fn global_cache_wall_clock_helper_produces_fresh_for_start_box() {
-        super::initialize_computer_act_observation_state_for_tests(
-            ComputerActObservationCache::new(),
-        );
+        super::initialize_computer_act_observation_state_for_tests(ComputerActObservationCache::new());
         let outcome = super::resolve_or_re_observe_with_wall_clock(&json!({"start_box": [50, 60]}));
         assert!(matches!(outcome, ImplicitObserveOutcome::Fresh { .. }));
         super::reset_computer_act_observation_state_for_tests();

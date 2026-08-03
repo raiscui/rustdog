@@ -17,8 +17,8 @@
 //! Timeout watcher: spawn std::thread, sleep timeout_ms, then signal CancellationToken
 //! (跟 ticket 03 cancellation 整合)。Background thread leak 由 daemon 退出清理。
 
-use crate::cancellation::CancellationToken;
 use crate::control_computer_act::ComputerActErrorCode;
+use crate::cancellation::CancellationToken;
 use serde_json::Value;
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
@@ -55,7 +55,11 @@ pub(crate) fn wait_derived_timeout_ms(duration_ms: u64) -> u64 {
 /// 解析 effective timeout (考虑 client override + wait 派生公式)
 ///
 /// 返回 (effective_timeout_ms, override_applied: bool)
-pub(crate) fn resolve_timeout(action: &str, args: &Value, request_timeout_ms: Option<u64>) -> u64 {
+pub(crate) fn resolve_timeout(
+    action: &str,
+    args: &Value,
+    request_timeout_ms: Option<u64>,
+) -> u64 {
     // client override 优先
     if let Some(override_ms) = request_timeout_ms {
         return override_ms;
@@ -159,10 +163,7 @@ mod tests {
         // ADR-0005: wait timeout 永远 >= duration_ms + 1 (永不自杀)
         for d in [0, 100, 1_000, 10_000, 60_000] {
             let timeout = wait_derived_timeout_ms(d);
-            assert!(
-                timeout > d,
-                "wait timeout {timeout} should be > duration {d}"
-            );
+            assert!(timeout > d, "wait timeout {timeout} should be > duration {d}");
         }
     }
 

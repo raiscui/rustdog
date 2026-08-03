@@ -10,10 +10,9 @@ use crate::control_display_scope::{
 };
 use crate::control_observation::ObservationHeader;
 use crate::control_protocol::{
-    normalize_object_field_name, object_inner, parse_compact_window_pair, parse_quoted_payload,
-    split_object_field, split_object_fields, CompactWindowSelector,
+    normalize_object_field_name, object_inner, parse_quoted_payload, split_object_field,
+    split_object_fields,
 };
-use crate::control_window::resolve_unique_app_window_id;
 use crate::screenshot::current_display_summaries;
 use serde::Serialize;
 use std::io;
@@ -21,9 +20,6 @@ use std::io;
 const DEFAULT_AX_FIND_LIMIT: u16 = 20;
 const DEFAULT_AX_FIND_MODE: AxMode = AxMode::Interactive;
 const DEFAULT_AX_GET_MODE: AxMode = AxMode::Interactive;
-const COMPACT_AX_FIND_DEPTH: u8 = 8;
-const COMPACT_AX_FIND_MAX_ELEMENTS: u16 = 5_000;
-const COMPACT_AX_FIND_LIMIT: u16 = 50;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AxFindRequest {
@@ -37,7 +33,6 @@ pub struct AxFindRequest {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AxWindowIdentity {
     pub window_id: Option<String>,
-    pub app: Option<String>,
     pub ref_id: Option<String>,
     pub observation_id: Option<String>,
 }
@@ -46,9 +41,6 @@ impl AxWindowIdentity {
     pub fn resolve_window_id(&self) -> io::Result<String> {
         if let Some(window_id) = self.window_id.as_ref() {
             return Ok(window_id.clone());
-        }
-        if let Some(app) = self.app.as_deref() {
-            return resolve_unique_app_window_id(app);
         }
         let observation_id = self
             .observation_id
@@ -230,40 +222,6 @@ impl AxGetResponse {
 }
 
 pub fn parse_ax_find_payload(input: &str) -> io::Result<AxFindRequest> {
-    let trimmed = input.trim();
-    if !trimmed.starts_with('{') {
-        let (window_selector, role) = parse_compact_window_pair("@ax-find", trimmed)?;
-        let window = match window_selector {
-            CompactWindowSelector::WindowId(window_id) => AxWindowIdentity {
-                window_id: Some(window_id),
-                app: None,
-                ref_id: None,
-                observation_id: None,
-            },
-            CompactWindowSelector::App(app) => AxWindowIdentity {
-                window_id: None,
-                app: Some(app),
-                ref_id: None,
-                observation_id: None,
-            },
-        };
-        return Ok(AxFindRequest {
-            tree: AxTreeRequest {
-                depth: COMPACT_AX_FIND_DEPTH,
-                max_elements: COMPACT_AX_FIND_MAX_ELEMENTS,
-                include_values: true,
-                ..AxTreeRequest::default()
-            },
-            query: AxFindQuery {
-                role: Some(role),
-                ..AxFindQuery::default()
-            },
-            window: Some(window),
-            display_scope: None,
-            limit: COMPACT_AX_FIND_LIMIT,
-        });
-    }
-
     let inner = object_inner(input, "@ax-find")?;
     if inner.is_empty() {
         return Err(invalid_data("@ax-find 对象 payload 不能为空"));
@@ -479,7 +437,6 @@ fn parse_ax_window_identity(input: &str) -> io::Result<AxWindowIdentity> {
 
     Ok(AxWindowIdentity {
         window_id,
-        app: None,
         ref_id,
         observation_id,
     })
@@ -894,27 +851,6 @@ mod tests {
         assert!(!request.tree.include_values);
         assert_eq!(request.limit, DEFAULT_AX_FIND_LIMIT);
         assert_eq!(request.query.name_contains.as_deref(), Some("can"));
-    }
-
-    #[test]
-    fn parse_ax_find_payload_should_accept_compact_window_or_app_role() {
-        let direct = parse_ax_find_payload("pid:123/window:0,AXStaticText").unwrap();
-        let direct_window = direct.window.unwrap();
-        assert_eq!(direct_window.window_id.as_deref(), Some("pid:123/window:0"));
-        assert!(direct_window.app.is_none());
-        assert_eq!(direct.query.role.as_deref(), Some("AXStaticText"));
-        assert_eq!(direct.tree.depth, COMPACT_AX_FIND_DEPTH);
-        assert_eq!(direct.tree.max_elements, COMPACT_AX_FIND_MAX_ELEMENTS);
-        assert!(direct.tree.include_values);
-        assert_eq!(direct.limit, COMPACT_AX_FIND_LIMIT);
-
-        let app = parse_ax_find_payload("app:Calculator,AXStaticText").unwrap();
-        let app_window = app.window.unwrap();
-        assert_eq!(app_window.app.as_deref(), Some("Calculator"));
-        assert!(app_window.window_id.is_none());
-
-        assert!(parse_ax_find_payload("app:Calculator App,AXStaticText").is_err());
-        assert!(parse_ax_find_payload("app:Calculator,AXButton,extra").is_err());
     }
 
     #[test]

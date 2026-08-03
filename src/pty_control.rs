@@ -392,25 +392,28 @@ pub fn run_pty_client_transport(
 ) -> io::Result<()> {
     transport.write_message(&open_line)?;
 
-    let Some(message) = transport.read_message()? else {
-        return Err(io::Error::new(
-            io::ErrorKind::UnexpectedEof,
-            "control connection 在 PTY ready 前关闭",
-        ));
-    };
-    let ready = match ControlFrame::parse_inbound_result_message(&message)? {
-        ControlFrame::PtyReady(frame) => frame,
-        ControlFrame::ResponseLine(response) => {
+    let ready = loop {
+        let Some(message) = transport.read_message()? else {
             return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("PTY open 返回了普通响应而不是 @pty-ready: {response}"),
+                io::ErrorKind::UnexpectedEof,
+                "control connection 在 PTY ready 前关闭",
             ));
-        }
-        frame => {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("PTY open 收到意外 frame: {}", frame.to_wire_message()),
-            ));
+        };
+
+        match ControlFrame::parse_inbound_result_message(&message)? {
+            ControlFrame::PtyReady(frame) => break frame,
+            ControlFrame::ResponseLine(response) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("PTY open 返回了普通响应而不是 @pty-ready: {response}"),
+                ));
+            }
+            frame => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("PTY open 收到意外 frame: {}", frame.to_wire_message()),
+                ));
+            }
         }
     };
 
@@ -436,25 +439,28 @@ pub fn run_pty_attach_client_transport(
 ) -> io::Result<()> {
     transport.write_message(&attach_line)?;
 
-    let Some(message) = transport.read_message()? else {
-        return Err(io::Error::new(
-            io::ErrorKind::UnexpectedEof,
-            "control connection 在 PTY attach 前关闭",
-        ));
-    };
-    let attached = match ControlFrame::parse_inbound_result_message(&message)? {
-        ControlFrame::PtyAttached(frame) => frame,
-        ControlFrame::ResponseLine(response) => {
+    let attached = loop {
+        let Some(message) = transport.read_message()? else {
             return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("PTY attach 返回了普通响应而不是 @pty-attached: {response}"),
+                io::ErrorKind::UnexpectedEof,
+                "control connection 在 PTY attach 前关闭",
             ));
-        }
-        frame => {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("PTY attach 收到意外 frame: {}", frame.to_wire_message()),
-            ));
+        };
+
+        match ControlFrame::parse_inbound_result_message(&message)? {
+            ControlFrame::PtyAttached(frame) => break frame,
+            ControlFrame::ResponseLine(response) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("PTY attach 返回了普通响应而不是 @pty-attached: {response}"),
+                ));
+            }
+            frame => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("PTY attach 收到意外 frame: {}", frame.to_wire_message()),
+                ));
+            }
         }
     };
 

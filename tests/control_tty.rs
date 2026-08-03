@@ -101,9 +101,6 @@ fn control_cli_should_treat_arrow_keys_as_local_cursor_motion_in_tty() {
         .write_all(b"@png\x1b[D\x1b[Di\x1b[C\r")
         .expect("should write tty-edited control line");
     child_stdin.flush().expect("script stdin should flush");
-    // `script` 在 stdin 关闭时会结束伪终端.给 line editor 一个短窗口消费
-    // 已 flush 的按键,避免测试先发送 HUP、后处理输入的竞态.
-    thread::sleep(Duration::from_millis(200));
     drop(child_stdin);
 
     let received = server.join().expect("server thread should finish");
