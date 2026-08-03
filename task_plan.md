@@ -648,3 +648,19 @@ deepseek 3/3(历史一致) | minimax 2/3 | qwen36 2/3 | qwen37 1/3(历史 2/3) |
 - 三种坏写法 (role: 前缀/尾部选项/对象顶层 app) 全部工作
 - 冲突/未知前缀报错带可操作提示
 - macos-ops: qwen37 5/5 (safari 收复), 总计 28/30
+
+## [2026-08-04 07:25:00] [Session ID: omx-1785634372447-ezls0t] [记录类型]: @window-find 空格参数兼容 (macos-ops 30/30)
+
+### 实施 (commit 3837b5a)
+- parse_control_line: 命令名后空格参数归一化为冒号形式 (@window-find app:X -> @window-find:app:X)
+- parse_window_find_payload: compact 语法 (app:/pid:)
+- parse_compact_fields: 带引号值剥离 (app:"Terminal")
+- 2 新测试, 670 passed
+
+### 关键结论
+- qwen-plus preview/terminal "未做 AX 验证"是假象: @window-find 语法不兼容
+  导致模型所有验证手段失败, 不是行为问题
+- macos-ops 30/30 (6 模型全 5/5)
+
+### 死文件清理 (commit 前置)
+- 删除 parsers/ax.rs, control_ax/press.rs, control_ax/postcondition.rs (功能已在 control_ax.rs)
