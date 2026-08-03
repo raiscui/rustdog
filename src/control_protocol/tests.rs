@@ -1041,6 +1041,24 @@ fn parse_compact_window_selector_should_reject_mixed_ascii_app_name() -> io::Res
 }
 
 #[test]
+fn compact_should_reject_window_suffix_with_actionable_hint() {
+    // 模型误用 `@window:N` 后缀时, 必须显式报错提示正确语法, 不能静默 0 匹配。
+    let err = parse_control_line(r#"@ax-find:app:Calculator,AXButton@window:0"#)
+        .expect_err("compact @window: suffix must be rejected");
+    let msg = err.to_string();
+    assert!(msg.contains("@window:"), "error must echo suffix: {msg}");
+    assert!(
+        msg.contains("app:APP,ROLE"),
+        "error must suggest correct compact syntax: {msg}"
+    );
+
+    // 同样的误用出现在 @ax-press 的 description 位置也要被拒绝。
+    let err = parse_control_line(r#"@ax-press:app:Calculator,1@window:0"#)
+        .expect_err("compact @window: suffix must be rejected for press too");
+    assert!(err.to_string().contains("@window:"));
+}
+
+#[test]
 fn parse_should_reject_unknown_or_empty_or_multiline_payloads_or_bad_request_ids() {
     assert!(parse_control_line(r#"@unknown:"x""#).is_err());
     assert!(parse_control_line(r#"@key:"""#).is_err());

@@ -45,6 +45,19 @@ pub(crate) fn parse_compact_atom(kind: &str, input: &str) -> io::Result<String> 
         ));
     }
 
+    // 2026-08-03 (评测回归): 模型常把对象语法的 `@window:N` 后缀塞进 compact
+    // 语法 (例如 `app:Calculator,AXButton@window:0`), 旧行为把它原样当作
+    // role/description 的一部分, 静默 0 匹配且无错误提示, 模型无法自纠。
+    // 这里显式拒绝, 并提示正确写法 (窗口选择走 selector 前缀或对象语法)。
+    if value.contains("@window:") {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "{kind} 短格式不支持 `@window:` 后缀: {input}; 请用 `app:APP,ROLE` 或 `pid:PID/window:N,ROLE` 选择窗口"
+            ),
+        ));
+    }
+
     if let Some(invalid) = value.chars().find(|character| {
         !character.is_alphanumeric()
             && !matches!(character, '_' | '-' | '.' | '/' | ':' | '+' | '=' | '@')
