@@ -45,6 +45,26 @@ rdog control @ax-press:app:APP,DESCRIPTION
 rdog control @ax-press-sequence:app:APP,DESCRIPTION_1,DESCRIPTION_2
 ```
 
+**按钮/控件应用必须走 `@ax-press`(语义按钮), 不要用 `@key` 输入符号。**
+计算器、键盘驱动的工具栏、游戏等应用只响应真实按键事件, `@key` 的
+unicode 字符注入不会触发按钮 (例如 `@key:{key:"+"}` 不会按计算器的加号键,
+但 `@ax-press:app:TextEdit,加` 会)。先 `@ax-find` 枚举按钮 description,
+再按 description 用 `@ax-press` / `@ax-press-sequence`。
+`@key` 只用于: 快捷键 / 修饰键组合 / 无 AX 语义的全局按键 (Cmd+T, Esc 等)。
+
+### Verify (动作后验证)
+
+动作类命令支持 `verify` 字段 (窗口命令用 `post_verify`):
+
+```bash
+rdog control '@ax-press:{target:{id:"pid:1/window:0/path:0"},verify:"best_effort"}'
+rdog control '@key:{key:"Cmd+T",verify:"best_effort"}'
+rdog control '@window-close:{target:{app:"TextEdit"},post_verify:"best_effort"}'
+```
+
+`best_effort` 返回 `verification:{method:"ax_diff",...}` 动作前后 AX diff。
+动作成功且 GUI 变化符合预期 = 完成; 不要重做动作来"验证"。
+
 ### Text Input (文字输入)
 
 向文本框 / 文本区 / 地址栏输入文字时,默认使用 AXValue 直写,不依赖
@@ -111,8 +131,10 @@ After a guarded press, regardless of `verified`, take a separate fresh
 `@ax-find` for the result role before issuing the next input step. The
 fresh read is the only proof the reset actually took effect.
 
-Use `@key` for an explicit shortcut request or when no semantic action can express
-the operation. Use guarded screenshot coordinates only after semantic lookup fails.
+Use `@key` only for explicit shortcuts (Cmd+T, Esc) or when the target has no
+AX button to press. Prefer `@ax-press` / `@ax-press-sequence` for any visible
+button — @key unicode injection does not trigger button-driven apps.
+Use guarded screenshot coordinates only after semantic lookup fails.
 
 ## Browser Lane
 
