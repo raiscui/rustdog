@@ -954,3 +954,20 @@
 - @key:"+" 的"payload 不能为空"是执行层 bug 不是协议层: 协议解析成功, 执行层把 `+` 当和弦分隔符
 - 本地化 GUI 的 AX 按钮 description 是语义文本(加/Add), 精确字符匹配会 fallback 到 enigo; 语义别名匹配让 AX press 真正覆盖运算符
 - daemon 调试用 RDOG_LOG_LEVEL(不是 RUST_LOG); 起 daemon 用 tmux 持久, 路径务必用 $HOME 防拼写错误
+
+## [2026-08-03 17:10:00] [Session ID: omx-1785634372447-ezls0t] 任务名称: Wayfinder #39 评测验证 (AX press backend)
+
+### 任务内容
+- 6 模型评测复跑 (pi-rdog-calculator-eval runner), 对比 16/18 基线
+- 结果归档到评测工程 results/ (suite-result 格式)
+
+### 完成过程
+- 复跑 deepseek / minimax / m27hs (qwen 3 模型因 key 401 无法跑)
+- m27hs 3/3 全过, 证明 @key 符号 AX press 全链路 (加/乘/除/等于 timeline 精确匹配)
+- minimax 2/3 (happy 单轮完成 multiTurn 判定失败), deepseek 2/3 (stale 模型走偏)
+- 根因定位 qwen key: models.json 的 apiKey 是 "env:DASHSCOPE_API_KEY" 引用, 真相源 xtalk/.envrc, 但 key 已 401 过期
+
+### 总结感悟
+- 评测环境 key 真相源: DASHSCOPE_API_KEY 在 xtalk/.envrc (Bonsai-demo 注释指明), 不是 models.json 字面值
+- 模型普遍用 @ax-press/@ax-press-sequence (SKILL 引导), @key AX press 是兜底路径
+- runner 的 timeline 从命令恢复 label: @key 和 @ax-press 都能恢复, 但 @ax-press 的 pid 路径 target 会 unresolved

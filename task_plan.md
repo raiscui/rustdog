@@ -503,3 +503,22 @@ deepseek 3/3(历史一致) | minimax 2/3 | qwen36 2/3 | qwen37 1/3(历史 2/3) |
 
 ### 状态
 **#38 完成** - 提交后关闭 ticket
+
+## [2026-08-03 17:10:00] [Session ID: omx-1785634372447-ezls0t] [记录类型]: Wayfinder #39 评测验证(部分完成)
+
+### 评测结果
+- m27hs: 3/3 ✓ (timeline 含 加/乘/除/等于 精确匹配, @key AX press 全链路生效)
+- minimax: 2/3 (happy 用 @ax-press-sequence 单轮完成, multiTurnVerified=false; 结果 7 正确)
+- deepseek: 2/3 (stale 两次失败均为模型行为: 首次走偏, 复跑用 @ax-press 致 timeline unresolved; 结果 60 正确)
+- qwen37/qwen36/qwen-plus: 无法评测 — DASHSCOPE_API_KEY 401 失效 (models.json 是 env: 引用; xtalk/.envrc key 已过期)
+
+### 结论
+1. @key AX press backend 验证成功: 手动端到端 + m27hs 3/3 证明符号(+*/=)可靠触发
+2. 未回 16/18 主因: qwen 3 模型 key 失效 (历史 7 分), 模型行为随机性 (minimax/deepseek)
+3. 模型多走 @ax-press 路径 (SKILL 引导), #38 的价值是 @key 兜底可靠
+
+### 归档
+- 评测工程 results/: 52 (m27hs 3/3), 53 (minimax 2/3), 54 (deepseek 2/3)
+
+### 阻塞
+- DASHSCOPE_API_KEY 失效, qwen 补跑待 key 恢复
