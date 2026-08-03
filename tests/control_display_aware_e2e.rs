@@ -406,6 +406,49 @@ fn macos_fixture_should_create_one_deterministic_window_per_display() {
 }
 
 #[test]
+#[ignore = "requires a visible macOS desktop and Accessibility permission"]
+fn daemon_should_repeat_guarded_ax_press_until_fresh_value_matches() {
+    let fixture_binary = compile_fixture();
+    let (fixture, _ready) = start_fixture(&fixture_binary, 1);
+    let rdog_binary = rdog_binary_path();
+    let (_daemon, port) = start_daemon(&rdog_binary);
+
+    let fixture_window = find_fixture_window(&rdog_binary, port, "rdog-display-aware-d1", 1);
+    let window_id = fixture_window["matches"][0]["window_id"]
+        .as_str()
+        .expect("fixture window应该返回window_id");
+    let guarded = run_control_command(
+        &rdog_binary,
+        port,
+        &format!("@ax-press:{window_id},display-aware-button-1,AXStaticText,count:2,3"),
+    );
+
+    assert_eq!(guarded["status"], "ok", "guarded press失败: {guarded}");
+    assert_eq!(guarded["performed"], true);
+    assert_eq!(guarded["verified"], true);
+    assert_eq!(guarded["attempt_count"], 2);
+    let steps = guarded["steps"]
+        .as_array()
+        .expect("guarded press应该返回逐次timeline");
+    assert_eq!(steps.len(), 2);
+    assert_eq!(steps[0]["performed"], true);
+    assert_eq!(steps[0]["verified"], false);
+    assert_eq!(steps[1]["performed"], true);
+    assert_eq!(steps[1]["verified"], true);
+
+    let fresh = run_control_command(
+        &rdog_binary,
+        port,
+        &format!("@ax-find:{window_id},AXStaticText"),
+    );
+    assert!(fresh["matches"]
+        .as_array()
+        .is_some_and(|matches| matches.iter().any(|item| item["value"] == "count:2")));
+
+    fixture.terminate();
+}
+
+#[test]
 #[ignore = "requires a visible dual-display macOS desktop and Accessibility permission"]
 fn daemon_should_guard_and_verify_activation_on_second_display() {
     let fixture_binary = compile_fixture();

@@ -39,11 +39,54 @@ const LINUX_EXAMPLE_CONFIG_TEMPLATE: &str = include_str!("../rdog_linux.toml");
 #[serde(default)]
 pub struct DaemonConfig {
     pub daemon: DaemonSettings,
+    pub key: KeyConfig,
     pub observation: ObservationConfig,
     pub hidden: HiddenResidentConfig,
     pub outbound: OutboundConfig,
     pub inbound: InboundConfig,
     pub zenoh: ZenohConfig,
+}
+
+/// `@key` 命令的送达后端配置。
+///
+/// 2026-08-03 (wayfinder #36): 让 @key 在 macOS 上默认通过 AX press 执行,
+/// 单字符按键在焦点窗口 AX 树中找匹配按钮并按它; 找不到则 fallback 到
+/// 模拟按键。其他平台(无 AX)默认 simulated。
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct KeyConfig {
+    pub delivery_backend: KeyDeliveryBackend,
+}
+
+impl Default for KeyConfig {
+    fn default() -> Self {
+        Self {
+            delivery_backend: KeyDeliveryBackend::default_for_platform(),
+        }
+    }
+}
+
+/// `@key` 的送达后端。
+///
+/// - `ax_press`: 单字符按键先尝试在当前聚焦窗口 AX 树中匹配按钮并按它,
+///   找不到匹配按钮时 fallback 到模拟按键。
+/// - `simulated`: 始终用 enigo 模拟按键(历史行为)。
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum KeyDeliveryBackend {
+    AxPress,
+    Simulated,
+}
+
+impl KeyDeliveryBackend {
+    /// 平台默认: macOS 有 AX 能力, 默认 ax_press; 其他平台默认 simulated。
+    pub fn default_for_platform() -> Self {
+        if cfg!(target_os = "macos") {
+            Self::AxPress
+        } else {
+            Self::Simulated
+        }
+    }
 }
 
 /// daemon 级别的通用设置。
@@ -393,6 +436,8 @@ fn write_example_configs(force: bool) -> io::Result<Vec<PathBuf>> {
 
 #[cfg_attr(not(any(test, windows)), allow(dead_code))]
 fn validate_daemon_config(config: &DaemonConfig) -> io::Result<()> {
+    validate_key_config(&config.key)?;
+
     if !config.outbound.enabled && !config.inbound.enabled && !config.zenoh.enabled {
         return Err(io::Error::new(
             ErrorKind::InvalidInput,
@@ -429,6 +474,16 @@ fn validate_daemon_config(config: &DaemonConfig) -> io::Result<()> {
     validate_observation_config(&config.observation)?;
 
     Ok(())
+}
+
+/// 校验 `@key` 配置。
+///
+/// `delivery_backend` 是 serde enum, 非法值在反序列化时已报错;
+/// 这里保留显式校验入口, 便于未来增加跨字段约束。
+fn validate_key_config(config: &KeyConfig) -> io::Result<()> {
+    match config.delivery_backend {
+        KeyDeliveryBackend::AxPress | KeyDeliveryBackend::Simulated => Ok(()),
+    }
 }
 
 /// 供 Zenoh router daemon CLI 路径复用的配置校验入口。
@@ -837,6 +892,89 @@ shell = "/bin/bash"
                 let err = load_daemon_config(None).unwrap_err();
 
                 assert_eq!(err.kind(), ErrorKind::InvalidInput);
+                Ok(())
+            });
+        }
+
+        #[test]
+        fn should_default_key_backend_to_platform_default() {
+            Jail::expect_with(|jail| {
+                jail.clear_env();
+                jail.create_file(
+                    default_platform_config_file_name(),
+                    r#"[outbound]
+enabled = true
+host = "127.0.0.1"
+port = 4444
+shell = "/bin/bash"
+"#,
+                )?;
+
+                let config = load_daemon_config(None).map_err(to_figment_error)?;
+                let expected = crate::config::KeyDeliveryBackend::default_for_platform();
+
+                assert_eq!(config.key.delivery_backend, expected);
+                Ok(())
+            });
+        }
+
+        #[test]
+        fn should_override_key_backend_from_toml() {
+            Jail::expect_with(|jail| {
+                jail.clear_env();
+                jail.create_file(
+                    default_platform_config_file_name(),
+                    r#"[outbound]
+enabled = true
+host = "127.0.0.1"
+port = 4444
+shell = "/bin/bash"
+
+[key]
+delivery_backend = "simulated"
+"#,
+                )?;
+
+                let config = load_daemon_config(None).map_err(to_figment_error)?;
+
+                assert_eq!(
+                    config.key.delivery_backend,
+                    crate::config::KeyDeliveryBackend::Simulated
+                );
+                Ok(())
+            });
+        }
+
+        #[test]
+        fn should_reject_unknown_key_backend() {
+            Jail::expect_with(|jail| {
+                jail.clear_env();
+                jail.create_file(
+                    default_platform_config_file_name(),
+                    r#"[outbound]
+enabled = true
+host = "127.0.0.1"
+port = 4444
+shell = "/bin/bash"
+
+[key]
+delivery_backend = "invalid-backend"
+"#,
+                )?;
+
+                let err = load_daemon_config(None).unwrap_err();
+
+                assert!(
+                    matches!(err.kind(), ErrorKind::InvalidData | ErrorKind::InvalidInput),
+                    "unexpected error kind: {:?}",
+                    err.kind()
+                );
+                assert!(
+                    err.to_string().contains("delivery_backend")
+                        || err.to_string().contains("unknown variant")
+                        || err.to_string().contains("无法解析"),
+                    "unexpected error: {err}"
+                );
                 Ok(())
             });
         }

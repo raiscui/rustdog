@@ -16,7 +16,10 @@ fn parse_should_accept_minimal_computer_act_request() {
         ControlCommand::ComputerAct(req) => {
             assert_eq!(req.schema, "rdog.computer-act.v1");
             assert_eq!(req.action, "wait");
-            assert_eq!(req.args.get("duration_ms").and_then(|v| v.as_u64()), Some(100));
+            assert_eq!(
+                req.args.get("duration_ms").and_then(|v| v.as_u64()),
+                Some(100)
+            );
             assert!(req.verify.is_none());
             assert!(req.observation_id.is_none());
             assert!(req.timeout_ms.is_none());
@@ -50,10 +53,8 @@ fn parse_should_accept_computer_act_with_all_optional_fields() {
 
 #[test]
 fn parse_should_reject_computer_act_missing_schema() {
-    let err = parse_control_line(
-        r#"@computer-act#1:{action:"wait",args:{duration_ms:100}}"#,
-    )
-    .unwrap_err();
+    let err = parse_control_line(r#"@computer-act#1:{action:"wait",args:{duration_ms:100}}"#)
+        .unwrap_err();
     assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
 }
 
@@ -77,10 +78,9 @@ fn parse_should_reject_computer_act_missing_action() {
 
 #[test]
 fn parse_should_reject_computer_act_missing_args() {
-    let err = parse_control_line(
-        r#"@computer-act#1:{schema:"rdog.computer-act.v1",action:"wait"}"#,
-    )
-    .unwrap_err();
+    let err =
+        parse_control_line(r#"@computer-act#1:{schema:"rdog.computer-act.v1",action:"wait"}"#)
+            .unwrap_err();
     assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
 }
 

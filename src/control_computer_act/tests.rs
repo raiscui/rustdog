@@ -7,12 +7,12 @@
 use serde_json::json;
 
 use super::{route_computer_act_action, RoutedCommand};
+use crate::control_mouse::{
+    DragRequest, MouseButtonName, MouseCoordinateSpace, MouseEndpoint, MouseMoveRequest,
+    MousePoint, MouseRefTarget, WheelRequest,
+};
 use crate::control_protocol::{
     ControlCommand, KeyMode, OpenAppRequest, PasteRequestKind, WaitRequest,
-};
-use crate::control_mouse::{
-    DragRequest, MouseButtonName, MouseCoordinateSpace, MouseEndpoint, MousePoint,
-    MouseMoveRequest, MouseRefTarget, WheelRequest,
 };
 
 fn route(action: &str, args: serde_json::Value) -> RoutedCommand {
@@ -73,7 +73,10 @@ fn click_routes_to_click_with_count_1_and_left_button() {
             assert_eq!(req.count, 1);
             assert_eq!(req.button, MouseButtonName::Left);
             assert_eq!(req.hold_ms, 80);
-            assert!(matches!(req.target, Some(MouseEndpoint::Coordinate(MousePoint { x: 100, y: 200 }))));
+            assert!(matches!(
+                req.target,
+                Some(MouseEndpoint::Coordinate(MousePoint { x: 100, y: 200 }))
+            ));
         }
         c => panic!("expected Click, got {c:?}"),
     }
@@ -151,7 +154,10 @@ fn hover_routes_to_mouse_move() {
         ControlCommand::MouseMove(MouseMoveRequest { x, y, target, .. }) => {
             assert_eq!(x, Some(300));
             assert_eq!(y, Some(400));
-            assert!(matches!(target, Some(MouseEndpoint::Coordinate(MousePoint { x: 300, y: 400 }))));
+            assert!(matches!(
+                target,
+                Some(MouseEndpoint::Coordinate(MousePoint { x: 300, y: 400 }))
+            ));
         }
         c => panic!("expected MouseMove, got {c:?}"),
     }
@@ -164,14 +170,12 @@ fn type_routes_to_paste_when_no_target() {
     let r = route("type", json!({"content": "hello world"}));
     assert_eq!(r.dispatched_to, "@type-text");
     match r.command {
-        ControlCommand::Paste(req) => {
-            match req.kind {
-                PasteRequestKind::LegacyTextInjection(text) => {
-                    assert_eq!(text, "hello world");
-                }
-                _ => panic!("expected LegacyTextInjection, got other kind"),
+        ControlCommand::Paste(req) => match req.kind {
+            PasteRequestKind::LegacyTextInjection(text) => {
+                assert_eq!(text, "hello world");
             }
-        }
+            _ => panic!("expected LegacyTextInjection, got other kind"),
+        },
         c => panic!("expected Paste, got {c:?}"),
     }
 }
@@ -197,7 +201,10 @@ fn hotkey_routes_to_key() {
 #[test]
 fn hotkey_click_routes_to_composite_3_steps() {
     // ticket 08 + 21: hotkey_click 实现为 ControlCommand::Composite([key down, click, key up])
-    let r = route("hotkey_click", json!({"start_box": [10, 20], "key": "shift"}));
+    let r = route(
+        "hotkey_click",
+        json!({"start_box": [10, 20], "key": "shift"}),
+    );
     assert_eq!(r.dispatched_to, "@key+@click+@key");
     match r.command {
         ControlCommand::Composite(cmds) => {
@@ -242,7 +249,14 @@ fn scroll_routes_to_wheel_with_negative_delta_y_for_down() {
     );
     assert_eq!(r.dispatched_to, "@wheel");
     match r.command {
-        ControlCommand::Wheel(WheelRequest { delta_x, delta_y, x, y, coordinate_space, .. }) => {
+        ControlCommand::Wheel(WheelRequest {
+            delta_x,
+            delta_y,
+            x,
+            y,
+            coordinate_space,
+            ..
+        }) => {
             assert_eq!(x, Some(100));
             assert_eq!(y, Some(200));
             assert_eq!(delta_x, 0);
@@ -263,9 +277,21 @@ fn drag_routes_to_drag_with_from_to() {
     );
     assert_eq!(r.dispatched_to, "@drag");
     match r.command {
-        ControlCommand::Drag(DragRequest { from, to, duration_ms, steps, .. }) => {
-            assert!(matches!(from, MouseEndpoint::Coordinate(MousePoint { x: 100, y: 200 })));
-            assert!(matches!(to, MouseEndpoint::Coordinate(MousePoint { x: 400, y: 500 })));
+        ControlCommand::Drag(DragRequest {
+            from,
+            to,
+            duration_ms,
+            steps,
+            ..
+        }) => {
+            assert!(matches!(
+                from,
+                MouseEndpoint::Coordinate(MousePoint { x: 100, y: 200 })
+            ));
+            assert!(matches!(
+                to,
+                MouseEndpoint::Coordinate(MousePoint { x: 400, y: 500 })
+            ));
             assert_eq!(duration_ms, 450);
             assert_eq!(steps, 24);
         }

@@ -19,7 +19,12 @@ struct FakeExecutor {
 }
 
 impl ControlActionExecutor for FakeExecutor {
-    fn execute(&self, command: &ControlCommand, _shell: &str, _cancel: Option<&crate::cancellation::CancellationToken>) -> io::Result<ActionExecutionResult> {
+    fn execute(
+        &self,
+        command: &ControlCommand,
+        _shell: &str,
+        _cancel: Option<&crate::cancellation::CancellationToken>,
+    ) -> io::Result<ActionExecutionResult> {
         self.commands
             .lock()
             .expect("commands lock should work")
@@ -44,9 +49,7 @@ impl ControlActionExecutor for FakeExecutor {
             ControlCommand::SaveFile(frame) => {
                 format!("SAVEFILE:{}\n", frame.filename).into_bytes()
             }
-            ControlCommand::Wait(request) => {
-                format!("WAIT:{}\n", request.duration_ms).into_bytes()
-            }
+            ControlCommand::Wait(request) => format!("WAIT:{}\n", request.duration_ms).into_bytes(),
             ControlCommand::OpenApp(request) => {
                 format!("OPEN_APP:{}:{}\n", request.app_name, request.wait_ms).into_bytes()
             }
@@ -131,6 +134,9 @@ impl ControlActionExecutor for FakeExecutor {
                 request.target.id.as_deref().unwrap_or("semantic")
             )
             .into_bytes(),
+            ControlCommand::AxPressSequence(request) => {
+                format!("AX_PRESS_SEQUENCE:{}\n", request.targets.len()).into_bytes()
+            }
             ControlCommand::AxSetValue(request) => format!(
                 "AX_SET_VALUE:{}:{}\n",
                 request.mode.as_str(),
@@ -205,9 +211,6 @@ impl ControlActionExecutor for FakeExecutor {
             }
             ControlCommand::SelectorRefind(request) => {
                 format!("SELECTOR_REFIND:{}\n", request.selector_id).into_bytes()
-            }
-            ControlCommand::Record(_) => {
-                b"RECORD_CONTROL\n".to_vec()
             }
         };
 

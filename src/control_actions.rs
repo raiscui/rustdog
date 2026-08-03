@@ -1,10 +1,12 @@
 use crate::{
+    cancellation::CancellationToken,
     control_ax::{
         build_ax_find_response_json, build_ax_get_response_json, capture_ax_find_snapshot,
         capture_default_ax_snapshot, perform_default_ax_action, perform_default_ax_focus,
-        perform_default_ax_press, perform_default_ax_scroll, perform_default_ax_set_value,
-        perform_default_key_delivery, perform_default_type_text, window_activation_verified,
-        AxFocusReport,
+        perform_default_ax_press, perform_default_ax_press_sequence,
+        perform_default_ax_press_with_postcondition, perform_default_ax_scroll,
+        perform_default_ax_set_value, perform_default_key_delivery, perform_default_type_text,
+        window_activation_verified, AxFocusReport,
     },
     // Phase F-1: 三个 error_envelope wrapper helper (Cancelled / PlatformUnsupported /
     // PermissionDenied), 让手写 JSON payload 跟其它 error_code 走同一 envelope 形状。
@@ -21,7 +23,6 @@ use crate::{
         PreparedMouseRequest,
     },
     control_observation::resolve_observation_ref,
-    cancellation::CancellationToken,
     control_protocol::{
         CancelRequest, ControlCommand, KeyMode, KeyRequest, KeyResponseMode, OpenAppRequest,
         PasteRequest, PasteRequestKind, WaitRequest, DEFAULT_KEY_HOLD_MS,
@@ -76,6 +77,11 @@ pub struct SystemControlActionExecutor {
     key_input_event_sink: Option<Arc<dyn KeyInputEventSink>>,
     savefile_base_dir: Option<PathBuf>,
     cancel_registry: Arc<crate::cancellation::CancelRegistry>,
+    /// `@key` 的送达后端 (2026-08-03 wayfinder #37)。
+    ///
+    /// daemon 启动时从 `[key] delivery_backend` 注入; 默认随平台
+    /// (macOS = ax_press, 其他 = simulated)。
+    key_delivery_backend: crate::config::KeyDeliveryBackend,
 }
 
 impl Default for SystemControlActionExecutor {
@@ -84,6 +90,7 @@ impl Default for SystemControlActionExecutor {
             key_input_event_sink: None,
             savefile_base_dir: None,
             cancel_registry: Arc::new(crate::cancellation::CancelRegistry::new()),
+            key_delivery_backend: crate::config::KeyDeliveryBackend::default_for_platform(),
         }
     }
 }
@@ -95,6 +102,7 @@ impl SystemControlActionExecutor {
             key_input_event_sink: Some(key_input_event_sink),
             savefile_base_dir: None,
             cancel_registry: Arc::new(crate::cancellation::CancelRegistry::new()),
+            key_delivery_backend: crate::config::KeyDeliveryBackend::default_for_platform(),
         }
     }
 
@@ -107,7 +115,21 @@ impl SystemControlActionExecutor {
             key_input_event_sink: None,
             savefile_base_dir: Some(savefile_base_dir),
             cancel_registry: Arc::new(crate::cancellation::CancelRegistry::new()),
+            key_delivery_backend: crate::config::KeyDeliveryBackend::default_for_platform(),
         }
+    }
+
+    /// 显式设置 `@key` 的送达后端。
+    ///
+    /// daemon 启动时从 `[key] delivery_backend` 配置注入。
+    pub fn with_key_delivery_backend(mut self, backend: crate::config::KeyDeliveryBackend) -> Self {
+        self.key_delivery_backend = backend;
+        self
+    }
+
+    /// 读取 `@key` 的送达后端 (供 execute_key 决策)。
+    pub(crate) fn key_delivery_backend(&self) -> crate::config::KeyDeliveryBackend {
+        self.key_delivery_backend
     }
 
     /// 暴露内部 cancel_registry 引用, 让 dispatcher (zenoh_control / 控制平面)
@@ -128,6 +150,7 @@ impl Clone for SystemControlActionExecutor {
             cancel_registry: self.cancel_registry.clone(),
             key_input_event_sink: self.key_input_event_sink.as_ref().map(Arc::clone),
             savefile_base_dir: self.savefile_base_dir.clone(),
+            key_delivery_backend: self.key_delivery_backend,
         }
     }
 }
@@ -180,6 +203,7 @@ impl ControlActionExecutor for SystemControlActionExecutor {
             ControlCommand::AxScroll(request) => execute_ax_scroll(request),
             ControlCommand::AxAction(request) => execute_ax_action(request),
             ControlCommand::AxPress(request) => execute_ax_press(request),
+            ControlCommand::AxPressSequence(request) => execute_ax_press_sequence(request),
             ControlCommand::AxSetValue(request) => execute_ax_set_value(request),
             ControlCommand::TypeText(request) => execute_type_text(request),
             ControlCommand::WindowFind(request) => execute_window_find(request),
@@ -196,10 +220,6 @@ impl ControlActionExecutor for SystemControlActionExecutor {
             ControlCommand::Flow(_) => Err(io::Error::new(
                 io::ErrorKind::Unsupported,
                 "@flow 由 control_core 直接返回多 frame outcome,不应进入默认 executor 分支",
-            )),
-            ControlCommand::Record(_) => Err(io::Error::new(
-                io::ErrorKind::Unsupported,
-                "@record-* 由 control_core 直接走 RecordingHandler,不应进入默认 executor 分支",
             )),
             ControlCommand::Capabilities => Err(io::Error::new(
                 io::ErrorKind::Unsupported,
@@ -781,7 +801,22 @@ fn execute_ax_get(request: &crate::control_ax::AxGetRequest) -> io::Result<Actio
 fn execute_ax_press(
     request: &crate::control_ax::AxPressRequest,
 ) -> io::Result<ActionExecutionResult> {
-    let report = perform_default_ax_press(request)?;
+    let response_value_json = match request.postcondition {
+        Some(_) => perform_default_ax_press_with_postcondition(request)?.to_value_json()?,
+        None => perform_default_ax_press(request)?.to_value_json()?,
+    };
+    Ok(ActionExecutionResult {
+        exit_code: 0,
+        stdout: Vec::new(),
+        stderr: Vec::new(),
+        response_value_json: Some(response_value_json),
+    })
+}
+
+fn execute_ax_press_sequence(
+    request: &crate::control_ax::AxPressSequenceRequest,
+) -> io::Result<ActionExecutionResult> {
+    let report = perform_default_ax_press_sequence(request);
     Ok(ActionExecutionResult {
         exit_code: 0,
         stdout: Vec::new(),

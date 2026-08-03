@@ -1,7 +1,5 @@
 use std::io;
 
-use crate::control_recording::control_handler::{with_recording_handler, RecordRequest};
-use crate::control_recording::session::ConnectionId;
 use crate::{
     control_actions::{build_shell_command, ControlActionExecutor},
     control_bootstrap::build_bootstrap_outcome,
@@ -33,7 +31,6 @@ pub fn execute_explicit_control_request<E: ControlActionExecutor>(
         ControlCommand::Ping => ControlExecutionOutcome::from_response_line(
             render_response_string(request.request_id, "pong"),
         ),
-        ControlCommand::Record(record_request) => handle_record_command(record_request, request.request_id),
         ControlCommand::PtyClose(pty_close) => {
             match crate::pty_control::close_active_pty_session(&pty_close.session_id) {
                 Ok(true) => ControlExecutionOutcome::from_response_line(
@@ -150,9 +147,7 @@ pub fn execute_explicit_control_request<E: ControlActionExecutor>(
             let token = if is_cancel_command {
                 None
             } else {
-                request
-                    .request_id
-                    .map(|seq| cancel_registry.register(seq))
+                request.request_id.map(|seq| cancel_registry.register(seq))
             };
             let result = executor.execute(command, shell, token.as_ref());
             if !is_cancel_command {
@@ -391,22 +386,6 @@ fn escape_json_string(input: &str) -> String {
     escaped
 }
 
-
-/// `ControlCommand::Record` 不走默认 executor,直接派发到
-/// `RecordingHandler`(由 daemon 启动时 install)。未 install 时返回
-/// 结构化 4111 错误,而不是 panic,这样 control plane 测试可以走完。
-fn handle_record_command(request: &RecordRequest, request_id: Option<u64>) -> ControlExecutionOutcome {
-    let connection = ConnectionId(request_id.unwrap_or(0));
-    match with_recording_handler(|handler| handler.handle(request_id, connection, request.clone())) {
-        Some(outcome) => outcome,
-        None => ControlExecutionOutcome::from_response_line(render_protocol_error_response(
-            request_id,
-            4111,
-            &format!("{{\"schema\":\"{}\",\"error_code\":\"RECORDING_NOT_INITIALIZED\"}}", "rdog.record-control.v1"),
-        )),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -560,8 +539,13 @@ mod tests {
         let executor = FakeExecutor::default();
         let recorded = Arc::clone(&executor.commands);
 
-        let response = parse_and_execute_control_line(r#"@key#9:"F11""#, "/bin/sh", &executor, &cancel_registry)
-            .into_single_response_line();
+        let response = parse_and_execute_control_line(
+            r#"@key#9:"F11""#,
+            "/bin/sh",
+            &executor,
+            &cancel_registry,
+        )
+        .into_single_response_line();
 
         assert_eq!(response, r#"@response {"id":9,"value":"EXEC_OK"}"#);
         assert_eq!(
@@ -583,8 +567,13 @@ mod tests {
         let executor = FakeExecutor::default();
         let recorded = Arc::clone(&executor.commands);
 
-        let response = parse_and_execute_control_line(r#"@paste:"hello""#, "/bin/sh", &executor, &cancel_registry)
-            .into_single_response_line();
+        let response = parse_and_execute_control_line(
+            r#"@paste:"hello""#,
+            "/bin/sh",
+            &executor,
+            &cancel_registry,
+        )
+        .into_single_response_line();
 
         assert_eq!(response, r#"@response "EXEC_OK""#);
         assert_eq!(
@@ -602,8 +591,9 @@ mod tests {
         let executor = FakeExecutor::default();
         let recorded = Arc::clone(&executor.commands);
 
-        let response = parse_and_execute_control_line(r#"@paste#12"#, "/bin/sh", &executor, &cancel_registry)
-            .into_single_response_line();
+        let response =
+            parse_and_execute_control_line(r#"@paste#12"#, "/bin/sh", &executor, &cancel_registry)
+                .into_single_response_line();
 
         assert_eq!(response, r#"@response {"id":12,"value":"EXEC_OK"}"#);
         assert_eq!(
@@ -623,8 +613,13 @@ mod tests {
         #[cfg(not(windows))]
         let (shell, command) = ("/bin/sh", "printf LITERAL_OK");
 
-        let response = parse_and_execute_control_line(command, shell, &FakeExecutor::default(), &cancel_registry)
-            .into_single_response_line();
+        let response = parse_and_execute_control_line(
+            command,
+            shell,
+            &FakeExecutor::default(),
+            &cancel_registry,
+        )
+        .into_single_response_line();
 
         assert!(
             response.contains("LITERAL_OK"),
@@ -638,7 +633,9 @@ mod tests {
         let response = parse_and_execute_control_line(
             r#"@key:"F11""#,
             "/bin/sh",
-            &FakePermissionDeniedExecutor, &cancel_registry)
+            &FakePermissionDeniedExecutor,
+            &cancel_registry,
+        )
         .into_single_response_line();
 
         assert!(response.contains(r#""code":77"#));
@@ -668,7 +665,9 @@ mod tests {
         let response = parse_and_execute_control_line(
             r#"@window-close:{app:"Terminal",title_contains:"rdog"}"#,
             "/bin/sh",
-            &StructuredInvalidInputExecutor, &cancel_registry)
+            &StructuredInvalidInputExecutor,
+            &cancel_registry,
+        )
         .into_single_response_line();
 
         assert_eq!(
@@ -696,9 +695,13 @@ mod tests {
             }
         }
 
-        let response =
-            parse_and_execute_control_line(r#"@key#17:"F11""#, "/bin/sh", &StructuredOtherExecutor, &cancel_registry)
-                .into_single_response_line();
+        let response = parse_and_execute_control_line(
+            r#"@key#17:"F11""#,
+            "/bin/sh",
+            &StructuredOtherExecutor,
+            &cancel_registry,
+        )
+        .into_single_response_line();
 
         assert_eq!(
             response,
@@ -806,6 +809,15 @@ mod tests {
                             r#"{"kind":"ax","action":"press","performed":true}"#.to_owned(),
                         ),
                     }),
+                    ControlCommand::AxPressSequence(_) => Ok(ActionExecutionResult {
+                        exit_code: 0,
+                        stdout: Vec::new(),
+                        stderr: Vec::new(),
+                        response_value_json: Some(
+                            r#"{"kind":"ax-press-sequence","performed":true,"step_count":2}"#
+                                .to_owned(),
+                        ),
+                    }),
                     ControlCommand::AxSetValue(_) => Ok(ActionExecutionResult {
                         exit_code: 0,
                         stdout: Vec::new(),
@@ -835,27 +847,37 @@ mod tests {
         let tree_response = parse_and_execute_control_line(
             r#"@ax-tree#9:{scope:"windows"}"#,
             "/bin/sh",
-            &StructuredAxExecutor, &cancel_registry)
+            &StructuredAxExecutor,
+            &cancel_registry,
+        )
         .into_single_response_line();
         let press_response = parse_and_execute_control_line(
             r#"@ax-press#10:{target:{id:"pid:1/window:0/path:0"}}"#,
             "/bin/sh",
-            &StructuredAxExecutor, &cancel_registry)
+            &StructuredAxExecutor,
+            &cancel_registry,
+        )
         .into_single_response_line();
         let action_response = parse_and_execute_control_line(
             r#"@ax-action#11:{target:{id:"pid:1/window:0/path:0"},action:"AXShowMenu"}"#,
             "/bin/sh",
-            &StructuredAxExecutor, &cancel_registry)
+            &StructuredAxExecutor,
+            &cancel_registry,
+        )
         .into_single_response_line();
         let set_value_response = parse_and_execute_control_line(
             r#"@ax-set-value#12:{target:{id:"pid:1/window:0/path:0"},value:"hello",mode:"append"}"#,
             "/bin/sh",
-            &StructuredAxExecutor, &cancel_registry)
+            &StructuredAxExecutor,
+            &cancel_registry,
+        )
         .into_single_response_line();
         let type_text_response = parse_and_execute_control_line(
             r#"@type-text#13:{target:{id:"pid:1/window:0/path:0"},text:"hello",mode:"ax-value"}"#,
             "/bin/sh",
-            &StructuredAxExecutor, &cancel_registry)
+            &StructuredAxExecutor,
+            &cancel_registry,
+        )
         .into_single_response_line();
 
         assert_eq!(
@@ -899,9 +921,13 @@ mod tests {
     #[test]
     fn explicit_request_should_render_capabilities_report() {
         let cancel_registry = crate::cancellation::CancelRegistry::new();
-        let response =
-            parse_and_execute_control_line("@capabilities#12", "/bin/sh", &FakeExecutor::default(), &cancel_registry)
-                .into_single_response_line();
+        let response = parse_and_execute_control_line(
+            "@capabilities#12",
+            "/bin/sh",
+            &FakeExecutor::default(),
+            &cancel_registry,
+        )
+        .into_single_response_line();
         let parsed: Value = serde_json::from_str(
             response
                 .strip_prefix("@response ")
@@ -1040,9 +1066,13 @@ mod tests {
     fn explicit_request_should_render_observe_without_action_executor() {
         let cancel_registry = crate::cancellation::CancelRegistry::new();
         let executor = FakeExecutor::default();
-        let response =
-            parse_and_execute_control_line(r#"@observe#77:{mode:"window"}"#, "/bin/sh", &executor, &cancel_registry)
-                .into_single_response_line();
+        let response = parse_and_execute_control_line(
+            r#"@observe#77:{mode:"window"}"#,
+            "/bin/sh",
+            &executor,
+            &cancel_registry,
+        )
+        .into_single_response_line();
         let parsed: Value = serde_json::from_str(
             response
                 .strip_prefix("@response ")
@@ -1066,8 +1096,9 @@ mod tests {
     fn explicit_request_should_render_basic_bootstrap_without_action_executor() {
         let cancel_registry = crate::cancellation::CancelRegistry::new();
         let executor = FakeExecutor::default();
-        let response = parse_and_execute_control_line("@bootstrap#21", "/bin/sh", &executor, &cancel_registry)
-            .into_single_response_line();
+        let response =
+            parse_and_execute_control_line("@bootstrap#21", "/bin/sh", &executor, &cancel_registry)
+                .into_single_response_line();
         let parsed: Value = serde_json::from_str(
             response
                 .strip_prefix("@response ")
@@ -1237,7 +1268,10 @@ mod tests {
 
         // 通过 executor.cancel_registry() 拿同一 Arc 再 signal
         let signaled = executor.cancel_registry().signal(7);
-        assert!(signaled, "executor.cancel_registry() 必须跟 registry_arc 是同一实例");
+        assert!(
+            signaled,
+            "executor.cancel_registry() 必须跟 registry_arc 是同一实例"
+        );
         assert!(token.is_cancelled());
     }
 }

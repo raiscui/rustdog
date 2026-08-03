@@ -155,9 +155,7 @@ pub(crate) fn parse_computer_act_payload(input: &str) -> io::Result<ComputerActR
     if schema != COMPUTER_ACT_SCHEMA_V1 {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            format!(
-                "@computer-act schema 必须是 {COMPUTER_ACT_SCHEMA_V1},实际收到: {schema}"
-            ),
+            format!("@computer-act schema 必须是 {COMPUTER_ACT_SCHEMA_V1},实际收到: {schema}"),
         ));
     }
     let action = action.ok_or_else(|| {
@@ -195,7 +193,6 @@ pub(crate) fn parse_computer_act_payload(input: &str) -> io::Result<ComputerActR
         trace,
     })
 }
-
 
 /// 把 rdog dict 语法 (unquoted keys) 转换成标准 JSON 字符串。
 ///

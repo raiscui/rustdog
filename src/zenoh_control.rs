@@ -78,6 +78,8 @@ pub struct ZenohDaemonRuntimeConfig {
     pub startup_guard_window_ms: u64,
     pub key_input_events: KeyInputEventsConfig,
     pub observation: ObservationConfig,
+    /// `@key` 的送达后端 (2026-08-03 wayfinder #37)。
+    pub key_delivery_backend: crate::config::KeyDeliveryBackend,
     #[cfg(unix)]
     pub unixpipe_startup: Option<ZenohUnixpipeStartupConfig>,
 }
@@ -168,7 +170,8 @@ pub fn run_router_daemon(config: ZenohDaemonRuntimeConfig, shell: &str) -> io::R
         .as_ref()
         .map(|publisher| publisher.keyexpr.clone())
         .unwrap_or_else(|| "<disabled>".to_owned());
-    let executor = build_router_control_executor(key_input_event_publisher);
+    let executor =
+        build_router_control_executor(key_input_event_publisher, config.key_delivery_backend);
     let active_session_bridges = Arc::new(Mutex::new(HashSet::new()));
 
     log::info!(
@@ -371,12 +374,16 @@ fn resolve_key_input_event_keyexpr(
 
 fn build_router_control_executor(
     key_input_event_publisher: Option<ZenohKeyInputEventPublisher>,
+    key_delivery_backend: crate::config::KeyDeliveryBackend,
 ) -> SystemControlActionExecutor {
     match key_input_event_publisher {
         Some(key_input_event_publisher) => SystemControlActionExecutor::with_key_input_event_sink(
             Arc::new(key_input_event_publisher),
-        ),
-        None => SystemControlActionExecutor::default(),
+        )
+        .with_key_delivery_backend(key_delivery_backend),
+        None => {
+            SystemControlActionExecutor::default().with_key_delivery_backend(key_delivery_backend)
+        }
     }
 }
 

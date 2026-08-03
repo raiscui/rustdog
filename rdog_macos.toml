@@ -11,6 +11,11 @@
 # outbound 或 inbound 失败后的重试间隔,单位是秒。
 retry_seconds = 5
 
+[key]
+# @key 的送达后端: ax_press(单字符按键优先 AX 按钮, fallback 模拟按键)
+# 或 simulated(始终 enigo 模拟按键)。macOS 默认 ax_press。
+delivery_backend = "ax_press"
+
 [observation]
 # 持久化 observation metadata 和 selector 线索。
 # 这不会让短期 `@eN` ref 跨 daemon 重启继续可用。

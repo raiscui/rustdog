@@ -231,13 +231,16 @@ keystroke through enigo, not as remote stdin. Chord syntax is `Modifier+Key`:
 
 ```bash
 # refresh the active browser page (instead of a long osascript Cmd+R roundtrip)
-rdog control mac.lab '@key#210:"Cmd+R"'
+rdog control mac.lab @key#210:Cmd+R
 
 # focus URL bar, then verify
 rdog control mac.lab \
-  '@key#220:"Cmd+L"' \
+  @key#220:Cmd+L \
   @observe#221:{mode:"hybrid",include_screenshot:true,include_ax:true,ax_required:false,ax_mode:"interactive"}
 ```
+
+Bare key payloads are limited to non-empty names without whitespace. Use quoted or
+object syntax when a key name contains whitespace or needs delivery options.
 
 See the "Local Key Chords" section in `SKILL.md` for the full modifier /
 main-key grammar. Inside a `@pty` session, `@key` reverts to remote stdin

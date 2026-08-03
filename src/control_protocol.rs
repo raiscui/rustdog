@@ -3,31 +3,29 @@ use std::io;
 mod parsers;
 
 pub(crate) use self::parsers::{
-    normalize_object_field_name, object_inner, parse_quoted_payload, split_object_field,
-    split_object_fields,
+    normalize_object_field_name, object_inner, parse_compact_atom,
+    parse_compact_ax_button_sequence, parse_compact_window_pair, parse_compact_window_selector,
+    parse_quoted_payload, split_object_field, split_object_fields, CompactWindowSelector,
 };
 
 use self::parsers::{
-    parse_cancel_payload, parse_computer_act_payload, parse_control_header, parse_key_payload, parse_open_app_payload, parse_wait_payload, parse_pty_attach_payload, parse_pty_close_payload,
-    parse_pty_detach_payload, parse_pty_payload, parse_screenshot_payload,
+    parse_cancel_payload, parse_computer_act_payload, parse_control_header, parse_key_payload,
+    parse_open_app_payload, parse_pty_attach_payload, parse_pty_close_payload,
+    parse_pty_detach_payload, parse_pty_payload, parse_screenshot_payload, parse_wait_payload,
     require_non_empty_payload,
 };
 
 use crate::control_ax::{
     parse_ax_action_payload, parse_ax_find_payload, parse_ax_focus_payload, parse_ax_get_payload,
-    parse_ax_press_payload, parse_ax_scroll_payload, parse_ax_set_value_payload,
-    parse_ax_tree_payload, parse_type_text_payload, AxActionRequest, AxFindRequest, AxFocusRequest,
-    AxGetRequest, AxMode, AxPressRequest, AxScrollRequest, AxSetValueRequest, AxTreeRequest,
-    TypeTextRequest, DEFAULT_AX_DEPTH, DEFAULT_AX_INCLUDE_VALUES, DEFAULT_AX_MAX_ELEMENTS,
+    parse_ax_press_payload, parse_ax_press_sequence_payload, parse_ax_scroll_payload,
+    parse_ax_set_value_payload, parse_ax_tree_payload, parse_type_text_payload, AxActionRequest,
+    AxFindRequest, AxFocusRequest, AxGetRequest, AxMode, AxPressRequest, AxPressSequenceRequest,
+    AxScrollRequest, AxSetValueRequest, AxTreeRequest, TypeTextRequest, DEFAULT_AX_DEPTH,
+    DEFAULT_AX_INCLUDE_VALUES, DEFAULT_AX_MAX_ELEMENTS,
 };
 use crate::control_bootstrap::{parse_bootstrap_payload, BootstrapRequest};
 use crate::control_flow::{parse_flow_payload, FlowRequest};
 use crate::control_frames::SaveFileFrame;
-use crate::control_recording::control_handler::RecordRequest;
-use crate::control_recording::protocol::{
-    parse_record_cancel_payload, parse_record_mark_payload, parse_record_start_payload,
-    parse_record_status_payload, parse_record_stop_payload,
-};
 use crate::control_gui_bench::{parse_gui_bench_payload, GuiBenchRequest};
 use crate::control_mouse::{
     parse_click_payload, parse_drag_payload, parse_mouse_button_payload, parse_mouse_move_payload,
@@ -83,6 +81,7 @@ pub enum ControlCommand {
     AxScroll(AxScrollRequest),
     AxAction(AxActionRequest),
     AxPress(AxPressRequest),
+    AxPressSequence(AxPressSequenceRequest),
     AxSetValue(AxSetValueRequest),
     TypeText(TypeTextRequest),
     WindowFind(WindowFindRequest),
@@ -104,7 +103,6 @@ pub enum ControlCommand {
     OpenApp(OpenAppRequest),
     Cancel(CancelRequest),
     ComputerAct(ComputerActRequest),
-    Record(RecordRequest),
     /// ticket 08 + 21: composite 复合命令 (e.g., hotkey_click = key down + click + key up)
     /// mod.rs dispatch_underlying 顺序执行每个 sub-command, 任一失败回滚已执行的 (modifier release)。
     Composite(Vec<ControlCommand>),
@@ -112,7 +110,6 @@ pub enum ControlCommand {
 
 pub const DEFAULT_KEY_HOLD_MS: u64 = 200;
 pub const DEFAULT_SCREENSHOT_QUALITY: u8 = 75;
-
 
 /// `@wait` 的结构化请求。
 ///
@@ -128,7 +125,6 @@ pub struct WaitRequest {
     pub duration_ms: u64,
 }
 
-
 /// `@open-app` 的结构化请求。
 ///
 /// macOS 上由 daemon 走 `open -a <app_name>`;其他平台返回
@@ -142,7 +138,6 @@ pub struct OpenAppRequest {
     pub wait_ms: u64,
 }
 
-
 /// `@cancel#seq` 的结构化请求。
 ///
 /// 让 in-flight 命令 `target_seq` 被取消。被取消命令的 response
@@ -155,7 +150,6 @@ pub struct OpenAppRequest {
 pub struct CancelRequest {
     pub target_seq: u64,
 }
-
 
 /// `@computer-act` 的结构化请求 (rdog 适配 Mano-CUA 16 动作中的 13 个 daemon-side action)。
 ///
@@ -174,9 +168,6 @@ pub struct ComputerActRequest {
     pub timeout_ms: Option<u64>,
     pub trace: Option<String>,
 }
-
-
-
 
 /// `@paste` 的结构化请求。
 ///
@@ -430,24 +421,6 @@ pub fn parse_control_line(line: &str) -> io::Result<ControlParseResult> {
             command: ControlCommand::Observe(ObserveRequest::default()),
         }));
     }
-    if kind.eq_ignore_ascii_case("record-status") && !has_payload {
-        return Ok(ControlParseResult::Control(ControlRequest {
-            request_id,
-            command: ControlCommand::Record(crate::control_recording::protocol::parse_record_status_payload("")?),
-        }));
-    }
-    if kind.eq_ignore_ascii_case("record-stop") && !has_payload {
-        return Ok(ControlParseResult::Control(ControlRequest {
-            request_id,
-            command: ControlCommand::Record(crate::control_recording::protocol::parse_record_stop_payload("")?),
-        }));
-    }
-    if kind.eq_ignore_ascii_case("record-cancel") && !has_payload {
-        return Ok(ControlParseResult::Control(ControlRequest {
-            request_id,
-            command: ControlCommand::Record(crate::control_recording::protocol::parse_record_cancel_payload("")?),
-        }));
-    }
 
     let Some((_, payload)) = command.split_once(':') else {
         return Err(io::Error::new(
@@ -490,6 +463,9 @@ pub fn parse_control_line(line: &str) -> io::Result<ControlParseResult> {
         "ax-scroll" => ControlCommand::AxScroll(parse_ax_scroll_payload(payload)?),
         "ax-action" => ControlCommand::AxAction(parse_ax_action_payload(payload)?),
         "ax-press" => ControlCommand::AxPress(parse_ax_press_payload(payload)?),
+        "ax-press-sequence" => {
+            ControlCommand::AxPressSequence(parse_ax_press_sequence_payload(payload)?)
+        }
         "ax-set-value" => ControlCommand::AxSetValue(parse_ax_set_value_payload(payload)?),
         "type-text" => ControlCommand::TypeText(parse_type_text_payload(payload)?),
         "window-find" => ControlCommand::WindowFind(parse_window_find_payload(payload)?),
@@ -522,11 +498,6 @@ pub fn parse_control_line(line: &str) -> io::Result<ControlParseResult> {
         "open-app" => ControlCommand::OpenApp(parse_open_app_payload(payload)?),
         "cancel#seq" => ControlCommand::Cancel(parse_cancel_payload(payload)?),
         "computer-act" => ControlCommand::ComputerAct(parse_computer_act_payload(payload)?),
-        "record-start" => ControlCommand::Record(parse_record_start_payload(payload)?),
-        "record-status" => ControlCommand::Record(parse_record_status_payload(payload)?),
-        "record-mark" => ControlCommand::Record(parse_record_mark_payload(payload)?),
-        "record-stop" => ControlCommand::Record(parse_record_stop_payload(payload)?),
-        "record-cancel" => ControlCommand::Record(parse_record_cancel_payload(payload)?),
         _ => {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
