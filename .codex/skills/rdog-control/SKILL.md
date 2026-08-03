@@ -52,6 +52,14 @@ unicode 字符注入不会触发按钮 (例如 `@key:{key:"+"}` 不会按计算�
 再按 description 用 `@ax-press` / `@ax-press-sequence`。
 `@key` 只用于: 快捷键 / 修饰键组合 / 无 AX 语义的全局按键 (Cmd+T, Esc 等)。
 
+按钮按压三步流程 (与 Text Input 的三步流程对称):
+1. `@ax-find` 枚举按钮 description (role 用 `AXButton` / `AXMenuItem`, 一次拿全列表)
+2. 按 description 用 `@ax-press` / `@ax-press-sequence` 按下目标按钮
+3. 独立 `@ax-find` 读结果角色 (常用 `AXStaticText`) 证明 GUI 已变化
+
+枚举之后必须立即执行按下 (步骤 2), 不要先去查语法或截图 ——
+`@ax-find` 返回的 description 就是 `@ax-press` 的输入。
+
 ### Verify (动作后验证)
 
 动作类命令支持 `verify` 字段 (窗口命令用 `post_verify`):
