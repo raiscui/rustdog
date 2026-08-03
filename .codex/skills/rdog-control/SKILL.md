@@ -58,12 +58,14 @@ unicode 字符注入不会触发按钮 (例如 `@key:{key:"+"}` 不会按计算�
 
 ```bash
 rdog control '@ax-press:{target:{id:"pid:1/window:0/path:0"},verify:"best_effort"}'
-rdog control '@key:{key:"Cmd+T",verify:"best_effort"}'
 rdog control '@window-close:{target:{app:"TextEdit"},post_verify:"best_effort"}'
 ```
 
 `best_effort` 返回 `verification:{method:"ax_diff",...}` 动作前后 AX diff。
 动作成功且 GUI 变化符合预期 = 完成; 不要重做动作来"验证"。
+Verify 是动作后的验证字段, 不是新的输入方式: 它跟在 `@ax-press` /
+`@ax-press-sequence` 这类按钮动作后面, 不改变"按钮应用用 @ax-press"
+的输入规则。
 
 ### Text Input (文字输入)
 
@@ -173,8 +175,8 @@ the change actually took effect on the relevant subtree.
 | Trigger (observable evidence) | First repair | Still failing |
 | --- | --- | --- |
 | `@window-find` matches 0 windows | Verify the app is open (`@open-app` first); check `app:APP` spelling — ASCII case-insensitive after v2.18, but Chinese names do not resolve | Take a `@screenshot` to confirm visual state; do not guess window state blind |
-| `@ax-find` returns 0 elements for a role | Verify role spelling; re-query the parent role (e.g. `AXWindow`) to find the right subtree first | Drop to `@key` keyboard shortcut if the role has no children |
-| `@ax-press` returns `performed:false` | Re-`@ax-find` for the role; the button may have been renamed, moved, or disabled | Switch to a sibling description or `@key` |
+| `@ax-find` returns 0 elements for a role | Verify role spelling; re-query the parent role (e.g. `AXWindow`) to find the right subtree first | Drop to `@ax-press` on a sibling button, or `@key` shortcut only if the target has no AX button at all |
+| `@ax-press` returns `performed:false` | Re-`@ax-find` for the role; the button may have been renamed, moved, or disabled | Switch to a sibling description first; `@key` only for explicit shortcuts, never to type symbols |
 | `@ax-press-sequence` stops mid-way | The failed step's `target_id` is in the response; re-query just that role and continue from the failing step | Restart the sequence from a known fresh state (`@ax-find` first) |
 | Fresh AX read returns a different value than expected | You may have read the wrong subtree; re-query with the correct value role (commonly `AXStaticText` or `AXValue`) | Use `@screenshot` for visual confirmation |
 | Window ownership is ambiguous (≥2 matching interactive windows) | Disambiguate via fresh `@window-find` and pass `pid:PID/window:INDEX` instead of `app:APP` | Stop; ask the user which window is the target |
@@ -199,6 +201,7 @@ None of these are valid tactics.
 | Retry the same `@ax-press` more than three times with the same description | If the description still does not resolve, the locator is wrong. Re-query the role or change lane; do not throw the same payload at the daemon. |
 | Pre-emptively press a clear / reset button on a fresh app | A reset before reading state is a protocol violation, not a safety measure. The fresh read tells you whether the app already starts at the target baseline. |
 | Use `@cmd` to compute math, parse JSON, or evaluate expressions | Shell math has nothing to do with the GUI task. `@cmd` is for legitimate system commands; bypassing semantic actions defeats all rdog-control evidence. |
+| 🔴 Use `@key` to type symbols (`+` `*` `/` `=`) into a button-driven app | Button-driven apps (calculator, toolbars, games) respond to real key events, not unicode injection. `@key:{key:"+"}` does NOT press the plus button; `@ax-press` on the button description does. Using `@key` for symbols silently produces wrong results. |
 | Pass `app:备忘录`, `app:備忘錄`, or any non-ASCII app name | `@window-find` only resolves ASCII app names. Non-ASCII names return 0 matches and will never succeed. |
 | Mix `app:APP` with `pid:PID/window:INDEX`, `process:`, or `window_title:` in the same target | The target validator rejects the request. Pick exactly one ownership channel. |
 | Reuse `@eN` ref across daemon restarts or turn boundaries | Observation refs are short-lived. A ref that resolved in the previous turn may resolve to a different element today. Re-query via `@ax-find`. |
