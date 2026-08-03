@@ -377,8 +377,31 @@ pub fn parse_control_line(line: &str) -> io::Result<ControlParseResult> {
     }
 
     let command = line[1..].trim_start();
+    // 2026-08-04 (LLM 兼容): 模型常写 `@window-find app:Terminal` /
+    // `@window-find {json}` (空格分隔参数) 而非冒号分隔。这里把
+    // "命令名 + 空格 + 参数" 归一化为标准 payload, 与冒号写法等价。
+    // 仅当命令不含 ':' 且存在非空空格后缀时触发, 不干扰既有冒号语法。
+    let command: String = if let Some(space_idx) = command.find(char::is_whitespace) {
+        // 先遇到空格: 检查空格前是否是完整命令名 (不含 ':'),
+        // 是则把剩余部分当作 payload 归一化为冒号形式。
+        let head = &command[..space_idx];
+        if head.contains(':') {
+            command.to_owned()
+        } else {
+            let rest = command[space_idx..].trim();
+            if rest.is_empty() {
+                command.to_owned()
+            } else {
+                // `window-find app:Terminal` -> `window-find:app:Terminal`,
+                // `window-find {json}` -> `window-find:{json}`。
+                format!("{head}:{rest}")
+            }
+        }
+    } else {
+        command.to_owned()
+    };
     let has_payload = command.contains(':');
-    let (kind, request_id) = parse_control_header(command)?;
+    let (kind, request_id) = parse_control_header(&command)?;
 
     if kind.eq_ignore_ascii_case("ping") && !has_payload {
         return Ok(ControlParseResult::Control(ControlRequest {

@@ -785,6 +785,42 @@ pub fn resolve_default_window_target_rect(
 }
 
 pub fn parse_window_find_payload(input: &str) -> io::Result<WindowFindRequest> {
+    // 2026-08-04 (LLM 兼容): compact 短格式 `app:APP` / `pid:PID/window:INDEX`
+    // 与对象语法等价 (模型从 ax 命令类推, 常写 `@window-find:app:Terminal`)。
+    if !input.trim_start().starts_with('{') {
+        let mut fields = crate::control_protocol::parse_compact_fields("@window-find", input)?;
+        let mut query = WindowQuery::default();
+        if let Some(app) = fields.take_named("@window-find", "app")? {
+            query.app = Some(app);
+        }
+        if let Some(pid) = fields.take_named("@window-find", "pid")? {
+            let pid = pid
+                .split("/window:")
+                .next()
+                .unwrap_or(&pid)
+                .parse::<i32>()
+                .ok()
+                .filter(|pid| *pid > 0)
+                .ok_or_else(|| {
+                    invalid_data("@window-find 的 `pid:` 必须是正整数, 例如 pid:123/window:0")
+                })?;
+            query.pid = Some(pid);
+        }
+        fields.ensure_empty("@window-find")?;
+        if query.is_empty() {
+            return Err(invalid_data(
+                "@window-find 短格式需要 app:APP 或 pid:PID/window:INDEX",
+            ));
+        }
+        return Ok(WindowFindRequest {
+            query,
+            display_scope: None,
+            limit: DEFAULT_WINDOW_FIND_LIMIT,
+            include_state: true,
+            include_recipes: true,
+        });
+    }
+
     let inner = object_inner(input, "@window-find")?;
     if inner.is_empty() {
         return Err(invalid_data("@window-find 对象 payload 不能为空"));

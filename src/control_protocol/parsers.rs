@@ -124,6 +124,13 @@ pub(crate) fn parse_compact_fields(kind: &str, input: &str) -> io::Result<Parsed
         }
         match raw.split_once(':') {
             Some((name, value)) if KNOWN_COMPACT_PREFIXES.contains(&name) => {
+                // 兼容带引号值: `app:"Terminal"` / `role:"AXButton"`。
+                // compact 值本不允许引号, 剥掉外层引号是 LLM 写法的宽容处理。
+                let value = value.trim();
+                let value = value
+                    .strip_prefix('"')
+                    .and_then(|inner| inner.strip_suffix('"'))
+                    .unwrap_or(value);
                 let value = parse_compact_atom(kind, value)?;
                 fields.named.push((name.to_owned(), value));
             }

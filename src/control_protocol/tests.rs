@@ -1217,6 +1217,67 @@ fn press_sequence_should_accept_named_description_fields() {
 }
 
 #[test]
+fn window_find_should_accept_space_separated_and_compact_payloads() {
+    // 空格分隔参数 (模型把 shell 习惯带进协议): @window-find app:Terminal
+    let result = parse_control_line("@window-find app:Terminal").unwrap();
+    let ControlParseResult::Control(ControlRequest {
+        command: ControlCommand::WindowFind(request),
+        ..
+    }) = result
+    else {
+        panic!("应解析为 WindowFind");
+    };
+    assert_eq!(request.query.app.as_deref(), Some("Terminal"));
+
+    // 空格 + JSON 参数也归一化。
+    let result = parse_control_line(r#"@window-find {"app":"Terminal"}"#).unwrap();
+    let ControlParseResult::Control(ControlRequest {
+        command: ControlCommand::WindowFind(request),
+        ..
+    }) = result
+    else {
+        panic!("应解析为 WindowFind");
+    };
+    assert_eq!(request.query.app.as_deref(), Some("Terminal"));
+
+    // compact 冒号写法 + 带引号值。
+    let result = parse_control_line(r#"@window-find:app:"Terminal""#).unwrap();
+    let ControlParseResult::Control(ControlRequest {
+        command: ControlCommand::WindowFind(request),
+        ..
+    }) = result
+    else {
+        panic!("应解析为 WindowFind");
+    };
+    assert_eq!(request.query.app.as_deref(), Some("Terminal"));
+
+    // pid compact。
+    let result = parse_control_line("@window-find:pid:123/window:0").unwrap();
+    let ControlParseResult::Control(ControlRequest {
+        command: ControlCommand::WindowFind(request),
+        ..
+    }) = result
+    else {
+        panic!("应解析为 WindowFind");
+    };
+    assert_eq!(request.query.pid, Some(123));
+}
+
+#[test]
+fn key_should_accept_space_separated_payload() {
+    // 空格参数兼容对 @key 同样生效: @key 1 等价 @key:1。
+    let result = parse_control_line("@key 1").unwrap();
+    let ControlParseResult::Control(ControlRequest {
+        command: ControlCommand::Key(request),
+        ..
+    }) = result
+    else {
+        panic!("应解析为 Key");
+    };
+    assert_eq!(request.key, "1");
+}
+
+#[test]
 fn parse_should_reject_unknown_or_empty_or_multiline_payloads_or_bad_request_ids() {
     assert!(parse_control_line(r#"@unknown:"x""#).is_err());
     assert!(parse_control_line(r#"@key:"""#).is_err());
