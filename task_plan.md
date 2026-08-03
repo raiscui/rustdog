@@ -537,3 +537,16 @@ deepseek 3/3(历史一致) | minimax 2/3 | qwen36 2/3 | qwen37 1/3(历史 2/3) |
 ### 结论
 - AX press backend 全链路正常 (符号触发可靠, 动作结果全对)
 - 剩余缺口在 runner: @ax-press pid 路径 timeline 回溯解析 + multiTurn 判定边界
+
+## [2026-08-03 19:40:00] [Session ID: omx-1785634372447-ezls0t] [记录类型]: Runner timeline 回溯解析完成 (13/18)
+
+### 实施内容 (评测工程 commit 9dbd4a9)
+- performed_action_timeline: unresolved target_id 用全会话 matches (id/ref) 回溯补全
+- 只补 unresolved, fresh 优先语义不变; 3 新测试, 36 全过
+
+### 效果
+- 11/18 -> 13/18: qwen37/qwen36 error-result 收复 (动作正确但 timeline 无法解析)
+- 剩余 5 失败全为模型行为: @ax-find 0 匹配 / 不按等于 / 中途停止 / 全部清除替代删除 / multiTurn 边界
+
+### 结论
+- AX press backend + runner 解析能力已达上限; 13/18, 需继续提升走模型侧/SKILL 引导
