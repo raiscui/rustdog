@@ -1,11 +1,12 @@
 use std::io;
 
-mod parsers;
+pub mod parsers;
 
 pub(crate) use self::parsers::{
     normalize_object_field_name, object_inner, parse_compact_atom,
     parse_compact_ax_button_sequence, parse_compact_window_pair, parse_compact_window_selector,
-    parse_quoted_payload, split_object_field, split_object_fields, CompactWindowSelector,
+    parse_quoted_payload, parse_verify_field, split_object_field, split_object_fields,
+    CompactWindowSelector,
 };
 
 use self::parsers::{
@@ -61,6 +62,11 @@ pub enum ControlParseResult {
 #[derive(Debug, Clone, PartialEq)]
 pub enum ControlCommand {
     Ping,
+    /// 运行时协议自文档化: `@help` 全量 / `@help:<cmd>` 单命令。
+    ///
+    /// 2026-08-02 (eval-driven): 远端 agent 只有 control 通道,
+    /// 无法访问 SKILL.md; @help 让命令语法在协议内可查。
+    Help(Option<String>),
     Key(KeyRequest),
     Paste(PasteRequest),
     Script(String),
@@ -106,6 +112,305 @@ pub enum ControlCommand {
     /// ticket 08 + 21: composite 复合命令 (e.g., hotkey_click = key down + click + key up)
     /// mod.rs dispatch_underlying 顺序执行每个 sub-command, 任一失败回滚已执行的 (modifier release)。
     Composite(Vec<ControlCommand>),
+}
+
+/// `@help` 的单条命令语法条目。
+///
+/// 2026-08-02 (eval-driven): 运行时协议自文档化。
+/// HELP_ENTRIES 与 ControlCommand 枚举同文件, 新增命令时强制同步。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HelpEntry {
+    /// 命令名 (与 @ 后的 kind 一致, 如 "window-find")。
+    pub name: &'static str,
+    /// 一句话用途描述。
+    pub description: &'static str,
+    /// 最常用/推荐语法示例 (不含 @ 前缀)。
+    pub syntax: &'static str,
+    /// 是否为只读查询命令 (响应带 read: true)。
+    pub read: bool,
+}
+
+/// 全部控制命令的运行时帮助表。
+///
+/// 保持与 `ControlCommand` 枚举一一对应;新增命令时在此补一条。
+pub static HELP_ENTRIES: &[HelpEntry] = &[
+    HelpEntry {
+        name: "ping",
+        description: "存活探测",
+        syntax: "ping",
+        read: true,
+    },
+    HelpEntry {
+        name: "help",
+        description: "协议自文档化: 全量或单命令",
+        syntax: "help 或 help:<cmd>",
+        read: true,
+    },
+    HelpEntry {
+        name: "key",
+        description: "快捷键/修饰键 (按钮输入用 ax-press, 不是 key)",
+        syntax: "key:\"F11\" 或 key:{key:\"Cmd+T\",hold_ms:200}",
+        read: false,
+    },
+    HelpEntry {
+        name: "paste",
+        description: "系统粘贴 (前台焦点)",
+        syntax: "paste 或 paste:\"text\"",
+        read: false,
+    },
+    HelpEntry {
+        name: "script",
+        description: "执行 shell 命令",
+        syntax: "script:\"printf hi\"",
+        read: false,
+    },
+    HelpEntry {
+        name: "cmd",
+        description: "执行 shell 命令 (script 别名)",
+        syntax: "cmd:\"printf hi\"",
+        read: false,
+    },
+    HelpEntry {
+        name: "pty",
+        description: "打开 PTY 会话",
+        syntax: "pty:{cmd:\"bash\",cols:80,rows:24}",
+        read: false,
+    },
+    HelpEntry {
+        name: "pty-close",
+        description: "关闭 PTY 会话",
+        syntax: "pty-close:{session_id:\"s1\"}",
+        read: false,
+    },
+    HelpEntry {
+        name: "pty-detach",
+        description: "分离 PTY 会话",
+        syntax: "pty-detach:{session_id:\"s1\"}",
+        read: false,
+    },
+    HelpEntry {
+        name: "pty-attach",
+        description: "附加到 PTY 会话",
+        syntax: "pty-attach:{session_id:\"s1\",cols:80,rows:24}",
+        read: false,
+    },
+    HelpEntry {
+        name: "screenshot",
+        description: "截屏 (默认全显示器)",
+        syntax: "screenshot 或 screenshot:{display:\"primary\"}",
+        read: true,
+    },
+    HelpEntry {
+        name: "mouse-move",
+        description: "移动鼠标",
+        syntax: "mouse-move:{x:1200,y:540,coordinate_space:\"os-logical\"}",
+        read: false,
+    },
+    HelpEntry {
+        name: "mouse-button",
+        description: "鼠标按键",
+        syntax: "mouse-button:{button:\"left\",action:\"click\"}",
+        read: false,
+    },
+    HelpEntry {
+        name: "click",
+        description: "点击",
+        syntax: "click:{x:1200,y:540,coordinate_space:\"os-logical\"}",
+        read: false,
+    },
+    HelpEntry {
+        name: "drag",
+        description: "拖拽",
+        syntax: "drag:{from:{x:1,y:1},to:{x:2,y:2}}",
+        read: false,
+    },
+    HelpEntry {
+        name: "wheel",
+        description: "滚轮",
+        syntax: "wheel:{dx:0,dy:-120}",
+        read: false,
+    },
+    HelpEntry {
+        name: "ax-tree",
+        description: "AX 树读取",
+        syntax: "ax-tree:{scope:\"windows\",depth:4}",
+        read: true,
+    },
+    HelpEntry {
+        name: "ax-find",
+        description: "AX 元素查找",
+        syntax: "ax-find:app:Calculator,AXButton 或 ax-find:{role:\"AXButton\"}",
+        read: true,
+    },
+    HelpEntry {
+        name: "ax-get",
+        description: "AX 元素详情",
+        syntax: "ax-get:{target:{id:\"pid:1/window:0/path:0\"}}",
+        read: true,
+    },
+    HelpEntry {
+        name: "ax-focus",
+        description: "AX 焦点设置",
+        syntax: "ax-focus:{target:{id:\"pid:1/window:0/path:0\"}}",
+        read: false,
+    },
+    HelpEntry {
+        name: "ax-scroll",
+        description: "AX 滚动",
+        syntax: "ax-scroll:{target:{id:\"...\"},direction:\"down\",amount:1}",
+        read: false,
+    },
+    HelpEntry {
+        name: "ax-action",
+        description: "AX 动作",
+        syntax: "ax-action:{target:{id:\"...\"},action:\"press\"}",
+        read: false,
+    },
+    HelpEntry {
+        name: "ax-press",
+        description: "AX 元素按压",
+        syntax: "ax-press:app:Calculator,1",
+        read: false,
+    },
+    HelpEntry {
+        name: "ax-press-sequence",
+        description: "AX 元素序列按压",
+        syntax: "ax-press-sequence:app:Calculator,1,加,2,等于",
+        read: false,
+    },
+    HelpEntry {
+        name: "ax-set-value",
+        description: "AX 值写入",
+        syntax: "ax-set-value:{target:{id:\"...\"},value:\"hello\"}",
+        read: false,
+    },
+    HelpEntry {
+        name: "type-text",
+        description: "文本输入",
+        syntax: "type-text:{target:{id:\"pid:1/window:0/path:8.2\"},text:\"hello\"}",
+        read: false,
+    },
+    HelpEntry {
+        name: "window-find",
+        description: "窗口查找",
+        syntax: "window-find:app:Calculator 或 window-find:{app:\"Calculator\"}",
+        read: true,
+    },
+    HelpEntry {
+        name: "window-activate",
+        description: "窗口激活",
+        syntax: "window-activate:app:Calculator 或 window-activate:{target:{app:\"Calculator\"}}",
+        read: false,
+    },
+    HelpEntry {
+        name: "window-close",
+        description: "窗口关闭",
+        syntax: "window-close:app:Calculator 或 window-close:{target:{app:\"Calculator\"}}",
+        read: false,
+    },
+    HelpEntry {
+        name: "window-resize",
+        description: "窗口调整大小",
+        syntax: "window-resize:{target:{app:\"Calculator\"},size:{width:800,height:600}}",
+        read: false,
+    },
+    HelpEntry {
+        name: "web-find",
+        description: "网页元素查找",
+        syntax: "web-find:{match:{text:\"首页\"}}",
+        read: true,
+    },
+    HelpEntry {
+        name: "web-act",
+        description: "网页动作",
+        syntax: "web-act:{target:{...},action:\"click\"}",
+        read: false,
+    },
+    HelpEntry {
+        name: "gui-bench",
+        description: "GUI 基准测试",
+        syntax: "gui-bench:{...}",
+        read: true,
+    },
+    HelpEntry {
+        name: "bootstrap",
+        description: "组合引导 (capabilities+observe)",
+        syntax: "bootstrap:{mode:\"gui\"}",
+        read: true,
+    },
+    HelpEntry {
+        name: "flow",
+        description: "daemon-side 脚本流程",
+        syntax: "flow:{steps:[...]}",
+        read: false,
+    },
+    HelpEntry {
+        name: "observe",
+        description: "观察 (截图+AX+窗口)",
+        syntax: "observe 或 observe:{mode:\"hybrid\"}",
+        read: true,
+    },
+    HelpEntry {
+        name: "selector-get",
+        description: "读取 selector",
+        syntax: "selector-get:{ref:\"@e1\"}",
+        read: true,
+    },
+    HelpEntry {
+        name: "selector-resolve",
+        description: "解析 selector",
+        syntax: "selector-resolve:{selector:{...}}",
+        read: true,
+    },
+    HelpEntry {
+        name: "selector-refind",
+        description: "重新查找 selector",
+        syntax: "selector-refind:{ref:\"@e1\"}",
+        read: true,
+    },
+    HelpEntry {
+        name: "capabilities",
+        description: "能力诊断",
+        syntax: "capabilities",
+        read: true,
+    },
+    HelpEntry {
+        name: "savefile",
+        description: "保存文件帧 (client->daemon)",
+        syntax: "savefile:{filename:\"x.png\",mime:\"image/png\",encoding:\"base64\",data:\"...\"}",
+        read: false,
+    },
+    HelpEntry {
+        name: "wait",
+        description: "等待",
+        syntax: "wait:{ms:200}",
+        read: false,
+    },
+    HelpEntry {
+        name: "open-app",
+        description: "打开应用",
+        syntax: "open-app:Calculator 或 open-app:\"Activity Monitor\" 或 open-app:{app_name:\"X\"}",
+        read: false,
+    },
+    HelpEntry {
+        name: "cancel",
+        description: "取消 in-flight 命令",
+        syntax: "cancel#<seq>:{target_seq:1}",
+        read: false,
+    },
+    HelpEntry {
+        name: "computer-act",
+        description: "CUA 语义动作 (13 动作闭集)",
+        syntax: "computer-act:{action:\"click\",args:{...},verify:\"best_effort\"}",
+        read: false,
+    },
+];
+
+/// 按命令名查询 help 条目 (不区分大小写)。
+pub fn help_entry_for(name: &str) -> Option<&'static HelpEntry> {
+    HELP_ENTRIES
+        .iter()
+        .find(|entry| entry.name.eq_ignore_ascii_case(name))
 }
 
 pub const DEFAULT_KEY_HOLD_MS: u64 = 200;
@@ -213,6 +518,8 @@ pub struct KeyRequest {
     pub pid: Option<i32>,
     pub window_id: Option<String>,
     pub response_mode: KeyResponseMode,
+    /// 2026-08-02 (eval-driven): 动作后验证策略 none/best_effort/always。
+    pub verify: Option<String>,
 }
 
 impl KeyRequest {
@@ -225,6 +532,26 @@ impl KeyRequest {
             pid: None,
             window_id: None,
             response_mode: KeyResponseMode::Legacy,
+            verify: None,
+        }
+    }
+
+    /// 默认结构化响应模式的构造器。
+    ///
+    /// 2026-08-02 (eval-driven): bare/quoted @key 语法默认 Structured,
+    /// 让响应携带 `key`/`mode`/`performed` 等自描述证据, 评测与 agent
+    /// 无需再从命令字符串正则恢复动作 label。显式请求旧裸数字响应
+    /// 请用对象语法 `response_mode:"legacy"` 或直接构造 `KeyRequest::legacy`。
+    pub fn structured(key: impl Into<String>, hold_ms: u64, mode: KeyMode) -> Self {
+        Self {
+            key: key.into(),
+            hold_ms,
+            mode,
+            delivery: KeyDelivery::Global,
+            pid: None,
+            window_id: None,
+            response_mode: KeyResponseMode::Structured,
+            verify: None,
         }
     }
 }
@@ -384,6 +711,27 @@ pub fn parse_control_line(line: &str) -> io::Result<ControlParseResult> {
         return Ok(ControlParseResult::Control(ControlRequest {
             request_id,
             command: ControlCommand::Ping,
+        }));
+    }
+
+    // `@help` 无 payload -> 全量; `@help:<cmd>` -> 单命令主题。
+    if kind.eq_ignore_ascii_case("help") {
+        let topic = if has_payload {
+            let (_, payload) = command.split_once(':').expect("has_payload 已保证有冒号");
+            let topic = payload.trim();
+            if topic.is_empty() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "@help payload 不能为空; 请用 @help 或 @help:<command>",
+                ));
+            }
+            Some(topic.to_ascii_lowercase())
+        } else {
+            None
+        };
+        return Ok(ControlParseResult::Control(ControlRequest {
+            request_id,
+            command: ControlCommand::Help(topic),
         }));
     }
 
