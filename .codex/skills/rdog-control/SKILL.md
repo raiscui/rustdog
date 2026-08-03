@@ -47,9 +47,8 @@ rdog control @ax-press-sequence:app:APP,DESCRIPTION_1,DESCRIPTION_2
 
 **按钮/控件应用必须走 `@ax-press`(语义按钮), 不要用 `@key` 输入符号。**
 计算器、键盘驱动的工具栏、游戏等应用只响应真实按键事件, `@key` 的
-unicode 字符注入不会触发按钮 (例如 `@key:{key:"+"}` 不会按计算器的加号键,
-但 `@ax-press:app:TextEdit,加` 会)。先 `@ax-find` 枚举按钮 description,
-再按 description 用 `@ax-press` / `@ax-press-sequence`。
+unicode 字符注入不会触发按钮。先 `@ax-find` 枚举按钮 description,
+再按 description 用 `@ax-press` / `@ax-press-sequence` 按下。
 `@key` 只用于: 快捷键 / 修饰键组合 / 无 AX 语义的全局按键 (Cmd+T, Esc 等)。
 
 按钮按压三步流程 (与 Text Input 的三步流程对称):
@@ -209,7 +208,7 @@ None of these are valid tactics.
 | Retry the same `@ax-press` more than three times with the same description | If the description still does not resolve, the locator is wrong. Re-query the role or change lane; do not throw the same payload at the daemon. |
 | Pre-emptively press a clear / reset button on a fresh app | A reset before reading state is a protocol violation, not a safety measure. The fresh read tells you whether the app already starts at the target baseline. |
 | Use `@cmd` to compute math, parse JSON, or evaluate expressions | Shell math has nothing to do with the GUI task. `@cmd` is for legitimate system commands; bypassing semantic actions defeats all rdog-control evidence. |
-| 🔴 Use `@key` to type symbols (`+` `*` `/` `=`) into a button-driven app | Button-driven apps (keypad-style tools, toolbars, games) respond to real key events, not unicode injection. `@key:{key:"+"}` does NOT press the plus button; `@ax-press` on the button description does. Using `@key` for symbols silently produces wrong results. |
+| 🔴 Use `@key` to type operator symbols into a button-driven app | Button-driven apps (keypad-style tools, toolbars, games) respond to real key events, not unicode injection. Operator symbols typed via `@key` are silently ignored by the app, producing wrong results. Press the operator button via `@ax-press` instead. |
 | Pass `app:备忘录`, `app:備忘錄`, or any non-ASCII app name | `@window-find` only resolves ASCII app names. Non-ASCII names return 0 matches and will never succeed. |
 | Mix `app:APP` with `pid:PID/window:INDEX`, `process:`, or `window_title:` in the same target | The target validator rejects the request. Pick exactly one ownership channel. |
 | Reuse `@eN` ref across daemon restarts or turn boundaries | Observation refs are short-lived. A ref that resolved in the previous turn may resolve to a different element today. Re-query via `@ax-find`. |
