@@ -19,7 +19,10 @@ use serde::Serialize;
 use std::io;
 
 const DEFAULT_AX_FIND_LIMIT: u16 = 20;
-const DEFAULT_AX_FIND_MODE: AxMode = AxMode::Interactive;
+// 2026-08-03 (macos-ops 回归): 对象语法 @ax-find 默认 Interactive depth=2,
+// 抓不到 Safari 地址栏 (AXTextField 在 depth 3), 导致导航类场景 0 匹配。
+// 提到 Full (depth=4) 与 compact 语法 (depth=8) 的行为对齐, 覆盖深层控件。
+const DEFAULT_AX_FIND_MODE: AxMode = AxMode::Full;
 const DEFAULT_AX_GET_MODE: AxMode = AxMode::Interactive;
 const COMPACT_AX_FIND_DEPTH: u8 = 8;
 const COMPACT_AX_FIND_MAX_ELEMENTS: u16 = 5_000;
@@ -884,14 +887,15 @@ mod tests {
     }
 
     #[test]
-    fn parse_ax_find_payload_should_use_light_mode_defaults() {
+    fn parse_ax_find_payload_should_use_full_mode_defaults() {
         let request = parse_ax_find_payload(r#"{role:"AXButton",name_contains:"can"}"#).unwrap();
-        assert_eq!(request.tree.depth, AxMode::Interactive.preset().depth);
+        assert_eq!(request.tree.depth, AxMode::Full.preset().depth);
         assert_eq!(
             request.tree.max_elements,
-            AxMode::Interactive.preset().max_elements
+            AxMode::Full.preset().max_elements
         );
-        assert!(!request.tree.include_values);
+        // Full 模式默认 include_values=true, 供 @type-text 三步流程读回 value 验证。
+        assert!(request.tree.include_values);
         assert_eq!(request.limit, DEFAULT_AX_FIND_LIMIT);
         assert_eq!(request.query.name_contains.as_deref(), Some("can"));
     }
