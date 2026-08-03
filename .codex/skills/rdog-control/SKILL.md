@@ -49,7 +49,9 @@ rdog control @ax-press-sequence:app:APP,DESCRIPTION_1,DESCRIPTION_2
 计算器、键盘驱动的工具栏、游戏等应用只响应真实按键事件, `@key` 的
 unicode 字符注入不会触发按钮。先 `@ax-find` 枚举按钮 description,
 再按 description 用 `@ax-press` / `@ax-press-sequence` 按下。
-`@key` 只用于: 快捷键 / 修饰键组合 / 无 AX 语义的全局按键 (Cmd+T, Esc 等)。
+`@key` 只用于: 任务明确要求的热键 (Cmd+T 新建标签) / 无 AX 语义的全局按键。
+清理旧内容、清除状态、确认按钮等一切可见控件操作都是 `@ax-press` 的职责,
+不要用 Esc / Delete / Cmd+A 等键盘快捷键代替按钮按压。
 
 按钮按压三步流程 (与 Text Input 的三步流程对称):
 1. `@ax-find` 枚举按钮 description (role 用 `AXButton` / `AXMenuItem`, 一次拿全列表)
@@ -209,6 +211,7 @@ None of these are valid tactics.
 | Pre-emptively press a clear / reset button on a fresh app | A reset before reading state is a protocol violation, not a safety measure. The fresh read tells you whether the app already starts at the target baseline. |
 | Use `@cmd` to compute math, parse JSON, or evaluate expressions | Shell math has nothing to do with the GUI task. `@cmd` is for legitimate system commands; bypassing semantic actions defeats all rdog-control evidence. |
 | 🔴 Use `@key` to type operator symbols into a button-driven app | Button-driven apps (keypad-style tools, toolbars, games) respond to real key events, not unicode injection. Operator symbols typed via `@key` are silently ignored by the app, producing wrong results. Press the operator button via `@ax-press` instead. |
+| 🔴 Use Esc / Delete / Cmd+A keyboard shortcuts to clear or reset app state | Clearing stale content, dismissing dialogs, or selecting all are visible control operations. They must be done with `@ax-press` on the actual button (e.g. a clear button). Keyboard shortcuts are not a substitute and will not be counted as performed button actions. |
 | Pass `app:备忘录`, `app:備忘錄`, or any non-ASCII app name | `@window-find` only resolves ASCII app names. Non-ASCII names return 0 matches and will never succeed. |
 | Mix `app:APP` with `pid:PID/window:INDEX`, `process:`, or `window_title:` in the same target | The target validator rejects the request. Pick exactly one ownership channel. |
 | Reuse `@eN` ref across daemon restarts or turn boundaries | Observation refs are short-lived. A ref that resolved in the previous turn may resolve to a different element today. Re-query via `@ax-find`. |
