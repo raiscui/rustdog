@@ -589,3 +589,62 @@ deepseek 3/3(历史一致) | minimax 2/3 | qwen36 2/3 | qwen37 1/3(历史 2/3) |
 ### 关键经验
 - restore 分支回滚会把 main 上的 SKILL 优化一起丢掉, 评测前必须核对 SKILL 版本
 - 对象语法 @ax-find 默认 depth 2 太浅, 常见控件在 depth 3; 与 compact (depth 8) 行为不一致是隐患
+
+## [2026-08-03 21:30:00] [Session ID: omx-1785634372447-ezls0t] [记录类型]: rdog parser LLM 兼容改造 (grilling 中)
+
+### 用户决策
+- 核心要务: rdog parser 本身兼容 LLM 多样化写法 (AI-native, 不靠 SKILL 约束)
+- 落点: 通用 parser 层 (已确认)
+- 目标: 兼容 qwen37/qwen-plus 的三种混用写法 (role: 前缀 / compact 尾部选项 / 对象顶层 app)
+
+### 待确认设计决策
+- [ ] 问题 2: role:/description: 前缀剥离的范围
+- [ ] 问题 3: compact 尾部选项支持哪些 key
+- [ ] 问题 4: 对象顶层 app/pid/window_id 归一化
+- [ ] 问题 5: 冲突与歧义处理
+
+## [2026-08-04 00:10:00] [Session ID: omx-1785634372447-ezls0t] [记录类型]: rdog parser LLM 兼容改造设计定稿 (grilling 完成)
+
+### 核心原则 (EPIPHANY_LOG 已记录)
+- rdog parser 兼容 LLM 多样化写法是核心要务 (AI-native)
+- compact 语法统一为前缀路由模型: 每个字段 = `前缀:值`, 按前缀路由; 无前缀裸值按位置回退
+
+### 决策清单 (8 项全确认)
+1. 落点: 通用 parser 层 (parse_compact_window_pair / parse_compact_ax_button_sequence / 对象字段归一化)
+2. 前缀路由: 带前缀按名路由, 无前缀按位置 (第1=selector, 第2=主值, guarded 第3-5 按位)
+3. 字段集合: app/pid/role/description/value/name/include_values/limit/depth/max_elements/mode (11 个)
+4. 冲突规则: 位置+显式前缀同字段 -> 报错 (提示只写一种)
+5. 未知前缀: 报错并列出合法前缀列表
+6. 对象顶层归一化: ax-find/ax-get/ax-tree 顶层 app/pid/process/window_title/window_id -> window; ax-press 顶层 app/window_id/pid -> target; 与嵌套冲突报错
+7. guarded press 5 字段: description/role/expected_value/max_attempts 支持前缀化
+8. 同步更新 references/protocol.md 语法规格 + 单测 + macos-ops 验证
+
+### 实施状态
+- [ ] 通用 compact 字段解析器 (前缀识别 + 未知前缀报错)
+- [ ] @ax-find compact 前缀路由 + 尾部选项
+- [ ] @ax-press / guarded press 前缀化
+- [ ] @ax-press-sequence 前缀化
+- [ ] 对象语法顶层字段归一化
+- [ ] 单测 + protocol.md + 全量测试 + macos-ops 验证
+
+## [2026-08-04 00:35:00] [Session ID: omx-1785634372447-ezls0t] [记录类型]: compact 前缀路由实施完成 (macos-ops 28/30)
+
+### 实施 (commit a5ff3e5)
+- parse_compact_fields: 通用 compact 字段解析器 (前缀路由 + 位置回退 + 未知前缀报错)
+- resolve_compact_selector: 命名 app/pid 优先, 无命名时位置[0] 回退
+- take_named_or_positional: 命名/位置同槽位冲突检测 (规避 Option::or eager 求值陷阱)
+- @ax-find: role: 前缀 + include_values/limit/depth/max_elements/mode 尾部选项
+- @ax-press: description: 前缀 + guarded 三件套命名化
+- @ax-press-sequence: description:N 重复前缀追加
+- 对象语法顶层 app/window_id 归一化 (@ax-find -> window, @ax-press -> target)
+- 删除废弃 parse_compact_window_pair / parse_compact_ax_button_sequence
+- protocol.md 新增 Compact 前缀路由语法规格; 7 新测试, 668 passed
+
+### 关键发现
+- 真实实现是 control_ax.rs, control_protocol/parsers/ax.rs 是死文件 (历史遗留)
+- Option::or 参数 eager 求值会静默消费位置字段, 冲突检测必须显式
+
+### 验证
+- 三种坏写法 (role: 前缀/尾部选项/对象顶层 app) 全部工作
+- 冲突/未知前缀报错带可操作提示
+- macos-ops: qwen37 5/5 (safari 收复), 总计 28/30
