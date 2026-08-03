@@ -522,3 +522,18 @@ deepseek 3/3(历史一致) | minimax 2/3 | qwen36 2/3 | qwen37 1/3(历史 2/3) |
 
 ### 阻塞
 - DASHSCOPE_API_KEY 失效, qwen 补跑待 key 恢复
+
+## [2026-08-03 19:25:00] [Session ID: omx-1785634372447-ezls0t] [记录类型]: Wayfinder #39 qwen 补跑完成 (11/18)
+
+### key 问题复盘
+- 之前 401 根因: xtalk/.envrc 的 key 是 `export DASHSCOPE_API_KEY="sk-..."` 带引号, 用 cut -d= 提取把引号带进去 → 401
+- 修复: sed 去引号后 curl 200 正常
+
+### 补跑结果 (总计 11/18, 历史 16/18)
+- qwen37: 1/3, qwen36: 1/3, qwen-plus: 2/3
+- 失败模式 A (runner timeline unresolved, 动作正确): qwen37/qwen36 error (@ax-press 先按后查), deepseek stale, minimax happy (multiTurn)
+- 失败模式 B (纯模型行为): qwen37 happy 按键混乱, qwen36 stale 中途停止, qwen-plus stale 未按等于
+
+### 结论
+- AX press backend 全链路正常 (符号触发可靠, 动作结果全对)
+- 剩余缺口在 runner: @ax-press pid 路径 timeline 回溯解析 + multiTurn 判定边界
