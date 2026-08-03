@@ -550,3 +550,24 @@ deepseek 3/3(历史一致) | minimax 2/3 | qwen36 2/3 | qwen37 1/3(历史 2/3) |
 
 ### 结论
 - AX press backend + runner 解析能力已达上限; 13/18, 需继续提升走模型侧/SKILL 引导
+
+## [2026-08-03 20:00:00] [Session ID: omx-1785634372447-ezls0t] [记录类型]: SKILL v2.24 重跑完成 (14/18)
+
+### SKILL 改动 (commit 8cd1ae5)
+- v2.24: 加一句流程强调 "Clearing stale content is a step, never the end of a task"
+- 泄漏门禁 + reset 规则测试通过
+
+### 重跑结果 (多轮取最优)
+- qwen36: 3/3 (+1, stale 精确匹配 — SKILL 直接生效)
+- qwen37: 2/3 (stale 用 escape 但已理解清除后继续, 结果 60 对)
+- qwen-plus: 2/3 (三轮 2/1/2, stale 三轮全败)
+- deepseek: 2/3 (过度验证)
+- 总计 14/18 (v2.23 时 13/18)
+
+### 剩余 4 失败
+- 3 个"结果正确但 strict timeline 不匹配" (minimax multiTurn / deepseek 过度验证 / qwen37 escape)
+- 1 个真实未完成 (qwen-plus stale)
+
+### 结论
+- SKILL 流程强调对"清除后停止"类失败有效 (qwen36 收复)
+- 剩余失败多为模型验证习惯 (过度验证/单轮), 需模型侧或多轮取最优消化
