@@ -664,3 +664,27 @@ deepseek 3/3(历史一致) | minimax 2/3 | qwen36 2/3 | qwen37 1/3(历史 2/3) |
 
 ### 死文件清理 (commit 前置)
 - 删除 parsers/ax.rs, control_ax/press.rs, control_ax/postcondition.rs (功能已在 control_ax.rs)
+
+## [2026-08-04 07:30:00] [Session ID: omx-1785634372447-ezls0t] [记录类型]: parser 兼容改动 calculator 回归验证
+
+### 计划
+- [ ] 跑 calculator 6 模型 (验证前缀路由/空格参数/引号剥离无回归)
+- [ ] 沉淀 "rdog parser 兼容 LLM" 经验到 EXPERIENCE.md
+- [ ] 更新 AGENTS.md 索引
+
+## [2026-08-04 08:30:00] [Session ID: omx-1785634372447-ezls0t] [记录类型]: parser 兼容改动 calculator 回归验证完成
+
+### 回归结论
+- qwen36 3/3 全过: parser 改动 (前缀路由/空格/引号/响应自包含) 无破坏
+- 其他模型失败全为模型行为 (多按/少按/未按等于/进程崩溃/multiTurn 边界)
+- runner 修复: @key JS 风格对象 + 运算符符号归一化 + 响应 description 优先
+
+### 交付
+- rdog: @ax-press 响应自包含 description (commit)
+- runner: JS 风格对象/符号归一化/description 优先 (commit)
+- EXPERIENCE.md: parser LLM 兼容经验沉淀 + AGENTS.md 索引更新
+- 归档 results/6x-parser-compat-*
+
+### 下一步候选
+- calculator 多轮取最优消化模型随机性
+- qwen-plus stale 的"删除后不继续"模式 (SKILL clear-continue 已引导, 模型仍漂移)
