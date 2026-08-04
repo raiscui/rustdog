@@ -445,6 +445,22 @@ pub fn parse_control_line(line: &str) -> io::Result<ControlParseResult> {
         }));
     }
 
+    // 2026-08-05 (LLM 兼容): 裸 @window-find 返回全部窗口 (空 query 在
+    // backend 层匹配所有窗口)。模型常发无参数 window-find 期望看到窗口列表,
+    // 旧行为报"无效控制指令"让模型无从修正。
+    if kind.eq_ignore_ascii_case("window-find") && !has_payload {
+        return Ok(ControlParseResult::Control(ControlRequest {
+            request_id,
+            command: ControlCommand::WindowFind(WindowFindRequest {
+                query: Default::default(),
+                display_scope: None,
+                limit: 20,
+                include_state: true,
+                include_recipes: true,
+            }),
+        }));
+    }
+
     let Some((_, payload)) = command.split_once(':') else {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,

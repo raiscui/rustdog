@@ -1264,6 +1264,23 @@ fn window_find_should_accept_space_separated_and_compact_payloads() {
 }
 
 #[test]
+fn bare_window_find_should_return_all_windows() {
+    // 裸 @window-find (无参数) 返回全部窗口查询, 模型无需知道参数写法。
+    let result = parse_control_line("@window-find").unwrap();
+    let ControlParseResult::Control(ControlRequest {
+        command: ControlCommand::WindowFind(request),
+        ..
+    }) = result
+    else {
+        panic!("裸 @window-find 应解析为 WindowFind");
+    };
+    assert!(request.query.app.is_none(), "空 query = 匹配全部窗口");
+    assert!(request.query.pid.is_none());
+    assert!(request.query.title.is_none());
+    assert_eq!(request.limit, 20);
+}
+
+#[test]
 fn key_should_accept_space_separated_payload() {
     // 空格参数兼容对 @key 同样生效: @key 1 等价 @key:1。
     let result = parse_control_line("@key 1").unwrap();
