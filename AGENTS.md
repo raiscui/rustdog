@@ -40,9 +40,9 @@ Issues 和 Wayfinder maps 使用 GitHub Issues。详见 `docs/agents/issue-track
   - 何时阅读: 修改远程 PTY、control transport streaming、Zenoh session channel、`--pty-close` 或 TTY 交互行为前
 
 - `EXPERIENCE.md`
-  - 主题: 本项目已经验证过的协议、运行时与GUI安全经验边界
-  - 用途: 帮助后续改协议时避免把 `@exit`、显式协议请求和裸 shell 行再次混淆;沉淀跨平台修复、Zenoh、log路径、AX hit-test窗口归属等隐性契约教训
-  - 何时阅读: 做协议演进、回顾历史判断口径、沉淀经验时;改daemon日志/e2e polling、坐标AX root discovery、backend locator或GUI目标归属门禁前
+  - 主题: 本项目已经验证过的协议、运行时与GUI安全经验边界,以及 rdog parser 兼容 LLM 多样化写法的机制与踩坑
+  - 用途: 帮助后续改协议时避免把 `@exit`、显式协议请求和裸 shell 行再次混淆;沉淀跨平台修复、Zenoh、log路径、AX hit-test窗口归属等隐性契约教训;改 parser 时先读 compact 前缀路由/空格参数/引号剥离/响应自包含机制,避免破坏 LLM 兼容
+  - 何时阅读: 做协议演进、回顾历史判断口径、沉淀经验时;改daemon日志/e2e polling、坐标AX root discovery、backend locator、GUI目标归属门禁、或任何 compact/对象语法解析前
 
 - `.codex/skills/rdog-control/SKILL.md`
   - 主题: rdog-control skill,覆盖 Zenoh target-name、line-control、PTY、daemon-side `@flow`、AX/window/web/鼠标、硬件桥接、WeChat no-AX override,以及 `rdog ax-diff` 结构化 AX JSON diff

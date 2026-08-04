@@ -391,3 +391,45 @@
 - 最小证伪顺序是:focused运行、默认并发复现、串行对照、接入共享锁、默认并发重复多轮.
 - 只有静态看到`std::env::set_var`还不能确认原因.必须用并发/串行差异和共享锁前后结果建立动态证据.
 - 这类失败先按测试隔离问题调查,不要直接修改production cleanup、lease或重试逻辑来掩盖症状.
+
+## [2026-08-04 08:20:00] [Session ID: omx-1785634372447-ezls0t] rdog parser 兼容 LLM 多样化写法是核心要务 (AI-native)
+
+### 核心原则 (用户明确定义)
+
+- rdog 首先被 LLM agent 使用, 其次被人类使用。parser 应宽容吸收 LLM 的多样化
+  命令写法, 而不是要求模型严格遵守语法 (不要用 SKILL 文案约束模型)。
+- 模型会自然混用 compact 短格式与对象语法, 把 shell 习惯 (空格参数) 带进协议,
+  写 JS 风格无引号键名, 把 compact 的 app: 思维带进对象顶层。
+
+### 已实现的兼容机制 (2026-08-04)
+
+1. **compact 前缀路由**: 每个逗号字段 = `前缀:值`, 按前缀路由到槽位
+   (role:/description:/value:/name:/include_values:/limit:/depth:/max_elements:/
+   mode:/expected_value:/max_attempts:); 无前缀裸值按位置回退。
+2. **空格参数归一化**: `@window-find app:X` -> `@window-find:app:X`
+   (先遇空格才触发, 不干扰冒号语法)。
+3. **引号剥离**: `app:"Terminal"` 的值剥外层引号。
+4. **对象顶层归一化**: `{app:"Safari",role:"AXButton"}` 顶层 app/window_id
+   自动归一化到 window/target。
+5. **响应自包含**: @ax-press 响应带 description, runner/agent 无需依赖
+   @ax-find 映射恢复 timeline (先按后查场景)。
+6. **未知前缀报错 + 合法前缀列表**: 让模型一眼看到正确写法, 不静默 0 匹配。
+7. **冲突报错**: 位置+命名同槽位 "请只写一种"。
+
+### 踩坑 (必须避免)
+
+- **死文件**: control_protocol/parsers/ax.rs 等 3 个文件不参与编译 (不在 mod 树),
+  功能已在 control_ax.rs。改代码前先确认文件真的被编译 (rg mod 声明)。
+- **Option::or eager 求值**: `take_named()?.or(take_positional()?)` 会静默消费
+  位置字段, 冲突检测必须显式写 (take_named_or_positional)。
+- **runner json.loads**: 模型写 `{key:"1"}` (无引号键名) 不是合法 JSON, 要用
+  正则兼容提取; rdog parser (split_object_fields) 天然兼容, runner 需对齐。
+- **@key 符号归一化**: @key 输入 ÷/+/*/= 的 label 是符号, expected timeline 是
+  按钮描述 (除/加/乘/等于), runner 必须做 arithmetic aliases 归一化。
+- **"模型行为差" 先查工具兼容**: qwen-plus "未做 AX 验证" 实为 @window-find
+  空格写法全失败, 无成功验证手段。模型在尝试, 是工具拒绝导致假象。
+
+### 判定口径
+
+- 评测失败先区分: 解析层失败 (rdog 报错/静默 0 匹配) vs 执行层失败 vs 模型行为。
+- 三个模型同时挂同一个 case -> 大概率是 rdog/SKILL 兼容问题, 不是随机性。
