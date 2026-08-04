@@ -280,6 +280,10 @@ pub struct AxActionReport {
     pub backend: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub target_id: Option<String>,
+    // 2026-08-04 (LLM 兼容): 响应自包含按钮描述, runner/agent 无需
+    // 依赖 @ax-find 映射即可恢复 timeline label (先按后查场景)。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
     pub performed: bool,
     pub status: &'static str,
 }

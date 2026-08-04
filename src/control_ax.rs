@@ -365,12 +365,17 @@ impl AxElement {
 }
 
 impl AxActionReport {
-    pub fn press(backend: impl Into<String>, target_id: Option<String>) -> Self {
+    pub fn press(
+        backend: impl Into<String>,
+        target_id: Option<String>,
+        description: Option<String>,
+    ) -> Self {
         Self {
             kind: "ax",
             action: "press".to_owned(),
             backend: backend.into(),
             target_id,
+            description,
             performed: true,
             status: "ok",
         }
@@ -699,7 +704,11 @@ pub fn perform_default_ax_press(request: &AxPressRequest) -> io::Result<AxAction
         target: request.target.clone(),
         action: AxActionName::Press,
     })?;
-    Ok(AxActionReport::press(report.backend, report.target_id))
+    Ok(AxActionReport::press(
+        report.backend,
+        report.target_id,
+        request.target.description.clone(),
+    ))
 }
 
 pub fn perform_default_ax_press_with_postcondition(
@@ -2373,6 +2382,7 @@ mod tests {
                 Ok(AxActionReport::press(
                     "test",
                     Some(format!("pid:321/window:0/path:{}", press_calls.get())),
+                    None,
                 ))
             },
             |window_id, role| {
@@ -2414,6 +2424,7 @@ mod tests {
                 Ok(AxActionReport::press(
                     "test",
                     Some("pid:321/window:0/path:1".to_owned()),
+                    None,
                 ))
             },
             |_, _| Ok(vec!["pending".to_owned()]),
@@ -2533,6 +2544,7 @@ mod tests {
             Ok(AxActionReport::press(
                 "test",
                 Some(format!("pid:123/window:0/path:{index}")),
+                None,
             ))
         });
 
