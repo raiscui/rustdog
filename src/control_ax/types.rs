@@ -409,6 +409,10 @@ pub struct KeyDeliveryReport {
     pub target_pid: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub window_id: Option<String>,
+    // 2026-08-04 (清除类按键 hint): @key 的清除类按键 (escape/backspace/delete)
+    // 模拟成功后带通用引导, 防止"清除子目标完成 -> 流程断裂"。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hint: Option<String>,
     pub performed: bool,
     pub status: &'static str,
 }

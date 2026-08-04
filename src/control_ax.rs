@@ -556,6 +556,7 @@ impl KeyDeliveryReport {
             delivery: request.delivery.as_str(),
             target_pid,
             window_id,
+            hint: None,
             performed: true,
             status: "ok",
         }
@@ -722,10 +723,13 @@ fn clear_action_hint(description: Option<&str>) -> Option<String> {
     description
         .filter(|desc| is_clear_action_description(desc))
         .map(|_| {
-            "clear completed; the task is not finished until the remaining input steps and the final confirm action are done"
-                .to_string()
+            CLEAR_ACTION_HINT.to_string()
         })
 }
+
+/// 清除类操作完成后的通用 continue 引导 (共享给 @ax-press 与 @key)。
+pub(crate) const CLEAR_ACTION_HINT: &str =
+    "clear completed; the task is not finished until the remaining input steps and the final confirm action are done";
 
 /// 判断按钮描述是否为"清除类"操作 (删除 / 全部清除 / Clear / AC 等)。
 ///

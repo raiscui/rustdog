@@ -734,6 +734,20 @@ fn operator_alias_matches(text: &str, key: &str) -> bool {
 }
 
 fn structured_global_key_success_response(request: &KeyRequest) -> io::Result<Option<String>> {
+    // 清除类按键 (escape/backspace/delete) 即使 legacy 模式也返回结构化响应
+    // 并带 continue hint: 模型用快捷键清除后容易"清除即停", hint 把它拉回
+    // 主任务。非清除类按键保持 legacy 裸 0 不变 (wayfinder #36 决策 5)。
+    if is_clear_key(&request.key) {
+        let mut report = crate::control_ax::KeyDeliveryReport::success(
+            "global-input-simulation",
+            request,
+            None,
+            None,
+        );
+        report.hint = Some(crate::control_ax::CLEAR_ACTION_HINT.to_string());
+        return report.to_value_json().map(Some);
+    }
+
     if !matches!(request.response_mode, KeyResponseMode::Structured) {
         return Ok(None);
     }
@@ -741,6 +755,18 @@ fn structured_global_key_success_response(request: &KeyRequest) -> io::Result<Op
     crate::control_ax::KeyDeliveryReport::success("global-input-simulation", request, None, None)
         .to_value_json()
         .map(Some)
+}
+
+/// 判断 @key 按键是否为"清除类" (escape / backspace / delete)。
+///
+/// 覆盖模型用快捷键清除的常见写法 (m27hs / qwen-plus stale 用 escape 清除)。
+/// 注意: 单字符 `c` / `C` 不加 hint —— 文本输入场景 c 是普通字符,
+/// rdog 无法区分前台 app 语义, 保守只覆盖明确的清除命名键。
+fn is_clear_key(key: &str) -> bool {
+    matches!(
+        key.to_ascii_lowercase().as_str(),
+        "escape" | "esc" | "backspace" | "delete" | "del" | "clear"
+    )
 }
 
 fn execute_key_with_dependencies<F>(

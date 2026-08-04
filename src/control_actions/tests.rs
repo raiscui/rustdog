@@ -391,6 +391,43 @@ fn structured_global_key_success_response_should_report_structured_global_succes
 }
 
 #[test]
+fn clear_key_should_include_continue_hint_even_in_legacy_mode() {
+    // 清除类按键 (escape/backspace/delete) 即使 legacy 模式也返回结构化响应 + hint,
+    // 防止模型"快捷键清除后流程断裂"。非清除类按键保持 legacy 裸 0 (None)。
+    for key in ["Escape", "esc", "Backspace", "Delete", "clear"] {
+        let request = KeyRequest::legacy(key, 200, KeyMode::PressRelease);
+        let response_json = structured_global_key_success_response(&request)
+            .expect("clear key should serialize")
+            .expect("clear key should produce structured response even in legacy mode");
+        let response_value: serde_json::Value =
+            serde_json::from_str(&response_json).expect("response json should parse");
+        assert_eq!(response_value["key"].as_str(), Some(key));
+        let hint = response_value["hint"].as_str().expect("clear key must hint");
+        assert!(
+            hint.contains("not finished") && hint.contains("final confirm"),
+            "hint must guide continue: {hint}"
+        );
+    }
+
+    // 非清除类按键: legacy 模式保持裸 0 (None)。
+    let request = KeyRequest::legacy("F11", 200, KeyMode::PressRelease);
+    assert!(structured_global_key_success_response(&request)
+        .expect("serialize should work")
+        .is_none());
+
+    // 单字符 c / C 不加 hint (文本输入场景 c 是普通字符)。
+    for key in ["c", "C"] {
+        let request = KeyRequest::legacy(key, 200, KeyMode::PressRelease);
+        assert!(
+            structured_global_key_success_response(&request)
+                .expect("serialize should work")
+                .is_none(),
+            "{key} 不应加清除 hint"
+        );
+    }
+}
+
+#[test]
 fn execute_paste_hotkey_should_use_platform_shortcut_and_structured_report() {
     let hotkey_performed = Arc::new(AtomicBool::new(false));
     let text_injected = Arc::new(AtomicBool::new(false));
