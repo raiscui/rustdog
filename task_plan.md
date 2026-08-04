@@ -702,3 +702,22 @@ deepseek 3/3(历史一致) | minimax 2/3 | qwen36 2/3 | qwen37 1/3(历史 2/3) |
    失败模型验证后不纠错 (qwen-plus 读回 17 不修正)
 2. rdog 错误反馈覆盖解析/执行层 (code:64); "结果不对" rdog 无任务知识无法反馈
 3. 重试消化随机性, 但 3 次全败说明系统性模型行为差 (今天所有模型偏差)
+
+## [2026-08-04 16:00:00] [Session ID: omx-1785634372447-ezls0t] [记录类型]: 清除类 hint 机制实施并验证 (minimax 3/3)
+
+### 实施 (rdog commit)
+- @ax-press 清除类按钮 (删除/全部清除/Clear/AC 等) 响应带 hint:
+  "clear completed; the task is not finished until the remaining input steps and the final confirm action are done"
+- 纯函数 clear_action_hint + is_clear_action_description, 671 测试过
+
+### 验证 (minimax M3)
+- error 1次过 / happy 1次过 / stale [false,false,true] 第3次过 -> 3/3
+- stale attempt-3 命令链: 删除(hint) -> ax-find 验证 -> 删除 -> ax-find -> ax-press-sequence 8,加,4,等于,乘,5,等于 -> 验证 60
+- hint 直接引导模型清除后继续输入
+
+### 教训 (路径拼写)
+- 真实路径 /Users/cuilumbing (cuiluming 无 b), 反复打成 cuilumbing 浪费大量时间
+- 铁律: 手打用户名路径一律用 $HOME 或 python 构造, 绝不手写
+
+### 下一步
+- 其余 5 模型跑 hint 验证 (qwen36/m27hs/deepseek/qwen37/qwen-plus)
