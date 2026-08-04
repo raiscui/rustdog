@@ -763,3 +763,25 @@ deepseek 3/3(历史一致) | minimax 2/3 | qwen36 2/3 | qwen37 1/3(历史 2/3) |
 ### 当前组合水平
 - minimax 3/3, qwen36 3/3, m27hs 2/3, qwen37 2/3, qwen-plus 1-2/3, deepseek 1/3
 - 今天所有模型整体偏差 (昨天 m27hs 3/3)
+
+## [2026-08-05 04:40:00] [Session ID: omx-1785634372447-ezls0t] [记录类型]: 全面全套 LLM rdog 测试完成
+
+### 结果
+- calculator: 13/18 (deepseek 2, minimax 3, m27hs 2, qwen36 2, qwen37 2, qwen-plus 2)
+- macos-ops: 30/30 (6 模型全 5/5, 满分!)
+
+### 本轮修复 (rdog commit)
+- 裸 @window-find 返回全部窗口: qwen-plus preview 从 3 次全败 -> 1 次过
+- macos-ops runner 加 case 级重试 (与 calculator 一致)
+
+### calculator 剩余失败分型 (下一步优化点)
+1. deepseek error: 探索迷失 (19+ 命令全 @ax-find, 不按按钮) - 模型状态
+2. qwen36 error: 用 @key:return 代替"等于" - runner 可归一化 return->等于
+3. m27hs/qwen37 stale: 过度验证 (算对又重算) - 模型纪律
+4. qwen-plus stale: 删除后只按 8 就停 - 部分执行
+5. m27hs stale: 乱按 (按 k) - 模型状态
+
+### 下一步候选
+- runner: @key:return 归一化为"等于" (qwen36 error 可收复)
+- calculator stale 的"部分执行"模式分析
+- 多轮重跑已消化随机性, 剩余为系统性模型行为
