@@ -922,3 +922,26 @@ command => {
 - LP-ticket-15-deferred-3-RESOLVED 已追加 self-target fix 段.
 - Cancel 命令的语义边界 (signal-only, 不参与 in-flight state) 现在在 control_core.rs
   显式 guard 里显式声明, 未来 review 时不会再滑落.
+
+## [2026-08-03 21:30:00] [Session ID: omx-1785634372447-ezls0t] 主题: rdog parser 兼容 LLM 多样化写法是核心要务
+
+### 发现来源
+- macos-ops 第 3 轮评测: qwen37/qwen-plus 的 safari 场景因 compact/对象语法混用失败
+- 用户明确指示: 不要改 SKILL 文案约束模型, 而是改 rdog parser 让其兼容 LLM 的多样化命令写法
+
+### 核心原则
+- rdog 首先被 LLM agent 使用, 其次被人类使用 (AI-native)
+- 模型会自然混用 compact 短格式与对象语法 (带 role: 前缀、尾部选项、顶层 app 字段等)
+- parser 应宽容吸收这些变体, 而不是要求模型严格遵守语法
+- 修复落点: 通用 parser 层 (parse_compact_window_pair / parse_compact_atom / 对象字段归一化), 一次覆盖所有 compact/对象命令
+
+### 未来风险
+- 若继续用 SKILL 文案约束模型, SKILL 会越来越长且模型仍会犯错
+- 只修单个命令是打补丁, 坑会出现在下一个命令
+
+### 当前结论
+- 已确认: 通用 parser 层实施兼容
+- 设计决策树: role: 前缀剥离 / compact 尾部选项 / 对象顶层字段归一化 / 冲突歧义处理
+
+### 后续讨论入口
+- 继续 grilling 设计决策 (问题 2+), 达成共识后实施
