@@ -688,3 +688,17 @@ deepseek 3/3(历史一致) | minimax 2/3 | qwen36 2/3 | qwen37 1/3(历史 2/3) |
 ### 下一步候选
 - calculator 多轮取最优消化模型随机性
 - qwen-plus stale 的"删除后不继续"模式 (SKILL clear-continue 已引导, 模型仍漂移)
+
+## [2026-08-04 09:10:00] [Session ID: omx-1785634372447-ezls0t] [记录类型]: case 级自动重试实施完成
+
+### 实施 (评测工程)
+- run_one 循环尝试: maxCaseAttempts=3 (6 config 已配)
+- 每次尝试独立 Pi 会话, attempt-N 子目录, 通过即停, 最优写 run-result.json
+- result 加 attempt/attemptCount/attempts 元数据
+- 37 测试过; m27hs 验证: error 1 次过, happy/stale 3 次全败 (模型行为)
+
+### 关键洞察 (回答用户三问)
+1. pi 有 30 轮 tool iterations (case 内), 但"自己认为完成"就结束;
+   失败模型验证后不纠错 (qwen-plus 读回 17 不修正)
+2. rdog 错误反馈覆盖解析/执行层 (code:64); "结果不对" rdog 无任务知识无法反馈
+3. 重试消化随机性, 但 3 次全败说明系统性模型行为差 (今天所有模型偏差)
