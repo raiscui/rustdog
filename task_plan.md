@@ -742,3 +742,24 @@ deepseek 3/3(历史一致) | minimax 2/3 | qwen36 2/3 | qwen37 1/3(历史 2/3) |
 - hint 扩展到 @key 清除类按键? (escape 是 @key, 但 SKILL 禁止用 escape 清除, 不该鼓励)
 - deepseek 探索迷失是模型状态问题 (今天全部模型偏差)
 - 或接受 13/18 为当前组合水平
+
+## [2026-08-04 20:40:00] [Session ID: omx-1785634372447-ezls0t] [记录类型]: @key 清除 hint 实施 + m27hs/qwen-plus 验证
+
+### 实施 (rdog commit)
+- KeyDeliveryReport 加 hint; @key 清除类命名键 (escape/esc/backspace/delete/del/clear)
+  即使 legacy 模式返回结构化 + hint (共享 CLEAR_ACTION_HINT)
+- 组合键 (Cmd+A 等) 不触发 (不是清除命名键); 单字符 c/C 不触发 (防误伤文本输入)
+- 672 测试过
+
+### 验证
+- m27hs stale 进步: escape -> 删除按钮 + 一次做对 (hint 生效), 但过度验证重算 FAIL
+- qwen-plus: 组合键 Cmd+A/Cmd+Tab 清除 (hint 不覆盖) + happy 无操作 (状态差)
+- hint 机制 (@ax-press + @key) 已达清除类覆盖边界
+
+### 剩余 stale 失败分型 (模型行为)
+- 过度验证 (m27hs 算对重算) / 部分执行 (qwen37 只按 8) / 探索迷失 (deepseek)
+- 组合键清除 (qwen-plus) - SKILL 禁止, hint 不鼓励
+
+### 当前组合水平
+- minimax 3/3, qwen36 3/3, m27hs 2/3, qwen37 2/3, qwen-plus 1-2/3, deepseek 1/3
+- 今天所有模型整体偏差 (昨天 m27hs 3/3)
