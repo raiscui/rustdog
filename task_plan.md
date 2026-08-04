@@ -721,3 +721,24 @@ deepseek 3/3(历史一致) | minimax 2/3 | qwen36 2/3 | qwen37 1/3(历史 2/3) |
 
 ### 下一步
 - 其余 5 模型跑 hint 验证 (qwen36/m27hs/deepseek/qwen37/qwen-plus)
+
+## [2026-08-04 17:20:00] [Session ID: omx-1785634372447-ezls0t] [记录类型]: 清除 hint + 重试 6 模型轮完成 (13/18)
+
+### 结果
+- minimax 3/3 (stale hint 生效, [f,f,t])
+- qwen36 3/3 (stale hint 生效, 1 次过)
+- m27hs 2/3 (stale escape 清除 + 无括号分步策略)
+- qwen37 2/3 (stale attempt-2 结果 60 对但 timeline 多轮)
+- qwen-plus 2/3 (stale 快捷键清除 Cmd+A/Backspace)
+- deepseek 1/3 (happy 过, error/stale 探索迷失)
+- 总计 13/18
+
+### hint 机制效果分型
+1. @ax-press 清除 (删除按钮) -> hint 触发 -> 继续输入 (minimax/qwen36 成功)
+2. 快捷键清除 (escape/Cmd+A) -> hint 不触发 -> 仍失败 (m27hs/qwen-plus, 违反 SKILL Esc 规则)
+3. 部分执行 (qwen37 删除后只按 8) / 分步策略错 (m27hs 无括号) / 探索迷失 (deepseek)
+
+### 下一步候选
+- hint 扩展到 @key 清除类按键? (escape 是 @key, 但 SKILL 禁止用 escape 清除, 不该鼓励)
+- deepseek 探索迷失是模型状态问题 (今天全部模型偏差)
+- 或接受 13/18 为当前组合水平
