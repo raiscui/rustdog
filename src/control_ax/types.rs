@@ -284,6 +284,10 @@ pub struct AxActionReport {
     // 依赖 @ax-find 映射即可恢复 timeline label (先按后查场景)。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    // 2026-08-04 (清除类操作 hint): 清除类按钮被按下后, 给 agent 一句
+    // 通用引导, 防止"清除子目标完成 -> 流程断裂"的系统性迷失。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hint: Option<String>,
     pub performed: bool,
     pub status: &'static str,
 }

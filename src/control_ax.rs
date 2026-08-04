@@ -376,6 +376,7 @@ impl AxActionReport {
             backend: backend.into(),
             target_id,
             description,
+            hint: None,
             performed: true,
             status: "ok",
         }
@@ -704,11 +705,38 @@ pub fn perform_default_ax_press(request: &AxPressRequest) -> io::Result<AxAction
         target: request.target.clone(),
         action: AxActionName::Press,
     })?;
-    Ok(AxActionReport::press(
+    let mut report = AxActionReport::press(
         report.backend,
         report.target_id,
         request.target.description.clone(),
-    ))
+    );
+    // 2026-08-04 (清除类 hint): 清除类按钮被按下后, 给 agent 一句通用引导,
+    // 防止"清除子目标完成 -> 流程断裂" (模型清除后迷失, 不继续剩余输入)。
+    // 文案不含任何任务知识, 任何"清除后要继续"的场景都成立。
+    report.hint = clear_action_hint(request.target.description.as_deref());
+    Ok(report)
+}
+
+/// 清除类操作的 continue hint (纯函数, 便于单测)。
+fn clear_action_hint(description: Option<&str>) -> Option<String> {
+    description
+        .filter(|desc| is_clear_action_description(desc))
+        .map(|_| {
+            "clear completed; the task is not finished until the remaining input steps and the final confirm action are done"
+                .to_string()
+        })
+}
+
+/// 判断按钮描述是否为"清除类"操作 (删除 / 全部清除 / Clear / AC 等)。
+///
+/// 清除类操作通常是任务的中间步骤 (清掉旧状态), 完成清除后 agent 容易
+/// 把子目标当成任务终点。这里只做通用语义匹配, 不含任何具体任务知识。
+fn is_clear_action_description(description: &str) -> bool {
+    let normalized = description.trim().to_ascii_lowercase();
+    matches!(
+        normalized.as_str(),
+        "删除" | "全部清除" | "清除" | "清空" | "clear" | "all clear" | "ac" | "delete" | "del"
+    )
 }
 
 pub fn perform_default_ax_press_with_postcondition(
@@ -2360,6 +2388,29 @@ mod tests {
                 "app:Demo,重置,AXStaticText,ready,{invalid_attempts}"
             ))
             .is_err());
+        }
+    }
+
+    #[test]
+    fn clear_action_press_should_include_continue_hint() {
+        // 清除类按钮被按下后, 响应带通用 hint, 防止"清除后流程断裂"。
+        let hint = clear_action_hint(Some("删除")).expect("clear must hint");
+        assert!(
+            hint.contains("not finished") && hint.contains("final confirm"),
+            "hint must guide continue: {hint}"
+        );
+
+        // 非清除按钮不加 hint。
+        assert!(clear_action_hint(Some("1")).is_none());
+        assert!(clear_action_hint(Some("加")).is_none());
+        assert!(clear_action_hint(None).is_none());
+
+        // 英文清除语义同样命中。
+        for desc in ["clear", "all clear", "AC", "delete", "全部清除", "清空"] {
+            assert!(
+                clear_action_hint(Some(desc)).is_some(),
+                "{desc} must be treated as clear action"
+            );
         }
     }
 
