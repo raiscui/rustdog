@@ -165,6 +165,29 @@ pub(crate) fn parse_screenshot_payload(input: &str) -> io::Result<ScreenshotRequ
                 )?);
             }
             _ => {
+                // 2026-08-05 (LLM 兼容): 模型常想截"某个窗口" (deepseek error
+                // 曾 9 次尝试 @screenshot 窗口参数全部被拒后卡死)。当前
+                // @screenshot 只支持全屏 display, 给出可执行恢复路径,
+                // 引导模型转回 AX 树读取, 而不是反复试参数写法。
+                if matches!(
+                    field_name.as_str(),
+                    "window"
+                        | "window_id"
+                        | "ref"
+                        | "ref_id"
+                        | "observe"
+                        | "app"
+                        | "pid"
+                        | "process"
+                        | "title"
+                ) {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!(
+                            "@screenshot 不支持窗口级截图 (`{field_name}` 字段); 当前只支持 target=\"display\" 全屏截图; 窗口内容请用 @ax-find / @ax-get 读取 AX 树"
+                        ),
+                    ));
+                }
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
                     format!("@screenshot 对象 payload 包含未知字段: {field_name}"),

@@ -1362,3 +1362,22 @@ fn parse_should_handle_single_char_operator_keys() {
         assert_eq!(request.key, expected, "line={line}");
     }
 }
+
+#[test]
+fn screenshot_window_intent_should_hint_ax_fallback() {
+    // 模型想截窗口时, 错误必须给出可执行恢复路径 (转回 AX), 不能只报未知字段。
+    let err = parse_control_line(
+        r#"@screenshot:{window:{window_id:"pid:1/window:0"}}"#,
+    )
+    .expect_err("window screenshot must be rejected");
+    let msg = err.to_string();
+    assert!(msg.contains("不支持窗口级截图"), "error: {msg}");
+    assert!(
+        msg.contains("@ax-find"),
+        "error must suggest AX fallback: {msg}"
+    );
+
+    let err = parse_control_line(r#"@screenshot:{window_id:"pid:1/window:0"}"#)
+        .expect_err("window_id screenshot must be rejected");
+    assert!(err.to_string().contains("不支持窗口级截图"));
+}
