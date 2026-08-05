@@ -1364,6 +1364,42 @@ fn parse_should_handle_single_char_operator_keys() {
 }
 
 #[test]
+fn key_object_should_accept_modifiers_field() {
+    // OpenAI 风格 modifiers 数组归一化为组合键字符串。
+    let result = parse_control_line(r#"@key:{key:"k",modifiers:["Cmd"]}"#).unwrap();
+    let ControlParseResult::Control(ControlRequest {
+        command: ControlCommand::Key(request),
+        ..
+    }) = result
+    else {
+        panic!("应解析为 Key");
+    };
+    assert_eq!(request.key, "Cmd+k");
+
+    // 多修饰符 + 单字符串形式。
+    let result = parse_control_line(r#"@key:{key:"t",modifiers:"Cmd+Shift"}"#).unwrap();
+    let ControlParseResult::Control(ControlRequest {
+        command: ControlCommand::Key(request),
+        ..
+    }) = result
+    else {
+        panic!("应解析为 Key");
+    };
+    assert_eq!(request.key, "Cmd+Shift+t");
+
+    // 空数组 = 无修饰符, key 原样。
+    let result = parse_control_line(r#"@key:{key:"1",modifiers:[]}"#).unwrap();
+    let ControlParseResult::Control(ControlRequest {
+        command: ControlCommand::Key(request),
+        ..
+    }) = result
+    else {
+        panic!("应解析为 Key");
+    };
+    assert_eq!(request.key, "1");
+}
+
+#[test]
 fn screenshot_window_intent_should_hint_ax_fallback() {
     // 模型想截窗口时, 错误必须给出可执行恢复路径 (转回 AX), 不能只报未知字段。
     let err = parse_control_line(

@@ -53,6 +53,7 @@ fn parse_key_object_payload(input: &str) -> io::Result<KeyRequest> {
     let mut key = None::<String>;
     let mut hold_ms = None::<u64>;
     let mut mode = None::<KeyMode>;
+    let mut modifiers = None::<Vec<String>>;
     let mut delivery = None::<KeyDelivery>;
     let mut pid = None::<i32>;
     let mut window_id = None::<String>;
@@ -97,6 +98,17 @@ fn parse_key_object_payload(input: &str) -> io::Result<KeyRequest> {
                     ));
                 }
                 mode = Some(parse_key_mode(raw_value)?);
+            }
+            // 2026-08-05 (LLM 兼容): 模型常写 `{key:"k",modifiers:["Cmd"]}`
+            // (OpenAI 风格), 归一化为 `Cmd+k` 组合键字符串, 与紧凑语法等价。
+            "modifiers" | "modifier" => {
+                if modifiers.is_some() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "@key 对象 payload 的 `modifiers` 字段重复",
+                    ));
+                }
+                modifiers = Some(parse_key_modifiers(raw_value)?);
             }
             "delivery" => {
                 if delivery.is_some() {
@@ -150,6 +162,7 @@ fn parse_key_object_payload(input: &str) -> io::Result<KeyRequest> {
         KeyResponseMode::Legacy
     };
 
+    let key = combine_key_with_modifiers(key, modifiers)?;
     default_key_request(key).map(|defaulted| KeyRequest {
         key: defaulted.key,
         hold_ms: hold_ms.unwrap_or(DEFAULT_KEY_HOLD_MS),
@@ -159,6 +172,60 @@ fn parse_key_object_payload(input: &str) -> io::Result<KeyRequest> {
         window_id,
         response_mode,
     })
+}
+
+/// 解析 `modifiers` 字段: 数组 `["Cmd","Shift"]` 或单值 `"Cmd"` / `Cmd`。
+fn parse_key_modifiers(raw_value: &str) -> io::Result<Vec<String>> {
+    let trimmed = raw_value.trim();
+    if let Some(inner) = trimmed
+        .strip_prefix('[')
+        .and_then(|value| value.strip_suffix(']'))
+    {
+        let inner = inner.trim();
+        if inner.is_empty() {
+            return Ok(Vec::new());
+        }
+        return inner
+            .split(',')
+            .map(|item| {
+                let item = item.trim();
+                let item = item
+                    .strip_prefix('"')
+                    .and_then(|value| value.strip_suffix('"'))
+                    .unwrap_or(item);
+                if item.is_empty() {
+                    Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "@key 的 `modifiers` 数组包含空元素",
+                    ))
+                } else {
+                    Ok(item.to_owned())
+                }
+            })
+            .collect();
+    }
+    let single = trimmed
+        .strip_prefix('"')
+        .and_then(|value| value.strip_suffix('"'))
+        .unwrap_or(trimmed);
+    Ok(vec![single.to_owned()])
+}
+
+/// 把 key 与 modifiers 组合成 `Cmd+k` 形式 (parse_key_action 兼容)。
+fn combine_key_with_modifiers(
+    key: String,
+    modifiers: Option<Vec<String>>,
+) -> io::Result<String> {
+    let Some(modifiers) = modifiers else {
+        return Ok(key);
+    };
+    if modifiers.is_empty() {
+        return Ok(key);
+    }
+    let mut combined = modifiers.join("+");
+    combined.push('+');
+    combined.push_str(&key);
+    Ok(combined)
 }
 
 fn parse_key_delivery(input: &str) -> io::Result<KeyDelivery> {
