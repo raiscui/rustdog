@@ -798,3 +798,17 @@ deepseek 3/3(历史一致) | minimax 2/3 | qwen36 2/3 | qwen37 1/3(历史 2/3) |
 ### 后续影响
 - calculator 分母从 18 变 15 (5 模型 x 3 case)
 - macos-ops 分母从 30 变 25
+
+## [2026-08-05 05:30:00] [Session ID: omx-1785634372447-ezls0t] [记录类型]: runner @key:return -> 等于 归一化
+
+### 实施 (评测工程)
+- _normalize_key_symbol_to_ax_description 加 return -> 等于 (大小写不敏感)
+- 依据: macOS 计算器 Return=等于 (5+3 return -> 8 实测)
+- 37 测试过; qwen36 error timeline [1,除,return] -> [1,除,等于]
+
+### 结论
+- return 归一化生效, 但 qwen36 error 仍失败: 模型漏按 0 (表达式 1÷ 不完整)
+- 归一化是锦上添花 (完整输入 + return 完成计算时可匹配), 救不了漏输入
+
+### qwen36 error 剩余问题
+- 模型按 1 ÷ return 缺 0 -> 模型行为 (漏输入), 非 rdog/runner 可修
