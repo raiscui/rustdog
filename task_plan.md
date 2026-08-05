@@ -785,3 +785,16 @@ deepseek 3/3(历史一致) | minimax 2/3 | qwen36 2/3 | qwen37 1/3(历史 2/3) |
 - runner: @key:return 归一化为"等于" (qwen36 error 可收复)
 - calculator stale 的"部分执行"模式分析
 - 多轮重跑已消化随机性, 剩余为系统性模型行为
+
+## [2026-08-05 05:00:00] [Session ID: omx-1785634372447-ezls0t] [记录类型]: qwen-plus 模型退役
+
+### 改动 (评测工程)
+- eval-cross-model.sh / eval-macos-ops.sh 移除 qwen-plus
+- 删除 config-qwen-plus.json
+- README + specs 基线文档标注退役 (2026-08-05)
+- 历史归档 results/*-qwen-plus-* 保留
+- 评测集: 6 模型 -> 5 模型 (deepseek/minimax/m27hs/qwen36/qwen37)
+
+### 后续影响
+- calculator 分母从 18 变 15 (5 模型 x 3 case)
+- macos-ops 分母从 30 变 25
