@@ -829,3 +829,22 @@ deepseek 3/3(历史一致) | minimax 2/3 | qwen36 2/3 | qwen37 1/3(历史 2/3) |
 ### 下一步
 - 重跑 deepseek 验证 @screenshot 提示是否让它转回 AX
 - LATER_PLANS: @screenshot 窗口级截图 (真实能力缺口, 成本高)
+
+## [2026-08-05 15:40:00] [Session ID: omx-1785634372447-ezls0t] [记录类型]: macos-ops 新增 3 case + parse_ax_target app 修复
+
+### 新 case (评测工程, 8 case 总)
+- terminal-run-command: 终端 echo + AXTextArea 验证 (targeted-keyboard, 实测通过)
+- safari-new-tab-navigate: Cmd+T + 地址导航 (实测通过)
+- textedit-multi-window: Cmd+N + 窗口数 (统计全部窗口, 新建窗口可能未激活)
+
+### 放弃的 case (LATER_PLANS 候选)
+- AXMenuItem 菜单操作: rdog 需 app 级菜单 AX 支持 (@ax-find 只抓窗口子树)
+- 保存对话框 sheet: 提交不稳定 (按钮无 description, Return 焦点问题)
+
+### rdog 修复 (commit)
+- parse_ax_target 支持 app 字段: struct 有但解析器漏了, 模型 {target:{app:...}} 报未知字段
+- 676 测试过
+
+### 关键发现
+- 终端 AXValue 不可写, 需 targeted-keyboard (ax-value 失败无自动 fallback)
+- TextEdit 新建窗口 interactable=False (未激活), 窗口统计必须算全部窗口
