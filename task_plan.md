@@ -812,3 +812,20 @@ deepseek 3/3(历史一致) | minimax 2/3 | qwen36 2/3 | qwen37 1/3(历史 2/3) |
 
 ### qwen36 error 剩余问题
 - 模型按 1 ÷ return 缺 0 -> 模型行为 (漏输入), 非 rdog/runner 可修
+
+## [2026-08-05 06:00:00] [Session ID: omx-1785634372447-ezls0t] [记录类型]: 优化点分析 - screenshot 提示 + key modifiers
+
+### 本轮修复 (rdog)
+1. @screenshot 窗口意图错误提示: 模型想截窗口 (deepseek 9 次尝试全败卡死),
+   报错给 AX 恢复路径 -> 引导转回 @ax-find
+2. @key 对象语法 modifiers 字段: OpenAI 风格 {key:"k",modifiers:["Cmd"]}
+   -> 归一化 Cmd+k (m27hs 组合键写法)
+
+### 剩余失败 (模型行为, rdog 难修)
+- qwen36 error: 漏按 0 (1÷ 不完整)
+- m27hs/qwen37 stale: 过度验证/分步策略 (无括号先中间等于)
+- hint 副作用: 完成后误清被 hint 鼓励重算 (净效应仍为正)
+
+### 下一步
+- 重跑 deepseek 验证 @screenshot 提示是否让它转回 AX
+- LATER_PLANS: @screenshot 窗口级截图 (真实能力缺口, 成本高)
