@@ -127,8 +127,10 @@ fn init_logger(command: &Command) -> Result<(), String> {
 
 /// 为新增的结构化诊断事件安装 subscriber,但不接管既有 `log` / `fern` 调用。
 ///
-/// `tracing-subscriber` 显式关闭 `tracing-log` feature,避免它注册全局 `LogTracer`
-/// 并和下方 `fern::Dispatch::apply` 争夺唯一 logger。两套事件共用同一日志等级和目标。
+/// Zenoh 也依赖 `tracing-subscriber`,Cargo feature 会全局合并,因此不能仅依赖
+/// 本 crate 的 `default-features = false` 来阻止 `tracing-log`。这里直接安装
+/// tracing subscriber,不调用 `try_init()`,让下方 `fern::Dispatch::apply` 始终是
+/// `log` 的唯一全局 logger。两套事件共用同一日志等级和目标。
 fn init_tracing(level: log::LevelFilter, target: &hidden_mode::LogTarget) -> Result<(), String> {
     let writer = match target {
         hidden_mode::LogTarget::Stderr => BoxMakeWriter::new(stderr),
@@ -143,12 +145,13 @@ fn init_tracing(level: log::LevelFilter, target: &hidden_mode::LogTarget) -> Res
         }
     };
 
-    tracing_subscriber::fmt()
+    let subscriber = tracing_subscriber::fmt()
         .with_max_level(tracing_level_filter(level))
         .with_ansi(false)
         .with_target(true)
         .with_writer(writer)
-        .try_init()
+        .finish();
+    tracing::subscriber::set_global_default(subscriber)
         .map_err(|err| format!("failed to initialize tracing subscriber: {err}"))
 }
 
