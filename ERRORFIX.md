@@ -678,3 +678,25 @@
 - `rtk cargo test --package rustdog --bin rdog --quiet`: 441 passed。
 - `rtk cargo test --package rustdog --test control_lanes --quiet`: 15 passed,1 ignored。
 - final TCP live smoke 通过,summary complete,trace 4 lines。
+
+## [2026-08-06 15:06:56] [Session ID: omx-1785926019233-oohizd] 错误修复: tracing 与 fern 的全局 logger 注册冲突
+
+### 现象
+- 当前 daemon 启动时报 `attempted to set a logger after the logging system was already initialized`。
+- 这会阻止包含 native screenshot tracing 的 current binary 进入 live macOS ops 评测。
+
+### 原因
+- `tracing-subscriber` 的 Cargo feature 会经由 Zenoh 依赖全局合并 `tracing-log`。因此本 crate 虽写了 `default-features = false`,旧 `try_init()` 仍可能注册全局 `LogTracer`。
+- 随后的 `fern::Dispatch::apply()` 需要成为唯一 `log` logger,于是注册失败。
+
+### 修复
+- `src/main.rs` 构建 tracing fmt subscriber 后改用 `tracing::subscriber::set_global_default()` 安装,不再调用会初始化 `LogTracer` 的 `try_init()`。
+- `fern::Dispatch::apply()` 继续作为 `log` 的唯一全局 logger;两套输出仍共享原有等级与 writer 选择。
+
+### 验证
+- `cargo fmt -- --check` 与 `cargo build --package rustdog --bin rdog` 已通过。
+- current daemon 的 `@ping` / `@capabilities` 成功;随后的 5 模型 x 8 case live macOS ops suite 以 40/40 收口。
+
+### 审阅与提交
+- 独立代码审阅结论为 `APPROVE`;架构审阅为 `WATCH`,仅提示两条日志写入管线不具备严格跨 facade 顺序。
+- 修复代码已提交为 `dbbf7b9 fix(logging): avoid tracing log tracer conflict`。

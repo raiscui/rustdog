@@ -32,3 +32,24 @@
 
 ### 总结感悟
 - 对无法取消的 native API,控制面 timeout 只说明等待结束,不代表底层 worker 已停止。日志必须分别记录 deadline、fallback 和单一终态,现场才能避免错误重试。
+
+## [2026-08-06 15:06:56] [Session ID: omx-1785926019233-oohizd] 任务名称: 全模型 macOS ops 评测与 DeepSeek 隔离重跑
+
+### 任务内容
+- 重新评测 DeepSeek、MiniMax-M3、qwen3.7、qwen3.6、MiniMax-M2.7-highspeed 的完整 8-case macOS ops suite。
+- 废弃受到人工 GUI 干扰的 DeepSeek 首轮结果,用新 artifact 取代。
+- 核对 native tracing 引入后 logger 初始化与现有 fern logger 的真实 daemon 兼容性。
+
+### 完成过程
+- 新 DeepSeek suite 位于 `/tmp/pi-rdog-macos-ops-deepseek-20260806-145902`;runner 正常 exit 0,汇总为 8/8,每 case 都在首次尝试成功。
+- 4 个先前完成的无干扰 suite 也均为 8/8。全矩阵为 40/40;两次 Safari 新标签的 case-level retry 均在第二次成功。
+- 通过 `@ping`、`@capabilities` 与完整 live suite 验证 current daemon。Accessibility、Screen Recording、keyboard、screenshot 与 type-text 均为 available。
+- 审计 JSONL 后没有发现需要本轮新增协议兼容代码的失败路径。低风险的 `@window-find:APP` 候选已记录为后续项。
+
+### 总结感悟
+- 满分 case 不等于零协议错误。评测报告必须同时给出 final success 与 recoverable error 分布,否则会掩盖模型可自愈但有成本的写法偏差。
+
+### 提交与审阅
+- 代码审阅为 `APPROVE`,架构审阅为 `WATCH`;watch 项是 fern / tracing 两条输出管线不提供跨 facade 严格排序。
+- 运行时代码已提交为 `dbbf7b9 fix(logging): avoid tracing log tracer conflict`。
+- 文档记录将在独立 commit 中提交,与运行时代码边界分离。

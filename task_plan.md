@@ -946,3 +946,89 @@ deepseek 3/3(历史一致) | minimax 2/3 | qwen36 2/3 | qwen37 1/3(历史 2/3) |
 ### 验证修正
 - `rtk cargo nextest` 的摘要未显示编译失败。读取原始 nextest log 后确认新增 timeout + fallback 测试的两个 closure 返回类型不一致 (`()` vs `i32`),Rust 报 `E0308`。
 - 修复: 让超时的 SCK closure 和成功的 xcap closure 都使用 `i32`;随后从定向测试重新验证。`git diff --check` 同时发现 `notes.md` EOF 空行,已一并清除。
+
+## [2026-08-06 14:17:42] [Session ID: omx-1785926019233-oohizd] [记录类型]: 全模型 macOS ops 回归评测与兼容性诊断
+
+### 目标
+- 用当前 canonical `rdog-control` 和完整 macos-ops suite,重新执行所有活动模型的 live 评测。
+- 保存每模型、每 case 的 JSONL 与 tool/GUI 证据,区分模型决策失败、协议/解析不兼容和本机 GUI 基础设施波动。
+
+### 阶段
+- [ ] 阶段 1: 从 runner 读取活动模型、完整 case 清单、重试和 artifact 路径,并检查 daemon、端口与 provider 可用性。
+- [ ] 阶段 2: 用统一命令运行全部活动模型,不得以子集代替全量结果。
+- [ ] 阶段 3: 逐个复核失败样本的原始 JSONL、实际 control request 和新鲜 AX/window/URL 证据。
+- [ ] 阶段 4: 仅对已经有静态与动态证据支持的兼容性问题实施修复,补回归测试后重跑受影响 case。
+- [ ] 阶段 5: 汇总完整矩阵、归因、修复验证与剩余风险。
+
+### 当前口径
+- 当前历史记录中的活动模型是 DeepSeek、MiniMax、M2.7 highspeed、qwen3.6 与 qwen3.7;执行前仍以 runner 当前配置为唯一事实源。
+- macos-ops 当前应为 8 个 case,`maxCaseAttempts=3`;执行前仍以 prompt 文件和 runner 参数为准。
+- 没有 fresh tool call、精确 window/display ownership 与 post-action evidence 的样本,不能计为模型成功或 rdog 兼容性结论。
+
+### 状态
+**当前在阶段 1**: 检查外部评测工程的 runner、活动配置、本机 daemon 和 provider 健康状态。
+
+### 阻塞与修复分支
+- [x] 发现并复现: 8 月 5 日的旧 daemon 不能覆盖刚提交实现;重启 current binary 后,`fern::Dispatch::apply()` 报 `attempted to set a logger after the logging system was already initialized`。
+- [x] 静态确认: Zenoh 的默认 feature 将 `tracing-subscriber/tracing-log` 合并回来,因此 direct dependency 的 `default-features = false` 不能保证 `try_init()` 不注册 `LogTracer`。
+- [ ] 修复: 使用 `tracing::subscriber::set_global_default()` 安装 subscriber,保留 `fern` 作为 `log` 的唯一全局 logger。
+- [ ] 重新构建、启动 current daemon 并用 `@ping` 验证后,继续阶段 1 的 dry-run 与全模型 live 评测。
+
+### 阶段 1 验证
+- [x] 日志初始化修复已构建;current daemon 通过 `@ping` 和 `@capabilities`。Accessibility、Screen Recording、keyboard、screenshot、type-text 均为 available。
+- [x] `runner/eval-macos-ops.sh dry all` 成功验证 5 个活动 provider/model 的 canonical skill 绑定,每个模型均为 8 个 case。
+- [ ] 阶段 2: 正在执行 5 模型 x 8 case 的 live suite,失败 case 最多尝试 3 次。
+
+### 评测运行时修复
+- [x] 第一轮 live suite 在 TextEdit setup 前退出;动态 traceback 显示 `capture_app_state()` 读取未初始化的 `verify`。
+- [x] 修复外部 runner: 在所有分支前读取 `case["verify"]`,并新增 `window-count-increase` capture regression test。
+- [x] `python3 -m unittest test_run_macos_ops_eval.py`: 23 passed。
+- [ ] 重新运行完整 live suite;先前 `/tmp/pi-rdog-macos-ops-deepseek-20260806-142426` 只包含无效的启动失败,不得纳入评分。
+
+### 样本有效性修正
+- [ ] 用户确认 DeepSeek 的首轮 macOS ops 执行受到人工 GUI 干扰。废弃 `/tmp/pi-rdog-macos-ops-deepseek-20260806-142620` 的全部 8 个最终结果,重新执行完整 DeepSeek suite。
+- [x] MiniMax、qwen3.7、qwen3.6、M2.7 highspeed 均已完成;它们的 artifact 与运行期无人工干扰报告,暂保留为有效横向样本。
+
+## [2026-08-06 14:58:12] [Session ID: omx-1785926019233-oohizd] [记录类型]: DeepSeek 隔离重跑
+
+### 行动与依据
+- 用户确认上一轮 DeepSeek 运行存在人工 GUI 干扰,因此不再分析或计分该轮 artifact。
+- 已重新执行 `@ping`、`@capabilities` 和 DeepSeek dry-run: local daemon 与 Accessibility、Screen Recording、keyboard、screenshot、type-text 都为 available;dry-run 列出完整 8 个 case。
+- 即将启动新的 `deepseek-v4-flash` live suite。只在生成新的 `suite-result.json` 后,才以该输出替换废弃样本。
+
+### 状态
+**当前在阶段 2**: 正在运行 DeepSeek 的隔离 8-case live suite,并会用进程、日志与 artifact 三项证据确认结束。
+
+## [2026-08-06 15:06:56] [Session ID: omx-1785926019233-oohizd] [记录类型]: 全模型 macOS ops 收口
+
+### 完成状态
+- [x] 阶段 2: 5 个活动模型各完成完整 8-case live suite。废弃受人工干扰的旧 DeepSeek artifact,以 `/tmp/pi-rdog-macos-ops-deepseek-20260806-145902/suite-result.json` 替换。
+- [x] 阶段 3: 审阅 DeepSeek 新 JSONL 和 5 个 suite 的 `rdogResponseErrors`,区分可恢复协议写法、模型探索行为与真正失败。
+- [x] 阶段 4: logger 初始化 bug 已具备静态与动态证据并完成修复;没有为全部已自愈的 parser 错误新增宽松行为。
+- [ ] 阶段 5: 等待独立 review、最终 Rust 回归与 scoped commit 后交付完整矩阵。
+
+### 有效矩阵
+- DeepSeek: 8/8,全部首次成功,canonical skill SHA-256 为 `129aa820edbedaed787d7dd9397c9b69ffeaf74140edbc19c3031207dc97f5d2`。
+- MiniMax-M3、qwen3.7、qwen3.6、MiniMax-M2.7-highspeed: 各 8/8;只有 MiniMax-M3 与 M2.7 的 Safari 新标签 case 各发生一次成功后的 case-level 重试。
+
+### 兼容性结论
+- `@window-find:APP` 在至少两个模型的三次调用中被写出。现有 parser 已接受 `app:APP`,但没有消费同一位置参数;模型收到 error 后均使用对象形式自愈并通过。
+- 当前不扩展 `@key` 的 `target` / `keys` / `chord` 变体: 它们会触及 targeted keyboard 的目标语义和权限边界,原始样本也都已通过,没有必要为消除非致命探索扩大协议面。
+
+### 状态
+**当前在阶段 5**: 等待两路独立 review,随后运行最终回归并提交当前 logger 修复与本轮上下文记录。
+
+## [2026-08-06 15:12:32] [Session ID: omx-1785926019233-oohizd] [记录类型]: 评测、审阅与代码提交完成
+
+### 完成
+- [x] 阶段 5: `cargo fmt -- --check`、`git diff --check`、`cargo nextest run --package rustdog --bin rdog` (683 passed,1 skipped) 和 `cargo build --package rustdog --bin rdog` 均已完成。
+- [x] 独立代码审阅: `APPROVE`,未发现 CRITICAL/HIGH/MEDIUM/LOW finding。
+- [x] 独立架构审阅: `WATCH`,当前 fern 与 tracing 两条写入管线不保证跨 facade 全序;这不是当前 root-cause fix 的阻断项。
+- [x] 运行时代码提交: `dbbf7b9 fix(logging): avoid tracing log tracer conflict`。
+
+### 已知边界
+- build 的 17 条 warning 来自本次 diff 未触及模块,已登记到 `LATER_PLANS.md`,不混入本次已验证的 logger 修复。
+- Windows hidden-daemon 的 file-target smoke 未在本机执行;共享初始化逻辑没有平台分支,但该平台证据仍缺失。
+
+### 状态
+**本轮实施完成**: 等待上下文记录提交和干净工作树验证后交付。

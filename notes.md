@@ -27,3 +27,22 @@
 
 - `cargo info tracing@0.1.44`: 当前 crate 提供 application-level tracing。
 - `cargo info tracing-subscriber@0.3.23`: `fmt` subscriber 可输出 events。源码 `fmt::writer::BoxMakeWriter` 支持运行时选择 stderr 或 file writer。
+
+## [2026-08-06 15:06:56] [Session ID: omx-1785926019233-oohizd] 笔记: 全模型 macOS ops 与兼容性归因
+
+### 动态证据
+
+- 新 DeepSeek artifact: `/tmp/pi-rdog-macos-ops-deepseek-20260806-145902/suite-result.json`。`runCount:8`、`successCount:8`,8 个 case 均为 attempt 1 success。
+- 该 suite 记录的 canonical skill 是仓库内 `.codex/skills/rdog-control/SKILL.md`,SHA-256 为 `129aa820edbedaed787d7dd9397c9b69ffeaf74140edbc19c3031207dc97f5d2`。
+- 其余四个有效 suite 也均为 8/8。MiniMax-M3 与 MiniMax-M2.7-highspeed 的 `safari-new-tab-navigate` 为 attempt 2 success,其余 case 均首次成功。
+
+### 可恢复错误审计
+
+- 五个 suite 共记录多类非致命 `code:64`。所有 case 最终都有 real rdog call、fresh AX/window/URL verification 与 expected result,因此没有失败样本可归因为 rdog 兼容缺口。
+- `@window-find:Calendar`、`@window-find:Terminal`、`@window-find:TextEdit` 合计出现 3 次。静态代码显示 `parse_compact_fields` 已把无前缀 token 放入 positional,而 `parse_window_find_payload` 只消费 `app:` 与 `pid:` named field,随后报多余字段。
+- 最强备选解释是 canonical skill 已足以让模型快速改用对象请求。新 DeepSeek JSONL 支持该解释: `@window-find:Calendar` 报错后改用 `@window-find:{app:"Calendar"}` 并成功。
+
+### 决策
+
+- 不在本轮为上述自愈错误扩展 parser,避免改变 canonical skill hash 后重跑五模型完整矩阵。
+- `@window-find:APP` 作为低风险候选记录到 `LATER_PLANS.md`;若后续目标是降低每 case 的 recoverable protocol error,应在 parser 消费唯一 positional app 后添加回归测试,再完整重跑五模型矩阵。

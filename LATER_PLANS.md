@@ -797,3 +797,26 @@ zenoh router down / unixpipe broken / zenoh timeout 等场景.
 
 触发条件: 需要 client 端断开测试, 或 daemon 端临时 kill zenoh session,
 可以 mock 但 live trigger 比较难稳定.
+
+## [2026-08-06 15:06:56] [Session ID: omx-1785926019233-oohizd] 候选: `@window-find:APP` 裸应用名兼容
+
+### 现象
+- 全模型 macOS ops JSONL 中出现 3 次 `@window-find:Calendar` / `Terminal` / `TextEdit`。
+- 当前 parser 已把无前缀 token 放入 compact positional,但 `parse_window_find_payload` 只消费 `app:` / `pid:` named field,因此返回 `code:64` 后模型再改用对象写法。
+
+### 建议
+- 若后续目标是降低 recoverable protocol error,把唯一 positional token 映射为 `query.app`,与既有 `@window-find:app:APP` 等价。
+- 必须保留 named/positional 冲突拒绝和多 token 拒绝,并添加 parser 单测后重新运行五模型 8-case 矩阵,因为 canonical skill / protocol 行为会变化。
+
+### 当前边界
+- 本轮全部 40 个 case 已成功,不以改变协议面换取已自愈错误的零计数。
+
+## [2026-08-06 15:06:56] [Session ID: omx-1785926019233-oohizd] 候选: Rust binary 既有 warning 清理
+
+### 证据
+- `cargo build --package rustdog --bin rdog` 成功,但报告 17 条 warning。
+- 涉及 `control_actions`、`control_ax`、`control_computer_act`、`control_protocol` 等未在当前 logger diff 中修改的模块,主要是 cfg 后未使用 import、未使用变量和尚未有触发路径的 enum variant/helper。
+
+### 建议
+- 单独按模块做 cfg import 收口与 dead-code 边界整理,每次保持功能不变并跑完整 binary tests。
+- 不与当前 logger 初始化修复混合提交,避免把已验证的启动修复掩盖在无关重构中。

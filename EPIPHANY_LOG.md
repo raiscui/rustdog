@@ -945,3 +945,21 @@ command => {
 
 ### 后续讨论入口
 - 继续 grilling 设计决策 (问题 2+), 达成共识后实施
+
+## [2026-08-06 15:06:56] [Session ID: omx-1785926019233-oohizd] 主题: macOS ops 的最终成功会掩盖可恢复协议成本
+
+### 发现来源
+- 五模型 40-case live macOS ops 评测的 `suite-result.json` 与每次 attempt 的 `pi-summary.json`。
+
+### 核心问题
+- 当前 suite 的 pass/fail 以最终 fresh verification 为准。它能正确识别任务是否完成,但不能单独体现一次任务此前发生的 `code:64` 解析失败、额外 token 消耗和重试成本。
+
+### 为什么重要
+- 全部 40 个 case 成功并不表示协议已无兼容性摩擦。若只看 success rate,后续很容易把模型自愈误判为零成本的协议兼容。
+
+### 当前结论
+- 保留 final success 作为正确性的唯一门槛,同时把 `rdogResponseErrors` 按 canonical skill hash 与 case 归档,作为兼容性回归指标。
+- 本轮不以清零所有可恢复错误为目标;任何 parser 放宽都要证明不会削弱目标/权限边界,并重跑完整矩阵。
+
+### 后续讨论入口
+- `notes.md` 的 2026-08-06 全模型 macOS ops 记录,以及 `LATER_PLANS.md` 的 `@window-find:APP` 候选。
