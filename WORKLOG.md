@@ -53,3 +53,8 @@
 - 代码审阅为 `APPROVE`,架构审阅为 `WATCH`;watch 项是 fern / tracing 两条输出管线不提供跨 facade 严格排序。
 - 运行时代码已提交为 `dbbf7b9 fix(logging): avoid tracing log tracer conflict`。
 - 文档记录将在独立 commit 中提交,与运行时代码边界分离。
+
+### 最终提交
+- 根仓库文档已提交为 `a267afb docs(context): record macos ops evaluation`。
+- 外部评测 runner 已提交为 `7502c1c fix(macos-ops): cover setup capture and cleanup`;其 24 项单测通过,并经独立 `APPROVE/CLEAR` 审阅。
+- root 工作树已清理。外部仓库的未跟踪历史上下文文件保持未改,没有混入代码提交。

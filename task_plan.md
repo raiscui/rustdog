@@ -1032,3 +1032,14 @@ deepseek 3/3(历史一致) | minimax 2/3 | qwen36 2/3 | qwen37 1/3(历史 2/3) |
 
 ### 状态
 **本轮实施完成**: 等待上下文记录提交和干净工作树验证后交付。
+
+## [2026-08-06 15:18:55] [Session ID: omx-1785926019233-oohizd] [记录类型]: 最终提交与工作树验证
+
+### 完成
+- [x] 根仓库文档提交: `a267afb docs(context): record macos ops evaluation`。
+- [x] 外部评测 runner 修复: `7502c1c fix(macos-ops): cover setup capture and cleanup`。它修复了 `window-count-increase` / `file-exists` 的未初始化 `verify` 分支,并补齐 `textedit-save-dir` cleanup 映射。
+- [x] runner 回归: `python3 -m unittest test_run_macos_ops_eval.py` 为 24 passed;独立代码审阅 `APPROVE`,架构审阅 `CLEAR`。
+- [x] 根仓库工作树: clean。外部评测仓库只剩未跟踪的历史上下文文件,未被本轮暂存或提交。
+
+### 状态
+**本轮全部完成**: 已提交、已验证,不存在待处理的运行中命令。

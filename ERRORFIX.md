@@ -700,3 +700,17 @@
 ### 审阅与提交
 - 独立代码审阅结论为 `APPROVE`;架构审阅为 `WATCH`,仅提示两条日志写入管线不具备严格跨 facade 顺序。
 - 修复代码已提交为 `dbbf7b9 fix(logging): avoid tracing log tracer conflict`。
+
+## [2026-08-06 15:18:55] [Session ID: omx-1785926019233-oohizd] 错误修复: macOS ops runner 的 setup 采集与 cleanup
+
+### 现象
+- 首轮 live suite 在 TextEdit 多窗口 case 的 setup 阶段抛出 `UnboundLocalError: verify`。
+- 独立审阅还发现已声明支持的 `textedit-save-dir` setup 会在 `finally` cleanup 因缺少 app 映射抛出 `KeyError`。
+
+### 修复
+- 在 `capture_app_state()` 的第一个分支判断前读取 `case["verify"]`,覆盖 `window-count-increase` 和 `file-exists` 两条共享路径。
+- 在 `quit_after_run()` 把 `textedit-save-dir` 映射到 TextEdit,避免 cleanup 覆盖原始评测结果。
+
+### 验证
+- 新增窗口计数和保存场景 cleanup 回归测试;`python3 -m unittest test_run_macos_ops_eval.py` 为 24 passed。
+- 完整五模型 40-case live suite 随后完成;runner 修复已提交为 `7502c1c`。
