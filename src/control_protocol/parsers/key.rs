@@ -212,10 +212,7 @@ fn parse_key_modifiers(raw_value: &str) -> io::Result<Vec<String>> {
 }
 
 /// 把 key 与 modifiers 组合成 `Cmd+k` 形式 (parse_key_action 兼容)。
-fn combine_key_with_modifiers(
-    key: String,
-    modifiers: Option<Vec<String>>,
-) -> io::Result<String> {
+fn combine_key_with_modifiers(key: String, modifiers: Option<Vec<String>>) -> io::Result<String> {
     let Some(modifiers) = modifiers else {
         return Ok(key);
     };

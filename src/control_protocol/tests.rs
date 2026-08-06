@@ -475,6 +475,7 @@ fn parse_should_support_ax_tree_and_ax_commands() {
             request_id: Some(1),
             command: ControlCommand::AxTree(AxTreeRequest {
                 scope: AxTreeScope::Windows,
+                app_menu_app: None,
                 depth: 4,
                 max_elements: 1000,
                 include_values: DEFAULT_AX_INCLUDE_VALUES,
@@ -488,6 +489,7 @@ fn parse_should_support_ax_tree_and_ax_commands() {
             request_id: Some(4),
             command: ControlCommand::AxTree(AxTreeRequest {
                 scope: AxTreeScope::Windows,
+                app_menu_app: None,
                 depth: crate::control_ax::AX_INTERACTIVE_DEPTH,
                 max_elements: crate::control_ax::AX_INTERACTIVE_MAX_ELEMENTS,
                 include_values: crate::control_ax::AX_INTERACTIVE_INCLUDE_VALUES,
@@ -1091,10 +1093,9 @@ fn compact_should_route_named_prefix_fields() {
 #[test]
 fn compact_should_accept_trailing_named_options() {
     // 模型把对象选项追加到 compact 尾部: include_values/limit/depth/max_elements/mode。
-    let result = parse_control_line(
-        r#"@ax-find:app:Calculator,AXStaticText,include_values:true,limit:10"#,
-    )
-    .unwrap();
+    let result =
+        parse_control_line(r#"@ax-find:app:Calculator,AXStaticText,include_values:true,limit:10"#)
+            .unwrap();
     let ControlParseResult::Control(ControlRequest {
         command: ControlCommand::AxFind(request),
         ..
@@ -1128,8 +1129,14 @@ fn compact_should_reject_unknown_prefix_with_prefix_list() {
     let err = parse_control_line(r#"@ax-find:app:Calculator,roll:AXButton"#)
         .expect_err("unknown prefix must be rejected");
     let msg = err.to_string();
-    assert!(msg.contains("未知字段前缀"), "error must mention prefix: {msg}");
-    assert!(msg.contains("role"), "error must list legal prefixes: {msg}");
+    assert!(
+        msg.contains("未知字段前缀"),
+        "error must mention prefix: {msg}"
+    );
+    assert!(
+        msg.contains("role"),
+        "error must list legal prefixes: {msg}"
+    );
 }
 
 #[test]
@@ -1188,7 +1195,9 @@ fn guarded_press_should_accept_named_fields() {
         panic!("应解析为 AxPress");
     };
     assert_eq!(request.target.description.as_deref(), Some("删除"));
-    let postcondition = request.postcondition.expect("guarded fields must set postcondition");
+    let postcondition = request
+        .postcondition
+        .expect("guarded fields must set postcondition");
     assert_eq!(postcondition.role, "AXStaticText");
     assert_eq!(postcondition.expected_value, "0");
     assert_eq!(postcondition.max_attempts, 3);
@@ -1400,20 +1409,79 @@ fn key_object_should_accept_modifiers_field() {
 }
 
 #[test]
-fn screenshot_window_intent_should_hint_ax_fallback() {
-    // 模型想截窗口时, 错误必须给出可执行恢复路径 (转回 AX), 不能只报未知字段。
-    let err = parse_control_line(
-        r#"@screenshot:{window:{window_id:"pid:1/window:0"}}"#,
-    )
-    .expect_err("window screenshot must be rejected");
-    let msg = err.to_string();
-    assert!(msg.contains("不支持窗口级截图"), "error: {msg}");
-    assert!(
-        msg.contains("@ax-find"),
-        "error must suggest AX fallback: {msg}"
+fn screenshot_window_target_should_accept_stable_window_locators() {
+    let direct = parse_control_line(r#"@screenshot:{window:{window_id:"pid:1/window:0"}}"#)
+        .expect("nested window id should parse");
+    assert_eq!(
+        direct,
+        ControlParseResult::Control(ControlRequest {
+            request_id: None,
+            command: ControlCommand::Screenshot(ScreenshotRequest {
+                target: ScreenshotTarget::Window,
+                window: Some(ScreenshotWindowTarget {
+                    window_id: Some("pid:1/window:0".to_owned()),
+                    ref_id: None,
+                    observation_id: None,
+                }),
+                ..ScreenshotRequest::default()
+            }),
+        })
     );
 
-    let err = parse_control_line(r#"@screenshot:{window_id:"pid:1/window:0"}"#)
-        .expect_err("window_id screenshot must be rejected");
-    assert!(err.to_string().contains("不支持窗口级截图"));
+    let observed = parse_control_line(
+        r#"@screenshot#12:{target:"window",window:{ref:"@e3",observation_id:"obs-7"}}"#,
+    )
+    .expect("fresh observation window locator should parse");
+    assert_eq!(
+        observed,
+        ControlParseResult::Control(ControlRequest {
+            request_id: Some(12),
+            command: ControlCommand::Screenshot(ScreenshotRequest {
+                target: ScreenshotTarget::Window,
+                window: Some(ScreenshotWindowTarget {
+                    window_id: None,
+                    ref_id: Some("@e3".to_owned()),
+                    observation_id: Some("obs-7".to_owned()),
+                }),
+                ..ScreenshotRequest::default()
+            }),
+        })
+    );
+
+    let top_level = parse_control_line(r#"@screenshot:{window_id:"pid:2/window:1"}"#)
+        .expect("top-level window id should normalize");
+    let ControlParseResult::Control(ControlRequest {
+        command: ControlCommand::Screenshot(request),
+        ..
+    }) = top_level
+    else {
+        panic!("应解析为 Screenshot");
+    };
+    assert_eq!(request.target, ScreenshotTarget::Window);
+    assert_eq!(
+        request.window.and_then(|window| window.window_id),
+        Some("pid:2/window:1".to_owned())
+    );
+
+    let err = parse_control_line(r#"@screenshot:{target:"window",ref:"@e3"}"#)
+        .expect_err("window ref must be nested and paired with observation id");
+    assert!(err.to_string().contains("只能写在 window 对象中"));
+}
+
+#[test]
+fn ax_target_should_accept_app_field() {
+    // AxTarget struct 有 app 字段, 但 parse_ax_target 漏了解析 (LLM 兼容缺口)。
+    let result = parse_control_line(
+        r#"@type-text:{target:{app:"Terminal",role:"AXTextArea"},text:"echo hi",mode:"ax-value"}"#,
+    )
+    .unwrap();
+    let ControlParseResult::Control(ControlRequest {
+        command: ControlCommand::TypeText(request),
+        ..
+    }) = result
+    else {
+        panic!("应解析为 TypeText");
+    };
+    assert_eq!(request.target.app.as_deref(), Some("Terminal"));
+    assert_eq!(request.target.role.as_deref(), Some("AXTextArea"));
 }

@@ -433,3 +433,15 @@
 
 - 评测失败先区分: 解析层失败 (rdog 报错/静默 0 匹配) vs 执行层失败 vs 模型行为。
 - 三个模型同时挂同一个 case -> 大概率是 rdog/SKILL 兼容问题, 不是随机性。
+
+## [2026-08-05 23:36:00] [Session ID: omx-1785926019233-oohizd] App 菜单 capture 与截图后端的运行时边界
+
+- App 菜单不是窗口 AX 子树。`root:"app-menu"` 的 `app` 必须先解析为唯一 PID 并作为 capture selector,不能先抓全局菜单树再事后过滤,否则 `max_elements` 截断会让目标菜单永久缺席。这个解析不要求唯一或可交互窗口,但多个 PID 必须 fail-closed。
+- macOS native screenshot backend 可能阻塞。每个 backend 都要有有限等待和单个 in-flight gate;主 backend 超时可走既有 fallback,但 timeout 后不能因重试无限创建 worker。窗口截图的 JPEG 只能表述为当前 display composite crop,不能伪装成未遮挡的 window surface。
+
+## [2026-08-05 23:15:33] [Session ID: omx-1785926019233-oohizd] Native screenshot capture 的结构化诊断边界
+
+- 不能在底层 `map_capture_error` 直接记录 capture 事件。它没有 `primary` / `all` 请求语义,也不知道当前错误是否会进入 fallback,会把同一次故障拆成不可关联的重复日志。
+- timeout helper 唯一知道 native worker deadline 与 in-flight gate,所以它负责 `screenshot_capture_timeout`;共享 SCK -> xcap policy 负责 `screenshot_capture_fallback` 和终态事件。事件至少要带 `capture_kind`、backend、timeout/fallback/error kind。
+- Screen Recording 权限拒绝必须是单独的终态 `screenshot_capture_permission_denied`: preflight、SCK 或 xcap 任一来源都不该再继续 fallback 或再附加普通 `screenshot_capture_failed`。
+- 现有 `fern` logger 不能直接充当 tracing subscriber。最小可靠整合是并行安装 `tracing-subscriber` 并关闭 `tracing-log`,复用同一 `RDOG_LOG_LEVEL` 和 stderr/hidden-file target,避免两个全局 logger 争夺注册权。

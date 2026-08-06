@@ -1,5 +1,8 @@
 use super::*;
-use crate::control_protocol::{KeyResponseMode, DEFAULT_KEY_HOLD_MS};
+use crate::{
+    control_protocol::{KeyResponseMode, DEFAULT_KEY_HOLD_MS},
+    control_window::resolve_unique_app_pid,
+};
 use std::{
     collections::BTreeMap,
     ffi::CString,
@@ -214,6 +217,32 @@ struct WindowBuildSource<'a> {
     fallback: Option<&'a VisibleWindow>,
 }
 
+/// AX 目标 id 的根节点。
+///
+/// 窗口与菜单栏属于同一应用,但菜单栏不在 `AXWindows` 下面。
+/// 将 root 明确编码进 id,后续 action 重新定位时才能回到同一份 AX 元素。
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+enum AxTargetRoot {
+    Window(usize),
+    MenuBar,
+}
+
+impl AxTargetRoot {
+    fn id_prefix(self, pid: i32) -> String {
+        match self {
+            Self::Window(index) => format!("pid:{pid}/window:{index}"),
+            Self::MenuBar => format!("pid:{pid}/menu-bar"),
+        }
+    }
+
+    fn window_id(self, pid: i32) -> Option<String> {
+        match self {
+            Self::Window(index) => Some(format!("pid:{pid}/window:{index}")),
+            Self::MenuBar => None,
+        }
+    }
+}
+
 #[derive(Debug, Default)]
 struct BuildState {
     element_count: usize,
@@ -223,6 +252,13 @@ struct BuildState {
 pub(super) fn snapshot(request: &AxTreeRequest) -> io::Result<AxSnapshot> {
     ensure_trusted()?;
 
+    match request.scope {
+        AxTreeScope::Windows => snapshot_windows(request),
+        AxTreeScope::AppMenu => snapshot_app_menus(request),
+    }
+}
+
+fn snapshot_windows(request: &AxTreeRequest) -> io::Result<AxSnapshot> {
     let visible_by_pid = visible_windows_by_pid();
     let mut windows = Vec::new();
     let mut state = BuildState::default();
@@ -280,6 +316,53 @@ pub(super) fn snapshot(request: &AxTreeRequest) -> io::Result<AxSnapshot> {
     Ok(AxSnapshot::complete("macos", windows, state.truncated))
 }
 
+fn snapshot_app_menus(request: &AxTreeRequest) -> io::Result<AxSnapshot> {
+    // `app_menu_app` 属于 capture selector,必须先解析成唯一应用 PID。
+    // 这样 AX 后端只遍历这个应用的菜单栏,而不是先抓全局树再做字符串过滤。
+    let app_menu_pid = request
+        .app_menu_app
+        .as_deref()
+        .map(resolve_unique_app_pid)
+        .transpose()?;
+    let visible_by_pid = visible_windows_by_pid();
+    let mut menus = Vec::new();
+    let mut state = BuildState::default();
+
+    for pid in visible_by_pid.keys().copied() {
+        if let Some(expected_pid) = app_menu_pid {
+            if pid != expected_pid {
+                continue;
+            }
+        }
+        let app = unsafe { CfOwned::new(AXUIElementCreateApplication(pid)) };
+        let Some(app) = app else {
+            continue;
+        };
+        let process_name = visible_by_pid
+            .get(&pid)
+            .and_then(|items| items.first())
+            .map(|window| window.process_name.clone())
+            .unwrap_or_else(|| pid.to_string());
+        let Some(menu_bar) = copy_attribute(app.as_ptr(), "AXMenuBar")? else {
+            continue;
+        };
+
+        menus.push(build_menu_bar(
+            pid,
+            &process_name,
+            menu_bar.as_ptr(),
+            request,
+            &mut state,
+        )?);
+        if state.element_count >= usize::from(request.max_elements) {
+            state.truncated = true;
+            break;
+        }
+    }
+
+    Ok(AxSnapshot::complete("macos", menus, state.truncated))
+}
+
 pub(super) fn capture_window(target_id: &str, request: &AxTreeRequest) -> io::Result<AxSnapshot> {
     ensure_trusted()?;
 
@@ -296,15 +379,15 @@ pub(super) fn capture_window(target_id: &str, request: &AxTreeRequest) -> io::Re
     let windows = copy_attribute(app.as_ptr(), "AXWindows")?
         .ok_or_else(|| invalid_input("AX targeted window capture 的目标应用没有 AXWindows"))?;
     let count = unsafe { CFArrayGetCount(windows.as_ptr()) };
-    if parsed.window_index >= count as usize {
+    let window_index = parsed.window_index()?;
+    if window_index >= count as usize {
         return Err(invalid_input(format!(
             "AX targeted window index 已失效: {}",
-            parsed.window_index
+            window_index
         )));
     }
 
-    let window_ref =
-        unsafe { CFArrayGetValueAtIndex(windows.as_ptr(), parsed.window_index as CFIndex) };
+    let window_ref = unsafe { CFArrayGetValueAtIndex(windows.as_ptr(), window_index as CFIndex) };
     if window_ref.is_null() {
         return Err(invalid_input("AX targeted window 已失效"));
     }
@@ -315,7 +398,7 @@ pub(super) fn capture_window(target_id: &str, request: &AxTreeRequest) -> io::Re
         .unwrap_or_else(|| parsed.pid.to_string());
     let fallback = visible_by_pid
         .get(&parsed.pid)
-        .and_then(|items| items.get(parsed.window_index));
+        .and_then(|items| items.get(window_index));
     let focused_window = copy_attribute(app.as_ptr(), "AXFocusedWindow")?;
     let mut state = BuildState::default();
     let window = build_window(
@@ -325,7 +408,7 @@ pub(super) fn capture_window(target_id: &str, request: &AxTreeRequest) -> io::Re
             focused_window_ref: focused_window.as_ref().map(CfOwned::as_ptr),
             fallback,
         },
-        parsed.window_index,
+        window_index,
         window_ref,
         request,
         &mut state,
@@ -354,7 +437,7 @@ pub(super) fn capture_current_subtree(
     };
     let element = build_element(
         parsed.pid,
-        parsed.window_index,
+        parsed.root,
         element_ref.as_ptr(),
         parsed.path,
         request.depth,
@@ -504,20 +587,12 @@ pub(super) fn type_text(request: &TypeTextRequest) -> io::Result<TypeTextReport>
         TypeTextMode::Clipboard => type_text_via_clipboard(request),
         TypeTextMode::Auto => match type_text_via_ax_value(request) {
             Ok(report) => Ok(report),
-            Err(ax_err)
-                if matches!(
-                    ax_err.kind(),
-                    io::ErrorKind::InvalidInput | io::ErrorKind::Unsupported
-                ) =>
-            {
+            Err(ax_err) if can_fallback_type_text_delivery(&ax_err) => {
                 match type_text_via_targeted_keyboard(request) {
                     Ok(report) => Ok(report),
                     Err(keyboard_err)
                         if request.allow_clipboard
-                            && matches!(
-                                keyboard_err.kind(),
-                                io::ErrorKind::InvalidInput | io::ErrorKind::Unsupported
-                            ) =>
+                            && can_fallback_type_text_delivery(&keyboard_err) =>
                     {
                         type_text_via_clipboard(request)
                     }
@@ -527,6 +602,15 @@ pub(super) fn type_text(request: &TypeTextRequest) -> io::Result<TypeTextReport>
             Err(ax_err) => Err(remap_type_text_ax_value_error(ax_err)),
         },
     }
+}
+
+/// 仅把“不支持此投递方式”作为 auto 的下一层尝试条件。
+/// 权限、IO 等失败必须原样返回,不能绕过用户或系统的安全边界。
+fn can_fallback_type_text_delivery(error: &io::Error) -> bool {
+    matches!(
+        error.kind(),
+        io::ErrorKind::InvalidInput | io::ErrorKind::Unsupported
+    )
 }
 
 fn type_text_via_ax_value(request: &TypeTextRequest) -> io::Result<TypeTextReport> {
@@ -677,7 +761,7 @@ fn build_window(
                 let path = vec![index as usize];
                 elements.push(build_element(
                     source.pid,
-                    window_index,
+                    AxTargetRoot::Window(window_index),
                     child,
                     path,
                     request.depth.saturating_sub(1),
@@ -702,9 +786,61 @@ fn build_window(
     })
 }
 
+fn build_menu_bar(
+    pid: i32,
+    process_name: &str,
+    menu_bar_ref: AXUIElementRef,
+    request: &AxTreeRequest,
+    state: &mut BuildState,
+) -> io::Result<AxWindow> {
+    let role = copy_string_attr(menu_bar_ref, "AXRole")?.unwrap_or_else(|| "AXMenuBar".to_owned());
+    let subrole = copy_string_attr(menu_bar_ref, "AXSubrole")?;
+    let rect = copy_ax_rect(menu_bar_ref)?;
+    let mut elements = Vec::new();
+
+    if request.depth > 0 {
+        if let Some(children) = copy_attribute(menu_bar_ref, "AXChildren")? {
+            let count = unsafe { CFArrayGetCount(children.as_ptr()) };
+            for index in 0..count {
+                if state.element_count >= usize::from(request.max_elements) {
+                    state.truncated = true;
+                    break;
+                }
+                let child = unsafe { CFArrayGetValueAtIndex(children.as_ptr(), index) };
+                if child.is_null() {
+                    continue;
+                }
+                state.element_count += 1;
+                elements.push(build_element(
+                    pid,
+                    AxTargetRoot::MenuBar,
+                    child,
+                    vec![index as usize],
+                    request.depth.saturating_sub(1),
+                    request,
+                    state,
+                )?);
+            }
+        }
+    }
+
+    Ok(AxWindow {
+        id: AxTargetRoot::MenuBar.id_prefix(pid),
+        ref_id: None,
+        pid,
+        process_name: process_name.to_owned(),
+        title: None,
+        role,
+        subrole,
+        rect,
+        focused: None,
+        elements,
+    })
+}
+
 fn build_element(
     pid: i32,
-    window_index: usize,
+    root: AxTargetRoot,
     element_ref: AXUIElementRef,
     path: Vec<usize>,
     remaining_depth: u8,
@@ -743,7 +879,7 @@ fn build_element(
                 child_path.push(index as usize);
                 children.push(build_element(
                     pid,
-                    window_index,
+                    root,
                     child,
                     child_path,
                     remaining_depth - 1,
@@ -756,7 +892,8 @@ fn build_element(
 
     Ok(AxElement {
         id: format!(
-            "pid:{pid}/window:{window_index}/path:{}",
+            "{}/path:{}",
+            root.id_prefix(pid),
             path.iter()
                 .map(usize::to_string)
                 .collect::<Vec<_>>()
@@ -804,9 +941,12 @@ pub(super) fn resolve_current_target_rect(target_id: &str) -> io::Result<AxResol
     let parsed = parse_target_id(target_id)?;
     let target_ref = retain_target_element(target_id)?;
     let rect = copy_ax_rect(target_ref.as_ptr())?;
-    let window_id = format!("pid:{}/window:{}", parsed.pid, parsed.window_index);
+    let window_id = parsed.root.window_id(parsed.pid);
     let target_type = if parsed.path.is_empty() {
-        "window"
+        match parsed.root {
+            AxTargetRoot::Window(_) => "window",
+            AxTargetRoot::MenuBar => "app-menu",
+        }
     } else {
         "element"
     };
@@ -814,7 +954,7 @@ pub(super) fn resolve_current_target_rect(target_id: &str) -> io::Result<AxResol
     Ok(AxResolvedTargetRect {
         target_id: target_id.to_owned(),
         target_type,
-        window_id: Some(window_id),
+        window_id,
         rect,
     })
 }
@@ -823,20 +963,24 @@ fn retain_target_element(target_id: &str) -> io::Result<CfOwned> {
     let parsed = parse_target_id(target_id)?;
     let app = unsafe { CfOwned::new(AXUIElementCreateApplication(parsed.pid)) }
         .ok_or_else(|| invalid_input("AX target 无法创建目标应用 AX element"))?;
-    let windows = copy_attribute(app.as_ptr(), "AXWindows")?
-        .ok_or_else(|| invalid_input("AX target 应用没有 AXWindows"))?;
-    let count = unsafe { CFArrayGetCount(windows.as_ptr()) };
-    if parsed.window_index >= count as usize {
-        return Err(invalid_input(format!(
-            "AX target window index 已失效: {}",
-            parsed.window_index
-        )));
-    }
-
-    let window_ref =
-        unsafe { CFArrayGetValueAtIndex(windows.as_ptr(), parsed.window_index as CFIndex) };
-    let mut current = unsafe { CfOwned::retain(window_ref) }
-        .ok_or_else(|| invalid_input("AX target window 已失效"))?;
+    let mut current = match parsed.root {
+        AxTargetRoot::Window(window_index) => {
+            let windows = copy_attribute(app.as_ptr(), "AXWindows")?
+                .ok_or_else(|| invalid_input("AX target 应用没有 AXWindows"))?;
+            let count = unsafe { CFArrayGetCount(windows.as_ptr()) };
+            if window_index >= count as usize {
+                return Err(invalid_input(format!(
+                    "AX target window index 已失效: {window_index}"
+                )));
+            }
+            let window_ref =
+                unsafe { CFArrayGetValueAtIndex(windows.as_ptr(), window_index as CFIndex) };
+            unsafe { CfOwned::retain(window_ref) }
+                .ok_or_else(|| invalid_input("AX target window 已失效"))?
+        }
+        AxTargetRoot::MenuBar => copy_attribute(app.as_ptr(), "AXMenuBar")?
+            .ok_or_else(|| invalid_input("AX target 应用没有 AXMenuBar"))?,
+    };
 
     for step in parsed.path {
         let children = copy_attribute(current.as_ptr(), "AXChildren")?
@@ -971,7 +1115,8 @@ fn set_scrollbar_value_for_target(
     pages: u16,
 ) -> io::Result<()> {
     let parsed = parse_target_id(target_id)?;
-    let window_id = format!("pid:{}/window:{}", parsed.pid, parsed.window_index);
+    let window_index = parsed.window_index()?;
+    let window_id = format!("pid:{}/window:{window_index}", parsed.pid);
     let window = retain_target_element(&window_id)?;
     let scrollbar = find_scrollbar_element(window.as_ptr(), direction)?.ok_or_else(|| {
         invalid_input(format!("目标窗口没有可用于 {:?} 的 AXScrollBar", direction,))
@@ -1394,8 +1539,19 @@ fn create_event_source() -> io::Result<CfOwned> {
 #[derive(Debug)]
 struct ParsedTargetId {
     pid: i32,
-    window_index: usize,
+    root: AxTargetRoot,
     path: Vec<usize>,
+}
+
+impl ParsedTargetId {
+    fn window_index(&self) -> io::Result<usize> {
+        match self.root {
+            AxTargetRoot::Window(index) => Ok(index),
+            AxTargetRoot::MenuBar => Err(invalid_input(
+                "此操作只接受 window target id,不能使用 menu-bar target id",
+            )),
+        }
+    }
 }
 
 fn parse_target_id(target_id: &str) -> io::Result<ParsedTargetId> {
@@ -1409,11 +1565,18 @@ fn parse_target_id(target_id: &str) -> io::Result<ParsedTargetId> {
         .ok_or_else(|| invalid_input(format!("AX target id 缺少 pid: {target_id}")))?
         .parse::<i32>()
         .map_err(|_| invalid_input(format!("AX target id pid 非法: {target_id}")))?;
-    let window_index = parts[1]
-        .strip_prefix("window:")
-        .ok_or_else(|| invalid_input(format!("AX target id 缺少 window: {target_id}")))?
-        .parse::<usize>()
-        .map_err(|_| invalid_input(format!("AX target id window 非法: {target_id}")))?;
+    let root = if parts[1] == "menu-bar" {
+        AxTargetRoot::MenuBar
+    } else {
+        let window_index = parts[1]
+            .strip_prefix("window:")
+            .ok_or_else(|| {
+                invalid_input(format!("AX target id 缺少 window 或 menu-bar: {target_id}"))
+            })?
+            .parse::<usize>()
+            .map_err(|_| invalid_input(format!("AX target id window 非法: {target_id}")))?;
+        AxTargetRoot::Window(window_index)
+    };
 
     let path = match parts.get(2) {
         Some(path) => {
@@ -1436,11 +1599,7 @@ fn parse_target_id(target_id: &str) -> io::Result<ParsedTargetId> {
         None => Vec::new(),
     };
 
-    Ok(ParsedTargetId {
-        pid,
-        window_index,
-        path,
-    })
+    Ok(ParsedTargetId { pid, root, path })
 }
 
 fn ensure_trusted() -> io::Result<()> {
@@ -1779,11 +1938,15 @@ mod tests {
     fn parse_target_id_should_reject_malformed_paths() {
         let parsed = parse_target_id("pid:123/window:2/path:3.4").unwrap();
         assert_eq!(parsed.pid, 123);
-        assert_eq!(parsed.window_index, 2);
+        assert_eq!(parsed.window_index().unwrap(), 2);
         assert_eq!(parsed.path, vec![3, 4]);
 
         let window = parse_target_id("pid:123/window:2").unwrap();
         assert!(window.path.is_empty());
+
+        let menu_item = parse_target_id("pid:123/menu-bar/path:3.4").unwrap();
+        assert!(matches!(menu_item.root, AxTargetRoot::MenuBar));
+        assert_eq!(menu_item.path, vec![3, 4]);
 
         assert!(parse_target_id("pid:123/window:2/path:").is_err());
         assert!(parse_target_id("pid:123/window:2/path:3.").is_err());
@@ -1799,6 +1962,25 @@ mod tests {
             !message.contains("@ax-press target"),
             "unexpected error: {message}"
         );
+    }
+
+    #[test]
+    fn type_text_auto_should_only_fallback_after_recoverable_delivery_errors() {
+        assert!(can_fallback_type_text_delivery(&io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "AXValue 不可写"
+        )));
+        assert!(can_fallback_type_text_delivery(&io::Error::new(
+            io::ErrorKind::Unsupported,
+            "AXValue 不支持"
+        )));
+        assert!(!can_fallback_type_text_delivery(&io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "Accessibility 未授权"
+        )));
+        assert!(!can_fallback_type_text_delivery(&io::Error::other(
+            "CGEvent 传输失败"
+        )));
     }
 
     #[test]

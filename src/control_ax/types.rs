@@ -54,6 +54,11 @@ pub struct AxModePreset {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AxTreeRequest {
     pub scope: AxTreeScope,
+    /// `AppMenu` root 的精确应用选择器。
+    ///
+    /// 这不是结果过滤条件。平台后端必须据此缩小 AX capture 范围,
+    /// 防止无关应用先耗尽 `max_elements` 后遗漏目标菜单。
+    pub app_menu_app: Option<String>,
     pub depth: u8,
     pub max_elements: u16,
     pub include_values: bool,
@@ -63,6 +68,9 @@ pub struct AxTreeRequest {
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum AxTreeScope {
     Windows,
+    /// 应用菜单栏不是任何普通窗口的子树。
+    /// 这个 root 让菜单元素保留自己的 AX 生命周期和 target id 语义。
+    AppMenu,
 }
 
 // ---- was lines 102-106 ----

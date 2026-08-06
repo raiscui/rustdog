@@ -848,3 +848,101 @@ deepseek 3/3(历史一致) | minimax 2/3 | qwen36 2/3 | qwen37 1/3(历史 2/3) |
 ### 关键发现
 - 终端 AXValue 不可写, 需 targeted-keyboard (ax-value 失败无自动 fallback)
 - TextEdit 新建窗口 interactable=False (未激活), 窗口统计必须算全部窗口
+
+## [2026-08-05 21:33:30] [Session ID: omx-1785926019233-oohizd] [记录类型]: 实施 App 菜单 AX、窗口级截图与文本输入回退
+
+### 目标
+- 让 `@ax-find` / `@ax-action` 可在 app 菜单树定位和执行,`@screenshot` 可针对已解析窗口生成真实窗口图,`@type-text mode:"auto"` 会诚实执行 AXValue 优先的回退梯子。
+
+### 方案
+- 方案 A,本轮采用: 扩展现有 AX target、screenshot 和 type-text control lane,复用既有 window resolver、AX action 和 screenshot bundle 返回模型。
+- 方案 B,不采用: 新增独立 menu/screenshot 命令或专用进程。这会复制协议、结果帧和权限边界,不符合当前单一控制面。
+
+### 阶段
+- [x] 阶段 1: 完整追踪 parser、执行后端和现有测试,确认行为缺口与 public contract。
+- [x] 阶段 2: 实现三个能力,优先复用现有 target 和结果模型。
+- [x] 阶段 3: 补定向回归测试,同步规格与 canonical skill。
+- [x] 阶段 4: 运行格式化、定向测试、全量构建和必要的 macOS live smoke。
+
+### 验收标准
+- App 菜单 target 不再被窗口根限制,但仍仅在指定 app 内查找和操作。
+- 窗口截图不会偷偷改变默认 display screenshot,并回传 window identity、裁剪和权限事实。
+- `auto` 仅在可恢复的 AXValue 写入失败时继续到下一层,显式 `ax-value` 仍 fail-closed。
+
+### 状态
+- 当前在阶段 4: 680 个二进制测试已通过,正在用当前构建做 macOS live smoke。
+
+## [2026-08-05 22:05:39] [Session ID: omx-1785926019233-oohizd] [记录类型]: App 菜单 live smoke 的截断修复计划
+
+### 已观察事实
+- `@ax-find:{root:"app-menu",app:"Finder",role:"AXMenuBarItem",limit:20}` 返回 `capture_status:"complete"`、`truncated:true`、`ref_count:1007`、`match_count:0`。
+- macOS `snapshot_app_menus` 会遍历全部 `visible_windows_by_pid()`; `build_ax_find_response_json` 在 capture 完成后才应用查询过滤。
+
+### 候选假设与最小验证
+- 主假设: Finder 菜单在全局 capture 的 `max_elements` 截断点之后,所以虽能捕获完成状态,却不包含 Finder 的菜单元素。
+- 最强备选: 输入的 app 名与窗口 owner 名不一致。
+- 计划: 复用 `resolve_unique_app_window_id(app)` 先做 exact-app 解析,将解析出的 app selector 传入 app-menu tree request,后端只捕获该 PID 的 `AXMenuBar`; parser 和 capture mock 测试应能证明不再把 app 当作事后 process 过滤。
+
+### 阶段状态
+- [x] 阶段 1: 全局截断的静态和动态证据已经确认。
+- [x] 阶段 2: 为 app-menu request 加入应用选择器,并按 PID 捕获。
+- [x] 阶段 3: 跑定向与全量验证,重启 daemon 做 Terminal live smoke。
+
+## [2026-08-05 23:10:00] [Session ID: omx-1785926019233-oohizd] [记录类型]: 三项控制能力的最终验证
+
+### 当前行动
+- 已完成 app-menu 的 PID 定向 capture 修复,并已用 Chrome 多窗口实测确认菜单项可定位和执行 `AXPress` / `AXCancel`。
+- 已完成窗口截图 composite crop 和 `@type-text mode:"auto"` 的 AXValue 到 targeted-keyboard 回退。
+- 本轮先验证新增 screenshot backend timeout guard 的单测与构建,避免 native capture 卡住时遗留无限等待的 control session。
+
+### 验收与待办
+- [x] 阶段 4.1: 运行 screenshot timeout 定向测试,处理所有新增编译或测试错误。
+  - 初次编译暴露 4 个旧 `AxTreeRequest` 完整字面量缺 `app_menu_app`;已显式补 `None`。
+  - `screenshot::tests` 27/27 通过,覆盖 timeout worker guard。
+- [x] 阶段 4.2: 运行 app-menu、窗口截图、type-text parser/行为定向测试。
+  - app-menu parser 11/11,capture selector 1/1,screenshot 27/27,type-text actions 30/30,协议 90/90。
+- [x] 阶段 4.3: 运行格式化检查、完整二进制测试与构建。
+  - `cargo fmt -- --check` 通过;二进制 nextest 680 passed,1 skipped;`cargo build` 成功。
+- [x] 阶段 4.4: 启动临时 TCP daemon,重跑窗口截图 live smoke。成功需有新 artifact;失败也必须在有限时间内返回明确错误。
+  - 新 JPEG/manifest 均已生成,Terminal `pid:30279/window:0` 的请求、捕获 rect 与 JPEG 均为 `570x399`。
+  - app-menu 返回 7 个菜单项并完成 `AXPress`/`AXCancel`;`type-text auto` 选择 targeted keyboard 且由 fresh AX read 读回。
+- [x] 阶段 4.5: 对齐 canonical skill/规格,写入 worklog,并运行 `git diff --check`。
+
+### 状态
+**已完成**: 三项能力、文档、live smoke、持续学习续档和最终 diff 检查均已收口。
+
+## [2026-08-05 23:32:00] [Session ID: omx-1785926019233-oohizd] [记录类型]: WORKLOG 续档与持续学习
+
+### 触发事实
+- 本轮完成记录使 `WORKLOG.md` 达到 1001 行,超过默认六文件 1000 行阈值。
+- 主任务已完成实现与验证,现在是安全收口点;本轮只续档 `WORKLOG.md`,不归档仍活跃的其余默认上下文文件。
+
+### 完成
+- [x] 回读默认六文件、候选历史文件和既有经验,提炼 app-menu capture / screenshot timeout 规律。
+- [x] 更新 `EXPERIENCE.md` 与 `AGENTS.md` 索引,生成 archive manifest,并创建新的 `WORKLOG.md` 入口。
+- [x] 运行归档后的格式、引用、端口与 diff 检查,完成阶段 4.5。
+
+## [2026-08-05 22:56:39] [Session ID: omx-1785926019233-oohizd] [记录类型]: Native capture 卡死的 tracing 诊断
+
+### 目标
+- 为所有 native screenshot capture 路径增加结构化 tracing 事件,明确区分 SCK 超时、转入 xcap fallback、Screen Recording 权限拒绝与最终失败。
+- 保持 `capture_primary_display_image` 和 `capture_all_display_images` 的既有返回语义、timeout guard 和 fallback 条件不变。
+
+### 阶段
+- [x] 阶段 1: 追踪两种入口到共享 timeout / permission / error-classification 路径,确认需新增最小 tracing subscriber。
+- [x] 阶段 2: 在共享截图路径发射具有稳定字段的事件,并避免权限错误误进入 xcap fallback。
+- [x] 阶段 3: 用可捕获的 tracing subscriber 添加回归测试,覆盖 timeout、fallback、最终失败与权限拒绝。
+- [x] 阶段 4: 同步 screenshot 规格和 canonical skill,运行格式化、定向测试、二进制测试、构建与 diff 检查。
+
+### 事件契约
+- `screenshot_capture_timeout`: backend、capture_kind、timeout_ms。
+- `screenshot_capture_fallback`: failed_backend、fallback_backend、capture_kind、error_kind。
+- `screenshot_capture_permission_denied`: capture_kind、backend 或 preflight 来源、error_kind。
+- `screenshot_capture_failed`: capture_kind、primary_backend、fallback_backend、primary_error_kind、fallback_error_kind、final_error_kind。
+
+### 状态
+**已完成**: tracing 事件、依赖初始化、回归测试、正式规格、canonical skill、notes 续档和 diff 检查均已收口。
+
+### 验证修正
+- `rtk cargo nextest` 的摘要未显示编译失败。读取原始 nextest log 后确认新增 timeout + fallback 测试的两个 closure 返回类型不一致 (`()` vs `i32`),Rust 报 `E0308`。
+- 修复: 让超时的 SCK closure 和成功的 xcap closure 都使用 `i32`;随后从定向测试重新验证。`git diff --check` 同时发现 `notes.md` EOF 空行,已一并清除。

@@ -666,7 +666,7 @@ fn try_ax_press_single_char(
 /// 排除修饰键组合 (Cmd+T, Shift+8 等含 `+` 的) 与命名键 (Esc, Return 等)。
 fn is_single_char_key(key: &str) -> bool {
     let mut chars = key.chars();
-    let Some(first) = chars.next() else {
+    let Some(_first) = chars.next() else {
         return false;
     };
     if chars.next().is_some() {
@@ -1302,19 +1302,20 @@ fn parse_key_action(chord: &str) -> io::Result<KeyAction> {
             modifiers.push(parse_modifier_key(token)?);
         }
 
-        parse_named_key(key).or_else(|| {
-            if key.chars().count() == 1 {
-                key.chars().next().map(Key::Unicode)
-            } else {
-                None
-            }
-        })
-        .ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!("首版不支持的 @key 按键: {key}"),
-            )
-        })?
+        parse_named_key(key)
+            .or_else(|| {
+                if key.chars().count() == 1 {
+                    key.chars().next().map(Key::Unicode)
+                } else {
+                    None
+                }
+            })
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("首版不支持的 @key 按键: {key}"),
+                )
+            })?
     };
 
     Ok(KeyAction {

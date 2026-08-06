@@ -169,6 +169,8 @@
 @screenshot:{target:"display"}
 @screenshot#7:{target:"display",display:"all",layout:"composite",coordinate_space:"os-logical",format:"jpeg",quality:75}
 @screenshot#8:{target:"display",display:"primary",layout:"single",format:"jpeg",quality:75}
+@screenshot#9:{target:"window",window:{window_id:"pid:123/window:0"}}
+@screenshot#10:{target:"window",window:{ref:"@e4",observation_id:"obs-123"}}
 ```
 
 ### 5.2 v1 默认值
@@ -185,7 +187,14 @@
 建议 v1 只开放下面这些字段:
 
 - `target`
-  - 当前只接受 `"display"`
+  - `"display"` 保持默认 all-display composite 行为
+  - `"window"` 要求 `window:{window_id}` 或 `window:{ref,observation_id}`
+- `window`
+  - 只在 `target = "window"` 时存在
+  - action 前从 fresh AX rect 重新解析,再按 `os-logical` 从 display composite 裁剪
+  - 结果的 manifest 必须报告 `source:"display-composite-crop"` 与
+    `visibility:"screen-composited"`;它不是未遮挡原生 window surface capture
+  - 该路径不接受 `display`、`layout` 或 `include_ax`
 - `display`
   - `"all"` 或 `"primary"`
 - `layout`
@@ -254,6 +263,12 @@ saved file: ./rdog_downloads/screenshot-20260501-143700.jpg
 @response {"kind":"screenshot-bundle","layout":"composite","coordinate_space":"os-logical","image":"screenshot-20260501-143700-virtual-desktop.jpg","manifest":"screenshot-20260501-143700-manifest.json","display_count":2}
 ```
 
+窗口截图的最终 response 使用独立 kind,避免下游把窗口图误解为虚拟桌面坐标图:
+
+```text
+@response {"id":9,"value":{"kind":"window-screenshot","coordinate_space":"os-logical","source":"display-composite-crop","visibility":"screen-composited","window_id":"pid:123/window:0","image":"screenshot-...-window.jpg","manifest":"screenshot-...-window-manifest.json","clipped":false}}
+```
+
 这里的作用不是携带文件内容。
 而是保留现有请求完成语义:
 
@@ -274,7 +289,7 @@ saved file: ./rdog_downloads/screenshot-20260501-143700.jpg
 - 参数非法: `64`
 - 权限不足 / 未授权: `77`
 - 平台不支持 / 后端不可用: `78`
-- 截图执行失败 / 编码失败: `70`
+- 截图执行失败 / 编码失败 / 全部 capture backend 超时: `70`
 
 ### 5.7 为什么不直接回原始 bytes
 
@@ -339,6 +354,26 @@ trait ScreenshotBackend {
 
 这里的“备用”指运行时 fallback。
 不是第二套 CLI。
+
+每个 macOS backend 调用都有 5 秒上限。`sck-rs` 超时与普通 capture 失败等价,会继续
+尝试 `xcap`;若 `xcap` 也失败或超时,control request 返回 code `70`。每个 backend 同时
+最多保留一个未返回 worker,因此 native 调用卡住时不会因重试无限累积线程。
+
+#### 6.2.1 Native capture tracing
+
+native capture 的控制面必须发出结构化 tracing event。它们写入 daemon 的既有 stderr
+或 hidden log file,并复用 `RDOG_LOG_LEVEL`;默认 `info` 已包含 fallback 事件。
+
+| `event_name` | level | 终态 / 过程 | 必有字段 |
+| --- | --- | --- | --- |
+| `screenshot_capture_timeout` | warn | 单个 backend 超时或命中仍在运行的 worker gate | `capture_kind`, `backend`, `timeout_ms`, `timeout_reason` |
+| `screenshot_capture_fallback` | info | SCK 非权限失败后开始 xcap | `capture_kind`, `failed_backend`, `fallback_backend`, `primary_error_kind` |
+| `screenshot_capture_permission_denied` | warn | Screen Recording preflight 或任一 backend 返回未授权 | `capture_kind`, `source`, `error_kind` |
+| `screenshot_capture_failed` | error | SCK 与 xcap 都失败,且最终不是权限错误 | `capture_kind`, `primary_backend`, `fallback_backend`, `primary_error_kind`, `fallback_error_kind`, `final_error_kind` |
+
+`screenshot_capture_permission_denied` 是权限失败的唯一终态事件。它不触发 xcap
+fallback,也不再额外记录泛化的 `screenshot_capture_failed`,避免同一请求产生两个终态错误。
+timeout event 不代表 worker 已被原生 API 取消;它只证明 control request 的等待期限已到。
 
 ### 6.3 Windows / Linux
 

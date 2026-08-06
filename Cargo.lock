@@ -3524,6 +3524,8 @@ dependencies = [
  "sha2",
  "signal-hook",
  "termios",
+ "tracing",
+ "tracing-subscriber",
  "url",
  "uuid",
  "windows-sys 0.61.2",

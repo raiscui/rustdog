@@ -266,6 +266,8 @@ pub enum KeyResponseMode {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScreenshotRequest {
     pub target: ScreenshotTarget,
+    /// 仅当 `target:"window"` 时存在。display 默认路径始终保持没有窗口目标。
+    pub window: Option<ScreenshotWindowTarget>,
     pub display: ScreenshotDisplaySelector,
     pub layout: ScreenshotLayout,
     pub coordinate_space: ScreenshotCoordinateSpace,
@@ -282,6 +284,7 @@ impl Default for ScreenshotRequest {
     fn default() -> Self {
         Self {
             target: ScreenshotTarget::Display,
+            window: None,
             display: ScreenshotDisplaySelector::All,
             layout: ScreenshotLayout::Composite,
             coordinate_space: ScreenshotCoordinateSpace::OsLogical,
@@ -299,6 +302,18 @@ impl Default for ScreenshotRequest {
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum ScreenshotTarget {
     Display,
+    Window,
+}
+
+/// 窗口截图只接受稳定到本次控制会话的定位器。
+///
+/// `window_id` 适合刚从 `@window-find` 获得的目标;ref 需要带 observation id,
+/// 这样 daemon 可以在动作前重新绑定真实窗口,不会裁剪陈旧坐标。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScreenshotWindowTarget {
+    pub window_id: Option<String>,
+    pub ref_id: Option<String>,
+    pub observation_id: Option<String>,
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]

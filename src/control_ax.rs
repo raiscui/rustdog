@@ -63,6 +63,7 @@ impl Default for AxTreeRequest {
     fn default() -> Self {
         Self {
             scope: AxTreeScope::Windows,
+            app_menu_app: None,
             depth: DEFAULT_AX_DEPTH,
             max_elements: DEFAULT_AX_MAX_ELEMENTS,
             include_values: DEFAULT_AX_INCLUDE_VALUES,
@@ -722,9 +723,7 @@ pub fn perform_default_ax_press(request: &AxPressRequest) -> io::Result<AxAction
 fn clear_action_hint(description: Option<&str>) -> Option<String> {
     description
         .filter(|desc| is_clear_action_description(desc))
-        .map(|_| {
-            CLEAR_ACTION_HINT.to_string()
-        })
+        .map(|_| CLEAR_ACTION_HINT.to_string())
 }
 
 /// 清除类操作完成后的通用 continue 引导 (共享给 @ax-press 与 @key)。
@@ -1123,6 +1122,7 @@ pub fn parse_ax_tree_payload(input: &str) -> io::Result<AxTreeRequest> {
     let preset = mode.unwrap_or(AxMode::Full).preset();
     Ok(AxTreeRequest {
         scope: scope.unwrap_or(AxTreeScope::Windows),
+        app_menu_app: None,
         depth: depth.unwrap_or(preset.depth),
         max_elements: max_elements.unwrap_or(preset.max_elements),
         include_values: include_values.unwrap_or(preset.include_values),
@@ -1162,7 +1162,10 @@ fn fill_ax_target_field(
             "{kind} 对象 payload 的 `{field_name}` 字段重复"
         )));
     }
-    *slot = Some(parse_non_empty_string(&format!("{kind}.{field_name}"), raw_value)?);
+    *slot = Some(parse_non_empty_string(
+        &format!("{kind}.{field_name}"),
+        raw_value,
+    )?);
     Ok(())
 }
 
@@ -1185,9 +1188,9 @@ pub(crate) fn parse_compact_opt_u8(
 ) -> io::Result<Option<u8>> {
     value
         .map(|value| {
-            value.parse::<u8>().map_err(|_| {
-                invalid_data(format!("{kind} 的 `{name}` 必须是无符号整数: {value}"))
-            })
+            value
+                .parse::<u8>()
+                .map_err(|_| invalid_data(format!("{kind} 的 `{name}` 必须是无符号整数: {value}")))
         })
         .transpose()
 }
@@ -1200,9 +1203,9 @@ pub(crate) fn parse_compact_opt_u16(
 ) -> io::Result<Option<u16>> {
     value
         .map(|value| {
-            value.parse::<u16>().map_err(|_| {
-                invalid_data(format!("{kind} 的 `{name}` 必须是无符号整数: {value}"))
-            })
+            value
+                .parse::<u16>()
+                .map_err(|_| invalid_data(format!("{kind} 的 `{name}` 必须是无符号整数: {value}")))
         })
         .transpose()
 }
@@ -1214,15 +1217,13 @@ pub(crate) fn parse_compact_opt_mode(
 ) -> io::Result<Option<AxMode>> {
     // compact 值不带引号 (parse_compact_atom 已校验), 直接按枚举名匹配。
     value
-        .map(|value| {
-            match value.to_ascii_lowercase().as_str() {
-                "windows" | "summary" | "skeleton" => Ok(AxMode::Windows),
-                "interactive" | "controls" => Ok(AxMode::Interactive),
-                "full" => Ok(AxMode::Full),
-                _ => Err(invalid_data(format!(
-                    "{kind} 的 `mode` 只支持 windows | interactive | full: {value}"
-                ))),
-            }
+        .map(|value| match value.to_ascii_lowercase().as_str() {
+            "windows" | "summary" | "skeleton" => Ok(AxMode::Windows),
+            "interactive" | "controls" => Ok(AxMode::Interactive),
+            "full" => Ok(AxMode::Full),
+            _ => Err(invalid_data(format!(
+                "{kind} 的 `mode` 只支持 windows | interactive | full: {value}"
+            ))),
         })
         .transpose()
 }
@@ -1244,9 +1245,8 @@ pub fn parse_ax_press_payload(input: &str) -> io::Result<AxPressRequest> {
             fields.take_named_or_positional("@ax-press", "max_attempts", "max_attempts")?;
         fields.ensure_empty("@ax-press")?;
 
-        let description = description.ok_or_else(|| {
-            invalid_data("@ax-press 短格式缺少按钮描述, 例如 `app:APP,删除`")
-        })?;
+        let description = description
+            .ok_or_else(|| invalid_data("@ax-press 短格式缺少按钮描述, 例如 `app:APP,删除`"))?;
         let postcondition = match (guarded_role, guarded_expected, guarded_max) {
             (Some(role), Some(expected_value), Some(max_attempts)) => {
                 let max_attempts = max_attempts
@@ -1305,17 +1305,11 @@ pub fn parse_ax_press_payload(input: &str) -> io::Result<AxPressRequest> {
             )?,
             // 2026-08-04 (LLM 兼容): 顶层字段自动归一化到 target,
             // 模型常把 compact 的 `app:APP,description:删除` 思维带进对象。
-            "app" | "window_id" | "process" | "window_title" | "role" | "subrole"
-            | "name" | "description" => {
+            "app" | "window_id" | "process" | "window_title" | "role" | "subrole" | "name"
+            | "description" => {
                 let explicit_target = target.is_some();
                 let slot = target.get_or_insert_with(AxTarget::default);
-                fill_ax_target_field(
-                    slot,
-                    explicit_target,
-                    "@ax-press",
-                    &field_name,
-                    raw_value,
-                )?;
+                fill_ax_target_field(slot, explicit_target, "@ax-press", &field_name, raw_value)?;
             }
             _ => {
                 return Err(invalid_data(format!(
@@ -1654,6 +1648,7 @@ fn parse_ax_target(input: &str) -> io::Result<AxTarget> {
     let mut ref_seen = false;
     let mut observation_id_seen = false;
     let mut window_id_seen = false;
+    let mut app_seen = false;
     let mut process_seen = false;
     let mut window_title_seen = false;
     let mut role_seen = false;
@@ -1685,6 +1680,13 @@ fn parse_ax_target(input: &str) -> io::Result<AxTarget> {
             "window_id" => {
                 reject_duplicate(&mut window_id_seen, "AX target", "window_id")?;
                 target.window_id = Some(parse_non_empty_string("AX target.window_id", raw_value)?);
+            }
+            // 2026-08-05 (LLM 兼容): AxTarget struct 有 app 字段且 validate 支持,
+            // 但 parse_ax_target 漏了解析, 模型写 {target:{app:"Terminal",...}}
+            // 一直报"未知字段: app"。补上后与 compact 的 app:APP 语义一致。
+            "app" => {
+                reject_duplicate(&mut app_seen, "AX target", "app")?;
+                target.app = Some(parse_non_empty_string("AX target.app", raw_value)?);
             }
             "process" | "process_name" => {
                 reject_duplicate(&mut process_seen, "AX target", "process")?;
@@ -2254,6 +2256,7 @@ mod tests {
             .unwrap(),
             AxTreeRequest {
                 scope: AxTreeScope::Windows,
+                app_menu_app: None,
                 depth: 4,
                 max_elements: 1000,
                 include_values: false,
@@ -2265,6 +2268,7 @@ mod tests {
             parse_ax_tree_payload(r#"{mode:"windows"}"#).unwrap(),
             AxTreeRequest {
                 scope: AxTreeScope::Windows,
+                app_menu_app: None,
                 depth: AX_WINDOWS_DEPTH,
                 max_elements: AX_WINDOWS_MAX_ELEMENTS,
                 include_values: AX_WINDOWS_INCLUDE_VALUES,
@@ -2902,6 +2906,26 @@ mod tests {
         assert_eq!(snapshot.platform, "targeted");
         assert_eq!(global_calls.get(), 0);
         assert_eq!(targeted_calls.get(), 1);
+    }
+
+    #[test]
+    fn ax_find_app_menu_should_pass_app_selector_to_capture_backend() {
+        let request =
+            parse_ax_find_payload(r#"{root:"app-menu",app:"Finder",role:"AXMenuBarItem"}"#)
+                .expect("app menu request should parse");
+
+        let snapshot = capture_ax_find_snapshot_with(
+            &request,
+            |tree| {
+                assert_eq!(tree.scope, AxTreeScope::AppMenu);
+                assert_eq!(tree.app_menu_app.as_deref(), Some("Finder"));
+                Ok(AxSnapshot::complete("targeted-app-menu", Vec::new(), false))
+            },
+            |_, _| panic!("app menu must not be captured as a window subtree"),
+        )
+        .expect("app menu capture should succeed");
+
+        assert_eq!(snapshot.platform, "targeted-app-menu");
     }
 
     #[test]

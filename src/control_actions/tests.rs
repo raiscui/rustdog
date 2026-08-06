@@ -402,7 +402,9 @@ fn clear_key_should_include_continue_hint_even_in_legacy_mode() {
         let response_value: serde_json::Value =
             serde_json::from_str(&response_json).expect("response json should parse");
         assert_eq!(response_value["key"].as_str(), Some(key));
-        let hint = response_value["hint"].as_str().expect("clear key must hint");
+        let hint = response_value["hint"]
+            .as_str()
+            .expect("clear key must hint");
         assert!(
             hint.contains("not finished") && hint.contains("final confirm"),
             "hint must guide continue: {hint}"

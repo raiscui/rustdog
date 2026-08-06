@@ -6,6 +6,7 @@ use std::{
     path::{Path, PathBuf},
     process::exit,
 };
+use tracing_subscriber::{filter::LevelFilter as TracingLevelFilter, fmt::writer::BoxMakeWriter};
 
 use crate::input::{Command, ConfigCommand, Transport};
 use crate::listener::{listen, Mode, Opts};
@@ -83,6 +84,9 @@ fn init_logger(command: &Command) -> Result<(), String> {
         })
         .unwrap_or(log::LevelFilter::Info);
 
+    let log_target = hidden_mode::log_target_for_command(command);
+    init_tracing(level, &log_target)?;
+
     let dispatch = Dispatch::new()
         .format(|out, message, record| {
             let colors = ColoredLevelConfig::new()
@@ -102,7 +106,7 @@ fn init_logger(command: &Command) -> Result<(), String> {
         .level(log::LevelFilter::Warn)
         .level(level);
 
-    match hidden_mode::log_target_for_command(command) {
+    match log_target {
         // ------------------------------------------------------------
         // 非 hidden 命令的日志走 stderr(Unix 习惯:错误/警告不应混入 stdout,
         // 否则 agent 走 pipe / redirect 解析 stdout 时会被噪音打断)。
@@ -118,6 +122,46 @@ fn init_logger(command: &Command) -> Result<(), String> {
             })?;
             dispatch.chain(file).apply().map_err(|err| err.to_string())
         }
+    }
+}
+
+/// 为新增的结构化诊断事件安装 subscriber,但不接管既有 `log` / `fern` 调用。
+///
+/// `tracing-subscriber` 显式关闭 `tracing-log` feature,避免它注册全局 `LogTracer`
+/// 并和下方 `fern::Dispatch::apply` 争夺唯一 logger。两套事件共用同一日志等级和目标。
+fn init_tracing(level: log::LevelFilter, target: &hidden_mode::LogTarget) -> Result<(), String> {
+    let writer = match target {
+        hidden_mode::LogTarget::Stderr => BoxMakeWriter::new(stderr),
+        hidden_mode::LogTarget::File(path) => {
+            let file = fern::log_file(path).map_err(|err| {
+                format!(
+                    "failed to open hidden tracing log file {}: {err}",
+                    path.display()
+                )
+            })?;
+            BoxMakeWriter::new(file)
+        }
+    };
+
+    tracing_subscriber::fmt()
+        .with_max_level(tracing_level_filter(level))
+        .with_ansi(false)
+        .with_target(true)
+        .with_writer(writer)
+        .try_init()
+        .map_err(|err| format!("failed to initialize tracing subscriber: {err}"))
+}
+
+/// `RDOG_LOG_LEVEL` 是唯一的运行时日志等级来源。这里仅把既有 log filter 映射到
+/// tracing filter,避免两个日志系统因同一环境变量而出现不同的可见性。
+fn tracing_level_filter(level: log::LevelFilter) -> TracingLevelFilter {
+    match level {
+        log::LevelFilter::Off => TracingLevelFilter::OFF,
+        log::LevelFilter::Error => TracingLevelFilter::ERROR,
+        log::LevelFilter::Warn => TracingLevelFilter::WARN,
+        log::LevelFilter::Info => TracingLevelFilter::INFO,
+        log::LevelFilter::Debug => TracingLevelFilter::DEBUG,
+        log::LevelFilter::Trace => TracingLevelFilter::TRACE,
     }
 }
 

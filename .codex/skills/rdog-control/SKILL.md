@@ -1,6 +1,6 @@
 ---
 name: rdog-control
-version: "2.25-darwin-dim3+dim9+dim4+clear-continue+text-input"  # 2026-08-03:补回 Text Input 小节 + Esc/Delete 清除规则
+version: "2.26-app-menu-window-screenshot-text-auto"
 description: "Use for rdog control on a local or named machine: health, shell, GUI, browser, window, AX, PTY, flow, verification, and safety."
 ---
 
@@ -40,24 +40,61 @@ rdog control @ax-press:app:APP,DESCRIPTION
 rdog control @ax-press-sequence:app:APP,DESCRIPTION_1,DESCRIPTION_2
 ```
 
+### App Menu (应用菜单)
+
+App 菜单栏不在窗口 AX tree 下面。菜单只用 `root:"app-menu"` 和 `app`;该 app
+必须解析为唯一 PID,但不要求存在唯一或可交互的窗口。不能附带 window / process
+选择器。先读菜单项,再将返回的 `pid:PID/menu-bar/path:...` 交给既有 AX action。
+
+```bash
+rdog control '@ax-find:{root:"app-menu",app:"Finder",role:"AXMenuItem",limit:20}'
+rdog control '@ax-action:{target:{id:"pid:123/menu-bar/path:0.2"},action:"AXPress"}'
+```
+
+菜单 target 是短期定位器。每次动作前要 fresh `@ax-find`;不要把它伪装成
+`pid:PID/window:N` 或跨应用复用。
+
 ### Text Input (文字输入)
 
-向文本框 / 文本区 / 地址栏输入文字时,默认使用 AXValue 直写,不依赖
-键盘模拟或剪贴板。`@type-text` 的 `ax-value` 模式直接设置目标控件的
-AXValue,不受输入法状态、macOS 自动大写句首、用户正在输入或焦点时序影响。
+向文本框 / 文本区 / 地址栏输入文字时,`@type-text mode:"auto"` 会先尝试 AXValue
+直写。只有 AXValue 不可写或不支持时,才回退到 targeted keyboard;clipboard 仍须
+`allow_clipboard:true`。response 的 `delivered_via` 是本次实际投递路径。
 
 ```bash
 rdog control '@ax-find:{window:{window_id:"pid:123/window:0"},role:"AXTextArea",limit:5}'
-rdog control '@type-text:{target:{id:"pid:123/window:0/path:0.0"},text:"hello rdog 42",mode:"ax-value"}'
+rdog control '@type-text:{target:{id:"pid:123/window:0/path:0.0"},text:"hello rdog 42",mode:"auto"}'
 rdog control '@ax-find:{window:{window_id:"pid:123/window:0"},role:"AXTextArea",include_values:true,limit:5}'
 ```
 
-三步流程:先 `@ax-find` 拿到文本控件的 AX id → `@type-text` 以
-`mode:"ax-value"` 写入 → 再独立 `@ax-find` 读回 value 证明输入生效。
+三步流程:先 `@ax-find` 拿到文本控件的 AX id → `@type-text mode:"auto"` 写入 →
+再独立 `@ax-find` 读回 value 证明输入生效。需要严格禁止键盘 / 剪贴板回退时,
+显式使用 `mode:"ax-value"`;该模式保持 fail-closed。
 
-`@type-text` 的 mode 优先级:`ax-value`(默认推荐) → `targeted-keyboard` →
-`clipboard`。`@paste` 走剪贴板,`@key` 只发按键,都不能替代可写控件的
-AXValue 直写。详细语法见 `references/protocol.md` 的 Text Input 小节。
+`auto` 仅会因 `InvalidInput` / `Unsupported` 继续下一层。权限和传输错误不会回退。
+`@paste` 走剪贴板,`@key` 只发按键,都不能替代可写控件的 AXValue 直写。详细语法见
+`references/protocol.md` 的 Text Input 小节。
+
+### Window Screenshot (窗口截图)
+
+默认 `@screenshot` 仍是全虚拟桌面。需要窗口视觉证据时,先用 fresh
+`@window-find` 获得 `window_id`,再请求窗口截图:
+
+```bash
+rdog control '@screenshot:{target:"window",window:{window_id:"pid:123/window:0"}}'
+```
+
+返回的 image 来自当前 display composite 的 AX rect 裁剪。manifest 的
+`source:"display-composite-crop"`、`visibility:"screen-composited"` 和 `clipped`
+是事实边界:被遮挡像素不能当成原生窗口内容。窗口截图不携带 AX;结构化证据单独用
+fresh `@ax-find` 读取。
+
+### Native Capture Diagnostics
+
+macOS screenshot 卡住或失败时,读取 daemon log 的 `event_name`。`screenshot_capture_timeout`
+说明某个 `backend` 到了控制面期限;`screenshot_capture_fallback` 表示 SCK 正转入 xcap;
+`screenshot_capture_permission_denied` 表示 Screen Recording 未授权且不会 fallback;
+`screenshot_capture_failed` 才表示两个 backend 都失败。所有事件都有 `capture_kind`
+(`primary` 或 `all`),因此窗口截图也能关联到实际 desktop capture。
 
 The 5-field `@ax-press:app:APP,DESCRIPTION,RESULT_ROLE,EXPECTED_VALUE,MAX_ATTEMPTS`
 form is intentionally not in this primary list. Read the GUARDED PRESS section

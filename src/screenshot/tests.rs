@@ -5,6 +5,200 @@ use crate::control_ax::{
 use serde_json::Value;
 use std::time::Duration;
 
+#[cfg(target_os = "macos")]
+use std::{
+    io::Write,
+    sync::atomic::{AtomicBool, Ordering},
+    sync::{Arc, Mutex},
+    thread,
+};
+
+#[cfg(target_os = "macos")]
+#[derive(Clone, Default)]
+struct TraceBuffer(Arc<Mutex<Vec<u8>>>);
+
+#[cfg(target_os = "macos")]
+struct TraceBufferWriter(TraceBuffer);
+
+#[cfg(target_os = "macos")]
+impl Write for TraceBufferWriter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0
+             .0
+            .lock()
+            .expect("trace buffer lock should not be poisoned")
+            .extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl<'writer> tracing_subscriber::fmt::MakeWriter<'writer> for TraceBuffer {
+    type Writer = TraceBufferWriter;
+
+    fn make_writer(&'writer self) -> Self::Writer {
+        TraceBufferWriter(self.clone())
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn capture_trace<R>(operation: impl FnOnce() -> R) -> (R, String) {
+    let buffer = TraceBuffer::default();
+    let subscriber = tracing_subscriber::fmt()
+        .without_time()
+        .with_ansi(false)
+        .with_target(false)
+        .with_writer(buffer.clone())
+        .finish();
+    let result = tracing::subscriber::with_default(subscriber, operation);
+    let events = String::from_utf8(
+        buffer
+            .0
+            .lock()
+            .expect("trace buffer lock should not be poisoned")
+            .clone(),
+    )
+    .expect("tracing formatter should write UTF-8");
+    (result, events)
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn bounded_capture_should_timeout_once_and_keep_worker_count_bounded() {
+    static TEST_CAPTURE_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
+    TEST_CAPTURE_IN_FLIGHT.store(false, Ordering::Release);
+
+    let error = capture_with_timeout(
+        "primary",
+        "test",
+        &TEST_CAPTURE_IN_FLIGHT,
+        Duration::from_millis(10),
+        || {
+            thread::sleep(Duration::from_millis(50));
+            Ok::<_, std::io::Error>(())
+        },
+    )
+    .expect_err("slow native capture should time out");
+    assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+
+    let duplicate = capture_with_timeout(
+        "primary",
+        "test",
+        &TEST_CAPTURE_IN_FLIGHT,
+        Duration::from_millis(10),
+        || Ok::<_, std::io::Error>(()),
+    )
+    .expect_err("a timed-out backend must not create a second worker");
+    assert_eq!(duplicate.kind(), std::io::ErrorKind::TimedOut);
+
+    thread::sleep(Duration::from_millis(75));
+    assert_eq!(
+        capture_with_timeout(
+            "primary",
+            "test",
+            &TEST_CAPTURE_IN_FLIGHT,
+            Duration::from_millis(10),
+            || Ok::<_, std::io::Error>(42),
+        )
+        .expect("completed worker should release the backend gate"),
+        42
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn capture_fallback_should_trace_sck_timeout_and_xcap_transition() {
+    static TEST_CAPTURE_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
+    TEST_CAPTURE_IN_FLIGHT.store(false, Ordering::Release);
+
+    let (result, events) = capture_trace(|| {
+        capture_with_sck_fallback(
+            "primary",
+            "截图",
+            || {
+                capture_with_timeout(
+                    "primary",
+                    "sck-rs",
+                    &TEST_CAPTURE_IN_FLIGHT,
+                    Duration::from_millis(10),
+                    || {
+                        thread::sleep(Duration::from_millis(50));
+                        Ok::<_, std::io::Error>(42)
+                    },
+                )
+            },
+            || Ok::<_, std::io::Error>(42),
+        )
+    });
+
+    assert_eq!(result.expect("xcap fallback should succeed"), 42);
+    assert!(events.contains("event_name=\"screenshot_capture_timeout\""));
+    assert!(events.contains("backend=\"sck-rs\""));
+    assert!(events.contains("event_name=\"screenshot_capture_fallback\""));
+    assert!(events.contains("fallback_backend=\"xcap\""));
+    assert!(!events.contains("screenshot_capture_failed"));
+
+    thread::sleep(Duration::from_millis(75));
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn capture_fallback_should_trace_terminal_backend_failure() {
+    let (result, events) = capture_trace(|| {
+        capture_with_sck_fallback(
+            "all",
+            "多显示器截图",
+            || Err::<(), _>(std::io::Error::other("sck unavailable")),
+            || Err::<(), _>(std::io::Error::other("xcap unavailable")),
+        )
+    });
+
+    assert_eq!(
+        result.expect_err("both backends should fail").kind(),
+        std::io::ErrorKind::Other
+    );
+    assert!(events.contains("event_name=\"screenshot_capture_fallback\""));
+    assert!(events.contains("event_name=\"screenshot_capture_failed\""));
+    assert!(events.contains("primary_backend=\"sck-rs\""));
+    assert!(events.contains("fallback_backend=\"xcap\""));
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn capture_permission_denied_should_trace_terminal_permission_without_fallback() {
+    let fallback_called = AtomicBool::new(false);
+    let (result, events) = capture_trace(|| {
+        capture_with_sck_fallback(
+            "primary",
+            "截图",
+            || {
+                Err::<(), _>(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "Screen Recording denied",
+                ))
+            },
+            || {
+                fallback_called.store(true, Ordering::Release);
+                Ok::<_, std::io::Error>(())
+            },
+        )
+    });
+
+    assert_eq!(
+        result.expect_err("permission must stop capture").kind(),
+        std::io::ErrorKind::PermissionDenied
+    );
+    assert!(!fallback_called.load(Ordering::Acquire));
+    assert!(events.contains("event_name=\"screenshot_capture_permission_denied\""));
+    assert!(events.contains("source=\"sck-rs\""));
+    assert!(!events.contains("screenshot_capture_fallback"));
+    assert!(!events.contains("screenshot_capture_failed"));
+}
+
 #[test]
 fn build_virtual_bounds_should_union_negative_and_positive_display_rects() {
     let bounds = build_virtual_bounds([
@@ -869,6 +1063,142 @@ fn build_screenshot_outcome_should_emit_primary_single_image_for_primary_request
         }
         other => panic!("expected second frame to be ResponseLine, got {other:?}"),
     }
+}
+
+#[test]
+fn build_window_screenshot_should_crop_composite_and_report_visibility_limits() {
+    let request = ScreenshotRequest {
+        target: ScreenshotTarget::Window,
+        window: Some(ScreenshotWindowTarget {
+            window_id: Some("pid:9/window:1".to_owned()),
+            ref_id: None,
+            observation_id: None,
+        }),
+        ..ScreenshotRequest::default()
+    };
+    let displays = vec![
+        fake_display(
+            "left",
+            LogicalRect {
+                x: -10,
+                y: 0,
+                width: 10,
+                height: 4,
+            },
+            Size {
+                width: 10,
+                height: 4,
+            },
+            Rgba([255, 0, 0, 255]),
+        ),
+        fake_display(
+            "right",
+            LogicalRect {
+                x: 0,
+                y: 0,
+                width: 12,
+                height: 4,
+            },
+            Size {
+                width: 12,
+                height: 4,
+            },
+            Rgba([0, 255, 0, 255]),
+        ),
+    ];
+    let outcome = build_window_screenshot_outcome_with_id(
+        Some(8),
+        &request,
+        displays,
+        "pid:9/window:1",
+        LogicalRect {
+            x: -5,
+            y: -2,
+            width: 10,
+            height: 7,
+        },
+        "fixed",
+    )
+    .expect("window crop should build");
+
+    assert_eq!(outcome.outbound_frames.len(), 3);
+    let image = match &outcome.outbound_frames[0] {
+        ControlFrame::SaveFile(frame) => {
+            assert_eq!(frame.request_id, Some(8));
+            assert_eq!(frame.filename, "screenshot-fixed-window.jpg");
+            assert_eq!(frame.width, Some(10));
+            assert_eq!(frame.height, Some(4));
+            frame
+        }
+        other => panic!("expected image SaveFile, got {other:?}"),
+    };
+    assert!(!image.data.is_empty());
+
+    match &outcome.outbound_frames[1] {
+        ControlFrame::SaveFile(frame) => {
+            let decoded = BASE64_STANDARD
+                .decode(&frame.data)
+                .expect("window manifest should be base64 json");
+            let manifest: Value =
+                serde_json::from_slice(&decoded).expect("window manifest should parse");
+            assert_eq!(manifest["schema"], "rdog.screenshot.window.v1");
+            assert_eq!(manifest["source"], "display-composite-crop");
+            assert_eq!(manifest["visibility"], "screen-composited");
+            assert_eq!(manifest["window"]["window_id"], "pid:9/window:1");
+            assert_eq!(manifest["window"]["requested_os_rect"]["y"], -2);
+            assert_eq!(manifest["window"]["captured_os_rect"]["y"], 0);
+            assert_eq!(manifest["window"]["clipped"], true);
+        }
+        other => panic!("expected manifest SaveFile, got {other:?}"),
+    }
+    match &outcome.outbound_frames[2] {
+        ControlFrame::ResponseLine(response) => {
+            assert!(response.contains(r#""kind":"window-screenshot""#));
+            assert!(response.contains(r#""visibility":"screen-composited""#));
+            assert!(response.contains(r#""clipped":true"#));
+        }
+        other => panic!("expected response frame, got {other:?}"),
+    }
+}
+
+#[test]
+fn window_screenshot_should_reject_ax_embedding_before_capture() {
+    let request = ScreenshotRequest {
+        target: ScreenshotTarget::Window,
+        window: Some(ScreenshotWindowTarget {
+            window_id: Some("pid:9/window:1".to_owned()),
+            ref_id: None,
+            observation_id: None,
+        }),
+        include_ax: true,
+        ..ScreenshotRequest::default()
+    };
+    let mut capture_called = false;
+
+    let error = execute_window_screenshot_request_with_capture(
+        Some(8),
+        &request,
+        "pid:9/window:1".to_owned(),
+        LogicalRect {
+            x: 0,
+            y: 0,
+            width: 1,
+            height: 1,
+        },
+        || {
+            capture_called = true;
+            Ok(Vec::new())
+        },
+        |_| Ok(()),
+    )
+    .expect_err("window screenshots must not silently ignore include_ax");
+
+    assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+    assert!(error.to_string().contains("暂不支持 include_ax"));
+    assert!(
+        !capture_called,
+        "invalid request must not capture the display"
+    );
 }
 
 #[test]

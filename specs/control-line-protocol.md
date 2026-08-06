@@ -500,6 +500,27 @@ mode = "press_release"
 @response {"id":10,"value":{"kind":"mouse","action":"move","backend":"enigo","status":"ok","coordinate_space":"os-logical","x":1200,"y":540}}
 ```
 
+### 截图
+
+裸 `@screenshot` 仍等价于全虚拟桌面的 display composite,坐标语义保持
+`os-logical`。窗口截图必须显式给出稳定窗口定位器:
+
+```text
+@screenshot#16:{target:"window",window:{window_id:"pid:123/window:0"}}
+@screenshot#17:{target:"window",window:{ref:"@e4",observation_id:"obs-123"}}
+```
+
+- 顶层 `window_id:"pid:.../window:N"` 是兼容写法,内部归一化为 `window` target。
+- `window` target 在 action 前重新解析当前 AX window rect,再从同次 all-display
+  composite 依照 `os-logical` 坐标裁剪。
+- 返回 image `@savefile`、window manifest `@savefile` 和最终
+  `@response ...kind:"window-screenshot"...`。manifest 会固定报告
+  `source:"display-composite-crop"` 与 `visibility:"screen-composited"`。
+  它表示当前屏幕可见像素,不能被解释为未受遮挡的原生窗口 surface。
+- 裁剪越出虚拟桌面时会返回 `clipped:true` 及实际 `captured_os_rect`。
+- window screenshot 当前不接受 `display`、`layout` 或 `include_ax`。需要 UI 结构时,
+  另行执行 `@ax-find` / `@ax-get`,不能让请求静默忽略 AX 字段。
+
 ### AX 结构读取与 AXPress
 
 AX 能力是 macOS UI 结构层。
@@ -536,6 +557,19 @@ Phase 1 返回 structured `@response`,不走 `@savefile`:
 ```text
 @response {"id":30,"value":{"kind":"ax-tree","schema":"rdog.ax.v1","platform":"macos","capture_status":"complete",...}}
 ```
+
+应用菜单栏不属于普通 `AXWindow` 子树。对菜单项使用专用的 app root,先定位再沿用
+既有 `@ax-action` 执行链:
+
+```text
+@ax-find#33:{root:"app-menu",app:"Finder",role:"AXMenuItem",limit:20}
+@ax-action#34:{target:{id:"pid:123/menu-bar/path:0.2"},action:"AXPress"}
+```
+
+`root:"app-menu"` 必须带解析为唯一 PID 的 `app`,但不要求唯一或可交互窗口,且不能
+混用 `window`、`process` 或 `process_contains`。结果中的菜单 target id 形如
+`pid:<pid>/menu-bar/path:<steps>`;side effect 前会从当前 `AXMenuBar` 重新解析该路径。
+菜单没有窗口归属,因此 response 不虚构 `window_id`。
 
 执行 AXPress:
 

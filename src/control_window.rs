@@ -759,6 +759,55 @@ pub fn resolve_unique_app_window_id(app: &str) -> io::Result<String> {
     select_unique_interactable_window_id(app, response.match_count, &response.matches)
 }
 
+/// 从 fresh exact-app 查询中解析唯一应用进程 PID。
+///
+/// 菜单栏归属于应用进程,不归属于单个可交互窗口。因此允许同一 PID 的多个窗口,
+/// 但候选窗口未完整返回或落到多个 PID 时必须拒绝,不能猜测菜单所属进程。
+pub fn select_unique_app_pid(
+    app: &str,
+    match_count: usize,
+    matches: &[WindowCandidate],
+) -> io::Result<i32> {
+    if match_count == 0 || match_count != matches.len() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "app selector `{app}` 无法完整解析唯一进程,实际匹配 {match_count} 个窗口,返回 {} 个",
+                matches.len()
+            ),
+        ));
+    }
+
+    let pid = matches[0].app.pid;
+    if matches.iter().any(|candidate| candidate.app.pid != pid) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("app selector `{app}` 匹配到多个进程,拒绝猜测菜单所属应用"),
+        ));
+    }
+
+    Ok(pid)
+}
+
+/// 对应用名执行 fresh exact query,并返回唯一进程 PID。
+///
+/// 仅 app-menu capture 使用这个 resolver。它故意不要求窗口可交互,
+/// 因为应用菜单栏仍可能在最小化或被遮挡时通过 AX 暴露。
+pub fn resolve_unique_app_pid(app: &str) -> io::Result<i32> {
+    let response = execute_default_window_find(&WindowFindRequest {
+        query: WindowQuery {
+            app: Some(app.to_owned()),
+            ..WindowQuery::default()
+        },
+        display_scope: None,
+        // 必须检查所有精确 app 候选是否落在同一 PID,不能用截断结果猜测。
+        limit: u16::MAX,
+        include_state: false,
+        include_recipes: false,
+    })?;
+    select_unique_app_pid(app, response.match_count, &response.matches)
+}
+
 pub fn execute_default_window_activate(
     request: &WindowActivateRequest,
 ) -> io::Result<WindowActionReport> {
@@ -2139,13 +2188,13 @@ mod tests {
 
     #[test]
     fn unique_interactable_window_selector_should_fail_closed() {
-        let candidate = |window_id: &str, interactable: bool| WindowCandidate {
+        let candidate = |window_id: &str, pid: i32, interactable: bool| WindowCandidate {
             window_id: window_id.to_owned(),
             ref_id: None,
             locator_lifetime: "short_lived",
             app: WindowAppDescriptor {
                 name: "TestApp".to_owned(),
-                pid: 123,
+                pid,
                 bundle_id: None,
                 hidden: false,
                 frontmost: true,
@@ -2169,7 +2218,7 @@ mod tests {
             select_unique_interactable_window_id(
                 "TestApp",
                 1,
-                &[candidate("pid:123/window:0", true)],
+                &[candidate("pid:123/window:0", 123, true)],
             )
             .unwrap(),
             "pid:123/window:0"
@@ -2179,15 +2228,41 @@ mod tests {
             "TestApp",
             2,
             &[
-                candidate("pid:123/window:0", true),
-                candidate("pid:123/window:1", true),
+                candidate("pid:123/window:0", 123, true),
+                candidate("pid:123/window:1", 123, true),
             ],
         )
         .is_err());
         assert!(select_unique_interactable_window_id(
             "TestApp",
             1,
-            &[candidate("pid:123/window:0", false)],
+            &[candidate("pid:123/window:0", 123, false)],
+        )
+        .is_err());
+
+        assert_eq!(
+            select_unique_app_pid(
+                "TestApp",
+                2,
+                &[
+                    candidate("pid:123/window:0", 123, false),
+                    candidate("pid:123/window:1", 123, false),
+                ],
+            )
+            .unwrap(),
+            123
+        );
+        assert!(
+            select_unique_app_pid("TestApp", 2, &[candidate("pid:123/window:0", 123, false)])
+                .is_err()
+        );
+        assert!(select_unique_app_pid(
+            "TestApp",
+            2,
+            &[
+                candidate("pid:123/window:0", 123, false),
+                candidate("pid:456/window:0", 456, false),
+            ],
         )
         .is_err());
     }

@@ -20,8 +20,8 @@ use crate::{
     },
     control_protocol::{
         normalize_object_field_name, object_inner, parse_compact_atom,
-        parse_compact_window_selector, parse_quoted_payload, split_object_field, split_object_fields,
-        CompactWindowSelector, KeyDelivery, KeyMode, KeyRequest,
+        parse_compact_window_selector, parse_quoted_payload, split_object_field,
+        split_object_fields, CompactWindowSelector, KeyDelivery, KeyMode, KeyRequest,
     },
     control_window::{resolve_unique_app_window_id, WindowActionReport, WindowActionVerifyReport},
 };
@@ -217,6 +217,11 @@ pub(crate) fn capture_ax_find_snapshot_with(
     capture_global: impl FnOnce(&AxTreeRequest) -> io::Result<AxSnapshot>,
     capture_window: impl FnOnce(&str, &AxTreeRequest) -> io::Result<AxSnapshot>,
 ) -> io::Result<AxSnapshot> {
+    // App 菜单栏挂在 AXApplication 下,不是任意 AXWindow 的子树。
+    // 因此必须保留 app-menu root,交给平台后端按应用筛选菜单快照。
+    if matches!(request.tree.scope, AxTreeScope::AppMenu) {
+        return capture_global(&request.tree);
+    }
     let Some(window) = request.window.as_ref() else {
         return capture_global(&request.tree);
     };

@@ -2,7 +2,10 @@ use super::{
     assign_once, invalid_data, parse_ax_depth, parse_ax_max_elements, parse_ax_mode_payload,
     parse_ax_target, parse_bool_literal, required_field, resolve_current_ax_target_rect,
     resolve_observation_ref, resolve_target_id_in_snapshot, AxElement, AxMode, AxRect, AxSnapshot,
-    AxTarget, AxTreeRequest, AxWindow, AX_SCHEMA,
+    AxTarget, AxTreeRequest, AxTreeScope, AxWindow, AX_SCHEMA,
+};
+use crate::control_ax::{
+    parse_compact_opt_bool, parse_compact_opt_mode, parse_compact_opt_u16, parse_compact_opt_u8,
 };
 use crate::control_display_scope::{
     display_intersects_rect, display_scope_report, parse_display_scope, resolve_display_scope,
@@ -12,9 +15,6 @@ use crate::control_observation::ObservationHeader;
 use crate::control_protocol::{
     normalize_object_field_name, object_inner, parse_compact_fields, parse_quoted_payload,
     resolve_compact_selector, split_object_field, split_object_fields, CompactWindowSelector,
-};
-use crate::control_ax::{
-    parse_compact_opt_bool, parse_compact_opt_mode, parse_compact_opt_u16, parse_compact_opt_u8,
 };
 use crate::control_window::resolve_unique_app_window_id;
 use crate::screenshot::current_display_summaries;
@@ -242,6 +242,11 @@ pub fn parse_ax_find_payload(input: &str) -> io::Result<AxFindRequest> {
         // 例如 `app:Safari,role:AXTextField`、`app:Safari,AXButton,limit:10`。
         // 带前缀字段按名路由, 无前缀字段按位置回退 (第1=窗口, 第2=角色)。
         let mut fields = parse_compact_fields("@ax-find", trimmed)?;
+        let root = fields
+            .take_named("@ax-find", "root")?
+            .map(|value| parse_ax_find_root_compact(&value))
+            .transpose()?
+            .unwrap_or(AxTreeScope::Windows);
         let selector = resolve_compact_selector("@ax-find", &mut fields)?;
         let role = fields.take_named_or_positional("@ax-find", "role", "role")?;
         let include_values = parse_compact_opt_bool(
@@ -249,16 +254,10 @@ pub fn parse_ax_find_payload(input: &str) -> io::Result<AxFindRequest> {
             "include_values",
             fields.take_named("@ax-find", "include_values")?,
         )?;
-        let limit = parse_compact_opt_u16(
-            "@ax-find",
-            "limit",
-            fields.take_named("@ax-find", "limit")?,
-        )?;
-        let depth = parse_compact_opt_u8(
-            "@ax-find",
-            "depth",
-            fields.take_named("@ax-find", "depth")?,
-        )?;
+        let limit =
+            parse_compact_opt_u16("@ax-find", "limit", fields.take_named("@ax-find", "limit")?)?;
+        let depth =
+            parse_compact_opt_u8("@ax-find", "depth", fields.take_named("@ax-find", "depth")?)?;
         let max_elements = parse_compact_opt_u16(
             "@ax-find",
             "max_elements",
@@ -273,22 +272,36 @@ pub fn parse_ax_find_payload(input: &str) -> io::Result<AxFindRequest> {
             )
         })?;
         let preset = mode.map(|mode| mode.preset());
-        let window = match selector {
-            CompactWindowSelector::WindowId(window_id) => AxWindowIdentity {
-                window_id: Some(window_id),
-                app: None,
-                ref_id: None,
-                observation_id: None,
-            },
-            CompactWindowSelector::App(app) => AxWindowIdentity {
-                window_id: None,
-                app: Some(app),
-                ref_id: None,
-                observation_id: None,
-            },
+        let (window, app_menu_app) = match (root, selector) {
+            (AxTreeScope::Windows, CompactWindowSelector::WindowId(window_id)) => (
+                Some(AxWindowIdentity {
+                    window_id: Some(window_id),
+                    app: None,
+                    ref_id: None,
+                    observation_id: None,
+                }),
+                None,
+            ),
+            (AxTreeScope::Windows, CompactWindowSelector::App(app)) => (
+                Some(AxWindowIdentity {
+                    window_id: None,
+                    app: Some(app),
+                    ref_id: None,
+                    observation_id: None,
+                }),
+                None,
+            ),
+            (AxTreeScope::AppMenu, CompactWindowSelector::App(app)) => (None, Some(app)),
+            (AxTreeScope::AppMenu, CompactWindowSelector::WindowId(_)) => {
+                return Err(invalid_data(
+                    "@ax-find root=app-menu 需要 app:APP,不能使用 window_id",
+                ));
+            }
         };
         return Ok(AxFindRequest {
             tree: AxTreeRequest {
+                scope: root,
+                app_menu_app,
                 depth: depth.unwrap_or(
                     preset
                         .as_ref()
@@ -313,7 +326,7 @@ pub fn parse_ax_find_payload(input: &str) -> io::Result<AxFindRequest> {
                 role: Some(role),
                 ..AxFindQuery::default()
             },
-            window: Some(window),
+            window,
             display_scope: None,
             limit: limit.unwrap_or(COMPACT_AX_FIND_LIMIT),
         });
@@ -329,7 +342,9 @@ pub fn parse_ax_find_payload(input: &str) -> io::Result<AxFindRequest> {
     let mut max_elements = None::<u16>;
     let mut include_values = None::<bool>;
     let mut limit = None::<u16>;
+    let mut root = None::<AxTreeScope>;
     let mut window = None::<AxWindowIdentity>;
+    let mut app = None::<String>;
     let mut display_scope = None::<DisplayScope>;
     let mut query = AxFindQuery::default();
 
@@ -339,6 +354,12 @@ pub fn parse_ax_find_payload(input: &str) -> io::Result<AxFindRequest> {
         let raw_value = raw_value.trim();
 
         match field_name.as_str() {
+            "root" => assign_once(
+                &mut root,
+                "root",
+                "@ax-find",
+                parse_ax_find_root_payload(raw_value)?,
+            )?,
             "mode" => assign_once(
                 &mut mode,
                 "mode",
@@ -368,20 +389,12 @@ pub fn parse_ax_find_payload(input: &str) -> io::Result<AxFindRequest> {
             // 2026-08-04 (LLM 兼容): 对象语法接受顶层 app / window_id,
             // 自动归一化为 window 选择器, 与 compact 的 `app:APP` 语义一致。
             // 模型常把 compact 思维带进对象 (如 {app:"Safari",role:"AXButton"})。
-            "app" => {
-                let app = parse_non_empty_string("@ax-find.app", raw_value)?;
-                assign_once(
-                    &mut window,
-                    "app",
-                    "@ax-find",
-                    AxWindowIdentity {
-                        window_id: None,
-                        app: Some(app),
-                        ref_id: None,
-                        observation_id: None,
-                    },
-                )?;
-            }
+            "app" => assign_once(
+                &mut app,
+                "app",
+                "@ax-find",
+                parse_non_empty_string("@ax-find.app", raw_value)?,
+            )?,
             "window_id" => {
                 let window_id = parse_non_empty_string("@ax-find.window_id", raw_value)?;
                 assign_once(
@@ -493,10 +506,47 @@ pub fn parse_ax_find_payload(input: &str) -> io::Result<AxFindRequest> {
         }
     }
 
+    let root = root.unwrap_or(AxTreeScope::Windows);
+    let (window, app_menu_app) = match root {
+        AxTreeScope::Windows => {
+            if let Some(app) = app {
+                assign_once(
+                    &mut window,
+                    "app",
+                    "@ax-find",
+                    AxWindowIdentity {
+                        window_id: None,
+                        app: Some(app),
+                        ref_id: None,
+                        observation_id: None,
+                    },
+                )?;
+            }
+            (window, None)
+        }
+        AxTreeScope::AppMenu => {
+            if window.is_some() {
+                return Err(invalid_data(
+                    "@ax-find root=app-menu 使用 app 筛选,不能携带 window",
+                ));
+            }
+            let app = app.ok_or_else(|| {
+                invalid_data("@ax-find root=app-menu 需要 app,例如 app:\"Finder\"")
+            })?;
+            if query.process.is_some() || query.process_contains.is_some() {
+                return Err(invalid_data(
+                    "@ax-find root=app-menu 的 app 不能与 process / process_contains 混用",
+                ));
+            }
+            (None, Some(app))
+        }
+    };
     query.validate()?;
     let preset = mode.unwrap_or(DEFAULT_AX_FIND_MODE).preset();
     Ok(AxFindRequest {
         tree: AxTreeRequest {
+            scope: root,
+            app_menu_app,
             depth: depth.unwrap_or(preset.depth),
             max_elements: max_elements.unwrap_or(preset.max_elements),
             include_values: include_values.unwrap_or(preset.include_values),
@@ -507,6 +557,24 @@ pub fn parse_ax_find_payload(input: &str) -> io::Result<AxFindRequest> {
         display_scope,
         limit: limit.unwrap_or(DEFAULT_AX_FIND_LIMIT),
     })
+}
+
+fn parse_ax_find_root_compact(input: &str) -> io::Result<AxTreeScope> {
+    parse_ax_find_root(input)
+}
+
+fn parse_ax_find_root_payload(input: &str) -> io::Result<AxTreeScope> {
+    parse_ax_find_root(&parse_quoted_payload(input)?)
+}
+
+fn parse_ax_find_root(input: &str) -> io::Result<AxTreeScope> {
+    match input.trim().to_ascii_lowercase().as_str() {
+        "window" | "windows" => Ok(AxTreeScope::Windows),
+        "app-menu" | "app_menu" | "menu" => Ok(AxTreeScope::AppMenu),
+        other => Err(invalid_data(format!(
+            "@ax-find root 只支持 window 或 app-menu: {other}"
+        ))),
+    }
 }
 
 fn parse_ax_window_identity(input: &str) -> io::Result<AxWindowIdentity> {
@@ -1002,6 +1070,32 @@ mod tests {
 
         assert!(parse_ax_find_payload("app:Calculator App,AXStaticText").is_err());
         assert!(parse_ax_find_payload("app:Calculator,AXButton,extra").is_err());
+    }
+
+    #[test]
+    fn parse_ax_find_payload_should_accept_app_menu_root_without_window_fallback() {
+        let object =
+            parse_ax_find_payload(r#"{root:"app-menu",app:"Finder",role:"AXMenuItem",limit:8}"#)
+                .expect("app menu object query should parse");
+        assert_eq!(object.tree.scope, AxTreeScope::AppMenu);
+        assert!(object.window.is_none());
+        assert_eq!(object.tree.app_menu_app.as_deref(), Some("Finder"));
+        assert!(object.query.process.is_none());
+        assert_eq!(object.query.role.as_deref(), Some("AXMenuItem"));
+        assert_eq!(object.limit, 8);
+
+        let compact = parse_ax_find_payload("root:app-menu,app:Finder,AXMenuItem")
+            .expect("app menu compact query should parse");
+        assert_eq!(compact.tree.scope, AxTreeScope::AppMenu);
+        assert!(compact.window.is_none());
+        assert_eq!(compact.tree.app_menu_app.as_deref(), Some("Finder"));
+        assert!(compact.query.process.is_none());
+
+        assert!(parse_ax_find_payload(r#"{root:"app-menu",role:"AXMenuItem"}"#).is_err());
+        assert!(parse_ax_find_payload(
+            r#"{root:"app-menu",app:"Finder",window:{window_id:"pid:1/window:0"},role:"AXMenuItem"}"#
+        )
+        .is_err());
     }
 
     #[test]

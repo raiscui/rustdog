@@ -92,6 +92,7 @@ const KNOWN_COMPACT_PREFIXES: &[&str] = &[
     "depth",
     "max_elements",
     "mode",
+    "root",
     "expected_value",
     "max_attempts",
 ];
@@ -227,7 +228,10 @@ impl ParsedCompactFields {
             leftovers.extend(self.named.iter().map(|(n, v)| format!("{n}:{v}")));
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                format!("{kind} 短格式存在无法识别的多余字段: {}", leftovers.join(", ")),
+                format!(
+                    "{kind} 短格式存在无法识别的多余字段: {}",
+                    leftovers.join(", ")
+                ),
             ));
         }
         Ok(())
