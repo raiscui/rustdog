@@ -58,3 +58,71 @@
 - 根仓库文档已提交为 `a267afb docs(context): record macos ops evaluation`。
 - 外部评测 runner 已提交为 `7502c1c fix(macos-ops): cover setup capture and cleanup`;其 24 项单测通过,并经独立 `APPROVE/CLEAR` 审阅。
 - root 工作树已清理。外部仓库的未跟踪历史上下文文件保持未改,没有混入代码提交。
+
+## [2026-08-07 00:19:24] [Session ID: omx-1786061963768-e7in9l] 任务名称: macOS ops 交互效率工作流规格
+
+### 任务内容
+- 新建 `workflows/macos-ops-interaction-efficiency.md`,作为优化 macOS ops agent 交互步数的唯一 workflow 规格。
+- 将用户确认的通用性边界、ledger 口径、baseline、brief 和全矩阵认证规则写入 workflow 与原始 notes。
+
+### 完成过程
+- 读取当前 runner、canonical skill 和历史评测记录,确认 agent JSONL、summary、suite result 与 5 模型 × 8 case 入口。
+- 通过逐项确认固定: 统计全部 agent `rdog control` 请求,禁止 app/case 特例,优先修共享层,全矩阵认证,fail-closed 计量和版本化 baseline。
+- baseline 归档固定在外部评测仓库 `results/macos-ops-interaction/<baseline-id>/`,不依赖 `/tmp`。
+
+### 总结感悟
+- 最终 pass 只能证明任务完成,不能证明控制成本低。ledger 必须保留重试、协议错误和动作后证据,才能把通用兼容性优化与局部脚本技巧区分开。
+
+## [2026-08-07 09:40:21] [Session ID: omx-1786061963768-e7in9l] 任务名称: macOS ops interaction ledger baseline 收口
+
+### 任务内容
+- 更新 `workflows/macos-ops-interaction-efficiency.md`,让计量规则与真实 Pi bash artifact 一致。
+- 在外部评测仓库完成真实 5 模型 x 8 case 的 immutable interaction baseline 归档。
+
+### 完成过程
+- 新 ledger 定向回归 7 项和与既有 macOS ops runner 的联合回归 31 项均通过,`ruff check` 无问题。
+- `macos-ops-20260807-live-5x8` 已保存 5 份 source suite、输入指纹、ledger、manifest 和摘要。
+- 保留 1 个零成本失败 retry,没有修改 rdog 协议、canonical skill 或任何 app 特例。
+
+### 总结感悟
+- agent 决策和 rdog 请求是两个不同指标。将 shell 预备步骤直接拒绝会扭曲成本,而将其算作请求又会高估控制面交互。
+
+## [2026-08-07 10:00:19] [Session ID: omx-1786061963768-e7in9l] 任务名称: macOS ops parser 兼容性候选 brief
+
+### 任务内容
+- 从 immutable interaction ledger 提取跨模型、跨 case 的共享 parser 摩擦,并在不改协议行为的前提下形成决策 brief。
+
+### 完成过程
+- 聚合 30 个 recovery 请求,确认 `@cmd` raw payload 和 `@window-find:APP` 都满足动态样本阈值并拥有明确共享 parser 入口。
+- 将 `@key.target` 和 `@ax-press.action` 排除,因为它们分别会改变显式 targeted delivery 与 AX action 语义。
+- 生成 external evaluation artifact brief,等待用户批准后才实施。
+
+### 总结感悟
+- 反复出现的 parse error 不必然可自动兼容。只有能保持既有 target、权限和 action 不变量的语法归一化才是合格优化。
+
+## [2026-08-07 11:25:39] [Session ID: omx-1786061963768-e7in9l] 任务名称: macOS ops 共享 parser 兼容与 current-binary 认证
+
+### 任务内容
+- 实现批准的通用 parser 兼容: `@cmd` raw 单行 payload 与 `@window-find:APP`。
+- 为外部 interaction archive 增加二进制 provenance 门禁,并以 current `target/debug/rdog` 完成 5 模型 x 8 case 认证。
+
+### 完成过程
+- Rust 格式化、685 项 binary nextest 和 binary build 已通过。评测 runner 以 `rdogBinary` 固定 runner 与 Pi bash 的同一可执行文件。
+- archive 从 config 重新计算 `rdogBinary` path/SHA-256,要求每个 source `run-plan.rdog` 完全匹配;10 项 ledger 回归、27 项 runner 回归和 `ruff check runner` 全部通过。
+- 归档 40/40 成功的 5 个 suite,得到 258 agent decisions、243 rdog requests、40 attempts。相对 immutable baseline 的 260 / 252 / 41,请求减少 9 次,满足已批准升级门槛。
+
+### 总结感悟
+- LLM eval 的版本号不足以证明 parser 改动被实际执行。只有 binary path 与内容 hash 同时封存,ledger 才能作为 shared protocol 优化的证据。
+- 这轮没有向 skill 写入 App 或操作序列。改善来自共享 parser 兼容和可验证的评测路径,不是局部脚本化。
+
+## [2026-08-07 12:54:47] [Session ID: omx-1786061963768-e7in9l] 任务名称: rdog parser 兼容性提交
+
+### 任务内容
+- 将本轮共享 parser 兼容、协议文档、canonical skill reference 和 workflow 固化为独立提交。
+
+### 完成过程
+- 已创建 `feat(control): accept raw cmd and positional window lookup` scoped commit。
+- 提交只包含本轮审阅的 13 个文件,没有加入 App/case 特例操作序列。
+
+### 总结感悟
+- 评测改善应来自共享控制面兼容性,并通过全矩阵 artifact 验证,不能依赖脚本化的局部路径。

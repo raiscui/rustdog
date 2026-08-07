@@ -626,3 +626,23 @@ pub(crate) fn parse_quoted_payload(input: &str) -> io::Result<String> {
         format!("未闭合的控制指令 payload: {input}"),
     ))
 }
+
+/// 解析显式 `@cmd` 的 shell 文本。
+///
+/// `@cmd` 是既有裸 shell lane 的 request-id 入口,因此允许非对象的单行 raw
+/// payload;其它控制命令仍继续使用严格的 quoted/object 契约。
+pub(super) fn parse_cmd_payload(input: &str) -> io::Result<String> {
+    let trimmed = input.trim();
+    if trimmed.starts_with('"') {
+        return parse_quoted_payload(trimmed);
+    }
+
+    if trimmed.is_empty() || input.contains(['\r', '\n']) || trimmed.starts_with('{') {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("@cmd payload 必须是非空、单行的 quoted 或 raw shell 文本: {input}"),
+        ));
+    }
+
+    Ok(trimmed.to_owned())
+}

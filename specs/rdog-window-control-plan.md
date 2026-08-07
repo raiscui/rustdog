@@ -54,6 +54,12 @@ Phase 1 状态边界:
 - `title`
 - `title_contains`
 
+短格式兼容:
+
+- `@window-find:APP` 等价于 `{app:"APP"}`。
+- 既有 named 写法 `@window-find:app:APP` 保持可用。
+- compact payload 只能提供一个 positional app;不能与 named 查询字段混用,也不能提供多个 positional atom。
+
 返回要点:
 
 - `kind:"window-find"`

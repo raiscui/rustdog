@@ -798,19 +798,6 @@ zenoh router down / unixpipe broken / zenoh timeout 等场景.
 触发条件: 需要 client 端断开测试, 或 daemon 端临时 kill zenoh session,
 可以 mock 但 live trigger 比较难稳定.
 
-## [2026-08-06 15:06:56] [Session ID: omx-1785926019233-oohizd] 候选: `@window-find:APP` 裸应用名兼容
-
-### 现象
-- 全模型 macOS ops JSONL 中出现 3 次 `@window-find:Calendar` / `Terminal` / `TextEdit`。
-- 当前 parser 已把无前缀 token 放入 compact positional,但 `parse_window_find_payload` 只消费 `app:` / `pid:` named field,因此返回 `code:64` 后模型再改用对象写法。
-
-### 建议
-- 若后续目标是降低 recoverable protocol error,把唯一 positional token 映射为 `query.app`,与既有 `@window-find:app:APP` 等价。
-- 必须保留 named/positional 冲突拒绝和多 token 拒绝,并添加 parser 单测后重新运行五模型 8-case 矩阵,因为 canonical skill / protocol 行为会变化。
-
-### 当前边界
-- 本轮全部 40 个 case 已成功,不以改变协议面换取已自愈错误的零计数。
-
 ## [2026-08-06 15:06:56] [Session ID: omx-1785926019233-oohizd] 候选: Rust binary 既有 warning 清理
 
 ### 证据
@@ -820,3 +807,15 @@ zenoh router down / unixpipe broken / zenoh timeout 等场景.
 ### 建议
 - 单独按模块做 cfg import 收口与 dead-code 边界整理,每次保持功能不变并跑完整 binary tests。
 - 不与当前 logger 初始化修复混合提交,避免把已验证的启动修复掩盖在无关重构中。
+
+## [2026-08-07 11:25:39] [Session ID: omx-1786061963768-e7in9l] 待办: 认证 matrix 的独立重复采样
+
+- 当前 current-binary 5 x 8 matrix 满足请求数下降门槛,但它是单轮 live 结果,且 recovery 请求从 30 增至 31。
+- 需要在不同时间至少再运行两轮相同的 current-binary matrix,持续记录 binary provenance,再估计两项 shared parser compatibility 的稳定请求收益。
+- 不得通过修改 canonical skill、追加 App recipe 或调整 case 操作序列来获得该统计结果。
+
+## [2026-08-07 11:25:39] [Session ID: omx-1786061963768-e7in9l] 待办: Zenoh client 关闭时的 admin transport event 日志
+
+- 在本轮 current daemon live matrix 中,每次 Zenoh control client 正常关闭后 stderr 会出现 `ERROR zenoh::api::admin: Unable to publish transport event: session closed`。
+- 对应 control response 和进程退出状态正常,当前没有静态或动态证据证明它影响 parser、评测成功率或 ledger 统计。
+- 后续应以最小 control client 复现并定位 event publisher 的生命周期,再决定是修复、降级日志还是保留诊断事件。

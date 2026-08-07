@@ -855,6 +855,17 @@ pub fn parse_window_find_payload(input: &str) -> io::Result<WindowFindRequest> {
                 })?;
             query.pid = Some(pid);
         }
+
+        // 只有没有 named 查询字段时,才把唯一 positional atom 视为 exact app。
+        // 这样不会把 `pid:...,App` 一类混合输入悄悄放宽成更宽的查询。
+        if let Some(app) = fields.take_positional("@window-find", "app")? {
+            if !query.is_empty() {
+                return Err(invalid_data(
+                    "@window-find 短格式不能混用 named 查询字段与 positional app",
+                ));
+            }
+            query.app = Some(app);
+        }
         fields.ensure_empty("@window-find")?;
         if query.is_empty() {
             return Err(invalid_data(
@@ -1884,6 +1895,12 @@ mod tests {
         assert_eq!(request.limit, 10);
         assert!(request.include_state);
         assert!(!request.include_recipes);
+
+        let compact = parse_window_find_payload("Terminal").unwrap();
+        assert_eq!(compact.query.app.as_deref(), Some("Terminal"));
+        assert!(parse_window_find_payload("Terminal,Finder").is_err());
+        assert!(parse_window_find_payload("app:Terminal,Finder").is_err());
+        assert!(parse_window_find_payload("pid:1,Terminal").is_err());
     }
 
     #[test]

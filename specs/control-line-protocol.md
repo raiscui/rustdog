@@ -88,6 +88,7 @@ line-control 会把每一行输入分成 3 类:
 @script#42:"printf READY"
 @cmd:"printf READY"
 @cmd#42:"printf READY"
+@cmd#42:printf READY
 @pty:"codex"
 @pty:"codex resume 019e02de-8814-72a2-ab0c-b06263cc0fba"
 @pty:{cmd:"codex",args:[],cols:80,rows:24}
@@ -610,6 +611,12 @@ compact `app:APP` 必须通过 fresh exact window query 解析为唯一且可交
 
 - 你要保留终端式输入时,继续写裸 shell 行
 - 你要把 shell 请求纳入 request-id 协议时,写 `@cmd#id:"..."`
+
+兼容性边界:
+
+- quoted payload 始终可用。
+- raw payload 也可用,但必须是非空的单个物理行,例如 `@cmd#42:printf READY`。
+- raw payload 不能是对象,也不能跨行;这两种写法返回解析错误,不会被拆分或规整为另一条命令。
 
 ### `@pty`
 

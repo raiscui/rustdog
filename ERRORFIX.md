@@ -714,3 +714,38 @@
 ### 验证
 - 新增窗口计数和保存场景 cleanup 回归测试;`python3 -m unittest test_run_macos_ops_eval.py` 为 24 passed。
 - 完整五模型 40-case live suite 随后完成;runner 修复已提交为 `7502c1c`。
+
+## [2026-08-07 10:10:51] [Session ID: omx-1786061963768-e7in9l] 错误修复: raw `@cmd` 单行校验被全局 trim 覆盖
+
+### 现象
+- `@cmd:\necho READY` 在 raw 单行约束下本应拒绝,但新增回归测试在修复前失败,说明它被当作有效命令解析。
+
+### 原因
+- `parse_control_line()` 在分派给 `parse_cmd_payload()` 前无差别执行 `payload.trim()`。
+- 这删除了 raw payload 的前导物理换行,令下游 `contains(['\r', '\n'])` 校验失去证据。
+
+### 修复
+- 保留 `raw_payload`,并仅向 `@cmd` parser 传递原始文本。
+- 其它控制命令继续使用既有 trim 后 payload,避免扩大行为变化。
+
+### 验证
+- 修复前: raw cmd 定向 nextest 失败。
+- 修复后: raw cmd、`@window-find:APP` 和 common window query 三项定向 nextest 通过。
+- 测试命令首次误传 `--exact` 给 nextest 后已改为 `-E 'test(...)'`;该命令错误不作为任何验证结果。
+
+## [2026-08-07 11:25:39] [Session ID: omx-1786061963768-e7in9l] 错误修复: interaction archive 未绑定评测二进制 provenance
+
+### 现象
+- 初次 candidate 40/40 成功,但 raw `@cmd` 与 positional `@window-find` 仍返回旧 parser 的 `code:64`。
+- Pi probe 证明它实际解析到 `/Users/cuiluming/.cargo/bin/rdog`,不是本轮 `target/debug/rdog`。archive 当时不会拒绝这类错配 artifact。
+
+### 原因
+- runner 过去只通过 PATH 解析 `rdog`,而 ledger 只读取 `run-plan.rdog` 作为展示字段,没有和 archive config 做身份验证。
+
+### 修复
+- runner config 使用可执行的绝对 `rdogBinary`,runner 自身直接调用该路径,Pi child PATH 前置其目录,run-plan 写入 path/SHA-256。
+- archive 重新计算 config binary hash,强制每个 source run 的 path/SHA-256 完全匹配;缺失或不一致直接失败关闭,并把 identity 写入 ledger 和 manifest。
+
+### 验证
+- ledger 定向回归 10 项覆盖正常、缺失 provenance 和 hash mismatch;runner 回归 27 项与 `ruff check runner` 通过。
+- 新 5 x 8 archive 全部匹配 `target/debug/rdog` SHA-256 `db5cb9fde3afd4e6d7c54c1375af1578e450994e457ae72eb6c174fe9d0f39c7`,40/40 成功。

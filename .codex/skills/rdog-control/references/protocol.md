@@ -11,6 +11,7 @@
 | `@bootstrap` | read-only liveness + capabilities + optional observe preflight |
 | `@capabilities` | structured capability report request |
 | `@cmd#42:"printf READY"` | explicit protocol request with request id |
+| `@cmd#42:printf READY` | explicit request with one-line raw shell payload |
 | `printf PLAIN_OK` | bare one-shot shell line |
 
 Explicit request ids apply only to `@...` requests.
@@ -27,6 +28,7 @@ Bare shell lines do not have request ids.
 @capabilities#7
 @cmd:"printf READY"
 @cmd#42:"printf READY"
+@cmd#42:printf READY
 @script:"git status --short"
 @paste:"hello"
 @key:"F11"
@@ -39,6 +41,7 @@ Bare shell lines do not have request ids.
 @screenshot#10:{include_ax:true,ax_required:false,ax_mode:"interactive"}
 @observe#19:{mode:"hybrid",include_screenshot:true,include_ax:true,include_windows:true,ax_required:false,ax_mode:"interactive"}
 @window-find#11:{app:"TextEdit",title_contains:"release-notes",limit:5,include_state:true,include_recipes:true}
+@window-find:APP
 @window-activate#12:{target:{ref:"@e1",observation_id:"obs-123"}}
 @window-activate#13:{window_id:"pid:123/window:0"}
 @window-resize#18:{target:{ref:"@e1",observation_id:"obs-123"},size:{width:1200,height:800,unit:"os-logical",box:"outer"},origin:"keep",verify:true}
@@ -349,6 +352,10 @@ Common requests:
 - `matches[].ref`
 - `matches[].state`
 - `matches[].recipes`
+
+`@window-find:APP` is a compact alias for `{app:"APP"}`. It accepts exactly one
+positional app atom. Keep `app:APP` for the existing named compact form; do not
+mix the two forms or add a second positional atom.
 
 Current `window_id` shape:
 

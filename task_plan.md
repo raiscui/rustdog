@@ -1043,3 +1043,248 @@ deepseek 3/3(历史一致) | minimax 2/3 | qwen36 2/3 | qwen37 1/3(历史 2/3) |
 
 ### 状态
 **本轮全部完成**: 已提交、已验证,不存在待处理的运行中命令。
+
+## [2026-08-07 09:35:14] [Session ID: omx-1786061963768-e7in9l] [记录类型]: interaction ledger 实现完成,进入验证与归档
+
+### 已完成
+- [x] 外部评测仓库已实现独立 ledger 生成、完整输入指纹和原子 baseline 归档,未修改 rdog 协议或 canonical skill。
+- [x] 已为请求分类、supporting shell、零调用 attempt、多 control 拒绝、完整输入指纹与 source artifact 归档增加定向回归测试。
+- [ ] 正在重跑最新补丁的单测和静态检查,随后归档真实 5 模型 x 8 case baseline。
+
+### 经真实 artifact 修正的计量口径
+- 所有 Pi `bash` tool call 都计入 `agentDecisionCount`。
+- 单个可用 shell 解析识别出的 `rdog control` invocation 计入 `requestCount`。同一 bash 中可有预备 shell,例如 `sleep ...; rdog control ...`。
+- 没有 control 的 bash 记录为 `supporting_shell`;模型在工具调用前失败的 attempt 保留为零决策、零请求。
+- 同一 bash 含多个 control invocation,或 shell 无法可靠解析时必须失败关闭。解析和分类不读取 app、case、prompt 或预期结果。
+
+### 本轮操作
+- 首次读取外部评测仓库时误用了 rustdog 的相对 workflow 路径,命令仅返回文件不存在,未改动文件;已改用绝对路径重读。
+- 接下来依次运行 Python 回归、ruff、真实 artifact baseline archive 和 ledger 结构审计。
+
+### 状态
+**当前在验证阶段**: 归档已完成的 5 x 8 真实评测。
+
+## [2026-08-07 09:40:21] [Session ID: omx-1786061963768-e7in9l] [完成]: macOS ops interaction ledger 与 immutable baseline
+
+- [x] 运行新 ledger 的 7 项定向回归和与既有 runner 的 31 项联合回归。
+- [x] 运行 `ruff check`,并归档真实 5 模型 x 8 case suite。
+- [x] 生成 `macos-ops-20260807-live-5x8`,保留 5 份 source artifact 和完整输入指纹。
+- [x] 同步 workflow 与评测 README 的计量定义,删除已被真实 artifact 推翻的“bash 必须以 control 开头”规则。
+
+**状态**: 本轮 measurement 和 archival 已完成。未出现满足跨至少两个独立样本门槛且需要修改 rdog 协议或 canonical skill 的候选。
+
+## [2026-08-07 09:57:25] [Session ID: omx-1786061963768-e7in9l] [记录类型]: baseline 候选摩擦诊断
+
+### 目标
+- 从已认证 `macos-ops-20260807-live-5x8` ledger 提炼重复模式,并将动态样本和 rdog 共享代码位置关联。
+- 只生成 decision brief 或“无合格候选”结论。本阶段不得修改 rdog 协议、canonical skill 或 app/case 操作路径。
+
+### 阶段
+- [ ] 阶段 1: 按错误形状、verb 和命令结构聚合 260 条 agent 决策,确认至少两个独立 `(model, case)` 样本。
+- [ ] 阶段 2: 为强动态模式追踪共享 parser / protocol 静态路径,并核对权限、目标和初始化不变量。
+- [ ] 阶段 3: 写入证据化 decision brief;若候选合格,停在用户批准门前。
+
+### 状态
+**当前在阶段 1**: 从不可变 baseline 聚合通用摩擦模式。
+
+### 阶段 1 结果
+- [x] `@cmd` 裸 payload 的 `code:64` 跨 5 个 `(model, case)` 样本出现 6 次。
+- [x] `@key` 对象的 `target` 字段被拒绝,跨 4 个 `(model, case)` 样本出现 4 次。
+- [x] `@ax-press` 的 `action` 字段被拒绝,跨 2 个 `(model, case)` 样本出现 3 次。
+- [x] `@window-find:APP` 的单 positional app 写法被拒绝,跨 2 个 `(model, case)` 样本出现 2 次。
+- [ ] 阶段 2: 追踪这四组动态候选的共享代码路径与安全边界,排除仅模型探索或环境噪音。
+
+### 状态
+**当前在阶段 2**: 从 parser / protocol 代码和正式规格取得静态证据。
+
+### 阶段 2 结果
+- [x] `@cmd` 当前直接调用 `parse_quoted_payload`;它与裸 shell 共用既有执行器,候选仅是为显式 request-id lane 接受非对象、单行 raw payload。
+- [x] `@window-find` compact parser 只消费 `app:` / `pid:` named field;把唯一 positional atom 映射为 `app` 不改变只读查询或窗口唯一性验证。
+- [x] `@key.target` 不能直接宽容: 现有 `delivery + pid/window_id` 显式区分 global / pid / window 送达,样本中的 app、window、AX element target 不能安全归一。
+- [x] `@ax-press.action` 不能直接宽容: `@ax-press` 固定 AXPress,其它 allowlist action 属于 `@ax-action`,自动改写会改变 command 语义。
+- [ ] 阶段 3: 写入两项合格候选与两项否决方向的 decision brief,停在用户批准门前。
+
+### 状态
+**当前在阶段 3**: 生成只含共享行为的决策 brief。
+
+### 阶段 3 结果
+- [x] 已在外部评测仓库写入 `results/macos-ops-interaction/decision-brief__20260807_parser-compatibility.md`。
+- [x] brief 仅提出 `@cmd` raw 单行 payload 与 `@window-find:APP` 两项共享 parser 候选。
+- [x] `@key.target` 与 `@ax-press.action` 被明确排除,避免破坏 targeted delivery / AX action 的既有不变量。
+
+### 状态
+**等待用户批准**: 只能在批准候选 A、候选 B 或两者后进入 parser 实现和完整 5 x 8 认证。
+
+## [2026-08-07 10:03:57] [Session ID: omx-1786061963768-e7in9l] [批准]: 实施候选 A + B
+
+### 用户决定
+- 用户选择 `1`,批准 `@cmd` raw 单行 payload 与 `@window-find:APP` 的共享 parser 兼容。
+
+### 实施阶段
+- [ ] 阶段 1: 为两个新增语法补 parser 回归,固定 quoted、request-id、混合字段和多行拒绝不变量。
+- [ ] 阶段 2: 修改共享 parser,不改变 shell executor、targeted delivery、AX action 或 canonical skill。
+- [ ] 阶段 3: 跑定向 Rust 测试、完整 Rust 回归、构建,再重跑完整 5 x 8 live matrix 并生成 candidate ledger。
+
+### 状态
+**当前在阶段 1**: 在代码变更前锁定 parser 行为。
+
+## [2026-08-07 10:08:13] [Session ID: omx-1786061963768-e7in9l] [修正计划]: `@cmd` raw 单行边界
+
+### 已观察事实
+- `parse_control_line()` 在命令分派前执行 `payload.trim()`。
+- 新增的 `parse_cmd_payload()` 虽检查 `input.contains(['\r', '\n'])`,但它当前接收的是已规整的 payload。
+- 因此 `@cmd:\necho READY` 的前导物理换行可能在进入该检查前丢失,与已批准的 raw "单行" 契约不一致。
+
+### 当前假设与验证
+- 主假设: 将原始 payload 单独保留,仅 `@cmd` 传入原始值,即可拒绝前导/中间换行,同时保留其它命令既有 trim 行为。
+- 最强备选: header 解析已经拒绝命令内换行,导致该路径不可达。先加精确单测验证;若测试未复现,撤销该假设而不扩大改动。
+- [ ] 阶段 1: 添加前导换行拒绝和正常行尾换行接受测试,确认失败路径。
+- [ ] 阶段 2: 修正 raw payload 分派边界,并运行 parser 定向回归。
+- [ ] 阶段 3: 同步正式协议,运行完整二进制回归、构建和 5 x 8 live matrix。
+
+### 状态
+**当前在阶段 1**: 先以最小测试证伪或确认 `trim()` 是否掩盖换行。
+
+## [2026-08-07 10:10:51] [Session ID: omx-1786061963768-e7in9l] [阶段更新]: raw `@cmd` 分派边界已验证并修复
+
+- [x] 阶段 1: 在未改实现时,`parse_should_accept_raw_single_line_cmd_and_reject_ambiguous_payloads` 失败,确认 `@cmd:\necho READY` 会穿过 `payload.trim()` 被错误接受。
+- [x] 阶段 2: `@cmd` 改为唯一接收原始 payload;其它命令继续接收原有 trim 后 payload。定向 raw cmd、positional window-find 和 common window query 三项 nextest 均通过。
+- [ ] 阶段 3: 正式协议已同步,待运行完整二进制回归、构建和 5 x 8 live matrix;全矩阵成功且 requestCount 小于 252 才能提升 candidate ledger。
+
+### 记录的命令错误
+- `cargo nextest` 不支持 `--exact`;已改用 `-E 'test(...)'` 过滤,此前无输出的命令不计为测试通过。
+
+### 状态
+**当前在阶段 3**: 协议文档已同步,准备执行全量 Rust 验证。
+
+## [2026-08-07 10:12:34] [Session ID: omx-1786061963768-e7in9l] [阶段更新]: 全量 Rust 验证通过
+
+- [x] `cargo fmt -- --check` 与 `git diff --check` 通过。
+- [x] `cargo nextest run --package rustdog --bin rdog` 通过: 685 passed, 1 skipped。
+- [x] `cargo build --package rustdog --bin rdog` 成功: 0 errors, 17 warnings。warning 均为既有跨模块 cfg/dead-code 边界,不属于本次 parser diff,继续遵循 `LATER_PLANS.md` 的独立清理边界。
+- [ ] 下一步: 读取外部 macOS ops runner 的当前配置和真实入口,重启 current daemon 后运行完整 5 x 8 live matrix,生成不可变 candidate ledger 并判定是否满足 requestCount < 252。
+
+### 状态
+**当前在 live 验证准备**: Rust 代码和正式文档均已通过本地检查,尚未宣称 interaction 改善。
+
+## [2026-08-07 10:46:53] [Session ID: omx-1786061963768-e7in9l] [验证阻断修复]: interaction ledger 的 heredoc 兼容
+
+### 已观察事实
+- 新 live matrix 的 5 模型 x 8 case 均最终成功,runner exit 0。
+- candidate ledger 在 MiniMax Safari attempt 2 报 `无法解析 bash command: No closing quotation`。
+- 原始 bash command 是 quoted heredoc;`bash -n` 返回 0,对应 Pi tool result 也不是 error。
+
+### 已验证结论与实施边界
+- 已验证结论: `macos_ops_interaction.py` 的 `shlex` 不理解合法 heredoc body,将 body 内 apostrophe 误作 shell 引号,这是计量器 parser 缺口而非 rdog 或模型控制失败。
+- [ ] 阶段 3.1: 用现有 stdlib 为 shell 计量器剥离可识别 heredoc body,保留 header token 并继续对未知复杂形式失败关闭。
+- [ ] 阶段 3.2: 测试 body 内 `rdog control` 文本不计为 control request,并重跑 ledger 单测与候选归档。
+- [ ] 阶段 3.3: 审计 candidate ledger 与旧 baseline;仅成功、完整且 `requestCount < 252` 才能提升。
+
+### 状态
+**当前在阶段 3.1**: 修复的是跨模型 shell 计量兼容,不增加任何 App 或 case 特例。
+
+## [2026-08-07 10:51:26] [Session ID: omx-1786061963768-e7in9l] [验证阻断]: candidate 未调用当前 rdog 二进制
+
+### 已验证事实
+- heredoc 通用解析已补齐,外部 ledger 定向测试 8 项、runner 回归 24 项和 `ruff check` 均通过。
+- 完整 5 模型 x 8 case 的 candidate 最终都成功,但 ledger 是 299 个 agent 决策、271 个 rdog 请求和 43 个 attempt,高于 immutable baseline 的 260 / 252 / 41。
+- candidate 中 `@window-find:Terminal` 与 raw `@cmd:open -a TextEdit` 仍得到旧 parser 的 `code:64`;当前 `target/debug/rdog` 的单测已证明两种写法均应成功。
+
+### 结论与下一步
+- 结论: candidate 的 Pi bash tool 没有调用当前构建的 `target/debug/rdog`,因此不能作为本次 parser 改动的 live 证据,更不能提升 baseline。
+- [ ] 阶段 3.3: 先做无 GUI 副作用的 Pi 环境探针,记录 agent 内 `command -v rdog`、解析后的路径和版本。
+- [ ] 阶段 3.4: 仅通过既有评测配置或环境注入使 Pi 明确调用当前二进制,不改写或删除 `~/.cargo/bin/rdog`。
+- [ ] 阶段 3.5: 重跑完整 5 x 8 matrix,校验 artifact 的 binary provenance 后再比较 `requestCount < 252`。
+
+### 状态
+**当前在阶段 3.3**: 先验证 Pi 实际命令解析路径;在该证据缺失前,不对交互效率作任何改善声明。
+
+## [2026-08-07 10:53:54] [Session ID: omx-1786061963768-e7in9l] [阶段更新]: Pi 二进制 provenance 已确认
+
+- [x] 阶段 3.3: 无 GUI 副作用 probe 已执行。Pi 的 bash tool 调用 `command -v rdog && rdog --version && shasum -a 256 "$(command -v rdog)"`,返回 `/Users/cuiluming/.cargo/bin/rdog` 和 SHA-256 `57eae7f8660c16c1abf2584f8072d8c083ab77219e1434e94cf774cbbf04c9ac`。
+- [x] 该 SHA 与 current `target/debug/rdog` 的 `db5cb9fde3afd4e6d7c54c1375af1578e450994e457ae72eb6c174fe9d0f39c7` 不同,确认 candidate 使用旧安装版。
+- [ ] 阶段 3.4: 将当前 rdog 可执行文件作为 eval config 的显式、绝对路径字段校验,并只在 Pi 子进程 PATH 前置其目录;runner 的 setup/verification 路径保持不变。
+- [ ] 阶段 3.5: 以同一 Pi probe 验证环境注入后命中当前 SHA,再启动 current daemon 并重跑完整 5 x 8 matrix。
+
+### 状态
+**当前在阶段 3.4**: 修复评测路径的 binary provenance 缺口,不改系统安装版、不为模型或 App 写任何分支。
+
+## [2026-08-07 10:57:30] [Session ID: omx-1786061963768-e7in9l] [阶段更新]: current binary 的 Pi 环境已验证
+
+- [x] 阶段 3.4: 外部 runner 新增 `rdogBinary` 绝对路径配置,runner-side control 直接调用该路径,Pi child PATH 前置其父目录,执行计划记录路径与 SHA-256。
+- [x] runner 回归 27 项、ledger 回归 8 项和 `ruff check runner` 通过。
+- [x] 同一条无 GUI Pi probe 通过 `build_pi_env()` 启动后返回 `/Users/cuiluming/local_doc/l_dev/my/rust/rustdog/target/debug/rdog` 与 SHA-256 `db5cb9fde3afd4e6d7c54c1375af1578e450994e457ae72eb6c174fe9d0f39c7`。
+- [ ] 阶段 3.5: 启动 current binary daemon,执行 5 模型 x 8 case live matrix,归档 ledger 并验证每个 source run 的 binary provenance。
+
+### 状态
+**当前在阶段 3.5**: 环境注入已经被 Pi 实际 bash tool 验证,现在才进入有 GUI 副作用的完整评测。
+
+## [2026-08-07 11:20:39] [Session ID: omx-1786061963768-e7in9l] [执行计划]: candidate ledger 的二进制 provenance 门禁
+
+### 已观察现象
+- 5 个新 live suite 的 `run-plan.json` 已记录 current `rdog` 的绝对路径与 SHA-256,且 40/40 通过。
+- `macos_ops_interaction.py` 当前只读取这些字段,没有与归档输入 config 的 `rdogBinary` 做完整性比较。
+
+### 候选假设与最小验证
+- 主假设: 在归档入口从 config 计算唯一 expected rdog identity,并要求每个 source run 的 path/SHA 完全相同,可阻止旧安装版 artifact 被归为 current-build candidate。
+- 最强备选: 仅在 ledger 中记录 identity 已足够,因为 source run 已带 `run-plan.rdog`;该解释会被“伪造或错配 run-plan 仍可成功归档”的定向测试推翻。
+
+### 阶段
+- [ ] 阶段 3.5a: 为归档器添加 config-to-run 二进制 provenance fail-closed 门禁和纯文件回归。
+- [ ] 阶段 3.5b: 运行外部 runner / ledger 回归、ruff 与真实 5 x 8 candidate 归档。
+- [ ] 阶段 3.5c: 审计新 ledger,按 `requestCount < 252` 判断是否提升 candidate,并停止本轮 daemon。
+
+### 状态
+**当前在阶段 3.5a**: 先保证 metrics 的 binary provenance 可验证,再生成可能影响 baseline 的 ledger。
+
+## [2026-08-07 11:22:58] [Session ID: omx-1786061963768-e7in9l] [阶段更新]: provenance 门禁已通过纯文件与 runner 回归
+
+- [x] 阶段 3.5a: `macos_ops_interaction.py` 从 config 计算 `rdogBinary` identity,并要求每份 `run-plan.rdog` path/SHA-256 完全匹配;ledger 和 manifest 记录同一份 identity。
+- [x] 阶段 3.5a: 10 项 ledger 回归覆盖正常记录、缺失 provenance 拒绝和 SHA 不一致拒绝;27 项 runner 回归与 `ruff check runner` 通过。
+- [ ] 阶段 3.5b: 以 5 个 current-binary suite 生成 candidate archive,审计统计值和来源 identity。
+- [ ] 阶段 3.5c: 用 immutable baseline 的 `requestCount < 252` 门槛决定是否提升,清理本轮 daemon。
+
+### 当前证据
+- rustdog 工作树当前为 dirty,commit 标识必须诚实记录为 `46f8ee81048d57f0e5470e87c24ea8b94e68384d-dirty`。
+- 外部评测工作树也有用户既有和本轮未提交改动;归档只会新增独立 candidate 目录,不会覆盖任何已有 baseline。
+
+### 状态
+**当前在阶段 3.5b**: 归档前的 fail-closed provenance 校验已完成,正在以真实 source artifact 计算 candidate ledger。
+
+## [2026-08-07 11:25:39] [Session ID: omx-1786061963768-e7in9l] [阶段完成]: parser compatibility current-binary 认证
+
+- [x] 阶段 3.5b: archive 成功写入 `macos-ops-20260807-parser-compatibility-current-binary-candidate-5x8`;5 个 source suite 的 run-plan identity 都与 config 指向的 current binary 完全一致。
+- [x] 阶段 3.5c: 新 ledger 为 40/40 成功、258 decisions、243 requests、40 attempts;历史 immutable baseline 为 260 / 252 / 41。`requestCount` 严格下降 9 次,满足提升门槛。
+- [x] 当前认证结果已写入跨模型 baseline 文档。旧 baseline 保留不变;新 artifact 的 candidate 命名保留其生成历史,但被标记为后续比较的 current reference。
+- [x] 收尾: 已停止 current binary daemon,确认 PID 92217 / 92218 无残留,并完成最终 diff 与回归检查。
+
+### 不应过度解释的差异
+- recovery 从 30 到 31,而 supporting shell 从 8 到 15。当前证据足以确认这次完整认证请求总数更低,不足以把全部差异唯一归因于两项 parser 兼容。
+- 旧 baseline 早于 binary provenance schema,缺少 `rdog` identity;不能把它作为 current-build 的二进制来源证据。
+
+### 状态
+**当前在收尾阶段**: 认证和指标判断完成,仅剩 daemon 清理与最终验证。
+
+## [2026-08-07 11:25:39] [Session ID: omx-1786061963768-e7in9l] [完成]: macOS ops 交互步数优化第一轮
+
+- [x] parser compatibility 与二进制 provenance 门禁已实现并通过回归。
+- [x] current-binary 5 x 8 live matrix 已归档、审计并提升为 current certified reference。
+- [x] current daemon 已停止,两仓 `git diff --check`、Python 37 项回归、Rust 685 项 binary nextest 与 build 均通过。
+
+### 最终状态
+**本轮完成**: 不存在未完成的实施或验证步骤。后续只保留独立重复 matrix 的统计确认,不阻塞本轮交付。
+
+## [2026-08-07 12:50:27] [Session ID: omx-1786061963768-e7in9l] [提交计划]: 分仓提交已验证的实现与证据
+
+- [x] 根仓库: 已审阅 parser、协议、skill reference、workflow 与上下文 diff,13 个明确文件已暂存。
+- [x] 外部评测仓库: 已审阅 runner、provenance ledger、文档和 archive;124 个 `pi-events.jsonl` 由已验证的 Git LFS 规则承载,其它 evidence 文件正常 Git 暂存。
+- [ ] 两仓: 创建 scoped commit 后核对状态、可达 submodule 与 remote,按当前分支推送。
+
+### 边界
+- 不使用 `git add .`,不暂存任何未经过本轮审阅的文件。
+- baseline 证据必须保留,但不会把超出普通 Git 可接受大小的原始 trace 盲目推到 remote。
+
+## [2026-08-07 12:54:47] [Session ID: omx-1786061963768-e7in9l] [提交完成]: rdog parser 兼容性
+
+- [x] 根仓库已创建 scoped commit: `feat(control): accept raw cmd and positional window lookup`。
+- [ ] 将提交记录纳入当前提交后,推送 `restore-point-20260803-1300`。

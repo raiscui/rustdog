@@ -9,8 +9,8 @@ pub(crate) use self::parsers::{
 };
 
 use self::parsers::{
-    parse_cancel_payload, parse_computer_act_payload, parse_control_header, parse_key_payload,
-    parse_open_app_payload, parse_pty_attach_payload, parse_pty_close_payload,
+    parse_cancel_payload, parse_cmd_payload, parse_computer_act_payload, parse_control_header,
+    parse_key_payload, parse_open_app_payload, parse_pty_attach_payload, parse_pty_close_payload,
     parse_pty_detach_payload, parse_pty_payload, parse_screenshot_payload, parse_wait_payload,
     require_non_empty_payload,
 };
@@ -483,7 +483,10 @@ pub fn parse_control_line(line: &str) -> io::Result<ControlParseResult> {
         ));
     };
 
-    let payload = payload.trim();
+    // 大多数控制命令保持既有的空白规整语义。`@cmd` 则必须保留 payload 的
+    // 物理行边界,否则前导换行会在单行校验前被隐藏。
+    let raw_payload = payload;
+    let payload = raw_payload.trim();
     let control = match kind.trim().to_ascii_lowercase().as_str() {
         "key" => ControlCommand::Key(parse_key_payload(payload)?),
         "paste" => {
@@ -497,7 +500,7 @@ pub fn parse_control_line(line: &str) -> io::Result<ControlParseResult> {
             require_non_empty_payload("script", payload, ControlCommand::Script)?
         }
         "cmd" => {
-            let payload = parse_quoted_payload(payload)?;
+            let payload = parse_cmd_payload(raw_payload)?;
             require_non_empty_payload("cmd", payload, ControlCommand::Script)?
         }
         "pty" => ControlCommand::PtyOpen(parse_pty_payload(payload)?),

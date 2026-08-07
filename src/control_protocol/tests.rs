@@ -145,6 +145,21 @@ fn parse_should_support_key_paste_script_cmd_and_screenshot() {
 }
 
 #[test]
+fn parse_should_accept_raw_single_line_cmd_and_reject_ambiguous_payloads() {
+    assert_eq!(
+        parse_control_line("@cmd#42:printf READY").unwrap(),
+        ControlParseResult::Control(ControlRequest {
+            request_id: Some(42),
+            command: ControlCommand::Script("printf READY".to_owned()),
+        })
+    );
+    assert!(parse_control_line(r#"@cmd:{exec:"printf READY"}"#).is_err());
+    assert!(parse_control_line("@cmd:\necho READY").is_err());
+    assert!(parse_control_line("@cmd:printf READY\nprintf AGAIN").is_err());
+    assert!(parse_control_line("@cmd:echo READY\n").is_ok());
+}
+
+#[test]
 fn parse_should_support_screenshot_display_layout_and_coordinate_space() {
     assert_eq!(
             parse_control_line(
@@ -705,6 +720,26 @@ fn parse_should_support_window_commands() {
                     display: DisplaySelector::Id("d2".to_owned()),
                 }),
                 verify: WindowResizeVerify { tolerance_px: 2 },
+            }),
+        })
+    );
+}
+
+#[test]
+fn parse_should_support_single_positional_window_find_app() {
+    assert_eq!(
+        parse_control_line("@window-find:Terminal").unwrap(),
+        ControlParseResult::Control(ControlRequest {
+            request_id: None,
+            command: ControlCommand::WindowFind(WindowFindRequest {
+                query: WindowQuery {
+                    app: Some("Terminal".to_owned()),
+                    ..WindowQuery::default()
+                },
+                display_scope: None,
+                limit: 20,
+                include_state: true,
+                include_recipes: true,
             }),
         })
     );
