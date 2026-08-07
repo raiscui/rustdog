@@ -749,3 +749,20 @@
 ### 验证
 - ledger 定向回归 10 项覆盖正常、缺失 provenance 和 hash mismatch;runner 回归 27 项与 `ruff check runner` 通过。
 - 新 5 x 8 archive 全部匹配 `target/debug/rdog` SHA-256 `db5cb9fde3afd4e6d7c54c1375af1578e450994e457ae72eb6c174fe9d0f39c7`,40/40 成功。
+
+## [2026-08-08 01:48:00] [Session ID: omx-1786061963768-e7in9l] 错误修复: live matrix 缺少 managed local-default daemon
+
+### 现象
+- 首次 `eval-macos-ops.sh all` 在 `prepare-open` 退出,没有产生模型 interaction。
+- 独立 `rdog control @ping` 返回“没有可用的 active managed local-default registry”。
+
+### 原因
+- runner 只消费现有 control daemon,不会自行启动 daemon;本轮执行前本机没有 active managed local-default daemon。
+
+### 修复
+- 使用 current `target/debug/rdog daemon -c rdog_macos.toml` 启动仓库既有 local-default 配置。
+- 没有修改 runner、协议或测试 case。
+
+### 验证
+- 重试前 `rdog control @ping` 返回 `pong`。
+- 随后的完整 5 x 8 matrix 为 40/40,失败 setup 没有进入 ledger 或效率统计。

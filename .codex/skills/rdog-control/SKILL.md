@@ -1,6 +1,6 @@
 ---
 name: rdog-control
-version: "2.26-app-menu-window-screenshot-text-auto"
+version: "2.27-key-contract"
 description: "Use for rdog control on a local or named machine: health, shell, GUI, browser, window, AX, PTY, flow, verification, and safety."
 ---
 
@@ -155,6 +155,28 @@ no AX semantics; clearing stale content, resetting state, and confirming buttons
 are `@ax-press` responsibilities — do not use Esc / Delete / Cmd+A keyboard
 shortcuts instead of pressing the actual button. Use guarded screenshot
 coordinates only after semantic lookup fails.
+
+### Local @key Actions
+
+Outside a `@pty` session, `@key` targets the local macOS input system. Use the
+compact form for a single key or chord, for example `@key:Cmd+R`. Use the object
+form when timing, delivery, or an explicit target is needed:
+
+```bash
+rdog control '@key:{key:"R",modifiers:["Cmd"],mode:"press_release",hold_ms:200}'
+rdog control '@key:{key:"R",delivery:"pid-targeted",pid:123}'
+rdog control '@key:{key:"R",delivery:"window-targeted",window_id:"pid:123/window:0"}'
+```
+
+The object form accepts only `key` (required), `hold_ms`, `mode`, `modifiers`,
+`delivery`, `pid`, and `window_id`. `delivery` defaults to `global`; targeted
+delivery must name exactly one fresh `pid` or `window_id` and must not use an
+app selector. `target`, `keys`, and `shortcut` are not `@key` fields. Do not
+invent aliases for them or infer a target from the application name.
+
+`@key` is a key action, not text input or an AX action alias. Use `@type-text`
+for text and `@ax-press` for AXPress. Use `@ax-action` when the requested AX
+action is something else, such as `AXConfirm` or `AXShowDefaultUI`.
 
 ## Browser Lane
 

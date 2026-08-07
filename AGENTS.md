@@ -123,6 +123,16 @@ Issues 和 Wayfinder maps 使用 GitHub Issues。详见 `docs/agents/issue-track
   - 用途: 说明旧 notes 的归档路径,以及 SCK timeout、xcap fallback、Screen Recording 权限事件的调研边界
   - 何时阅读: 需要回溯 native capture tracing 设计,或确认当前默认 `notes.md` 为什么重新变短时
 
+- `archive/manifests/ARCHIVE_MANIFEST__2026-08-08_macos_ops_interaction_ledger.md`
+  - 主题: macOS ops current-binary 三轮 interaction ledger 前的旧支线上下文归档
+  - 用途: 记录 24 个旧支线主题、81 个文件的整组归档映射,以及 current-binary 请求数、provenance 和 parser 兼容边界摘要
+  - 何时阅读: 需要追溯本轮 macOS ops 交互效率分析前的旧支线,或确认后缀上下文为何从根目录移入 `archive/branch_contexts/` 时
+
+- `workflows/macos-ops-interaction-efficiency.md`
+  - 主题: macOS ops interaction ledger、请求计量、baseline 和批准 gate 工作流
+  - 用途: 固定 `agentDecisionCount`、`requestCount`、supporting shell、recovery、provenance、5 x 8 live matrix 和 fail-closed 认证口径
+  - 何时阅读: 修改 macOS ops case、runner、interaction ledger、共享 parser、协议、通用 primitive 或 canonical skill 前
+
 - `specs/zenoh-unixpipe-fast-path-plan.md`
   - 主题: rdog control macOS / Linux 本机 fast path(Zenoh `transport_unixpipe`)规划
   - 用途: 固定"同机 daemon + control 自动走 Zenoh unixpipe FIFO,失败透明 fallback 到 UDP/TCP"的契约,以及 FIFO base 路径推导、local-default registry、daemon/client 行为边界、错误处理、验收标准;包含 2026-06-21 加的 `self` / 空 target 入口设计和 2026-06-25 加的 local-default 默认 daemon 规则

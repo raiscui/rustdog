@@ -153,3 +153,34 @@
 
 ### 总结感悟
 - 大型 LFS 提交必须分别确认对象上传和 Git ref 更新;只有远端 ref 指向本地 HEAD 才算推送完成。
+
+## [2026-08-08 09:12:00] [Session ID: omx-1786061963768-e7in9l] 任务名称: macOS ops ledger 前旧支线上下文归档
+
+### 任务内容
+- 整理 24 个已结束的后缀支线主题,共 81 个上下文文件。
+- 保留当前默认六文件主线,同步归档 manifest、长期经验和 AGENTS 索引。
+
+### 完成过程
+- 按主题将文件移动到 `archive/branch_contexts/<topic>/`,不改正文和原文件名。
+- 创建 `archive/manifests/ARCHIVE_MANIFEST__2026-08-08_macos_ops_interaction_ledger.md`,记录 81 条源路径到目标路径映射。
+- 在 `EXPERIENCE.md` 记录 current reference `243`、repeat A `252`、repeat B `340` 的重复采样边界,以及 binary provenance 和 parser 语义安全门。
+- 在 `AGENTS.md` 增加 manifest 和 macOS ops workflow 的检索入口。
+
+### 总结感悟
+- 40/40 成功不能替代交互成本和可恢复错误的独立统计。
+- 旧上下文必须按主题整组归档,否则后续检索会把历史支线误当作当前任务状态。
+
+## [2026-08-08 01:48:00] [Session ID: omx-1786061963768-e7in9l] 任务名称: macOS ops 通用 key/AX 契约候选
+
+### 任务内容
+- 在 canonical skill/reference 中明确 `@key` 合法字段、targeted delivery 和 AXPress/其它 AX action 的边界。
+- 完成 5 x 8 live matrix 与 interaction ledger 认证,不使用 App/case 固定操作序列。
+
+### 完成过程
+- 只修改 `.codex/skills/rdog-control` 的三份通用文档,没有改变 parser、protocol runtime、runner 或 case。
+- 最小 parser 回归 2 项通过;完整 matrix 为 40/40,并归档 5 份 source suite。
+- candidate 总请求从输入兼容 reference 的 243 降到 209,但 9 个未变化 case 增长,因此按门禁拒绝 baseline promotion。
+
+### 总结感悟
+- 清零目标语法错误只能证明文案被本轮模型采用,不能证明整体收益稳定。
+- 逐 case 门禁能阻止用少数大幅下降掩盖其它任务的控制难度回退。

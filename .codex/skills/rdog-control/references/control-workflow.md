@@ -242,7 +242,7 @@ rdog control mac.lab \
 Bare key payloads are limited to non-empty names without whitespace. Use quoted or
 object syntax when a key name contains whitespace or needs delivery options.
 
-See the "Local Key Chords" section in `SKILL.md` for the full modifier /
+See the "Local @key Actions" section in `SKILL.md` for the full modifier /
 main-key grammar. Inside a `@pty` session, `@key` reverts to remote stdin
 and chord syntax is not local.
 

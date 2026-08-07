@@ -1,1362 +1,149 @@
-# 任务计划: rdog `@computer-act` Phase F-1 (Cancelled / PlatformUnsupported / PermissionDenied envelope)
+# 任务计划: macOS ops 稳定共享摩擦分析
 
-## 目标
+## [2026-08-08 00:43:43] [Session ID: omx-1786061963768-e7in9l] [续档与执行计划]: current-binary 三轮 ledger 只读分析
 
-Phase F-1 收口 LP-ticket-15-deferred-1: 把 3 个手写 JSON payload 的 error_code 路径
-(Cancelled / PlatformUnsupported / PermissionDenied) 改走 `error_envelope()` helper,
-跟其它 4 个已触发的 error_code 形状一致 (ADR-0004 E2: `error_code` + `retry.strategy` +
-`retry.hint` + `evidence`)。
+### 目标
 
-不依赖 Phase I (真实 observe 集成), 单 session 收口。
+- 从 current reference、repeat A、repeat B 的真实 interaction ledger 中识别跨模型、跨 case 重复出现的共享摩擦。
+- 只有同时具备动态重复样本和共享 rdog / canonical skill 静态路径的候选,才进入 decision brief。
+- 本阶段只交付 decision brief,不修改 parser、协议、primitive、canonical skill、runner 或 case。
 
-## 阶段
+### 阶段
 
-- [x] 阶段 1: 加 3 个 String-returning envelope helper (cancelled_envelope_json /
-      platform_unsupported_envelope_json / permission_denied_envelope_json)
-- [x] 阶段 2: 加 3 个单测验 envelope shape (ADR-0004 E2 形状)
-- [x] 阶段 3: 改 `control_actions.rs` 3 处 caller 走新 helper
-      (build_cancelled_wait_response_json + open_app platform_unsupported 分支 +
-      open_app permission_denied 分支)
-- [x] 阶段 4: `mod error_envelope` 改 `pub(crate) mod error_envelope` 让兄弟模块 use
-- [x] 阶段 5: 加 `scripts/smoke_computer_act_error_envelope.sh` (3 段, 单测驱动)
-- [x] 阶段 6: 跑回归 (8/8 smoke + 594 tests + 0 warning)
-- [x] 阶段 7: commit + push (8b21988) + docs commit + push (ecc8ee4)
+- [x] 阶段 0: 读取 workflow、历史六文件、重复采样报告和当前 Git 状态,恢复上一轮 checkpoint。
+- [ ] 阶段 1: 聚合三份 ledger 的 error code/message、verb、独立 `(model, case)` 样本和 recovery 请求序列。
+- [ ] 阶段 2: 对达到重复门槛的候选定位共享 parser、protocol、primitive 或 canonical skill 路径。
+- [ ] 阶段 3: 排除模型格式探索、窗口瞬态、权限波动和不安全语义归一化,形成 decision brief。
+- [ ] 阶段 4: 验证文档、回溯六文件与归档状态,在批准 gate 前停止实现。
 
-## 关键决策
+### 候选判断
 
-1. **形状正确 vs 行为正确**: Phase F-1 只改 caller 走 envelope helper (形状正确),
-   不做 live trigger (行为正确)。Live trigger 路径都撞 ticket 03 遗留 bug
-   (zenoh_control.rs:240 每次新建 CancelRegistry), 留 Phase F-3 一起做。
-2. **smoke 退到 unit-test driven**: 不假装 e2e live trigger, 显式注释 + 跑 cargo test
-   单测验 envelope shape。这是诚实选择, 比编造 live trigger 路径更负责。
-3. **`pub(crate) mod error_envelope` 提升可见性**: 让 control_actions 兄弟模块 use
-   内部 helper, 不破坏现有依赖图 (单向调用)。
-4. **`#[allow(dead_code)]` platform_unsupported_envelope_json**: macOS 编译时
-   `cfg(not(target_os))` 分支被排除, helper 没有 live caller, 但单测还在用, 不能删。
-5. **不依赖 Phase I**: 4 个剩余 variant (ObservationExpired / TargetNotFound /
-   VerifyFailed / Infrastructure) 完全没触发路径, 留 LP-ticket-15-deferred-2。
+- 主假设: 三轮中可能存在少量跨样本重复的通用失败形状,可由共享控制层减少 recovery 请求。
+- 最强备选解释: 高成本主要来自模型自身探索和瞬态运行波动,不存在值得修改共享层的稳定候选。
+- 推翻主假设的证据: 重复模式无法跨至少两个独立 `(model, case)` 样本,或静态路径只支持改变语义、放宽权限、猜测 target 的修复。
 
-## 遇到错误
+### 续档说明
 
-- **smoke live trigger 撞 ticket 03 bug**: `@cancel#seq#99:{target_seq:1}` 取消 `@wait#1`
-  返回 `unknown_target_seq`, 因为 zenoh_control.rs:240 每次新建 CancelRegistry 跟
-  executor 内部 registry 跨实例。**修复策略**: 留 Phase F-3 + ticket 03 fixup 一起做,
-  本 Phase F-1 不动 zenoh_control.rs。
-- **smoke 改 PATH 不影响 daemon**: PermissionDenied live trigger 需要让 daemon 进程
-  的 `open` Command 失败, 但 PATH 是 daemon 启动时 env, smoke 改 client shell PATH
-  不影响 daemon。**修复策略**: 留 Phase F-3 cfg(test) mock Command 或 refactor
-  execute_open_app 暴露 injectable open_fn。
-- **warning: `platform_unsupported_envelope_json` is never used**: macOS 编译时
-  cfg(not(target_os)) 分支不调用。**修复策略**: 加 `#[allow(dead_code)]` 注释。
-
-## 当前状态
-
-**Phase F-1 实施完成 + commit + push (8b21988) + docs commit + push (ecc8ee4)!**
-
-完整时间线:
-```
-ticket 19 (a9b6401) → ticket 20 (c07dad3) → docs (0150204) → Phase F-1 (8b21988) → docs (ecc8ee4)
- ✓                      ✓                   ✓                ✓                    ✓
-```
-
-下一步候选:
-- Phase F-3: 修 ticket 03 cancel registry 跨实例 bug + Cancelled/PermissionDenied live trigger
-- Phase F-2: verify logic 真实化 (VerifyFailed envelope 触发)
-- Phase I: 真实 observe 集成 (ObservationExpired / TargetNotFound 触发)
-- fast-infer: LFM2.5 Pi 端到端 + rdog 控制 (LATER_PLANS #6/#7/#8)
-
-## 索引
-
-- 当前 task_plan.md 只追踪本 session (Phase F-1) 状态。
-- 历史 plan: `archive/default_history/task_plan_2026-07-17_143000_before_phase_f_1_rollover.md`
-  (1018 行, 涵盖 ticket 01-22 + Phase H ticket 19+20 + 早期 planning entry)。
-- 详细实施记录: `WORKLOG.md` `[2026-07-17 14:30:00]` entry。
-- 后续工作清单: `LATER_PLANS.md` LP-ticket-15-deferred-2/3/4。
-- 重要洞察: `EPIPHANY_LOG.md` `[2026-07-17 14:35:00]` smoke 诚实选择 entry。
-- 续档 manifest: `archive/manifests/ARCHIVE_MANIFEST__2026-07-17_task_plan_rollover_phase_f_1.md`
-
-## [2026-07-17 15:00:00] [Session ID: omx-1783957580965-m4bn8e] Phase F-3: ticket 03 cancel registry 跨实例 bug 修复 + Cancelled / PermissionDenied live trigger
-
-### 触发
-- 用户选 "1: Phase F-3" (修 ticket 03 cancel registry bug + 让 Cancelled / PermissionDenied live trigger)
-
-### 当前状态 (LP-ticket-15-deferred-3 真实根因)
-**zenoh_control.rs:240 每次请求新建 `CancelRegistry::new()`**, 跟
-`SystemControlActionExecutor::cancel_registry` 字段 (control_actions.rs:78) 跨实例。
-
-控制流:
-```
-handle_daemon_control_query (zenoh_control.rs:240)
-  └─ parse_and_execute_control_line(line, shell, executor, &CancelRegistry::new())  ← 临时 registry_A
-       └─ execute_explicit_control_request(request, shell, executor, &registry_A)
-             ├─ ControlCommand::Cancel(req) → executor.execute(Cancel, ...)
-             │     └─ execute_cancel(request, &executor.cancel_registry_B)         ← registry_B
-             └─ default arm:
-                   let token = registry_A.register(seq)
-                   executor.execute(command, shell, &token)
-                   registry_A.unregister(seq)
-```
-
-结果:
-- `wait#1` → token register 到 registry_A (临时, 函数返回就释放)
-- `cancel#seq#99:{target_seq:1}` → 走 `ControlCommand::Cancel` 分支, signal registry_B → 找不到 seq=1 → unknown_target_seq
-- wait 完整跑完 (cancel 没生效)
-
-### 实施范围 (Phase F-3)
-
-**Step 1: 修 ticket 03 cancel registry 跨实例 bug**
-- [ ] 给 `SystemControlActionExecutor` 加 accessor `pub(crate) fn cancel_registry(&self) -> &Arc<CancelRegistry>`
-- [ ] `zenoh_control.rs:240` 改 `&executor.cancel_registry()` 传引用, 不再新建临时 registry
-- [ ] 加单测: 模拟 wait register + cancel signal 命中同一 registry
-
-**Step 2: Cancelled live trigger smoke**
-- [ ] `scripts/smoke_computer_act_error_envelope.sh` test 1 改成 live trigger:
-  `@wait#1:{duration_ms:10000}` (background) + `@cancel#seq#99:{target_seq:1}` → 验证 wait 返回 cancelled envelope
-- [ ] 注意: 取消 hit 后 sleep_cancellable 50ms 内醒, 总耗时 ~50-200ms 不是 10000ms
-
-**Step 3: PermissionDenied live trigger**
-- [ ] refactor `execute_open_app` 暴露 injectable open_fn (或单独抽 helper)
-- [ ] 单元测 mock open_fn 返回 Err → 验证走 permission_denied_envelope_json 路径
-- [ ] smoke 不需要 live trigger (因为 daemon PATH 隔离), 单元测足够覆盖
-
-**Step 4: 跑回归**
-- [ ] cargo test 全过 (595+ tests)
-- [ ] 8/8 smoke 全过
-- [ ] commit + push + 文档收口
-
-### 实施决策 (待办)
-1. **executor accessor 暴露级别**: `pub(crate)` 让 zenoh_control 兄弟模块能访问, 不暴露 pub API。
-2. **Arc<CancelRegistry> vs &CancelRegistry**: 保持 Arc 包装, 让 executor 可以 Clone 同时共享 registry。
-3. **Step 3 open_fn refactor**: 抽 `run_open_app_command(app_name) -> io::Result<()>` helper,
-   `run_open_app_on_macos` 调它。 单元测直接测 helper 用 mock Command (cfg(test))。
-   Live trigger 不强求 (daemon PATH 隔离), 单测覆盖即可。
+- 旧 `task_plan.md` 已超过 1000 行,稳定保存为 `archive/default_history/task_plan_2026-08-08_004343_macos_ops_interaction.md`。
+- 按 `continuous-learning` 规则执行后台总结、归档 manifest 和长期知识索引检查。主线只读分析不等待其完成。
 
 ### 状态
-**Phase F-3 计划已建, 准备从 Step 1 开始。**
-
-## [2026-07-17 16:00:00] [Session ID: omx-1783957580965-m4bn8e] Phase F-2: VerifyFailed envelope 真实触发 (verify logic 真实化)
-
-### 触发
-- 用户选 "1: Phase F-2" (LP-ticket-15-deferred-2: VerifyFailed envelope 真实触发)
-
-### 当前状态 (LP-ticket-15-deferred-2 真实根因)
-- `run_best_effort_verify` / `run_always_verify` 已经真跑 AX diff (前后 snapshot + compute_diff)
-- `compute_verification_passed` 根据 diff 数量判断 verify 是否通过
-- **`verify` 失败时 envelope 仍 `ok:true`** — 关键 bug: dispatch ok + verify 失败,
-  client 看到 ok:true 以为动作成功, 但 GUI 实际没变 (动作点错地方了)
-
-### 实施范围 (Phase F-2)
-
-**Step 1: 在 mod.rs:execute_computer_act 末尾, dispatch ok 之后 + verify 完成后, 加 verify 失败分支**
-- if `verify_policy` 是 `BestEffort` 或 `Always`
-- if `verification_passed == false`
-- if dispatch ok 是 true (dispatch 错误优先)
-- 改 payload: `ok: false`, 加 `error_code: "verify_failed"`, `error_message: "..."`,
-  `retry: {strategy: "manual_only", hint: "..."}`, `evidence: {verification: ..., ax_diff: ...}`
-- exit_code 改为 64 (跟 parse error / platform_unsupported 一致)
-- 用 `error_envelope(ComputerActErrorCode::VerifyFailed, msg, Some(evidence))` helper
-
-**Step 2: 单测 envelope shape + dispatch+verify_failed 决策**
-- `verify_failed_envelope_json_matches_e2_shape` (跟 Phase F-1 风格一致)
-- `dispatch_ok_with_failed_verify_emits_verify_failed_envelope` (集成测, 模拟 dispatch 成功但 verify 失败)
-- `dispatch_failed_with_passed_verify_keeps_dispatch_error_code` (dispatch 错误优先)
-
-**Step 3: 跑 7 smoke + 600+ tests 全过**
-
-**Step 4: smoke_computer_act_error_envelope.sh 新加 test 4: VerifyFailed live trigger**
-- 跑个不太可能改变 GUI 的 action (e.g. click off-screen @wait 然后 verify=best_effort, 等待 GUI 不变)
-- 或者: 跑 click 在 fixed position (0,0) + verify=best_effort → 可能 GUI 不变
-- 验 envelope shape: ok:false + error_code:verify_failed + retry.strategy:manual_only
-
-### 实施决策 (待办)
-1. **VerifyFailed 优先级**: dispatch 错误 > verify 错误. 如果 dispatch 失败, 用
-   dispatch 错误码; 只有 dispatch 成功但 verify 失败才用 VerifyFailed
-2. **verify=none 不触发 VerifyFailed**: VerifyPolicy::None 永远不验 verify,
-   所以 verify_failed 不应该出现 (跟现有 compute_verification_passed 行为一致)
-3. **error_envelope helper 复用**: 直接调 `error_envelope(ComputerActErrorCode::VerifyFailed, msg, Some(evidence))`,
-   envelope shape 自动对齐 ADR-0004 E2 (error_code + retry.strategy + retry.hint + evidence)
-4. **live trigger 难点**: 跑真 GUI 动作很难保证 GUI 不变, 可能用 `click off-screen`
-   或者 `wait long` 之类; smoke live trigger 如果不稳, 退到 unit-test driven
-   + live trigger 双重覆盖 (Phase F-1 模式)
-
-### 状态
-**Phase F-2 计划已建, 准备从 Step 1 开始。**
-
-## [2026-07-17 17:00:00] [Session ID: omx-1783957580965-m4bn8e] Phase F-3.5: PermissionDenied live trigger (refactor execute_open_app 暴露 injectable open_fn)
-
-### 触发
-- 用户选 "1: Phase F-3.5" (LP-ticket-15-deferred-5: PermissionDenied live trigger)
-- 收口 11 个 ComputerActErrorCode variant 中 3 个 live trigger (Cancelled/VerifyFailed/PermissionDenied)
-
-### 当前状态 (LP-ticket-15-deferred-5 真实根因)
-- error_envelope.rs::permission_denied_envelope_json() helper 已存在 (Phase F-1)
-- run_open_app_on_macos PermissionDenied 分支已走 envelope helper (Phase F-1)
-- **PermissionDenied 真触发路径难稳定**:
-  - daemon PATH 是 daemon 启动时 env 决定的, smoke 改 client shell PATH 不影响 daemon
-  - macOS 上 `open` 命令通常在 /usr/bin/open, 不会因 PATH 缺失
-  - 真实能触发的: chmod -x /usr/bin/open (sandbox 限制), spawn 失败 (OS 限制)
-  - 跟 Phase F-1 test 2 一样退到 unit-test driven 也行, 但单元测
-    覆盖的是 envelope shape, 缺少 dispatch + envelope 协同验证
-
-### 实施范围 (Phase F-3.5)
-
-**Step 1: refactor execute_open_app 暴露 injectable open_fn (cfg(test) trait)**
-- 抽 `trait OpenAppCommand { fn run(&self, app_name: &str) -> io::Result<std::process::Output>; }`
-- `SystemOpenAppCommand` 默认实现: 调 `Command::new("open")`
-- `execute_open_app` 接收 `&dyn OpenAppCommand` 参数, 默认参数是 `&SystemOpenAppCommand`
-- cfg(test) 测试用 `MockOpenAppCommand` 注入失败场景
-
-**Step 2: 单测 cfg(test) 覆盖 PermissionDenied live path**
-- 注入 MockOpenAppCommand 返 Err(IO error)
-- 调 execute_open_app + 验 response envelope shape
-- (跟 Phase F-1 test 2 风格一致, 但这次是 execute_open_app 完整路径)
-
-**Step 3: smoke_computer_act_error_envelope.sh test 2 升级为 cfg(test) 驱动 (不依赖 env)**
-- test 2 之前是 unit-test driven (跑 cargo test)
-- 升级: 同时跑 cargo test 验 envelope shape + 用 mock 跑 execute_open_app 验端到端
-
-**Step 4: 跑 7/7 smoke + 600+ tests 全过**
-
-### 实施决策 (待办)
-1. **injectable 设计**: 用 trait object (`&dyn OpenAppCommand`) 而不是 generic, 保持
-   execute_open_app 签名向后兼容 (tester 传 mock, production 走 system)
-2. **不在 macOS 上依赖 PATH 缺失**: daemon 启动时 PATH 固定, smoke 改不到
-3. **cfg(test) 单测覆盖 end-to-end**: 测 dispatch + envelope 协同 (Phase F-1
-   unit-test driven 只测 envelope shape)
-4. **OpenAppErrorCode 留 `app_not_found` 区别于 PermissionDenied**:
-   - `app_not_found`: `open -a <bad_app>` 返 exit 1 (e.g. app 不存在)
-   - `permission_denied`: spawn `open` 本身失败 (PATH 缺失 / 权限)
-   - 两者是不同 error_code, 都需要 envelope helper, 这次只补 PermissionDenied live
-
-### 状态
-**Phase F-3.5 计划已建, 准备从 Step 1 开始。**
-
-
-### 状态 (2026-07-17 17:30:00)
-**Phase F-3.5 收口 ✓**
-
-- Step 1 (OpenAppCommand trait refactor) 完成
-- Step 2 (3 mock + 3 unit tests + `fake_exit_status` helper) 完成, 3/3 passed
-- Step 3 (smoke_computer_act_error_envelope.sh test 2 升级 mock 注入) 完成
-  - 2a Phase F-1 envelope shape 单元测: 1 passed (原保留)
-  - 2b Phase F-3.5 execute_open_app live trigger via mock: 3 passed (新加)
-- Step 4 (worklog + LATER_PLANS LP-15-deferred-5 RESOLVED + EPIPHANY_LOG) 完成
-- cargo test 601 passed, 0 failed, 1 ignored
-- 8/9 smoke scripts 7+ 段端到端验证通过 (smoke_cancel_seq test 5 self-target
-  是 main 上 pre-existing bug, 不在 Phase F-3.5 范围内, 已在 EPIPHANY 记录)
-
-
-## [2026-07-17 18:00:00] [Session ID: omx-1783957580965-m4bn8e] 任务: @cancel#seq self-target bug fix (Phase F-3.5 follow-up)
-
-### 触发
-- 用户说 "继续" (Phase F-3.5 收口后续)
-- 我上一轮标 smoke_cancel_seq test 5 self-target 是 pre-existing bug 跳过
-- 这一轮仔细 trace 发现是 root cause 明确的真 bug
-
-### root cause 静态 + 动态证据
-**静态证据**:
-- control_core.rs:104 `command =>` catch-all (包括 Cancel)
-- control_core.rs:141 `cancel_registry.register(seq)` 把 cancel 自己的 seq 加进共享 registry
-- control_actions.rs:146 Cancel 分支: `execute_cancel(request, &self.cancel_registry)` 用同一 registry
-- control_actions.rs:317 `registry.signal(target_seq)` 然后 `signaled = true`
-
-**动态证据**:
-- 跑 smoke_cancel_seq, test 5 输出 `{signaled:true, ok:true}` 而不是
-  `{ok:false, error_code:unknown_target_seq}`
-- git stash 验证 main (9e2b329) 上同样 fail → 排除本会话引入
-- fix 后跑 smoke_cancel_seq, test 5 输出 `{ok:false, error_code:unknown_target_seq}` ✓
-
-### 实施
-**Step 1** (committed in this session): control_core.rs catch-all 加
-`is_cancel_command` guard, Cancel 命令不进 cancel registry (signal-only,
-没有 in-flight 期).
-
-**Step 2**: src/control_actions/tests.rs 末尾 2 个 unit test
-(`execute_cancel_emits_unknown_target_seq_when_target_not_in_registry` +
-`execute_cancel_emits_ok_when_target_signal_succeeds`).
-
-**Step 3**: cargo test 603 passed (+2), 0 failed
-**Step 4**: smoke_cancel_seq 5/5 PASSED, 6 个其他 smoke 全过不退化
-**Step 5**: WORKLOG + LATER_PLANS (LP-15-deferred-3-RESOLVED 追加) + EPIPHANY_LOG 一起发
-
-### 状态
-**Self-target bug fix 收口 ✓**
-
-## [2026-07-17 19:30:00] 跨项目索引: fast-infer Mano-CUA OpenAI server 上线 (port 18094)
-
-### 触发
-- 用户指令: LFM2.5 已删除 + 主要关注 Mano-CUA + "继续 A" (开 OpenAI-compatible server wrapper)
-- fast-infer commit: 36a0872 (feat) + 46d3ed6 (docs)
-
-### 上线状态 (fast-infer origin/main)
-- **端口 18094** Mano-CUA OpenAI-compatible server 已 runnable
-  - 16 action space (OpenAI tools=[] schema 完整)
-  - 双 parser 路径 (自然 XML / qwen3-coder XML)
-  - 4/4 smoke 全过 (含 click 精度 ~5px)
-- **Pi 集成**: `local-mano-cua-vlm` provider 已在 `~/.pi/agent/models.json`
-  - baseUrl http://127.0.0.1:18094/v1
-  - 支持 tools + image_url
-- 待补: rdog-control-16-actions toolUseProfile (LP-2026-07-06-1 follow-up)
-
-### 关键发现 (跨项目共享经验)
-- **Apple Metal multi-call GPU crash** (fast-infer EPIPHANY 沉淀):
-  - Apple MLX Metal stateful, 连续推理第二次 prefill 时崩
-  - 修复: per-request `mx.clear_cache()` + `gc.collect()` — 跟 Holo 3.1 / mlx-vlm 同款
-  - 重要性: rustdog 未来如果接 Apple Silicon MLX 后端, 必须继承这个 pattern
-
-### rustdog 后续候选
-- LP-2026-07-06-1 follow-up: 设计 rdog-control-16-actions toolUseProfile
-  - 16 个 Mano-CUA action 怎么映射到 rdog control 命令 (click/type/scroll/drag/hotkey 等)
-  - Pi tools 集成闭环: prompt → Mano-CUA tool_call → rdog control action → screenshot → next step
-- LP-2026-07-06-3 multi-step agent loop benchmark (5 步)
-
-
-## [2026-07-17 20:00:00] 跨项目索引: fast-infer Phase B rdag-control-16-actions profile + Mano-CUA + rdag 端到端 e2e 闭环
-
-### 触发
-- 用户 "B 接着做" (rdag-control-16-actions Pi profile + 闭环)
-- fast-infer 上 commit 36a0872 (Phase A) → 6f2548b (Phase B)
-
-### 跨项目状态
-- **Mano-CUA server schema 已对齐 rdag @computer-act.v1**: 
-  `mano_cua_actions.py`: start_box / end_box 从 string literal 改 int array [int, int],
-  duration 改 duration_ms:int. 16 action 同名 (rdag <-> Mano-CUA).
-  防御性 fallback: model 输出 box_start literal 时, server 自动 strip 转 [int, int].
-- **Pi provider local-mano-cua-vlm 已写 + toolUseProfile rdag-control-16-actions 已写**.
-- **端到端 smoke (`smoke_mano_cua_to_rdag_e2e.py`)** 全过:
-  click(701, 501) (model output) → rdag control @computer-act#1001:click →
-  rdag @click dispatch 173ms, ok=true, observation_used.freshness=fresh,
-  坐标精度 3-5px.
-
-### rustdog 后续候选
-- **LP-2026-07-06-4 (Pi 真实端到端)**: 在 /tmp/干净小目录跑 
-  `pi --provider local-mano-cua-vlm --tools bash --skill rdog-control`,
-  验证 Pi 真实 binary 走 Mano-CUA → tool_call → bash → rdag control 完整闭环.
-- **LP-2026-07-06-3 (multi-step agent loop)**: 仿 smoke_holo31_agent_loop.py 模式,
-  5 步 loop, 测 tool role 回灌 + multi-turn image_url 注入.
-- **rustdog 没有改动**: rdag @computer-act.v1 已支持 13 个 action, 跟 Mano-CUA 16 个
-  只是含 3 个 termination signal (finish/stop/call_user) 不 dispatch, 不影响 rdag 端.
-
-## [2026-07-18 00:10:44] [Session ID: omx-1784304547353-h5409r] [支线索引]: local-default registry 恢复与一致性验证
-
-- 启用支线上下文集后缀: `local_default_registry_recovery`.
-- 触发: daemon 报 `local-default` 守卫已存在,但裸 `rdog control` 同时报告没有可用 registry,并发现两个 FIFO 候选.
-- 目标: 区分真实存活实例、陈旧 PID guard、缺失/失效 registry 与残留 FIFO,用动态证据决定运行态恢复还是代码修复.
-- 当前计划文件: `task_plan__local_default_registry_recovery.md`.
-
-## [2026-07-18 10:23:45] [Session ID: omx-1784304547353-h5409r] [支线完成]: local-default registry 恢复与一致性验证
-
-- 已修复重复 daemon在 ownership确认前删除活跃 unixpipe FIFO的问题.
-- canonical base-path guard、endpoint单一真相源、隔离 e2e与规格同步均已完成.
-- 真实 `mac.lab` daemon已切换到安装版PID 69053;重复启动正确失败,前后裸 ping都返回pong.
-- 详细计划与证据: `task_plan__local_default_registry_recovery.md`、`notes__local_default_registry_recovery.md`.
-- 交付与后续: `WORKLOG__local_default_registry_recovery.md`、`ERRORFIX__local_default_registry_recovery.md`、`LATER_PLANS__local_default_registry_recovery.md`、`EPIPHANY_LOG__local_default_registry_recovery.md`.
-
-## [2026-07-18 10:54:47] [Session ID: omx-1784304547353-h5409r] [支线索引]: local-default 原子 lease状态源
-
-- 启用支线上下文集后缀: `local_default_atomic_lease`.
-- 触发:用户要求按建议继续,上一轮首个后续风险是PID复用、双文件写入中断与guard状态分裂.
-- 目标:用OS生命周期绑定的ownership lease统一三类guard记录格式与校验语义,同时保留现有v1本地状态兼容恢复.
-- 当前计划文件: `task_plan__local_default_atomic_lease.md`.
-
-## [2026-07-18 12:40:06] [Session ID: omx-1784340333160-6bwnss] [支线完成]: local-default 原子process lease
-
-- Unix service-name、canonical path和local-default已迁移到OS文件锁lease,保留独立冲突域与legacy v1读取兼容.
-- 已验证metadata失败回滚、lease ID关联、部分managed拒绝、SIGKILL接管和stable inode不变.
-- 最终daemon PID 29465正在`rdog-daemon` tmux运行,bare ping返回pong,重复启动正确拒绝.
-- 详细证据:`task_plan__local_default_atomic_lease.md`、`notes__local_default_atomic_lease.md`.
-- 交付与风险:`WORKLOG__local_default_atomic_lease.md`、`ERRORFIX__local_default_atomic_lease.md`、`LATER_PLANS__local_default_atomic_lease.md`、`EPIPHANY_LOG__local_default_atomic_lease.md`.
-
-## [2026-07-18 12:51:22] [Session ID: omx-1784340333160-6bwnss] [支线索引]: local-default legacy退役
-
-- 启用支线上下文集后缀:`local_default_legacy_retirement`.
-- 触发:用户选择上一轮后续建议1,要求退役旧二进制stale PID unlink迁移窗口.
-- 目标:把legacy状态限制为fail-closed升级入口,managed-only成为唯一正常运行契约,并用旧版/新版矩阵验证不会出现双owner.
-- 当前计划文件:`task_plan__local_default_legacy_retirement.md`.
-
-## [2026-07-18 13:35:10] [Session ID: omx-1784304547353-h5409r] [支线完成]: local-default legacy退役
-
-- 空target/self已改为只接受完整managed registry、匹配sidecar identity与active OS lock;纯v1 PID和FIFO候选不再自动成为owner.
-- active legacy PID检查保留为fail-closed升级门;stopped legacy继续在stable inode上原地迁移.
-- runtime 34、unixpipe e2e 12、router-client 26通过,all-targets check和release build为0 error.
-- 最终安装版hash:`96955460e968cc8ccaf06c1b4fc2bce888e4c5564df5b6f0cac69e348249cc75`;正式daemon PID 19047,bare ping返回pong.
-- 详细证据:`task_plan__local_default_legacy_retirement.md`、`notes__local_default_legacy_retirement.md`、`WORKLOG__local_default_legacy_retirement.md`、`ERRORFIX__local_default_legacy_retirement.md`.
-- 后续边界:Windows ownership迁移见`LATER_PLANS__local_default_legacy_retirement.md`;超长runtime模块拆分仍见`LATER_PLANS__local_default_atomic_lease.md`.
-
-## [2026-07-18 16:13:17] [Session ID: omx-1784304547353-h5409r] [支线索引]: zenoh_runtime职责拆分
-
-- 启用支线上下文集后缀:`zenoh_runtime_split`.
-- 触发:用户要求拆分已经达到1928行的`src/zenoh_runtime.rs`.
-- 目标:保持`zenoh_runtime`外部interface和运行行为不变,按session、unixpipe、local-default职责形成深模块,并把单元测试移出生产门面文件.
-- 当前计划文件:`task_plan__zenoh_runtime_split.md`.
-
-## [2026-07-18 17:05:00] [Session ID: omx-1784304547353-h5409r] [支线完成]: zenoh_runtime职责拆分
-
-- `src/zenoh_runtime.rs`从1928行收敛为22行稳定门面;session、unixpipe、local-default及各自测试已按职责拆分.
-- production symbol、34个测试名与26个外部调用行均与HEAD旧实现等价,没有改变公开调用路径.
-- 全bin 612 passed / 1 ignored,runtime 38 passed,unixpipe e2e 12 passed,router-client 26 passed / 2 ignored;check与release build为0 error.
-- 安装版和release hash一致,正式daemon PID 82774的bare/self/显式target ping均返回pong,重复daemon正确拒绝.
-- 详细记录:`task_plan__zenoh_runtime_split.md`、`notes__zenoh_runtime_split.md`、`WORKLOG__zenoh_runtime_split.md`、`ERRORFIX__zenoh_runtime_split.md`.
-
-## [2026-08-03 14:30:00] [Session ID: omx-1785584880574-cz5d0k] [记录类型]: 恢复到 16/18 状态完成
-
-### 恢复操作
-1. 备份: 8-03 协议改进已 stash(stash@{0}), 可随时恢复
-2. rustdog 代码恢复到 0502231(07-30 23:50, 可编译 + bare @key + SKILL v2.23 a8cdb9dc)
-   - 验证: e742419(07-31 release 3.1.0)编译失败(deda434 parser 搬迁引入 mod parsers 私有 bug)
-   - 0502231 是 deda434 之前最后一个可编译且 SKILL 匹配的 commit
-3. SKILL = v2.23(sha256 a8cdb9dc 与评测结果一致)
-4. 评测 runner 恢复到 a0ec662 + test-prompts 3 case
-5. 构建 + 重启 daemon + 全量 6 模型复跑
-
-### 恢复后基线: 12/18
-deepseek 3/3(历史一致) | minimax 2/3 | qwen36 2/3 | qwen37 1/3(历史 2/3) | qwen-plus 2/3(历史一致) | m27hs 2/3
-
-### 与历史 16/18 差距
-- 代码/SKILL/runner 已完全回到 16/18 时代
-- deepseek/qwen-plus 与历史完全一致
-- 剩余差异是模型 provider 行为波动(qwen37 历史即 2/3 随机)
-
-### 恢复点
-- 分支 restore-point-20260803-1300(commit 9f013c5)
-- 8-03 协议改进在 stash@{0}(rustdog) + stash@{0}(评测 runner)
-
-## [2026-08-03 15:00:00] [Session ID: omx-1785584880574-cz5d0k] [记录类型]: Wayfinder 地图 chart 完成
-
-### 地图
-- Map: https://github.com/raiscui/rustdog/issues/34
-  "Wayfinder: @key AX press backend(配置化, macOS 默认)"
-
-### Destination(grilling 5 问确认)
-- [key] delivery_backend 配置(daemon 侧全局): ax_press / simulated
-- macOS 默认 ax_press, Linux/Windows 默认 simulated
-- 单字符按键(数字/运算符/字母)走 AX press(焦点窗口 AX 树找匹配按钮), 找不到 fallback simulated
-- 快捷键/修饰键组合直接 simulated
-- 响应不新增字段: Legacy 裸 0 不变, backend 走 KeyDeliveryReport 既有字段
-- 在 0502231 工作区实施, 评测验证(目标回到 16/18)
-- 约束: @key 协议不改 / SKILL 不改 / 8-03 stash 保持
-
-### Tickets
-- #35 Research: @key 执行路径与 macOS AX press 能力盘点 (AFK)
-- #36 Grilling: [key] delivery_backend 配置语义 (HITL)
-- #37 Task: 配置加载与平台模板 (阻塞 #36)
-- #38 Task: execute_key 接入 AX press backend (阻塞 #35, #37)
-- #39 Task: 评测验证 6 模型复跑 (阻塞 #38)
-
-### Frontier(当前可取)
-#35 (research, AFK) 与 #36 (grilling, HITL) 均未阻塞
-
-### 状态
-**chart 完成** - 按 wayfinder 规则本 session 不 resolve, 等待用户选择 ticket
-
-## [2026-08-03 15:30:00] [Session ID: omx-1785584880574-cz5d0k] [记录类型]: Wayfinder #36 配置语义 grilling 完成
-
-### 决策记录(6 问全确认)
-1. 非法值: validate_daemon_config 报错拒绝启动
-2. 默认值: KeyConfig::default() 编译期平台默认(macOS=ax_press, 其他=simulated)
-3. 加载时机: 启动时加载, 注入 SystemControlActionExecutor.key_delivery_backend
-4. 单字符判定: 执行层按 request.key 判定(无 + 组合符 + 单字符), 不新增配置
-5. fallback: 静默 enigo + KeyDeliveryReport.backend 标注("ax-press"/"global-input-simulation"), Legacy 裸 0 不变
-6. 扩展: enum KeyDeliveryBackend { AxPress, Simulated } + snake_case
-
-### 下游影响
-- #37: DaemonConfig.key + KeyConfig + validate + 平台模板 + executor 注入
-- #38: 单字符判定 + frontmost_pid AX 定位 + backend 标注
-
-### Map 状态
-- 已关闭 #35, #36
-- frontier: #37(配置加载, 阻塞 #36 已解除)
-
-## [2026-08-03 16:00:00] [Session ID: omx-1785584880574-cz5d0k] [记录类型]: Wayfinder #37 配置加载实施完成
-
-### 实施内容
-- config.rs: KeyConfig { delivery_backend } + KeyDeliveryBackend enum(AxPress/Simulated, snake_case, default_for_platform cfg!(macos))
-- DaemonConfig 加 key 字段; validate_daemon_config 加 validate_key_config
-- rdog_macos.toml: [key] delivery_backend = "ax_press"; rdog_linux.toml: "simulated"
-- control_actions.rs: SystemControlActionExecutor 加 key_delivery_backend 字段 + with_key_delivery_backend + accessor
-- zenoh_control.rs: ZenohDaemonRuntimeConfig 加 key_delivery_backend; build_router_control_executor 注入
-- daemon.rs: 构造点传 config.key.delivery_backend
+
+**当前在阶段 1**: 先从机器可读 ledger 建立动态重复证据,不从单个错误文本猜测修复方向。
+
+## [2026-08-08 00:48:12] [Session ID: omx-1786061963768-e7in9l] [错误记录]: 首次 ledger 聚合排序失败
+
+- 现象: 临时 Python 聚合器在排序 response error signature 时抛出 `TypeError: '<' not supported between instances of 'NoneType' and 'int'`。
+- 原因: ledger 中部分 error code 为 `null`,排序键直接比较了 `None` 与整数。
+- 处理: 不修改 ledger;仅在临时分析器的排序键中把 code 转成字符串,保留原始 code 用于展示和分组。
+- 状态: 阶段 1 尚未完成,本次失败输出不作为动态证据。
+
+## [2026-08-08 01:02:49] [Session ID: omx-1786061963768-e7in9l] [阶段更新]: 动态聚合与共享路径筛选完成
+
+- [x] 阶段 1: 完成三份 current-binary ledger 的 error code/message、verb、独立 `(model, case)` 样本和相邻 recovery 聚合。
+- [x] 阶段 2: 定位 `parse_key_payload`、`parse_ax_press_payload`、`parse_window_find_payload` 与 `resolve_unique_app_window_id` 的共享路径,并核对 canonical skill 与 protocol reference。
+- [ ] 阶段 3: 写入 decision brief,区分可批准的通用契约改良与必须拒绝的语义猜测。
+- [ ] 阶段 4: 等待批准 gate;批准前不改 parser、协议行为、primitive、canonical skill、runner 或 case。
+
+### 动态结论
+
+- `@key` 对象字段漂移(`target`/`keys`/`shortcut`)共 20 个 response errors,覆盖 7 个独立 `(model, case)` 样本和 3 轮,其中 12 次紧接 recovery。
+- `@ax-press` 顶层 `action` 共 9 个 response errors,覆盖 4 个独立样本和 3 轮,9 次都紧接 recovery。
+- 两类合计 29 个 parser errors,最多暴露 21 个可避免的紧接 recovery 请求;这是上限,不是已验证收益。
+- App selector 多窗口歧义和 AX/window stale locator 都重复出现,但现有 fail-closed 语义是安全不变量,不能用自动选择或静默重绑替代。
+
+### 静态结论
+
+- `src/control_protocol/parsers/key.rs:41-175` 只接受 `key`、`hold_ms`、`mode`、`modifiers`、`delivery`、`pid`、`window_id`;`target`、`keys`、`shortcut` 没有无歧义的现有语义。
+- `src/control_ax.rs:1231-1325` 的 `@ax-press` 固定 AXPress;其它 AX action 走独立 `@ax-action` parser,接受顶层 `action` 会改变命令边界。
+- `.codex/skills/rdog-control/references/protocol.md` 已给出基础 `@key` 示例,但第 633 行把完整语法指向 canonical `SKILL.md` 中不存在的章节,造成通用文档路径断裂。
+
+### 当前状态
+
+**阶段 3**: decision brief 已生成,批准前停止实现。
+
+## [2026-08-08 01:08:21] [Session ID: omx-1786061963768-e7in9l] [阶段完成]: decision brief 已生成
+
+- [x] 阶段 3: 完成 `decision-brief__20260808-stable-shared-friction.md`,包含动态样本、静态路径、请求差额上限、风险和批准/拒绝/暂缓三种决策。
+- [ ] 阶段 4: 等待用户批准。批准前不修改 parser、协议行为、primitive、canonical skill、runner 或 case。
+
+### 推荐决策
+
+- 推荐选项 1: 只做通用 canonical skill/reference 契约澄清,不添加 `target` / `keys` / `shortcut` / 通用 `action` parser alias。
+- 选项 2: 保持实现不变,继续观察模型探索噪声。
+- 选项 3: 另开 durable selector/ref + 显式 `auto_refind` 设计,不作为本轮短期修复。
+
+### 停止条件
+
+**当前在批准 gate**: brief 已落盘并待审阅;未获批准不进入实现。
+
+## [2026-08-08 00:32:00] [Session ID: omx-1786061963768-e7in9l] [批准后执行]: 通用 key/AX 契约澄清
+
+### 目标
+
+- 只改 canonical `rdog-control` skill 和 protocol reference 的通用文案,减少模型在 `@key` 与 AX action 上的语法探索。
+- 不新增 parser alias,不改变协议行为,不记录任何特定 App 或 case 的操作序列。
+
+### 阶段
+
+- [x] 阶段 1: 应用通用 skill/reference 契约澄清。
+- [x] 阶段 2: 运行静态检查和最小 parser 回归。
+- [ ] 阶段 3: 运行完整 5 x 8 live matrix 并生成 interaction ledger。
+- [ ] 阶段 4: 审阅请求数、错误和新鲜证据,决定是否提升 baseline。
+
+### 已完成改动
+
+- `.codex/skills/rdog-control/SKILL.md`: 增加 `Local @key Actions`,列出合法字段、targeted delivery 约束和禁止字段;明确 `@ax-press` 与 `@ax-action` 边界。
+- `.codex/skills/rdog-control/references/protocol.md`: 增加同一 `@key` / AX action 合同,修正 `Local @key Actions` 引用。
+- `.codex/skills/rdog-control/references/control-workflow.md`: 同步修正引用。
 
 ### 验证
-- config 测试 36 过(新增 3 个: 平台默认/TOML 覆盖/非法值拒绝)
-- 全量 655 passed
-- daemon 启动正常, @key 协议行为不变(裸 0)
-- 非法配置拒绝启动: "unknown variant: found invalid-backend, expected ax_press or simulated"
+
+- `git diff --check` 通过。
+- `rtk cargo nextest run --package rustdog --bin rdog -E 'test(parse_should_support_compact_bare_key_payloads) | test(parse_should_accept_raw_single_line_cmd_and_reject_ambiguous_payloads)' --no-capture`: 2 passed。
 
 ### 状态
-**#37 完成** - 等待关闭 ticket + 下一 frontier
 
-## [2026-08-03 16:45:00] [Session ID: omx-1785634372447-ezls0t] [记录类型]: Wayfinder #38 execute_key 接入 AX press 完成
+**当前在阶段 3**: 使用相同活动模型和 8 个 case 做完整认证,不把单轮收益当作稳定结论。
 
-### 实施内容
-- control_window: frontmost_pid 改 pub(crate) + 非 macOS stub
-- control_actions: execute_key 加 delivery_backend 参数; try_ax_press_single_char(单字符 + Global delivery 才 AX 候选); find_button_matching_key(递归 AXButton description/name 匹配)
-- 修复 parse_key_action 字面 `+` 主键: split('+') 把纯 `+` 拆空导致 "@key payload 不能为空"; 新增 strip_suffix 字面加号处理(`+` / `Cmd++`)
-- 新增运算符语义别名匹配: 计算器按钮 AX description 是本地化文本(加/乘/除/等于/add/plus...), 单字符运算符按语义别名匹配按钮
-- computer_act: execute_key 签名适配(传 None, 不走 AX press)
+## [2026-08-08 09:00:00] [Session ID: omx-1786061963768-e7in9l] [归档动作]: 整理已结束的后缀支线上下文
 
-### 验证
-- 新增 4 测试(单字符判定/非单字符 fallback/字面+解析/语义别名匹配), 全量 660 passed
-- 端到端: @key:"6"+"+4"+"=" 全 backend:"ax-press" performed:true (target_pid 计算器)
-- 端到端: @key:"7"+"*"+"8"+"=" / "9"+"3"+"-"+"2"+"=" 全 ax-press
-- recording_e2e 5 失败为基线问题(record-start 协议未接入 restore 分支), 与 #38 无关
+- [x] 已确认默认六文件仍是当前 macOS ops interaction ledger 主线,继续保留在根目录。
+- [x] 已将 24 个旧支线主题的 81 个带后缀文件整组移动到 `archive/branch_contexts/<topic>/`。
+- [x] 已生成本批归档 manifest,并同步 `EXPERIENCE.md` 与 `AGENTS.md` 的长期索引。
+- [x] 已完成归档完整性、格式和工作区范围验证。
 
-### 状态
-**#38 完成** - 提交后关闭 ticket
+## [2026-08-08 09:12:00] [Session ID: omx-1786061963768-e7in9l] [阶段完成]: 归档与长期索引验证
 
-## [2026-08-03 17:10:00] [Session ID: omx-1785634372447-ezls0t] [记录类型]: Wayfinder #39 评测验证(部分完成)
+- [x] 24 个旧支线主题、81 个文件已整组移动到 `archive/branch_contexts/<topic>/`。
+- [x] 已生成 `archive/manifests/ARCHIVE_MANIFEST__2026-08-08_macos_ops_interaction_ledger.md`,包含完整 81 条映射。
+- [x] 已将三轮 current-binary ledger 的请求波动、provenance 门禁和 parser 安全边界追加到 `EXPERIENCE.md`。
+- [x] 已在 `AGENTS.md` 索引归档 manifest 和 `workflows/macos-ops-interaction-efficiency.md`。
+- [x] 已验证根目录无 `*__*.md`,manifest 映射无重复且每条目标均存在,`git diff --check` 通过。
 
-### 评测结果
-- m27hs: 3/3 ✓ (timeline 含 加/乘/除/等于 精确匹配, @key AX press 全链路生效)
-- minimax: 2/3 (happy 用 @ax-press-sequence 单轮完成, multiTurnVerified=false; 结果 7 正确)
-- deepseek: 2/3 (stale 两次失败均为模型行为: 首次走偏, 复跑用 @ax-press 致 timeline unresolved; 结果 60 正确)
-- qwen37/qwen36/qwen-plus: 无法评测 — DASHSCOPE_API_KEY 401 失效 (models.json 是 env: 引用; xtalk/.envrc key 已过期)
+**当前状态**: 归档支线已完成;默认 macOS ops 认证仍在阶段 3,本轮归档没有修改 parser、协议、primitive、runner、skill 或 case。
 
-### 结论
-1. @key AX press backend 验证成功: 手动端到端 + m27hs 3/3 证明符号(+*/=)可靠触发
-2. 未回 16/18 主因: qwen 3 模型 key 失效 (历史 7 分), 模型行为随机性 (minimax/deepseek)
-3. 模型多走 @ax-press 路径 (SKILL 引导), #38 的价值是 @key 兜底可靠
-
-### 归档
-- 评测工程 results/: 52 (m27hs 3/3), 53 (minimax 2/3), 54 (deepseek 2/3)
-
-### 阻塞
-- DASHSCOPE_API_KEY 失效, qwen 补跑待 key 恢复
-
-## [2026-08-03 19:25:00] [Session ID: omx-1785634372447-ezls0t] [记录类型]: Wayfinder #39 qwen 补跑完成 (11/18)
-
-### key 问题复盘
-- 之前 401 根因: xtalk/.envrc 的 key 是 `export DASHSCOPE_API_KEY="sk-..."` 带引号, 用 cut -d= 提取把引号带进去 → 401
-- 修复: sed 去引号后 curl 200 正常
-
-### 补跑结果 (总计 11/18, 历史 16/18)
-- qwen37: 1/3, qwen36: 1/3, qwen-plus: 2/3
-- 失败模式 A (runner timeline unresolved, 动作正确): qwen37/qwen36 error (@ax-press 先按后查), deepseek stale, minimax happy (multiTurn)
-- 失败模式 B (纯模型行为): qwen37 happy 按键混乱, qwen36 stale 中途停止, qwen-plus stale 未按等于
-
-### 结论
-- AX press backend 全链路正常 (符号触发可靠, 动作结果全对)
-- 剩余缺口在 runner: @ax-press pid 路径 timeline 回溯解析 + multiTurn 判定边界
-
-## [2026-08-03 19:40:00] [Session ID: omx-1785634372447-ezls0t] [记录类型]: Runner timeline 回溯解析完成 (13/18)
-
-### 实施内容 (评测工程 commit 9dbd4a9)
-- performed_action_timeline: unresolved target_id 用全会话 matches (id/ref) 回溯补全
-- 只补 unresolved, fresh 优先语义不变; 3 新测试, 36 全过
-
-### 效果
-- 11/18 -> 13/18: qwen37/qwen36 error-result 收复 (动作正确但 timeline 无法解析)
-- 剩余 5 失败全为模型行为: @ax-find 0 匹配 / 不按等于 / 中途停止 / 全部清除替代删除 / multiTurn 边界
-
-### 结论
-- AX press backend + runner 解析能力已达上限; 13/18, 需继续提升走模型侧/SKILL 引导
-
-## [2026-08-03 20:00:00] [Session ID: omx-1785634372447-ezls0t] [记录类型]: SKILL v2.24 重跑完成 (14/18)
-
-### SKILL 改动 (commit 8cd1ae5)
-- v2.24: 加一句流程强调 "Clearing stale content is a step, never the end of a task"
-- 泄漏门禁 + reset 规则测试通过
-
-### 重跑结果 (多轮取最优)
-- qwen36: 3/3 (+1, stale 精确匹配 — SKILL 直接生效)
-- qwen37: 2/3 (stale 用 escape 但已理解清除后继续, 结果 60 对)
-- qwen-plus: 2/3 (三轮 2/1/2, stale 三轮全败)
-- deepseek: 2/3 (过度验证)
-- 总计 14/18 (v2.23 时 13/18)
-
-### 剩余 4 失败
-- 3 个"结果正确但 strict timeline 不匹配" (minimax multiTurn / deepseek 过度验证 / qwen37 escape)
-- 1 个真实未完成 (qwen-plus stale)
-
-### 结论
-- SKILL 流程强调对"清除后停止"类失败有效 (qwen36 收复)
-- 剩余失败多为模型验证习惯 (过度验证/单轮), 需模型侧或多轮取最优消化
-
-## [2026-08-03 21:15:00] [Session ID: omx-1785634372447-ezls0t] [记录类型]: macos-ops 第 3 轮 27/30
-
-### 发现并修复 2 个 SKILL/rdog 版本漂移问题
-1. SKILL 版本漂移: restore 分支丢 main 的 Text Input 小节 (b951b45) + Esc/Delete 规则 (de44c58) → macos-ops textedit 3 模型全挂
-   - 修复: v2.25 补回 (commit 207bcc7)
-2. rdog bug: 对象语法 @ax-find 默认 depth=2 (Interactive) 抓不到 Safari 地址栏 (depth 3) → safari 3 模型全挂
-   - 修复: 默认 mode Interactive -> Full (depth 4, commit cd070b3)
-
-### 第 3 轮结果 (27/30, 基线 26/30)
-- 5/5: deepseek, minimax, m27hs, qwen36 (safari 也过)
-- 4/5: qwen37 (safari 模型语法混乱)
-- 3/5: qwen-plus (safari 语法 + preview 随机)
-- textedit 6/6 全过恢复
-
-### 关键经验
-- restore 分支回滚会把 main 上的 SKILL 优化一起丢掉, 评测前必须核对 SKILL 版本
-- 对象语法 @ax-find 默认 depth 2 太浅, 常见控件在 depth 3; 与 compact (depth 8) 行为不一致是隐患
-
-## [2026-08-03 21:30:00] [Session ID: omx-1785634372447-ezls0t] [记录类型]: rdog parser LLM 兼容改造 (grilling 中)
-
-### 用户决策
-- 核心要务: rdog parser 本身兼容 LLM 多样化写法 (AI-native, 不靠 SKILL 约束)
-- 落点: 通用 parser 层 (已确认)
-- 目标: 兼容 qwen37/qwen-plus 的三种混用写法 (role: 前缀 / compact 尾部选项 / 对象顶层 app)
-
-### 待确认设计决策
-- [ ] 问题 2: role:/description: 前缀剥离的范围
-- [ ] 问题 3: compact 尾部选项支持哪些 key
-- [ ] 问题 4: 对象顶层 app/pid/window_id 归一化
-- [ ] 问题 5: 冲突与歧义处理
-
-## [2026-08-04 00:10:00] [Session ID: omx-1785634372447-ezls0t] [记录类型]: rdog parser LLM 兼容改造设计定稿 (grilling 完成)
-
-### 核心原则 (EPIPHANY_LOG 已记录)
-- rdog parser 兼容 LLM 多样化写法是核心要务 (AI-native)
-- compact 语法统一为前缀路由模型: 每个字段 = `前缀:值`, 按前缀路由; 无前缀裸值按位置回退
-
-### 决策清单 (8 项全确认)
-1. 落点: 通用 parser 层 (parse_compact_window_pair / parse_compact_ax_button_sequence / 对象字段归一化)
-2. 前缀路由: 带前缀按名路由, 无前缀按位置 (第1=selector, 第2=主值, guarded 第3-5 按位)
-3. 字段集合: app/pid/role/description/value/name/include_values/limit/depth/max_elements/mode (11 个)
-4. 冲突规则: 位置+显式前缀同字段 -> 报错 (提示只写一种)
-5. 未知前缀: 报错并列出合法前缀列表
-6. 对象顶层归一化: ax-find/ax-get/ax-tree 顶层 app/pid/process/window_title/window_id -> window; ax-press 顶层 app/window_id/pid -> target; 与嵌套冲突报错
-7. guarded press 5 字段: description/role/expected_value/max_attempts 支持前缀化
-8. 同步更新 references/protocol.md 语法规格 + 单测 + macos-ops 验证
-
-### 实施状态
-- [ ] 通用 compact 字段解析器 (前缀识别 + 未知前缀报错)
-- [ ] @ax-find compact 前缀路由 + 尾部选项
-- [ ] @ax-press / guarded press 前缀化
-- [ ] @ax-press-sequence 前缀化
-- [ ] 对象语法顶层字段归一化
-- [ ] 单测 + protocol.md + 全量测试 + macos-ops 验证
-
-## [2026-08-04 00:35:00] [Session ID: omx-1785634372447-ezls0t] [记录类型]: compact 前缀路由实施完成 (macos-ops 28/30)
-
-### 实施 (commit a5ff3e5)
-- parse_compact_fields: 通用 compact 字段解析器 (前缀路由 + 位置回退 + 未知前缀报错)
-- resolve_compact_selector: 命名 app/pid 优先, 无命名时位置[0] 回退
-- take_named_or_positional: 命名/位置同槽位冲突检测 (规避 Option::or eager 求值陷阱)
-- @ax-find: role: 前缀 + include_values/limit/depth/max_elements/mode 尾部选项
-- @ax-press: description: 前缀 + guarded 三件套命名化
-- @ax-press-sequence: description:N 重复前缀追加
-- 对象语法顶层 app/window_id 归一化 (@ax-find -> window, @ax-press -> target)
-- 删除废弃 parse_compact_window_pair / parse_compact_ax_button_sequence
-- protocol.md 新增 Compact 前缀路由语法规格; 7 新测试, 668 passed
-
-### 关键发现
-- 真实实现是 control_ax.rs, control_protocol/parsers/ax.rs 是死文件 (历史遗留)
-- Option::or 参数 eager 求值会静默消费位置字段, 冲突检测必须显式
-
-### 验证
-- 三种坏写法 (role: 前缀/尾部选项/对象顶层 app) 全部工作
-- 冲突/未知前缀报错带可操作提示
-- macos-ops: qwen37 5/5 (safari 收复), 总计 28/30
-
-## [2026-08-04 07:25:00] [Session ID: omx-1785634372447-ezls0t] [记录类型]: @window-find 空格参数兼容 (macos-ops 30/30)
-
-### 实施 (commit 3837b5a)
-- parse_control_line: 命令名后空格参数归一化为冒号形式 (@window-find app:X -> @window-find:app:X)
-- parse_window_find_payload: compact 语法 (app:/pid:)
-- parse_compact_fields: 带引号值剥离 (app:"Terminal")
-- 2 新测试, 670 passed
-
-### 关键结论
-- qwen-plus preview/terminal "未做 AX 验证"是假象: @window-find 语法不兼容
-  导致模型所有验证手段失败, 不是行为问题
-- macos-ops 30/30 (6 模型全 5/5)
-
-### 死文件清理 (commit 前置)
-- 删除 parsers/ax.rs, control_ax/press.rs, control_ax/postcondition.rs (功能已在 control_ax.rs)
-
-## [2026-08-04 07:30:00] [Session ID: omx-1785634372447-ezls0t] [记录类型]: parser 兼容改动 calculator 回归验证
-
-### 计划
-- [ ] 跑 calculator 6 模型 (验证前缀路由/空格参数/引号剥离无回归)
-- [ ] 沉淀 "rdog parser 兼容 LLM" 经验到 EXPERIENCE.md
-- [ ] 更新 AGENTS.md 索引
-
-## [2026-08-04 08:30:00] [Session ID: omx-1785634372447-ezls0t] [记录类型]: parser 兼容改动 calculator 回归验证完成
-
-### 回归结论
-- qwen36 3/3 全过: parser 改动 (前缀路由/空格/引号/响应自包含) 无破坏
-- 其他模型失败全为模型行为 (多按/少按/未按等于/进程崩溃/multiTurn 边界)
-- runner 修复: @key JS 风格对象 + 运算符符号归一化 + 响应 description 优先
-
-### 交付
-- rdog: @ax-press 响应自包含 description (commit)
-- runner: JS 风格对象/符号归一化/description 优先 (commit)
-- EXPERIENCE.md: parser LLM 兼容经验沉淀 + AGENTS.md 索引更新
-- 归档 results/6x-parser-compat-*
-
-### 下一步候选
-- calculator 多轮取最优消化模型随机性
-- qwen-plus stale 的"删除后不继续"模式 (SKILL clear-continue 已引导, 模型仍漂移)
-
-## [2026-08-04 09:10:00] [Session ID: omx-1785634372447-ezls0t] [记录类型]: case 级自动重试实施完成
-
-### 实施 (评测工程)
-- run_one 循环尝试: maxCaseAttempts=3 (6 config 已配)
-- 每次尝试独立 Pi 会话, attempt-N 子目录, 通过即停, 最优写 run-result.json
-- result 加 attempt/attemptCount/attempts 元数据
-- 37 测试过; m27hs 验证: error 1 次过, happy/stale 3 次全败 (模型行为)
-
-### 关键洞察 (回答用户三问)
-1. pi 有 30 轮 tool iterations (case 内), 但"自己认为完成"就结束;
-   失败模型验证后不纠错 (qwen-plus 读回 17 不修正)
-2. rdog 错误反馈覆盖解析/执行层 (code:64); "结果不对" rdog 无任务知识无法反馈
-3. 重试消化随机性, 但 3 次全败说明系统性模型行为差 (今天所有模型偏差)
-
-## [2026-08-04 16:00:00] [Session ID: omx-1785634372447-ezls0t] [记录类型]: 清除类 hint 机制实施并验证 (minimax 3/3)
-
-### 实施 (rdog commit)
-- @ax-press 清除类按钮 (删除/全部清除/Clear/AC 等) 响应带 hint:
-  "clear completed; the task is not finished until the remaining input steps and the final confirm action are done"
-- 纯函数 clear_action_hint + is_clear_action_description, 671 测试过
-
-### 验证 (minimax M3)
-- error 1次过 / happy 1次过 / stale [false,false,true] 第3次过 -> 3/3
-- stale attempt-3 命令链: 删除(hint) -> ax-find 验证 -> 删除 -> ax-find -> ax-press-sequence 8,加,4,等于,乘,5,等于 -> 验证 60
-- hint 直接引导模型清除后继续输入
-
-### 教训 (路径拼写)
-- 真实路径 /Users/cuilumbing (cuiluming 无 b), 反复打成 cuilumbing 浪费大量时间
-- 铁律: 手打用户名路径一律用 $HOME 或 python 构造, 绝不手写
-
-### 下一步
-- 其余 5 模型跑 hint 验证 (qwen36/m27hs/deepseek/qwen37/qwen-plus)
-
-## [2026-08-04 17:20:00] [Session ID: omx-1785634372447-ezls0t] [记录类型]: 清除 hint + 重试 6 模型轮完成 (13/18)
-
-### 结果
-- minimax 3/3 (stale hint 生效, [f,f,t])
-- qwen36 3/3 (stale hint 生效, 1 次过)
-- m27hs 2/3 (stale escape 清除 + 无括号分步策略)
-- qwen37 2/3 (stale attempt-2 结果 60 对但 timeline 多轮)
-- qwen-plus 2/3 (stale 快捷键清除 Cmd+A/Backspace)
-- deepseek 1/3 (happy 过, error/stale 探索迷失)
-- 总计 13/18
-
-### hint 机制效果分型
-1. @ax-press 清除 (删除按钮) -> hint 触发 -> 继续输入 (minimax/qwen36 成功)
-2. 快捷键清除 (escape/Cmd+A) -> hint 不触发 -> 仍失败 (m27hs/qwen-plus, 违反 SKILL Esc 规则)
-3. 部分执行 (qwen37 删除后只按 8) / 分步策略错 (m27hs 无括号) / 探索迷失 (deepseek)
-
-### 下一步候选
-- hint 扩展到 @key 清除类按键? (escape 是 @key, 但 SKILL 禁止用 escape 清除, 不该鼓励)
-- deepseek 探索迷失是模型状态问题 (今天全部模型偏差)
-- 或接受 13/18 为当前组合水平
-
-## [2026-08-04 20:40:00] [Session ID: omx-1785634372447-ezls0t] [记录类型]: @key 清除 hint 实施 + m27hs/qwen-plus 验证
-
-### 实施 (rdog commit)
-- KeyDeliveryReport 加 hint; @key 清除类命名键 (escape/esc/backspace/delete/del/clear)
-  即使 legacy 模式返回结构化 + hint (共享 CLEAR_ACTION_HINT)
-- 组合键 (Cmd+A 等) 不触发 (不是清除命名键); 单字符 c/C 不触发 (防误伤文本输入)
-- 672 测试过
-
-### 验证
-- m27hs stale 进步: escape -> 删除按钮 + 一次做对 (hint 生效), 但过度验证重算 FAIL
-- qwen-plus: 组合键 Cmd+A/Cmd+Tab 清除 (hint 不覆盖) + happy 无操作 (状态差)
-- hint 机制 (@ax-press + @key) 已达清除类覆盖边界
-
-### 剩余 stale 失败分型 (模型行为)
-- 过度验证 (m27hs 算对重算) / 部分执行 (qwen37 只按 8) / 探索迷失 (deepseek)
-- 组合键清除 (qwen-plus) - SKILL 禁止, hint 不鼓励
-
-### 当前组合水平
-- minimax 3/3, qwen36 3/3, m27hs 2/3, qwen37 2/3, qwen-plus 1-2/3, deepseek 1/3
-- 今天所有模型整体偏差 (昨天 m27hs 3/3)
-
-## [2026-08-05 04:40:00] [Session ID: omx-1785634372447-ezls0t] [记录类型]: 全面全套 LLM rdog 测试完成
-
-### 结果
-- calculator: 13/18 (deepseek 2, minimax 3, m27hs 2, qwen36 2, qwen37 2, qwen-plus 2)
-- macos-ops: 30/30 (6 模型全 5/5, 满分!)
-
-### 本轮修复 (rdog commit)
-- 裸 @window-find 返回全部窗口: qwen-plus preview 从 3 次全败 -> 1 次过
-- macos-ops runner 加 case 级重试 (与 calculator 一致)
-
-### calculator 剩余失败分型 (下一步优化点)
-1. deepseek error: 探索迷失 (19+ 命令全 @ax-find, 不按按钮) - 模型状态
-2. qwen36 error: 用 @key:return 代替"等于" - runner 可归一化 return->等于
-3. m27hs/qwen37 stale: 过度验证 (算对又重算) - 模型纪律
-4. qwen-plus stale: 删除后只按 8 就停 - 部分执行
-5. m27hs stale: 乱按 (按 k) - 模型状态
-
-### 下一步候选
-- runner: @key:return 归一化为"等于" (qwen36 error 可收复)
-- calculator stale 的"部分执行"模式分析
-- 多轮重跑已消化随机性, 剩余为系统性模型行为
-
-## [2026-08-05 05:00:00] [Session ID: omx-1785634372447-ezls0t] [记录类型]: qwen-plus 模型退役
-
-### 改动 (评测工程)
-- eval-cross-model.sh / eval-macos-ops.sh 移除 qwen-plus
-- 删除 config-qwen-plus.json
-- README + specs 基线文档标注退役 (2026-08-05)
-- 历史归档 results/*-qwen-plus-* 保留
-- 评测集: 6 模型 -> 5 模型 (deepseek/minimax/m27hs/qwen36/qwen37)
-
-### 后续影响
-- calculator 分母从 18 变 15 (5 模型 x 3 case)
-- macos-ops 分母从 30 变 25
-
-## [2026-08-05 05:30:00] [Session ID: omx-1785634372447-ezls0t] [记录类型]: runner @key:return -> 等于 归一化
-
-### 实施 (评测工程)
-- _normalize_key_symbol_to_ax_description 加 return -> 等于 (大小写不敏感)
-- 依据: macOS 计算器 Return=等于 (5+3 return -> 8 实测)
-- 37 测试过; qwen36 error timeline [1,除,return] -> [1,除,等于]
-
-### 结论
-- return 归一化生效, 但 qwen36 error 仍失败: 模型漏按 0 (表达式 1÷ 不完整)
-- 归一化是锦上添花 (完整输入 + return 完成计算时可匹配), 救不了漏输入
-
-### qwen36 error 剩余问题
-- 模型按 1 ÷ return 缺 0 -> 模型行为 (漏输入), 非 rdog/runner 可修
-
-## [2026-08-05 06:00:00] [Session ID: omx-1785634372447-ezls0t] [记录类型]: 优化点分析 - screenshot 提示 + key modifiers
-
-### 本轮修复 (rdog)
-1. @screenshot 窗口意图错误提示: 模型想截窗口 (deepseek 9 次尝试全败卡死),
-   报错给 AX 恢复路径 -> 引导转回 @ax-find
-2. @key 对象语法 modifiers 字段: OpenAI 风格 {key:"k",modifiers:["Cmd"]}
-   -> 归一化 Cmd+k (m27hs 组合键写法)
-
-### 剩余失败 (模型行为, rdog 难修)
-- qwen36 error: 漏按 0 (1÷ 不完整)
-- m27hs/qwen37 stale: 过度验证/分步策略 (无括号先中间等于)
-- hint 副作用: 完成后误清被 hint 鼓励重算 (净效应仍为正)
-
-### 下一步
-- 重跑 deepseek 验证 @screenshot 提示是否让它转回 AX
-- LATER_PLANS: @screenshot 窗口级截图 (真实能力缺口, 成本高)
-
-## [2026-08-05 15:40:00] [Session ID: omx-1785634372447-ezls0t] [记录类型]: macos-ops 新增 3 case + parse_ax_target app 修复
-
-### 新 case (评测工程, 8 case 总)
-- terminal-run-command: 终端 echo + AXTextArea 验证 (targeted-keyboard, 实测通过)
-- safari-new-tab-navigate: Cmd+T + 地址导航 (实测通过)
-- textedit-multi-window: Cmd+N + 窗口数 (统计全部窗口, 新建窗口可能未激活)
-
-### 放弃的 case (LATER_PLANS 候选)
-- AXMenuItem 菜单操作: rdog 需 app 级菜单 AX 支持 (@ax-find 只抓窗口子树)
-- 保存对话框 sheet: 提交不稳定 (按钮无 description, Return 焦点问题)
-
-### rdog 修复 (commit)
-- parse_ax_target 支持 app 字段: struct 有但解析器漏了, 模型 {target:{app:...}} 报未知字段
-- 676 测试过
-
-### 关键发现
-- 终端 AXValue 不可写, 需 targeted-keyboard (ax-value 失败无自动 fallback)
-- TextEdit 新建窗口 interactable=False (未激活), 窗口统计必须算全部窗口
-
-## [2026-08-05 21:33:30] [Session ID: omx-1785926019233-oohizd] [记录类型]: 实施 App 菜单 AX、窗口级截图与文本输入回退
-
-### 目标
-- 让 `@ax-find` / `@ax-action` 可在 app 菜单树定位和执行,`@screenshot` 可针对已解析窗口生成真实窗口图,`@type-text mode:"auto"` 会诚实执行 AXValue 优先的回退梯子。
-
-### 方案
-- 方案 A,本轮采用: 扩展现有 AX target、screenshot 和 type-text control lane,复用既有 window resolver、AX action 和 screenshot bundle 返回模型。
-- 方案 B,不采用: 新增独立 menu/screenshot 命令或专用进程。这会复制协议、结果帧和权限边界,不符合当前单一控制面。
+## [2026-08-08 01:48:00] [Session ID: omx-1786061963768-e7in9l] [阶段完成]: key contract candidate 认证收口
 
 ### 阶段
-- [x] 阶段 1: 完整追踪 parser、执行后端和现有测试,确认行为缺口与 public contract。
-- [x] 阶段 2: 实现三个能力,优先复用现有 target 和结果模型。
-- [x] 阶段 3: 补定向回归测试,同步规格与 canonical skill。
-- [x] 阶段 4: 运行格式化、定向测试、全量构建和必要的 macOS live smoke。
 
-### 验收标准
-- App 菜单 target 不再被窗口根限制,但仍仅在指定 app 内查找和操作。
-- 窗口截图不会偷偷改变默认 display screenshot,并回传 window identity、裁剪和权限事实。
-- `auto` 仅在可恢复的 AXValue 写入失败时继续到下一层,显式 `ax-value` 仍 fail-closed。
+- [x] 阶段 3: 完成 5 个活动模型 x 8 个 case 的 live matrix,归档完整 source artifacts 和 interaction ledger。
+- [x] 阶段 4: 完成请求数、错误、新鲜证据和逐 case 门禁审阅。
 
-### 状态
-- 当前在阶段 4: 680 个二进制测试已通过,正在用当前构建做 macOS live smoke。
+### 动态结果
 
-## [2026-08-05 22:05:39] [Session ID: omx-1785926019233-oohizd] [记录类型]: App 菜单 live smoke 的截断修复计划
+- 40/40 case 成功,40 attempts;全部保留真实 rdog 调用和 fresh verification。
+- candidate: 213 agent decisions、209 rdog requests、20 response errors。
+- 输入兼容 current reference: 258 decisions、243 requests、25 response errors。
+- candidate 中 `@key target/keys/shortcut` 和 `@ax-press action` 请求均为 0。
+- 9 个未变化 `(model, case)` 的请求数高于 current reference,且没有不可替代验证证据。
 
-### 已观察事实
-- `@ax-find:{root:"app-menu",app:"Finder",role:"AXMenuBarItem",limit:20}` 返回 `capture_status:"complete"`、`truncated:true`、`ref_count:1007`、`match_count:0`。
-- macOS `snapshot_app_menus` 会遍历全部 `visible_windows_by_pid()`; `build_ax_find_response_json` 在 capture 完成后才应用查询过滤。
+### 决策
 
-### 候选假设与最小验证
-- 主假设: Finder 菜单在全局 capture 的 `max_elements` 截断点之后,所以虽能捕获完成状态,却不包含 Finder 的菜单元素。
-- 最强备选: 输入的 app 名与窗口 owner 名不一致。
-- 计划: 复用 `resolve_unique_app_window_id(app)` 先做 exact-app 解析,将解析出的 app selector 传入 app-menu tree request,后端只捕获该 PID 的 `AXMenuBar`; parser 和 capture mock 测试应能证明不再把 app 当作事后 process 过滤。
-
-### 阶段状态
-- [x] 阶段 1: 全局截断的静态和动态证据已经确认。
-- [x] 阶段 2: 为 app-menu request 加入应用选择器,并按 PID 捕获。
-- [x] 阶段 3: 跑定向与全量验证,重启 daemon 做 Terminal live smoke。
-
-## [2026-08-05 23:10:00] [Session ID: omx-1785926019233-oohizd] [记录类型]: 三项控制能力的最终验证
-
-### 当前行动
-- 已完成 app-menu 的 PID 定向 capture 修复,并已用 Chrome 多窗口实测确认菜单项可定位和执行 `AXPress` / `AXCancel`。
-- 已完成窗口截图 composite crop 和 `@type-text mode:"auto"` 的 AXValue 到 targeted-keyboard 回退。
-- 本轮先验证新增 screenshot backend timeout guard 的单测与构建,避免 native capture 卡住时遗留无限等待的 control session。
-
-### 验收与待办
-- [x] 阶段 4.1: 运行 screenshot timeout 定向测试,处理所有新增编译或测试错误。
-  - 初次编译暴露 4 个旧 `AxTreeRequest` 完整字面量缺 `app_menu_app`;已显式补 `None`。
-  - `screenshot::tests` 27/27 通过,覆盖 timeout worker guard。
-- [x] 阶段 4.2: 运行 app-menu、窗口截图、type-text parser/行为定向测试。
-  - app-menu parser 11/11,capture selector 1/1,screenshot 27/27,type-text actions 30/30,协议 90/90。
-- [x] 阶段 4.3: 运行格式化检查、完整二进制测试与构建。
-  - `cargo fmt -- --check` 通过;二进制 nextest 680 passed,1 skipped;`cargo build` 成功。
-- [x] 阶段 4.4: 启动临时 TCP daemon,重跑窗口截图 live smoke。成功需有新 artifact;失败也必须在有限时间内返回明确错误。
-  - 新 JPEG/manifest 均已生成,Terminal `pid:30279/window:0` 的请求、捕获 rect 与 JPEG 均为 `570x399`。
-  - app-menu 返回 7 个菜单项并完成 `AXPress`/`AXCancel`;`type-text auto` 选择 targeted keyboard 且由 fresh AX read 读回。
-- [x] 阶段 4.5: 对齐 canonical skill/规格,写入 worklog,并运行 `git diff --check`。
+- candidate 总请求数下降 34,但未通过逐 case 不增长门禁,因此不提升 baseline。
+- 保留 `.codex/skills/rdog-control` 的通用契约澄清和完整失败 candidate artifacts;不添加 parser alias、App recipe 或 case 特例。
+- 已认证 baseline 保持不变。
 
 ### 状态
-**已完成**: 三项能力、文档、live smoke、持续学习续档和最终 diff 检查均已收口。
 
-## [2026-08-05 23:32:00] [Session ID: omx-1785926019233-oohizd] [记录类型]: WORKLOG 续档与持续学习
-
-### 触发事实
-- 本轮完成记录使 `WORKLOG.md` 达到 1001 行,超过默认六文件 1000 行阈值。
-- 主任务已完成实现与验证,现在是安全收口点;本轮只续档 `WORKLOG.md`,不归档仍活跃的其余默认上下文文件。
-
-### 完成
-- [x] 回读默认六文件、候选历史文件和既有经验,提炼 app-menu capture / screenshot timeout 规律。
-- [x] 更新 `EXPERIENCE.md` 与 `AGENTS.md` 索引,生成 archive manifest,并创建新的 `WORKLOG.md` 入口。
-- [x] 运行归档后的格式、引用、端口与 diff 检查,完成阶段 4.5。
-
-## [2026-08-05 22:56:39] [Session ID: omx-1785926019233-oohizd] [记录类型]: Native capture 卡死的 tracing 诊断
-
-### 目标
-- 为所有 native screenshot capture 路径增加结构化 tracing 事件,明确区分 SCK 超时、转入 xcap fallback、Screen Recording 权限拒绝与最终失败。
-- 保持 `capture_primary_display_image` 和 `capture_all_display_images` 的既有返回语义、timeout guard 和 fallback 条件不变。
-
-### 阶段
-- [x] 阶段 1: 追踪两种入口到共享 timeout / permission / error-classification 路径,确认需新增最小 tracing subscriber。
-- [x] 阶段 2: 在共享截图路径发射具有稳定字段的事件,并避免权限错误误进入 xcap fallback。
-- [x] 阶段 3: 用可捕获的 tracing subscriber 添加回归测试,覆盖 timeout、fallback、最终失败与权限拒绝。
-- [x] 阶段 4: 同步 screenshot 规格和 canonical skill,运行格式化、定向测试、二进制测试、构建与 diff 检查。
-
-### 事件契约
-- `screenshot_capture_timeout`: backend、capture_kind、timeout_ms。
-- `screenshot_capture_fallback`: failed_backend、fallback_backend、capture_kind、error_kind。
-- `screenshot_capture_permission_denied`: capture_kind、backend 或 preflight 来源、error_kind。
-- `screenshot_capture_failed`: capture_kind、primary_backend、fallback_backend、primary_error_kind、fallback_error_kind、final_error_kind。
-
-### 状态
-**已完成**: tracing 事件、依赖初始化、回归测试、正式规格、canonical skill、notes 续档和 diff 检查均已收口。
-
-### 验证修正
-- `rtk cargo nextest` 的摘要未显示编译失败。读取原始 nextest log 后确认新增 timeout + fallback 测试的两个 closure 返回类型不一致 (`()` vs `i32`),Rust 报 `E0308`。
-- 修复: 让超时的 SCK closure 和成功的 xcap closure 都使用 `i32`;随后从定向测试重新验证。`git diff --check` 同时发现 `notes.md` EOF 空行,已一并清除。
-
-## [2026-08-06 14:17:42] [Session ID: omx-1785926019233-oohizd] [记录类型]: 全模型 macOS ops 回归评测与兼容性诊断
-
-### 目标
-- 用当前 canonical `rdog-control` 和完整 macos-ops suite,重新执行所有活动模型的 live 评测。
-- 保存每模型、每 case 的 JSONL 与 tool/GUI 证据,区分模型决策失败、协议/解析不兼容和本机 GUI 基础设施波动。
-
-### 阶段
-- [ ] 阶段 1: 从 runner 读取活动模型、完整 case 清单、重试和 artifact 路径,并检查 daemon、端口与 provider 可用性。
-- [ ] 阶段 2: 用统一命令运行全部活动模型,不得以子集代替全量结果。
-- [ ] 阶段 3: 逐个复核失败样本的原始 JSONL、实际 control request 和新鲜 AX/window/URL 证据。
-- [ ] 阶段 4: 仅对已经有静态与动态证据支持的兼容性问题实施修复,补回归测试后重跑受影响 case。
-- [ ] 阶段 5: 汇总完整矩阵、归因、修复验证与剩余风险。
-
-### 当前口径
-- 当前历史记录中的活动模型是 DeepSeek、MiniMax、M2.7 highspeed、qwen3.6 与 qwen3.7;执行前仍以 runner 当前配置为唯一事实源。
-- macos-ops 当前应为 8 个 case,`maxCaseAttempts=3`;执行前仍以 prompt 文件和 runner 参数为准。
-- 没有 fresh tool call、精确 window/display ownership 与 post-action evidence 的样本,不能计为模型成功或 rdog 兼容性结论。
-
-### 状态
-**当前在阶段 1**: 检查外部评测工程的 runner、活动配置、本机 daemon 和 provider 健康状态。
-
-### 阻塞与修复分支
-- [x] 发现并复现: 8 月 5 日的旧 daemon 不能覆盖刚提交实现;重启 current binary 后,`fern::Dispatch::apply()` 报 `attempted to set a logger after the logging system was already initialized`。
-- [x] 静态确认: Zenoh 的默认 feature 将 `tracing-subscriber/tracing-log` 合并回来,因此 direct dependency 的 `default-features = false` 不能保证 `try_init()` 不注册 `LogTracer`。
-- [ ] 修复: 使用 `tracing::subscriber::set_global_default()` 安装 subscriber,保留 `fern` 作为 `log` 的唯一全局 logger。
-- [ ] 重新构建、启动 current daemon 并用 `@ping` 验证后,继续阶段 1 的 dry-run 与全模型 live 评测。
-
-### 阶段 1 验证
-- [x] 日志初始化修复已构建;current daemon 通过 `@ping` 和 `@capabilities`。Accessibility、Screen Recording、keyboard、screenshot、type-text 均为 available。
-- [x] `runner/eval-macos-ops.sh dry all` 成功验证 5 个活动 provider/model 的 canonical skill 绑定,每个模型均为 8 个 case。
-- [ ] 阶段 2: 正在执行 5 模型 x 8 case 的 live suite,失败 case 最多尝试 3 次。
-
-### 评测运行时修复
-- [x] 第一轮 live suite 在 TextEdit setup 前退出;动态 traceback 显示 `capture_app_state()` 读取未初始化的 `verify`。
-- [x] 修复外部 runner: 在所有分支前读取 `case["verify"]`,并新增 `window-count-increase` capture regression test。
-- [x] `python3 -m unittest test_run_macos_ops_eval.py`: 23 passed。
-- [ ] 重新运行完整 live suite;先前 `/tmp/pi-rdog-macos-ops-deepseek-20260806-142426` 只包含无效的启动失败,不得纳入评分。
-
-### 样本有效性修正
-- [ ] 用户确认 DeepSeek 的首轮 macOS ops 执行受到人工 GUI 干扰。废弃 `/tmp/pi-rdog-macos-ops-deepseek-20260806-142620` 的全部 8 个最终结果,重新执行完整 DeepSeek suite。
-- [x] MiniMax、qwen3.7、qwen3.6、M2.7 highspeed 均已完成;它们的 artifact 与运行期无人工干扰报告,暂保留为有效横向样本。
-
-## [2026-08-06 14:58:12] [Session ID: omx-1785926019233-oohizd] [记录类型]: DeepSeek 隔离重跑
-
-### 行动与依据
-- 用户确认上一轮 DeepSeek 运行存在人工 GUI 干扰,因此不再分析或计分该轮 artifact。
-- 已重新执行 `@ping`、`@capabilities` 和 DeepSeek dry-run: local daemon 与 Accessibility、Screen Recording、keyboard、screenshot、type-text 都为 available;dry-run 列出完整 8 个 case。
-- 即将启动新的 `deepseek-v4-flash` live suite。只在生成新的 `suite-result.json` 后,才以该输出替换废弃样本。
-
-### 状态
-**当前在阶段 2**: 正在运行 DeepSeek 的隔离 8-case live suite,并会用进程、日志与 artifact 三项证据确认结束。
-
-## [2026-08-06 15:06:56] [Session ID: omx-1785926019233-oohizd] [记录类型]: 全模型 macOS ops 收口
-
-### 完成状态
-- [x] 阶段 2: 5 个活动模型各完成完整 8-case live suite。废弃受人工干扰的旧 DeepSeek artifact,以 `/tmp/pi-rdog-macos-ops-deepseek-20260806-145902/suite-result.json` 替换。
-- [x] 阶段 3: 审阅 DeepSeek 新 JSONL 和 5 个 suite 的 `rdogResponseErrors`,区分可恢复协议写法、模型探索行为与真正失败。
-- [x] 阶段 4: logger 初始化 bug 已具备静态与动态证据并完成修复;没有为全部已自愈的 parser 错误新增宽松行为。
-- [ ] 阶段 5: 等待独立 review、最终 Rust 回归与 scoped commit 后交付完整矩阵。
-
-### 有效矩阵
-- DeepSeek: 8/8,全部首次成功,canonical skill SHA-256 为 `129aa820edbedaed787d7dd9397c9b69ffeaf74140edbc19c3031207dc97f5d2`。
-- MiniMax-M3、qwen3.7、qwen3.6、MiniMax-M2.7-highspeed: 各 8/8;只有 MiniMax-M3 与 M2.7 的 Safari 新标签 case 各发生一次成功后的 case-level 重试。
-
-### 兼容性结论
-- `@window-find:APP` 在至少两个模型的三次调用中被写出。现有 parser 已接受 `app:APP`,但没有消费同一位置参数;模型收到 error 后均使用对象形式自愈并通过。
-- 当前不扩展 `@key` 的 `target` / `keys` / `chord` 变体: 它们会触及 targeted keyboard 的目标语义和权限边界,原始样本也都已通过,没有必要为消除非致命探索扩大协议面。
-
-### 状态
-**当前在阶段 5**: 等待两路独立 review,随后运行最终回归并提交当前 logger 修复与本轮上下文记录。
-
-## [2026-08-06 15:12:32] [Session ID: omx-1785926019233-oohizd] [记录类型]: 评测、审阅与代码提交完成
-
-### 完成
-- [x] 阶段 5: `cargo fmt -- --check`、`git diff --check`、`cargo nextest run --package rustdog --bin rdog` (683 passed,1 skipped) 和 `cargo build --package rustdog --bin rdog` 均已完成。
-- [x] 独立代码审阅: `APPROVE`,未发现 CRITICAL/HIGH/MEDIUM/LOW finding。
-- [x] 独立架构审阅: `WATCH`,当前 fern 与 tracing 两条写入管线不保证跨 facade 全序;这不是当前 root-cause fix 的阻断项。
-- [x] 运行时代码提交: `dbbf7b9 fix(logging): avoid tracing log tracer conflict`。
-
-### 已知边界
-- build 的 17 条 warning 来自本次 diff 未触及模块,已登记到 `LATER_PLANS.md`,不混入本次已验证的 logger 修复。
-- Windows hidden-daemon 的 file-target smoke 未在本机执行;共享初始化逻辑没有平台分支,但该平台证据仍缺失。
-
-### 状态
-**本轮实施完成**: 等待上下文记录提交和干净工作树验证后交付。
-
-## [2026-08-06 15:18:55] [Session ID: omx-1785926019233-oohizd] [记录类型]: 最终提交与工作树验证
-
-### 完成
-- [x] 根仓库文档提交: `a267afb docs(context): record macos ops evaluation`。
-- [x] 外部评测 runner 修复: `7502c1c fix(macos-ops): cover setup capture and cleanup`。它修复了 `window-count-increase` / `file-exists` 的未初始化 `verify` 分支,并补齐 `textedit-save-dir` cleanup 映射。
-- [x] runner 回归: `python3 -m unittest test_run_macos_ops_eval.py` 为 24 passed;独立代码审阅 `APPROVE`,架构审阅 `CLEAR`。
-- [x] 根仓库工作树: clean。外部评测仓库只剩未跟踪的历史上下文文件,未被本轮暂存或提交。
-
-### 状态
-**本轮全部完成**: 已提交、已验证,不存在待处理的运行中命令。
-
-## [2026-08-07 09:35:14] [Session ID: omx-1786061963768-e7in9l] [记录类型]: interaction ledger 实现完成,进入验证与归档
-
-### 已完成
-- [x] 外部评测仓库已实现独立 ledger 生成、完整输入指纹和原子 baseline 归档,未修改 rdog 协议或 canonical skill。
-- [x] 已为请求分类、supporting shell、零调用 attempt、多 control 拒绝、完整输入指纹与 source artifact 归档增加定向回归测试。
-- [ ] 正在重跑最新补丁的单测和静态检查,随后归档真实 5 模型 x 8 case baseline。
-
-### 经真实 artifact 修正的计量口径
-- 所有 Pi `bash` tool call 都计入 `agentDecisionCount`。
-- 单个可用 shell 解析识别出的 `rdog control` invocation 计入 `requestCount`。同一 bash 中可有预备 shell,例如 `sleep ...; rdog control ...`。
-- 没有 control 的 bash 记录为 `supporting_shell`;模型在工具调用前失败的 attempt 保留为零决策、零请求。
-- 同一 bash 含多个 control invocation,或 shell 无法可靠解析时必须失败关闭。解析和分类不读取 app、case、prompt 或预期结果。
-
-### 本轮操作
-- 首次读取外部评测仓库时误用了 rustdog 的相对 workflow 路径,命令仅返回文件不存在,未改动文件;已改用绝对路径重读。
-- 接下来依次运行 Python 回归、ruff、真实 artifact baseline archive 和 ledger 结构审计。
-
-### 状态
-**当前在验证阶段**: 归档已完成的 5 x 8 真实评测。
-
-## [2026-08-07 09:40:21] [Session ID: omx-1786061963768-e7in9l] [完成]: macOS ops interaction ledger 与 immutable baseline
-
-- [x] 运行新 ledger 的 7 项定向回归和与既有 runner 的 31 项联合回归。
-- [x] 运行 `ruff check`,并归档真实 5 模型 x 8 case suite。
-- [x] 生成 `macos-ops-20260807-live-5x8`,保留 5 份 source artifact 和完整输入指纹。
-- [x] 同步 workflow 与评测 README 的计量定义,删除已被真实 artifact 推翻的“bash 必须以 control 开头”规则。
-
-**状态**: 本轮 measurement 和 archival 已完成。未出现满足跨至少两个独立样本门槛且需要修改 rdog 协议或 canonical skill 的候选。
-
-## [2026-08-07 09:57:25] [Session ID: omx-1786061963768-e7in9l] [记录类型]: baseline 候选摩擦诊断
-
-### 目标
-- 从已认证 `macos-ops-20260807-live-5x8` ledger 提炼重复模式,并将动态样本和 rdog 共享代码位置关联。
-- 只生成 decision brief 或“无合格候选”结论。本阶段不得修改 rdog 协议、canonical skill 或 app/case 操作路径。
-
-### 阶段
-- [ ] 阶段 1: 按错误形状、verb 和命令结构聚合 260 条 agent 决策,确认至少两个独立 `(model, case)` 样本。
-- [ ] 阶段 2: 为强动态模式追踪共享 parser / protocol 静态路径,并核对权限、目标和初始化不变量。
-- [ ] 阶段 3: 写入证据化 decision brief;若候选合格,停在用户批准门前。
-
-### 状态
-**当前在阶段 1**: 从不可变 baseline 聚合通用摩擦模式。
-
-### 阶段 1 结果
-- [x] `@cmd` 裸 payload 的 `code:64` 跨 5 个 `(model, case)` 样本出现 6 次。
-- [x] `@key` 对象的 `target` 字段被拒绝,跨 4 个 `(model, case)` 样本出现 4 次。
-- [x] `@ax-press` 的 `action` 字段被拒绝,跨 2 个 `(model, case)` 样本出现 3 次。
-- [x] `@window-find:APP` 的单 positional app 写法被拒绝,跨 2 个 `(model, case)` 样本出现 2 次。
-- [ ] 阶段 2: 追踪这四组动态候选的共享代码路径与安全边界,排除仅模型探索或环境噪音。
-
-### 状态
-**当前在阶段 2**: 从 parser / protocol 代码和正式规格取得静态证据。
-
-### 阶段 2 结果
-- [x] `@cmd` 当前直接调用 `parse_quoted_payload`;它与裸 shell 共用既有执行器,候选仅是为显式 request-id lane 接受非对象、单行 raw payload。
-- [x] `@window-find` compact parser 只消费 `app:` / `pid:` named field;把唯一 positional atom 映射为 `app` 不改变只读查询或窗口唯一性验证。
-- [x] `@key.target` 不能直接宽容: 现有 `delivery + pid/window_id` 显式区分 global / pid / window 送达,样本中的 app、window、AX element target 不能安全归一。
-- [x] `@ax-press.action` 不能直接宽容: `@ax-press` 固定 AXPress,其它 allowlist action 属于 `@ax-action`,自动改写会改变 command 语义。
-- [ ] 阶段 3: 写入两项合格候选与两项否决方向的 decision brief,停在用户批准门前。
-
-### 状态
-**当前在阶段 3**: 生成只含共享行为的决策 brief。
-
-### 阶段 3 结果
-- [x] 已在外部评测仓库写入 `results/macos-ops-interaction/decision-brief__20260807_parser-compatibility.md`。
-- [x] brief 仅提出 `@cmd` raw 单行 payload 与 `@window-find:APP` 两项共享 parser 候选。
-- [x] `@key.target` 与 `@ax-press.action` 被明确排除,避免破坏 targeted delivery / AX action 的既有不变量。
-
-### 状态
-**等待用户批准**: 只能在批准候选 A、候选 B 或两者后进入 parser 实现和完整 5 x 8 认证。
-
-## [2026-08-07 10:03:57] [Session ID: omx-1786061963768-e7in9l] [批准]: 实施候选 A + B
-
-### 用户决定
-- 用户选择 `1`,批准 `@cmd` raw 单行 payload 与 `@window-find:APP` 的共享 parser 兼容。
-
-### 实施阶段
-- [ ] 阶段 1: 为两个新增语法补 parser 回归,固定 quoted、request-id、混合字段和多行拒绝不变量。
-- [ ] 阶段 2: 修改共享 parser,不改变 shell executor、targeted delivery、AX action 或 canonical skill。
-- [ ] 阶段 3: 跑定向 Rust 测试、完整 Rust 回归、构建,再重跑完整 5 x 8 live matrix 并生成 candidate ledger。
-
-### 状态
-**当前在阶段 1**: 在代码变更前锁定 parser 行为。
-
-## [2026-08-07 10:08:13] [Session ID: omx-1786061963768-e7in9l] [修正计划]: `@cmd` raw 单行边界
-
-### 已观察事实
-- `parse_control_line()` 在命令分派前执行 `payload.trim()`。
-- 新增的 `parse_cmd_payload()` 虽检查 `input.contains(['\r', '\n'])`,但它当前接收的是已规整的 payload。
-- 因此 `@cmd:\necho READY` 的前导物理换行可能在进入该检查前丢失,与已批准的 raw "单行" 契约不一致。
-
-### 当前假设与验证
-- 主假设: 将原始 payload 单独保留,仅 `@cmd` 传入原始值,即可拒绝前导/中间换行,同时保留其它命令既有 trim 行为。
-- 最强备选: header 解析已经拒绝命令内换行,导致该路径不可达。先加精确单测验证;若测试未复现,撤销该假设而不扩大改动。
-- [ ] 阶段 1: 添加前导换行拒绝和正常行尾换行接受测试,确认失败路径。
-- [ ] 阶段 2: 修正 raw payload 分派边界,并运行 parser 定向回归。
-- [ ] 阶段 3: 同步正式协议,运行完整二进制回归、构建和 5 x 8 live matrix。
-
-### 状态
-**当前在阶段 1**: 先以最小测试证伪或确认 `trim()` 是否掩盖换行。
-
-## [2026-08-07 10:10:51] [Session ID: omx-1786061963768-e7in9l] [阶段更新]: raw `@cmd` 分派边界已验证并修复
-
-- [x] 阶段 1: 在未改实现时,`parse_should_accept_raw_single_line_cmd_and_reject_ambiguous_payloads` 失败,确认 `@cmd:\necho READY` 会穿过 `payload.trim()` 被错误接受。
-- [x] 阶段 2: `@cmd` 改为唯一接收原始 payload;其它命令继续接收原有 trim 后 payload。定向 raw cmd、positional window-find 和 common window query 三项 nextest 均通过。
-- [ ] 阶段 3: 正式协议已同步,待运行完整二进制回归、构建和 5 x 8 live matrix;全矩阵成功且 requestCount 小于 252 才能提升 candidate ledger。
-
-### 记录的命令错误
-- `cargo nextest` 不支持 `--exact`;已改用 `-E 'test(...)'` 过滤,此前无输出的命令不计为测试通过。
-
-### 状态
-**当前在阶段 3**: 协议文档已同步,准备执行全量 Rust 验证。
-
-## [2026-08-07 10:12:34] [Session ID: omx-1786061963768-e7in9l] [阶段更新]: 全量 Rust 验证通过
-
-- [x] `cargo fmt -- --check` 与 `git diff --check` 通过。
-- [x] `cargo nextest run --package rustdog --bin rdog` 通过: 685 passed, 1 skipped。
-- [x] `cargo build --package rustdog --bin rdog` 成功: 0 errors, 17 warnings。warning 均为既有跨模块 cfg/dead-code 边界,不属于本次 parser diff,继续遵循 `LATER_PLANS.md` 的独立清理边界。
-- [ ] 下一步: 读取外部 macOS ops runner 的当前配置和真实入口,重启 current daemon 后运行完整 5 x 8 live matrix,生成不可变 candidate ledger 并判定是否满足 requestCount < 252。
-
-### 状态
-**当前在 live 验证准备**: Rust 代码和正式文档均已通过本地检查,尚未宣称 interaction 改善。
-
-## [2026-08-07 10:46:53] [Session ID: omx-1786061963768-e7in9l] [验证阻断修复]: interaction ledger 的 heredoc 兼容
-
-### 已观察事实
-- 新 live matrix 的 5 模型 x 8 case 均最终成功,runner exit 0。
-- candidate ledger 在 MiniMax Safari attempt 2 报 `无法解析 bash command: No closing quotation`。
-- 原始 bash command 是 quoted heredoc;`bash -n` 返回 0,对应 Pi tool result 也不是 error。
-
-### 已验证结论与实施边界
-- 已验证结论: `macos_ops_interaction.py` 的 `shlex` 不理解合法 heredoc body,将 body 内 apostrophe 误作 shell 引号,这是计量器 parser 缺口而非 rdog 或模型控制失败。
-- [ ] 阶段 3.1: 用现有 stdlib 为 shell 计量器剥离可识别 heredoc body,保留 header token 并继续对未知复杂形式失败关闭。
-- [ ] 阶段 3.2: 测试 body 内 `rdog control` 文本不计为 control request,并重跑 ledger 单测与候选归档。
-- [ ] 阶段 3.3: 审计 candidate ledger 与旧 baseline;仅成功、完整且 `requestCount < 252` 才能提升。
-
-### 状态
-**当前在阶段 3.1**: 修复的是跨模型 shell 计量兼容,不增加任何 App 或 case 特例。
-
-## [2026-08-07 10:51:26] [Session ID: omx-1786061963768-e7in9l] [验证阻断]: candidate 未调用当前 rdog 二进制
-
-### 已验证事实
-- heredoc 通用解析已补齐,外部 ledger 定向测试 8 项、runner 回归 24 项和 `ruff check` 均通过。
-- 完整 5 模型 x 8 case 的 candidate 最终都成功,但 ledger 是 299 个 agent 决策、271 个 rdog 请求和 43 个 attempt,高于 immutable baseline 的 260 / 252 / 41。
-- candidate 中 `@window-find:Terminal` 与 raw `@cmd:open -a TextEdit` 仍得到旧 parser 的 `code:64`;当前 `target/debug/rdog` 的单测已证明两种写法均应成功。
-
-### 结论与下一步
-- 结论: candidate 的 Pi bash tool 没有调用当前构建的 `target/debug/rdog`,因此不能作为本次 parser 改动的 live 证据,更不能提升 baseline。
-- [ ] 阶段 3.3: 先做无 GUI 副作用的 Pi 环境探针,记录 agent 内 `command -v rdog`、解析后的路径和版本。
-- [ ] 阶段 3.4: 仅通过既有评测配置或环境注入使 Pi 明确调用当前二进制,不改写或删除 `~/.cargo/bin/rdog`。
-- [ ] 阶段 3.5: 重跑完整 5 x 8 matrix,校验 artifact 的 binary provenance 后再比较 `requestCount < 252`。
-
-### 状态
-**当前在阶段 3.3**: 先验证 Pi 实际命令解析路径;在该证据缺失前,不对交互效率作任何改善声明。
-
-## [2026-08-07 10:53:54] [Session ID: omx-1786061963768-e7in9l] [阶段更新]: Pi 二进制 provenance 已确认
-
-- [x] 阶段 3.3: 无 GUI 副作用 probe 已执行。Pi 的 bash tool 调用 `command -v rdog && rdog --version && shasum -a 256 "$(command -v rdog)"`,返回 `/Users/cuiluming/.cargo/bin/rdog` 和 SHA-256 `57eae7f8660c16c1abf2584f8072d8c083ab77219e1434e94cf774cbbf04c9ac`。
-- [x] 该 SHA 与 current `target/debug/rdog` 的 `db5cb9fde3afd4e6d7c54c1375af1578e450994e457ae72eb6c174fe9d0f39c7` 不同,确认 candidate 使用旧安装版。
-- [ ] 阶段 3.4: 将当前 rdog 可执行文件作为 eval config 的显式、绝对路径字段校验,并只在 Pi 子进程 PATH 前置其目录;runner 的 setup/verification 路径保持不变。
-- [ ] 阶段 3.5: 以同一 Pi probe 验证环境注入后命中当前 SHA,再启动 current daemon 并重跑完整 5 x 8 matrix。
-
-### 状态
-**当前在阶段 3.4**: 修复评测路径的 binary provenance 缺口,不改系统安装版、不为模型或 App 写任何分支。
-
-## [2026-08-07 10:57:30] [Session ID: omx-1786061963768-e7in9l] [阶段更新]: current binary 的 Pi 环境已验证
-
-- [x] 阶段 3.4: 外部 runner 新增 `rdogBinary` 绝对路径配置,runner-side control 直接调用该路径,Pi child PATH 前置其父目录,执行计划记录路径与 SHA-256。
-- [x] runner 回归 27 项、ledger 回归 8 项和 `ruff check runner` 通过。
-- [x] 同一条无 GUI Pi probe 通过 `build_pi_env()` 启动后返回 `/Users/cuiluming/local_doc/l_dev/my/rust/rustdog/target/debug/rdog` 与 SHA-256 `db5cb9fde3afd4e6d7c54c1375af1578e450994e457ae72eb6c174fe9d0f39c7`。
-- [ ] 阶段 3.5: 启动 current binary daemon,执行 5 模型 x 8 case live matrix,归档 ledger 并验证每个 source run 的 binary provenance。
-
-### 状态
-**当前在阶段 3.5**: 环境注入已经被 Pi 实际 bash tool 验证,现在才进入有 GUI 副作用的完整评测。
-
-## [2026-08-07 11:20:39] [Session ID: omx-1786061963768-e7in9l] [执行计划]: candidate ledger 的二进制 provenance 门禁
-
-### 已观察现象
-- 5 个新 live suite 的 `run-plan.json` 已记录 current `rdog` 的绝对路径与 SHA-256,且 40/40 通过。
-- `macos_ops_interaction.py` 当前只读取这些字段,没有与归档输入 config 的 `rdogBinary` 做完整性比较。
-
-### 候选假设与最小验证
-- 主假设: 在归档入口从 config 计算唯一 expected rdog identity,并要求每个 source run 的 path/SHA 完全相同,可阻止旧安装版 artifact 被归为 current-build candidate。
-- 最强备选: 仅在 ledger 中记录 identity 已足够,因为 source run 已带 `run-plan.rdog`;该解释会被“伪造或错配 run-plan 仍可成功归档”的定向测试推翻。
-
-### 阶段
-- [ ] 阶段 3.5a: 为归档器添加 config-to-run 二进制 provenance fail-closed 门禁和纯文件回归。
-- [ ] 阶段 3.5b: 运行外部 runner / ledger 回归、ruff 与真实 5 x 8 candidate 归档。
-- [ ] 阶段 3.5c: 审计新 ledger,按 `requestCount < 252` 判断是否提升 candidate,并停止本轮 daemon。
-
-### 状态
-**当前在阶段 3.5a**: 先保证 metrics 的 binary provenance 可验证,再生成可能影响 baseline 的 ledger。
-
-## [2026-08-07 11:22:58] [Session ID: omx-1786061963768-e7in9l] [阶段更新]: provenance 门禁已通过纯文件与 runner 回归
-
-- [x] 阶段 3.5a: `macos_ops_interaction.py` 从 config 计算 `rdogBinary` identity,并要求每份 `run-plan.rdog` path/SHA-256 完全匹配;ledger 和 manifest 记录同一份 identity。
-- [x] 阶段 3.5a: 10 项 ledger 回归覆盖正常记录、缺失 provenance 拒绝和 SHA 不一致拒绝;27 项 runner 回归与 `ruff check runner` 通过。
-- [ ] 阶段 3.5b: 以 5 个 current-binary suite 生成 candidate archive,审计统计值和来源 identity。
-- [ ] 阶段 3.5c: 用 immutable baseline 的 `requestCount < 252` 门槛决定是否提升,清理本轮 daemon。
-
-### 当前证据
-- rustdog 工作树当前为 dirty,commit 标识必须诚实记录为 `46f8ee81048d57f0e5470e87c24ea8b94e68384d-dirty`。
-- 外部评测工作树也有用户既有和本轮未提交改动;归档只会新增独立 candidate 目录,不会覆盖任何已有 baseline。
-
-### 状态
-**当前在阶段 3.5b**: 归档前的 fail-closed provenance 校验已完成,正在以真实 source artifact 计算 candidate ledger。
-
-## [2026-08-07 11:25:39] [Session ID: omx-1786061963768-e7in9l] [阶段完成]: parser compatibility current-binary 认证
-
-- [x] 阶段 3.5b: archive 成功写入 `macos-ops-20260807-parser-compatibility-current-binary-candidate-5x8`;5 个 source suite 的 run-plan identity 都与 config 指向的 current binary 完全一致。
-- [x] 阶段 3.5c: 新 ledger 为 40/40 成功、258 decisions、243 requests、40 attempts;历史 immutable baseline 为 260 / 252 / 41。`requestCount` 严格下降 9 次,满足提升门槛。
-- [x] 当前认证结果已写入跨模型 baseline 文档。旧 baseline 保留不变;新 artifact 的 candidate 命名保留其生成历史,但被标记为后续比较的 current reference。
-- [x] 收尾: 已停止 current binary daemon,确认 PID 92217 / 92218 无残留,并完成最终 diff 与回归检查。
-
-### 不应过度解释的差异
-- recovery 从 30 到 31,而 supporting shell 从 8 到 15。当前证据足以确认这次完整认证请求总数更低,不足以把全部差异唯一归因于两项 parser 兼容。
-- 旧 baseline 早于 binary provenance schema,缺少 `rdog` identity;不能把它作为 current-build 的二进制来源证据。
-
-### 状态
-**当前在收尾阶段**: 认证和指标判断完成,仅剩 daemon 清理与最终验证。
-
-## [2026-08-07 11:25:39] [Session ID: omx-1786061963768-e7in9l] [完成]: macOS ops 交互步数优化第一轮
-
-- [x] parser compatibility 与二进制 provenance 门禁已实现并通过回归。
-- [x] current-binary 5 x 8 live matrix 已归档、审计并提升为 current certified reference。
-- [x] current daemon 已停止,两仓 `git diff --check`、Python 37 项回归、Rust 685 项 binary nextest 与 build 均通过。
-
-### 最终状态
-**本轮完成**: 不存在未完成的实施或验证步骤。后续只保留独立重复 matrix 的统计确认,不阻塞本轮交付。
-
-## [2026-08-07 12:50:27] [Session ID: omx-1786061963768-e7in9l] [提交计划]: 分仓提交已验证的实现与证据
-
-- [x] 根仓库: 已审阅 parser、协议、skill reference、workflow 与上下文 diff,13 个明确文件已暂存。
-- [x] 外部评测仓库: 已审阅 runner、provenance ledger、文档和 archive;124 个 `pi-events.jsonl` 由已验证的 Git LFS 规则承载,其它 evidence 文件正常 Git 暂存。
-- [x] 两仓: 创建 scoped commit 后核对状态、可达 submodule 与 remote,按当前分支推送。
-
-### 边界
-- 不使用 `git add .`,不暂存任何未经过本轮审阅的文件。
-- baseline 证据必须保留,但不会把超出普通 Git 可接受大小的原始 trace 盲目推到 remote。
-
-## [2026-08-07 15:45:08] [Session ID: omx-1786061963768-e7in9l] [执行计划]: parser compatibility 独立重复采样
-
-### 目标
-- 按 `workflows/macos-ops-interaction-efficiency.md` 与 `LATER_PLANS.md`，在不同时间执行两次不改输入的 current-binary 5 x 8 live matrix。
-- 用二进制 provenance、interaction ledger、recoverable error 与 attempt 分布判断单轮请求下降是否稳定；本阶段不引入新的协议、skill、App recipe 或 case 特例。
-
-### 阶段
-- [x] 阶段 1: 复核同一 runner / skill / binary 输入和运行时权限，启动当前 daemon。
-- [x] 阶段 2: 完成独立采样 A，fail-closed 归档 artifacts 并核对 identity。
-- [x] 阶段 3: 完成独立采样 B，fail-closed 归档 artifacts 并核对 identity。
-- [x] 阶段 4: 生成统计比较，明确稳定结论或保留不确定性，停止 daemon 并完成验证。
-
-### 比较边界
-- 这两轮用于估计同一已认证实现的波动，不能把单轮总数差异唯一归因于 parser。
-- 每轮都必须保持 40/40 成功、真实 rdog 调用和新鲜结果证据；不可计量 artifact 或 provenance 不匹配均使该轮无效。
-
-### 状态
-**本次重复采样已完成**: 采样 B 已归档并完成统计比较。
-
-### 阶段 1 证据
-- Pi skill symlink 指向 canonical `SKILL.md`;其 SHA-256 为 `129aa820edbedaed787d7dd9397c9b69ffeaf74140edbc19c3031207dc97f5d2`。
-- config 的 `rdogBinary` 指向 current `target/debug/rdog`;其 SHA-256 为 `db5cb9fde3afd4e6d7c54c1375af1578e450994e457ae72eb6c174fe9d0f39c7`。
-- 4 个 provider credential 在当前环境均存在；本机 daemon 就绪后全部所需 GUI capability 均为 `available`。
-- 正常 client close 仍记录已知 Zenoh admin transport event；完整 control response 未受影响，按 `LATER_PLANS.md` 留在独立诊断项。
-
-### 阶段 2 证据
-- `macos-ops-20260807-parser-compatibility-repeat-a-5x8` 已通过归档器的 config-to-run binary provenance 门禁。
-- 采样 A 为 40/40 成功、272 agent decisions、252 requests、20 supporting shell、40 attempts、31 recovery、30 个 recoverable response error。
-- 当前认证参考为 243 requests / 40 attempts；采样 A 的 252 requests 说明单轮下降不具稳定结论，继续执行独立采样 B。
-- 统计脚本首次错误地假定旧 baseline 具有 `rdog` identity；历史 schema 实际没有该字段。改用显式缺失标记后读取成功，旧 baseline 不再被当作 current-build provenance 证据。
-
-## [2026-08-07 12:54:47] [Session ID: omx-1786061963768-e7in9l] [提交完成]: rdog parser 兼容性
-
-- [x] 根仓库已创建 scoped commit: `feat(control): accept raw cmd and positional window lookup`。
-- [x] parser compatibility 记录已纳入 root context commit,并推送 `restore-point-20260803-1300`。
-
-## [2026-08-07 16:32:51] [Session ID: omx-1786061963768-e7in9l] [续执行]: parser compatibility 独立重复采样 B
-
-### 当前行动
-- [x] 保持正在运行的 B 轮 5 x 8 live matrix 不变,等待所有 provider 完成。
-- [x] 用既有 provenance 门禁归档 B 轮 artifacts,确认每份 source run 都使用 current binary。
-- [x] 对历史 baseline、current reference、A/B 两轮作分布比较,仅据此判断稳定性。
-- [x] 停止 daemon,更新上下文记录,审阅 scoped diff 后提交并推送。
-
-### 边界
-- 不修改 parser、canonical skill、runner、case 或计量规则。
-- 不新增 app、case 或操作序列特例。B 轮失败、不可计量或 provenance 不一致时,保留失败 artifacts,不得替换 reference。
-
-### 状态
-**该阶段已完成**: B 轮已归档,比较报告已生成,daemon 已停止。
-
-## [2026-08-07 16:39:13] [Session ID: omx-1786061963768-e7in9l] [完成]: parser compatibility 独立重复采样
-
-### 阶段状态
-- [x] 完成 B 轮 5 x 8 live matrix,所有 40 个 case 通过,并通过 source run binary provenance 门禁。
-- [x] 归档 `macos-ops-20260807-parser-compatibility-repeat-b-5x8`,比较历史 baseline、current reference、repeat A 和 repeat B。
-- [x] 生成外部可审计比较报告,停止继续扩展 parser/skill 的假设。
-
-### 结论
-- repeat A 是 `252` requests,repeat B 是 `340` requests;current reference 的 `243` 没有被重复样本稳定复现。
-- 保留 parser compatibility 的正确性验证与所有 immutable artifacts,但不把单轮 `243` 表述为稳定效率收益,也不提升新的效率 baseline。
-
-### 遇到的错误
-- 初次上下文补丁因 `WORKLOG.md` 锚点已变化而未应用。已重新读取文件尾部并使用精确锚点追加,没有造成部分写入。
-
-### 状态
-**本轮 loop 已完成**: 没有新的合格共享候选,下一步仅做 scoped review、验证和提交。
-
-## [2026-08-08 00:17:56] [Session ID: omx-1786061963768-e7in9l] [收口]: 两仓提交已推送
-
-- [x] root commit `e508132` 已推送到 `origin/restore-point-20260803-1300`。
-- [x] external commit `9a03d1b` 已推送到 `origin/master`;LFS 84 个对象上传完成。
-- [x] 两仓工作树干净,远端 ref 与本地 HEAD 已核对一致。
-
-### 最终状态
-**本轮全部完成**: parser compatibility 重复采样、比较报告、提交和远端同步均已完成。
+**本轮完成**: 已按 workflow 的 fail-closed 规则收口,没有待执行的认证步骤。

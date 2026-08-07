@@ -445,3 +445,27 @@
 - timeout helper 唯一知道 native worker deadline 与 in-flight gate,所以它负责 `screenshot_capture_timeout`;共享 SCK -> xcap policy 负责 `screenshot_capture_fallback` 和终态事件。事件至少要带 `capture_kind`、backend、timeout/fallback/error kind。
 - Screen Recording 权限拒绝必须是单独的终态 `screenshot_capture_permission_denied`: preflight、SCK 或 xcap 任一来源都不该再继续 fallback 或再附加普通 `screenshot_capture_failed`。
 - 现有 `fern` logger 不能直接充当 tracing subscriber。最小可靠整合是并行安装 `tracing-subscriber` 并关闭 `tracing-log`,复用同一 `RDOG_LOG_LEVEL` 和 stderr/hidden-file target,避免两个全局 logger 争夺注册权。
+
+## [2026-08-08 01:02:49] [Session ID: omx-1786061963768-e7in9l] macOS ops current-binary 三轮交互 ledger 的共享摩擦边界
+
+### 动态证据
+
+- current reference、repeat A、repeat B 均为 40/40 成功,但请求数分别为 `243`、`252`、`340`。
+- 因此三轮 current-binary 样本的中位数是 `252`,不能把单轮较低请求数写成稳定效率收益,也不能提升新的效率 baseline。
+- `@key` 对象中的 `target`、`keys`、`shortcut` 未知字段共 20 次 response error,覆盖 7 个独立 `(model, case)` 样本和 3 轮;其中 12 次紧接 recovery。
+- `@ax-press` 顶层 `action` 共 9 次 response error,覆盖 4 个独立样本和 3 轮,且每次都紧接 recovery。
+- 两类合计 29 个 parser error,最多暴露 21 个可避免的紧接 recovery 请求。这个数量是上限,不是已验证收益。
+
+### 静态证据与安全边界
+
+- 三轮 ledger artifact 记录的 canonical skill SHA-256 为 `129aa820edbedaed787d7dd9397c9b69ffeaf74140edbc19c3031207dc97f5d2`。归档时工作区另有此前未提交的 skill contract diff,当前文件 SHA-256 为 `a5063f19387367344a92bfb5959e18a4fc7734e3d7531e02b13414c943a9a646`;后者不属于本轮 ledger 输入。
+- current `rdog` binary SHA-256 为 `db5cb9fde3afd4e6d7c54c1375af1578e450994e457ae72eb6c174fe9d0f39c7`。每个 source `run-plan` 都必须与配置重新计算出的绝对路径和 hash 匹配,缺失或不一致时归档 fail closed。
+- `@cmd` raw 单行 payload 和 `@window-find:APP` 是共享 parser 的低风险候选,前者必须按通用 shell 单行语法处理 heredoc body,不能按 app 或 case 特判。
+- `@key.target`、`@key.keys`、`@key.shortcut` 不能自动归一化,因为 targeted delivery、chord/sequence 语义仍不明确。
+- `@ax-press.action` 不能自动归一化为通用 AX action。`@ax-press` 固定表达 AXPress,其它 action 使用独立 `@ax-action`。
+- App selector 多窗口歧义和 stale locator 的现有 fail-closed 语义是安全不变量,不能用自动选择或静默重绑替代。
+
+### 复用规则
+
+- 交互优化必须同时报告 `agentDecisionCount`、`requestCount`、supporting shell、recovery、protocol error 和 attempt;最终成功不代表交互成本低。
+- 任何 parser、协议、通用 primitive、canonical skill 或 macOS ops case 变更都必须重新跑完整活动模型矩阵,并保留 immutable ledger 与 binary provenance。

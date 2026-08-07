@@ -93,6 +93,28 @@ Bare shell lines do not have request ids.
 For agents, prefer object payloads when fields matter.
 Human shorthand is fine for temporary terminal use.
 
+### Key Actions
+
+Outside a `@pty` session, `@key` sends a local key action. The compact form
+accepts one key or chord, such as `@key:Cmd+R`. The object form accepts only
+`key` (required), `hold_ms`, `mode`, `modifiers`, `delivery`, `pid`, and
+`window_id`:
+
+```text
+@key:{key:"R",modifiers:["Cmd"],mode:"press_release",hold_ms:200}
+@key:{key:"R",delivery:"pid-targeted",pid:123}
+@key:{key:"R",delivery:"window-targeted",window_id:"pid:123/window:0"}
+```
+
+`delivery` defaults to `global`. `pid-targeted` requires `pid`, and
+`window-targeted` requires `window_id`; neither may be combined with the other
+target field. `target`, `keys`, and `shortcut` are not valid `@key` fields.
+There is no implicit application-name target resolution.
+
+`@ax-press` always means AXPress and does not accept a top-level `action` field.
+Use `@ax-action` for another allowlisted AX action, such as `AXConfirm` or
+`AXShowDefaultUI`.
+
 ## Response Shapes
 
 Most requests end with one `@response ...`.
@@ -630,7 +652,7 @@ During PTY streaming, input bytes are transparent:
   (the bytes go to the running program, not to the local OS).
 - Outside a `@pty` session, `@key` is a **local** control action that supports key
   chords via `+` syntax, e.g. `@key:Cmd+R` triggers a Cmd+R keystroke on the
-  local machine. See the "Local Key Chords" section in `SKILL.md` for the
+  local machine. See the "Local @key Actions" section in `SKILL.md` for the
   full modifier / main-key grammar and examples.
 - Compact bare payloads accept non-empty key names without whitespace. Quoted string
   and object payloads remain supported; use them for whitespace or delivery options.

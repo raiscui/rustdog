@@ -214,3 +214,47 @@
 - current reference 的 `243` requests 低于历史 baseline 的 `252`,但 A 回到 `252`,B 升至 `340`。三个 current-binary 样本的中位数为 `252`,没有严格低于历史 baseline。
 - repeat B 的高成本主要由 MiniMax-M3 (`101` requests) 和 MiniMax-M2.7-highspeed (`106` requests) 贡献。当前只有动态成本分布,没有足够证据把它归为 parser regression 或授权新的 parser/skill 兼容分支。
 - 已验证结论是: shared parser compatibility 的单轮收益不能表述为稳定交互效率改善。保留实现和原始 artifacts,不升级新的效率 baseline。
+
+## [2026-08-08 01:02:49] [Session ID: omx-1786061963768-e7in9l] 笔记: 稳定共享摩擦候选筛选
+
+### 动态证据
+
+- `@key` 对象 `target` 未知字段: 11 次,7 个独立 `(model, case)` 样本,3 轮;8 次紧接 recovery。
+- `@key` 对象 `keys` / `shortcut` 未知字段: 9 次,5 个独立样本,至少 2 轮;4 次紧接 recovery。
+- `@ax-press` 顶层 `action` 未知字段: 9 次,4 个独立样本,3 轮;9 次紧接 recovery。
+- 三类合计 29 个 response errors,21 次紧接 recovery。21 是暴露的可避免 recovery 上限,不是已验证收益。
+- App selector 多窗口歧义: 10 次,6 个独立样本,每次都进入 recovery;这是现有 fail-closed 唯一窗口不变量的正常保护。
+- AX/window locator stale: 11 次,6 个独立样本,每次都进入 fresh re-query 或 recovery;不能静默重绑。
+
+### 静态证据
+
+- `src/control_protocol/parsers/key.rs:41-175` 明确定义 `@key` 对象字段,没有 `target`、`keys`、`shortcut`;targeted delivery 需要显式 `delivery` 与 `pid` 或 `window_id`。
+- `src/control_ax.rs:1231-1325` 的 `@ax-press` parser 固定构造 AXPress;其它 action 由独立 `@ax-action` parser 处理。
+- `src/control_window.rs:718-760` 要求 app selector 的 fresh 查询返回唯一且可交互窗口;`src/control_window/macos.rs:1681-1690` 对过期 window index 明确 fail closed。
+- `.codex/skills/rdog-control/references/protocol.md:35-56` 有基础 `@key` 示例,但第 633 行引用 canonical `SKILL.md` 中不存在的 `Local Key Chords` 章节。
+
+### 判断
+
+- 建议批准的第一步是通用契约澄清: 在 canonical skill 中补齐 `@key` 对象字段、targeted delivery 约束,并明确 `@ax-press` 只表达 AXPress、其它 action 使用 `@ax-action`;同时修正 protocol reference 的断链。该方向不接受歧义字段,不改变 target、权限或 action 语义,也不写 App/case 操作序列。
+- 不建议批准 `target`、`keys`、`shortcut` 或通用 `action` parser alias。它们可能改变投递范围、把数组当 chord/sequence 猜测,或把 AXConfirm/AXShowDefaultUI 错路由为 press。
+- 暂缓自动修复 app 多窗口歧义和 stale locator。后续只能基于显式 durable selector/ref + `auto_refind` policy 设计,不能根据 app/case 文本猜目标。
+
+## [2026-08-08 01:48:00] [Session ID: omx-1786061963768-e7in9l] 笔记: key contract candidate 动态认证
+
+### 现象
+
+- 首次执行 matrix 在 setup 的 `prepare-open` 失败,`rdog control @ping` 显示没有 active managed local-default registry。
+- 使用仓库当前 binary 和 `rdog_macos.toml` 启动 daemon 后,同一 `@ping` 返回 `pong`,完整 matrix 随后可运行。
+
+### 验证
+
+- 5 个活动模型各完成 8/8,合计 40/40,全部为 attempt 1。
+- ledger 为 213 decisions、209 requests、20 response errors;current reference 为 258、243、25。
+- candidate 原始命令中 `@key target`、`@key keys`、`@key shortcut`、`@ax-press action` 的命中数均为 0。
+- 对输入兼容 current reference 做逐 `(provider, model, case)` 聚合后,有 9 个 case 请求数增加。
+
+### 结论
+
+- 已验证: 本轮样本消除了 decision brief 关注的两类语法漂移,并保持全部正确性证据。
+- 未验证: 单轮总请求下降不能证明稳定收益,因为逐 case 门禁已失败。
+- 按 workflow 拒绝 baseline promotion,保留 artifacts 供后续跨轮观察。该结论不授权新增 parser alias 或模型/App 特例。
