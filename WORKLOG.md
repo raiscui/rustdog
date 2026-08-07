@@ -126,3 +126,18 @@
 
 ### 总结感悟
 - 评测改善应来自共享控制面兼容性,并通过全矩阵 artifact 验证,不能依赖脚本化的局部路径。
+
+## [2026-08-07 16:39:13] [Session ID: omx-1786061963768-e7in9l] 任务名称: parser compatibility 独立重复采样
+
+### 任务内容
+- 对已认证的共享 parser compatibility 执行两次独立的 5 模型 x 8 case macOS ops matrix。
+- 归档完整 source artifacts,用 existing binary provenance 门禁比较稳定性,不改 canonical skill、runner、case 或 app-specific 操作序列。
+
+### 完成过程
+- repeat A 与 repeat B 都完成 40/40,并通过 current binary path/SHA-256 校验。
+- 外部评测仓库归档了两个 immutable ledger,另写 `repeat-sampling__20260807-parser-compatibility.md` 汇总历史 baseline、current reference、A/B 的计量与 provider 分布。
+- B 的高成本集中在 MiniMax-M3 和 MiniMax-M2.7-highspeed;没有将可恢复错误或运行波动伪装成 parser 根因。
+
+### 总结感悟
+- 一次全矩阵请求数下降只能构成候选认证,不能单独证明稳定改善。重复采样必须保留 attempt、recovery 和 response error,否则最终成功会掩盖控制成本波动。
+- 不稳定时的正确动作是停止扩展兼容语法,保留可审计样本,而不是追加 App 或 case 特例让某次评测更低。

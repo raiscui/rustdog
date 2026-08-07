@@ -199,3 +199,18 @@
 ### 结论
 
 - provenance 是评测输入的一部分,不是只读展示字段。缺失或不一致时归档必须失败关闭,否则 requestCount 不能证明属于当前 rdog build。
+
+## [2026-08-07 16:39:13] [Session ID: omx-1786061963768-e7in9l] 笔记: parser compatibility 独立重复采样
+
+### 验证命令与关键输出
+
+- 两次独立 `runner/eval-macos-ops.sh all` 均完成 5 x 8 live matrix。归档器对每份 source `run-plan.json` 检查 current binary path 和 SHA-256。
+- repeat A: 40/40 成功,272 agent decisions,252 rdog requests,40 attempts,31 recovery,30 response errors。
+- repeat B: 40/40 成功,354 agent decisions,340 rdog requests,44 attempts,67 recovery,71 response errors。
+- current reference 与 A/B 的 rdog SHA-256、canonical skill SHA-256 和所有输入内容 hash 一致。manifest 中 skill 的绝对/相对 path 表示不同,对应 SHA-256 相同,不构成内容差异。
+
+### 结论
+
+- current reference 的 `243` requests 低于历史 baseline 的 `252`,但 A 回到 `252`,B 升至 `340`。三个 current-binary 样本的中位数为 `252`,没有严格低于历史 baseline。
+- repeat B 的高成本主要由 MiniMax-M3 (`101` requests) 和 MiniMax-M2.7-highspeed (`106` requests) 贡献。当前只有动态成本分布,没有足够证据把它归为 parser regression 或授权新的 parser/skill 兼容分支。
+- 已验证结论是: shared parser compatibility 的单轮收益不能表述为稳定交互效率改善。保留实现和原始 artifacts,不升级新的效率 baseline。

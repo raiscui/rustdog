@@ -808,12 +808,6 @@ zenoh router down / unixpipe broken / zenoh timeout 等场景.
 - 单独按模块做 cfg import 收口与 dead-code 边界整理,每次保持功能不变并跑完整 binary tests。
 - 不与当前 logger 初始化修复混合提交,避免把已验证的启动修复掩盖在无关重构中。
 
-## [2026-08-07 11:25:39] [Session ID: omx-1786061963768-e7in9l] 待办: 认证 matrix 的独立重复采样
-
-- 当前 current-binary 5 x 8 matrix 满足请求数下降门槛,但它是单轮 live 结果,且 recovery 请求从 30 增至 31。
-- 需要在不同时间至少再运行两轮相同的 current-binary matrix,持续记录 binary provenance,再估计两项 shared parser compatibility 的稳定请求收益。
-- 不得通过修改 canonical skill、追加 App recipe 或调整 case 操作序列来获得该统计结果。
-
 ## [2026-08-07 11:25:39] [Session ID: omx-1786061963768-e7in9l] 待办: Zenoh client 关闭时的 admin transport event 日志
 
 - 在本轮 current daemon live matrix 中,每次 Zenoh control client 正常关闭后 stderr 会出现 `ERROR zenoh::api::admin: Unable to publish transport event: session closed`。

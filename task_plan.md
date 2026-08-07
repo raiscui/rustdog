@@ -1284,7 +1284,70 @@ deepseek 3/3(历史一致) | minimax 2/3 | qwen36 2/3 | qwen37 1/3(历史 2/3) |
 - 不使用 `git add .`,不暂存任何未经过本轮审阅的文件。
 - baseline 证据必须保留,但不会把超出普通 Git 可接受大小的原始 trace 盲目推到 remote。
 
+## [2026-08-07 15:45:08] [Session ID: omx-1786061963768-e7in9l] [执行计划]: parser compatibility 独立重复采样
+
+### 目标
+- 按 `workflows/macos-ops-interaction-efficiency.md` 与 `LATER_PLANS.md`，在不同时间执行两次不改输入的 current-binary 5 x 8 live matrix。
+- 用二进制 provenance、interaction ledger、recoverable error 与 attempt 分布判断单轮请求下降是否稳定；本阶段不引入新的协议、skill、App recipe 或 case 特例。
+
+### 阶段
+- [x] 阶段 1: 复核同一 runner / skill / binary 输入和运行时权限，启动当前 daemon。
+- [x] 阶段 2: 完成独立采样 A，fail-closed 归档 artifacts 并核对 identity。
+- [x] 阶段 3: 完成独立采样 B，fail-closed 归档 artifacts 并核对 identity。
+- [x] 阶段 4: 生成统计比较，明确稳定结论或保留不确定性，停止 daemon 并完成验证。
+
+### 比较边界
+- 这两轮用于估计同一已认证实现的波动，不能把单轮总数差异唯一归因于 parser。
+- 每轮都必须保持 40/40 成功、真实 rdog 调用和新鲜结果证据；不可计量 artifact 或 provenance 不匹配均使该轮无效。
+
+### 状态
+**本次重复采样已完成**: 采样 B 已归档并完成统计比较。
+
+### 阶段 1 证据
+- Pi skill symlink 指向 canonical `SKILL.md`;其 SHA-256 为 `129aa820edbedaed787d7dd9397c9b69ffeaf74140edbc19c3031207dc97f5d2`。
+- config 的 `rdogBinary` 指向 current `target/debug/rdog`;其 SHA-256 为 `db5cb9fde3afd4e6d7c54c1375af1578e450994e457ae72eb6c174fe9d0f39c7`。
+- 4 个 provider credential 在当前环境均存在；本机 daemon 就绪后全部所需 GUI capability 均为 `available`。
+- 正常 client close 仍记录已知 Zenoh admin transport event；完整 control response 未受影响，按 `LATER_PLANS.md` 留在独立诊断项。
+
+### 阶段 2 证据
+- `macos-ops-20260807-parser-compatibility-repeat-a-5x8` 已通过归档器的 config-to-run binary provenance 门禁。
+- 采样 A 为 40/40 成功、272 agent decisions、252 requests、20 supporting shell、40 attempts、31 recovery、30 个 recoverable response error。
+- 当前认证参考为 243 requests / 40 attempts；采样 A 的 252 requests 说明单轮下降不具稳定结论，继续执行独立采样 B。
+- 统计脚本首次错误地假定旧 baseline 具有 `rdog` identity；历史 schema 实际没有该字段。改用显式缺失标记后读取成功，旧 baseline 不再被当作 current-build provenance 证据。
+
 ## [2026-08-07 12:54:47] [Session ID: omx-1786061963768-e7in9l] [提交完成]: rdog parser 兼容性
 
 - [x] 根仓库已创建 scoped commit: `feat(control): accept raw cmd and positional window lookup`。
 - [ ] 将提交记录纳入当前提交后,推送 `restore-point-20260803-1300`。
+
+## [2026-08-07 16:32:51] [Session ID: omx-1786061963768-e7in9l] [续执行]: parser compatibility 独立重复采样 B
+
+### 当前行动
+- [x] 保持正在运行的 B 轮 5 x 8 live matrix 不变,等待所有 provider 完成。
+- [x] 用既有 provenance 门禁归档 B 轮 artifacts,确认每份 source run 都使用 current binary。
+- [x] 对历史 baseline、current reference、A/B 两轮作分布比较,仅据此判断稳定性。
+- [x] 停止 daemon,更新上下文记录,审阅 scoped diff 后提交并推送。
+
+### 边界
+- 不修改 parser、canonical skill、runner、case 或计量规则。
+- 不新增 app、case 或操作序列特例。B 轮失败、不可计量或 provenance 不一致时,保留失败 artifacts,不得替换 reference。
+
+### 状态
+**该阶段已完成**: B 轮已归档,比较报告已生成,daemon 已停止。
+
+## [2026-08-07 16:39:13] [Session ID: omx-1786061963768-e7in9l] [完成]: parser compatibility 独立重复采样
+
+### 阶段状态
+- [x] 完成 B 轮 5 x 8 live matrix,所有 40 个 case 通过,并通过 source run binary provenance 门禁。
+- [x] 归档 `macos-ops-20260807-parser-compatibility-repeat-b-5x8`,比较历史 baseline、current reference、repeat A 和 repeat B。
+- [x] 生成外部可审计比较报告,停止继续扩展 parser/skill 的假设。
+
+### 结论
+- repeat A 是 `252` requests,repeat B 是 `340` requests;current reference 的 `243` 没有被重复样本稳定复现。
+- 保留 parser compatibility 的正确性验证与所有 immutable artifacts,但不把单轮 `243` 表述为稳定效率收益,也不提升新的效率 baseline。
+
+### 遇到的错误
+- 初次上下文补丁因 `WORKLOG.md` 锚点已变化而未应用。已重新读取文件尾部并使用精确锚点追加,没有造成部分写入。
+
+### 状态
+**本轮 loop 已完成**: 没有新的合格共享候选,下一步仅做 scoped review、验证和提交。
