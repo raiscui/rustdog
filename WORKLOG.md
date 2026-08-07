@@ -141,3 +141,15 @@
 ### 总结感悟
 - 一次全矩阵请求数下降只能构成候选认证,不能单独证明稳定改善。重复采样必须保留 attempt、recovery 和 response error,否则最终成功会掩盖控制成本波动。
 - 不稳定时的正确动作是停止扩展兼容语法,保留可审计样本,而不是追加 App 或 case 特例让某次评测更低。
+
+## [2026-08-08 00:17:56] [Session ID: omx-1786061963768-e7in9l] 任务名称: repeat sampling 提交收口
+
+### 任务内容
+- 将两轮 immutable artifacts、比较报告和项目上下文提交并推送到各自远端分支。
+
+### 完成过程
+- root `e508132` 已推送到 `origin/restore-point-20260803-1300`。
+- external `9a03d1b` 已推送到 `origin/master`;首次 SSH ref 更新被远端关闭,已上传的 84 个 LFS 对象被复用,第二次 push 成功。
+
+### 总结感悟
+- 大型 LFS 提交必须分别确认对象上传和 Git ref 更新;只有远端 ref 指向本地 HEAD 才算推送完成。

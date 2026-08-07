@@ -1278,7 +1278,7 @@ deepseek 3/3(历史一致) | minimax 2/3 | qwen36 2/3 | qwen37 1/3(历史 2/3) |
 
 - [x] 根仓库: 已审阅 parser、协议、skill reference、workflow 与上下文 diff,13 个明确文件已暂存。
 - [x] 外部评测仓库: 已审阅 runner、provenance ledger、文档和 archive;124 个 `pi-events.jsonl` 由已验证的 Git LFS 规则承载,其它 evidence 文件正常 Git 暂存。
-- [ ] 两仓: 创建 scoped commit 后核对状态、可达 submodule 与 remote,按当前分支推送。
+- [x] 两仓: 创建 scoped commit 后核对状态、可达 submodule 与 remote,按当前分支推送。
 
 ### 边界
 - 不使用 `git add .`,不暂存任何未经过本轮审阅的文件。
@@ -1318,7 +1318,7 @@ deepseek 3/3(历史一致) | minimax 2/3 | qwen36 2/3 | qwen37 1/3(历史 2/3) |
 ## [2026-08-07 12:54:47] [Session ID: omx-1786061963768-e7in9l] [提交完成]: rdog parser 兼容性
 
 - [x] 根仓库已创建 scoped commit: `feat(control): accept raw cmd and positional window lookup`。
-- [ ] 将提交记录纳入当前提交后,推送 `restore-point-20260803-1300`。
+- [x] parser compatibility 记录已纳入 root context commit,并推送 `restore-point-20260803-1300`。
 
 ## [2026-08-07 16:32:51] [Session ID: omx-1786061963768-e7in9l] [续执行]: parser compatibility 独立重复采样 B
 
@@ -1351,3 +1351,12 @@ deepseek 3/3(历史一致) | minimax 2/3 | qwen36 2/3 | qwen37 1/3(历史 2/3) |
 
 ### 状态
 **本轮 loop 已完成**: 没有新的合格共享候选,下一步仅做 scoped review、验证和提交。
+
+## [2026-08-08 00:17:56] [Session ID: omx-1786061963768-e7in9l] [收口]: 两仓提交已推送
+
+- [x] root commit `e508132` 已推送到 `origin/restore-point-20260803-1300`。
+- [x] external commit `9a03d1b` 已推送到 `origin/master`;LFS 84 个对象上传完成。
+- [x] 两仓工作树干净,远端 ref 与本地 HEAD 已核对一致。
+
+### 最终状态
+**本轮全部完成**: parser compatibility 重复采样、比较报告、提交和远端同步均已完成。
