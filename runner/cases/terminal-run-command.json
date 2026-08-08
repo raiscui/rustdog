@@ -1,0 +1,11 @@
+{
+  "id": "terminal-run-command",
+  "task": "打开 Terminal.app, 输入 'echo HELLO_FROM_RDOG', 按 Return",
+  "expectedResult": "Terminal 窗口 AXTextArea 出现 'HELLO_FROM_RDOG'",
+  "verify": {
+    "method": "ax_read",
+    "description": "Terminal 进程 pid 的 AXWindow 子树 AXTextArea 含 'HELLO_FROM_RDOG'",
+    "processName": "Terminal"
+  },
+  "cleanup": "@computer-act#cleanup:{schema:\"rdog.computer-act.v1\",action:\"hotkey_click\",args:{hotkey:\"Cmd+W\"},verify:\"none\"}"
+}

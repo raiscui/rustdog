@@ -381,3 +381,78 @@
 - ponytail 推 deletion over addition: dead getter 真删 (4 行), dead enum variant 保留 (E2 contract 不能删). 这是 "复用 vs 删除" 的细微差别 — dead helper 是 pure abstraction 没 caller, dead enum variant 是协议契约有 client reader.
 - `#[allow(dead_code)]` 不是 suppression hack, 是"暂时 dead 但保留语义" 的诚实表达. ponytail comment 把 ceiling + upgrade path 写清楚, 让继承者知道什么时候复活.
 - dead_code cleanup 顺手验证 outcome 三态 status 三档全部实证, 是 outcome 三态 ADR 的最后一格验证 (decision table 完整 + status 三档真实出现).
+
+## [2026-08-09 01:30:00] [Session ID: omx-1786201921174-cvveb1] 任务名称: 重建 5×8 macOS ops matrix runner (阶段 12)
+
+### 任务内容
+
+- 重建 `runner/eval-macos-ops.sh` + case prompt + ledger classifier
+- 验证 5×8=40 run 真客户端消费 outcome / status 字段
+- archive 5×8 baseline: 260 agent decisions / 252 rdog requests / 41 attempts
+
+### 完成过程
+
+- 阶段 12.1: 扫环境 — Pi binary `~/.cargo/bin/pi` ✓, Pi extension `mano_cua_rdog.mjs` ✓
+  (13 supported actions + @computer-act frame 翻译), `~/.pi/agent/models.json` 5 个
+  活动 provider (deepseek / minimax-cn / qwen37-flash / qwen36-flash /
+  minimax-m27-highspeed), `qwen-plus` 在 models.json stale
+- 阶段 12.2: 5 model + 8 case 完整列表 user 拍板
+  - 5 model: deepseek / minimax-cn / qwen37-flash / qwen36-flash /
+    minimax-m27-highspeed
+  - 8 case: calculator-{happy-path,old-state-recovery,divide-by-zero} +
+    terminal-run-command + safari-new-tab-navigate + textedit-multi-window +
+    clipboard-copy-paste + multi-window-textedit
+- 阶段 12.3-12.6: 写 runner 骨架
+  - `runner/config.json`: 5 model + 8 case + baseline + ledger schema v1
+  - `runner/cases/*.json`: 8 case prompt (task + verify + cleanup)
+  - `runner/lib/daemon_manager.py`: managed local-default daemon lifecycle,
+    prepend `target/debug` 到 PATH (archive 5x8 教训: Pi bash tool 必须用 current
+    binary 否则 baseline 不严格可比)
+  - `runner/lib/interaction_ledger.py`: bash command 6 档分类
+    (query / action / post_action_evidence / recovery / supporting_shell /
+    unknown), 不读 app/case/prompt 文本, heredoc body 剥离
+  - `runner/lib/runner.py`: main runner, parse Pi session JSONL → ledger
+  - `runner/eval-macos-ops.sh`: shell 入口, dry / live 模式
+- 阶段 12.7: dry-run 验证
+  - `bash runner/eval-macos-ops.sh dry all`: 成功输出 manifest
+  - manifest: rustdog_commit c78c76e, rdogBinary SHA-256 c03ebbdf...,
+    skill SHA-256 e936fe5f..., baseline 260/252/41
+- 阶段 12.7b: provider 在线探测
+  - 5 provider 全 HTTP 401 Unauthorized (API key 过期或被撤销)
+  - local provider (gemma/holo/nemotron) 是本地 vlm, 不能跑 rdog-control-bash profile
+  - **live matrix 物理上跑不动** — 5 provider 都 401
+
+### 验证证据
+
+- dry-run: `DRY RUN: would run 5 models x 8 cases = 40 attempts`
+- manifest: rdogBinary SHA-256 `c03ebbdf3860e760876e1ec4180ff7a38f1c02f62c64be3703fe485d7192c031`
+- provider probe: 5 provider 全 HTTP 401, qwen-plus STALE
+- runner 骨架文件: runner/config.json + runner/cases/*.json (8) +
+  runner/lib/{daemon_manager,interaction_ledger,runner}.py + runner/eval-macos-ops.sh
+
+### 总结感悟
+
+- **archive 5×8 baseline 是不可严格比的** — archive 提到 candidate 的 Pi bash tool
+  没有调用 current `target/debug/rdog`, 导致 ledger 数字偏高 (299 / 271 / 43 > baseline
+  260 / 252 / 41). 我重建 runner 显式 prepend PATH 强制 Pi 用 current binary, 解决
+  这条历史 lesson. 但要严格比较, 还得跑同一 binary (current) + 同一 skill (current)
+  的 baseline — 即新 binary 也要跑一遍 baseline case, 不能只比 archive 旧 binary 数据.
+- **API key 状态是 hard gate**: 5 provider 全 401, live matrix 不能跑. 不是 runner
+  问题, 是 environment state. 按 user 偏好 "跑不到不假装跑过", 不能跑就
+  stop + 报告.
+- **dry-run 骨架本身有 value**: 验证 manifest schema + 5×8 列表完整性 + rdogBinary
+  SHA-256 锁定 + skill SHA-256 锁定. 等 API key 更新后, `bash runner/eval-macos-ops.sh
+  live all` 一键跑全套.
+- **provider probe 应该 future-proof**: 探测用 `/models` endpoint + Bearer token
+  401 是明确的 unauthorized. 但 Pi 真正调用走 `/chat/completions` 跟 `/models`
+  可能用不同 key 验证路径. 下次 API key 更新后, 应该先 dry + 1 model mini-test
+  再决定全跑.
+
+### 后续建议
+
+- **user 更新 API key** (deepseek / minimax-cn / qwen37-flash / qwen36-flash /
+  minimax-m27-highspeed 都 401), 然后 `bash runner/eval-macos-ops.sh live
+  deepseek` mini-test 1 case 验证 Pi 调通
+- runner 骨架 + 8 case prompt 已 commit-ready, 不需要改
+- **清理 qwen-plus stale**: models.json 删除 qwen-plus provider (archive 2026-08-05
+  退役, 但 models.json 还有), 单独 1 行 commit

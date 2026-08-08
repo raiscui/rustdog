@@ -19,3 +19,7 @@ openspec
 rdog_downloads
 *.log
 .history
+
+# rdog eval runner
+runner/__pycache__/
+runner/lib/__pycache__/

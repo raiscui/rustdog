@@ -1,0 +1,10 @@
+{
+  "id": "calculator-happy-path",
+  "task": "用 Calculator 计算 7 × 8 + 12 = ?",
+  "expectedResult": "68",
+  "verify": {
+    "method": "ax_read",
+    "description": "读取 Calculator 显示屏 AXStaticText 值, 必须 == '68'"
+  },
+  "cleanup": "@computer-act#cleanup:{schema:\"rdog.computer-act.v1\",action:\"open_app\",args:{app_name:\"Calculator\"},verify:\"none\"}"
+}

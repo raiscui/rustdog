@@ -1,0 +1,10 @@
+{
+  "id": "calculator-divide-by-zero",
+  "task": "Calculator 算 5 ÷ 0, 读错误提示 (通常是 'Not a number' 或 'NaN')",
+  "expectedResult": "显示屏显示 'Not a number' 或 'NaN' 或 'Error'",
+  "verify": {
+    "method": "ax_read",
+    "description": "读 Calculator 显示屏 AXStaticText, 必须包含 'NaN' / 'Not a number' / 'Error' 之一"
+  },
+  "cleanup": "@computer-act#cleanup:{schema:\"rdog.computer-act.v1\",action:\"open_app\",args:{app_name:\"Calculator\"},verify:\"none\"}"
+}

@@ -1,0 +1,11 @@
+{
+  "id": "textedit-multi-window",
+  "task": "打开 TextEdit, Cmd+N 新建第二个窗口, 两个窗口各自输入 'Window1' 和 'Window2', 验证两个窗口独立存在 + 各自内容",
+  "expectedResult": "至少 2 个 TextEdit 窗口, 一个含 'Window1', 一个含 'Window2'",
+  "verify": {
+    "method": "window_count_and_ax_read",
+    "description": "@window-find:TextEdit 至少 2 个 window, 每个 window 的 AXTextArea 含预期文字 (注意: 新建窗口可能 interactable=False, 必须遍历全部窗口)",
+    "processName": "TextEdit"
+  },
+  "cleanup": "@computer-act#cleanup:{schema:\"rdog.computer-act.v1\",action:\"hotkey\",args:{hotkey:\"Cmd+Q\"},verify:\"none\"}"
+}

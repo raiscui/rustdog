@@ -1,0 +1,10 @@
+{
+  "id": "multi-window-textedit",
+  "task": "打开 TextEdit, 在主窗口输入 'MAIN_DOC', @window-resize 把窗口缩到 600x400, 验证 window 状态 (rect + title 仍 OK), 窗口内文本仍是 'MAIN_DOC'",
+  "expectedResult": "TextEdit 窗口 AXWindow rect = {width:600, height:400}, AXTextArea 含 'MAIN_DOC'",
+  "verify": {
+    "method": "window_state_and_ax_read",
+    "description": "@window-find:TextEdit 拿 window_id, @window-resize 改 size, 再 @ax-find:AXWindow 读 rect + AXTextArea 读文本"
+  },
+  "cleanup": "@computer-act#cleanup:{schema:\"rdog.computer-act.v1\",action:\"hotkey\",args:{hotkey:\"Cmd+Q\"},verify:\"none\"}"
+}

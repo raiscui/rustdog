@@ -1,0 +1,10 @@
+{
+  "id": "clipboard-copy-paste",
+  "task": "在 TextEdit 输入 'RDOG_COPY_TEST_42', Cmd+A 选全部, Cmd+C 复制, Cmd+N 新窗口, Cmd+V 粘贴, 验证新窗口含原文",
+  "expectedResult": "新 TextEdit 窗口含 'RDOG_COPY_TEST_42'",
+  "verify": {
+    "method": "ax_read",
+    "description": "第二个 TextEdit 窗口的 AXTextArea 含 'RDOG_COPY_TEST_42'"
+  },
+  "cleanup": "@computer-act#cleanup:{schema:\"rdog.computer-act.v1\",action:\"hotkey\",args:{hotkey:\"Cmd+Q\"},verify:\"none\"}"
+}

@@ -375,3 +375,50 @@ feature/computer-act-outcome-3state 分支已推到 origin. 后续决策:
 
 - 修 dead_code warning (LP-ticket-20-deferred-1): `key_delivery_backend` + 5 个 ComputerActErrorCode variant
 - 等下一个集成 client 落地后跑 5×8 matrix 验证 outcome 字段被 client 实际消费
+
+## [2026-08-09 01:00:00] [Session ID: omx-1786201921174-cvveb1] 阶段 12: 重建 5×8 macOS ops matrix runner
+
+### 背景
+
+- 方案 2 outcome 三态已落地 + smoke 全过 + skill 同步
+- outcome / status 在 wire 上工作, 但 "client 真消费" 仍是间接证据
+- archive 提到 `runner/eval-macos-ops.sh` 在 "外部评测工程", 该工程已不在 filesystem
+- 当前 pi agent `models.json` 有 5 个活动 provider (deepseek / minimax-cn / qwen37-flash / qwen36-flash / minimax-m27-highspeed)
+- archive `macos-ops-20260807-live-5x8` 5 模型各 8/8 全部成功, 是 baseline
+
+### 目标
+
+重建 5×8 macOS ops matrix runner + case + ledger, 跑一次 current-binary live matrix
+验证 outcome / status / epoch 字段是否被真客户端 (Pi-driven models) 实际消费.
+
+### 阶段
+
+- [x] 阶段 12.1: 扫环境 (Pi binary + extension + provider + archive evidence)
+- [ ] 阶段 12.2: user 拍板 5 model 完整列表 + 8 case 完整列表 (基准对齐 archive 5×8)
+- [ ] 阶段 12.3: 写 runner 骨架 (eval-macos-ops.sh + lib/ + cases/ + ledger/)
+- [ ] 阶段 12.4: 8 case prompt 文件 (基于 archive 已知 case + 当前 binary 能力)
+- [ ] 阶段 12.5: 5 model 配置 (对齐 models.json, 清理 qwen-plus stale)
+- [ ] 阶段 12.6: 写 interaction ledger schema + classification (rdog.macos-ops.interaction-ledger.v1)
+- [ ] 阶段 12.7: dry-run 验证 (provider 在线探测 + daemon 起来 + skill SHA-256 锁定)
+- [ ] 阶段 12.8: live matrix 跑 5×8=40 run (maxCaseAttempts=3, 失败 case 重试到 3 次)
+- [ ] 阶段 12.9: 汇总 ledger, 对比 baseline (archive 5×8), 验证 outcome / status 字段
+- [ ] 阶段 12.10: docs / commit / push
+
+### 关键决策
+
+- runner 放 rustdog 仓库下 `runner/eval-macos-ops.sh` (不是外部 sibling project, 让 runner 跟 rdog binary 在同一仓库, 减少 runner/rdog 版本错位风险)
+- case prompt 8 个对齐 archive 5×8 (5 老 + 3 新: terminal-run-command / safari-new-tab-navigate / textedit-multi-window)
+- 5 model 对齐 models.json 当前 5 个活动 provider (deepseek / minimax-cn / qwen37-flash / qwen36-flash / minimax-m27-highspeed)
+- interaction ledger schema 对齐 workflows/macos-ops-interaction-efficiency.md 的 v1 schema
+- classification 规则: query / action / post_action_evidence / recovery / supporting_shell / unknown (6 档, 不读 app/case/prompt 文本)
+
+### 风险
+
+- Pi provider API key 可能过期 (5 个 model 都 set, 但实时可用性需探测)
+- 5×8 = 40 run + maxCaseAttempts=3 = 120 run 上限, 时间 1-3 小时
+- 1-2 天工作量, 跟 user 拍板范围
+- 历史 baseline 是 archive 5×8 (canonical skill SHA-256 `129aa820...`), 当前 skill SHA-256 不同, baseline 不严格可比但能看趋势
+
+### 状态
+
+**当前在阶段 12.2**: 等 user 拍板 5 model + 8 case 完整列表.

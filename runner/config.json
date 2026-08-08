@@ -1,0 +1,43 @@
+{
+  "_comment": "5 model x 8 case macOS ops live matrix 配置 (archive 5x8 baseline 对齐). 加新 model/case 必须确认完整目标列表 (不假装跑过子集).",
+  "schema": "rdog.eval-macos-ops.config.v1",
+  "rdogBinary": {
+    "_comment": "强制 Pi bash tool 用 current binary. prepend target/debug 到 PATH, 让 which rdog 指向这里. SHA-256 写入 ledger manifest.",
+    "path": "target/debug/rdog",
+    "config": "rdog_macos.toml",
+    "namespace": "mac.lab"
+  },
+  "daemon": {
+    "_comment": "managed local-default daemon lifecycle. runner 启动 daemon, 5x8 跑完 kill.",
+    "managed": true,
+    "config": "rdog_macos.toml"
+  },
+  "models": [
+    {"id": "deepseek",             "provider_key": "deepseek",             "profile": "rdog-control-bash", "maxCaseAttempts": 3},
+    {"id": "minimax-cn",           "provider_key": "minimax-cn",           "profile": "rdog-control-bash", "maxCaseAttempts": 3},
+    {"id": "qwen37-flash",         "provider_key": "qwen37-flash",         "profile": "rdog-control-bash", "maxCaseAttempts": 3},
+    {"id": "qwen36-flash",         "provider_key": "qwen36-flash",         "profile": "rdog-control-bash", "maxCaseAttempts": 3},
+    {"id": "minimax-m27-highspeed","provider_key": "minimax-m27-highspeed","profile": "rdog-control-bash", "maxCaseAttempts": 3}
+  ],
+  "cases": [
+    "calculator-happy-path",
+    "calculator-old-state-recovery",
+    "calculator-divide-by-zero",
+    "terminal-run-command",
+    "safari-new-tab-navigate",
+    "textedit-multi-window",
+    "clipboard-copy-paste",
+    "multi-window-textedit"
+  ],
+  "ledger": {
+    "schema": "rdog.macos-ops.interaction-ledger.v1",
+    "manifestFields": ["rustdog_commit", "rdogBinary_path", "rdogBinary_sha256", "skill_sha256", "runner_version"],
+    "decisionRecordFields": ["model_id", "case_id", "attempt", "seq", "kind", "classification", "rdog_response", "rdog_error", "artifact_path"]
+  },
+  "immutableBaseline": {
+    "_comment": "archive 2026-08-07 baseline (5 model x 8 case, 旧 binary). current binary 应该 < 252 requests 才算改善.",
+    "agentDecisions": 260,
+    "rdogRequests": 252,
+    "attempts": 41
+  }
+}
