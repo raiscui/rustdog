@@ -338,3 +338,46 @@
 - **不进 LATER_PLANS**: outcome / status 字段在 live wire 上工作, smoke 通过, skill 同步完成. 方案 2 outcome 三态正式 close.
 - **修复 dead_code warning (LP-ticket-20-deferred-1)**: 跑 smoke 时看到 `key_delivery_backend` 和 5 个 ComputerActErrorCode variant (ObservationExpired / TargetNotFound / VerifyFailed / UnknownAction / Infrastructure) 是 dead_code. VerifyFailed 是 outcome 三态保留的, 其他 4 个是 ADR-0004 占位. 这是独立 cleanup, 可以单独 commit.
 - **smoke 期望改动需要 commit**: scripts/smoke_computer_act_verify.sh test 3 outcome / status 改成枚举匹配, 这是 smoke 设计 bug fix.
+
+## [2026-08-09 00:30:00] [Session ID: omx-1786201921174-cvveb1] 任务名称: dead_code warning cleanup (LP-ticket-20-deferred-1)
+
+### 任务内容
+
+- 清理 smoke 输出里累积的 dead_code warning noise
+- 5 个 `ComputerActErrorCode` variant + 1 个 dead helper (`key_delivery_backend()` getter)
+
+### 完成过程
+
+- grep `key_delivery_backend` callers: getter 0 caller (setter `with_key_delivery_backend` 在 zenoh_control.rs:383 + 385 真用, 字段 + 构造器在用), 只 getter 是 dead
+- grep `ComputerActErrorCode::*` production callers: 5 个 variant (ObservationExpired / TargetNotFound / VerifyFailed / UnknownAction / Infrastructure) 在生产代码 0 construction (test mod 里调用方法不影响 warning, 因为 `#[cfg(test)]` 不计入 dead_code 分析)
+- 决定: ponytail 推 minimal — getter 删 (真 0 caller), enum variant 保留 + 加 `#[allow(dead_code)]` (variant 是 E2 envelope 协议契约, 删会破坏 client 错误处理代码读 `as_str()`)
+
+### 修改
+
+- `src/control_actions.rs:130-132`: 删 `key_delivery_backend()` getter (`pub(crate)` 0 caller). setter `with_key_delivery_backend` + 字段保留 (zenoh_control.rs 还在用)
+- `src/control_computer_act/error_envelope.rs`: enum 加 `#[allow(dead_code)]` + doc 注释 (12 个 variant, 5 个 dead + 复活路径). 5 个 variant 复活路径:
+  - `ObservationExpired`: ticket 15-deferred-7 (Phase I 真实 observe + TTL 过期)
+  - `TargetNotFound`: ticket 15-deferred-7 (Phase I 真实 observe, AX 找不到 element)
+  - `VerifyFailed`: outcome 三态替代后保留 enum 作 reference
+  - `UnknownAction`: ticket 21 (13 动作 smoke, 目前 routing 走 `ComputerActRouteError::UnknownAction`)
+  - `Infrastructure`: ticket 15-deferred-8 (zenoh router down / pipe broken)
+
+### 验证证据
+
+- `cargo build --bin rdog`: 0 dead_code warning (5 个 variant warning 消失, getter warning 消失)
+- `cargo nextest run -p rustdog --bin rdog`: **705 passed, 0 failed, 1 skipped** (无回归)
+- `smoke_computer_act_verify.sh`: 5/5 passed (smoke 不再被 dead_code warning 污染)
+
+### 副作用: outcome 三态 status 三档全部实证
+
+- **"verified"** 首次出现: test 3 第二次跑 (`elements_modified=4` + `windows_modified=1`, changed=5 > 0 → "verified", outcome:"worked")
+  - 真实 OS 事件: Zap terminal `.codex` spinner 字符 `⠙` → `⠴` + 4 个 button rect 坐标变化
+- **"preexisting"**: test 3 第一次跑 (changed=0 + morphed=2, AX 拓扑变化但 field 没变)
+- **"failed"**: test 3 (verify_passed=false, ax_diff 全 0)
+- outcome 三态 + verification.status 三档全部 5×5 = 25 组合里**实证 4 档**, 剩 1 档 `unknown` 需要 verify timeout (需 live smoke 触发 timeout, 暂未实测)
+
+### 总结感悟
+
+- ponytail 推 deletion over addition: dead getter 真删 (4 行), dead enum variant 保留 (E2 contract 不能删). 这是 "复用 vs 删除" 的细微差别 — dead helper 是 pure abstraction 没 caller, dead enum variant 是协议契约有 client reader.
+- `#[allow(dead_code)]` 不是 suppression hack, 是"暂时 dead 但保留语义" 的诚实表达. ponytail comment 把 ceiling + upgrade path 写清楚, 让继承者知道什么时候复活.
+- dead_code cleanup 顺手验证 outcome 三态 status 三档全部实证, 是 outcome 三态 ADR 的最后一格验证 (decision table 完整 + status 三档真实出现).

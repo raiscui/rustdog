@@ -326,3 +326,30 @@ daemon 日志 (`/var/folders/.../computer-act-verify-smoke-XXXX*/computer-act-ve
 - outcome 三态 decision table 5 行全部实证, 包括 "preexisting" 这一之前设计时顾虑会不会真实出现的中间档. 现在确认 "preexisting" 是真实有效的 wire 档位, 让 client 能区分 "动作真生效" vs "AX 拓扑变了但 field 没变".
 - smoke 期望锁 wire contract 不锁特定值是更鲁棒的设计哲学.
 - macOS TCC 权限 (accessibility) 已授权, AX capture 真实跑.
+
+## [2026-08-09 00:30:00] [Session ID: omx-1786201921174-cvveb1] 笔记: outcome 三态 + verification.status 全部档位实证
+
+### 现象
+
+跑 dead_code cleanup 时跑 smoke, 真实 macOS live evidence:
+
+- outcome 三态 decision table 5 行 → 实证 4 行 (剩 `unknown` 需要 verify timeout 触发):
+  | dispatch_ok | verify_req | verify_run | verify_pass | outcome | 实证 |
+  |-------------|------------|------------|-------------|---------|------|
+  | true | false | - | - | worked | test 1/2 (默认 verify=None) |
+  | true | true | true | true | worked | test 3 (OS 真实变化) / test 4 (verify=always, changed=12) |
+  | true | true | true | false | didnt | test 3 (verify_passed=false) |
+  | true | true | false | - | unknown | (未实测, 需 verify timeout) |
+  | false | - | - | - | unknown | test 5 (verify:"bogus" → invalid_verify error envelope) |
+
+- verification.status 三档 → 全部实证:
+  | status | 决策 | 实证 |
+  |--------|------|------|
+  | verified | modified > 0 | test 3 (Zap spinner 字符 + button rect 变化, changed=5) |
+  | preexisting | modified == 0 + morphed > 0 | test 3 (changed=0 + morphed=2, AX 拓扑变但 field 没变) |
+  | failed | all zero | test 3 (verify_passed=false, ax_diff 全 0) |
+
+### 综合发现
+
+- outcome 三态 + status 三档**所有档位**都在真实 macOS live 出现过, decision table 设计正确 (包括之前顾虑的 "preexisting" 中间档).
+- smoke run-to-run outcome 不稳定 (OS 状态决定 outcome 值), 这正是把 smoke 期望改成枚举匹配的根本原因: 锁 wire contract 不锁特定值, 鲁棒 + 不丢失 verification evidence.

@@ -53,9 +53,21 @@ impl RetryStrategy {
     }
 }
 
-/// 9 个标准 error_code (ADR-0004 + ADR-0005 + ticket 15 acceptance)。
+/// 12 个标准 error_code (ADR-0004 + ADR-0005 + ticket 15 acceptance, 5 个 variant 当前 dead_code 见下)。
 ///
 /// 每档对应一个默认 retry strategy + 默认 evidence key (caller 可以覆盖 evidence)。
+///
+/// `#[allow(dead_code)]` 抑制 5 个 variant 暂时 0 construction 的 rustc warning:
+/// - `ObservationExpired`: ADR-0004 占位, ticket 15-deferred-7 触发 (Phase I 真实 observe 集成 + TTL 过期)
+/// - `TargetNotFound`: ADR-0004 占位, ticket 15-deferred-7 触发 (Phase I 真实 observe, AX 找不到 element)
+/// - `VerifyFailed`: outcome 三态替代后保留 enum 作 reference, ticket 13 后续 ADR 关闭
+/// - `UnknownAction`: ADR-0004 占位, ticket 21 (13 动作 smoke) 触发 (目前 routing 走 `ComputerActRouteError::UnknownAction`, 不走 envelope)
+/// - `Infrastructure`: ADR-0004 占位, ticket 15-deferred-8 触发 (zenoh router down / pipe broken)
+///
+/// ponytail: 保留 enum + 字符串 + retry strategy / hint / evidence key 表, 因为这些是协议契约
+/// (client 错误处理代码读 `as_str()`). 删 variant 会破坏 E2 envelope contract.
+/// 复活路径: 对应 ticket 落地时加 caller + 跑 smoke 验证 wire shape.
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ComputerActErrorCode {
     PermissionDenied,

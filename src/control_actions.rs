@@ -127,10 +127,6 @@ impl SystemControlActionExecutor {
         self
     }
 
-    /// 读取 `@key` 的送达后端 (供 execute_key 决策)。
-    pub(crate) fn key_delivery_backend(&self) -> crate::config::KeyDeliveryBackend {
-        self.key_delivery_backend
-    }
 
     /// 暴露内部 cancel_registry 引用, 让 dispatcher (zenoh_control / 控制平面)
     /// 跟 executor 共享同一 registry 实例, 避免 ticket 03 跨实例 bug。
