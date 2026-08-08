@@ -206,6 +206,13 @@ Read only the matching reference before using an Other Lane:
 - `references/zenoh-hardware.md`: discovery, SDK, serial, and bridge hosts.
 
 ## Failure Handling
+🔴 **READ FIRST for `@computer-act` responses.** Before matching on `ok` or `error_code`,
+read [references/computer-act-outcome.md](references/computer-act-outcome.md).
+The shape changed in `feature/computer-act-outcome-3state`: `outcome` and
+`verification.status` carry postcondition signal that used to live in
+`error_code:"verify_failed"`. Phase F-2's `ok:false + error_code:verify_failed`
+path is removed.
+
 
 🔴 **REPAIR — when a control fails.** When a control returns `performed:false`, zero matches, or an unexpected
 fresh read, walk the three-tier ladder below before retrying with a new
