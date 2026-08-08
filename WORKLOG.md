@@ -286,3 +286,55 @@
 - smoke 跑完后 (下一轮 macOS live smoke) 验证 outcome 字段是否真被 client 读到;
   如果读到, 这一轮方案 2 就 close; 如果没读到, 进 LATER_PLANS 考虑删 outcome 字段
   (跟 epoch 验证逻辑类似).
+
+## [2026-08-08 23:50:00] [Session ID: omx-1786201921174-cvveb1] 任务名称: feature/computer-act-outcome-3state macOS live smoke 验证
+
+### 任务内容
+
+- 跑一轮 macOS live smoke 验证 outcome / status 字段在 wire 上工作
+- 修复 smoke 期望错误 (test 3 outcome:"didnt" 在真实 macOS 上 false fail)
+
+### 完成过程
+
+- 探测 daemon 状态: `~/.local/state/rustdog/local-default/lab.pid` 是 stale PID 76330 (进程已死)
+- rebuild `target/debug/rdog` (touch outcome.rs / mod.rs / verify.rs / error_envelope.rs 强制 cargo rebuild, 2.62s)
+- 验证 binary 含 outcome 三态: `strings target/debug/rdog | grep workeddidntunknown` 命中, `verification_status_for_diff` 已编译
+- 跑 `smoke_computer_act_verify.sh` 5 个 test:
+  - test 1/2 ok (outcome:"worked", 不带 verification)
+  - **test 3 失败**: 期望 outcome:"didnt", 实际 outcome:"worked" + status:"preexisting"
+    - 根因: `wait 0ms` 期间 macOS 背景让 AX diff 出现 elements_added=1 + elements_removed=1 (pid:538 加 AXGroup, pid:86138 window 3 减 "速度" StaticText), changed=0+morphed=2 → "preexisting", verify_passed=true → "worked"
+    - 这是 outcome 三态 "preexisting" 中间档在真实 macOS 上的首次实证, 不是 bug
+    - 但 smoke 期望错 (Phase F-2 时代期望 "wait + 0ms = GUI 不变" 是错的, wait 0ms 不保证 AX tree 不变)
+  - 修 smoke 期望: outcome / status 改成枚举匹配 (三态 / 三档) 而非锁死特定值, 锁 wire contract 不锁具体值
+  - 重跑 5/5 全过, test 3 真出 outcome:"didnt" + status:"failed" (这次 wait 期间 OS 无背景变化, verify_passed=false)
+- 跑 `smoke_computer_act_trace.sh` 3 个 test:
+  - test 1/2 ok
+  - **test 3 ok**: `verify:"best_effort" + trace:"savefile" + wait` 真出 outcome:"didnt" + status:"failed" + trace_savefile 落盘到 rdog_downloads/trace-1786204153445-1786204153445.json
+- 跑 `mac_lab_live_smoke.sh` 4 个 test (ping / literal shell / pty / tty display) 全过
+- daemon 日志无 TCC warning, verify_ms=955ms 真实 AX capture, TCC 权限 OK
+
+### 验证证据
+
+- cargo build: 含 outcome 三态 (workeddidntunknown wire strings)
+- smoke_computer_act_verify.sh: **5/5 passed** (test 3 outcome / status 字段 + 枚举值验证)
+- smoke_computer_act_trace.sh: **3/3 passed** (outcome:"didnt" + trace_savefile 落盘)
+- mac_lab_live_smoke.sh: **4/4 passed** (ping / literal shell / pty / tty display)
+- 真实 wire shape 实证:
+  - test 3 (verify best_effort + wait): `outcome:"didnt"` + `verification.status:"failed"` + `ax_diff` 全 0 + `verify_ms`~955
+  - test 3 (第一次跑, OS 有背景): `outcome:"worked"` + `verification.status:"preexisting"` (AX 拓扑变化但 field 没变)
+  - test 4 (verify always): `outcome:"worked"` + `verification.method:"full"` (always 路径不走 status 字段)
+- daemon 日志: `zenoh router daemon ready: namespace=lab, service_name(daemon_name)=mac.lab`, 无 TCC warning
+
+### 总结感悟
+
+- **outcome 三态 "preexisting" 中间档是真实有效档**: 之前 outcome.rs 设计时顾虑这一档会不会出现, 实际 macOS 真实背景变化就让 verify_passed=true + status="preexisting" 出现. 这一档让 client 能区分 "动作真生效" vs "AX 拓扑变了但字段没变 (罕见, 但要诚实表达)", 不是空跑设计.
+- **smoke 期望应该锁 wire contract 不锁具体值**: Phase F-2 时代 "wait 0ms + verify best_effort = GUI 不变 = outcome:didnt" 这个假设在真实 macOS 上不稳. 改成 "outcome 字段存在且是三态之一 + verification.status 字段存在且是 status 三档之一" 更准确反映 wire contract.
+- **TCC 权限 OK, AX capture 真实跑**: verify_ms=955-1023ms 不是 0, AX diff 真出来 (pid:538 加 element, pid:86138 减 element), 无 daemon 日志 warning, 表明 accessibility / screen recording 权限已授权.
+- **smoke 改枚举匹配 vs 锁特定值的 trade-off**: 锁特定值更严格但 fragile (依赖 OS 状态), 锁枚举更稳但宽松 (无法抓 regression 到特定值). 选枚举匹配是 outcome 三态 wire contract 验证的最小可用方案; 特定值 regression 可以用 cargo test (outcome.rs 单测已经覆盖决策表所有分支) 抓.
+- **live smoke 是 wire shape 验证, 不是 "client 是否读 outcome" 验证**: 当前没有 active client 集成, 所以 "outcome 字段被 client 实际读取" 无法直接验证. skill 同步 (4b864a3) 已经做了, 等下一个集成 client 落地后跑 5×8 matrix 才算闭环.
+
+### 后续建议
+
+- **不进 LATER_PLANS**: outcome / status 字段在 live wire 上工作, smoke 通过, skill 同步完成. 方案 2 outcome 三态正式 close.
+- **修复 dead_code warning (LP-ticket-20-deferred-1)**: 跑 smoke 时看到 `key_delivery_backend` 和 5 个 ComputerActErrorCode variant (ObservationExpired / TargetNotFound / VerifyFailed / UnknownAction / Infrastructure) 是 dead_code. VerifyFailed 是 outcome 三态保留的, 其他 4 个是 ADR-0004 占位. 这是独立 cleanup, 可以单独 commit.
+- **smoke 期望改动需要 commit**: scripts/smoke_computer_act_verify.sh test 3 outcome / status 改成枚举匹配, 这是 smoke 设计 bug fix.

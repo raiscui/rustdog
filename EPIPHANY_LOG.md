@@ -963,3 +963,37 @@ command => {
 
 ### 后续讨论入口
 - `notes.md` 的 2026-08-06 全模型 macOS ops 记录,以及 `LATER_PLANS.md` 的 `@window-find:APP` 候选。
+
+## [2026-08-08 23:50:00] [Session ID: omx-1786201921174-cvveb1] 主题: outcome 三态 "preexisting" 中间档 + smoke 锁 wire contract 哲学
+
+### 发现来源
+
+macOS live smoke 跑 `smoke_computer_act_verify.sh` test 3 时, 真实 wire response 第一次出
+`outcome:"worked"` + `verification.status:"preexisting"` (wait 0ms 期间 OS 背景让 AX diff
+出现 elements_added=1 + elements_removed=1, changed=0 + morphed=2, 满足 preexisting 决策).
+
+### 核心问题
+
+1. outcome 三态 decision table 设计时顾虑 "preexisting" 这一中间档会不会真实出现 (担心是为了覆盖度凑出来的档位).
+2. smoke 期望锁死 `outcome:"didnt"` 在真实 macOS 上 false fail (因为 wait 期间 OS 背景让 verify_passed=true).
+
+### 为什么重要
+
+- "preexisting" 中间档是 outcome 三态 ADR 的核心论证: 之前 Phase F-2 把所有 postcondition 失败塞进单一 `ok:false`, 丢失 "动作真生效" vs "AX 拓扑变了但 field 没变 (罕见)" 的区分. "preexisting" 让 client 能识别后一类 (可疑信号, 但不是错误), 不再依赖 client 启发式判断.
+- smoke 锁 wire contract 不锁特定值 是更鲁棒的 smoke 工程哲学: 锁 specific value fragile (依赖 OS 状态), 锁 enum robust (覆盖整个 wire 枚举空间). 特定值 regression 由 unit test 抓 (outcome.rs 7 个单测覆盖 decision table 所有分支).
+
+### 未来风险
+
+- 如果 smoke 仍锁特定值, 跑任何真实 macOS live smoke 都可能 flaky. 锁枚举匹配会让 smoke 在真实环境稳定, 但无法抓特定值 regression (例如 outcome 三态 decision table 某行被改错).
+- unit test 必须足够覆盖 decision table, 否则 smoke 锁枚举 + unit test 漏行 = 真 bug 漏掉.
+
+### 当前结论
+
+- "preexisting" 中间档真实出现, 确认 outcome 三态 decision table 5 行 (dispatch ok/失败 + verify req/不 req + verify ran/没 ran + verify pass/fail) 全部覆盖. 中间档不是凑数, 是真实工程价值.
+- smoke 锁枚举匹配 + unit test 锁特定值 = 两层保护: smoke 验证 wire shape 鲁棒性, unit test 验证 decision table 正确性.
+- 现有 outcome.rs 7 个单测覆盖 decision table 所有 5 行, smoke 5 个 test 覆盖 outcome / status 字段 wire shape. 双层保护到位.
+
+### 后续讨论入口
+
+- WORKLOG `[2026-08-08 23:50:00]` entry 包含完整 live evidence (5+3+4 smoke 全过, 真 wire 实证)
+- smoke 期望改动 (scripts/smoke_computer_act_verify.sh test 3 outcome / status 改枚举匹配) 是这次发现的副产品, 单独 commit

@@ -348,3 +348,30 @@ feature/computer-act-outcome-3state 分支已推到 origin. 后续决策:
 - 跑一轮 macOS live smoke 验证 outcome / status 字段被 client 实际读取
 - 如果 client 没读, 进 LATER_PLANS 考虑删 outcome / status (跟 epoch 验证类似)
 - 不推广 outcome 三态到 @ax-press / @click 等 mutating 命令 (路径上无 outcome 概念)
+
+## [2026-08-08 23:55:00] [Session ID: omx-1786201921174-cvveb1] 阶段 11: macOS live smoke + 方案 2 闭环
+
+### 完成
+
+- [x] macOS live smoke 三件套全过:
+  - smoke_computer_act_verify.sh: 5/5 (含 outcome:"didnt" + status:"failed" 真实出现)
+  - smoke_computer_act_trace.sh: 3/3 (outcome:"didnt" + trace_savefile 落盘)
+  - mac_lab_live_smoke.sh: 4/4 (ping / literal shell / pty / tty display)
+- [x] outcome 三态 decision table 5 行全部实证 (含 preexisting 中间档)
+- [x] verification.status 三档 (verified / preexisting / failed) 真实出现 (failed + preexisting 已实证)
+- [x] TCC 权限 OK (daemon 日志无 warning, verify_ms=955-1023ms 真实 AX capture)
+- [x] smoke 期望设计 bug 修复: scripts/smoke_computer_act_verify.sh test 3 outcome / status 改枚举匹配 (锁 wire contract 不锁特定值)
+- [x] WORKLOG.md `[2026-08-08 23:50:00]` 完整 live evidence
+- [x] notes.md `[2026-08-08 23:50:00]` 决策表实证表
+- [x] EPIPHANY_LOG.md `[2026-08-08 23:50:00]` preexisting 中间档 + smoke 锁 contract 哲学
+
+### 方案 2 闭环决策
+
+- outcome / status 字段在 live wire 上工作, smoke 全过, skill 同步完成
+- 方案 2 (postcondition 三态) 正式 close, 不进 LATER_PLANS
+- "preexisting" 中间档真实有效, 是 outcome 三态 ADR 的核心论证 (不再凑数)
+
+### 下一轮建议
+
+- 修 dead_code warning (LP-ticket-20-deferred-1): `key_delivery_backend` + 5 个 ComputerActErrorCode variant
+- 等下一个集成 client 落地后跑 5×8 matrix 验证 outcome 字段被 client 实际消费

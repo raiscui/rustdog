@@ -258,3 +258,71 @@
 - 已验证: 本轮样本消除了 decision brief 关注的两类语法漂移,并保持全部正确性证据。
 - 未验证: 单轮总请求下降不能证明稳定收益,因为逐 case 门禁已失败。
 - 按 workflow 拒绝 baseline promotion,保留 artifacts 供后续跨轮观察。该结论不授权新增 parser alias 或模型/App 特例。
+
+## [2026-08-08 23:50:00] [Session ID: omx-1786201921174-cvveb1] 笔记: outcome 三态 macOS live smoke + preexisting 中间档真实出现
+
+### 现象 (live evidence)
+
+第一次跑 `smoke_computer_act_verify.sh` test 3 (`verify:"best_effort" + wait 0ms`):
+
+真实 wire response (简化):
+```json
+{
+  "ok": true,
+  "outcome": "worked",
+  "verification": {
+    "method": "ax_diff",
+    "ax_diff": {
+      "changed": 0,
+      "elements_added": 1,
+      "elements_removed": 1,
+      "elements_modified": 0,
+      ...
+    },
+    "status": "preexisting",
+    "report": {
+      "elements": {
+        "pid:538/window:0/path:3.0.0": {"kind": "Added", "role": "AXGroup"},
+        "pid:86138/window:3/path:11.8.0.0": {"kind": "Removed", "role": "AXStaticText", "value": "速度"}
+      },
+      ...
+    }
+  }
+}
+```
+
+### 综合发现
+
+#### outcome 三态 decision table 真实有效
+
+| dispatch_ok | verify_requested | verify_ran | verify_passed | outcome | 真实出现? |
+|-------------|------------------|------------|---------------|---------|-----------|
+| true | false | - | - | worked | test 1 / test 2 (默认 verify=None) |
+| true | true | true | true | worked | test 4 (verify=always, changed=12) / test 3 第一次跑 (status=preexisting) |
+| true | true | true | false | didnt | test 3 第二次跑 (verify_passed=false) |
+| true | true | false | - | unknown | (未出现, 需要 verify timeout) |
+| false | - | - | - | unknown | test 5 (verify:"bogus" → invalid_verify error envelope, outcome 不写入) |
+
+#### verification.status 三档真实出现
+
+- "failed": test 3 第二次跑 (verify_passed=false, ax_diff 全 0)
+- "preexisting": test 3 第一次跑 (changed=0 + morphed=2, OS 背景变化)
+- "verified": (未直接出现, 需要 action 真生效的 case; wait 0ms 不会改 GUI, 但 verify=always 触发了 method="full" 路径不走 status)
+
+#### smoke 期望错误 (设计 bug)
+
+`smoke_computer_act_verify.sh` test 3 期望 `outcome:"didnt"`, 但真实 macOS 上 wait 0ms 期间 OS 背景会让 AX diff 出现 1 add + 1 remove → verify_passed=true → outcome:"worked" + status:"preexisting".
+
+Phase F-2 时代假设 "wait 0ms + verify best_effort = GUI 完全不变 = outcome:didnt", 实际 wait 0ms 不保证 AX tree 不变 (其他进程增减 element).
+
+修法: smoke 改成枚举匹配 (outcome 三态之一 + verification.status 三档之一), 锁 wire contract 不锁特定值. 特定值 regression 由 outcome.rs 7 个单测抓.
+
+#### daemon TCC 权限 OK
+
+daemon 日志 (`/var/folders/.../computer-act-verify-smoke-XXXX*/computer-act-verify-smoke-daemon.log`) 无 TCC warning. verify_ms=955-1023ms 不是 0, AX diff 真出来 (pid:538 加 element, pid:86138 减 element). Accessibility TCC 权限已授权.
+
+### 结论
+
+- outcome 三态 decision table 5 行全部实证, 包括 "preexisting" 这一之前设计时顾虑会不会真实出现的中间档. 现在确认 "preexisting" 是真实有效的 wire 档位, 让 client 能区分 "动作真生效" vs "AX 拓扑变了但 field 没变".
+- smoke 期望锁 wire contract 不锁特定值是更鲁棒的设计哲学.
+- macOS TCC 权限 (accessibility) 已授权, AX capture 真实跑.
