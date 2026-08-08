@@ -147,3 +147,89 @@
 ### 状态
 
 **本轮完成**: 已按 workflow 的 fail-closed 规则收口,没有待执行的认证步骤。
+
+## [2026-08-08 14:00:00] [Session ID: omx-1786112971218-cbf063] 阶段 1: 方案 1 - 资源 epoch + stale write fast-reject
+
+### 目标
+
+新增 `epoch` 字段到 `@observe` 响应,以及可选 `epoch` 字段到 `@computer-act` 等
+mutating 命令,使得客户端可以显式回传它们观察到的 epoch,后端在 dispatch
+之前 fast-reject 不匹配的 epoch (而不是依赖 TTL 检测一次就走到底再失败)。
+
+### 范围 (向后兼容加成)
+
+- 不改变现有 `@observe` / `@ax-press` / `@click` / `@computer-act` 默认行为
+- 不动 TTL-based eviction 逻辑
+- 不引入 per-resource epoch (留给后续 Phase B)
+- 不修改其他 mutating 命令 (key / mouse / drag / wheel / type-text 等) — 那些命令
+  暂不参与 epoch fast-reject, 等 Phase B 用 `@observe` + `@computer-act` 路径
+  验证后再扩张
+
+### 阶段
+
+- [ ] 阶段 1: 规划 + 建分支
+- [ ] 阶段 2: 在 `src/control_observation/observe/response.rs` 加 `epoch` 顶层字段
+- [ ] 阶段 3: 在 `src/control_protocol.rs` 加 `epoch: Option<u64>` 到 `ComputerActRequest`
+- [ ] 阶段 4: 在 `src/control_protocol/parsers/computer_act.rs` 解析 `epoch` 字段
+- [ ] 阶段 5: 在 `src/control_actions.rs` 的 `execute_computer_act` 前置 epoch 校验
+- [ ] 阶段 6: 加测试 (parser 接受/拒绝 epoch, dispatch 验证/拒绝)
+- [ ] 阶段 7: 编译 + 单测 + 协议文档同步
+- [ ] 阶段 8: 提交 commit + 推送
+
+### 关键决策
+
+- **epoch 值 = `created_at_unix_ms`**: 最小可行, 无新状态, 复用现有 observation header
+- **可选字段**: 不传 epoch = 走原路径 (TTL 校验); 传了 epoch = 显式 fast-reject
+- **错误码**: `STALE_OBSERVATION_EPOCH`, 复用现有 `stale_observation_ref_error` 风格
+- **分支名**: `feature/observe-epoch-stale-reject`, 基于 `restore-point-20260803-1300`
+- **不**修改 `ObservationHeader` struct: 响应 JSON 顶层加 `epoch` 字段, 不破坏现有
+  serializer / durable store
+
+### 风险
+
+- 误用 epoch: 客户端可能错把 `observation_id` 当 epoch — 需在 SKILL.md 明确
+- epoch 单位不明: 需在 spec 写 "epoch == observed_at_unix_ms, 单位 ms"
+- 与 future per-resource epoch 的迁移: 留有 docstring 说明 "epoch 是 daemon-global
+  monotonic, 未来可能换成 per-resource"
+
+### 状态
+
+**当前在阶段 1**: 创建分支 + 写 plan + 准备动手
+
+### 阶段 1 完成
+
+- [x] 阶段 1: 规划 + 建分支 (`feature/observe-epoch-stale-reject`)
+- [x] 阶段 2: `@observe` 响应顶层 `epoch` 字段 (src/control_observation/observe/response.rs)
+- [x] 阶段 3: `ComputerActRequest.epoch: Option<u64>` (src/control_protocol.rs)
+- [x] 阶段 4: parser 接受 `epoch`, 拒绝重复/负数/非整数 (src/control_protocol/parsers/computer_act.rs)
+- [x] 阶段 5: `check_observation_epoch_fast_reject` 在 implicit_observe 之前拦截 (src/control_computer_act/mod.rs)
+- [x] 阶段 6: 加 12 个测试 (parser 5 + dispatch 5 + response 2)
+- [x] 阶段 7: 编译 + 697 个 tests pass (524 control + 173 其它), 0 warning
+- [ ] 阶段 8: 文档同步 (SKILL.md / REFERENCES) + 提交
+
+### 验证证据
+
+- `RUSTFLAGS="-Awarnings" cargo check --quiet`: exit 0, no output
+- `cargo nextest run -p rustdog --bin rdog -E 'test(/control_/)'`: 524 passed, 0 failed
+- `cargo nextest run -p rustdog --bin rdog -E 'not test(/control_/)'`: 173 passed, 0 failed
+- 新加 12 个 tests 全部 pass:
+  - `parse_should_accept_computer_act_epoch`
+  - `parse_should_accept_computer_act_without_epoch`
+  - `parse_should_reject_computer_act_negative_epoch`
+  - `parse_should_reject_computer_act_non_integer_epoch`
+  - `parse_should_reject_computer_act_duplicate_epoch_field`
+  - `epoch_check_passes_when_epoch_matches_header`
+  - `epoch_check_rejects_when_epoch_mismatches`
+  - `epoch_check_rejects_when_observation_absent`
+  - `epoch_check_returns_none_when_epoch_not_provided`
+  - `epoch_check_returns_none_when_observation_id_missing`
+  - `render_observe_response_should_expose_epoch_at_top_level`
+  - `build_observe_response_should_expose_epoch_even_without_primary_observation`
+
+### 决议
+
+- 维持"向后兼容加成": 不传 epoch 的现有 caller 行为完全不变
+- epoch 仅作用于 `@computer-act`, 其它 mutating 命令 (`@ax-press` / `@click` / ...)
+  暂不参与, 等 Phase B 用 `@computer-act` 验证后再扩张
+- epoch = `created_at_unix_ms` (最小可行), 未来 per-resource epoch 时只换
+  `resolve_observation_header` 的实现, 上层 API 不变

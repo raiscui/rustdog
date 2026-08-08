@@ -116,3 +116,71 @@ fn parse_should_reject_computer_act_unknown_top_level_field() {
     .unwrap_err();
     assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
 }
+
+// --- epoch (feature/observe-epoch-stale-reject) ---
+
+#[test]
+fn parse_should_accept_computer_act_epoch() {
+    let result = parse_control_line(
+        r#"@computer-act#1:{schema:"rdog.computer-act.v1",action:"wait",args:{duration_ms:100},epoch:1700000000000}"#,
+    )
+    .expect("epoch should be accepted as optional field");
+    let request = match result {
+        ControlParseResult::Control(req) => req,
+        _ => panic!("expected Control result"),
+    };
+    match request.command {
+        ControlCommand::ComputerAct(req) => {
+            assert_eq!(req.epoch, Some(1700000000000));
+            assert_eq!(req.action, "wait");
+        }
+        other => panic!("expected ComputerAct, got {other:?}"),
+    }
+}
+
+#[test]
+fn parse_should_accept_computer_act_without_epoch() {
+    let result = parse_control_line(
+        r#"@computer-act#1:{schema:"rdog.computer-act.v1",action:"wait",args:{duration_ms:100}}"#,
+    )
+    .expect("missing epoch should not break parsing");
+    let request = match result {
+        ControlParseResult::Control(req) => req,
+        _ => panic!("expected Control result"),
+    };
+    match request.command {
+        ControlCommand::ComputerAct(req) => {
+            assert_eq!(req.epoch, None);
+        }
+        other => panic!("expected ComputerAct, got {other:?}"),
+    }
+}
+
+#[test]
+fn parse_should_reject_computer_act_negative_epoch() {
+    let err = parse_control_line(
+        r#"@computer-act#1:{schema:"rdog.computer-act.v1",action:"wait",args:{duration_ms:100},epoch:-1}"#,
+    )
+    .unwrap_err();
+    assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+    assert!(err.to_string().contains("epoch"));
+}
+
+#[test]
+fn parse_should_reject_computer_act_non_integer_epoch() {
+    let err = parse_control_line(
+        r#"@computer-act#1:{schema:"rdog.computer-act.v1",action:"wait",args:{duration_ms:100},epoch:"abc"}"#,
+    )
+    .unwrap_err();
+    assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+    assert!(err.to_string().contains("epoch"));
+}
+
+#[test]
+fn parse_should_reject_computer_act_duplicate_epoch_field() {
+    let err = parse_control_line(
+        r#"@computer-act#1:{schema:"rdog.computer-act.v1",action:"wait",args:{duration_ms:100},epoch:100,epoch:200}"#,
+    )
+    .unwrap_err();
+    assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+}

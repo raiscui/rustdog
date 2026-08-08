@@ -44,6 +44,7 @@ pub(crate) fn parse_computer_act_payload(input: &str) -> io::Result<ComputerActR
     let mut observation_id: Option<String> = None;
     let mut timeout_ms: Option<u64> = None;
     let mut trace: Option<String> = None;
+    let mut epoch: Option<u64> = None;
 
     for field in split_object_fields(inner)? {
         let (field_name, raw_value) = split_object_field(field)?;
@@ -137,6 +138,27 @@ pub(crate) fn parse_computer_act_payload(input: &str) -> io::Result<ComputerActR
                 }
                 trace = Some(parse_quoted_payload(raw_value)?);
             }
+            "epoch" => {
+                if epoch.is_some() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "@computer-act payload 的 `epoch` 字段重复",
+                    ));
+                }
+                let parsed = raw_value.parse::<i64>().map_err(|_| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("@computer-act 的 `epoch` 必须是整数: {raw_value}"),
+                    )
+                })?;
+                if parsed < 0 {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("@computer-act 的 `epoch` 不能为负数: {parsed}"),
+                    ));
+                }
+                epoch = Some(parsed as u64);
+            }
             other => {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
@@ -191,6 +213,7 @@ pub(crate) fn parse_computer_act_payload(input: &str) -> io::Result<ComputerActR
         observation_id,
         timeout_ms,
         trace,
+        epoch,
     })
 }
 

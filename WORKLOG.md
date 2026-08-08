@@ -184,3 +184,39 @@
 ### 总结感悟
 - 清零目标语法错误只能证明文案被本轮模型采用,不能证明整体收益稳定。
 - 逐 case 门禁能阻止用少数大幅下降掩盖其它任务的控制难度回退。
+
+## [2026-08-08 14:48:00] [Session ID: omx-1786112971218-cbf063] 任务名称: feature/observe-epoch-stale-reject 方案 1 落地
+
+### 任务内容
+
+- 在 `feature/observe-epoch-stale-reject` 分支实现 pi-computer-use 借鉴方案 1。
+- 给 `@observe` 响应顶层暴露 `epoch` 字段 + `ComputerActRequest` 加 `epoch: Option<u64>`,
+  在 implicit_observe / routing / dispatch 之前做 fast-reject, 阻止 stale write
+  落到过期 observation 上。
+
+### 完成过程
+
+- 在 `src/control_observation/observe/response.rs` 响应顶层加 `epoch = primary_observation.created_at_unix_ms` (无 primary 时退化到 observed_at_unix_ms)。
+- 在 `src/control_observation.rs` 加 `pub fn resolve_observation_header(observation_id)` 及 store::{resolve_header} 只解析 header 的 API, 不要求 ref_id。
+- 在 `src/control_protocol.rs` 给 `ComputerActRequest` 加 `epoch: Option<u64>` 字段, 文档说明 epoch 与 observation_id 配对使用。
+- 在 `src/control_protocol/parsers/computer_act.rs` 解析 `epoch` 字段, 对重复/负数/非整数报错, 与 `timeout_ms` 共用同一套风格。
+- 在 `src/control_computer_act/error_envelope.rs` 加 `StaleObservationEpoch` error_code, retry.strategy = `re_observe_then_retry`, hint 引导重新 @observe。
+- 在 `src/control_computer_act/mod.rs` 加 `check_observation_epoch_fast_reject` + `stale_observation_epoch_envelope`, 在 `execute_computer_act` 入口前验证; 不传 epoch 或 epoch 单独没 observation_id 时 no-op, 保持原行为。
+- 在 `src/control_protocol/tests/computer_act.rs` 加 5 个 parser test。
+- 在 `src/control_computer_act/tests.rs` 加 5 个 dispatch test (no_epoch / no_obs_id / match / mismatch / absent)。
+- 在 `src/control_observation/observe_tests.rs` 加 2 个 response shape test。
+- 在 `specs/rdog-computer-act-spec.md` 补 epoch 字段说明, 标注 feature/observe-epoch-stale-reject。
+
+### 验证证据
+
+- `RUSTFLAGS="-Awarnings" cargo check --quiet`: exit 0, 无 warning。
+- `cargo nextest run -p rustdog --bin rdog -E 'test(/control_/)'`: 524 passed, 0 failed。
+- `cargo nextest run -p rustdog --bin rdog -E 'not test(/control_/)'`: 173 passed, 0 failed。
+- 新增 12 个测试全部 pass: parse 5 + dispatch 5 + response 2。
+
+### 总结感悟
+
+- "向后兼容加成" 的实现路径比较安全: 不传 epoch 走原路径, 传了 epoch 才 fast-reject, 没有改变任何现有 caller 行为。
+- 把 epoch 字段挂在响应顶层而不是 `observation.observation_id` 嵌套对象里, 客户端一次 JSON 路径就能取到, 大幅降低集成成本。
+- `check_observation_epoch_fast_reject` 作为独立 pub(crate) 函数暴露, 方便单测覆盖各分支 (no_epoch / no_obs_id / match / mismatch / absent), 不会污染 dispatch 主流程。
+- epoch 用 `created_at_unix_ms` 而不是新建 monotonic counter, 最小可行, 未来切 per-resource epoch 时只换 `resolve_observation_header` 实现, 上层 API 不变。

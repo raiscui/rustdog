@@ -73,12 +73,19 @@ pub(super) fn build_observe_bundle_from_sections(
         accessibility_value.unwrap_or_else(|| json!({"status": "not_requested"}));
     let status = observe_status(&visual_value, &accessibility_value, &windows_value);
 
+    let epoch = produced
+        .primary_observation
+        .as_ref()
+        .map(|header| header.created_at_unix_ms)
+        .unwrap_or(observed_at_unix_ms);
+
     let mut value = json!({
         "kind": "observe",
         "schema": OBSERVE_SCHEMA,
         "status": status,
         "mode": request.mode.as_str(),
         "observed_at_unix_ms": observed_at_unix_ms,
+        "epoch": epoch,
         "primary_observation_source": primary_observation_source(
             produced.primary_observation.as_ref(),
             produced.accessibility.as_ref(),

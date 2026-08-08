@@ -219,6 +219,27 @@ impl ObservationStore {
         Ok((observation.header.clone(), entry))
     }
 
+    /// 只解析 observation header (不要求 ref_id)。
+    ///
+    /// 用于 `feature/observe-epoch-stale-reject`: 客户端把 `epoch` 跟
+    /// `observation_id` 一同回传,daemon 在 dispatch 之前先确认:
+    /// 1. observation 仍存活 (未 TTL 过期)
+    /// 2. observation 的 `created_at_unix_ms` 等于客户端回传的 epoch
+    ///
+    /// 任何一条不满足即 fail closed,避免 stale write 落到过期 observation 上。
+    pub fn resolve_header(&mut self, observation_id: &str, now_ms: u64) -> io::Result<ObservationHeader> {
+        self.evict_expired(now_ms);
+        let Some(observation) = self.observations.get(observation_id) else {
+            return Err(observation_ref_error(
+                "OBSERVATION_EXPIRED",
+                "observation 已过期或不存在",
+                observation_id,
+                None,
+            ));
+        };
+        Ok(observation.header.clone())
+    }
+
     fn evict_expired(&mut self, now_ms: u64) {
         let expired = self
             .observations
@@ -333,6 +354,16 @@ pub fn resolve_observation_ref_with_header(
     with_global_store(|store| {
         store.resolve_ref_with_header(observation_id, ref_id, current_unix_ms())
     })
+}
+
+/// 只解析 observation header (不要求 ref_id), 用于 epoch fast-reject。
+///
+/// 失败原因:
+/// - `OBSERVATION_EXPIRED`: observation 已被 TTL 驱逐或 daemon 重启后失效
+///   (返回 `io::Error` with `OBSERVATION_EXPIRED` code, 上游应转为
+///   `stale_observation_epoch` envelope)
+pub fn resolve_observation_header(observation_id: &str) -> io::Result<ObservationHeader> {
+    with_global_store(|store| store.resolve_header(observation_id, current_unix_ms()))
 }
 
 pub fn build_selector_get_response_json(request: &SelectorGetRequest) -> io::Result<String> {

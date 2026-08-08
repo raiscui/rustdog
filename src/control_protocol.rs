@@ -154,10 +154,15 @@ pub struct CancelRequest {
 /// `@computer-act` 的结构化请求 (rdog 适配 Mano-CUA 16 动作中的 13 个 daemon-side action)。
 ///
 /// 顶层 envelope: `schema` / `action` / `args` 三必填 + `verify` /
-/// `observation_id` / `timeout_ms` / `trace` 四个可选 (后续 ticket 11/12/16/18 实际使用)。
+/// `observation_id` / `timeout_ms` / `trace` / `epoch` 五个可选
+/// (后续 ticket 11/12/16/18 实际使用; `epoch` 由 feature/observe-epoch-stale-reject 引入)。
 ///
 /// `args` 是 `serde_json::Value` 形式的对象,内部字段取决于 `action`。
 /// 路由层 (`control_computer_act`) 把它转译成底层 `ControlCommand`。
+///
+/// `epoch` (可选): 客户端从 `@observe` 响应顶层读到的 `epoch` 值;提供时必须
+/// 与 `observation_id` 同一对使用,daemon 在 dispatch 之前 fast-reject 不匹配的
+/// epoch (返回 `STALE_OBSERVATION_EPOCH`)。不提供 = 走原 TTL 路径,行为不变。
 #[derive(Debug, Clone, PartialEq)]
 pub struct ComputerActRequest {
     pub schema: String,
@@ -167,6 +172,7 @@ pub struct ComputerActRequest {
     pub observation_id: Option<String>,
     pub timeout_ms: Option<u64>,
     pub trace: Option<String>,
+    pub epoch: Option<u64>,
 }
 
 /// `@paste` 的结构化请求。

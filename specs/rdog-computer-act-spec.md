@@ -67,10 +67,20 @@ coordinates (`start_box`, `[0, 1000]`) or rdog-native AX refs
 
 **Schema** (ADR-0004): flat JSON envelope at `rdog.computer-act.v1`.
 Top-level fields are `schema`, `action`, `args`, `verify`,
-`observation_id`, `timeout_ms`, `trace`. Field names follow Mano-CUA
+`observation_id`, `timeout_ms`, `trace`, `epoch`. Field names follow Mano-CUA
 where natural (`start_box`, `app_name`, `content`, `direction`,
 `amount`) and rdog conventions where pre-existing (`duration_ms`,
 `ref`, `observation_id`, `coordinate_space`).
+
+**Epoch** (feature/observe-epoch-stale-reject, follows pi-computer-use
+resource-epoch pattern): optional `epoch: <u64>` paired with `observation_id`.
+Client reads `epoch` from `@observe` response top-level field (== primary
+observation's `created_at_unix_ms`) and echoes it back. Daemon runs
+`check_observation_epoch_fast_reject` before implicit_observe / routing /
+dispatch; mismatched epoch returns `stale_observation_epoch` envelope with
+`retry.strategy = "re_observe_then_retry"`. Epoch is optional; omitting it
+keeps the existing TTL-only path unchanged, so this is a pure backward-
+compatible addition.
 
 **Verify** (ADR-0004): three tiers — `none` (no observation overhead),
 `best_effort` (AX-tree diff only), `always` (full observation +

@@ -25,6 +25,7 @@ use serde_json::Value;
 
 use crate::cancellation::CancellationToken;
 use crate::control_actions::ActionExecutionResult;
+use crate::control_observation::resolve_observation_header;
 use crate::control_mouse::MouseEndpoint;
 use crate::control_mouse::MouseRefTarget;
 use crate::control_protocol::{
@@ -424,6 +425,91 @@ fn route_wait(args: &Value) -> Result<ControlCommand, ComputerActRouteError> {
     Ok(ControlCommand::Wait(WaitRequest { duration_ms }))
 }
 
+/// `feature/observe-epoch-stale-reject` 的 fast-reject 钩子.
+///
+/// 触发条件 (全部满足):
+/// 1. `request.epoch` 是 `Some(e)` — 客户端读到了 `@observe` 顶层 epoch 字段
+/// 2. `request.observation_id` 是 `Some(obs_id)` — 客户端持有 observation_id
+/// 3. daemon 端 `resolve_observation_header(obs_id)` 失败 (observation 已 TTL 过期) 或
+///    返回 header 的 `created_at_unix_ms` 不等于 `e`
+///
+/// 满足任一 staleness 条件即返回 `stale_observation_epoch` envelope, 不进入
+/// implicit_observe / routing / dispatch. 这是为了避免客户端拿旧 ref + 旧 epoch
+/// 触发 modal 操作 (e.g., 点到错的按钮).
+///
+/// 注意: epoch 与 `observation_id` 必须成对使用. 客户端只给 epoch 不给
+/// `observation_id` 时, daemon 没有依据验证, 这里 no-op (后续 Phase B 引入
+/// per-resource epoch 再覆盖).
+pub(crate) fn check_observation_epoch_fast_reject(
+    request: &ComputerActRequest,
+) -> Option<ActionExecutionResult> {
+    let epoch = request.epoch?;
+    let observation_id = request.observation_id.as_deref()?;
+
+    match resolve_observation_header(observation_id) {
+        Ok(header) if header.created_at_unix_ms == epoch => None,
+        Ok(header) => Some(stale_observation_epoch_envelope(
+            epoch,
+            observation_id,
+            Some(header.created_at_unix_ms),
+        )),
+        Err(err) => {
+            // OBSERVATION_EXPIRED 是 JSON string payload, 用字符串含匹配识别.
+            if err.to_string().contains("OBSERVATION_EXPIRED") {
+                Some(stale_observation_epoch_envelope(
+                    epoch,
+                    observation_id,
+                    None,
+                ))
+            } else {
+                // 其他错误 (e.g., poisoned lock) 不应 fast-reject, 让上层走
+                // implicit_observe 路径拿到正常 error envelope.
+                None
+            }
+        }
+    }
+}
+
+/// 构造 `stale_observation_epoch` envelope。
+///
+/// `current_epoch` 是 daemon 端观察到的 (Some 表示 mismatch, None 表示 observation
+/// 已被驱逐, 客户端拿到的 epoch 因此无法验证). 两者都暴露给客户端, 方便下一次
+/// 重新 @observe 后带新 epoch 重试.
+fn stale_observation_epoch_envelope(
+    presented_epoch: u64,
+    observation_id: &str,
+    current_epoch: Option<u64>,
+) -> ActionExecutionResult {
+    let mut evidence = serde_json::Map::new();
+    evidence.insert(
+        "presented_epoch".into(),
+        serde_json::Value::Number(presented_epoch.into()),
+    );
+    evidence.insert(
+        "observation_id".into(),
+        serde_json::Value::String(observation_id.to_owned()),
+    );
+    if let Some(current) = current_epoch {
+        evidence.insert(
+            "current_epoch".into(),
+            serde_json::Value::Number(current.into()),
+        );
+    }
+    ActionExecutionResult {
+        exit_code: 64,
+        stdout: Vec::new(),
+        stderr: Vec::new(),
+        response_value_json: Some(
+            error_envelope(
+                ComputerActErrorCode::StaleObservationEpoch,
+                "request.epoch 与 observation 创建时间不一致, 已 fast-reject",
+                Some(serde_json::Value::Object(evidence)),
+            )
+            .to_string(),
+        ),
+    }
+}
+
 /// `execute_computer_act` 是 `@computer-act` 的 executor。
 ///
 /// 流程 (skeleton 范围):
@@ -440,6 +526,12 @@ pub(crate) fn execute_computer_act(
 
     let start = Instant::now();
     let _ = default_timeout_ms_for_action(&request.action); // ticket 16 替换
+
+    // feature/observe-epoch-stale-reject: 客户端回传 epoch 时, 在implicit_observe
+    // 之前做 fast-reject. 成功路径返回 None, 失败路径返回 envelope.
+    if let Some(envelope) = check_observation_epoch_fast_reject(request) {
+        return Ok(envelope);
+    }
 
     // ticket 11 implicit_observe: 在 routing 之前解析 args.target / start_box,
     // 校验 observation_id TTL,过期自动 re-observe,outcome 写到 response 顶层。

@@ -323,3 +323,128 @@ fn unknown_action_returns_error() {
         Err(super::ComputerActRouteError::UnknownAction(_))
     ));
 }
+
+use super::check_observation_epoch_fast_reject;
+use crate::control_observation::{
+    record_observation, ObservationRoot, ObservationRefEntry,
+};
+use crate::control_protocol::ComputerActRequest;
+
+fn make_request(observation_id: Option<&str>, epoch: Option<u64>) -> ComputerActRequest {
+    ComputerActRequest {
+        schema: "rdog.computer-act.v1".to_string(),
+        action: "wait".to_string(),
+        args: json!({"duration_ms": 100}),
+        verify: None,
+        observation_id: observation_id.map(str::to_owned),
+        timeout_ms: None,
+        trace: None,
+        epoch,
+    }
+}
+
+fn record_observation_at(now_ms: u64, refs: Vec<ObservationRefEntry>) -> String {
+    let root = ObservationRoot {
+        schema: "rdog.observation.root.v1".to_string(),
+        platform: "test".to_string(),
+        coordinate_space: "os-logical".to_string(),
+    };
+    let header = record_observation("test", "@computer-act", root, refs)
+        .expect("record_observation should succeed");
+    header.observation_id
+}
+
+#[test]
+fn epoch_check_returns_none_when_epoch_not_provided() {
+    // 没传 epoch: 走原路径, fast-reject 钩子 no-op
+    let request = make_request(Some("obs-123"), None);
+    assert!(check_observation_epoch_fast_reject(&request).is_none());
+}
+
+#[test]
+fn epoch_check_returns_none_when_observation_id_missing() {
+    // 传了 epoch 但没 observation_id: 没有验证依据, no-op
+    let request = make_request(None, Some(1700000000000));
+    assert!(check_observation_epoch_fast_reject(&request).is_none());
+}
+
+#[test]
+fn epoch_check_passes_when_epoch_matches_header() {
+    // 记录 observation, epoch 用真实 created_at_unix_ms: 应该通过
+    let observation_id = record_observation_at(
+        1700000001000,
+        vec![ObservationRefEntry {
+            ref_id: "@e1".to_string(),
+            backend_id: "pid:1/path:0".to_string(),
+            kind: "ax".to_string(),
+        }],
+    );
+    // created_at_unix_ms 由 global store 用 current_unix_ms 自动算, 不能直接控制.
+    // 通过先 record 再读 header 拿真实 epoch, 然后用真实 epoch 校验.
+    let header = crate::control_observation::resolve_observation_header(&observation_id)
+        .expect("header should resolve");
+    let request = make_request(Some(&observation_id), Some(header.created_at_unix_ms));
+    assert!(
+        check_observation_epoch_fast_reject(&request).is_none(),
+        "matching epoch should pass through"
+    );
+}
+
+#[test]
+fn epoch_check_rejects_when_epoch_mismatches() {
+    let observation_id = record_observation_at(
+        1700000002000,
+        vec![ObservationRefEntry {
+            ref_id: "@e1".to_string(),
+            backend_id: "pid:1/path:0".to_string(),
+            kind: "ax".to_string(),
+        }],
+    );
+    // 用错 epoch: 应该 fast-reject, 错误 envelope, exit_code 64
+    let request = make_request(Some(&observation_id), Some(42));
+    let result = check_observation_epoch_fast_reject(&request)
+        .expect("mismatched epoch must produce envelope");
+    assert_eq!(result.exit_code, 64);
+    let envelope: serde_json::Value = serde_json::from_str(
+        result.response_value_json.as_deref().expect("envelope is JSON"),
+    )
+    .expect("envelope should be JSON");
+    assert_eq!(envelope["ok"], false);
+    assert_eq!(envelope["error_code"], "stale_observation_epoch");
+    assert_eq!(envelope["retry"]["strategy"], "re_observe_then_retry");
+    assert_eq!(
+        envelope["evidence"]["presented_epoch"],
+        serde_json::Value::Number(42u64.into())
+    );
+    assert_eq!(
+        envelope["evidence"]["observation_id"],
+        serde_json::Value::String(observation_id.clone())
+    );
+    assert!(
+        envelope["evidence"]["current_epoch"].is_number(),
+        "current_epoch 应该被写入 evidence, 实际: {}",
+        envelope["evidence"]
+    );
+}
+
+#[test]
+fn epoch_check_rejects_when_observation_absent() {
+    // observation_id 不存在 -> resolve_observation_header 返回 OBSERVATION_EXPIRED
+    let request = make_request(Some("obs-does-not-exist-9999"), Some(1700000003000));
+    let result = check_observation_epoch_fast_reject(&request)
+        .expect("missing observation must produce envelope");
+    assert_eq!(result.exit_code, 64);
+    let envelope: serde_json::Value = serde_json::from_str(
+        result.response_value_json.as_deref().expect("envelope is JSON"),
+    )
+    .expect("envelope should be JSON");
+    assert_eq!(envelope["error_code"], "stale_observation_epoch");
+    assert_eq!(
+        envelope["evidence"]["observation_id"],
+        serde_json::Value::String("obs-does-not-exist-9999".to_string())
+    );
+    assert!(
+        envelope["evidence"].get("current_epoch").is_none(),
+        "observation 不存在时不应有 current_epoch 字段"
+    );
+}
