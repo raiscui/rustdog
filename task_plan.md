@@ -312,3 +312,39 @@ mutating 命令,使得客户端可以显式回传它们观察到的 epoch,后端
 - `verify_failed_carries_ax_diff_evidence` 测试保留 (测 error_envelope 工厂本身, 与 VerifyFailed variant 共生)
 - 不加 `verification.failed_reason` 字段 (outcome + status 已足够区分, ponytail 拒绝冗余)
 - smoke 脚本期望从 `error_code:"verify_failed"` 改成 `outcome:"didnt"`
+
+## [2026-08-08 17:55:00] [Session ID: omx-1786201921174-cvveb1] 阶段 5-10 收口: commit + push 完成
+
+### 阶段推进
+
+- [x] 阶段 5: error_envelope.rs 清理 VerifyFailed dead code (删 helper + 2 测试, -69 行)
+- [x] 阶段 6: verify.rs 加 verification_status_for_diff 单测 (3 档: verified / preexisting / failed)
+- [x] 阶段 7: outcome 三态单测不下冗余集成测试 — 决策点
+  - outcome.rs 7 个单测已覆盖决策表 + wire 字符串 + render, 不再加 mod.rs 集成测试
+  - 理由: ponytail 推 "non-trivial logic leaves ONE runnable check" — outcome.rs 已是唯一真相源
+  - WORKLOG 记录这一决策
+- [x] 阶段 8: smoke 脚本更新期望 (verify.sh + trace.sh test 3 各改 outcome:"didnt" + status:"failed")
+- [x] 阶段 9: cargo check + cargo test 全套 (705 passed, 0 failed, 1 skipped macOS-only)
+- [x] 阶段 10: 文档同步 + commit + push
+  - LATER_PLANS.md SUPERSEDED 标注
+  - WORKLOG.md 阶段记录
+  - specs/rdog-computer-act-spec.md 加 Outcome 三态段
+  - tickets/13 + tickets/14 加 outcome acceptance
+  - task_plan.md 推进
+  - commit 7764c29 + push origin/feature/computer-act-outcome-3state
+
+### 验证证据汇总
+
+- RUSTFLAGS="-Awarnings" cargo check --quiet: exit 0, 无 warning
+- cargo nextest run -p rustdog --bin rdog: 705 passed, 0 failed, 1 skipped
+- +10 新测试 (7 outcome + 3 verification_status), -3 dead 测试
+- 净改动: +464 / -182 = +282 行 (含 outcome.rs +174)
+- 单一 commit: 7764c29
+
+### 任务完成
+
+feature/computer-act-outcome-3state 分支已推到 origin. 后续决策:
+
+- 跑一轮 macOS live smoke 验证 outcome / status 字段被 client 实际读取
+- 如果 client 没读, 进 LATER_PLANS 考虑删 outcome / status (跟 epoch 验证类似)
+- 不推广 outcome 三态到 @ax-press / @click 等 mutating 命令 (路径上无 outcome 概念)
