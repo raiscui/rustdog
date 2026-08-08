@@ -178,15 +178,15 @@ grep -q '"dispatch"' "$trace_path" || fail "test 2: trace file missing dispatch 
 grep -q '"verification_passed"' "$trace_path" || fail "test 2: trace file missing verification_passed (path: $trace_path)"
 log "test 2 OK (trace file written to $trace_path)"
 
-# --- Test 3: trace_summary verify 步骤在 best_effort 时是 ok (Phase F-2 行为变化) ---
-log "test 3: trace=\"savefile\" + verify=\"best_effort\" + wait -> VerifyFailed (Phase F-2 行为变化)"
-# Phase F-2: dispatch 成功 + verify 失败 (AX diff 全 0) -> 改 envelope 为 VerifyFailed
-# (之前 best_effort verify 失败仍然 ok:true, 是 Phase F-2 要改的 bug)
+# --- Test 3: trace_summary verify 步骤在 best_effort 时是 ok (feature/computer-act-outcome-3state) ---
+log "test 3: trace=\"savefile\" + verify=\"best_effort\" + wait -> outcome=\"didnt\" (outcome 三态, 替换 Phase F-2 verify_failed)"
+# outcome 三态语义: dispatch 成功 + verify 失败 (AX diff 全 0) -> ok:true + outcome:"didnt"
+# (取代 Phase F-2 的 ok:false + error_code:verify_failed; 之前 best_effort verify 失败仍 ok:true 是 false success)
 out3="$(run_computer_act t3 '@computer-act#33:{schema:"rdog.computer-act.v1",action:"wait",verify:"best_effort",trace:"savefile",args:{duration_ms:0}}')"
 echo "  response: $out3"
-# Phase F-2: 期望 ok:false + error_code:verify_failed
-echo "$out3" | grep -qE '"ok"[[:space:]]*:[[:space:]]*false' || fail "test 3: ok != false (Phase F-2 期望, output: $out3)"
-echo "$out3" | grep -qE '"error_code"[[:space:]]*:[[:space:]]*"verify_failed"' || fail "test 3: error_code != verify_failed (output: $out3)"
+# outcome 三态: 期望 ok:true + outcome:"didnt" (dispatch 成功, postcondition 没满足)
+echo "$out3" | grep -qE '"ok"[[:space:]]*:[[:space:]]*true' || fail "test 3: ok != true (outcome 三态, dispatch 成功, output: $out3)"
+echo "$out3" | grep -qE '"outcome"[[:space:]]*:[[:space:]]*"didnt"' || fail "test 3: outcome != didnt (output: $out3)"
 # trace_summary.verify 步骤 status 仍应该是 ok (verify 跑了, 不是 skipped)
 verify_status="$(printf '%s' "$out3" | python3 -c "
 import json, re, sys

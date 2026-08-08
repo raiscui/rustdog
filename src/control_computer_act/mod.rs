@@ -70,6 +70,12 @@ pub(crate) use error_envelope::{error_envelope, ComputerActErrorCode, RetryStrat
 mod timeout;
 pub(crate) use timeout::{resolve_timeout, TimeoutWatcher};
 
+// feature/computer-act-outcome-3state: postcondition outcome 三态 (worked / didnt / unknown)
+// 源自 pi-computer-use `ActOutcome`, 替代 Phase F-2 把 verify_failed 塞 ok:false 的写法.
+#[path = "outcome.rs"]
+mod outcome;
+pub(crate) use outcome::{compute_outcome, render_outcome, ComputerActOutcome, OutcomeInputs};
+
 /// `control_computer_act` 把 action + args 翻译成的中间结果。
 ///
 /// `dispatched_to` 是底层 primitive 的人类可读标签 (`@click` / `@key` 等),
@@ -751,89 +757,18 @@ pub(crate) fn execute_computer_act(
         payload["verification"] = v;
     }
 
-    // Phase F-2 (LP-ticket-15-deferred-2): dispatch 成功 + verify 失败 → 改 envelope 为
-    // VerifyFailed (走 error_envelope helper 对齐 ADR-0004 E2)。
-    // 优先级: dispatch 错误 > verify 错误 (下面的 if !ok 分支已经处理 dispatch 错误,
-    // 这里只处理 ok:true 路径下的 verify 失败)。
-    let verify_failed = !verification_passed
-        && matches!(
-            verify_policy,
-            VerifyPolicy::BestEffort | VerifyPolicy::Always
-        )
-        && ok;
-    if verify_failed {
-        let verify_evidence = match verify_policy {
-            VerifyPolicy::BestEffort => verify_summary.as_ref().map(|s| {
-                serde_json::json!({
-                    "verification": {
-                        "method": "ax_diff",
-                        "ax_diff": {
-                            "windows_added": s.windows_added,
-                            "windows_removed": s.windows_removed,
-                            "windows_modified": s.windows_modified,
-                            "elements_added": s.elements_added,
-                            "elements_removed": s.elements_removed,
-                            "elements_modified": s.elements_modified,
-                        },
-                        "verify_ms": s.verify_ms,
-                    },
-                })
-            }),
-            VerifyPolicy::Always => always_summary.as_ref().map(|s| {
-                serde_json::json!({
-                    "verification": {
-                        "method": "full_observe",
-                        "screenshot_id": s.screenshot_id,
-                        "ax_tree_id": s.ax_tree_id,
-                        "screenshot_truncated": s.screenshot_truncated,
-                        "ax_diff": {
-                            "windows_added": s.ax_diff.windows_added,
-                            "windows_removed": s.ax_diff.windows_removed,
-                            "windows_modified": s.ax_diff.windows_modified,
-                            "elements_added": s.ax_diff.elements_added,
-                            "elements_removed": s.ax_diff.elements_removed,
-                            "elements_modified": s.ax_diff.elements_modified,
-                        },
-                    },
-                })
-            }),
-            VerifyPolicy::None => None,
-        };
-        // 改写 payload 为 VerifyFailed envelope
-        let mut verify_failed_env = error_envelope(
-            ComputerActErrorCode::VerifyFailed,
-            "动作执行成功但 GUI 未变化, AX diff 显示无新增/修改/删除",
-            verify_evidence,
-        );
-        // 保留 dispatch ok=true 时的 metadata (action / dispatched_to / duration_ms / density / trace_summary / observation_id)
-        // 让 client 知道是哪个 action + 多少耗时
-        if let Some(action) = payload.get("action").cloned() {
-            verify_failed_env["action"] = action;
-        }
-        if let Some(dispatched) = payload.get("dispatched_to").cloned() {
-            verify_failed_env["dispatched_to"] = dispatched;
-        }
-        if let Some(dur) = payload.get("duration_ms").cloned() {
-            verify_failed_env["duration_ms"] = dur;
-        }
-        if let Some(density) = payload.get("density").cloned() {
-            verify_failed_env["density"] = density;
-        }
-        if let Some(trace) = payload.get("trace_summary").cloned() {
-            verify_failed_env["trace_summary"] = trace;
-        }
-        if let Some(obs_id) = payload.get("observation_id").cloned() {
-            verify_failed_env["observation_id"] = obs_id;
-        }
-        // 保留 verification 段 (client 看到 verify 的细节)
-        if let Some(v) = payload.get("verification").cloned() {
-            verify_failed_env["verification"] = v;
-        }
-        // 替换原 payload
-        for (k, v) in verify_failed_env.as_object().unwrap().iter() {
-            payload[k] = v.clone();
-        }
-    }
+    // feature/computer-act-outcome-3state: outcome 三态替换 Phase F-2 verify_failed
+    // envelope rewrite. dispatch 成功 + verify_failed 现在是 ok:true + outcome:"didnt",
+    // 不再改 ok:false + error_code:verify_failed. 三态详见 `outcome.rs` 的决策表.
+    let verify_requested = !matches!(verify_policy, VerifyPolicy::None);
+    let verify_ran = verify_summary.is_some() || always_summary.is_some();
+    let outcome = compute_outcome(&OutcomeInputs {
+        dispatch_ok: ok,
+        verify_requested,
+        verify_ran,
+        verify_passed: verification_passed,
+    });
+    payload["outcome"] = render_outcome(outcome);
 
     // ticket 18: trace_summary 总是带 (即使 verify=none 也占 4 段);trace_savefile
     // 仅在 request.trace == Some("savefile") 时存在

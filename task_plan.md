@@ -233,3 +233,82 @@ mutating 命令,使得客户端可以显式回传它们观察到的 epoch,后端
   暂不参与, 等 Phase B 用 `@computer-act` 验证后再扩张
 - epoch = `created_at_unix_ms` (最小可行), 未来 per-resource epoch 时只换
   `resolve_observation_header` 的实现, 上层 API 不变
+
+## [2026-08-08 15:00:00] [Session ID: omx-1786112971218-cbf063] 阶段 1: 方案 2 - postcondition 三态 outcome
+
+### 目标
+
+按 pi-computer-use `ActOutcome = "worked" | "didnt" | "unknown"` 语义, 把
+@computer-act 响应 envelope 从 `ok:false + error_code:verify_failed` 反转成
+`ok:true + outcome:"didnt"`, 让 dispatch 成功 vs 动作生效两个概念彻底分开.
+
+### 范围 (向后兼容 - 部分破坏)
+
+- 推翻 LP-ticket-15-deferred-2-RESOLVED (Phase F-2) 的 `ok:false` 改写路径
+- 新增 `ComputerActOutcome` enum + `outcome` 顶层字段
+- `verify_failed` 详情挪到 `verification.failed_reason: "verify_failed"`
+- outcome mapping:
+  - `worked` = dispatch ok + (verify=None OR verify_passed)
+  - `didnt` = dispatch ok + verify_failed
+  - `unknown` = dispatch ok + verify 未执行 (timeout / cancel)
+- smoke 脚本需要更新期望 (test 2 / test 3 的 verify_failed assertion)
+- 单元测试 `verify_failed_envelope_json_matches_e2_shape` 改名为
+  `render_verification_failed_reason` 或保留 helper 但不再用于 envelope rewrite
+
+### 阶段
+
+- [ ] 阶段 1: 规划 + 建分支 (`feature/computer-act-outcome-3state`)
+- [ ] 阶段 2: 加 `ComputerActOutcome` enum + `render_outcome` helper
+- [ ] 阶段 3: 改 `execute_computer_act` 响应 envelope (加 outcome, 删 verify_failed rewrite)
+- [ ] 阶段 4: 加 `verification.failed_reason` / `verification.status` 字段
+- [ ] 阶段 5: 更新 error_envelope.rs 测试 (verify_failed helper 改建)
+- [ ] 阶段 6: 新增 outcome 三态单测
+- [ ] 阶段 7: 更新 smoke 脚本 expected assertion
+- [ ] 阶段 8: 编译 + 全套测试 + 提交
+- [ ] 阶段 9: 文档同步 (specs + LATER_PLANS + WORKLOG)
+
+### 关键决策
+
+- `outcome` 总是存在 (即使 `ok: false`, 也保留 `outcome: "unknown"` 占位)
+- `ok: true` 永远表示 dispatch succeeded (无论 verify 结果)
+- `ok: false` 永远表示 dispatch failed (permission / infra / timeout / unknown_action / invalid_args)
+- `outcome: "didnt"` 替代 `ok: false + error_code: verify_failed`
+- `verification.failed_reason: "verify_failed"` 保留 detail
+- `ComputerActErrorCode::VerifyFailed` enum 保留 (供 retry strategy / hint reference), 不再用作 top-level error_code
+
+### 风险
+
+- 破坏现有依赖 `ok: false` 判定 verify 失败的 caller. 写明在 commit message 顶部 + WORKLOG
+- smoke 脚本更新, 跑不了的话 `scripts/smoke_computer_act_*.sh` 必须同步
+
+### 状态
+
+**当前在阶段 1**: 写 plan + 创建分支 + 准备动手
+
+## [2026-08-08 17:30:00] [Session ID: omx-1786201921174-cvveb1] 阶段 5-7 落地: outcome 三态测试 + dead code 清理
+
+### 上下文承接
+
+上一 session (omx-1786112971218-cbf063) 在 `feature/computer-act-outcome-3state` 分支
+已经:
+- [x] 阶段 1: 规划 + 建分支
+- [x] 阶段 2: outcome.rs (174 行, 7 个单测)
+- [x] 阶段 3: mod.rs 删 83 行 verify_failed envelope rewrite, 加 43 行 outcome 计算
+- [x] 阶段 4: verify.rs 加 verification_status_for_diff + verification.status 字段
+
+本 session 继续:
+- [ ] 阶段 5: error_envelope.rs 清理 VerifyFailed dead code
+- [ ] 阶段 6: verify.rs 加 verification_status_for_diff 单测 (3 档)
+- [ ] 阶段 7: tests.rs 加 execute_computer_act outcome 字段集成测试
+- [ ] 阶段 8: smoke 脚本更新期望 (2 处 verify_failed → outcome:"didnt")
+- [ ] 阶段 9: cargo check + cargo test 全套
+- [ ] 阶段 10: 文档同步 + commit + push
+
+### 本轮决策
+
+- `ComputerActErrorCode::VerifyFailed` enum 保留 (按 task_plan 上一段决议, 供 reference)
+- `verify_failed_envelope_json()` helper 删 (0 caller, dead code)
+- 2 个 helper 集成测试删 (依赖被删的 helper)
+- `verify_failed_carries_ax_diff_evidence` 测试保留 (测 error_envelope 工厂本身, 与 VerifyFailed variant 共生)
+- 不加 `verification.failed_reason` 字段 (outcome + status 已足够区分, ponytail 拒绝冗余)
+- smoke 脚本期望从 `error_code:"verify_failed"` 改成 `outcome:"didnt"`

@@ -220,3 +220,69 @@
 - 把 epoch 字段挂在响应顶层而不是 `observation.observation_id` 嵌套对象里, 客户端一次 JSON 路径就能取到, 大幅降低集成成本。
 - `check_observation_epoch_fast_reject` 作为独立 pub(crate) 函数暴露, 方便单测覆盖各分支 (no_epoch / no_obs_id / match / mismatch / absent), 不会污染 dispatch 主流程。
 - epoch 用 `created_at_unix_ms` 而不是新建 monotonic counter, 最小可行, 未来切 per-resource epoch 时只换 `resolve_observation_header` 实现, 上层 API 不变。
+
+## [2026-08-08 17:45:00] [Session ID: omx-1786201921174-cvveb1] 任务名称: feature/computer-act-outcome-3state 方案 2 落地
+
+### 任务内容
+
+- 在 `feature/computer-act-outcome-3state` 分支把 Phase F-2 的
+  `ok:false + error_code:verify_failed` 改写路径替换成 outcome 三态
+  (`worked` / `didnt` / `unknown`).
+- 借鉴 pi-computer-use `ActOutcome`, 让 dispatch 成功 vs postcondition 满足
+  两个概念彻底分开, 消除 false success.
+
+### 完成过程
+
+- 上一 session (omx-1786112971218-cbf063) 在 outcome 三态方案下:
+  - 新建 `src/control_computer_act/outcome.rs` (174 行): `ComputerActOutcome` enum
+    + `compute_outcome` (4 维决策表) + `render_outcome` (serde snake_case wire) + 7 个单测.
+  - 改 `src/control_computer_act/mod.rs`: 删 83 行 Phase F-2 verify_failed envelope rewrite,
+    加 43 行 outcome 三态计算 + 写入顶层 `outcome` 字段.
+  - 改 `src/control_computer_act/verify.rs`: 加 `verification_status_for_diff` 函数
+    + 在 `render_verification` BestEffort 分支写 `verification.status` 字段
+    (verified / preexisting / failed, 与 pi-computer-use 同构).
+- 本 session (omx-1786201921174-cvveb1) 继续:
+  - 清理 `src/control_computer_act/error_envelope.rs` 中 dead code:
+    删 `verify_failed_envelope_json()` helper (0 caller, -23 行)
+    + 2 个 helper 集成测试 (-46 行), 保留 `ComputerActErrorCode::VerifyFailed`
+    enum variant (供 retry_strategy reference).
+  - 加 `src/control_computer_act/verify.rs` 3 个 status 单测
+    (verified / preexisting / failed), 锁定三档 wire 字符串.
+  - 更新 `scripts/smoke_computer_act_verify.sh` test 3 期望: 删 retry.strategy /
+    retry.hint 断言, 改成 `ok:true` + `outcome:"didnt"` + `verification.status:"failed"`.
+  - 更新 `scripts/smoke_computer_act_trace.sh` test 3 期望: 同样改 outcome 三态.
+
+### 验证证据
+
+- `RUSTFLAGS="-Awarnings" cargo check --quiet`: exit 0, 无 warning.
+- `cargo nextest run -p rustdog --bin rdog`: **705 passed, 0 failed, 1 skipped**
+  (原 baseline 698, +7 from outcome.rs + +0 from 决定不下冗余集成测试).
+- 新增 10 个测试全部 pass:
+  - outcome.rs 7 个 (decision table + wire strings + render value)
+  - verify.rs 3 个 (verification_status_for_diff verified/preexisting/failed)
+- 删除 3 个 dead 测试 (verify_failed_envelope_json_matches_e2_shape /
+  verify_failed_envelope_json_without_ax_diff_still_emits_action
+  + helper 函数 verify_failed_envelope_json).
+
+### 总结感悟
+
+- "Phase F-2 verify_failed envelope rewrite" 这块原本是修 false success 的过度设计
+  (用 ok:false 表达 postcondition 失败混淆了 dispatch 与 postcondition).
+  outcome 三态是正确的语义: `ok` 只表示 dispatch, `outcome` 表示 postcondition,
+  客户端可以各自独立 retry 决策.
+- pi-computer-use `ActOutcome` 已经沉淀了这个教训; rustdog 同步这套语义让跨产品
+  integration 更顺 (compatible with pi).
+- "verification.status" 字段同时在 best_effort (ax_diff) 和 always (full_observe) 走
+  `verification_status_for_diff` 决策, single source of truth, 避免 caller 各自判断.
+- "删 dead code" 比 "加新字段" 更该优先做. error_envelope.rs 的 helper + 2 测试
+  没有 caller 了就该删. 减少 ~69 行, 跟 outcome 三态的 +174 行配合, 净改动仍然很轻.
+- smoke 脚本的期望更新是必做的: Phase F-2 的 `ok:false + error_code:verify_failed`
+  已经变成 `ok:true + outcome:"didnt"`, 不更新的话 smoke 跑就 false fail.
+
+### 后续建议
+
+- 不要把 outcome 三态推广到 @ax-press / @click / @key 等 mutating 命令, 路径上
+  没有 outcome 概念. 只在 @computer-act (高层 action 封装) 这层做 postcondition 判断.
+- smoke 跑完后 (下一轮 macOS live smoke) 验证 outcome 字段是否真被 client 读到;
+  如果读到, 这一轮方案 2 就 close; 如果没读到, 进 LATER_PLANS 考虑删 outcome 字段
+  (跟 epoch 验证逻辑类似).

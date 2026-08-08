@@ -90,7 +90,28 @@ screenshot + AX tree + window state). Tier is selected per request.
 + `retry.strategy` + `retry.hint` + `evidence`. Strategies are
 `never`, `re_observe_then_retry`, `change_locator`,
 `reconnect_then_retry`, `manual_only`. `verify_failed` is its own
-`error_code` to distinguish silent-failure from dispatch failure.
+`error_code` to distinguish silent-failure from dispatch failure (Phase F-2
+行为, 已被 Outcome 三态替代 — 见下一段).
+
+**Outcome 三态 (postcondition)** (feature/computer-act-outcome-3state,
+follows pi-computer-use `ActOutcome`): response top-level adds `outcome: "worked" |
+"didnt" | "unknown"` field. `outcome: "didnt"` 替代 Phase F-2 的 `ok:false +
+error_code:verify_failed` 改写路径, 让 dispatch 成功 vs postcondition 满足两个概念
+彻底分开. `ok: true` 永远表示 dispatch 成功 (无论 verify 结果), `ok: false` 永远
+表示 dispatch 失败 (permission / infra / timeout / etc.). `outcome` 字段总是写入
+(即使 `ok: false` 也保留 `outcome: "unknown"` 占位, 让 client 明确 dispatch 失败时
+不需要看 outcome).
+
+`verification` 段同时增加 `status: "verified" | "preexisting" | "failed"` 字段
+(best_effort + always 都用 ax_diff 决策: modified > 0 → verified; modified == 0
+但 added/removed > 0 → preexisting; 全 0 → failed).
+
+`ComputerActErrorCode::VerifyFailed` enum variant 保留供 retry_strategy reference,
+但不再用作顶层 error_code (改由 `outcome: "didnt"` + `verification.status: "failed"` 表达).
+
+破坏性变更: 现有依赖 `ok: false` 判定 verify 失败的 caller 必须改读 outcome / status.
+ticket 13 ADR 占位明确这一迁移路径.
+
 
 **Lifecycle** (ADR-0005): implicit observations are exposed to the
 client (returned as `observation_id`), reusable across turns within a

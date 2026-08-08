@@ -781,6 +781,25 @@ Phase F-2 收口, 详见 commit 4c74a01 + WORKLOG `[2026-07-17 16:30:00]` entry.
 smoke 更新:
 - smoke_computer_act_verify.sh test 3: 改 VerifyFailed 期望
 - smoke_computer_act_trace.sh test 3: 改 VerifyFailed 期望 (保留 trace_summary.verify status=ok + trace_savefile)
+SUPERSEDED BY outcome 三态 (`feature/computer-act-outcome-3state`, commit 跟本 session):
+- 替代原因: Phase F-2 把 verify_failed 塞 ok:false 让 client 误以为 dispatch 失败, 实际
+  dispatch 是 ok 的, 只是 postcondition 没满足. 借鉴 pi-computer-use `ActOutcome` 改成
+  三态 outcome (worked / didnt / unknown).
+- 改动: 删 mod.rs verify_failed envelope rewrite (83 行), 新 outcome.rs (174 行含 7 单测),
+  mod.rs 加 outcome 字段写入 (43 行), verify.rs 加 verification.status 字段 (25 行 + 3 单测),
+  error_envelope.rs 删 verify_failed_envelope_json helper (23 行 + 2 测试).
+- 新语义:
+  - `ok: true` 永远表示 dispatch 成功 (无论 verify 结果)
+  - `outcome: "worked" | "didnt" | "unknown"` 表示 postcondition 三态
+  - `outcome: "didnt"` 替代 `ok: false + error_code: verify_failed`
+  - `verification.status: "verified" | "preexisting" | "failed"` (ax_diff 决策)
+- smoke 更新: verify.sh test 3 / trace.sh test 3 改成期望 ok:true + outcome:"didnt"
+  + verification.status:"failed", 删 retry.strategy / retry.hint 断言
+- 破坏性变更: 现有依赖 ok:false 判定 verify 失败的 caller 必须改读 outcome / verification.status.
+  commit message 顶部 + WORKLOG 已写明.
+- ComputerActErrorCode::VerifyFailed enum 保留 (供 retry_strategy / hint reference, ticket 13 ADR 占位),
+  helper 函数 + 2 测试已删 (dead code, 0 caller).
+
 
 ### LP-ticket-15-deferred-7: ObservationExpired + TargetNotFound live trigger (Phase I 候选)
 剩 2 个 variant 完全没触发路径, 依赖 Phase I 真实 observe 集成:
