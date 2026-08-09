@@ -576,3 +576,29 @@ feature/computer-act-outcome-3state 分支已推到 origin. 后续决策:
 - A3.2: merge 主分支
 - A3.3: 二阶 prompt engineering (attempt-aware)
 - A3.4: 验证 model 真消费 outcome 字段
+
+## [2026-08-09 12:35:00] [Session ID: omx-1786201921174-cvveb1] [新阶段 14]: git bisect 验证 deepseek 0/8 退步根因 (选项 1)
+
+### 背景
+
+- deepseek + minimax-cn 在 archive baseline (旧 binary) 都 8/8
+- 现在 baseline (新 binary) 都 0/8, v2 (prompt engineering) 都 2/8
+- 改动可能原因: binary (outcome 三态 in 7764c29) + skill SHA-256 (in 4b864a3) + runner RPC mode (in a382458) + epoch (in 6bbce4b)
+- user 选项 1: checkout 到 c78c76e 之前 (skill SHA-256 不同之前) 的 binary + runner, 看 deepseek 是否回到 8/8
+
+### 计划
+
+- [ ] 阶段 14.1: 创建 temp branch + checkout 到 eefe802 (skill 旧, binary 仍 outcome 三态, runner 旧)
+- [ ] 阶段 14.2: cargo build 旧 binary, 验证编译
+- [ ] 阶段 14.3: 跑 deepseek 8 case (用旧 binary + 旧 skill + 旧 runner)
+- [ ] 阶段 14.4: 写 WORKLOG + 切回 main branch
+
+### 关键决策
+
+- 先做 eefe802 test (isolates skill change): 如果 deepseek=8/8 → skill 是原因
+- 如果仍 0/8,继续 bisect: 7764c29~1 (= 6bbce4b) → tests binary outcome 三态
+- 再不行: 6bbce4b~1 (= 28ed415) → tests epoch + runner + everything
+
+### 状态
+
+**当前在阶段 14.1**: 创建 temp branch + checkout.
