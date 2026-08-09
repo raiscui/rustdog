@@ -832,3 +832,10 @@ zenoh router down / unixpipe broken / zenoh timeout 等场景.
 - 在本轮 current daemon live matrix 中,每次 Zenoh control client 正常关闭后 stderr 会出现 `ERROR zenoh::api::admin: Unable to publish transport event: session closed`。
 - 对应 control response 和进程退出状态正常,当前没有静态或动态证据证明它影响 parser、评测成功率或 ledger 统计。
 - 后续应以最小 control client 复现并定位 event publisher 的生命周期,再决定是修复、降级日志还是保留诊断事件。
+
+## [2026-08-09 20:30:00] [Session ID: omx-1786268168901-f711dm] 待办: 清理历史遗留 zenoh guard / unixpipe FIFO
+
+- 现象: ~/.local/state/rustdog/zenoh-guards/ 有数千个历史 guard 文件 (channel/dup/entry/key/pty/tri 等测试残留, 来自多轮 daemon 生命周期测试), $TMPDIR 下也有大量未托管 FIFO 候选
+- 影响: 不阻塞功能 (daemon 启动只认自己的 mac.lab guard, 已实测多轮), 但 `rdog control` 无 target 时错误提示会列出全部 FIFO 候选 (几百行噪音), ls 该目录也慢
+- 清理方案 (需要时): 确认无活跃 daemon 后, 删除 zenoh-guards 中 PID 已不存在的 guard + 清 $TMPDIR/rdog-*.pipe
+- 触发条件: 用户觉得 FIFO 候选噪音影响诊断时再做, 或定期清理
