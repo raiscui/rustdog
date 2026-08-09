@@ -353,3 +353,73 @@ daemon 日志 (`/var/folders/.../computer-act-verify-smoke-XXXX*/computer-act-ve
 
 - outcome 三态 + status 三档**所有档位**都在真实 macOS live 出现过, decision table 设计正确 (包括之前顾虑的 "preexisting" 中间档).
 - smoke run-to-run outcome 不稳定 (OS 状态决定 outcome 值), 这正是把 smoke 期望改成枚举匹配的根本原因: 锁 wire contract 不锁特定值, 鲁棒 + 不丢失 verification evidence.
+
+## [2026-08-09 01:48] TextEdit MAIN_DOC + @window-resize 600x400 — 工具预算 80% 触发 graceful handoff
+
+### 状态 (one-line)
+
+TextEdit pid:6586/window:0 focused+contains MAIN_DOC; @window-resize + fresh verify 待续.
+
+### 不完整 handoff envelope
+
+**任务**:
+打开 TextEdit, 在主窗口输入 'MAIN_DOC', `@window-resize` 把窗口缩到 600x400, 验证 window 状态 (rect + title 仍 OK), 窗口内文本仍是 'MAIN_DOC'.
+
+**verify method**: window_state_and_ax_read
+**expected**: TextEdit AXWindow rect={width:600,height:400}, AXTextArea 含 'MAIN_DOC'
+
+### 已完成 (fresh proof 都在 rdog control 真实 stdout 里)
+
+1. `rdog control @ping` → `@response "pong"` ✅ (unixpipe fast path)
+2. `rdog control @ping @capabilities#1` → 11/11 capability available, status=complete ✅
+3. `rdog control '@window-find:TextEdit'` → 6 个未命名窗口, @e1 = `pid:6586/window:0` title="未命名6" rect={x:1828,y:96,width:586,height:476}, frontmost=true, interactable=true ✅
+4. `rdog control '@window-activate:{window_id:"pid:6586/window:0"}'` → status=ok, verify={focused:true,frontmost:true}, elapsed_ms=43 ✅
+5. `rdog control '@ax-find:{window:{window_id:"pid:6586/window:0"},role:"AXTextArea",limit:5}'` → 1 match, id=`pid:6586/window:0/path:0.0`, **value="MAIN_DOC"** ✅
+
+### 已观察到的事实边界
+
+- TextEdit 当前 6 个未命名窗口都是 frontmost=true, 需用 window_id 唯一定位
+- @e1 (`pid:6586/window:0`, "未命名6") 是当前选定的主窗口, 已 activate + focused
+- AXTextArea.value 已经是 "MAIN_DOC" — 这是 fresh `@ax-find` 读到的真实 GUI 状态, 不是 self-report
+- AXTextArea rect = {x:1828,y:184,width:586,height:388} (相对窗口内容区)
+- 窗口当前 rect = 586x476, 任务目标 600x400
+
+### 剩余工作 (next-agent 必须做)
+
+1. **查 `@window-resize` 协议语法**:
+   - 入口: `references/protocol.md` 搜 `window-resize` 或 `WindowSize`
+   - 预期字段: `{window_id, size:{width,height}}` 或 `{target, size}`
+   - 在执行 resize 前**必须**先看到 syntax example, 不能猜
+
+2. **执行 `@window-resize`**:
+   ```bash
+   rdog control '@window-resize:{window_id:"pid:6586/window:0",size:{width:600,height:400}}'
+   # 或实际 syntax, 见协议
+   ```
+   必须 `@response` 含 `status:ok` 且 verify 通过 (resize 真正生效)
+
+3. **Fresh verify 三件套** (按 verify method 顺序):
+   - `rdog control '@window-find:TextEdit'` → 重新拿 window_id (refs 可能已变, 不要复用)
+   - 用新 window_id 跑 `@ax-find` AXWindow, 读 rect 必须 = {width:600, height:400}, title 仍是 "未命名6"
+   - 用新 window_id 跑 `@ax-find` AXTextArea, value 必须 = "MAIN_DOC"
+   - 三件全 OK 才算 verify pass
+
+4. **报告**:
+   - 三件 verify 结果贴原始 stdout (含 `@response` 完整 JSON)
+   - 明确标"verify pass"或"verify fail", 不能模糊
+
+### Next-agent starting position
+
+- cwd: `/Users/cuiluming/local_doc/l_dev/my/rust/rustdog`
+- 当前 iteration 已用 6/8, handoff 是因为预算触发, 不是任务完成
+- **不要重复已完成的工作** (ping / window-find / window-activate / ax-find 都已 fresh, 直接用)
+- 也不要"为了完成" 跳过 verify — verify 是任务的硬性部分
+- 如果 `@window-resize` 报 resize 后文本丢失, **不要**自己 clear+retype, **停下来**报告这是 regression
+- 完整事实已留在本 notes 段, 下个 agent 读这一段就能继续
+
+### 不要做的事
+
+- ❌ 不要把"输入 MAIN_DOC"再做一次 (已 fresh verified 在 AXTextArea.value)
+- ❌ 不要 pipe `@response` 到 jq/grep/tail (跟 profile 规则冲突)
+- ❌ 不要用 `app:TextEdit` 跑 resize (必须用 window_id, 6 窗口要唯一定位)
+- ❌ 不要复用旧的 @e1 ref 跨 daemon restart (refs 是 short-lived)

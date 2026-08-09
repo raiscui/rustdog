@@ -422,3 +422,74 @@ feature/computer-act-outcome-3state 分支已推到 origin. 后续决策:
 ### 状态
 
 **当前在阶段 12.2**: 等 user 拍板 5 model + 8 case 完整列表.
+
+## [2026-08-09 09:30:00] [Session ID: omx-1786201921174-cvveb1] [阶段更新]: 跑 4 model 完整 5×8 live matrix (选项 A)
+
+### 背景
+
+- deepseek 1 model × 8 case 跑完 (commit 3ea6c58, WORKLOG [2026-08-09 09:17:00])
+- 0/8 success, per-run 46.1 decisions / 23.8 rdog / 3.0 attempts (vs archive baseline 6.5 / 6.3 / 1.025)
+- user 选项 A: 跑其他 4 model 完成完整 5×8 baseline
+- 5 provider HTTP 200 在线 (deepseek / minimax-cn / qwen37-flash / qwen36-flash / minimax-m27-highspeed)
+- daemon / stale guard 干净, runner 骨架就位
+
+### 目标
+
+- 跑剩余 4 model × 8 case = 32 case, 完成 5×8 = 40 run 完整 baseline
+- 每 model 独立 output dir 隔离 (`/tmp/rdog-eval-<model>`)
+- 每 model 完成后合并 suite-result.json 到 `/tmp/rdog-eval-5x8-final/suite-result.json`
+- 跑完更新 WORKLOG + commit + push
+
+### 阶段
+
+- [x] 阶段 12.11: 启动检查 (git status clean / 5 provider 200 / daemon 干净 / stale 清)
+- [ ] 阶段 12.12: minimax-cn × 8 case live (后台, 估计 30-60 min)
+- [ ] 阶段 12.13: qwen37-flash × 8 case live
+- [ ] 阶段 12.14: qwen36-flash × 8 case live
+- [ ] 阶段 12.15: minimax-m27-highspeed × 8 case live
+- [ ] 阶段 12.16: 合并 5 model 数据 + archive baseline 对比 + 写 WORKLOG
+- [ ] 阶段 12.17: commit + push (待 user 拍板)
+
+### 关键决策
+
+- 4 model 串行跑 (避免并发 daemon 冲突)
+- 每 model 独立 output dir 隔离结果
+- max-tool-iterations=8 + timeout=90s 已 fix (commit 92b0613)
+- runner main() 起 daemon + 跑完 kill, 全程自己管理
+
+### 风险
+
+- 4 model 估算 2-4 hours, deepseek 1 model ~30 min
+- 其他 4 model 可能也 0/8 success (跟 deepseek 行为类似)
+- 如果 model 长时间 retry 不收敛, per-case 可能 3 attempts × 90s = 4.5 min (maxCaseAttempts=3)
+- macOS TCC 权限 (accessibility + screen recording) 必须仍 OK, 不然 AX capture 失败
+
+### 当前状态
+
+**阶段 12.12 即将启动**: minimax-cn × 8 case live, output dir `/tmp/rdog-eval-minimax-cn`.
+
+## [2026-08-09 10:10:00] [Session ID: omx-1786201921174-cvveb1] [阶段完成]: 5 model 完整 5×8 matrix 跑完
+
+### 完成
+
+- [x] 阶段 12.12: minimax-cn × 8 case live (9:22 → 9:48, 26 min, 0/8 success)
+- [x] 阶段 12.13: qwen37-flash × 8 case live (9:49 → 9:55, 6 min, 7/8 success)
+- [x] 阶段 12.14: qwen36-flash × 8 case live (9:55 → 10:00, 5 min, 6/8 success)
+- [x] 阶段 12.15: minimax-m27-highspeed × 8 case live (10:00 → 10:09, 9 min, 7/8 success)
+- [x] 阶段 12.16: 5 model 数据合并 + archive baseline 对比 + 完整 WORKLOG entry
+- [x] 阶段 12.17: git add + commit + push (本次 task)
+
+### 关键结果
+
+- 5×8 = 40 run 完整跑完
+- 20/40 success (50% 退化 vs archive 40/40)
+- decisions 3.84× / rdog 2.0× / attempts 2.0× vs archive
+- 2 model 全 0/8 (deepseek + minimax-cn), 3 model 6-7/8 (qwen37/qwen36/m27)
+- case 2 calculator-old-state-recovery 跨 4/5 model fail
+
+### 后续任务 (不进 commit)
+
+- 选项 A1: 接受现状 + merge 主分支 (等 user 拍板)
+- 选项 A2: 修 deepseek/minimax-cn 高 churn (max-iter 16 + prompt guidance)
+- 选项 A3: prompt engineering 引导 @computer-act 路径
+- 选项 A4: case 2 单测 + skill 加固

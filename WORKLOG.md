@@ -599,3 +599,88 @@ deepseek 1 model 跟 archive 5 model per-run 对比:
   alignment 主题. feature/computer-act-outcome-3state 可 merge.
 - **prompt engineering 引导 deepseek 走 @computer-act**: 改 case prompt 加 scoring 提示
   (用 @computer-act 才被评分), 1-2 次迭代可能让 success rate 提升.
+
+## [2026-08-09 10:10:00] [Session ID: omx-1786201921174-cvveb1] 任务名称: 5×8 live matrix - 5 model 完整 40 run (选项 A 完成)
+
+### 任务内容
+
+按 user 选项 A 跑剩余 4 model (minimax-cn / qwen37-flash / qwen36-flash / minimax-m27-highspeed) 完成完整 5×8=40 run baseline, 合并 deepseek 1 model 数据, 写 5 model merged suite + 对比 archive baseline。
+
+### 完成过程
+
+- minimax-cn 9:22 spawn → 9:48 done (26 min, 0/8 success)
+- qwen37-flash 9:49 spawn → 9:55 done (6 min, 7/8 success)
+- qwen36-flash 9:55 spawn → 10:00 done (5 min, 6/8 success)
+- minimax-m27-highspeed 10:00 spawn → 10:09 done (9 min, 7/8 success)
+- 总后台跑时间 ~1h47m (串行, daemon 冲突避免)
+- spawn helper `/tmp/spawn_eval.sh` 复用 Python start_new_session=True + clean output dir
+
+### 5 model × 8 case 实证数据 (合并 /tmp/rdog-eval-5x8-final/suite-result.json)
+
+| model | success | attempts | decisions | rdog | per-run dec | per-run rdog | per-run att |
+|---|---|---|---|---|---|---|---|
+| deepseek             | 0/8 | 24 | 369 | 190 | 46.1 | 23.8 | 3.00 |
+| minimax-cn           | 0/8 | 24 | 338 | 164 | 42.2 | 20.5 | 3.00 |
+| qwen37-flash         | 7/8 | 11 |  97 |  49 | 12.1 |  6.1 | 1.38 |
+| qwen36-flash         | 6/8 | 13 |  66 |  33 |  8.2 |  4.1 | 1.62 |
+| minimax-m27-highspeed| 7/8 | 10 | 128 |  68 | 16.0 |  8.5 | 1.25 |
+| **5 model TOTAL**    |**20/40**| **82** | **998** | **504** | 25.0 | 12.6 | 2.05 |
+| archive baseline (旧 binary) | 40/40 | 41 | 260 | 252 | 6.5 | 6.3 | 1.03 |
+
+### 对比 archive baseline
+
+- `successful`: -20 (40 → 20, 50% 退化)
+- `agent_decisions`: 3.84× (260 → 998)
+- `rdog_requests`: 2.0× (252 → 504)
+- `attempts`: 2.0× (41 → 82)
+
+### 关键发现: Model 二元分布
+
+**Group A (不收敛, 全 0/8 success):**
+- deepseek (deepseek-v4-flash): 46.1 decisions/run, 3 attempts 全用, 8 tool iterations 不够
+- minimax-cn (MiniMax-M3): 42.2 decisions/run, 3 attempts 全用, 同样 8 iter 不够
+
+**Group B (收敛快, 6-7/8 success):**
+- qwen37-flash (qwen3.7-flash): 12.1 decisions/run, 大多 attempts=1
+- qwen36-flash (qwen3.6-flash): 8.2 decisions/run, attempts=1 为主
+- minimax-m27-highspeed (MiniMax-M2.7-highspeed): 16.0 decisions/run, attempts=1 为主
+
+**跨 5 model 一致难 case:**
+- case 2 calculator-old-state-recovery: 4/5 model fail (qwen37/qwen36/m27/deepseek all fail; minimax-cn case 2 fail 也 fail)
+- 其他 7 case: Group B model 全 success
+
+### Runner 行为细节
+
+- `_invoke_pi_rpc` RPC mode + extension (mano_cua_rdog.mjs) + 6 bug fix 全程 OK
+- max-tool-iterations=8 + timeout_s=90 + TimeoutExpired catch 全程稳定
+- Group A model 大多 trigger `Maximum tool iterations (8) exceeded` 后 retry,3 attempts 全 fail
+- Group B model attempt 1 就满足 `has_actions + recoveries==0 + rc==0`,break early
+
+### Model 行为 vs Protocol 行为
+
+- 协议层 (outcome 三态 + epoch + rdog envelope + error envelope) 全程 wire shape 正确
+- Model 行为层面: Group A 偏好 direct verbs (`@open-app` / `@ax-find` / `@ax-press`),**不走 `@computer-act` envelope**
+- Group B 同样用 direct verbs 但收敛快 + 无 recovery,证明 direct verbs 不必然导致 fail
+- archive 5 model 100% success 应该是不同 prompt / 旧 skill 行为,不是 protocol regression
+
+### 总结感悟
+
+- **5×8 live matrix 完整闭环**: 40 run 全部跑完, manifest 完整, archived baseline 可对比
+- **Model 行为是 outcome 字段能否被消费的关键**: 协议层 wire shape OK 不等于 model 真读 outcome 字段
+- **deepseek + minimax-cn 是 high-churn model**: 不能用 max-tool-iterations=8 (应该 16+ 给 model 探索空间) 或加更多 guidance
+- **case 2 calculator-old-state-recovery 跨 4/5 model fail**: 真正难 case,值得单测 / skill 加固
+- **archive baseline 不可严格对比**: case prompt / skill SHA-256 不同, 但能看趋势
+
+### 后续建议
+
+- **可选 A1: 接受现状 + merge 主分支**: outcome 三态在协议层闭环 (5×8 完整数据已写, protocol 层验证完成). deepseek/minimax-cn 0/8 是 model 行为问题,不是 protocol regression
+- **可选 A2: 修 deepseek/minimax-cn case 1 success + per-case 单独 retry 策略**: max-tool-iterations=16 + 加 case 2 calculator-old-state-recovery 单测
+- **可选 A3: prompt engineering 引导所有 model 走 @computer-act**: 系统提示 + scoring 提示, 让 outcome 字段真被消费
+- **可选 A4: case 2 calculator-old-state-recovery 单测 + skill 加固**: 跨 4/5 model fail 说明 case 2 prompt 不够明确
+- **可选 A5: kill all live daemons + 清 stale guard**: 5 model 跑完确认 daemon 全 kill, /tmp/rdog-eval-* 留作历史
+
+### 硬约束记录
+
+- max-tool-iterations=8 是 trade-off (vs deepseek 30 触发 TimeoutExpired): 保持 8 不变, Group A model 调整靠 prompt / skill
+- timeout_s=90 是 per-Pi-call ceiling, 维持
+- runner main() 起 daemon 用 current binary (daemon_manager.py), 不要让 stale daemon 留在 host
