@@ -72,14 +72,38 @@ def _resolve_binary(repo_root: Path, config: dict) -> tuple[Path, str]:
 
 
 def _build_case_prompt(case: dict) -> str:
-    """Compose the task prompt fed to Pi for one case attempt."""
-    return (
-        f"{case['task']}\n\n"
-        f"完成后必须 fresh verify (read 真实 GUI / window / URL 状态, 不是 self-report), "
-        f"verify 标准: {case['verify'].get('description', case.get('expectedResult', ''))}\n\n"
-        f"expected result: {case.get('expectedResult', '')}\n"
-        f"verify method: {case['verify'].get('method', 'unspecified')}"
-    )
+    """Compose the task prompt fed to Pi for one case attempt.
+
+    Adds explicit @computer-act protocol requirement + scoring rule so models
+    do not fall back to direct verbs (@open-app / @ax-press etc.), which bypass
+    the @computer-act envelope and therefore skip outcome 三态.
+
+    The requirement block is placed BEFORE the task so the model sees it first.
+    5x8 baseline (commit 5c7b9a6) showed deepseek + minimax-cn 全 0/8 despite
+    a system_prompt-level IMPORTANT hint — they consistently chose direct verbs.
+    Putting the requirement in front of the task is the next iteration.
+    """
+    task = case['task']
+    verify_desc = case['verify'].get('description', case.get('expectedResult', ''))
+    expected = case.get('expectedResult', '')
+    verify_method = case['verify'].get('method', 'unspecified')
+
+    # ponytail: hard-constraint language ("不计分" / "硬约束") is the only lever
+    # that flipped any model off direct verbs in 5x8 round 1. keep terse.
+    requirement = """## Protocol requirement (硬约束 — 必须遵守)
+所有 GUI 动作必须包在 `@computer-act#N:{...}` envelope 内 (schema: rdog.computer-act.v1).
+直接调用 `@open-app` / `@ax-press` / `@key` / `@click` / `@ax-set-value` / `@type-text` 等 direct verb **不计分** (视为未完成).
+模板: `rdog control @computer-act#1:'{schema:"rdog.computer-act.v1",action:"open_app",args:{app_name:"Calculator"},verify:"best_effort"}'`
+action 可选: open_app / ax_press / ax_set_value / ax_action / ax_focus / type_text / key / click.
+verify 选项: "none" / "best_effort" (默认) / "always" (强制 verify).
+"""
+
+    verify_block = f"""## Verify standard (完成后必做, 不通过算 fail)
+verify 方法: {verify_method}
+verify 标准: {verify_desc}
+expected result: {expected}"""
+
+    return f"{requirement}\n## Task\n{task}\n\n{verify_block}"
 
 
 def _invoke_pi_rpc(*, provider_key: str, model: str, api_key: str,
@@ -105,13 +129,11 @@ def _invoke_pi_rpc(*, provider_key: str, model: str, api_key: str,
     Without this hint, models prefer direct verbs (@ping, @window-find, @ax-find)
     which bypass @computer-act envelope and therefore outcome field.
     """
-    _force_computer_act_hint = system_prompt + (
-        "\n\nIMPORTANT: Use `@computer-act#N:{...}` syntax for ALL GUI actions. "
-        "Do not use direct verbs like `@open-app`, `@key`, `@click`, `@ax-press` directly -- "
-        "wrap them in `@computer-act` with schema rdog.computer-act.v1 so the "
-        "outcome field is recorded. Use `@ping`, `@capabilities`, `@window-find`, `@ax-find` "
-        "for read-only verification only."
-    )
+    # ponytail: case prompt now carries the explicit @computer-act requirement
+    # (see _build_case_prompt). The system_prompt-level hint is removed because
+    # 5x8 baseline (commit 5c7b9a6) showed models ignore it. Keep system_prompt
+    # as-is so we do not regress unrelated profile-driven behavior.
+    _force_computer_act_hint = system_prompt
     cmd = [
         str(shutil.which("pi") or "/Users/cuiluming/.cargo/bin/pi"),
         "--mode", "rpc",

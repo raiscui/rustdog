@@ -493,3 +493,86 @@ feature/computer-act-outcome-3state 分支已推到 origin. 后续决策:
 - 选项 A2: 修 deepseek/minimax-cn 高 churn (max-iter 16 + prompt guidance)
 - 选项 A3: prompt engineering 引导 @computer-act 路径
 - 选项 A4: case 2 单测 + skill 加固
+
+## [2026-08-09 10:15:00] [Session ID: omx-1786201921174-cvveb1] [新阶段 13]: prompt engineering 引导所有 model 走 @computer-act (选项 A3)
+
+### 目标
+
+- 让 Group A model (deepseek + minimax-cn) 也走 `@computer-act` envelope, 让 outcome / verification.status 字段真被 model 消费
+- 5 model × 8 case 重跑, 验证 success rate 提升 (baseline 20/40 = 50%)
+- 验证 model 是否真用 `@computer-act` (wire 上 outcome 字段出现率)
+
+### 现状 (来自 5×8 baseline commit 5c7b9a6)
+
+- 5 model: 20/40 success
+- Group A (deepseek + minimax-cn): 0/8 全 fail, 全 direct verbs (`@open-app` / `@ax-find` / `@ax-press`), 不走 `@computer-act`
+- Group B (qwen37 + qwen36 + m27): 6-7/8 success, 也用 direct verbs, 但收玫快
+- runner `_force_computer_act_hint` 已加但 model ignore (system prompt 末尾加 IMPORTANT 段)
+
+### 阶段
+
+- [ ] 阶段 13.1: 读 8 case prompt 文件 + 当前 system_prompt hint, 定位 prompt engineering 落点
+- [ ] 阶段 13.2: 改 case prompt 加 `@computer-act` wrapper example + scoring incentive
+- [ ] 阶段 13.3: 改 runner `_force_computer_act_hint` 更明确 (强引导)
+- [ ] 阶段 13.4: dry-run 验证骨架
+- [ ] 阶段 13.5: 跑 5 model × 8 case (重跑完整 matrix)
+- [ ] 阶段 13.6: 验证 model 是否真用 `@computer-act` (count envelope usage in wire events)
+- [ ] 阶段 13.7: 对比 5×8 baseline (commit 5c7b9a6) success rate + decisions ratio + rdog ratio
+- [ ] 阶段 13.8: 写 WORKLOG + commit + push (按 user scoped commit 偏好)
+
+### 关键决策
+
+- prompt engineering 是 iterative, 不预设 1 次到位
+- 改 case prompt 是主要杠杆 (model 第一眼看 case task 字段)
+- runner system_prompt hint 是次要杠杆 (model 优先看 case task)
+- scoring incentive ("用 @computer-act 才被评分") 强制 model 走 envelope
+- 跑 5 model 完整 matrix, 不偷工 (user 偏好 "跑不到不假装跑过")
+
+### 风险
+
+- Group A model 可能仍 ignore (api-level 行为难改)
+- prompt 改坏可能让 Group B model 也 fail
+- 5×8 重跑 ~2 hours
+- 改了 case prompt 跟 archive baseline 不可比 (但跟 commit 5c7b9a6 baseline 可比)
+
+### 状态
+
+**当前在阶段 13.1**: 读 case prompt + runner system_prompt hint 现状.
+
+## [2026-08-09 12:25:00] [Session ID: omx-1786201921174-cvveb1] [阶段完成]: A3 prompt engineering 5×8 重跑实证
+
+### 完成
+
+- [x] 阶段 13.1-13.3: 改 runner.py `_build_case_prompt` + 简化 `_force_computer_act_hint`
+- [x] 阶段 13.4: dry-run 验证骨架
+- [x] 阶段 13.5: 跑 5 model × 8 case v2 (minimax-cn 17 min + qwen37 10 min + qwen36 5 min + m27 10 min + deepseek 26 min)
+- [x] 阶段 13.6: 验证 model 是否真用 @computer-act (Group A 现在 1-5 action/case, baseline 0)
+- [x] 阶段 13.7: 对比 baseline: 20/40 → 25/40 success (+5), attempts -12%, decisions -5%, rdog -16%
+- [x] 阶段 13.8: WORKLOG entry + commit + push
+
+### 关键数据
+
+| metric | baseline | v2 prompt | ratio |
+|---|---|---|---|
+| successful | 20/40 | 25/40 | +5 (+25%) |
+| attempts | 82 | 72 | 0.88× |
+| decisions | 998 | 952 | 0.95× |
+| rdog | 504 | 423 | 0.84× |
+
+### Group A 改善
+
+- deepseek: 0/8 → 2/8 (+2)
+- minimax-cn: 0/8 → 2/8 (+2)
+
+### Group B 稳定
+
+- qwen37-flash: 7/8 → 7/8 (case 2 修, case 5 退化)
+- qwen36-flash: 6/8 → 7/8 (+1, case 2 修)
+- m27-highspeed: 7/8 → 7/8 (case 2 修, case 3 退化)
+
+### 后续 (LATER_PLANS 已记录)
+
+- A3.1: case 3 单测改造
+- A3.2: merge 主分支
+- A3.3: 二阶 prompt engineering (attempt-aware)
+- A3.4: 验证 model 真消费 outcome 字段
