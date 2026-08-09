@@ -744,3 +744,11 @@ feature/computer-act-outcome-3state 分支已推到 origin. 后续决策:
 - runner/config.json immutableBaseline: 260/252/41 (archive 旧) → 648/315/42 (2026-08-09 对齐后, 严格验证 40/40, RPC 口径)
 - 注释同步更新: attempts 为硬指标, decisions/requests 同口径对比
 - json 合法 + dry-run OK
+
+## [2026-08-09 21:10:00] [Session ID: omx-1786268168901-f711dm] [阶段完成]: A3.2 merge 主分支
+
+### 完成
+- main 合并 feature/computer-act-outcome-3state (merge commit 2ca1513, 已 push origin/main)
+- 冲突解决: src/control_protocol/tests.rs (两边独立测试全保留), tests/recording_e2e.rs (用 feature fmt 版, 无逻辑差异), docs/adr/0007 + specs/rdog-recording-auto-stop.md (保留 main 版, 对应 auto-stop 实现), WORKLOG/task_plan (append-only 保留两边)
+- 验证: cargo check --all-targets OK, 全量单测 796 passed, control_protocol 102 passed, recording_e2e 5 passed
+- feature 分支保留 (main 祖先), 未删除
