@@ -1,11 +1,9 @@
 {
   "id": "safari-new-tab-navigate",
-  "task": "打开 Safari, Cmd+T 新建标签页, 在地址栏输入 https://example.com, 按 Return",
-  "expectedResult": "Safari 当前 tab 显示 'Example Domain' 标题 + 内容",
-  "verify": {
-    "method": "ax_read",
-    "description": "Safari 窗口 AXWebArea 子树含 'Example Domain' 文本",
-    "processName": "Safari"
-  },
-  "cleanup": "@computer-act#cleanup:{schema:\"rdog.computer-act.v1\",action:\"hotkey_click\",args:{hotkey:\"Cmd+W\"},verify:\"none\"}"
+  "task": "打开 Safari，使用快捷键 Command+T 新建标签页，在地址栏输入 example.com 并导航，确认页面标题",
+  "expected": "真实 Safari 流程：Cmd+T 新建标签页，地址栏输入 URL 导航，fresh window/AX 证据确认窗口标题为 Example Domain。",
+  "expectedResult": "Example Domain",
+  "app": "Safari",
+  "setup": "safari-fresh-window",
+  "verify": "window-title-contains"
 }

@@ -773,3 +773,66 @@ deepseek 1 model 跟 archive 5 model per-run 对比:
 - **可选 A3.2: 接受现状 + merge 主分支**: 25/40 success (62.5%) vs baseline 20/40 (50%), 改善明确
 - **可选 A3.3: 进一步 prompt engineering (二阶)**: case-specific 改造 + 多轮 retry 时 prompt 不同 (attempt 2+ 强调 "上轮 fail, 这次先 verify 当前状态再 action")
 - **可选 A3.4: 验证 outcome 字段 model 真消费**: 当前 evidence 是 model 用 @computer-act (envelope 出现) 但不确定 model 真读 outcome / verification.status 字段 (回看 messages 检查)
+
+## [2026-08-09 18:30:00] [Session ID: omx-1786268168901-f711dm] 任务名称: bisect 验证 deepseek/minimax-cn "退步" 根因
+
+### 任务内容
+- 用户问: deepseek/minimax-cn 之前 7/8 甚至 8/8, 现在怎么了
+- 执行 phase 14 bisect: 用 archive 40/40 的同一载体 (外部 runner) + 当前 binary/skill 重跑老 8 case
+
+### 完成过程
+1. 读 archive manifest (macos-ops-20260808-key-contract-candidate-5x8/baseline-manifest.json): rustdogCommit=417c6b0a, skill SHA a5063f19, 外部 runner, maxToolIterations=30, 40/40
+2. 对比仓库内 runner/cases/*.json: 与 archive 老 case 集只有 3 个重叠 (5 个老 case 被换成 calculator×3 + clipboard + multi-window-textedit)
+3. 发现 phase 14 原计划缺陷: eefe802 时仓库内 runner 不存在 (9ba464a 才加), 改用外部 runner 做 bisect 载体
+4. 起 daemon (--transport zenoh, unixpipe fast path) + 外部 runner dry-run OK
+5. 第一次跑 deepseek: 0/8 且 44ms 秒败, usageTotals=0 → 根因: tmux server 环境无 DEEPSEEK_API_KEY (Pi 报 "No API key found")
+6. 带 key 重启: deepseek 8/8, minimax-cn 8/8 (全部 fresh AX verification 真实)
+
+### 验证证据
+- /tmp/pi-rdog-macos-ops-deepseek-20260809-175341/suite-result.json: successCount 8/8
+- /tmp/pi-rdog-macos-ops-minimax-20260809-180054/suite-result.json: successCount 8/8
+- 所有 case checks: freshVerificationObserved / realRdogCallObserved / expectedResultObserved / appWindowObserved 全 true
+
+### 总结感悟
+- **模型没有退步**: deepseek + minimax-cn 在当前 binary (outcome 三态+epoch) + 当前 skill 下, 老 case + 外部 runner 依然 8/8
+- **"退步"是评测载体变化**: 仓库内 runner 的 max-tool-iterations=8 (archive 30) + prompt 差异 + 5 个新 case 替换, 三者叠加导致 0/8 → v2 prompt 后 2/8
+- 评测对比必须先对齐载体 (runner 版本 / case 集 / max-tool-iterations / prompt), 否则会把基础设施差异误判成模型退步
+- 外部 runner 依赖 shell 环境注入 API key, tmux server 环境无 key 会秒败 (usageTotals=0), 排查时先看 pi-stderr
+
+## [2026-08-09 20:10:00] [Session ID: omx-1786268168901-f711dm] 任务名称: 仓库内 runner 对齐 archive 载体 (max-iter 30 + case 集对齐 + prompt 增强)
+
+### 任务内容
+按 user 拍板, 改仓库内 runner 三件事, 让 deepseek/minimax-cn 回到 8/8:
+1. max-tool-iterations 按模型配置 (deepseek/minimax-cn=30, Group B=16)
+2. case 集对齐 archive 老 8 case (删 calculator×3/clipboard/multi-window-textedit)
+3. prompt 增强 (Protocol contract 段落, 来自外部 runner skill 契约)
+
+### 改动 (待 commit)
+- runner/config.json: cases 换老 8 case, models 加 maxToolIterations
+- runner/cases/: 8 个老 case 迁移 (含 app/setup/verify/expected), 5 个新 case 删除
+- runner/lib/runner.py:
+  - _build_case_prompt: v2 @computer-act 硬约束 → Protocol contract (archive 风格)
+  - max_iter 从 model_cfg 读, Pi timeout 随 max-iter 放大 (cap 900)
+  - 移植外部 runner 严格验证: prepare (quit/open/before capture) → Pi → after capture → 7 项 checks → reset
+  - 修复 bug: _run_process 返回类型缺 timed_out; RPC tool result 是 {content:[{text}]} 结构解析
+
+### 验证证据 (live 5×8 全矩阵)
+- /tmp/rdog-eval-align-5x8-v2/suite-result.json: deepseek 8/8 + minimax-cn 8/8
+- /tmp/rdog-eval-align-gb/suite-result.json: qwen37 8/8 + qwen36 8/8 + m27 8/8
+- **完整 40/40 success, 42 attempts (41 case attempt 1, deepseek preview 3)**
+- 648 decisions / 315 rdog requests (RPC 计数口径, 非效率对比指标)
+- 全部 case 通过 fresh AX verification + expectedResultObserved + appWindowObserved
+
+### 对比
+| 载体 | success | attempts | 说明 |
+|---|---|---|---|
+| archive 外部 runner | 40/40 | 41 | skill 全文嵌入 + maxToolIterations=30 + 老 case |
+| 5×8 baseline (旧) | 20/40 | 82 | 仓库内 runner, 8 iter, 新 case, 弱验证 |
+| v2 prompt (旧) | 25/40 | 72 | 同上 + @computer-act 硬约束 |
+| **本次对齐后** | **40/40** | **42** | 严格验证 + 30 iter + 老 case + contract prompt |
+
+### 总结感悟
+- **评测可信度 = 载体三要素**: case 集 / max-tool-iterations / 验证逻辑, 任何一个不对齐都会误判模型能力
+- 仓库内 runner 原 success 判定 (有 action + 无 recovery) 是弱启发式, 移植外部严格验证后才可与 archive 可比
+- RPC tool result 结构 {content:[{text}]} 是 Pi 的封装格式, 解析时不能只处理裸 list
+- 操作坑: models.json 的 apiKey 用 env: 引用, tmux server 环境无 key 会秒败; DASHSCOPE key 在 xtalk/.envrc

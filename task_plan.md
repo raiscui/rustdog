@@ -602,3 +602,140 @@ feature/computer-act-outcome-3state 分支已推到 origin. 后续决策:
 ### 状态
 
 **当前在阶段 14.1**: 创建 temp branch + checkout.
+
+## [2026-08-09 18:05:00] [Session ID: omx-1786268168901-f711dm] [阶段更新]: phase 14 bisect 计划修正 + Step 1 启动
+
+### 新发现 (有证据)
+
+1. **archive 40/40 的载体是外部 runner**: `/Users/cuiluming/local_doc/l_dev/my/rust/pi-rdog-calculator-eval/runner/` (run_macos_ops_eval.py SHA cae01559, worktree clean 在 master)
+2. **archive baseline manifest** (macos-ops-20260808-key-contract-candidate-5x8/baseline-manifest.json):
+   - rustdogCommit = 417c6b0a (28ed415 的父 commit, 在当前 feature 分支历史内)
+   - skill SHA-256 = a5063f19 (旧版, 无 outcome 三态 reference)
+   - rdog binary SHA = db5cb9fd, maxToolIterations=30 (config-macos-ops.json 现仍为 30)
+   - case = macos-ops-prompts.json (8 case: textedit-type-text / calendar-window-check / safari-navigate-example / preview-open-image / terminal-window-check / terminal-run-command / safari-new-tab-navigate / textedit-multi-window)
+   - summary.md: deepseek 41 decisions / 40 requests / 8 attempts; allCasesPassed=true → 40/40
+3. **仓库内 runner/cases/*.json 与 archive case 集只有 3 个重叠** (terminal-run-command / safari-new-tab-navigate / textedit-multi-window):
+   - 仓库内 5 个新 case: calculator-divide-by-zero / calculator-happy-path / calculator-old-state-recovery / clipboard-copy-paste / multi-window-textedit
+   - archive 5 个老 case 被替换: textedit-type-text / calendar-window-check / safari-navigate-example / preview-open-image / terminal-window-check
+   - task_plan 之前写 "5 老 + 3 新" 与实际 runner/cases 不符 (实际 5 新 + 3 老)
+4. **原 phase 14 计划缺陷**: "checkout 到 eefe802 用旧 runner" 不成立 — 仓库内 runner 是 9ba464a (08-09) 才进仓库, eefe802 时 runner/ 不存在
+5. **外部 runner 的 config 指向当前工作区**: rdogBinary = rustdog/target/debug/rdog (当前 89c34b99, 含 outcome 三态 + epoch), canonicalSkillPath = rustdog/.codex/skills/rdog-control/SKILL.md (当前版)
+
+### 修正后的 bisect 计划 (载体 = 外部 runner)
+
+- [x] 阶段 14.1: 确认 archive manifest + 外部 runner 可跑 (完成上述证据收集)
+- [ ] 阶段 14.2: Step 1 - 外部 runner + 当前 binary (89c34b99) + 当前 skill + 老 8 case 跑 deepseek (~20-30 min)
+      8/8 → 模型没退步, 差异在仓库内 runner/case/prompt; 0/8 → binary/skill 影响大
+- [ ] 阶段 14.3: Step 2 - checkout 旧 SKILL.md (4b864a3~1) + 外部 runner 重跑 deepseek, 隔离 skill 变量
+- [ ] 阶段 14.4: Step 3 - cargo build 417c6b0a 旧 binary + 外部 runner 重跑 deepseek, 隔离 binary 变量
+- [ ] 阶段 14.5: 汇总 bisect 结论 + 写 WORKLOG + 切回原分支
+
+### 前置检查 (Step 1 前)
+
+- [ ] daemon 状态确认 (外部 runner 不自动起 daemon, 需要 rdog_macos.toml + 当前 binary 手动起)
+- [ ] dry-run 验证外部 runner 骨架
+- [ ] TCC 权限 (AX + screen recording) 确认
+
+### 风险
+
+- Step 1 用当前 binary 跑老 case, 如果 8/8 → 直接证明模型没有退步, 问题在评测基础设施 (case 集 + runner 迭代上限 + prompt)
+- deepseek 1 model × 8 case 约 20-30 min (archive 参考)
+- 真实操控 macOS 应用 (TextEdit/Safari/Preview/Calendar/Terminal), 用户已拍板 phase 14 选项 1
+
+### 状态
+
+**当前在阶段 14.2 前置检查**: daemon 状态 + dry-run.
+
+### Step 1 执行记录
+
+- daemon: rdog daemon --transport zenoh 已起 (tmux rdog-daemon, PID 44662), unixpipe fast path, @ping pong
+- 外部 runner: dry-run OK (8 老 case)
+- Step 1 启动: tmux rdog-eval, PID 63102, output_root /tmp/pi-rdog-macos-ops-deepseek-20260809-174815
+- 预计 20-40 min, 完成后读 suite-result.json 的 successCount
+
+### Step 1 第一次跑失败原因 (已修复)
+
+- 现象: 0/8, 每 attempt 44ms 秒败, usageTotals.totalTokens=0
+- 根因: tmux server 环境没有 DEEPSEEK_API_KEY (len=0), Pi 进程报 "No API key found for provider deepseek"
+- 验证: exec shell key len=35, tmux server key len=0
+- 修复: 重启 Step 1 时显式 export DEEPSEEK_API_KEY (tmux rdog-eval, output_root 175341)
+- 教训: 外部 runner 依赖 shell 环境注入 key, 不自己处理; 仓库内 runner (a382458) 是显式处理 env key 的
+
+### Step 1 结果: deepseek 老 case 8/8 (关键证据)
+
+- 外部 runner + 当前 binary 89c34b99 + 当前 skill + 老 8 case → **8/8 success**
+- 8 case 全部: freshVerificationObserved=true, realRdogCallObserved=true, expectedResultObserved=true, appWindowObserved=true
+- verify 有真实 AX observation (obs-1786269257341-70, permission granted)
+- 结论: **deepseek 模型没有退步**; binary (outcome 三态+epoch) 和 skill 变化都不是主因
+- 退步来源锁定为: 仓库内 runner (max-tool-iterations 30→8 + prompt 差异) + 新 case 集 (calculator×3 + clipboard + multi-window-textedit)
+- Step 2/3 (隔离 skill/binary) 不再必要, 8/8 已证伪 binary/skill 主因假设
+- minimax-cn 对照跑中: /tmp/pi-rdog-macos-ops-minimax-20260809-180054
+
+### Step 1 最终结论: deepseek + minimax-cn 双双 8/8 (老 case + 外部 runner)
+
+- deepseek: 8/8 (大多 attempt 1, safari-new-tab-navigate 2 attempts)
+- minimax-cn: 8/8 (safari-navigate-example 2, terminal-run-command 3, safari-new-tab-navigate 2)
+- 全部 fresh AX verification 真实 (freshVerificationObserved=true)
+- **bisect 结论: 模型没有退步**; 退步根因 = 仓库内 runner 的 max-tool-iterations=8 + prompt 差异 + 新 case 集 (5 个老 case 换成 calculator×3/clipboard/multi-window-textedit)
+- phase 14 完成: Step 2/3 (隔离 skill/binary) 不需要, Step 1 已证伪
+- 遗留: 仓库内 runner 若要回到 archive 水平, 需 max-tool-iterations 提到 30 (或按 model 配置) + case 集对齐 + prompt 增强
+
+## [2026-08-09 18:40:00] [Session ID: omx-1786268168901-f711dm] [新阶段 15]: 仓库内 runner 对齐 archive 载体 (max-iter 30 + case 集对齐 + prompt 增强)
+
+### 目标
+- 仓库内 runner 达到 archive 外部 runner 同等的评测效果 (deepseek/minimax-cn 8/8)
+- 三个改动: max-tool-iterations 30 (或按模型) / case 集对齐 archive 老 8 case / prompt 增强
+
+### 阶段
+- [ ] 阶段 15.1: 读仓库内 runner 现状 (runner.py / config.json / cases / README) + 外部 runner 的老 case prompts + prompt 构造
+- [ ] 阶段 15.2: 设计改动方案 (per-model max-iter? case 文件如何迁移? prompt 增强落点)
+- [ ] 阶段 15.3: 改代码
+- [ ] 阶段 15.4: dry-run 验证骨架
+- [ ] 阶段 15.5: 跑 deepseek + minimax-cn (先验证 Group A 回到 8/8)
+- [ ] 阶段 15.6: (可选) 跑完整 5×8 对比
+- [ ] 阶段 15.7: WORKLOG + commit + push
+
+### 风险
+- case prompt 迁移时 verify 逻辑要对齐外部 runner 语义
+- 改 prompt 可能影响 Group B (qwen) — 需要全矩阵验证
+- max-iter 30 会让 Group A 单 case 更久 (per-run 40+ decisions), 全矩阵时间更长
+
+### 状态
+**当前在阶段 15.1**: 读两套 runner 代码
+
+### 阶段 15.2 设计决策
+
+1. **max-tool-iterations 按模型**: config.json models[] 加 maxToolIterations, deepseek/minimax-cn=30, Group B=16 (5×8 显示 Group B 8-16 dec/run)
+2. **case 集对齐**: 外部 macos-ops-prompts.json 的 8 个老 case 完整迁移 (含 app/setup/verify/expected), 删 5 个新 case (calculator×3 + clipboard + multi-window-textedit)
+3. **prompt 增强**: case prompt 加 "Protocol contract" 段落 (来自外部 system-prompt-with-skill.md 前言 + 当前 SKILL.md 核心契约), 去掉 v2 的 @computer-act 硬约束 (移植严格验证后计分不看 envelope, archive 风格下 deepseek 0-1 dec/case 高效)
+4. **验证逻辑移植 (必要)**: 仓库内 runner 原 success 判定是弱启发式 (有 action+无 recovery), 移植外部 runner 的 before/after capture + fresh verification + 8 项 checks, 让结果可信且与 archive 可比
+5. daemon_manager 不动 (已验证 -c config 能识别 zenoh)
+
+### 阶段 15.3/15.4 完成
+- runner/cases: 8 个老 case 已写入, 5 个新 case 已删
+- config.json: cases 更新 + models 加 maxToolIterations (deepseek/minimax-cn=30, Group B=16)
+- runner.py: prompt 改 Protocol contract + 移植 prepare/capture/classify/reset + max-iter 按模型 + Pi timeout 随 max-iter 放大 (cap 900)
+- 验证: py_compile OK, dry-run OK (5x8=40), 纯函数单测 OK (prompt/classify/fresh 正反例)
+- 启动 live: deepseek + minimax-cn, output /tmp/rdog-eval-align-5x8
+
+### 阶段 15.5 结果: Group A 16/16 全 success (严格验证下)
+
+- deepseek 8/8 (preview-open-image 3 attempts, 其他 attempt 1)
+- minimax-cn 8/8 (全 attempt 1)
+- totals: 16 success / 18 attempts, 389 decisions, 189 rdog requests
+- 对比: 5×8 baseline 时 Group A 每 case 42-46 decisions 全 fail; 现在平均 24/case 全 success
+- 修复的 bug: (1) _run_process 返回类型缺 timed_out; (2) RPC tool result 是 {content:[{text}]} 结构, 解析只处理了 list → fresh verification 永远 false
+- 关键: tmux 环境无 API key (models.json 用 env: 引用), 启动需显式 export; DASHSCOPE key 在 xtalk/.envrc
+- Group B (qwen37/qwen36/m27) 全矩阵跑中: /tmp/rdog-eval-align-gb
+
+### 阶段 15.6 结果: 完整 5×8 = 40/40 全 success
+
+- Group A: deepseek 8/8 + minimax-cn 8/8 (16/16, 18 attempts)
+- Group B: qwen37 8/8 + qwen36 8/8 + m27 8/8 (24/24, 全 attempt 1)
+- totals: 40/40 success, 42 attempts, 648 decisions, 315 rdog requests
+- 全部严格验证 (fresh AX + expected + window)
+- 对比: 5×8 baseline 20/40 → v2 25/40 → 对齐后 40/40 (archive 同级)
+- 收尾: WORKLOG 已写, 准备 commit (scoped)
+
+### 完成
+- [x] 阶段 15.1-15.7 全部完成

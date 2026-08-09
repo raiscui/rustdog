@@ -1,0 +1,9 @@
+{
+  "id": "textedit-type-text",
+  "task": "打开文本编辑应用，在文稿的文本输入区输入文字 hello rdog 42，然后读取文本区的 AXValue 确认输入成功",
+  "expected": "真实打开 TextEdit 文稿，通过 rdog 语义在文本输入区输入文字，fresh AX 证据（AXTextArea 的 AXValue）确认包含 hello rdog 42，不依赖截图。",
+  "expectedResult": "hello rdog 42",
+  "app": "TextEdit",
+  "setup": "textedit-empty-doc",
+  "verify": "ax-textarea-contains"
+}

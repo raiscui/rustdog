@@ -1,0 +1,9 @@
+{
+  "id": "calendar-window-check",
+  "task": "打开日历应用，确认日历窗口已打开，报告窗口标题",
+  "expected": "真实打开 Calendar，fresh window 证据确认日历窗口存在并读取标题，不涉及任何日程内容。",
+  "expectedResult": "日历",
+  "app": "Calendar",
+  "setup": "calendar-open",
+  "verify": "window-title-contains"
+}

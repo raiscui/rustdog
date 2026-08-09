@@ -17,6 +17,8 @@ drive model x case matrix:
 from __future__ import annotations
 
 import argparse
+import re
+import signal
 import sys
 from pathlib import Path
 
@@ -31,10 +33,13 @@ import hashlib
 import json
 import os
 import shutil
+import struct
 import subprocess
 import sys
 import tempfile
 import time
+import unicodedata
+import zlib
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -54,6 +59,7 @@ class CaseRunResult:
     success: bool
     final_state: str
     ledger_summary: dict
+    checks: dict
     error: str = ""
 
 
@@ -74,36 +80,35 @@ def _resolve_binary(repo_root: Path, config: dict) -> tuple[Path, str]:
 def _build_case_prompt(case: dict) -> str:
     """Compose the task prompt fed to Pi for one case attempt.
 
-    Adds explicit @computer-act protocol requirement + scoring rule so models
-    do not fall back to direct verbs (@open-app / @ax-press etc.), which bypass
-    the @computer-act envelope and therefore skip outcome 三态.
+    2026-08-09 bisect 验证: archive 40/40 的组合是 "skill 契约 + 纯 task"
+    (外部 runner 把 skill 全文嵌入 system prompt, case prompt 是纯 task)。
+    仓库内 runner 的 profile system prompt 只有 4 行基础规则, 所以把
+    skill 关键契约放进 case prompt 开头 (等价于外部 runner 的嵌入效果)。
 
-    The requirement block is placed BEFORE the task so the model sees it first.
-    5x8 baseline (commit 5c7b9a6) showed deepseek + minimax-cn 全 0/8 despite
-    a system_prompt-level IMPORTANT hint — they consistently chose direct verbs.
-    Putting the requirement in front of the task is the next iteration.
+    不保留 v2 的 @computer-act 硬约束: 移植严格验证后计分不看 envelope,
+    archive 风格下 deepseek 0-1 decisions/case 高效完成 (bisect Step 1 证据)。
     """
-    task = case['task']
-    verify_desc = case['verify'].get('description', case.get('expectedResult', ''))
-    expected = case.get('expectedResult', '')
-    verify_method = case['verify'].get('method', 'unspecified')
+    task = case["task"]
+    expected = case.get("expectedResult", "")
+    verify_desc = case.get("expected", expected)
 
-    # ponytail: hard-constraint language ("不计分" / "硬约束") is the only lever
-    # that flipped any model off direct verbs in 5x8 round 1. keep terse.
-    requirement = """## Protocol requirement (硬约束 — 必须遵守)
-所有 GUI 动作必须包在 `@computer-act#N:{...}` envelope 内 (schema: rdog.computer-act.v1).
-直接调用 `@open-app` / `@ax-press` / `@key` / `@click` / `@ax-set-value` / `@type-text` 等 direct verb **不计分** (视为未完成).
-模板: `rdog control @computer-act#1:'{schema:"rdog.computer-act.v1",action:"open_app",args:{app_name:"Calculator"},verify:"best_effort"}'`
-action 可选: open_app / ax_press / ax_set_value / ax_action / ax_focus / type_text / key / click.
-verify 选项: "none" / "best_effort" (默认) / "always" (强制 verify).
-"""
+    # skill 契约摘要: 来自外部 runner system-prompt-with-skill.md 前言 +
+    # 当前 SKILL.md 核心规则 (fresh 验证 / 不编造 / 失败先验证状态)。
+    contract = """## Protocol contract (必须遵守)
+你是本地 macOS GUI 控制 agent。
+通过 bash 工具运行原始 `rdog control` 命令完成请求, 每次调用一个 rdog 进程。
+不要使用 shell 管道、链式命令、命令替换、坐标或 raw mouse fallback。
+持续在同一 agent loop 内工作, 直到 fresh 结构化 rdog 输出证明真实 GUI 结果;
+成功的 action 响应不是最终证据。
+遇到权限错误、窗口歧义、stale target 或不可读结果时停止, 先验证状态再行动。
+不要编造命令、id、stdout、应用状态或成功。
+只有真正读到 GUI 结果后才简短回答。"""
 
-    verify_block = f"""## Verify standard (完成后必做, 不通过算 fail)
-verify 方法: {verify_method}
-verify 标准: {verify_desc}
-expected result: {expected}"""
+    verify_block = f"""## Verify standard (完成后必须满足)
+期望结果: {expected}
+验证标准: {verify_desc}"""
 
-    return f"{requirement}\n## Task\n{task}\n\n{verify_block}"
+    return f"{contract}\n## Task\n{task}\n\n{verify_block}"
 
 
 def _invoke_pi_rpc(*, provider_key: str, model: str, api_key: str,
@@ -230,6 +235,310 @@ def _resolve_api_key(provider_cfg: dict) -> str:
     return raw.strip("\r")
 
 
+# ---------------------------------------------------------------------------
+# macOS app 状态捕获 + case prepare/verify
+# 移植自外部 runner run_macos_ops_eval.py, 让评测判定对齐 archive 40/40
+# 的严格验证语义 (fresh window/AX 证据 + expected result 断言)。
+# ---------------------------------------------------------------------------
+
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+_READ_KINDS = {"ax-find", "ax-get", "ax-tree", "observe", "window-find"}
+
+
+@dataclass
+class _ProcessResult:
+    """轻量子进程结果 (带 timed_out 标志, 用于超时判定)。"""
+    args: list[str]
+    returncode: int
+    stdout: str
+    stderr: str
+    timed_out: bool = False
+
+
+def _run_process(args: list[str], *, cwd: Path, timeout_s: int) -> _ProcessResult:
+    """运行进程并在超时时终结整个进程组,避免遗留子进程。"""
+    proc = subprocess.Popen(
+        list(args), cwd=cwd, text=True,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        start_new_session=True,
+    )
+    timed_out = False
+    try:
+        stdout, stderr = proc.communicate(timeout=timeout_s)
+    except subprocess.TimeoutExpired:
+        timed_out = True
+        os.killpg(proc.pid, signal.SIGTERM)
+        try:
+            stdout, stderr = proc.communicate(timeout=5)
+        except subprocess.TimeoutExpired:
+            os.killpg(proc.pid, signal.SIGKILL)
+            stdout, stderr = proc.communicate()
+    return _ProcessResult(
+        args=list(args),
+        returncode=proc.returncode,
+        stdout=stdout,
+        stderr=stderr,
+        timed_out=timed_out,
+    )
+
+
+def _extract_rdog_responses(text: str) -> list:
+    """从完整 stdout 提取所有 @response,不依赖最后一行或 shell 管道。"""
+    responses: list = []
+    for line in text.splitlines():
+        clean = _ANSI_RE.sub("", line)
+        if not clean.startswith("@response "):
+            continue
+        payload = clean[len("@response "):]
+        try:
+            responses.append(json.loads(payload))
+        except json.JSONDecodeError:
+            responses.append(payload)
+    return responses
+
+
+def _extract_tool_result_text(result) -> str:
+    """从 Pi RPC tool_execution_end 的 result 里提取纯文本。
+
+    RPC 实际格式: {"content": [{"type": "text", "text": "..."}], "details": null}
+    部分老版本是裸 list, 两种形态都兼容。
+    """
+    if isinstance(result, dict):
+        content = result.get("content")
+        if isinstance(content, list):
+            return "".join(
+                b.get("text", "") for b in content
+                if isinstance(b, dict) and b.get("type") == "text"
+            )
+        return str(result)
+    if isinstance(result, list):
+        return "".join(
+            b.get("text", "") for b in result if isinstance(b, dict)
+        )
+    return str(result)
+
+
+def _run_rdog_frame(bin_path: Path, frame: str, cwd: Path, timeout_s: int = 60):
+    """执行一个原始 rdog control frame,返回最后一个 @response。"""
+    cwd.mkdir(parents=True, exist_ok=True)
+    result = _run_process([str(bin_path), "control", frame], cwd=cwd, timeout_s=timeout_s)
+    responses = _extract_rdog_responses(result.stdout)
+    if result.timed_out or result.returncode != 0 or not responses:
+        raise RuntimeError(f"rdog 失败: {frame[:60]}..., exit={result.returncode}, responses={len(responses)}")
+    response = responses[-1]
+    if isinstance(response, dict) and (response.get("error") or response.get("code") not in (None, 0)):
+        raise RuntimeError(f"rdog 返回错误: {response}")
+    return response
+
+
+def _response_value(response) -> dict:
+    """只接受带对象 value 的查询响应。"""
+    value = response.get("value") if isinstance(response, dict) else None
+    if not isinstance(value, dict):
+        raise RuntimeError("rdog 查询缺少对象 value")
+    return value
+
+
+def _normalize_ax_text(value) -> str:
+    """移除 AX 文本中的不可见方向控制字符,并去掉首尾空白。"""
+    text = unicodedata.normalize("NFKC", str(value or ""))
+    text = "".join(char for char in text if unicodedata.category(char) != "Cf")
+    return text.strip()
+
+
+def _app_window(bin_path: Path, app_name: str, cwd: Path, *, allow_missing: bool):
+    """返回 app 的第一扇可交互窗口,缺失时按合同处理。"""
+    response = _run_rdog_frame(
+        bin_path,
+        f'@window-find#2101:{{app:{json.dumps(app_name)},limit:10,include_state:true,include_recipes:false}}',
+        cwd,
+    )
+    value = _response_value(response)
+    matches = [
+        window for window in (value.get("matches") or [])
+        if (window.get("state") or {}).get("interactable") is True
+    ]
+    if not matches:
+        if allow_missing:
+            return None
+        raise RuntimeError(f"缺少可交互窗口: {app_name}")
+    return matches[0]
+
+
+def _capture_app_state(bin_path: Path, case: dict, cwd: Path, prefix: str, *, allow_missing: bool) -> dict:
+    """按 case 的 verify 类型捕获 fresh 窗口与 AX 文本状态。"""
+    verify = case["verify"]
+    window = _app_window(bin_path, case["app"], cwd, allow_missing=allow_missing)
+    state: dict = {
+        "exists": window is not None,
+        "windowTitle": (window or {}).get("title") or "",
+        "values": [],
+    }
+    if verify == "window-count-increase":
+        # 窗口数验证 (菜单新建场景): 统计 app 全部可交互窗口数。
+        response = _run_rdog_frame(
+            bin_path,
+            f'@window-find#2103:{{app:{json.dumps(case["app"])},limit:20,include_state:true,include_recipes:false}}',
+            cwd,
+        )
+        value = _response_value(response)
+        state["windowCount"] = len(value.get("matches") or [])
+        return state
+    if window is None:
+        return state
+    window_id = window["window_id"]
+    if verify in ("ax-textarea-contains", "ax-statictext-contains"):
+        role = "AXTextArea" if verify == "ax-textarea-contains" else "AXStaticText"
+        response = _run_rdog_frame(
+            bin_path,
+            f'@ax-find#2102:{{window:{{window_id:"{window_id}"}},role:"{role}",depth:12,max_elements:5000,include_values:true,limit:80}}',
+            cwd,
+        )
+        value = _response_value(response)
+        state["values"] = [
+            normalized
+            for match in (value.get("matches") or [])
+            if (normalized := _normalize_ax_text(match.get("value")))
+        ]
+    return state
+
+
+def _quit_app(app_name: str, cwd: Path) -> None:
+    """退出指定 app: 先优雅 quit, 失败 (如未保存弹窗) 则 killall 兜底。"""
+    cwd.mkdir(parents=True, exist_ok=True)
+    result = _run_process(
+        ["osascript", "-e", f'tell application "{app_name}" to quit'],
+        cwd=cwd, timeout_s=10,
+    )
+    if result.timed_out or result.returncode != 0:
+        # 未保存文档会阻止优雅退出: 评测场景全部是我们自己创建的内容,
+        # killall 兜底不会丢失用户数据。
+        force = _run_process(["killall", app_name], cwd=cwd, timeout_s=10)
+        if force.returncode != 0:
+            raise RuntimeError(f"{app_name} 无法退出")
+    time.sleep(0.5)
+
+
+def _open_app(bin_path: Path, app_name: str, cwd: Path) -> None:
+    """通过 rdog @open-app 真实打开指定 app。"""
+    _run_rdog_frame(
+        bin_path,
+        f'@open-app#2103:{{app_name:{json.dumps(app_name)},wait_ms:1500}}',
+        cwd,
+    )
+    time.sleep(1.0)
+
+
+def _ensure_probe_image() -> Path:
+    """确保 /tmp 下存在评测用测试图片 (纯色 PNG, 无 PIL 依赖)。"""
+    probe = Path("/tmp/rdog-ops-probe.png")
+    if probe.exists() and probe.stat().st_size > 0:
+        return probe
+
+    def chunk(tag: bytes, data: bytes) -> bytes:
+        block = struct.pack(">I", len(data)) + tag + data
+        block += struct.pack(">I", zlib.crc32(tag + data) & 0xFFFFFFFF)
+        return block
+
+    width, height = 320, 200
+    raw = b"".join(b"\x00" + bytes((66, 135, 245)) * width for _ in range(height))
+    png = (
+        b"\x89PNG\r\n\x1a\n"
+        + chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0))
+        + chunk(b"IDAT", zlib.compress(raw))
+        + chunk(b"IEND", b"")
+    )
+    probe.write_bytes(png)
+    return probe
+
+
+def _prepare_case(bin_path: Path, case: dict, cwd: Path) -> dict:
+    """建立每个 case 约定的初始 app 状态,返回 before 状态证据。"""
+    setup = case["setup"]
+    if setup == "textedit-empty-doc":
+        # TextEdit 首启可能弹"打开"对话框: 先退出, 再打开并新建空文稿,
+        # 保证模型面对的是干净的空白文本区。
+        _quit_app("TextEdit", cwd)
+        _open_app(bin_path, "TextEdit", cwd)
+        _run_rdog_frame(bin_path, "@key:Esc", cwd)
+        _run_rdog_frame(bin_path, "@key:Cmd+N", cwd)
+        time.sleep(0.8)
+        before = _capture_app_state(bin_path, case, cwd, "before", allow_missing=False)
+        if not before["windowTitle"] and not before["values"]:
+            raise RuntimeError("TextEdit 空文稿未就绪")
+        return before
+    if setup == "preview-file-ready":
+        # 只预置测试图片与 "Preview 未运行" 状态, 打开动作留给模型完成。
+        probe = _ensure_probe_image()
+        _quit_app("Preview", cwd)
+        return {"exists": False, "windowTitle": "", "values": [], "probeFile": str(probe)}
+    # 其余场景: 确保 app 处于未运行状态, 由模型自己打开。
+    app_by_setup = {
+        "calendar-open": "Calendar",
+        "safari-fresh-window": "Safari",
+        "terminal-open": "Terminal",
+    }
+    _quit_app(app_by_setup[setup], cwd)
+    before = _capture_app_state(bin_path, case, cwd, "before", allow_missing=True)
+    if before["exists"]:
+        raise RuntimeError("app 退出后仍存在窗口")
+    return before
+
+
+def _fresh_verification_observed(tool_results_raw: list[str]) -> bool:
+    """只接受 rdog 实际返回的成功结构化读取结果。"""
+    for text in tool_results_raw:
+        for response in _extract_rdog_responses(text):
+            if not isinstance(response, dict):
+                continue
+            value = response.get("value")
+            if not isinstance(value, dict):
+                value = response
+            if value.get("error") or value.get("code") not in (None, 0):
+                continue
+            if value.get("kind") in _READ_KINDS:
+                return True
+    return False
+
+
+def _classify_run(case: dict, rc: int, events: list, tool_results_raw: list[str], before: dict, after: dict) -> dict:
+    """按真实 tool call、Pi 多轮和 fresh AX/window 结果联合判定 (对齐 archive)."""
+    verify = case["verify"]
+    # macOS 文本输入存在系统级"自动大写句首", 结果断言采用大小写不敏感比较。
+    expected = case.get("expectedResult", "").casefold()
+    if verify == "window-count-increase":
+        result_observed = after.get("windowCount", 0) > before.get("windowCount", 0)
+        window_observed = after.get("exists") is True
+    elif verify == "window-title-contains":
+        result_observed = expected in after.get("windowTitle", "").casefold()
+        window_observed = after.get("exists") is True
+    else:  # ax-textarea-contains / ax-statictext-contains
+        result_observed = any(expected in v.casefold() for v in after.get("values", []))
+        window_observed = after.get("exists") is True
+
+    # TextEdit 空文稿就绪场景初始状态是 "窗口已存在", 其余是 "app 未运行"。
+    if case.get("setup") in ("textedit-empty-doc", "textedit-save-dir"):
+        initial_matched = bool(before.get("exists")) or bool(before.get("values"))
+    else:
+        initial_matched = before.get("exists") is False
+
+    rdog_commands = [
+        evt.get("args", {}).get("command", "")
+        for evt in events
+        if evt.get("type") == "tool_execution_start" and evt.get("toolName") == "bash"
+    ]
+    checks = {
+        "processCompleted": rc == 0,
+        "multiTurnVerified": len(rdog_commands) >= 1,
+        "realRdogCallObserved": any("rdog control" in c for c in rdog_commands),
+        "freshVerificationObserved": _fresh_verification_observed(tool_results_raw),
+        "appWindowObserved": window_observed,
+        "expectedResultObserved": result_observed,
+        "initialStateMatched": initial_matched,
+    }
+    return checks
+
+
 def _run_one_case(*, repo_root: Path, config: dict, model_cfg: dict, case_id: str,
                   bin_path: Path, skill_dir: Path | None) -> CaseRunResult:
     case = json.loads((repo_root / "runner" / "cases" / f"{case_id}.json").read_text())
@@ -252,19 +561,36 @@ def _run_one_case(*, repo_root: Path, config: dict, model_cfg: dict, case_id: st
 
     ledger = InteractionLedger(model_id=model_id, case_id=case_id)
     max_attempts = model_cfg.get("maxCaseAttempts", 3)
+    # max-tool-iterations 按模型配置: Group A (deepseek/minimax-cn) 高 churn
+    # 需要 30 (archive 外部 runner 的 maxToolIterations=30), Group B 16 够用。
+    # 5x8 baseline (commit 5c7b9a6) 实证: 8 次迭代会截断 Group A 导致 0/8。
+    max_iter = int(model_cfg.get("maxToolIterations", 30))
+    # Pi 调用超时随迭代上限线性放大 (外部 runner processTimeoutSeconds=900)。
+    pi_timeout_s = min(900, max(120, max_iter * 30))
     final_success = False
     final_state = "not_attempted"
     error = ""
+    last_checks: dict = {}
 
     for attempt in range(1, max_attempts + 1):
         ledger._attempt = attempt
         session_dir = Path(tempfile.mkdtemp(prefix=f"pi-{case_id}-", dir=tempfile.gettempdir()))
+        # prepare: 建立 case 约定的初始 app 状态 + before 证据。
+        # 环境阻塞 (app 退不掉 / 窗口起不来) 时直接判 runner_error, 不重试。
+        try:
+            before = _prepare_case(bin_path, case, session_dir / "prepare")
+        except Exception as e:
+            final_state = "environment_blocked"
+            error = str(e)
+            ledger.record("", rdog_error=f"prepare_failed: {e}")
+            break
         rc, events = _invoke_pi_rpc(
             provider_key=provider_key, model=model_id, api_key=api_key,
             extension_path=extension_path, system_prompt=system_prompt,
             prompt=_build_case_prompt(case),
             session_dir=session_dir,
-            max_tool_iterations=8,
+            max_tool_iterations=max_iter,
+            timeout_s=pi_timeout_s,
         )
 
         # Walk events to extract tool calls + tool results, feed into ledger.
@@ -272,6 +598,7 @@ def _run_one_case(*, repo_root: Path, config: dict, model_cfg: dict, case_id: st
         # {toolName, result, isError}. toolName is "bash" (after extension translation),
         # args.command is the actual `rdog control mac.lab ...` invocation.
         last_tool_start: dict | None = None
+        tool_results_raw: list[str] = []
         for evt in events:
             etype = evt.get("type")
             if etype == "tool_execution_start":
@@ -286,30 +613,33 @@ def _run_one_case(*, repo_root: Path, config: dict, model_cfg: dict, case_id: st
                 if last_tool_start is not None:
                     cmd = last_tool_start["command"]
                     last_tool_start = None
-                    res = evt.get("result", "")
-                    if isinstance(res, list):
-                        text = "".join(
-                            b.get("text", "") for b in res if isinstance(b, dict)
-                        )
-                    else:
-                        text = str(res)
+                    text = _extract_tool_result_text(evt.get("result", ""))
+                    tool_results_raw.append(text)
                     is_err = evt.get("isError", False)
                     ledger.record(
                         "", rdog_response=text[:500],
                         rdog_error=("tool_error" if is_err else ""),
                     )
 
-        # crude success heuristic: at least one action classified + no recovery tail
-        summary = ledger.summary()
-        has_actions = summary["by_class"].get("action", 0) >= 1
-        recoveries = summary["by_class"].get("recovery", 0)
-        if has_actions and recoveries == 0 and rc == 0:
+        # after 状态捕获 + 严格判定 (对齐 archive: fresh window/AX + expected)。
+        after = _capture_app_state(
+            bin_path, case, session_dir / "verify", "after", allow_missing=True
+        )
+        # reset: 恢复现场, 保证下一样本互不污染。
+        try:
+            _quit_app(case.get("app", ""), session_dir / "reset")
+        except Exception:
+            pass
+
+        checks = _classify_run(case, rc, events, tool_results_raw, before, after)
+        last_checks = checks
+        if all(checks.values()):
             final_success = True
             final_state = "success"
             break
         elif attempt == max_attempts:
             final_state = "max_attempts_exceeded"
-            error = f"rc={rc}, recoveries={recoveries}"
+            error = f"rc={rc}, checks={checks}"
             break
         else:
             final_state = "retry_pending"
@@ -321,6 +651,7 @@ def _run_one_case(*, repo_root: Path, config: dict, model_cfg: dict, case_id: st
         success=final_success,
         final_state=final_state,
         ledger_summary=ledger.summary(),
+        checks=last_checks,
         error=error,
     )
 
@@ -391,7 +722,7 @@ def main() -> int:
                     result = CaseRunResult(
                         model_id=model["id"], case_id=case, attempts=0,
                         success=False, final_state="runner_error",
-                        ledger_summary={"error": str(e)}, error=str(e),
+                        ledger_summary={"error": str(e)}, checks={}, error=str(e),
                     )
                 (case_dir / "result.json").write_text(
                     json.dumps(asdict(result), indent=2)

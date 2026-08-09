@@ -13,21 +13,21 @@
     "config": "rdog_macos.toml"
   },
   "models": [
-    {"id": "deepseek",             "provider_key": "deepseek",             "profile": "rdog-control-bash", "maxCaseAttempts": 3},
-    {"id": "minimax-cn",           "provider_key": "minimax-cn",           "profile": "rdog-control-bash", "maxCaseAttempts": 3},
-    {"id": "qwen37-flash",         "provider_key": "qwen37-flash",         "profile": "rdog-control-bash", "maxCaseAttempts": 3},
-    {"id": "qwen36-flash",         "provider_key": "qwen36-flash",         "profile": "rdog-control-bash", "maxCaseAttempts": 3},
-    {"id": "minimax-m27-highspeed","provider_key": "minimax-m27-highspeed","profile": "rdog-control-bash", "maxCaseAttempts": 3}
+    {"id": "deepseek",             "provider_key": "deepseek",             "profile": "rdog-control-bash", "maxCaseAttempts": 3, "maxToolIterations": 30},
+    {"id": "minimax-cn",           "provider_key": "minimax-cn",           "profile": "rdog-control-bash", "maxCaseAttempts": 3, "maxToolIterations": 30},
+    {"id": "qwen37-flash",         "provider_key": "qwen37-flash",         "profile": "rdog-control-bash", "maxCaseAttempts": 3, "maxToolIterations": 16},
+    {"id": "qwen36-flash",         "provider_key": "qwen36-flash",         "profile": "rdog-control-bash", "maxCaseAttempts": 3, "maxToolIterations": 16},
+    {"id": "minimax-m27-highspeed","provider_key": "minimax-m27-highspeed","profile": "rdog-control-bash", "maxCaseAttempts": 3, "maxToolIterations": 16}
   ],
   "cases": [
-    "calculator-happy-path",
-    "calculator-old-state-recovery",
-    "calculator-divide-by-zero",
+    "textedit-type-text",
+    "calendar-window-check",
+    "safari-navigate-example",
+    "preview-open-image",
+    "terminal-window-check",
     "terminal-run-command",
     "safari-new-tab-navigate",
-    "textedit-multi-window",
-    "clipboard-copy-paste",
-    "multi-window-textedit"
+    "textedit-multi-window"
   ],
   "ledger": {
     "schema": "rdog.macos-ops.interaction-ledger.v1",

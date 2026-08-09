@@ -469,3 +469,11 @@
 
 - 交互优化必须同时报告 `agentDecisionCount`、`requestCount`、supporting shell、recovery、protocol error 和 attempt;最终成功不代表交互成本低。
 - 任何 parser、协议、通用 primitive、canonical skill 或 macOS ops case 变更都必须重新跑完整活动模型矩阵,并保留 immutable ledger 与 binary provenance。
+
+## [2026-08-09] 评测载体差异会被误判成"模型退步" (已验证)
+
+- 现象: deepseek/minimax-cn 从 archive 8/8 掉到仓库内 runner 的 0/8
+- bisect 验证: 同一当前 binary (outcome 三态+epoch) + 当前 skill + 外部 runner + 老 case 集 → 两模型都 8/8
+- 结论: 退步来自载体差异, 不是模型: (1) max-tool-iterations 30→8 截断高 churn 模型; (2) 5 个老 case 被换成 calculator×3 + clipboard + multi-window-textedit; (3) prompt 从 skill 全文嵌入变为 profile hint
+- 复现命令: 外部 runner `eval-macos-ops.sh <model>`, 前置: `rdog daemon --transport zenoh` + shell env 注入 API key (tmux server 无 key 会 44ms 秒败, usageTotals=0, 看 pi-stderr "No API key found")
+- 边界: 只验证了 macOS ops 8 老 case; 新 case 集 + 仓库内 runner 的组合仍是 20/40 → 25/40
