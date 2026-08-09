@@ -39,9 +39,14 @@ Issues 和 Wayfinder maps 使用 GitHub Issues。详见 `docs/agents/issue-track
   - 用途: 固定 `rdog control TARGET --pty -- COMMAND ...`、PTY frame、透明输入、out-of-band close、Zenoh session channel 映射与验证边界
   - 何时阅读: 修改远程 PTY、control transport streaming、Zenoh session channel、`--pty-close` 或 TTY 交互行为前
 
+- `docs/solutions/`
+  - 主题: 正式、分类化、可验证的长期知识库 (Bug track + Knowledge track, 按 problem_type 分类)
+  - 用途: 处理 Bug、性能、权限、数据库、外部集成、非琐碎实现、架构或工作流任务时先定向检索; 新成熟经验写入前先查重叠; 每份文档经 frontmatter + claims 校验
+  - 何时阅读: 任务开始前按模块/错误文本检索; 沉淀成熟经验、出现与既有结论冲突的新证据、或要复用历史验证方法时
+
 - `EXPERIENCE.md`
   - 主题: 本项目已经验证过的协议、运行时与GUI安全经验边界,以及 rdog parser 兼容 LLM 多样化写法的机制与踩坑
-  - 用途: 帮助后续改协议时避免把 `@exit`、显式协议请求和裸 shell 行再次混淆;沉淀跨平台修复、Zenoh、log路径、AX hit-test窗口归属、app-menu capture selector 与 screenshot backend gate 等隐性契约教训;改 parser 时先读 compact 前缀路由/空格参数/引号剥离/响应自包含机制,避免破坏 LLM 兼容
+  - 用途: 待整理经验收件箱, 同时保留已承接协议/运行时经验的索引性描述; 满足成熟度门禁的经验分流到 `docs/solutions/`; 帮助后续改协议时避免把 `@exit`、显式协议请求和裸 shell 行再次混淆;沉淀跨平台修复、Zenoh、log路径、AX hit-test窗口归属、app-menu capture selector 与 screenshot backend gate 等隐性契约教训;改 parser 时先读 compact 前缀路由/空格参数/引号剥离/响应自包含机制,避免破坏 LLM 兼容
   - 何时阅读: 做协议演进、回顾历史判断口径、沉淀经验时;改daemon日志/e2e polling、坐标AX root discovery、backend locator、app-menu、screenshot backend、GUI目标归属门禁、或任何 compact/对象语法解析前
 
 - `.codex/skills/rdog-control/SKILL.md`
