@@ -1,5 +1,5 @@
 {
-  "_comment": "5 model x 8 case macOS ops live matrix 配置 (archive 5x8 baseline 对齐). 加新 model/case 必须确认完整目标列表 (不假装跑过子集).",
+  "_comment": "5 model x 8 case macOS ops live matrix 配置 (2026-08-09 已对齐 archive 载体: 老 8 case + per-model max-iter + 严格验证). 加新 model/case 必须确认完整目标列表 (不假装跑过子集).",
   "schema": "rdog.eval-macos-ops.config.v1",
   "rdogBinary": {
     "_comment": "强制 Pi bash tool 用 current binary. prepend target/debug 到 PATH, 让 which rdog 指向这里. SHA-256 写入 ledger manifest.",
@@ -35,9 +35,9 @@
     "decisionRecordFields": ["model_id", "case_id", "attempt", "seq", "kind", "classification", "rdog_response", "rdog_error", "artifact_path"]
   },
   "immutableBaseline": {
-    "_comment": "archive 2026-08-07 baseline (5 model x 8 case, 旧 binary). current binary 应该 < 252 requests 才算改善.",
-    "agentDecisions": 260,
-    "rdogRequests": 252,
-    "attempts": 41
+    "_comment": "2026-08-09 对齐 archive 载体后的 5 model x 8 case baseline (严格验证 40/40, RPC 计数口径). 后续 run 以 attempts 为硬指标, decisions/requests 是同口径对比.",
+    "agentDecisions": 648,
+    "rdogRequests": 315,
+    "attempts": 42
   }
 }

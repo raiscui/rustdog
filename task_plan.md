@@ -739,3 +739,8 @@ feature/computer-act-outcome-3state 分支已推到 origin. 后续决策:
 
 ### 完成
 - [x] 阶段 15.1-15.7 全部完成
+
+### 阶段 15.7 (后续收尾): immutableBaseline 更新为新 40/40 基准
+- runner/config.json immutableBaseline: 260/252/41 (archive 旧) → 648/315/42 (2026-08-09 对齐后, 严格验证 40/40, RPC 口径)
+- 注释同步更新: attempts 为硬指标, decisions/requests 同口径对比
+- json 合法 + dry-run OK
