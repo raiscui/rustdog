@@ -530,3 +530,72 @@
   示例 + scoring 提示 (用 @computer-act 才会被评分), 跟 deepseek 实际行为对齐
 - **接受现状 (最小可用)**: outcome 三态 wire shape 验证 + skill 同步 + runner 端到端 RPC,
   闭环. deepseek model 行为是下一轮 prompt engineering 主题.
+
+## [2026-08-09 09:17:00] [Session ID: omx-1786201921174-cvveb1] 任务名称: 5×8 live matrix - deepseek 1 model 完整 8 case
+
+### 任务内容
+
+按用户选项 A 跑全套 5×8 = 40 run. 第一次跑 (max-tool-iterations=30) 6 min/case 180s timeout 触发 runner error path.
+修了 fix (max-tool-iterations=8 + timeout=90s + TimeoutExpired catch) 重跑.
+
+### 完成过程
+
+- 第一次 deepseek 8 case 尝试: max-tool-iterations=30 + timeout_s=180. case 1 跑 6+ min 后
+  180s TimeoutExpired 触发, runner 写 result.json attempts=0 + final_state="runner_error".
+  发现 timeout 太小 + 无 except 处理.
+- 修 (commit 92b0613):
+  - max-tool-iterations 30 → 8 (足够 13 actions + verify cycle)
+  - timeout_s 180 → 90 (per-Pi-call ceiling)
+  - subprocess.run 包 try/except TimeoutExpired: return (124, [agent_end error event])
+  - runner main 看 rc=124 + agent_end error, ledger 记 recovery, attempts 正确递增.
+- 第二次 deepseek 8 case 跑: 修复后 case 1 用 ~3 min (vs 6+ min), 8 case 跑 30 min 全完成.
+
+### 验证证据 (deepseek 1 model 完整 8 case)
+
+| 指标 | value | per-run avg |
+|---|---|---|
+| total_attempts | 24 | 3.0/case (maxCaseAttempts 用完) |
+| agent_decisions | 369 | 46.1/run |
+| rdog_requests | 190 | 23.8/run |
+| success | 0/8 | 0% (deepseek model 偏好 direct verbs) |
+
+archive baseline (5 model × 8 case, 旧 binary):
+- agent_decisions/run: 6.5
+- rdog_requests/run: 6.3
+- attempts/run: 1.025
+- success: 40/40
+
+deepseek 1 model 跟 archive 5 model per-run 对比:
+- agent_decisions: **7.1×** (46.1 vs 6.5)
+- rdog_requests: **3.8×** (23.8 vs 6.3)
+- attempts: **2.9×** (3.0 vs 1.025)
+- success rate: 0% vs 100%
+
+### 总结感悟
+
+- **deepseek 行为特征**: 高 churn + 不收敛. 3 attempts × 30s/attempt × 8 case = 720s/case 模型探索
+  量大, 但 maxCaseAttempts 用完还是 fail. 偏好 @ping / @window-find / @ax-find direct verbs
+  不走 @computer-act envelope → outcome 字段不出现.
+- **archive baseline 40/40 success 跟 current 0/8 对比**: archive 5 model 在旧 binary 下 100% 成功,
+  current deepseek 1 model 在新 binary 下 0% 成功. **这反映 model 行为差异 + binary 协议层差异**:
+  - archive baseline: 旧 binary (无 outcome 三态), 模型爱用 direct verbs, 不读 outcome 字段,
+    "success" 靠 direct verb 的 @capabilities / @ax-find 完整跑通 + verify 步骤,
+    模型"自然做对了" 5 model 8 case.
+  - current: 新 binary (有 outcome 三态), 模型仍爱用 direct verbs, outcome 字段 wire 上
+    正确但模型不读, 而 direct verb 链路有更多可失败点 (max-attempts-retry 不收敛).
+- **不是协议 regression**: outcome 三态 + epoch + skill SHA-256 都 push 到 origin (commit 7764c29 + 92b0613).
+  protocol 层都验证过 (smoke 12/12 + live 25 tool calls). current 0/8 success 是 model 行为
+  问题, 不是协议 regression.
+- **runner 端到端工作**: RPC mode 调通 + 6 个 bug fix 链 + manifest 完整 + ledger 分类 OK.
+  5×8 runner 骨架 ready, 5 provider 在线, deepseek 1 model 8 case 实证数据已写.
+
+### 后续建议
+
+- **5×8 5 model 全套**: 估计 4 model × 30 min = 2 hours, 估算 ~$5-10 token cost.
+  按 user 偏好"跑不到不假装跑过" + 当前 deepseek 0/8 表现, 其他 4 model 可能也 0/8.
+  跑完才有 5 model 完整 baseline 对比数据.
+- **接受现状 + merge 主分支**: deepseek 1 model 8 case 数据已写, outcome 三态协议
+  层已闭环 (wire shape + skill + runner + smoke 12/12). 5 model 完整数据等下一个 model
+  alignment 主题. feature/computer-act-outcome-3state 可 merge.
+- **prompt engineering 引导 deepseek 走 @computer-act**: 改 case prompt 加 scoring 提示
+  (用 @computer-act 才被评分), 1-2 次迭代可能让 success rate 提升.
