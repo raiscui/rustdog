@@ -1046,3 +1046,11 @@ feature/computer-act-outcome-3state 分支已推到 origin. 后续决策:
 - 发布 GitHub issue #40 (raiscui/rustdog), 打 ready-for-agent
 - 落盘 specs/rdog-stable-signing-identity.md, AGENTS.md 索引登记
 - 测试缝: 签名身份不变量 (DR 字节级一致), 权限保留为人工一次性验收
+
+## [2026-08-09 22:10:00] [Session ID: omx-1786268168901-f711dm] [记录类型]: 完成 - 实施 issue #40
+
+### 动作
+- 新增 scripts/install-signed.sh (bash + set -euo pipefail): cargo install --force -> 固定 identifier + 自定义 DR 重签 -> canonical DR 归一化校验 (fail-closed)
+- 本机完整验证: 真实 install (6m18s) -> 重签 -> DR check 通过; fail-closed 验证 (破坏副本被拒) + 引号显示形式归一化验证
+- 已装 ~/.cargo/bin/rdog 切换为固定身份: Identifier=rdog, DR=designated => identifier rdog
+- 注意: 首次切换后需重新授权 Accessibility + Screen Recording 一次

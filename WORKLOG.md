@@ -984,3 +984,19 @@ deepseek 1 model 跟 archive 5 model per-run 对比:
 ### 总结感悟
 - 无 runtime 改动的 dev-workflow 方案, 测试缝选"DR 不变量"而非运行时测试
 - 权限保留的最终验收必须人工, spec 中明确写明自动化覆盖边界
+
+## [2026-08-09 22:12:00] [Session ID: omx-1786268168901-f711dm] 任务名称: 实施 issue #40 - install-signed 脚本
+
+### 任务内容
+- scripts/install-signed.sh: install -> 重签 (identifier=rdog, 自定义 DR) -> fail-closed 校验
+- issue #40 留实施完成 comment
+- main 提交 a746b2f (cherry-pick 自 feature 分支 dbedcb2, 顺带把 A3.2 文档记录带入 main)
+
+### 完成过程
+- 校验逻辑演进: 字符串断言被 canonical 显示格式坑 (纯字母数字 identifier 省略引号), 改为归一化提取 'designated => identifier <id>' 精确匹配
+- codesign --verify -r 对错误 identifier 也放行 (exit=0), 语义不可靠, 弃用
+- 真实 install 6m18s (target/release 首次全量编译)
+
+### 总结感悟
+- codesign 的 canonical 输出格式随内容变化, 断言必须归一化而非字符串比对
+- 验证 prefer codesign 自带评估 (verify/requirements), 但确认其语义后再用
