@@ -1,6 +1,6 @@
 ---
 name: rdog-control
-version: "2.23-darwin-dim3+dim9+dim4"  # 2026-07-28:加 When to Defer + 视觉标记
+version: "2.27-key-contract"
 description: "Use for rdog control on a local or named machine: health, shell, GUI, browser, window, AX, PTY, flow, verification, and safety."
 ---
 
@@ -39,6 +39,62 @@ rdog control @ax-find:app:APP,ROLE
 rdog control @ax-press:app:APP,DESCRIPTION
 rdog control @ax-press-sequence:app:APP,DESCRIPTION_1,DESCRIPTION_2
 ```
+
+### App Menu (应用菜单)
+
+App 菜单栏不在窗口 AX tree 下面。菜单只用 `root:"app-menu"` 和 `app`;该 app
+必须解析为唯一 PID,但不要求存在唯一或可交互的窗口。不能附带 window / process
+选择器。先读菜单项,再将返回的 `pid:PID/menu-bar/path:...` 交给既有 AX action。
+
+```bash
+rdog control '@ax-find:{root:"app-menu",app:"Finder",role:"AXMenuItem",limit:20}'
+rdog control '@ax-action:{target:{id:"pid:123/menu-bar/path:0.2"},action:"AXPress"}'
+```
+
+菜单 target 是短期定位器。每次动作前要 fresh `@ax-find`;不要把它伪装成
+`pid:PID/window:N` 或跨应用复用。
+
+### Text Input (文字输入)
+
+向文本框 / 文本区 / 地址栏输入文字时,`@type-text mode:"auto"` 会先尝试 AXValue
+直写。只有 AXValue 不可写或不支持时,才回退到 targeted keyboard;clipboard 仍须
+`allow_clipboard:true`。response 的 `delivered_via` 是本次实际投递路径。
+
+```bash
+rdog control '@ax-find:{window:{window_id:"pid:123/window:0"},role:"AXTextArea",limit:5}'
+rdog control '@type-text:{target:{id:"pid:123/window:0/path:0.0"},text:"hello rdog 42",mode:"auto"}'
+rdog control '@ax-find:{window:{window_id:"pid:123/window:0"},role:"AXTextArea",include_values:true,limit:5}'
+```
+
+三步流程:先 `@ax-find` 拿到文本控件的 AX id → `@type-text mode:"auto"` 写入 →
+再独立 `@ax-find` 读回 value 证明输入生效。需要严格禁止键盘 / 剪贴板回退时,
+显式使用 `mode:"ax-value"`;该模式保持 fail-closed。
+
+`auto` 仅会因 `InvalidInput` / `Unsupported` 继续下一层。权限和传输错误不会回退。
+`@paste` 走剪贴板,`@key` 只发按键,都不能替代可写控件的 AXValue 直写。详细语法见
+`references/protocol.md` 的 Text Input 小节。
+
+### Window Screenshot (窗口截图)
+
+默认 `@screenshot` 仍是全虚拟桌面。需要窗口视觉证据时,先用 fresh
+`@window-find` 获得 `window_id`,再请求窗口截图:
+
+```bash
+rdog control '@screenshot:{target:"window",window:{window_id:"pid:123/window:0"}}'
+```
+
+返回的 image 来自当前 display composite 的 AX rect 裁剪。manifest 的
+`source:"display-composite-crop"`、`visibility:"screen-composited"` 和 `clipped`
+是事实边界:被遮挡像素不能当成原生窗口内容。窗口截图不携带 AX;结构化证据单独用
+fresh `@ax-find` 读取。
+
+### Native Capture Diagnostics
+
+macOS screenshot 卡住或失败时,读取 daemon log 的 `event_name`。`screenshot_capture_timeout`
+说明某个 `backend` 到了控制面期限;`screenshot_capture_fallback` 表示 SCK 正转入 xcap;
+`screenshot_capture_permission_denied` 表示 Screen Recording 未授权且不会 fallback;
+`screenshot_capture_failed` 才表示两个 backend 都失败。所有事件都有 `capture_kind`
+(`primary` 或 `all`),因此窗口截图也能关联到实际 desktop capture。
 
 The 5-field `@ax-press:app:APP,DESCRIPTION,RESULT_ROLE,EXPECTED_VALUE,MAX_ATTEMPTS`
 form is intentionally not in this primary list. Read the GUARDED PRESS section
@@ -87,8 +143,40 @@ After a guarded press, regardless of `verified`, take a separate fresh
 `@ax-find` for the result role before issuing the next input step. The
 fresh read is the only proof the reset actually took effect.
 
+Clearing stale content is a step, never the end of a task: after the fresh
+read proves the clear took effect, continue with the remaining input steps
+and finish with the final confirm action. Do not stop after a reset, and do
+not use shortcut keys (for example Esc) to clear — use the app's semantic
+clear button and keep going until the full sequence is done.
+
 Use `@key` for an explicit shortcut request or when no semantic action can express
-the operation. Use guarded screenshot coordinates only after semantic lookup fails.
+the operation. `@key` covers explicit hotkeys (Cmd+T new tab) and global keys with
+no AX semantics; clearing stale content, resetting state, and confirming buttons
+are `@ax-press` responsibilities — do not use Esc / Delete / Cmd+A keyboard
+shortcuts instead of pressing the actual button. Use guarded screenshot
+coordinates only after semantic lookup fails.
+
+### Local @key Actions
+
+Outside a `@pty` session, `@key` targets the local macOS input system. Use the
+compact form for a single key or chord, for example `@key:Cmd+R`. Use the object
+form when timing, delivery, or an explicit target is needed:
+
+```bash
+rdog control '@key:{key:"R",modifiers:["Cmd"],mode:"press_release",hold_ms:200}'
+rdog control '@key:{key:"R",delivery:"pid-targeted",pid:123}'
+rdog control '@key:{key:"R",delivery:"window-targeted",window_id:"pid:123/window:0"}'
+```
+
+The object form accepts only `key` (required), `hold_ms`, `mode`, `modifiers`,
+`delivery`, `pid`, and `window_id`. `delivery` defaults to `global`; targeted
+delivery must name exactly one fresh `pid` or `window_id` and must not use an
+app selector. `target`, `keys`, and `shortcut` are not `@key` fields. Do not
+invent aliases for them or infer a target from the application name.
+
+`@key` is a key action, not text input or an AX action alias. Use `@type-text`
+for text and `@ax-press` for AXPress. Use `@ax-action` when the requested AX
+action is something else, such as `AXConfirm` or `AXShowDefaultUI`.
 
 ## Browser Lane
 
@@ -118,6 +206,13 @@ Read only the matching reference before using an Other Lane:
 - `references/zenoh-hardware.md`: discovery, SDK, serial, and bridge hosts.
 
 ## Failure Handling
+🔴 **READ FIRST for `@computer-act` responses.** Before matching on `ok` or `error_code`,
+read [references/computer-act-outcome.md](references/computer-act-outcome.md).
+The shape changed in `feature/computer-act-outcome-3state`: `outcome` and
+`verification.status` carry postcondition signal that used to live in
+`error_code:"verify_failed"`. Phase F-2's `ok:false + error_code:verify_failed`
+path is removed.
+
 
 🔴 **REPAIR — when a control fails.** When a control returns `performed:false`, zero matches, or an unexpected
 fresh read, walk the three-tier ladder below before retrying with a new
@@ -153,6 +248,7 @@ None of these are valid tactics.
 | Retry the same `@ax-press` more than three times with the same description | If the description still does not resolve, the locator is wrong. Re-query the role or change lane; do not throw the same payload at the daemon. |
 | Pre-emptively press a clear / reset button on a fresh app | A reset before reading state is a protocol violation, not a safety measure. The fresh read tells you whether the app already starts at the target baseline. |
 | Use `@cmd` to compute math, parse JSON, or evaluate expressions | Shell math has nothing to do with the GUI task. `@cmd` is for legitimate system commands; bypassing semantic actions defeats all rdog-control evidence. |
+| 🔴 Use Esc / Delete / Cmd+A keyboard shortcuts to clear or reset app state | Clearing stale content, dismissing dialogs, or selecting all are visible control operations. They must be done with `@ax-press` on the actual button (e.g. a clear button). Keyboard shortcuts are not a substitute and will not be counted as performed button actions. |
 | Pass `app:计算器`, `app:計算機`, or any non-ASCII app name | `@window-find` only resolves ASCII app names. Non-ASCII names return 0 matches and will never succeed. |
 | Mix `app:APP` with `pid:PID/window:INDEX`, `process:`, or `window_title:` in the same target | The target validator rejects the request. Pick exactly one ownership channel. |
 | Reuse `@eN` ref across daemon restarts or turn boundaries | Observation refs are short-lived. A ref that resolved in the previous turn may resolve to a different element today. Re-query via `@ax-find`. |

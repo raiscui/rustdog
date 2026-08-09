@@ -1,8 +1,5 @@
 use crate::{
-    control_ax::{
-        capture_current_ax_subtree, capture_default_ax_snapshot, AxCapturedSubtree, AxElement,
-        AxRect, AxSnapshot, AxTreeRequest, AxWindow,
-    },
+    control_ax::{AxCapturedSubtree, AxElement, AxRect, AxSnapshot, AxTreeRequest, AxWindow},
     control_display_scope::{
         display_intersects_rect, display_scope_report, parse_display_scope, resolve_display_scope,
         resolve_observation_window_ref, DisplayRect, DisplayScope, DisplaySelector,
@@ -18,6 +15,7 @@ use serde::Serialize;
 use std::{borrow::Cow, collections::HashSet, io};
 
 mod act;
+mod capture;
 mod parse;
 
 pub use self::act::{build_default_web_act_response_json, parse_web_act_payload, WebActRequest};
@@ -114,6 +112,18 @@ impl WebFindBrowserTarget {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WebFindQuery {
     pub text: String,
+    pub mode: WebTextMatchMode,
+}
+
+/// Web 文本查询的匹配模式。
+///
+/// `Contains` 保留既有协议行为。需要执行副作用 action 时,调用者可显式使用
+/// `Exact`,避免短标签同时命中正文中的长文本。
+#[derive(Debug, Copy, Clone, Default, PartialEq, Eq)]
+pub enum WebTextMatchMode {
+    Exact,
+    #[default]
+    Contains,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -230,10 +240,7 @@ struct WebFindTraceStep {
 }
 
 pub fn build_default_web_find_response_json(request: &WebFindRequest) -> io::Result<String> {
-    let snapshot = capture_default_ax_snapshot(&request.tree_request())?;
-    build_web_find_response_json_with_refresh(&snapshot, request, |target_id, tree_request| {
-        capture_current_ax_subtree(target_id, tree_request).map(Some)
-    })
+    capture::build_default_web_find_response_json(request)
 }
 
 #[cfg(test)]
@@ -474,7 +481,7 @@ where
         &mut match_count,
         &mut matches,
         &mut seen_target_ids,
-        &[],
+        None,
     );
     trace.push(trace_step(
         "match-page-content",
@@ -552,7 +559,7 @@ where
         &mut match_count,
         &mut matches,
         &mut seen_target_ids,
-        &[],
+        None,
     );
     trace.push(trace_step(
         "refresh-web-area-subtree",
@@ -890,17 +897,24 @@ fn find_web_area(elements: &[AxElement]) -> Option<&AxElement> {
     None
 }
 
-fn collect_web_matches(
+fn collect_web_matches<'a>(
     window: &AxWindow,
-    element: &AxElement,
+    element: &'a AxElement,
     request: &WebFindRequest,
     match_count: &mut usize,
     matches: &mut Vec<WebFindMatch>,
     seen_target_ids: &mut HashSet<String>,
-    ancestors: &[&AxElement],
+    actionable_ancestor: Option<&'a AxElement>,
 ) {
-    if let Some(text_match) = match_text(element, &request.query.text) {
-        if let Some(target) = resolve_actionable_target(element, ancestors, &request.roles) {
+    // 子节点只需要最近的 actionable ancestor,不需要复制完整祖先路径。
+    // 当前元素可执行时优先使用当前元素,保持原有 promotion 语义。
+    let actionable_target = if is_allowed_target(element, &request.roles) {
+        Some(element)
+    } else {
+        actionable_ancestor
+    };
+    if let Some(text_match) = match_text(element, &request.query) {
+        if let Some(target) = actionable_target {
             if seen_target_ids.insert(target.id.clone()) {
                 *match_count += 1;
                 if matches.len() < usize::from(request.limit) {
@@ -910,8 +924,6 @@ fn collect_web_matches(
         }
     }
 
-    let mut next_ancestors = ancestors.to_vec();
-    next_ancestors.push(element);
     for child in &element.children {
         collect_web_matches(
             window,
@@ -920,25 +932,9 @@ fn collect_web_matches(
             match_count,
             matches,
             seen_target_ids,
-            &next_ancestors,
+            actionable_target,
         );
     }
-}
-
-fn resolve_actionable_target<'a>(
-    element: &'a AxElement,
-    ancestors: &[&'a AxElement],
-    roles: &[String],
-) -> Option<&'a AxElement> {
-    if is_allowed_target(element, roles) {
-        return Some(element);
-    }
-
-    ancestors
-        .iter()
-        .rev()
-        .copied()
-        .find(|ancestor| is_allowed_target(ancestor, roles))
 }
 
 fn is_allowed_target(element: &AxElement, roles: &[String]) -> bool {
@@ -952,7 +948,7 @@ struct MatchedText<'a> {
     text: &'a str,
 }
 
-fn match_text<'a>(element: &'a AxElement, needle: &str) -> Option<MatchedText<'a>> {
+fn match_text<'a>(element: &'a AxElement, query: &WebFindQuery) -> Option<MatchedText<'a>> {
     [
         ("description", element.description.as_deref()),
         ("name", element.name.as_deref()),
@@ -961,9 +957,16 @@ fn match_text<'a>(element: &'a AxElement, needle: &str) -> Option<MatchedText<'a
     .into_iter()
     .find_map(|(field, value)| {
         value
-            .filter(|value| contains_text(Some(value), needle))
+            .filter(|value| text_matches(value, query))
             .map(|text| MatchedText { field, text })
     })
+}
+
+fn text_matches(actual: &str, query: &WebFindQuery) -> bool {
+    match query.mode {
+        WebTextMatchMode::Exact => actual.eq_ignore_ascii_case(&query.text),
+        WebTextMatchMode::Contains => contains_text(Some(actual), &query.text),
+    }
 }
 
 fn contains_text(actual: Option<&str>, needle: &str) -> bool {

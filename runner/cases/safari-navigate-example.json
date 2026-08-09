@@ -1,0 +1,9 @@
+{
+  "id": "safari-navigate-example",
+  "task": "打开 Safari，访问 example.com，并报告页面标题",
+  "expected": "真实打开 Safari 并在地址栏输入 URL 导航，fresh window/AX 证据确认窗口标题为 Example Domain。",
+  "expectedResult": "Example Domain",
+  "app": "Safari",
+  "setup": "safari-fresh-window",
+  "verify": "window-title-contains"
+}

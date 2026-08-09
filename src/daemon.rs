@@ -124,6 +124,7 @@ pub fn run_zenoh_router(
             startup_guard_window_ms: config.zenoh.startup_guard_window_ms,
             key_input_events: config.zenoh.key_input_events,
             observation: config.observation,
+            key_delivery_backend: config.key.delivery_backend,
             #[cfg(unix)]
             unixpipe_startup,
         },

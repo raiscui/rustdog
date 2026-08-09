@@ -15,7 +15,9 @@ pub mod observe;
 pub mod refind;
 pub mod selector;
 
-pub use observe::{build_observe_bundle, build_observe_outcome, parse_observe_payload, ObserveRequest};
+pub use observe::{
+    build_observe_bundle, build_observe_outcome, parse_observe_payload, ObserveRequest,
+};
 pub use refind::{
     build_selector_refind_decision, build_selector_refind_response_json, SelectorRefindDecision,
     SelectorRefindPolicy, SelectorRefindRequest, SelectorRefindSource, DEFAULT_REFIND_LIMIT,
@@ -217,6 +219,27 @@ impl ObservationStore {
         Ok((observation.header.clone(), entry))
     }
 
+    /// 只解析 observation header (不要求 ref_id)。
+    ///
+    /// 用于 `feature/observe-epoch-stale-reject`: 客户端把 `epoch` 跟
+    /// `observation_id` 一同回传,daemon 在 dispatch 之前先确认:
+    /// 1. observation 仍存活 (未 TTL 过期)
+    /// 2. observation 的 `created_at_unix_ms` 等于客户端回传的 epoch
+    ///
+    /// 任何一条不满足即 fail closed,避免 stale write 落到过期 observation 上。
+    pub fn resolve_header(&mut self, observation_id: &str, now_ms: u64) -> io::Result<ObservationHeader> {
+        self.evict_expired(now_ms);
+        let Some(observation) = self.observations.get(observation_id) else {
+            return Err(observation_ref_error(
+                "OBSERVATION_EXPIRED",
+                "observation 已过期或不存在",
+                observation_id,
+                None,
+            ));
+        };
+        Ok(observation.header.clone())
+    }
+
     fn evict_expired(&mut self, now_ms: u64) {
         let expired = self
             .observations
@@ -270,6 +293,11 @@ pub fn observation_ref_name(index: usize) -> String {
 }
 
 #[cfg(test)]
+/// Observation 模块对外的 façade 入口(无 selector drafts 版本)。
+///
+/// 内部委托给 `record_observation_with_selectors`,这是 W-OB-02 决议确定的
+/// 唯一 producer 入口。producer 仍由自己算 selector_drafts,本 façade 只负责
+/// 分配 observation id、内存 store 与 durable 持久化。
 pub fn record_observation(
     scope: &str,
     source_command: &str,
@@ -279,6 +307,10 @@ pub fn record_observation(
     record_observation_with_selectors(scope, source_command, root, refs, Vec::new())
 }
 
+/// Observation 模块对外的 façade 入口(带 selector drafts 版本)。
+///
+/// W-OB-02 决议:这是 producer 的唯一入口,façade 不重新构造 envelope,
+/// 只负责 allocate id、内存 store、durable 持久化、TTL evict。
 pub fn record_observation_with_selectors(
     scope: &str,
     source_command: &str,
@@ -322,6 +354,16 @@ pub fn resolve_observation_ref_with_header(
     with_global_store(|store| {
         store.resolve_ref_with_header(observation_id, ref_id, current_unix_ms())
     })
+}
+
+/// 只解析 observation header (不要求 ref_id), 用于 epoch fast-reject。
+///
+/// 失败原因:
+/// - `OBSERVATION_EXPIRED`: observation 已被 TTL 驱逐或 daemon 重启后失效
+///   (返回 `io::Error` with `OBSERVATION_EXPIRED` code, 上游应转为
+///   `stale_observation_epoch` envelope)
+pub fn resolve_observation_header(observation_id: &str) -> io::Result<ObservationHeader> {
+    with_global_store(|store| store.resolve_header(observation_id, current_unix_ms()))
 }
 
 pub fn build_selector_get_response_json(request: &SelectorGetRequest) -> io::Result<String> {
@@ -1091,6 +1133,89 @@ mod tests {
             .unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
         assert!(err.to_string().contains("STALE_REF"));
+    }
+
+    #[test]
+    #[test]
+    fn facade_record_observation_preserves_observation_header_count() {
+        // ponytail: 1 runnable check that proves the façade does not collapse
+        // producer-supplied refs. W-OB-02 locked the façade as the single producer
+        // entry; this keeps the ref count stable across calls.
+        let _lock = durable_test_lock();
+        let drafts: Vec<DurableSelectorDraft> = (1..=3)
+            .map(|index| {
+                DurableSelectorDraft::new(
+                    format!("@e{index}"),
+                    SelectorKind::AxWindow,
+                    format!("pid:1/window:{index}"),
+                    SelectorEnvelope {
+                        platform: "macos".to_owned(),
+                        app: Some(AppSelector {
+                            name: "Fixture".to_owned(),
+                            bundle_id: Some("com.example.fixture".to_owned()),
+                            pid_hint: Some(1),
+                        }),
+                        window: Some(WindowSelector {
+                            title: Some(format!("Storage {index}")),
+                            role: "AXWindow".to_owned(),
+                            rect: None,
+                        }),
+                        element: None,
+                        anchors: Vec::new(),
+                    },
+                    SelectorRedaction::metadata_only(),
+                )
+            })
+            .collect();
+        let refs: Vec<ObservationRefEntry> = (1..=3)
+            .map(|index| ObservationRefEntry {
+                ref_id: format!("@e{index}"),
+                backend_id: format!("pid:1/window:{index}"),
+                kind: "window".to_owned(),
+            })
+            .collect();
+        let header =
+            record_observation_with_selectors("ax", "@ax-tree", root(), refs, drafts).unwrap();
+        assert_eq!(header.ref_count, 3);
+        assert_eq!(header.selector_count, 3);
+    }
+
+    fn prototype_observation_store_keeps_evict_local_during_record_path() {
+        // ponytail: 1 runnable check that proves TTL evict can stay inside the store.
+        // Repeated `record` only evicts when capacity is exceeded; the previous
+        // observation becomes unreachable without `record` ever calling
+        // `evict_expired` itself.
+        let mut store = ObservationStore::with_limits(10, 1, 100);
+        let first = store.record(
+            "ax",
+            "@ax-tree",
+            root(),
+            vec![ObservationRefEntry {
+                ref_id: "@e1".to_owned(),
+                backend_id: "pid:1/window:0".to_owned(),
+                kind: "window".to_owned(),
+            }],
+            0,
+            100,
+        );
+        let second = store.record(
+            "ax",
+            "@ax-tree",
+            root(),
+            vec![ObservationRefEntry {
+                ref_id: "@e1".to_owned(),
+                backend_id: "pid:1/window:1".to_owned(),
+                kind: "window".to_owned(),
+            }],
+            0,
+            100,
+        );
+        assert!(store
+            .resolve_ref(&first.observation_id, "@e1", 100)
+            .is_err());
+        assert!(store
+            .resolve_ref(&second.observation_id, "@e1", 100)
+            .is_ok());
     }
 
     #[test]

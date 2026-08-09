@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, HashSet},
     env, fs,
-    io::{self, BufRead, Write},
+    io::{self, BufRead, BufWriter, Write},
     path::{Path, PathBuf},
 };
 
@@ -14,6 +14,9 @@ pub const DURABLE_STATE_SCHEMA: &str = "rdog.observation.state.v1";
 pub const DURABLE_OBSERVATION_SCHEMA: &str = "rdog.observation.record.v1";
 pub const DURABLE_REF_CACHE_SCHEMA: &str = "rdog.ref-cache.v1";
 pub const DURABLE_INDEX_SCHEMA: &str = "rdog.observation.index.v1";
+
+/// Wayfinder Destination B: 默认 5 分钟,与 `ttl_ms` 数量级一致。
+pub const DEFAULT_SELECTOR_VISIBILITY_MS: u64 = 5 * 60_000;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DurableObservationIdentity {
@@ -185,6 +188,7 @@ pub struct JsonlDurableObservationStore {
     privacy: DurableObservationPrivacy,
     retention_observations: usize,
     retention_bytes: u64,
+    selector_visibility_ms: u64,
     write_ref_cache: bool,
     index: DurableStateIndex,
 }
@@ -199,6 +203,28 @@ impl JsonlDurableObservationStore {
         write_ref_cache: bool,
         now_ms: u64,
     ) -> io::Result<Self> {
+        Self::open_with_visibility(
+            state_dir,
+            identity,
+            privacy,
+            retention_observations,
+            retention_bytes,
+            write_ref_cache,
+            DEFAULT_SELECTOR_VISIBILITY_MS,
+            now_ms,
+        )
+    }
+
+    pub fn open_with_visibility(
+        state_dir: PathBuf,
+        identity: DurableObservationIdentity,
+        privacy: DurableObservationPrivacy,
+        retention_observations: usize,
+        retention_bytes: u64,
+        write_ref_cache: bool,
+        selector_visibility_ms: u64,
+        now_ms: u64,
+    ) -> io::Result<Self> {
         fs::create_dir_all(state_dir.join("tmp"))?;
         let index = load_or_replay_index(&state_dir, now_ms)?;
         let mut store = Self {
@@ -207,11 +233,14 @@ impl JsonlDurableObservationStore {
             privacy,
             retention_observations,
             retention_bytes,
+            selector_visibility_ms,
             write_ref_cache,
             index,
         };
+        store.prune_index();
         store.write_meta(now_ms)?;
         store.write_index(now_ms)?;
+        store.enforce_byte_retention(now_ms)?;
         Ok(store)
     }
 
@@ -223,28 +252,32 @@ impl JsonlDurableObservationStore {
     ) -> io::Result<()> {
         let observation_record = DurableObservationRecord::from_header(header);
         append_jsonl(self.observations_path(), &observation_record)?;
-
-        for selector in selectors {
-            append_jsonl(self.selectors_path(), selector)?;
-        }
+        append_jsonl_batch(self.selectors_path(), selectors.iter())?;
 
         if self.write_ref_cache {
-            for entry in refs {
-                let selector_id = selectors
-                    .iter()
-                    .find(|selector| selector.ref_id == entry.ref_id)
-                    .map(|selector| selector.selector_id.clone());
-                let cache_record = DurableRefCacheRecord {
+            // `.entry().or_insert()` 保留原线性 `.find()` 的首个匹配语义,
+            // 同时把 ref 到 selector 的关联从 O(R*S) 收敛为 O(R+S)。
+            let mut selector_ids = HashMap::<&str, &str>::with_capacity(selectors.len());
+            for selector in selectors {
+                selector_ids
+                    .entry(selector.ref_id.as_str())
+                    .or_insert(selector.selector_id.as_str());
+            }
+            let cache_records = refs
+                .iter()
+                .map(|entry| DurableRefCacheRecord {
                     schema: DURABLE_REF_CACHE_SCHEMA.to_owned(),
                     observation_id: header.observation_id.clone(),
                     ref_id: entry.ref_id.clone(),
-                    selector_id,
+                    selector_id: selector_ids
+                        .get(entry.ref_id.as_str())
+                        .map(|id| (*id).to_owned()),
                     backend_id_hint: entry.backend_id.clone(),
                     kind: entry.kind.clone(),
                     cache_lifetime: "hint_only".to_owned(),
-                };
-                append_jsonl(self.ref_cache_path(), &cache_record)?;
-            }
+                })
+                .collect::<Vec<_>>();
+            append_jsonl_batch(self.ref_cache_path(), cache_records.iter())?;
         }
 
         self.index.observations.push(DurableIndexObservation {
@@ -267,7 +300,8 @@ impl JsonlDurableObservationStore {
                 permanent_selector: Some(selector.permanent_selector()),
             }));
         self.prune_index();
-        self.write_index(header.created_at_unix_ms)
+        self.write_index(header.created_at_unix_ms)?;
+        self.enforce_byte_retention(header.created_at_unix_ms)
     }
 
     pub fn selector_hint_for_ref(
@@ -345,9 +379,23 @@ impl JsonlDurableObservationStore {
             .iter()
             .rev()
             .filter(|selector| selector.selector_id == selector_id)
+            .filter(|selector| {
+                self.selector_within_visibility(selector, self.index.updated_at_unix_ms)
+            })
             .take(limit)
             .map(DurableSelectorLastSeen::from_index_selector)
             .collect()
+    }
+
+    #[cfg(test)]
+    pub fn enforce_byte_retention_for_test(&mut self, now_ms: u64) -> io::Result<()> {
+        self.enforce_byte_retention(now_ms)
+    }
+
+    /// Wayfinder Destination B (W-OS-02): selector is live iff the caller-supplied    /// Wayfinder Destination B (W-OS-02): selector is live iff the caller-supplied
+    /// `now_ms` is within `selector_visibility_ms` of its last_seen timestamp.
+    fn selector_within_visibility(&self, selector: &DurableIndexSelector, now_ms: u64) -> bool {
+        now_ms.saturating_sub(selector.last_seen_unix_ms) <= self.selector_visibility_ms
     }
 
     #[cfg(test)]
@@ -356,9 +404,12 @@ impl JsonlDurableObservationStore {
     }
 
     fn prune_index(&mut self) {
-        while self.index.observations.len() > self.retention_observations {
-            self.index.observations.remove(0);
-        }
+        let excess = self
+            .index
+            .observations
+            .len()
+            .saturating_sub(self.retention_observations);
+        self.index.observations.drain(..excess);
         let retained = self
             .index
             .observations
@@ -366,15 +417,115 @@ impl JsonlDurableObservationStore {
             .map(|observation| observation.observation_id.as_str())
             .collect::<HashSet<_>>();
         let mut seen_stable = HashSet::<String>::new();
-        self.index.selectors.retain(|selector| {
-            if retained.contains(selector.observation_id.as_str()) {
-                return true;
-            }
-            // P2 之后 stable selector metadata 不能因为 observation history
-            // 淘汰而立刻消失。这里每个 selector_id 保留一条最近记录,
-            // 但 `selector_hint_for_ref()` 仍只对 retained observation 生效。
-            seen_stable.insert(selector.selector_id.clone())
+        let mut keep = vec![false; self.index.selectors.len()];
+        for (index, selector) in self.index.selectors.iter().enumerate().rev() {
+            keep[index] = retained.contains(selector.observation_id.as_str())
+                || seen_stable.insert(selector.selector_id.clone());
+        }
+        let mut index = 0usize;
+        self.index.selectors.retain(|_| {
+            let retain = keep[index];
+            index += 1;
+            retain
         });
+    }
+
+    fn enforce_byte_retention(&mut self, now_ms: u64) -> io::Result<()> {
+        if state_file_bytes(&self.state_dir)? <= self.retention_bytes {
+            return Ok(());
+        }
+
+        let mut records =
+            CompactionRecords::load(&self.state_dir, &self.index, self.write_ref_cache)?;
+        self.index.updated_at_unix_ms = now_ms;
+        // Wayfinder Destination B (W-OS-02): 先把超窗的 orphan selector rows 立即淘汰,
+        // 这样 `selector_history` 不会因为 disk 容差窗口之外看到 stale row。
+        let retained_observation_ids: HashSet<String> = self
+            .index
+            .observations
+            .iter()
+            .map(|obs| obs.observation_id.clone())
+            .collect();
+        let visibility_ms = self.selector_visibility_ms;
+        self.index.selectors.retain(|row| {
+            retained_observation_ids.contains(&row.observation_id)
+                || now_ms.saturating_sub(row.last_seen_unix_ms) <= visibility_ms
+        });
+        loop {
+            records.retain_for_index(&self.index);
+            let total = compacted_state_bytes(&self.index, &records)?;
+            if total <= self.retention_bytes {
+                break;
+            }
+
+            let retained = self
+                .index
+                .observations
+                .iter()
+                .map(|item| item.observation_id.as_str())
+                .collect::<HashSet<_>>();
+            let mut orphan_times = HashMap::<SelectorKey, u64>::new();
+            for item in self
+                .index
+                .selectors
+                .iter()
+                .filter(|item| !retained.contains(item.observation_id.as_str()))
+            {
+                orphan_times
+                    .entry(selector_key(item))
+                    .and_modify(|last_seen| *last_seen = (*last_seen).max(item.last_seen_unix_ms))
+                    .or_insert(item.last_seen_unix_ms);
+            }
+            let mut orphans = orphan_times
+                .into_iter()
+                .map(|(key, last_seen)| (last_seen, key))
+                .collect::<Vec<_>>();
+            orphans.sort();
+
+            if !orphans.is_empty() {
+                let selector_sizes = records.selector_sizes()?;
+                let mut index_sizes = HashMap::<SelectorKey, u64>::new();
+                for item in &self.index.selectors {
+                    *index_sizes.entry(selector_key(item)).or_default() +=
+                        serialized_line_bytes(item)?;
+                }
+                let mut estimated = total;
+                let mut remove = HashSet::new();
+                for (_, key) in orphans {
+                    estimated = estimated.saturating_sub(
+                        index_sizes.get(&key).copied().unwrap_or_default()
+                            + selector_sizes.get(&key).copied().unwrap_or_default(),
+                    );
+                    remove.insert(key);
+                    if estimated <= self.retention_bytes {
+                        break;
+                    }
+                }
+                self.index
+                    .selectors
+                    .retain(|item| !remove.contains(&selector_key(item)));
+            } else if !self.index.observations.is_empty() {
+                self.index.observations.remove(0);
+                self.prune_index();
+            } else {
+                return Err(io::Error::other(
+                    "durable observation 无法压缩到 retention_bytes 上限",
+                ));
+            }
+        }
+
+        // index 先替换,此时旧 JSONL 仍是新 index 的超集。即使中途退出,
+        // 正常读取也不会引用不存在的记录;随后再逐个原子替换 compact JSONL。
+        self.write_index(now_ms)?;
+        write_jsonl_atomic(self.observations_path(), &records.observations)?;
+        write_jsonl_atomic(self.selectors_path(), &records.selectors)?;
+        write_jsonl_atomic(self.ref_cache_path(), &records.ref_cache)?;
+        if state_file_bytes(&self.state_dir)? > self.retention_bytes {
+            return Err(io::Error::other(
+                "durable observation compaction 后仍超过 retention_bytes",
+            ));
+        }
+        Ok(())
     }
 
     fn write_meta(&self, now_ms: u64) -> io::Result<()> {
@@ -465,14 +616,25 @@ fn sanitize_path_component(value: &str) -> String {
 }
 
 fn append_jsonl<T: Serialize>(path: PathBuf, value: &T) -> io::Result<()> {
-    let mut file = fs::OpenOptions::new()
+    append_jsonl_batch(path, std::iter::once(value))
+}
+
+fn append_jsonl_batch<'a, T: Serialize + 'a>(
+    path: PathBuf,
+    values: impl IntoIterator<Item = &'a T>,
+) -> io::Result<()> {
+    let file = fs::OpenOptions::new()
         .create(true)
         .append(true)
         .open(path)?;
-    serde_json::to_writer(&mut file, value)
-        .map_err(|err| io::Error::other(format!("durable observation JSONL 写入失败: {err}")))?;
-    file.write_all(b"\n")?;
-    file.flush()
+    let mut writer = BufWriter::new(file);
+    for value in values {
+        serde_json::to_writer(&mut writer, value).map_err(|err| {
+            io::Error::other(format!("durable observation JSONL 写入失败: {err}"))
+        })?;
+        writer.write_all(b"\n")?;
+    }
+    writer.flush()
 }
 
 fn write_json_atomic<T: Serialize>(path: PathBuf, value: &T) -> io::Result<()> {
@@ -486,9 +648,175 @@ fn write_json_atomic<T: Serialize>(path: PathBuf, value: &T) -> io::Result<()> {
             .and_then(|name| name.to_str())
             .unwrap_or("durable-observation")
     ));
-    let bytes = serde_json::to_vec_pretty(value)
+    let bytes = serde_json::to_vec(value)
         .map_err(|err| io::Error::other(format!("durable observation JSON 序列化失败: {err}")))?;
     fs::write(&tmp_path, bytes)?;
+    fs::rename(tmp_path, path)
+}
+
+#[derive(Debug)]
+struct CompactionRecords {
+    observations: Vec<DurableObservationRecord>,
+    selectors: Vec<DurableSelectorRecord>,
+    ref_cache: Vec<DurableRefCacheRecord>,
+}
+
+type SelectorKey = (String, String, String);
+
+impl CompactionRecords {
+    fn load(
+        state_dir: &Path,
+        index: &DurableStateIndex,
+        include_ref_cache: bool,
+    ) -> io::Result<Self> {
+        let observation_ids = index
+            .observations
+            .iter()
+            .map(|item| item.observation_id.clone())
+            .collect::<HashSet<_>>();
+        let mut selector_counts = selector_key_counts(index);
+        Ok(Self {
+            observations: read_jsonl_where(
+                state_dir.join("observations.jsonl"),
+                |item: &DurableObservationRecord| observation_ids.contains(&item.observation_id),
+            )?,
+            selectors: read_jsonl_where(
+                state_dir.join("selectors.jsonl"),
+                |item: &DurableSelectorRecord| {
+                    take_selector_key(&mut selector_counts, selector_record_key(item))
+                },
+            )?,
+            ref_cache: if include_ref_cache {
+                read_jsonl_where(
+                    state_dir.join("ref_cache.jsonl"),
+                    |item: &DurableRefCacheRecord| observation_ids.contains(&item.observation_id),
+                )?
+            } else {
+                Vec::new()
+            },
+        })
+    }
+
+    fn retain_for_index(&mut self, index: &DurableStateIndex) {
+        let observation_ids = index
+            .observations
+            .iter()
+            .map(|item| item.observation_id.as_str())
+            .collect::<HashSet<_>>();
+        let mut selector_counts = selector_key_counts(index);
+        self.observations
+            .retain(|item| observation_ids.contains(item.observation_id.as_str()));
+        self.selectors
+            .retain(|item| take_selector_key(&mut selector_counts, selector_record_key(item)));
+        self.ref_cache
+            .retain(|item| observation_ids.contains(item.observation_id.as_str()));
+    }
+
+    fn selector_sizes(&self) -> io::Result<HashMap<SelectorKey, u64>> {
+        let mut sizes = HashMap::<SelectorKey, u64>::new();
+        for item in &self.selectors {
+            *sizes.entry(selector_record_key(item)).or_default() += serialized_line_bytes(item)?;
+        }
+        Ok(sizes)
+    }
+}
+
+fn selector_key_counts(index: &DurableStateIndex) -> HashMap<SelectorKey, usize> {
+    let mut counts = HashMap::new();
+    for item in &index.selectors {
+        *counts.entry(selector_key(item)).or_default() += 1;
+    }
+    counts
+}
+
+fn take_selector_key(counts: &mut HashMap<SelectorKey, usize>, key: SelectorKey) -> bool {
+    let Some(count) = counts.get_mut(&key) else {
+        return false;
+    };
+    if *count == 0 {
+        return false;
+    }
+    *count -= 1;
+    true
+}
+
+fn selector_key(item: &DurableIndexSelector) -> SelectorKey {
+    (
+        item.selector_id.clone(),
+        item.observation_id.clone(),
+        item.ref_id.clone(),
+    )
+}
+
+fn selector_record_key(item: &DurableSelectorRecord) -> SelectorKey {
+    (
+        item.stable_selector_id(),
+        item.observation_id.clone(),
+        item.ref_id.clone(),
+    )
+}
+
+fn compacted_state_bytes(
+    index: &DurableStateIndex,
+    records: &CompactionRecords,
+) -> io::Result<u64> {
+    let index_bytes = serde_json::to_vec(index)
+        .map_err(|err| io::Error::other(format!("durable observation index 序列化失败: {err}")))?
+        .len() as u64;
+    Ok(index_bytes
+        + serialized_jsonl_bytes(&records.observations)?
+        + serialized_jsonl_bytes(&records.selectors)?
+        + serialized_jsonl_bytes(&records.ref_cache)?)
+}
+
+fn serialized_jsonl_bytes<T: Serialize>(values: &[T]) -> io::Result<u64> {
+    values
+        .iter()
+        .try_fold(0u64, |total, item| Ok(total + serialized_line_bytes(item)?))
+}
+
+fn serialized_line_bytes<T: Serialize>(value: &T) -> io::Result<u64> {
+    serde_json::to_vec(value)
+        .map(|bytes| bytes.len() as u64 + 1)
+        .map_err(|err| io::Error::other(format!("durable observation JSON 序列化失败: {err}")))
+}
+
+fn state_file_bytes(state_dir: &Path) -> io::Result<u64> {
+    [
+        "observations.jsonl",
+        "selectors.jsonl",
+        "ref_cache.jsonl",
+        "index.json",
+    ]
+    .into_iter()
+    .try_fold(0u64, |total, name| {
+        match fs::metadata(state_dir.join(name)) {
+            Ok(metadata) => Ok(total + metadata.len()),
+            Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(total),
+            Err(err) => Err(err),
+        }
+    })
+}
+
+fn write_jsonl_atomic<T: Serialize>(path: PathBuf, values: &[T]) -> io::Result<()> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| io::Error::other("durable observation path 缺少 parent"))?;
+    let tmp_path = parent.join("tmp").join(format!(
+        "{}.tmp",
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("durable-observation.jsonl")
+    ));
+    let file = fs::File::create(&tmp_path)?;
+    let mut writer = BufWriter::new(file);
+    for value in values {
+        serde_json::to_writer(&mut writer, value).map_err(|err| {
+            io::Error::other(format!("durable observation JSONL 写入失败: {err}"))
+        })?;
+        writer.write_all(b"\n")?;
+    }
+    writer.flush()?;
     fs::rename(tmp_path, path)
 }
 
@@ -618,230 +946,38 @@ fn json_string(value: &str) -> String {
 }
 
 fn read_jsonl<T: for<'de> Deserialize<'de>>(path: PathBuf) -> io::Result<Vec<T>> {
-    let file = fs::File::open(path)?;
-    let reader = io::BufReader::new(file);
+    read_jsonl_where(path, |_| true)
+}
+
+fn read_jsonl_where<T, F>(path: PathBuf, mut keep: F) -> io::Result<Vec<T>>
+where
+    T: for<'de> Deserialize<'de>,
+    F: FnMut(&T) -> bool,
+{
+    let file = match fs::File::open(path) {
+        Ok(file) => file,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(err) => return Err(err),
+    };
     let mut values = Vec::new();
-    for line in reader.lines() {
+    for line in io::BufReader::new(file).lines() {
         let line = line?;
         if line.trim().is_empty() {
             continue;
         }
-        values.push(serde_json::from_str(&line).map_err(|err| {
+        let value = serde_json::from_str(&line).map_err(|err| {
             io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!("durable observation JSONL 解析失败: {err}"),
             )
-        })?);
+        })?;
+        if keep(&value) {
+            values.push(value);
+        }
     }
     Ok(values)
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::control_observation::selector::{
-        AppSelector, SelectorEnvelope, SelectorRedaction, WindowSelector,
-    };
-    use std::time::{SystemTime, UNIX_EPOCH};
-
-    fn temp_dir(name: &str) -> PathBuf {
-        let nonce = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        env::temp_dir().join(format!("rdog-{name}-{nonce}"))
-    }
-
-    fn identity() -> DurableObservationIdentity {
-        DurableObservationIdentity {
-            namespace: Some("lab".to_owned()),
-            daemon_name: "mini-a.lab".to_owned(),
-        }
-    }
-
-    fn privacy() -> DurableObservationPrivacy {
-        DurableObservationPrivacy {
-            persist_values: false,
-            persist_screenshots: false,
-        }
-    }
-
-    fn header(id: &str, selector_count: usize) -> ObservationHeader {
-        ObservationHeader {
-            observation_id: id.to_owned(),
-            session_id: None,
-            created_at_unix_ms: 100,
-            ttl_ms: 300_000,
-            scope: "ax".to_owned(),
-            source_command: "@ax-tree".to_owned(),
-            root: ObservationRoot {
-                schema: "rdog.ax.v1".to_owned(),
-                platform: "macos".to_owned(),
-                coordinate_space: "os-logical".to_owned(),
-            },
-            ref_count: 1,
-            selector_count,
-        }
-    }
-
-    fn selector(observation_id: &str, ref_id: &str) -> DurableSelectorRecord {
-        DurableSelectorRecord::new(
-            observation_id,
-            ref_id,
-            SelectorKind::AxWindow,
-            "pid:1/window:0",
-            SelectorEnvelope {
-                platform: "macos".to_owned(),
-                app: Some(AppSelector {
-                    name: "System Settings".to_owned(),
-                    bundle_id: Some("com.apple.systempreferences".to_owned()),
-                    pid_hint: Some(1),
-                }),
-                window: Some(WindowSelector {
-                    title: Some("Storage".to_owned()),
-                    role: "AXWindow".to_owned(),
-                    rect: None,
-                }),
-                element: None,
-                anchors: Vec::new(),
-            },
-            SelectorRedaction::metadata_only(),
-        )
-    }
-
-    #[test]
-    fn jsonl_store_should_write_and_reload_index() {
-        let dir = temp_dir("durable-reload");
-        let mut store = JsonlDurableObservationStore::open(
-            dir.clone(),
-            identity(),
-            privacy(),
-            16,
-            10_000_000,
-            true,
-            100,
-        )
-        .unwrap();
-        let header = header("obs-1", 1);
-        store
-            .record_observation(
-                &header,
-                &[ObservationRefEntry {
-                    ref_id: "@e1".to_owned(),
-                    backend_id: "pid:1/window:0".to_owned(),
-                    kind: "window".to_owned(),
-                }],
-                &[selector("obs-1", "@e1")],
-            )
-            .unwrap();
-
-        let reopened = JsonlDurableObservationStore::open(
-            dir.clone(),
-            identity(),
-            privacy(),
-            16,
-            10_000_000,
-            true,
-            101,
-        )
-        .unwrap();
-
-        assert_eq!(reopened.index().observations.len(), 1);
-        assert_eq!(reopened.index().selectors.len(), 1);
-        assert!(reopened.selector_hint_for_ref("obs-1", "@e1").is_some());
-        let _ = fs::remove_dir_all(dir);
-    }
-
-    #[test]
-    fn jsonl_store_should_replay_when_index_is_corrupt() {
-        let dir = temp_dir("durable-replay");
-        let mut store = JsonlDurableObservationStore::open(
-            dir.clone(),
-            identity(),
-            privacy(),
-            16,
-            10_000_000,
-            true,
-            100,
-        )
-        .unwrap();
-        store
-            .record_observation(&header("obs-1", 1), &[], &[selector("obs-1", "@e1")])
-            .unwrap();
-        fs::write(dir.join("index.json"), b"not-json").unwrap();
-
-        let reopened = JsonlDurableObservationStore::open(
-            dir.clone(),
-            identity(),
-            privacy(),
-            16,
-            10_000_000,
-            true,
-            101,
-        )
-        .unwrap();
-
-        assert_eq!(reopened.index().observations.len(), 1);
-        assert_eq!(reopened.index().selectors.len(), 1);
-        let _ = fs::remove_dir_all(dir);
-    }
-
-    #[test]
-    fn jsonl_store_should_prune_index_without_compacting_jsonl() {
-        let dir = temp_dir("durable-retention");
-        let mut store = JsonlDurableObservationStore::open(
-            dir.clone(),
-            identity(),
-            privacy(),
-            1,
-            10_000_000,
-            true,
-            100,
-        )
-        .unwrap();
-        store
-            .record_observation(&header("obs-1", 1), &[], &[selector("obs-1", "@e1")])
-            .unwrap();
-        store
-            .record_observation(&header("obs-2", 1), &[], &[selector("obs-2", "@e1")])
-            .unwrap();
-
-        assert_eq!(store.index().observations.len(), 1);
-        assert_eq!(store.index().observations[0].observation_id, "obs-2");
-        assert!(store.selector_hint_for_ref("obs-1", "@e1").is_none());
-        assert!(store.selector_hint_for_ref("obs-2", "@e1").is_some());
-        let _ = fs::remove_dir_all(dir);
-    }
-
-    #[test]
-    fn jsonl_store_should_return_selector_history_by_stable_id() {
-        let dir = temp_dir("durable-history");
-        let mut store = JsonlDurableObservationStore::open(
-            dir.clone(),
-            identity(),
-            privacy(),
-            16,
-            10_000_000,
-            true,
-            100,
-        )
-        .unwrap();
-        let first_selector = selector("obs-1", "@e1");
-        let selector_id = first_selector.selector_id.clone();
-        store
-            .record_observation(&header("obs-1", 1), &[], &[first_selector])
-            .unwrap();
-        store
-            .record_observation(&header("obs-2", 1), &[], &[selector("obs-2", "@e2")])
-            .unwrap();
-
-        let history = store.selector_history(&selector_id, 10);
-
-        assert_eq!(history.len(), 2);
-        assert_eq!(history[0].observation_id, "obs-2");
-        assert_eq!(history[0].ref_id, "@e2");
-        assert_eq!(history[1].observation_id, "obs-1");
-        assert_eq!(history[1].ref_id, "@e1");
-        let _ = fs::remove_dir_all(dir);
-    }
-}
+#[path = "durable/tests.rs"]
+mod tests;

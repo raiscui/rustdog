@@ -391,3 +391,89 @@
 - 最小证伪顺序是:focused运行、默认并发复现、串行对照、接入共享锁、默认并发重复多轮.
 - 只有静态看到`std::env::set_var`还不能确认原因.必须用并发/串行差异和共享锁前后结果建立动态证据.
 - 这类失败先按测试隔离问题调查,不要直接修改production cleanup、lease或重试逻辑来掩盖症状.
+
+## [2026-08-04 08:20:00] [Session ID: omx-1785634372447-ezls0t] rdog parser 兼容 LLM 多样化写法是核心要务 (AI-native)
+
+### 核心原则 (用户明确定义)
+
+- rdog 首先被 LLM agent 使用, 其次被人类使用。parser 应宽容吸收 LLM 的多样化
+  命令写法, 而不是要求模型严格遵守语法 (不要用 SKILL 文案约束模型)。
+- 模型会自然混用 compact 短格式与对象语法, 把 shell 习惯 (空格参数) 带进协议,
+  写 JS 风格无引号键名, 把 compact 的 app: 思维带进对象顶层。
+
+### 已实现的兼容机制 (2026-08-04)
+
+1. **compact 前缀路由**: 每个逗号字段 = `前缀:值`, 按前缀路由到槽位
+   (role:/description:/value:/name:/include_values:/limit:/depth:/max_elements:/
+   mode:/expected_value:/max_attempts:); 无前缀裸值按位置回退。
+2. **空格参数归一化**: `@window-find app:X` -> `@window-find:app:X`
+   (先遇空格才触发, 不干扰冒号语法)。
+3. **引号剥离**: `app:"Terminal"` 的值剥外层引号。
+4. **对象顶层归一化**: `{app:"Safari",role:"AXButton"}` 顶层 app/window_id
+   自动归一化到 window/target。
+5. **响应自包含**: @ax-press 响应带 description, runner/agent 无需依赖
+   @ax-find 映射恢复 timeline (先按后查场景)。
+6. **未知前缀报错 + 合法前缀列表**: 让模型一眼看到正确写法, 不静默 0 匹配。
+7. **冲突报错**: 位置+命名同槽位 "请只写一种"。
+
+### 踩坑 (必须避免)
+
+- **死文件**: control_protocol/parsers/ax.rs 等 3 个文件不参与编译 (不在 mod 树),
+  功能已在 control_ax.rs。改代码前先确认文件真的被编译 (rg mod 声明)。
+- **Option::or eager 求值**: `take_named()?.or(take_positional()?)` 会静默消费
+  位置字段, 冲突检测必须显式写 (take_named_or_positional)。
+- **runner json.loads**: 模型写 `{key:"1"}` (无引号键名) 不是合法 JSON, 要用
+  正则兼容提取; rdog parser (split_object_fields) 天然兼容, runner 需对齐。
+- **@key 符号归一化**: @key 输入 ÷/+/*/= 的 label 是符号, expected timeline 是
+  按钮描述 (除/加/乘/等于), runner 必须做 arithmetic aliases 归一化。
+- **"模型行为差" 先查工具兼容**: qwen-plus "未做 AX 验证" 实为 @window-find
+  空格写法全失败, 无成功验证手段。模型在尝试, 是工具拒绝导致假象。
+
+### 判定口径
+
+- 评测失败先区分: 解析层失败 (rdog 报错/静默 0 匹配) vs 执行层失败 vs 模型行为。
+- 三个模型同时挂同一个 case -> 大概率是 rdog/SKILL 兼容问题, 不是随机性。
+
+## [2026-08-05 23:36:00] [Session ID: omx-1785926019233-oohizd] App 菜单 capture 与截图后端的运行时边界
+
+- App 菜单不是窗口 AX 子树。`root:"app-menu"` 的 `app` 必须先解析为唯一 PID 并作为 capture selector,不能先抓全局菜单树再事后过滤,否则 `max_elements` 截断会让目标菜单永久缺席。这个解析不要求唯一或可交互窗口,但多个 PID 必须 fail-closed。
+- macOS native screenshot backend 可能阻塞。每个 backend 都要有有限等待和单个 in-flight gate;主 backend 超时可走既有 fallback,但 timeout 后不能因重试无限创建 worker。窗口截图的 JPEG 只能表述为当前 display composite crop,不能伪装成未遮挡的 window surface。
+
+## [2026-08-05 23:15:33] [Session ID: omx-1785926019233-oohizd] Native screenshot capture 的结构化诊断边界
+
+- 不能在底层 `map_capture_error` 直接记录 capture 事件。它没有 `primary` / `all` 请求语义,也不知道当前错误是否会进入 fallback,会把同一次故障拆成不可关联的重复日志。
+- timeout helper 唯一知道 native worker deadline 与 in-flight gate,所以它负责 `screenshot_capture_timeout`;共享 SCK -> xcap policy 负责 `screenshot_capture_fallback` 和终态事件。事件至少要带 `capture_kind`、backend、timeout/fallback/error kind。
+- Screen Recording 权限拒绝必须是单独的终态 `screenshot_capture_permission_denied`: preflight、SCK 或 xcap 任一来源都不该再继续 fallback 或再附加普通 `screenshot_capture_failed`。
+- 现有 `fern` logger 不能直接充当 tracing subscriber。最小可靠整合是并行安装 `tracing-subscriber` 并关闭 `tracing-log`,复用同一 `RDOG_LOG_LEVEL` 和 stderr/hidden-file target,避免两个全局 logger 争夺注册权。
+
+## [2026-08-08 01:02:49] [Session ID: omx-1786061963768-e7in9l] macOS ops current-binary 三轮交互 ledger 的共享摩擦边界
+
+### 动态证据
+
+- current reference、repeat A、repeat B 均为 40/40 成功,但请求数分别为 `243`、`252`、`340`。
+- 因此三轮 current-binary 样本的中位数是 `252`,不能把单轮较低请求数写成稳定效率收益,也不能提升新的效率 baseline。
+- `@key` 对象中的 `target`、`keys`、`shortcut` 未知字段共 20 次 response error,覆盖 7 个独立 `(model, case)` 样本和 3 轮;其中 12 次紧接 recovery。
+- `@ax-press` 顶层 `action` 共 9 次 response error,覆盖 4 个独立样本和 3 轮,且每次都紧接 recovery。
+- 两类合计 29 个 parser error,最多暴露 21 个可避免的紧接 recovery 请求。这个数量是上限,不是已验证收益。
+
+### 静态证据与安全边界
+
+- 三轮 ledger artifact 记录的 canonical skill SHA-256 为 `129aa820edbedaed787d7dd9397c9b69ffeaf74140edbc19c3031207dc97f5d2`。归档时工作区另有此前未提交的 skill contract diff,当前文件 SHA-256 为 `a5063f19387367344a92bfb5959e18a4fc7734e3d7531e02b13414c943a9a646`;后者不属于本轮 ledger 输入。
+- current `rdog` binary SHA-256 为 `db5cb9fde3afd4e6d7c54c1375af1578e450994e457ae72eb6c174fe9d0f39c7`。每个 source `run-plan` 都必须与配置重新计算出的绝对路径和 hash 匹配,缺失或不一致时归档 fail closed。
+- `@cmd` raw 单行 payload 和 `@window-find:APP` 是共享 parser 的低风险候选,前者必须按通用 shell 单行语法处理 heredoc body,不能按 app 或 case 特判。
+- `@key.target`、`@key.keys`、`@key.shortcut` 不能自动归一化,因为 targeted delivery、chord/sequence 语义仍不明确。
+- `@ax-press.action` 不能自动归一化为通用 AX action。`@ax-press` 固定表达 AXPress,其它 action 使用独立 `@ax-action`。
+- App selector 多窗口歧义和 stale locator 的现有 fail-closed 语义是安全不变量,不能用自动选择或静默重绑替代。
+
+### 复用规则
+
+- 交互优化必须同时报告 `agentDecisionCount`、`requestCount`、supporting shell、recovery、protocol error 和 attempt;最终成功不代表交互成本低。
+- 任何 parser、协议、通用 primitive、canonical skill 或 macOS ops case 变更都必须重新跑完整活动模型矩阵,并保留 immutable ledger 与 binary provenance。
+
+## [2026-08-09] 评测载体差异会被误判成"模型退步" (已验证)
+
+- 现象: deepseek/minimax-cn 从 archive 8/8 掉到仓库内 runner 的 0/8
+- bisect 验证: 同一当前 binary (outcome 三态+epoch) + 当前 skill + 外部 runner + 老 case 集 → 两模型都 8/8
+- 结论: 退步来自载体差异, 不是模型: (1) max-tool-iterations 30→8 截断高 churn 模型; (2) 5 个老 case 被换成 calculator×3 + clipboard + multi-window-textedit; (3) prompt 从 skill 全文嵌入变为 profile hint
+- 复现命令: 外部 runner `eval-macos-ops.sh <model>`, 前置: `rdog daemon --transport zenoh` + shell env 注入 API key (tmux server 无 key 会 44ms 秒败, usageTotals=0, 看 pi-stderr "No API key found")
+- 边界: 只验证了 macOS ops 8 老 case; 新 case 集 + 仓库内 runner 的组合仍是 20/40 → 25/40

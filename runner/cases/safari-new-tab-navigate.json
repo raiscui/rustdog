@@ -1,0 +1,9 @@
+{
+  "id": "safari-new-tab-navigate",
+  "task": "打开 Safari，使用快捷键 Command+T 新建标签页，在地址栏输入 example.com 并导航，确认页面标题",
+  "expected": "真实 Safari 流程：Cmd+T 新建标签页，地址栏输入 URL 导航，fresh window/AX 证据确认窗口标题为 Example Domain。",
+  "expectedResult": "Example Domain",
+  "app": "Safari",
+  "setup": "safari-fresh-window",
+  "verify": "window-title-contains"
+}

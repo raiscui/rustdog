@@ -7,6 +7,7 @@ use crate::{
     },
     control_web::{
         WebActRequest, WebFindBrowserTarget, WebFindQuery, WebFindRequest, WebFindTarget,
+        WebTextMatchMode,
     },
 };
 
@@ -30,6 +31,7 @@ fn parse_should_support_web_find_command() {
                 },
                 query: WebFindQuery {
                     text: "首页".to_owned(),
+                    mode: WebTextMatchMode::Contains,
                 },
                 display_scope: None,
                 roles: vec!["AXLink".to_owned(), "AXButton".to_owned()],
@@ -121,6 +123,7 @@ fn parse_should_support_web_act_command() {
             },
             query: WebFindQuery {
                 text: "首页".to_owned(),
+                mode: WebTextMatchMode::Contains,
             },
             display_scope: None,
             roles: vec!["AXLink".to_owned()],

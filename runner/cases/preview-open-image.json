@@ -1,0 +1,9 @@
+{
+  "id": "preview-open-image",
+  "task": "打开预览应用，显示图片文件 /tmp/rdog-ops-probe.png（可以使用系统 open 命令），并确认窗口标题",
+  "expected": "真实用 Preview 打开测试图片文件，fresh window 证据确认窗口标题为 rdog-ops-probe.png。",
+  "expectedResult": "rdog-ops-probe.png",
+  "app": "Preview",
+  "setup": "preview-file-ready",
+  "verify": "window-title-contains"
+}

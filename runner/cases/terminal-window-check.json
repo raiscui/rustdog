@@ -1,0 +1,9 @@
+{
+  "id": "terminal-window-check",
+  "task": "打开终端应用，确认终端窗口已打开，报告窗口标题",
+  "expected": "真实打开 Terminal，fresh window 证据确认终端窗口存在且标题包含用户或 shell 名。",
+  "expectedResult": "cuiluming",
+  "app": "Terminal",
+  "setup": "terminal-open",
+  "verify": "window-title-contains"
+}

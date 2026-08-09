@@ -6,7 +6,7 @@ use super::{
 use crate::control_ax::{parse_ax_mode_payload, AxMode};
 use crate::control_protocol::{
     ScreenshotCoordinateSpace, ScreenshotDisplaySelector, ScreenshotLayout, ScreenshotRequest,
-    ScreenshotTarget, DEFAULT_SCREENSHOT_QUALITY,
+    ScreenshotTarget, ScreenshotWindowTarget, DEFAULT_SCREENSHOT_QUALITY,
 };
 
 pub(crate) fn parse_screenshot_payload(input: &str) -> io::Result<ScreenshotRequest> {
@@ -35,6 +35,7 @@ pub(crate) fn parse_screenshot_payload(input: &str) -> io::Result<ScreenshotRequ
     }
 
     let mut target = None::<ScreenshotTarget>;
+    let mut window = None::<ScreenshotWindowTarget>;
     let mut display = None::<ScreenshotDisplaySelector>;
     let mut layout = None::<ScreenshotLayout>;
     let mut coordinate_space = None::<ScreenshotCoordinateSpace>;
@@ -69,6 +70,29 @@ pub(crate) fn parse_screenshot_payload(input: &str) -> io::Result<ScreenshotRequ
                     ));
                 }
                 target = Some(parse_screenshot_target(raw_value)?);
+            }
+            "window" => {
+                if window.is_some() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "@screenshot 对象 payload 的 `window` 字段重复",
+                    ));
+                }
+                window = Some(parse_screenshot_window_target(raw_value)?);
+            }
+            // 兼容模型常见的顶层写法,内部归一化为 window target。
+            "window_id" => {
+                if window.is_some() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "@screenshot 的 window 与 window_id 不能同时出现",
+                    ));
+                }
+                window = Some(ScreenshotWindowTarget {
+                    window_id: Some(parse_quoted_payload(raw_value)?),
+                    ref_id: None,
+                    observation_id: None,
+                });
             }
             "format" => {
                 let format = parse_quoted_payload(raw_value)?;
@@ -165,15 +189,53 @@ pub(crate) fn parse_screenshot_payload(input: &str) -> io::Result<ScreenshotRequ
                 )?);
             }
             _ => {
+                // 窗口截图的 locator 必须归属到 `window` 对象,避免顶层
+                // `ref` / `pid` 与 display screenshot 的字段语义相互混淆。
+                if matches!(
+                    field_name.as_str(),
+                    "ref" | "ref_id" | "observe" | "app" | "pid" | "process" | "title"
+                ) {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!(
+                            "@screenshot 的 `{field_name}` 只能写在 window 对象中;例如 target:\"window\",window:{{window_id:\"pid:123/window:0\"}}"
+                        ),
+                    ));
+                }
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
                     format!("@screenshot 对象 payload 包含未知字段: {field_name}"),
-                ))
+                ));
             }
         }
     }
 
-    let target = target.unwrap_or(ScreenshotTarget::Display);
+    let target = target.unwrap_or(if window.is_some() {
+        ScreenshotTarget::Window
+    } else {
+        ScreenshotTarget::Display
+    });
+    match target {
+        ScreenshotTarget::Display if window.is_some() => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "@screenshot target=display 不能携带 window",
+            ));
+        }
+        ScreenshotTarget::Window if window.is_none() => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "@screenshot target=window 需要 window:{window_id:\"...\"} 或 ref + observation_id",
+            ));
+        }
+        _ => {}
+    }
+    if matches!(target, ScreenshotTarget::Window) && (display.is_some() || layout.is_some()) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "@screenshot target=window 不接受 display 或 layout;窗口范围由 window target 决定",
+        ));
+    }
     let display = display.unwrap_or(ScreenshotDisplaySelector::All);
     let layout = layout.unwrap_or(match display {
         ScreenshotDisplaySelector::All => ScreenshotLayout::Composite,
@@ -187,6 +249,7 @@ pub(crate) fn parse_screenshot_payload(input: &str) -> io::Result<ScreenshotRequ
 
     Ok(ScreenshotRequest {
         target,
+        window,
         display,
         layout,
         coordinate_space,
@@ -205,11 +268,100 @@ fn parse_screenshot_target(input: &str) -> io::Result<ScreenshotTarget> {
     if target.eq_ignore_ascii_case("display") {
         return Ok(ScreenshotTarget::Display);
     }
+    if target.eq_ignore_ascii_case("window") {
+        return Ok(ScreenshotTarget::Window);
+    }
 
     Err(io::Error::new(
         io::ErrorKind::InvalidData,
-        format!("@screenshot 当前只支持 target=\"display\": {target}"),
+        format!("@screenshot target 只支持 \"display\" 或 \"window\": {target}"),
     ))
+}
+
+fn parse_screenshot_window_target(input: &str) -> io::Result<ScreenshotWindowTarget> {
+    let inner = input
+        .trim()
+        .strip_prefix('{')
+        .and_then(|value| value.strip_suffix('}'))
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "@screenshot.window 必须使用对象,例如 {window_id:\"pid:123/window:0\"}",
+            )
+        })?
+        .trim();
+    if inner.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "@screenshot.window 不能为空",
+        ));
+    }
+
+    let mut window_id = None::<String>;
+    let mut ref_id = None::<String>;
+    let mut observation_id = None::<String>;
+    for field in split_object_fields(inner)? {
+        let (field_name, raw_value) = split_object_field(field)?;
+        let field_name = normalize_object_field_name(field_name)?;
+        let raw_value = raw_value.trim();
+        match field_name.as_str() {
+            "window_id" => assign_once_window_field(
+                &mut window_id,
+                "window_id",
+                parse_quoted_payload(raw_value)?,
+            )?,
+            "ref" | "ref_id" => {
+                assign_once_window_field(&mut ref_id, "ref", parse_quoted_payload(raw_value)?)?
+            }
+            "observation_id" => assign_once_window_field(
+                &mut observation_id,
+                "observation_id",
+                parse_quoted_payload(raw_value)?,
+            )?,
+            _ => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("@screenshot.window 包含未知字段: {field_name}"),
+                ))
+            }
+        }
+    }
+
+    let has_window_id = window_id.is_some();
+    let has_ref = ref_id.is_some();
+    let has_observation_id = observation_id.is_some();
+    if has_window_id && (has_ref || has_observation_id) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "@screenshot.window 的 window_id 不能与 ref / observation_id 混用",
+        ));
+    }
+    if !has_window_id && (!has_ref || !has_observation_id) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "@screenshot.window 需要 window_id 或 ref + observation_id",
+        ));
+    }
+
+    Ok(ScreenshotWindowTarget {
+        window_id,
+        ref_id,
+        observation_id,
+    })
+}
+
+fn assign_once_window_field(
+    slot: &mut Option<String>,
+    name: &str,
+    value: String,
+) -> io::Result<()> {
+    if slot.replace(value).is_some() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("@screenshot.window 的 `{name}` 字段重复"),
+        ));
+    }
+    Ok(())
 }
 
 fn parse_screenshot_display(input: &str) -> io::Result<ScreenshotDisplaySelector> {

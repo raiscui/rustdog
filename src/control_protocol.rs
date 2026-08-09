@@ -3,22 +3,25 @@ use std::io;
 mod parsers;
 
 pub(crate) use self::parsers::{
-    normalize_object_field_name, object_inner, parse_quoted_payload, split_object_field,
-    split_object_fields,
+    normalize_object_field_name, object_inner, parse_compact_atom, parse_compact_fields,
+    parse_compact_window_selector, parse_quoted_payload, resolve_compact_selector,
+    split_object_field, split_object_fields, CompactWindowSelector, ParsedCompactFields,
 };
 
 use self::parsers::{
-    parse_cancel_payload, parse_computer_act_payload, parse_control_header, parse_key_payload, parse_open_app_payload, parse_wait_payload, parse_pty_attach_payload, parse_pty_close_payload,
-    parse_pty_detach_payload, parse_pty_payload, parse_screenshot_payload,
+    parse_cancel_payload, parse_cmd_payload, parse_computer_act_payload, parse_control_header,
+    parse_key_payload, parse_open_app_payload, parse_pty_attach_payload, parse_pty_close_payload,
+    parse_pty_detach_payload, parse_pty_payload, parse_screenshot_payload, parse_wait_payload,
     require_non_empty_payload,
 };
 
 use crate::control_ax::{
     parse_ax_action_payload, parse_ax_find_payload, parse_ax_focus_payload, parse_ax_get_payload,
-    parse_ax_press_payload, parse_ax_scroll_payload, parse_ax_set_value_payload,
-    parse_ax_tree_payload, parse_type_text_payload, AxActionRequest, AxFindRequest, AxFocusRequest,
-    AxGetRequest, AxMode, AxPressRequest, AxScrollRequest, AxSetValueRequest, AxTreeRequest,
-    TypeTextRequest, DEFAULT_AX_DEPTH, DEFAULT_AX_INCLUDE_VALUES, DEFAULT_AX_MAX_ELEMENTS,
+    parse_ax_press_payload, parse_ax_press_sequence_payload, parse_ax_scroll_payload,
+    parse_ax_set_value_payload, parse_ax_tree_payload, parse_type_text_payload, AxActionRequest,
+    AxFindRequest, AxFocusRequest, AxGetRequest, AxMode, AxPressRequest, AxPressSequenceRequest,
+    AxScrollRequest, AxSetValueRequest, AxTreeRequest, TypeTextRequest, DEFAULT_AX_DEPTH,
+    DEFAULT_AX_INCLUDE_VALUES, DEFAULT_AX_MAX_ELEMENTS,
 };
 use crate::control_bootstrap::{parse_bootstrap_payload, BootstrapRequest};
 use crate::control_flow::{parse_flow_payload, FlowRequest};
@@ -83,6 +86,7 @@ pub enum ControlCommand {
     AxScroll(AxScrollRequest),
     AxAction(AxActionRequest),
     AxPress(AxPressRequest),
+    AxPressSequence(AxPressSequenceRequest),
     AxSetValue(AxSetValueRequest),
     TypeText(TypeTextRequest),
     WindowFind(WindowFindRequest),
@@ -113,7 +117,6 @@ pub enum ControlCommand {
 pub const DEFAULT_KEY_HOLD_MS: u64 = 200;
 pub const DEFAULT_SCREENSHOT_QUALITY: u8 = 75;
 
-
 /// `@wait` 的结构化请求。
 ///
 /// 让 daemon 端 worker 线程 sleep 一段毫秒数,主要用于:
@@ -128,7 +131,6 @@ pub struct WaitRequest {
     pub duration_ms: u64,
 }
 
-
 /// `@open-app` 的结构化请求。
 ///
 /// macOS 上由 daemon 走 `open -a <app_name>`;其他平台返回
@@ -141,7 +143,6 @@ pub struct OpenAppRequest {
     pub app_name: String,
     pub wait_ms: u64,
 }
-
 
 /// `@cancel#seq` 的结构化请求。
 ///
@@ -156,14 +157,18 @@ pub struct CancelRequest {
     pub target_seq: u64,
 }
 
-
 /// `@computer-act` 的结构化请求 (rdog 适配 Mano-CUA 16 动作中的 13 个 daemon-side action)。
 ///
 /// 顶层 envelope: `schema` / `action` / `args` 三必填 + `verify` /
-/// `observation_id` / `timeout_ms` / `trace` 四个可选 (后续 ticket 11/12/16/18 实际使用)。
+/// `observation_id` / `timeout_ms` / `trace` / `epoch` 五个可选
+/// (后续 ticket 11/12/16/18 实际使用; `epoch` 由 feature/observe-epoch-stale-reject 引入)。
 ///
 /// `args` 是 `serde_json::Value` 形式的对象,内部字段取决于 `action`。
 /// 路由层 (`control_computer_act`) 把它转译成底层 `ControlCommand`。
+///
+/// `epoch` (可选): 客户端从 `@observe` 响应顶层读到的 `epoch` 值;提供时必须
+/// 与 `observation_id` 同一对使用,daemon 在 dispatch 之前 fast-reject 不匹配的
+/// epoch (返回 `STALE_OBSERVATION_EPOCH`)。不提供 = 走原 TTL 路径,行为不变。
 #[derive(Debug, Clone, PartialEq)]
 pub struct ComputerActRequest {
     pub schema: String,
@@ -173,10 +178,8 @@ pub struct ComputerActRequest {
     pub observation_id: Option<String>,
     pub timeout_ms: Option<u64>,
     pub trace: Option<String>,
+    pub epoch: Option<u64>,
 }
-
-
-
 
 /// `@paste` 的结构化请求。
 ///
@@ -275,6 +278,8 @@ pub enum KeyResponseMode {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScreenshotRequest {
     pub target: ScreenshotTarget,
+    /// 仅当 `target:"window"` 时存在。display 默认路径始终保持没有窗口目标。
+    pub window: Option<ScreenshotWindowTarget>,
     pub display: ScreenshotDisplaySelector,
     pub layout: ScreenshotLayout,
     pub coordinate_space: ScreenshotCoordinateSpace,
@@ -291,6 +296,7 @@ impl Default for ScreenshotRequest {
     fn default() -> Self {
         Self {
             target: ScreenshotTarget::Display,
+            window: None,
             display: ScreenshotDisplaySelector::All,
             layout: ScreenshotLayout::Composite,
             coordinate_space: ScreenshotCoordinateSpace::OsLogical,
@@ -308,6 +314,18 @@ impl Default for ScreenshotRequest {
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum ScreenshotTarget {
     Display,
+    Window,
+}
+
+/// 窗口截图只接受稳定到本次控制会话的定位器。
+///
+/// `window_id` 适合刚从 `@window-find` 获得的目标;ref 需要带 observation id,
+/// 这样 daemon 可以在动作前重新绑定真实窗口,不会裁剪陈旧坐标。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScreenshotWindowTarget {
+    pub window_id: Option<String>,
+    pub ref_id: Option<String>,
+    pub observation_id: Option<String>,
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -386,8 +404,31 @@ pub fn parse_control_line(line: &str) -> io::Result<ControlParseResult> {
     }
 
     let command = line[1..].trim_start();
+    // 2026-08-04 (LLM 兼容): 模型常写 `@window-find app:Terminal` /
+    // `@window-find {json}` (空格分隔参数) 而非冒号分隔。这里把
+    // "命令名 + 空格 + 参数" 归一化为标准 payload, 与冒号写法等价。
+    // 仅当命令不含 ':' 且存在非空空格后缀时触发, 不干扰既有冒号语法。
+    let command: String = if let Some(space_idx) = command.find(char::is_whitespace) {
+        // 先遇到空格: 检查空格前是否是完整命令名 (不含 ':'),
+        // 是则把剩余部分当作 payload 归一化为冒号形式。
+        let head = &command[..space_idx];
+        if head.contains(':') {
+            command.to_owned()
+        } else {
+            let rest = command[space_idx..].trim();
+            if rest.is_empty() {
+                command.to_owned()
+            } else {
+                // `window-find app:Terminal` -> `window-find:app:Terminal`,
+                // `window-find {json}` -> `window-find:{json}`。
+                format!("{head}:{rest}")
+            }
+        }
+    } else {
+        command.to_owned()
+    };
     let has_payload = command.contains(':');
-    let (kind, request_id) = parse_control_header(command)?;
+    let (kind, request_id) = parse_control_header(&command)?;
 
     if kind.eq_ignore_ascii_case("ping") && !has_payload {
         return Ok(ControlParseResult::Control(ControlRequest {
@@ -449,6 +490,22 @@ pub fn parse_control_line(line: &str) -> io::Result<ControlParseResult> {
         }));
     }
 
+    // 2026-08-05 (LLM 兼容): 裸 @window-find 返回全部窗口 (空 query 在
+    // backend 层匹配所有窗口)。模型常发无参数 window-find 期望看到窗口列表,
+    // 旧行为报"无效控制指令"让模型无从修正。
+    if kind.eq_ignore_ascii_case("window-find") && !has_payload {
+        return Ok(ControlParseResult::Control(ControlRequest {
+            request_id,
+            command: ControlCommand::WindowFind(WindowFindRequest {
+                query: Default::default(),
+                display_scope: None,
+                limit: 20,
+                include_state: true,
+                include_recipes: true,
+            }),
+        }));
+    }
+
     let Some((_, payload)) = command.split_once(':') else {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -456,7 +513,10 @@ pub fn parse_control_line(line: &str) -> io::Result<ControlParseResult> {
         ));
     };
 
-    let payload = payload.trim();
+    // 大多数控制命令保持既有的空白规整语义。`@cmd` 则必须保留 payload 的
+    // 物理行边界,否则前导换行会在单行校验前被隐藏。
+    let raw_payload = payload;
+    let payload = raw_payload.trim();
     let control = match kind.trim().to_ascii_lowercase().as_str() {
         "key" => ControlCommand::Key(parse_key_payload(payload)?),
         "paste" => {
@@ -470,7 +530,7 @@ pub fn parse_control_line(line: &str) -> io::Result<ControlParseResult> {
             require_non_empty_payload("script", payload, ControlCommand::Script)?
         }
         "cmd" => {
-            let payload = parse_quoted_payload(payload)?;
+            let payload = parse_cmd_payload(raw_payload)?;
             require_non_empty_payload("cmd", payload, ControlCommand::Script)?
         }
         "pty" => ControlCommand::PtyOpen(parse_pty_payload(payload)?),
@@ -490,6 +550,9 @@ pub fn parse_control_line(line: &str) -> io::Result<ControlParseResult> {
         "ax-scroll" => ControlCommand::AxScroll(parse_ax_scroll_payload(payload)?),
         "ax-action" => ControlCommand::AxAction(parse_ax_action_payload(payload)?),
         "ax-press" => ControlCommand::AxPress(parse_ax_press_payload(payload)?),
+        "ax-press-sequence" => {
+            ControlCommand::AxPressSequence(parse_ax_press_sequence_payload(payload)?)
+        }
         "ax-set-value" => ControlCommand::AxSetValue(parse_ax_set_value_payload(payload)?),
         "type-text" => ControlCommand::TypeText(parse_type_text_payload(payload)?),
         "window-find" => ControlCommand::WindowFind(parse_window_find_payload(payload)?),

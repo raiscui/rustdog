@@ -922,3 +922,78 @@ command => {
 - LP-ticket-15-deferred-3-RESOLVED 已追加 self-target fix 段.
 - Cancel 命令的语义边界 (signal-only, 不参与 in-flight state) 现在在 control_core.rs
   显式 guard 里显式声明, 未来 review 时不会再滑落.
+
+## [2026-08-03 21:30:00] [Session ID: omx-1785634372447-ezls0t] 主题: rdog parser 兼容 LLM 多样化写法是核心要务
+
+### 发现来源
+- macos-ops 第 3 轮评测: qwen37/qwen-plus 的 safari 场景因 compact/对象语法混用失败
+- 用户明确指示: 不要改 SKILL 文案约束模型, 而是改 rdog parser 让其兼容 LLM 的多样化命令写法
+
+### 核心原则
+- rdog 首先被 LLM agent 使用, 其次被人类使用 (AI-native)
+- 模型会自然混用 compact 短格式与对象语法 (带 role: 前缀、尾部选项、顶层 app 字段等)
+- parser 应宽容吸收这些变体, 而不是要求模型严格遵守语法
+- 修复落点: 通用 parser 层 (parse_compact_window_pair / parse_compact_atom / 对象字段归一化), 一次覆盖所有 compact/对象命令
+
+### 未来风险
+- 若继续用 SKILL 文案约束模型, SKILL 会越来越长且模型仍会犯错
+- 只修单个命令是打补丁, 坑会出现在下一个命令
+
+### 当前结论
+- 已确认: 通用 parser 层实施兼容
+- 设计决策树: role: 前缀剥离 / compact 尾部选项 / 对象顶层字段归一化 / 冲突歧义处理
+
+### 后续讨论入口
+- 继续 grilling 设计决策 (问题 2+), 达成共识后实施
+
+## [2026-08-06 15:06:56] [Session ID: omx-1785926019233-oohizd] 主题: macOS ops 的最终成功会掩盖可恢复协议成本
+
+### 发现来源
+- 五模型 40-case live macOS ops 评测的 `suite-result.json` 与每次 attempt 的 `pi-summary.json`。
+
+### 核心问题
+- 当前 suite 的 pass/fail 以最终 fresh verification 为准。它能正确识别任务是否完成,但不能单独体现一次任务此前发生的 `code:64` 解析失败、额外 token 消耗和重试成本。
+
+### 为什么重要
+- 全部 40 个 case 成功并不表示协议已无兼容性摩擦。若只看 success rate,后续很容易把模型自愈误判为零成本的协议兼容。
+
+### 当前结论
+- 保留 final success 作为正确性的唯一门槛,同时把 `rdogResponseErrors` 按 canonical skill hash 与 case 归档,作为兼容性回归指标。
+- 本轮不以清零所有可恢复错误为目标;任何 parser 放宽都要证明不会削弱目标/权限边界,并重跑完整矩阵。
+
+### 后续讨论入口
+- `notes.md` 的 2026-08-06 全模型 macOS ops 记录,以及 `LATER_PLANS.md` 的 `@window-find:APP` 候选。
+
+## [2026-08-08 23:50:00] [Session ID: omx-1786201921174-cvveb1] 主题: outcome 三态 "preexisting" 中间档 + smoke 锁 wire contract 哲学
+
+### 发现来源
+
+macOS live smoke 跑 `smoke_computer_act_verify.sh` test 3 时, 真实 wire response 第一次出
+`outcome:"worked"` + `verification.status:"preexisting"` (wait 0ms 期间 OS 背景让 AX diff
+出现 elements_added=1 + elements_removed=1, changed=0 + morphed=2, 满足 preexisting 决策).
+
+### 核心问题
+
+1. outcome 三态 decision table 设计时顾虑 "preexisting" 这一中间档会不会真实出现 (担心是为了覆盖度凑出来的档位).
+2. smoke 期望锁死 `outcome:"didnt"` 在真实 macOS 上 false fail (因为 wait 期间 OS 背景让 verify_passed=true).
+
+### 为什么重要
+
+- "preexisting" 中间档是 outcome 三态 ADR 的核心论证: 之前 Phase F-2 把所有 postcondition 失败塞进单一 `ok:false`, 丢失 "动作真生效" vs "AX 拓扑变了但 field 没变 (罕见)" 的区分. "preexisting" 让 client 能识别后一类 (可疑信号, 但不是错误), 不再依赖 client 启发式判断.
+- smoke 锁 wire contract 不锁特定值 是更鲁棒的 smoke 工程哲学: 锁 specific value fragile (依赖 OS 状态), 锁 enum robust (覆盖整个 wire 枚举空间). 特定值 regression 由 unit test 抓 (outcome.rs 7 个单测覆盖 decision table 所有分支).
+
+### 未来风险
+
+- 如果 smoke 仍锁特定值, 跑任何真实 macOS live smoke 都可能 flaky. 锁枚举匹配会让 smoke 在真实环境稳定, 但无法抓特定值 regression (例如 outcome 三态 decision table 某行被改错).
+- unit test 必须足够覆盖 decision table, 否则 smoke 锁枚举 + unit test 漏行 = 真 bug 漏掉.
+
+### 当前结论
+
+- "preexisting" 中间档真实出现, 确认 outcome 三态 decision table 5 行 (dispatch ok/失败 + verify req/不 req + verify ran/没 ran + verify pass/fail) 全部覆盖. 中间档不是凑数, 是真实工程价值.
+- smoke 锁枚举匹配 + unit test 锁特定值 = 两层保护: smoke 验证 wire shape 鲁棒性, unit test 验证 decision table 正确性.
+- 现有 outcome.rs 7 个单测覆盖 decision table 所有 5 行, smoke 5 个 test 覆盖 outcome / status 字段 wire shape. 双层保护到位.
+
+### 后续讨论入口
+
+- WORKLOG `[2026-08-08 23:50:00]` entry 包含完整 live evidence (5+3+4 smoke 全过, 真 wire 实证)
+- smoke 期望改动 (scripts/smoke_computer_act_verify.sh test 3 outcome / status 改枚举匹配) 是这次发现的副产品, 单独 commit

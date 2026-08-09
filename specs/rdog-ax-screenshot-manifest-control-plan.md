@@ -23,6 +23,18 @@ Phase 1 不做:
 
 这条线的核心约束是: AX 结构和鼠标控制都复用 screenshot manifest 的 `os-logical` 坐标语义,不要引入第二套坐标解释.
 
+### 2026-08-05 当前实现更新
+
+- `@ax-find` 已支持 `root:"app-menu"`。它必须带解析为唯一 PID 的 `app`,但不要求
+  唯一或可交互窗口。菜单 target 使用 `pid:<pid>/menu-bar/path:<steps>` 而不是伪造为某个窗口的子节点。
+  `@ax-action` 会在 side effect 前从 `AXMenuBar` 重新解析这个 target。
+- `@screenshot` 仍默认 `target:"display"`。`target:"window"` 会以 fresh
+  `window_id` 或 `ref + observation_id` 解析 AX rect,从 all-display composite 裁剪。
+  结果必须标记 `source:"display-composite-crop"` 与
+  `visibility:"screen-composited"`,不承诺被遮挡窗口的原生 surface。
+- window screenshot 暂不支持 `include_ax`,避免把未返回的 AX payload 伪装成成功。
+  结构化证据仍由独立 AX 请求提供。
+
 ## 2. 目标
 
 让 code agent 在 `@screenshot` 后获得可机器读取的 UI 结构:
@@ -51,6 +63,8 @@ Phase 1 不做:
 新增字段:
 
 ```text
+target: "display" | "window" = "display"
+window: {window_id} | {ref, observation_id}
 include_ax: bool = false
 ax_required: bool = false
 ax_mode: "windows" | "interactive" | "full" = "full"
@@ -71,6 +85,9 @@ ax_include_values: bool = true
 - `ax_max_elements`: 限制单次 snapshot 的最大元素数量.
 - `ax_include_values`: 是否读取普通文本值. 安全文本字段仍必须 redacted.
 - 显式 `ax_depth` / `ax_max_elements` / `ax_include_values` 会覆盖 `ax_mode` 默认值.
+- `target:"window"`: `window` 必须是 freshly resolved `window_id`,或同一 observation
+  中的 `ref + observation_id`。该路径拒绝 `display`、`layout` 与 `include_ax`。
+  图像是 virtual desktop 的裁剪,不是 ScreenCaptureKit window surface capture。
 
 示例:
 
@@ -81,6 +98,7 @@ ax_include_values: bool = true
 @screenshot#93:{include_ax:true,ax_required:false,ax_depth:1,ax_max_elements:80,ax_include_values:false}
 @screenshot#94:{include_ax:true,ax_required:false,ax_mode:"full"}
 @screenshot#95:{include_ax:true,ax_required:true,ax_include_values:false}
+@screenshot#96:{target:"window",window:{window_id:"pid:123/window:0"}}
 ```
 
 ### 4.2 manifest `accessibility` 字段
@@ -193,6 +211,7 @@ Phase 1 返回 structured `@response` summary,不走 `@savefile`.
 @ax-find#40:{role:"AXButton",name_contains:"取消",limit:20}
 @ax-find#41:{action:"AXPress",mode:"interactive",limit:30}
 @ax-find#42:{process:"Terminal",window_title_contains:"rdog",role:"AXButton",limit:10}
+@ax-find#43:{root:"app-menu",app:"Finder",role:"AXMenuItem",limit:20}
 ```
 
 返回:
@@ -212,6 +231,8 @@ Phase 1 返回 structured `@response` summary,不走 `@savefile`.
 - `value` / `value_contains`
 - `action`
 - `mode`, `depth`, `max_elements`, `include_values`, `limit`
+- `root:"app-menu"` 只允许 `app`,不能混用 window 或 process 过滤;返回的菜单
+  target id 以 `pid:<pid>/menu-bar` 开头,可直接交给 `@ax-action`。
 
 ### 4.5 `@ax-get`
 

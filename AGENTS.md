@@ -40,9 +40,9 @@ Issues 和 Wayfinder maps 使用 GitHub Issues。详见 `docs/agents/issue-track
   - 何时阅读: 修改远程 PTY、control transport streaming、Zenoh session channel、`--pty-close` 或 TTY 交互行为前
 
 - `EXPERIENCE.md`
-  - 主题: 本项目已经验证过的协议、运行时与GUI安全经验边界
-  - 用途: 帮助后续改协议时避免把 `@exit`、显式协议请求和裸 shell 行再次混淆;沉淀跨平台修复、Zenoh、log路径、AX hit-test窗口归属等隐性契约教训
-  - 何时阅读: 做协议演进、回顾历史判断口径、沉淀经验时;改daemon日志/e2e polling、坐标AX root discovery、backend locator或GUI目标归属门禁前
+  - 主题: 本项目已经验证过的协议、运行时与GUI安全经验边界,以及 rdog parser 兼容 LLM 多样化写法的机制与踩坑
+  - 用途: 帮助后续改协议时避免把 `@exit`、显式协议请求和裸 shell 行再次混淆;沉淀跨平台修复、Zenoh、log路径、AX hit-test窗口归属、app-menu capture selector 与 screenshot backend gate 等隐性契约教训;改 parser 时先读 compact 前缀路由/空格参数/引号剥离/响应自包含机制,避免破坏 LLM 兼容
+  - 何时阅读: 做协议演进、回顾历史判断口径、沉淀经验时;改daemon日志/e2e polling、坐标AX root discovery、backend locator、app-menu、screenshot backend、GUI目标归属门禁、或任何 compact/对象语法解析前
 
 - `.codex/skills/rdog-control/SKILL.md`
   - 主题: rdog-control skill,覆盖 Zenoh target-name、line-control、PTY、daemon-side `@flow`、AX/window/web/鼠标、硬件桥接、WeChat no-AX override,以及 `rdog ax-diff` 结构化 AX JSON diff
@@ -117,6 +117,21 @@ Issues 和 Wayfinder maps 使用 GitHub Issues。详见 `docs/agents/issue-track
   - 主题: 2026-06-29 `rdog-control` skill 文案瘦身触发默认 `WORKLOG.md` 续档说明
   - 用途: 说明旧 `WORKLOG.md` 归档位置,以及本轮 skill token 压缩、agent-facing 叙述边界和 continuous-learning 沉淀范围
   - 何时阅读: 需要追溯 `.codex/skills/rdog-control/SKILL.md` 1.5 为什么改成执行路径组织,或确认为何当前默认 `WORKLOG.md` 重新变短时
+
+- `archive/manifests/ARCHIVE_MANIFEST__2026-08-05_notes_rollover_native_capture_tracing.md`
+  - 主题: 2026-08-05 native screenshot capture tracing 前默认 `notes.md` 续档说明
+  - 用途: 说明旧 notes 的归档路径,以及 SCK timeout、xcap fallback、Screen Recording 权限事件的调研边界
+  - 何时阅读: 需要回溯 native capture tracing 设计,或确认当前默认 `notes.md` 为什么重新变短时
+
+- `archive/manifests/ARCHIVE_MANIFEST__2026-08-08_macos_ops_interaction_ledger.md`
+  - 主题: macOS ops current-binary 三轮 interaction ledger 前的旧支线上下文归档
+  - 用途: 记录 24 个旧支线主题、81 个文件的整组归档映射,以及 current-binary 请求数、provenance 和 parser 兼容边界摘要
+  - 何时阅读: 需要追溯本轮 macOS ops 交互效率分析前的旧支线,或确认后缀上下文为何从根目录移入 `archive/branch_contexts/` 时
+
+- `workflows/macos-ops-interaction-efficiency.md`
+  - 主题: macOS ops interaction ledger、请求计量、baseline 和批准 gate 工作流
+  - 用途: 固定 `agentDecisionCount`、`requestCount`、supporting shell、recovery、provenance、5 x 8 live matrix 和 fail-closed 认证口径
+  - 何时阅读: 修改 macOS ops case、runner、interaction ledger、共享 parser、协议、通用 primitive 或 canonical skill 前
 
 - `specs/zenoh-unixpipe-fast-path-plan.md`
   - 主题: rdog control macOS / Linux 本机 fast path(Zenoh `transport_unixpipe`)规划

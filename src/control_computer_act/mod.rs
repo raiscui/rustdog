@@ -23,29 +23,28 @@ use std::io;
 
 use serde_json::Value;
 
+use crate::cancellation::CancellationToken;
 use crate::control_actions::ActionExecutionResult;
+use crate::control_observation::resolve_observation_header;
 use crate::control_mouse::MouseEndpoint;
 use crate::control_mouse::MouseRefTarget;
-use crate::cancellation::CancellationToken;
 use crate::control_protocol::{
-    ComputerActRequest, ControlCommand, KeyMode, KeyRequest, OpenAppRequest,
-    WaitRequest,
+    ComputerActRequest, ControlCommand, KeyMode, KeyRequest, OpenAppRequest, WaitRequest,
 };
 
 // ticket 11 implicit_observe plumbing (TTL 5s, ADR-0005 L3)
 #[path = "implicit_observe.rs"]
 mod implicit_observe;
 pub(crate) use implicit_observe::{
-    render_observation_used, render_top_level_observation_id,
-    resolve_or_re_observe_with_wall_clock,
+    render_observation_used, render_top_level_observation_id, resolve_or_re_observe_with_wall_clock,
 };
 
 // ticket 12 + ticket 13 verify 三档 (ADR-0004 V3)
 #[path = "verify.rs"]
 mod verify;
 pub(crate) use verify::{
-    parse_verify_policy, render_verification, run_always_verify,
-    run_best_effort_verify, VerifyPolicy,
+    parse_verify_policy, render_verification, run_always_verify, run_best_effort_verify,
+    VerifyPolicy,
 };
 
 // ticket 17 density metrics (ADR-0006 §Consequences)
@@ -64,16 +63,18 @@ pub(crate) use trace::{
 // ticket 15 error envelope E2 (ADR-0004 §Considered Options E2)
 #[path = "error_envelope.rs"]
 pub(crate) mod error_envelope;
-pub(crate) use error_envelope::{
-    error_envelope, ComputerActErrorCode, RetryStrategy,
-};
+pub(crate) use error_envelope::{error_envelope, ComputerActErrorCode, RetryStrategy};
 
 // ticket 16 per-action timeout table (ADR-0005 §3)
 #[path = "timeout.rs"]
 mod timeout;
-pub(crate) use timeout::{
-    resolve_timeout, TimeoutWatcher,
-};
+pub(crate) use timeout::{resolve_timeout, TimeoutWatcher};
+
+// feature/computer-act-outcome-3state: postcondition outcome 三态 (worked / didnt / unknown)
+// 源自 pi-computer-use `ActOutcome`, 替代 Phase F-2 把 verify_failed 塞 ok:false 的写法.
+#[path = "outcome.rs"]
+mod outcome;
+pub(crate) use outcome::{compute_outcome, render_outcome, ComputerActOutcome, OutcomeInputs};
 
 /// `control_computer_act` 把 action + args 翻译成的中间结果。
 ///
@@ -151,36 +152,50 @@ fn default_timeout_ms_for_action(_action: &str) -> u64 {
 /// 解析 start_box: 期望 `[x, y]` 数组 (Mano-CUA normalized [0, 1000])。
 /// 后续 ticket 11 把它转换为底层 primitive 的 os-logical 像素坐标。
 fn parse_start_box(args: &Value) -> Result<(u16, u16), ComputerActRouteError> {
-    let start_box = args.get("start_box").and_then(|v| v.as_array()).ok_or_else(|| {
-        ComputerActRouteError::InvalidArgs("missing start_box [x, y]".to_string())
-    })?;
+    let start_box = args
+        .get("start_box")
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| {
+            ComputerActRouteError::InvalidArgs("missing start_box [x, y]".to_string())
+        })?;
     if start_box.len() != 2 {
         return Err(ComputerActRouteError::InvalidArgs(format!(
             "start_box 必须是 [x, y],实际长度 {}",
             start_box.len()
         )));
     }
-    let x = start_box[0].as_u64().ok_or_else(|| {
-        ComputerActRouteError::InvalidArgs("start_box[0] 必须是整数".to_string())
-    })? as u16;
-    let y = start_box[1].as_u64().ok_or_else(|| {
-        ComputerActRouteError::InvalidArgs("start_box[1] 必须是整数".to_string())
-    })? as u16;
+    let x = start_box[0]
+        .as_u64()
+        .ok_or_else(|| ComputerActRouteError::InvalidArgs("start_box[0] 必须是整数".to_string()))?
+        as u16;
+    let y = start_box[1]
+        .as_u64()
+        .ok_or_else(|| ComputerActRouteError::InvalidArgs("start_box[1] 必须是整数".to_string()))?
+        as u16;
     Ok((x, y))
 }
 
 /// 解析 ref 目标: `{ref:"@e1", observation_id:"obs-..."}`。
 /// ticket 11 会做完整 implicit_observe 联动;04 只做结构识别。
 fn parse_ref_target(args: &Value) -> Result<MouseEndpoint, ComputerActRouteError> {
-    let target = args.get("target").and_then(|v| v.as_object()).ok_or_else(|| {
-        ComputerActRouteError::InvalidArgs("missing target {ref, observation_id}".to_string())
-    })?;
-    let ref_id = target.get("ref").and_then(|v| v.as_str()).ok_or_else(|| {
-        ComputerActRouteError::InvalidArgs("target.ref 必须是字符串".to_string())
-    })?.to_string();
-    let observation_id = target.get("observation_id").and_then(|v| v.as_str()).ok_or_else(|| {
-        ComputerActRouteError::InvalidArgs("target.observation_id 必须是字符串".to_string())
-    })?.to_string();
+    let target = args
+        .get("target")
+        .and_then(|v| v.as_object())
+        .ok_or_else(|| {
+            ComputerActRouteError::InvalidArgs("missing target {ref, observation_id}".to_string())
+        })?;
+    let ref_id = target
+        .get("ref")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| ComputerActRouteError::InvalidArgs("target.ref 必须是字符串".to_string()))?
+        .to_string();
+    let observation_id = target
+        .get("observation_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| {
+            ComputerActRouteError::InvalidArgs("target.observation_id 必须是字符串".to_string())
+        })?
+        .to_string();
     Ok(MouseEndpoint::ObservationRef(MouseRefTarget {
         ref_id,
         observation_id,
@@ -195,26 +210,35 @@ fn parse_endpoint(args: &Value) -> Result<MouseEndpoint, ComputerActRouteError> 
     }
     let (x, y) = parse_start_box(args)?;
     // ticket 11 之前,start_box → pixel 转换是 1:1 占位 (后续 ticket 改 1000→pixel)
-    Ok(MouseEndpoint::Coordinate(crate::control_mouse::MousePoint {
-        x: x as i32,
-        y: y as i32,
-    }))
+    Ok(MouseEndpoint::Coordinate(
+        crate::control_mouse::MousePoint {
+            x: x as i32,
+            y: y as i32,
+        },
+    ))
 }
 
 fn route_open_app(args: &Value) -> Result<ControlCommand, ComputerActRouteError> {
-    let app_name = args.get("app_name").and_then(|v| v.as_str()).ok_or_else(|| {
-        ComputerActRouteError::InvalidArgs("open_app 缺少 app_name".to_string())
-    })?.to_string();
+    let app_name = args
+        .get("app_name")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| ComputerActRouteError::InvalidArgs("open_app 缺少 app_name".to_string()))?
+        .to_string();
     let wait_ms = args.get("wait_ms").and_then(|v| v.as_u64()).unwrap_or(1500);
-    Ok(ControlCommand::OpenApp(OpenAppRequest { app_name, wait_ms }))
+    Ok(ControlCommand::OpenApp(OpenAppRequest {
+        app_name,
+        wait_ms,
+    }))
 }
 
 fn route_open_url(args: &Value) -> Result<ControlCommand, ComputerActRouteError> {
     // open_url 折叠为 `@cmd "open <url>"` (macOS),后续 LP1 跟进 Linux/Windows。
     // 这条路由只生成 command 字符串,实际 Script 执行在 dispatcher 阶段。
-    let url = args.get("url").and_then(|v| v.as_str()).ok_or_else(|| {
-        ComputerActRouteError::InvalidArgs("open_url 缺少 url".to_string())
-    })?.to_string();
+    let url = args
+        .get("url")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| ComputerActRouteError::InvalidArgs("open_url 缺少 url".to_string()))?
+        .to_string();
     Ok(ControlCommand::Script(format!("open {url}")))
 }
 
@@ -256,43 +280,55 @@ fn route_hover(args: &Value) -> Result<ControlCommand, ComputerActRouteError> {
         MouseEndpoint::Coordinate(p) => (Some(p.x), Some(p.y)),
         _ => (None, None),
     };
-    Ok(ControlCommand::MouseMove(crate::control_mouse::MouseMoveRequest {
-        x,
-        y,
-        dx: None,
-        dy: None,
-        target: Some(endpoint),
-        guard: None,
-        coordinate_space: crate::control_mouse::MouseCoordinateSpace::OsLogical,
-    }))
+    Ok(ControlCommand::MouseMove(
+        crate::control_mouse::MouseMoveRequest {
+            x,
+            y,
+            dx: None,
+            dy: None,
+            target: Some(endpoint),
+            guard: None,
+            coordinate_space: crate::control_mouse::MouseCoordinateSpace::OsLogical,
+        },
+    ))
 }
 
 fn route_type(args: &Value) -> Result<ControlCommand, ComputerActRouteError> {
-    let content = args.get("content").and_then(|v| v.as_str()).ok_or_else(|| {
-        ComputerActRouteError::InvalidArgs("type 缺少 content".to_string())
-    })?.to_string();
+    let content = args
+        .get("content")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| ComputerActRouteError::InvalidArgs("type 缺少 content".to_string()))?
+        .to_string();
     // ticket 04 skeleton: 总是走 @paste (无 target),后续 ticket 07 加 ref→@type-text 分流。
-    Ok(ControlCommand::Paste(crate::control_protocol::PasteRequest::legacy_text(content)))
+    Ok(ControlCommand::Paste(
+        crate::control_protocol::PasteRequest::legacy_text(content),
+    ))
 }
 
 fn route_hotkey(args: &Value) -> Result<ControlCommand, ComputerActRouteError> {
-    let key = args.get("key").and_then(|v| v.as_str()).ok_or_else(|| {
-        ComputerActRouteError::InvalidArgs("hotkey 缺少 key".to_string())
-    })?.to_string();
-    Ok(ControlCommand::Key(crate::control_protocol::KeyRequest::legacy(
-        key,
-        200,
-        crate::control_protocol::KeyMode::PressRelease,
-    )))
+    let key = args
+        .get("key")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| ComputerActRouteError::InvalidArgs("hotkey 缺少 key".to_string()))?
+        .to_string();
+    Ok(ControlCommand::Key(
+        crate::control_protocol::KeyRequest::legacy(
+            key,
+            200,
+            crate::control_protocol::KeyMode::PressRelease,
+        ),
+    ))
 }
 
 fn route_hotkey_click(args: &Value) -> Result<ControlCommand, ComputerActRouteError> {
     // hotkey_click 是组合动作: 按下 modifier, click target, 释放 modifier。
     // ticket 08 + 21 实现: 3 个 sub-command 串成 Composite, dispatch_underlying
     // 顺序执行, 任一失败回滚 (release modifier)。
-    let key = args.get("key").and_then(|v| v.as_str()).ok_or_else(|| {
-        ComputerActRouteError::InvalidArgs("hotkey_click 缺少 key".to_string())
-    })?.to_string();
+    let key = args
+        .get("key")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| ComputerActRouteError::InvalidArgs("hotkey_click 缺少 key".to_string()))?
+        .to_string();
     let (x, y) = parse_start_box(args)?;
 
     let key_down = ControlCommand::Key(KeyRequest::legacy(&key, 200, KeyMode::Press));
@@ -313,12 +349,19 @@ fn route_hotkey_click(args: &Value) -> Result<ControlCommand, ComputerActRouteEr
 
 fn route_scroll(args: &Value) -> Result<ControlCommand, ComputerActRouteError> {
     let (x, y) = parse_start_box(args)?;
-    let direction = args.get("direction").and_then(|v| v.as_str()).ok_or_else(|| {
-        ComputerActRouteError::InvalidArgs("scroll 缺少 direction (down/up/left/right)".to_string())
-    })?;
-    let amount = args.get("amount").and_then(|v| v.as_u64()).ok_or_else(|| {
-        ComputerActRouteError::InvalidArgs("scroll 缺少 amount".to_string())
-    })? as i32;
+    let direction = args
+        .get("direction")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| {
+            ComputerActRouteError::InvalidArgs(
+                "scroll 缺少 direction (down/up/left/right)".to_string(),
+            )
+        })?;
+    let amount = args
+        .get("amount")
+        .and_then(|v| v.as_u64())
+        .ok_or_else(|| ComputerActRouteError::InvalidArgs("scroll 缺少 amount".to_string()))?
+        as i32;
     // positive amount = down (delta_y < 0 表示向下滚动手势); 简化映射,后续 ticket 09 校准。
     let (delta_x, delta_y) = match direction {
         "down" => (0, -amount),
@@ -344,22 +387,30 @@ fn route_scroll(args: &Value) -> Result<ControlCommand, ComputerActRouteError> {
 
 fn route_drag(args: &Value) -> Result<ControlCommand, ComputerActRouteError> {
     let (x1, y1) = parse_start_box(args)?;
-    let end_box = args.get("end_box").and_then(|v| v.as_array()).ok_or_else(|| {
-        ComputerActRouteError::InvalidArgs("drag 缺少 end_box [x, y]".to_string())
-    })?;
+    let end_box = args
+        .get("end_box")
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| {
+            ComputerActRouteError::InvalidArgs("drag 缺少 end_box [x, y]".to_string())
+        })?;
     if end_box.len() != 2 {
         return Err(ComputerActRouteError::InvalidArgs(format!(
             "end_box 必须是 [x, y],实际长度 {}",
             end_box.len()
         )));
     }
-    let x2 = end_box[0].as_u64().ok_or_else(|| {
-        ComputerActRouteError::InvalidArgs("end_box[0] 必须是整数".to_string())
-    })? as i32;
-    let y2 = end_box[1].as_u64().ok_or_else(|| {
-        ComputerActRouteError::InvalidArgs("end_box[1] 必须是整数".to_string())
-    })? as i32;
-    let from = MouseEndpoint::Coordinate(crate::control_mouse::MousePoint { x: x1 as i32, y: y1 as i32 });
+    let x2 = end_box[0]
+        .as_u64()
+        .ok_or_else(|| ComputerActRouteError::InvalidArgs("end_box[0] 必须是整数".to_string()))?
+        as i32;
+    let y2 = end_box[1]
+        .as_u64()
+        .ok_or_else(|| ComputerActRouteError::InvalidArgs("end_box[1] 必须是整数".to_string()))?
+        as i32;
+    let from = MouseEndpoint::Coordinate(crate::control_mouse::MousePoint {
+        x: x1 as i32,
+        y: y1 as i32,
+    });
     let to = MouseEndpoint::Coordinate(crate::control_mouse::MousePoint { x: x2, y: y2 });
     Ok(ControlCommand::Drag(crate::control_mouse::DragRequest {
         from,
@@ -373,10 +424,96 @@ fn route_drag(args: &Value) -> Result<ControlCommand, ComputerActRouteError> {
 }
 
 fn route_wait(args: &Value) -> Result<ControlCommand, ComputerActRouteError> {
-    let duration_ms = args.get("duration_ms").and_then(|v| v.as_u64()).ok_or_else(|| {
-        ComputerActRouteError::InvalidArgs("wait 缺少 duration_ms".to_string())
-    })?;
+    let duration_ms = args
+        .get("duration_ms")
+        .and_then(|v| v.as_u64())
+        .ok_or_else(|| ComputerActRouteError::InvalidArgs("wait 缺少 duration_ms".to_string()))?;
     Ok(ControlCommand::Wait(WaitRequest { duration_ms }))
+}
+
+/// `feature/observe-epoch-stale-reject` 的 fast-reject 钩子.
+///
+/// 触发条件 (全部满足):
+/// 1. `request.epoch` 是 `Some(e)` — 客户端读到了 `@observe` 顶层 epoch 字段
+/// 2. `request.observation_id` 是 `Some(obs_id)` — 客户端持有 observation_id
+/// 3. daemon 端 `resolve_observation_header(obs_id)` 失败 (observation 已 TTL 过期) 或
+///    返回 header 的 `created_at_unix_ms` 不等于 `e`
+///
+/// 满足任一 staleness 条件即返回 `stale_observation_epoch` envelope, 不进入
+/// implicit_observe / routing / dispatch. 这是为了避免客户端拿旧 ref + 旧 epoch
+/// 触发 modal 操作 (e.g., 点到错的按钮).
+///
+/// 注意: epoch 与 `observation_id` 必须成对使用. 客户端只给 epoch 不给
+/// `observation_id` 时, daemon 没有依据验证, 这里 no-op (后续 Phase B 引入
+/// per-resource epoch 再覆盖).
+pub(crate) fn check_observation_epoch_fast_reject(
+    request: &ComputerActRequest,
+) -> Option<ActionExecutionResult> {
+    let epoch = request.epoch?;
+    let observation_id = request.observation_id.as_deref()?;
+
+    match resolve_observation_header(observation_id) {
+        Ok(header) if header.created_at_unix_ms == epoch => None,
+        Ok(header) => Some(stale_observation_epoch_envelope(
+            epoch,
+            observation_id,
+            Some(header.created_at_unix_ms),
+        )),
+        Err(err) => {
+            // OBSERVATION_EXPIRED 是 JSON string payload, 用字符串含匹配识别.
+            if err.to_string().contains("OBSERVATION_EXPIRED") {
+                Some(stale_observation_epoch_envelope(
+                    epoch,
+                    observation_id,
+                    None,
+                ))
+            } else {
+                // 其他错误 (e.g., poisoned lock) 不应 fast-reject, 让上层走
+                // implicit_observe 路径拿到正常 error envelope.
+                None
+            }
+        }
+    }
+}
+
+/// 构造 `stale_observation_epoch` envelope。
+///
+/// `current_epoch` 是 daemon 端观察到的 (Some 表示 mismatch, None 表示 observation
+/// 已被驱逐, 客户端拿到的 epoch 因此无法验证). 两者都暴露给客户端, 方便下一次
+/// 重新 @observe 后带新 epoch 重试.
+fn stale_observation_epoch_envelope(
+    presented_epoch: u64,
+    observation_id: &str,
+    current_epoch: Option<u64>,
+) -> ActionExecutionResult {
+    let mut evidence = serde_json::Map::new();
+    evidence.insert(
+        "presented_epoch".into(),
+        serde_json::Value::Number(presented_epoch.into()),
+    );
+    evidence.insert(
+        "observation_id".into(),
+        serde_json::Value::String(observation_id.to_owned()),
+    );
+    if let Some(current) = current_epoch {
+        evidence.insert(
+            "current_epoch".into(),
+            serde_json::Value::Number(current.into()),
+        );
+    }
+    ActionExecutionResult {
+        exit_code: 64,
+        stdout: Vec::new(),
+        stderr: Vec::new(),
+        response_value_json: Some(
+            error_envelope(
+                ComputerActErrorCode::StaleObservationEpoch,
+                "request.epoch 与 observation 创建时间不一致, 已 fast-reject",
+                Some(serde_json::Value::Object(evidence)),
+            )
+            .to_string(),
+        ),
+    }
 }
 
 /// `execute_computer_act` 是 `@computer-act` 的 executor。
@@ -390,11 +527,17 @@ pub(crate) fn execute_computer_act(
     request: &ComputerActRequest,
     cancel: Option<&CancellationToken>,
 ) -> io::Result<ActionExecutionResult> {
-    use std::time::Instant;
     use serde_json::json;
+    use std::time::Instant;
 
     let start = Instant::now();
     let _ = default_timeout_ms_for_action(&request.action); // ticket 16 替换
+
+    // feature/observe-epoch-stale-reject: 客户端回传 epoch 时, 在implicit_observe
+    // 之前做 fast-reject. 成功路径返回 None, 失败路径返回 envelope.
+    if let Some(envelope) = check_observation_epoch_fast_reject(request) {
+        return Ok(envelope);
+    }
 
     // ticket 11 implicit_observe: 在 routing 之前解析 args.target / start_box,
     // 校验 observation_id TTL,过期自动 re-observe,outcome 写到 response 顶层。
@@ -410,17 +553,24 @@ pub(crate) fn execute_computer_act(
             let mut evidence = serde_json::Map::new();
             evidence.insert(
                 "verify".into(),
-                request.verify.clone().map(Value::String).unwrap_or(Value::Null),
+                request
+                    .verify
+                    .clone()
+                    .map(Value::String)
+                    .unwrap_or(Value::Null),
             );
             return Ok(ActionExecutionResult {
                 exit_code: 64,
                 stdout: Vec::new(),
                 stderr: Vec::new(),
-                response_value_json: Some(error_envelope(
-                    ComputerActErrorCode::InvalidVerify,
-                    err.to_string(),
-                    Some(Value::Object(evidence)),
-                ).to_string()),
+                response_value_json: Some(
+                    error_envelope(
+                        ComputerActErrorCode::InvalidVerify,
+                        err.to_string(),
+                        Some(Value::Object(evidence)),
+                    )
+                    .to_string(),
+                ),
             });
         }
     };
@@ -432,14 +582,17 @@ pub(crate) fn execute_computer_act(
                 exit_code: 64,
                 stdout: Vec::new(),
                 stderr: Vec::new(),
-                response_value_json: Some(json!({
-                    "ok": false,
-                    "action": action,
-                    "error_code": "unknown_action",
-                    "error_message": format!("unknown @computer-act action: {action}"),
-                    "evidence": { "action": action },
-                    "duration_ms": start.elapsed().as_millis() as u64,
-                }).to_string()),
+                response_value_json: Some(
+                    json!({
+                        "ok": false,
+                        "action": action,
+                        "error_code": "unknown_action",
+                        "error_message": format!("unknown @computer-act action: {action}"),
+                        "evidence": { "action": action },
+                        "duration_ms": start.elapsed().as_millis() as u64,
+                    })
+                    .to_string(),
+                ),
             });
         }
         Err(ComputerActRouteError::InvalidArgs(msg)) => {
@@ -450,11 +603,14 @@ pub(crate) fn execute_computer_act(
                 exit_code: 64,
                 stdout: Vec::new(),
                 stderr: Vec::new(),
-                response_value_json: Some(error_envelope(
-                    ComputerActErrorCode::InvalidArgs,
-                    msg,
-                    Some(Value::Object(evidence)),
-                ).to_string()),
+                response_value_json: Some(
+                    error_envelope(
+                        ComputerActErrorCode::InvalidArgs,
+                        msg,
+                        Some(Value::Object(evidence)),
+                    )
+                    .to_string(),
+                ),
             });
         }
     };
@@ -462,11 +618,7 @@ pub(crate) fn execute_computer_act(
     // ticket 16: timeout watcher (spawn background thread, 命中后 signal cancel_token)。
     // 跟 ticket 03 cancellation 整合: dispatch_underlying 拿 cancel, 命中后由
     // 底层 primitive 决定怎么处理 (e.g., @wait sleep_cancellable 返回 Err)。
-    let effective_timeout_ms = resolve_timeout(
-        &request.action,
-        &request.args,
-        request.timeout_ms,
-    );
+    let effective_timeout_ms = resolve_timeout(&request.action, &request.args, request.timeout_ms);
     let timeout_token = CancellationToken::new();
     let _timeout_watcher = TimeoutWatcher::start(effective_timeout_ms, timeout_token.clone());
     let effective_cancel: Option<&CancellationToken> = Some(&timeout_token);
@@ -483,30 +635,27 @@ pub(crate) fn execute_computer_act(
     let timeout_fired = timeout_token.is_cancelled();
     if timeout_fired {
         let mut evidence = serde_json::Map::new();
-        evidence.insert(
-            "last_step".into(),
-            Value::String("dispatch".to_string()),
-        );
+        evidence.insert("last_step".into(), Value::String("dispatch".to_string()));
         evidence.insert(
             "timeout_ms".into(),
             Value::Number(effective_timeout_ms.into()),
         );
-        evidence.insert(
-            "elapsed_ms".into(),
-            Value::Number(dispatch_ms.into()),
-        );
+        evidence.insert("elapsed_ms".into(), Value::Number(dispatch_ms.into()));
         return Ok(ActionExecutionResult {
             exit_code: 64,
             stdout: Vec::new(),
             stderr: Vec::new(),
-            response_value_json: Some(error_envelope(
-                ComputerActErrorCode::Timeout,
-                format!(
-                    "action {} exceeded timeout ({}ms after dispatch)",
-                    request.action, effective_timeout_ms
-                ),
-                Some(Value::Object(evidence)),
-            ).to_string()),
+            response_value_json: Some(
+                error_envelope(
+                    ComputerActErrorCode::Timeout,
+                    format!(
+                        "action {} exceeded timeout ({}ms after dispatch)",
+                        request.action, effective_timeout_ms
+                    ),
+                    Some(Value::Object(evidence)),
+                )
+                .to_string(),
+            ),
         });
     }
 
@@ -524,7 +673,12 @@ pub(crate) fn execute_computer_act(
     };
     let verify_ms = match verify_policy {
         VerifyPolicy::BestEffort => verify_summary.as_ref().map(|s| s.verify_ms),
-        VerifyPolicy::Always => Some(always_summary.as_ref().map(|s| s.ax_diff.verify_ms).unwrap_or(0)),
+        VerifyPolicy::Always => Some(
+            always_summary
+                .as_ref()
+                .map(|s| s.ax_diff.verify_ms)
+                .unwrap_or(0),
+        ),
         VerifyPolicy::None => None,
     };
 
@@ -541,15 +695,19 @@ pub(crate) fn execute_computer_act(
     // ticket 17: 构造 ComputerActDensity (含 verification_passed) - 必须在 json! macro 之前
     let verification_passed = compute_verification_passed(
         verify_policy,
-        verify_summary.as_ref().or_else(|| {
-            always_summary.as_ref().map(|s| &s.ax_diff)
-        }),
+        verify_summary
+            .as_ref()
+            .or_else(|| always_summary.as_ref().map(|s| &s.ax_diff)),
     );
 
     // ticket 18: 构造 inline trace_summary (4 段耗时)
     let trace_summary = TraceSummary::build(
         implicit_observe_ms,
-        if implicit_observe_ms > 0 { TraceStatus::Ok } else { TraceStatus::Skipped },
+        if implicit_observe_ms > 0 {
+            TraceStatus::Ok
+        } else {
+            TraceStatus::Skipped
+        },
         0, // ref_resolve: ticket 18 阶段测量 (start_box → ref 解析); 暂时占 0
         dispatch_ms,
         ok,
@@ -599,86 +757,18 @@ pub(crate) fn execute_computer_act(
         payload["verification"] = v;
     }
 
-    // Phase F-2 (LP-ticket-15-deferred-2): dispatch 成功 + verify 失败 → 改 envelope 为
-    // VerifyFailed (走 error_envelope helper 对齐 ADR-0004 E2)。
-    // 优先级: dispatch 错误 > verify 错误 (下面的 if !ok 分支已经处理 dispatch 错误,
-    // 这里只处理 ok:true 路径下的 verify 失败)。
-    let verify_failed = !verification_passed
-        && matches!(verify_policy, VerifyPolicy::BestEffort | VerifyPolicy::Always)
-        && ok;
-    if verify_failed {
-        let verify_evidence = match verify_policy {
-            VerifyPolicy::BestEffort => verify_summary.as_ref().map(|s| {
-                serde_json::json!({
-                    "verification": {
-                        "method": "ax_diff",
-                        "ax_diff": {
-                            "windows_added": s.windows_added,
-                            "windows_removed": s.windows_removed,
-                            "windows_modified": s.windows_modified,
-                            "elements_added": s.elements_added,
-                            "elements_removed": s.elements_removed,
-                            "elements_modified": s.elements_modified,
-                        },
-                        "verify_ms": s.verify_ms,
-                    },
-                })
-            }),
-            VerifyPolicy::Always => always_summary.as_ref().map(|s| {
-                serde_json::json!({
-                    "verification": {
-                        "method": "full_observe",
-                        "screenshot_id": s.screenshot_id,
-                        "ax_tree_id": s.ax_tree_id,
-                        "screenshot_truncated": s.screenshot_truncated,
-                        "ax_diff": {
-                            "windows_added": s.ax_diff.windows_added,
-                            "windows_removed": s.ax_diff.windows_removed,
-                            "windows_modified": s.ax_diff.windows_modified,
-                            "elements_added": s.ax_diff.elements_added,
-                            "elements_removed": s.ax_diff.elements_removed,
-                            "elements_modified": s.ax_diff.elements_modified,
-                        },
-                    },
-                })
-            }),
-            VerifyPolicy::None => None,
-        };
-        // 改写 payload 为 VerifyFailed envelope
-        let mut verify_failed_env = error_envelope(
-            ComputerActErrorCode::VerifyFailed,
-            "动作执行成功但 GUI 未变化, AX diff 显示无新增/修改/删除",
-            verify_evidence,
-        );
-        // 保留 dispatch ok=true 时的 metadata (action / dispatched_to / duration_ms / density / trace_summary / observation_id)
-        // 让 client 知道是哪个 action + 多少耗时
-        if let Some(action) = payload.get("action").cloned() {
-            verify_failed_env["action"] = action;
-        }
-        if let Some(dispatched) = payload.get("dispatched_to").cloned() {
-            verify_failed_env["dispatched_to"] = dispatched;
-        }
-        if let Some(dur) = payload.get("duration_ms").cloned() {
-            verify_failed_env["duration_ms"] = dur;
-        }
-        if let Some(density) = payload.get("density").cloned() {
-            verify_failed_env["density"] = density;
-        }
-        if let Some(trace) = payload.get("trace_summary").cloned() {
-            verify_failed_env["trace_summary"] = trace;
-        }
-        if let Some(obs_id) = payload.get("observation_id").cloned() {
-            verify_failed_env["observation_id"] = obs_id;
-        }
-        // 保留 verification 段 (client 看到 verify 的细节)
-        if let Some(v) = payload.get("verification").cloned() {
-            verify_failed_env["verification"] = v;
-        }
-        // 替换原 payload
-        for (k, v) in verify_failed_env.as_object().unwrap().iter() {
-            payload[k] = v.clone();
-        }
-    }
+    // feature/computer-act-outcome-3state: outcome 三态替换 Phase F-2 verify_failed
+    // envelope rewrite. dispatch 成功 + verify_failed 现在是 ok:true + outcome:"didnt",
+    // 不再改 ok:false + error_code:verify_failed. 三态详见 `outcome.rs` 的决策表.
+    let verify_requested = !matches!(verify_policy, VerifyPolicy::None);
+    let verify_ran = verify_summary.is_some() || always_summary.is_some();
+    let outcome = compute_outcome(&OutcomeInputs {
+        dispatch_ok: ok,
+        verify_requested,
+        verify_ran,
+        verify_passed: verification_passed,
+    });
+    payload["outcome"] = render_outcome(outcome);
 
     // ticket 18: trace_summary 总是带 (即使 verify=none 也占 4 段);trace_savefile
     // 仅在 request.trace == Some("savefile") 时存在
@@ -749,8 +839,8 @@ fn dispatch_underlying(
     cancel: Option<&CancellationToken>,
 ) -> io::Result<ActionExecutionResult> {
     use crate::control_actions::{
-        execute_cancel, execute_key, execute_open_app, execute_paste,
-        execute_script, execute_type_text, execute_wait,
+        execute_cancel, execute_key, execute_open_app, execute_paste, execute_script,
+        execute_type_text, execute_wait,
     };
     use crate::control_mouse::prepare_click_request;
     use crate::control_mouse::prepare_drag_request;
@@ -758,33 +848,29 @@ fn dispatch_underlying(
     use crate::control_mouse::prepare_wheel_request;
 
     match command {
-        ControlCommand::Click(req) => {
-            crate::control_actions::execute_prepared_mouse_request(
-                prepare_click_request(&req)?,
-                crate::control_mouse::build_click_plan,
-            )
-        }
-        ControlCommand::Drag(req) => {
-            crate::control_actions::execute_prepared_mouse_request(
-                prepare_drag_request(&req)?,
-                crate::control_mouse::build_drag_plan,
-            )
-        }
-        ControlCommand::Wheel(req) => {
-            crate::control_actions::execute_prepared_mouse_request(
-                prepare_wheel_request(&req)?,
-                crate::control_mouse::build_wheel_plan,
-            )
-        }
+        ControlCommand::Click(req) => crate::control_actions::execute_prepared_mouse_request(
+            prepare_click_request(&req)?,
+            crate::control_mouse::build_click_plan,
+        ),
+        ControlCommand::Drag(req) => crate::control_actions::execute_prepared_mouse_request(
+            prepare_drag_request(&req)?,
+            crate::control_mouse::build_drag_plan,
+        ),
+        ControlCommand::Wheel(req) => crate::control_actions::execute_prepared_mouse_request(
+            prepare_wheel_request(&req)?,
+            crate::control_mouse::build_wheel_plan,
+        ),
         ControlCommand::MouseMove(req) => crate::control_actions::execute_prepared_mouse_request(
             prepare_mouse_move_request(&req)?,
             crate::control_mouse::build_mouse_move_plan,
         ),
-        ControlCommand::Key(req) => execute_key(&req, None),
+        ControlCommand::Key(req) => execute_key(&req, None, None),
         ControlCommand::Paste(req) => execute_paste(&req),
         ControlCommand::TypeText(req) => execute_type_text(&req),
         ControlCommand::Wait(req) => execute_wait(&req, cancel),
-        ControlCommand::OpenApp(req) => execute_open_app(&req, &crate::control_actions::SystemOpenAppCommand),
+        ControlCommand::OpenApp(req) => {
+            execute_open_app(&req, &crate::control_actions::SystemOpenAppCommand)
+        }
         ControlCommand::Script(text) => {
             // `open_url` 路由生成 `@cmd "open <url>"` 形式, 走 shell。
             execute_script("/bin/sh", &text)
@@ -808,7 +894,9 @@ fn dispatch_underlying(
                         if let ControlCommand::Key(kr) = done_cmd {
                             if matches!(kr.mode, KeyMode::Press) {
                                 let release = ControlCommand::Key(KeyRequest::legacy(
-                                    &kr.key, 200, KeyMode::Release,
+                                    &kr.key,
+                                    200,
+                                    KeyMode::Release,
                                 ));
                                 let _ = dispatch_underlying(release, cancel);
                             }

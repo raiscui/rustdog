@@ -678,3 +678,91 @@
 - `rtk cargo test --package rustdog --bin rdog --quiet`: 441 passed。
 - `rtk cargo test --package rustdog --test control_lanes --quiet`: 15 passed,1 ignored。
 - final TCP live smoke 通过,summary complete,trace 4 lines。
+
+## [2026-08-06 15:06:56] [Session ID: omx-1785926019233-oohizd] 错误修复: tracing 与 fern 的全局 logger 注册冲突
+
+### 现象
+- 当前 daemon 启动时报 `attempted to set a logger after the logging system was already initialized`。
+- 这会阻止包含 native screenshot tracing 的 current binary 进入 live macOS ops 评测。
+
+### 原因
+- `tracing-subscriber` 的 Cargo feature 会经由 Zenoh 依赖全局合并 `tracing-log`。因此本 crate 虽写了 `default-features = false`,旧 `try_init()` 仍可能注册全局 `LogTracer`。
+- 随后的 `fern::Dispatch::apply()` 需要成为唯一 `log` logger,于是注册失败。
+
+### 修复
+- `src/main.rs` 构建 tracing fmt subscriber 后改用 `tracing::subscriber::set_global_default()` 安装,不再调用会初始化 `LogTracer` 的 `try_init()`。
+- `fern::Dispatch::apply()` 继续作为 `log` 的唯一全局 logger;两套输出仍共享原有等级与 writer 选择。
+
+### 验证
+- `cargo fmt -- --check` 与 `cargo build --package rustdog --bin rdog` 已通过。
+- current daemon 的 `@ping` / `@capabilities` 成功;随后的 5 模型 x 8 case live macOS ops suite 以 40/40 收口。
+
+### 审阅与提交
+- 独立代码审阅结论为 `APPROVE`;架构审阅为 `WATCH`,仅提示两条日志写入管线不具备严格跨 facade 顺序。
+- 修复代码已提交为 `dbbf7b9 fix(logging): avoid tracing log tracer conflict`。
+
+## [2026-08-06 15:18:55] [Session ID: omx-1785926019233-oohizd] 错误修复: macOS ops runner 的 setup 采集与 cleanup
+
+### 现象
+- 首轮 live suite 在 TextEdit 多窗口 case 的 setup 阶段抛出 `UnboundLocalError: verify`。
+- 独立审阅还发现已声明支持的 `textedit-save-dir` setup 会在 `finally` cleanup 因缺少 app 映射抛出 `KeyError`。
+
+### 修复
+- 在 `capture_app_state()` 的第一个分支判断前读取 `case["verify"]`,覆盖 `window-count-increase` 和 `file-exists` 两条共享路径。
+- 在 `quit_after_run()` 把 `textedit-save-dir` 映射到 TextEdit,避免 cleanup 覆盖原始评测结果。
+
+### 验证
+- 新增窗口计数和保存场景 cleanup 回归测试;`python3 -m unittest test_run_macos_ops_eval.py` 为 24 passed。
+- 完整五模型 40-case live suite 随后完成;runner 修复已提交为 `7502c1c`。
+
+## [2026-08-07 10:10:51] [Session ID: omx-1786061963768-e7in9l] 错误修复: raw `@cmd` 单行校验被全局 trim 覆盖
+
+### 现象
+- `@cmd:\necho READY` 在 raw 单行约束下本应拒绝,但新增回归测试在修复前失败,说明它被当作有效命令解析。
+
+### 原因
+- `parse_control_line()` 在分派给 `parse_cmd_payload()` 前无差别执行 `payload.trim()`。
+- 这删除了 raw payload 的前导物理换行,令下游 `contains(['\r', '\n'])` 校验失去证据。
+
+### 修复
+- 保留 `raw_payload`,并仅向 `@cmd` parser 传递原始文本。
+- 其它控制命令继续使用既有 trim 后 payload,避免扩大行为变化。
+
+### 验证
+- 修复前: raw cmd 定向 nextest 失败。
+- 修复后: raw cmd、`@window-find:APP` 和 common window query 三项定向 nextest 通过。
+- 测试命令首次误传 `--exact` 给 nextest 后已改为 `-E 'test(...)'`;该命令错误不作为任何验证结果。
+
+## [2026-08-07 11:25:39] [Session ID: omx-1786061963768-e7in9l] 错误修复: interaction archive 未绑定评测二进制 provenance
+
+### 现象
+- 初次 candidate 40/40 成功,但 raw `@cmd` 与 positional `@window-find` 仍返回旧 parser 的 `code:64`。
+- Pi probe 证明它实际解析到 `/Users/cuiluming/.cargo/bin/rdog`,不是本轮 `target/debug/rdog`。archive 当时不会拒绝这类错配 artifact。
+
+### 原因
+- runner 过去只通过 PATH 解析 `rdog`,而 ledger 只读取 `run-plan.rdog` 作为展示字段,没有和 archive config 做身份验证。
+
+### 修复
+- runner config 使用可执行的绝对 `rdogBinary`,runner 自身直接调用该路径,Pi child PATH 前置其目录,run-plan 写入 path/SHA-256。
+- archive 重新计算 config binary hash,强制每个 source run 的 path/SHA-256 完全匹配;缺失或不一致直接失败关闭,并把 identity 写入 ledger 和 manifest。
+
+### 验证
+- ledger 定向回归 10 项覆盖正常、缺失 provenance 和 hash mismatch;runner 回归 27 项与 `ruff check runner` 通过。
+- 新 5 x 8 archive 全部匹配 `target/debug/rdog` SHA-256 `db5cb9fde3afd4e6d7c54c1375af1578e450994e457ae72eb6c174fe9d0f39c7`,40/40 成功。
+
+## [2026-08-08 01:48:00] [Session ID: omx-1786061963768-e7in9l] 错误修复: live matrix 缺少 managed local-default daemon
+
+### 现象
+- 首次 `eval-macos-ops.sh all` 在 `prepare-open` 退出,没有产生模型 interaction。
+- 独立 `rdog control @ping` 返回“没有可用的 active managed local-default registry”。
+
+### 原因
+- runner 只消费现有 control daemon,不会自行启动 daemon;本轮执行前本机没有 active managed local-default daemon。
+
+### 修复
+- 使用 current `target/debug/rdog daemon -c rdog_macos.toml` 启动仓库既有 local-default 配置。
+- 没有修改 runner、协议或测试 case。
+
+### 验证
+- 重试前 `rdog control @ping` 返回 `pong`。
+- 随后的完整 5 x 8 matrix 为 40/40,失败 setup 没有进入 ledger 或效率统计。

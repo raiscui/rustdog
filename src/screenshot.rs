@@ -1,7 +1,7 @@
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use image::{
     codecs::jpeg::JpegEncoder,
-    imageops::{overlay, resize, FilterType},
+    imageops::{crop_imm, overlay, resize, FilterType},
     DynamicImage, Rgba, RgbaImage,
 };
 use serde::Serialize;
@@ -11,15 +11,28 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
+#[cfg(target_os = "macos")]
+use std::{
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        mpsc,
+    },
+    thread,
+};
+
 use crate::{
-    control_ax::{capture_default_ax_snapshot, current_ax_platform, AxSnapshot, AxTreeRequest},
+    control_ax::{
+        capture_default_ax_snapshot, current_ax_platform, resolve_current_ax_target_rect,
+        AxSnapshot, AxTarget, AxTreeRequest,
+    },
     control_display_scope::{
-        resolve_display_scope, DisplayRect, DisplayScope, DisplayScopeResolution, DisplaySelector,
-        DisplaySummary, DISPLAY_ID_STABILITY_SESSION,
+        resolve_display_scope, resolve_observation_window_ref, DisplayRect, DisplayScope,
+        DisplayScopeResolution, DisplaySelector, DisplaySummary, DISPLAY_ID_STABILITY_SESSION,
     },
     control_frames::{ControlExecutionOutcome, ControlFrame, SaveFileFrame},
     control_protocol::{
         ScreenshotCoordinateSpace, ScreenshotDisplaySelector, ScreenshotLayout, ScreenshotRequest,
+        ScreenshotTarget, ScreenshotWindowTarget,
     },
 };
 
@@ -31,22 +44,112 @@ pub fn execute_screenshot_request(
     request_id: Option<u64>,
     request: &ScreenshotRequest,
 ) -> io::Result<ControlExecutionOutcome> {
-    match request.display {
-        ScreenshotDisplaySelector::All => {
-            execute_composite_screenshot_request_with_capture_ax_and_freshness(
-                request_id,
-                request,
-                || capture_all_display_images(),
-                |ax_request| capture_default_ax_snapshot(ax_request),
-                reject_stale_composite_capture,
-            )
-        }
-        ScreenshotDisplaySelector::Primary => {
-            execute_primary_screenshot_request_with_capture(request_id, request, || {
-                capture_primary_display_image()
-            })
-        }
+    match request.target {
+        ScreenshotTarget::Display => match request.display {
+            ScreenshotDisplaySelector::All => {
+                execute_composite_screenshot_request_with_capture_ax_and_freshness(
+                    request_id,
+                    request,
+                    || capture_all_display_images(),
+                    |ax_request| capture_default_ax_snapshot(ax_request),
+                    reject_stale_composite_capture,
+                )
+            }
+            ScreenshotDisplaySelector::Primary => {
+                execute_primary_screenshot_request_with_capture(request_id, request, || {
+                    capture_primary_display_image()
+                })
+            }
+        },
+        ScreenshotTarget::Window => execute_window_screenshot_request(request_id, request),
     }
+}
+
+/// 窗口截图使用当前 screenshot backend 的真实桌面像素。
+///
+/// 这不是 ScreenCaptureKit 的独立 window surface capture。macOS 不允许我们把
+/// 被其他窗口遮挡的像素伪造成目标窗口内容,所以 manifest 必须明确标记来源。
+fn execute_window_screenshot_request(
+    request_id: Option<u64>,
+    request: &ScreenshotRequest,
+) -> io::Result<ControlExecutionOutcome> {
+    let window_id = resolve_screenshot_window_id(request.window.as_ref().ok_or_else(|| {
+        io::Error::new(io::ErrorKind::InvalidInput, "窗口截图缺少 window target")
+    })?)?;
+    let resolved = resolve_current_ax_target_rect(&AxTarget {
+        id: Some(window_id.clone()),
+        ..AxTarget::default()
+    })?;
+    if resolved.target_type != "window" {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "窗口截图 target 必须是 window id,当前是 {}",
+                resolved.target_type
+            ),
+        ));
+    }
+    let rect = resolved.rect.ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "窗口截图目标没有可用的 AX rect,无法裁剪显示器图像",
+        )
+    })?;
+
+    execute_window_screenshot_request_with_capture(
+        request_id,
+        request,
+        window_id,
+        LogicalRect {
+            x: rect.x,
+            y: rect.y,
+            width: rect.width,
+            height: rect.height,
+        },
+        capture_all_display_images,
+        reject_stale_composite_capture,
+    )
+}
+
+fn resolve_screenshot_window_id(target: &ScreenshotWindowTarget) -> io::Result<String> {
+    if let Some(window_id) = target.window_id.as_ref() {
+        return Ok(window_id.clone());
+    }
+    let observation_id = target.observation_id.as_deref().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "窗口截图 ref 缺少 observation_id",
+        )
+    })?;
+    let ref_id = target.ref_id.as_deref().ok_or_else(|| {
+        io::Error::new(io::ErrorKind::InvalidInput, "窗口截图缺少 window_id 或 ref")
+    })?;
+    Ok(resolve_observation_window_ref(observation_id, ref_id)?.window_id)
+}
+
+fn execute_window_screenshot_request_with_capture<C, S>(
+    request_id: Option<u64>,
+    request: &ScreenshotRequest,
+    window_id: String,
+    requested_rect: LogicalRect,
+    capture: C,
+    freshness_check: S,
+) -> io::Result<ControlExecutionOutcome>
+where
+    C: FnOnce() -> io::Result<Vec<CapturedDisplay>>,
+    S: FnOnce(&[CapturedDisplay]) -> io::Result<()>,
+{
+    validate_window_request(request)?;
+    let displays = capture()?;
+    freshness_check(&displays)?;
+    build_window_screenshot_outcome_with_id(
+        request_id,
+        request,
+        displays,
+        &window_id,
+        requested_rect,
+        &current_unix_epoch_millis().to_string(),
+    )
 }
 
 /// 生成 screenshot bundle 的文件 frame 和轻量摘要。
@@ -250,6 +353,112 @@ fn build_primary_screenshot_outcome(
     })
 }
 
+fn build_window_screenshot_outcome_with_id(
+    request_id: Option<u64>,
+    request: &ScreenshotRequest,
+    displays: Vec<CapturedDisplay>,
+    window_id: &str,
+    requested_os_rect: LogicalRect,
+    screenshot_id: &str,
+) -> io::Result<ControlExecutionOutcome> {
+    validate_window_request(request)?;
+    validate_captured_displays(&displays)?;
+    let virtual_bounds =
+        build_virtual_bounds(displays.iter().map(|display| display.metadata.os_rect))?;
+    let captured_os_rect = requested_os_rect
+        .intersection(virtual_bounds)
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "窗口截图目标不在当前虚拟桌面范围内",
+            )
+        })?;
+
+    // 先复用唯一的 composite builder 统一所有 display scale / rotation 处理。
+    // 裁剪只在该逻辑坐标已经归一化之后发生,不再另起一套像素换算公式。
+    let composite = build_screenshot_bundle_with_ax_and_layout(
+        displays,
+        screenshot_id,
+        None,
+        ScreenshotBundleLayout::Composite,
+    )?
+    .composite;
+    let image_rect = os_rect_to_image_rect(captured_os_rect, virtual_bounds)?;
+    let image = crop_imm(
+        &composite,
+        u32::try_from(image_rect.x)
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "窗口截图 image x 不应为负"))?,
+        u32::try_from(image_rect.y)
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "窗口截图 image y 不应为负"))?,
+        image_rect.width,
+        image_rect.height,
+    )
+    .to_image();
+    let image_filename = format!("screenshot-{screenshot_id}-window.jpg");
+    let manifest_filename = format!("screenshot-{screenshot_id}-window-manifest.json");
+    let manifest = WindowScreenshotManifest {
+        schema: "rdog.screenshot.window.v1",
+        screenshot_id,
+        coordinate_space: "os-logical",
+        image_coordinate_space: "window-logical-pixels",
+        capture_status: "complete",
+        source: "display-composite-crop",
+        visibility: "screen-composited",
+        window: WindowScreenshotTargetManifest {
+            window_id,
+            requested_os_rect,
+            captured_os_rect,
+            clipped: requested_os_rect != captured_os_rect,
+        },
+        image_size: Size {
+            width: image.width(),
+            height: image.height(),
+        },
+    };
+    let manifest_json = serde_json::to_vec_pretty(&manifest)
+        .map_err(|err| io::Error::other(format!("窗口截图 manifest 序列化失败: {err}")))?;
+    let response_value = serde_json::json!({
+        "kind": "window-screenshot",
+        "coordinate_space": "os-logical",
+        "source": "display-composite-crop",
+        "visibility": "screen-composited",
+        "window_id": window_id,
+        "image": image_filename,
+        "manifest": manifest_filename,
+        "clipped": requested_os_rect != captured_os_rect,
+    });
+    let response = match request_id {
+        Some(request_id) => format!("@response {{\"id\":{request_id},\"value\":{response_value}}}"),
+        None => format!("@response {response_value}"),
+    };
+
+    Ok(ControlExecutionOutcome {
+        outbound_frames: vec![
+            ControlFrame::SaveFile(SaveFileFrame {
+                request_id,
+                filename: image_filename,
+                mime: "image/jpeg".to_owned(),
+                encoding: "base64".to_owned(),
+                data: BASE64_STANDARD.encode(encode_jpeg(&image, request.quality)?),
+                quality: Some(request.quality),
+                width: Some(image.width()),
+                height: Some(image.height()),
+            }),
+            ControlFrame::SaveFile(SaveFileFrame {
+                request_id,
+                filename: manifest_filename,
+                mime: "application/json".to_owned(),
+                encoding: "base64".to_owned(),
+                data: BASE64_STANDARD.encode(manifest_json),
+                quality: None,
+                width: None,
+                height: None,
+            }),
+            ControlFrame::ResponseLine(response),
+        ],
+    })
+}
+
 #[cfg(test)]
 fn build_composite_screenshot_outcome_with_id(
     request_id: Option<u64>,
@@ -416,6 +625,22 @@ fn validate_primary_request(request: &ScreenshotRequest) -> io::Result<()> {
     validate_coordinate_space(request)
 }
 
+fn validate_window_request(request: &ScreenshotRequest) -> io::Result<()> {
+    if !matches!(request.target, ScreenshotTarget::Window) || request.window.is_none() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "窗口截图需要 target=window 和 window target",
+        ));
+    }
+    if request.include_ax {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "窗口截图暂不支持 include_ax;请分别执行 @ax-tree 或 @ax-get 获取结构化 AX 证据",
+        ));
+    }
+    validate_coordinate_space(request)
+}
+
 fn validate_composite_request(request: &ScreenshotRequest) -> io::Result<()> {
     if request.display != ScreenshotDisplaySelector::All
         || request.layout != ScreenshotLayout::Composite
@@ -527,6 +752,22 @@ impl LogicalRect {
             && other.right() <= self.right()
             && other.bottom() <= self.bottom()
     }
+
+    fn intersection(self, other: LogicalRect) -> Option<LogicalRect> {
+        let left = i64::from(self.x).max(i64::from(other.x));
+        let top = i64::from(self.y).max(i64::from(other.y));
+        let right = self.right().min(other.right());
+        let bottom = self.bottom().min(other.bottom());
+        if right <= left || bottom <= top {
+            return None;
+        }
+        Some(LogicalRect {
+            x: i32::try_from(left).ok()?,
+            y: i32::try_from(top).ok()?,
+            width: u32::try_from(right - left).ok()?,
+            height: u32::try_from(bottom - top).ok()?,
+        })
+    }
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Serialize)]
@@ -583,6 +824,28 @@ struct ScreenshotManifest {
     displays: Vec<DisplayManifest>,
     #[serde(skip_serializing_if = "Option::is_none")]
     accessibility: Option<AxSnapshot>,
+}
+
+#[derive(Serialize)]
+struct WindowScreenshotManifest<'a> {
+    schema: &'static str,
+    screenshot_id: &'a str,
+    coordinate_space: &'static str,
+    image_coordinate_space: &'static str,
+    capture_status: &'static str,
+    /// 说明图像来自可见 desktop composite,不是不可遮挡的原生 window surface。
+    source: &'static str,
+    visibility: &'static str,
+    window: WindowScreenshotTargetManifest<'a>,
+    image_size: Size,
+}
+
+#[derive(Serialize)]
+struct WindowScreenshotTargetManifest<'a> {
+    window_id: &'a str,
+    requested_os_rect: LogicalRect,
+    captured_os_rect: LogicalRect,
+    clipped: bool,
 }
 
 #[derive(Serialize)]
@@ -1254,36 +1517,234 @@ fn encode_jpeg(image: &RgbaImage, quality: u8) -> io::Result<Vec<u8>> {
 
 #[cfg(target_os = "macos")]
 fn capture_primary_display_image() -> io::Result<RgbaImage> {
-    ensure_screen_recording_permission()?;
-    capture_primary_with_sck_rs().or_else(|primary_err| {
-        if primary_err.kind() == io::ErrorKind::PermissionDenied {
-            return Err(primary_err);
-        }
-        capture_primary_with_xcap().map_err(|fallback_err| {
-            io::Error::new(
-                classify_capture_error(&primary_err, &fallback_err),
-                format!("sck-rs 截图失败: {primary_err}; xcap fallback 也失败: {fallback_err}"),
+    const CAPTURE_KIND: &str = "primary";
+    ensure_screen_recording_permission(CAPTURE_KIND)?;
+    capture_with_sck_fallback(
+        CAPTURE_KIND,
+        "截图",
+        || {
+            capture_with_timeout(
+                CAPTURE_KIND,
+                "sck-rs",
+                &SCK_CAPTURE_IN_FLIGHT,
+                MACOS_CAPTURE_TIMEOUT,
+                capture_primary_with_sck_rs,
             )
-        })
-    })
+        },
+        || {
+            capture_with_timeout(
+                CAPTURE_KIND,
+                "xcap",
+                &XCAP_CAPTURE_IN_FLIGHT,
+                MACOS_CAPTURE_TIMEOUT,
+                capture_primary_with_xcap,
+            )
+        },
+    )
 }
 
 #[cfg(target_os = "macos")]
 fn capture_all_display_images() -> io::Result<Vec<CapturedDisplay>> {
-    ensure_screen_recording_permission()?;
-    capture_all_with_sck_rs().or_else(|primary_err| {
-        if primary_err.kind() == io::ErrorKind::PermissionDenied {
-            return Err(primary_err);
-        }
-        capture_all_with_xcap().map_err(|fallback_err| {
-            io::Error::new(
-                classify_capture_error(&primary_err, &fallback_err),
-                format!(
-                    "sck-rs 多显示器截图失败: {primary_err}; xcap fallback 也失败: {fallback_err}"
-                ),
+    const CAPTURE_KIND: &str = "all";
+    ensure_screen_recording_permission(CAPTURE_KIND)?;
+    capture_with_sck_fallback(
+        CAPTURE_KIND,
+        "多显示器截图",
+        || {
+            capture_with_timeout(
+                CAPTURE_KIND,
+                "sck-rs",
+                &SCK_CAPTURE_IN_FLIGHT,
+                MACOS_CAPTURE_TIMEOUT,
+                capture_all_with_sck_rs,
             )
+        },
+        || {
+            capture_with_timeout(
+                CAPTURE_KIND,
+                "xcap",
+                &XCAP_CAPTURE_IN_FLIGHT,
+                MACOS_CAPTURE_TIMEOUT,
+                capture_all_with_xcap,
+            )
+        },
+    )
+}
+
+/// 统一 macOS 的 SCK -> xcap 策略,让 primary 与 all-display 的 fallback 和日志字段一致。
+#[cfg(target_os = "macos")]
+fn capture_with_sck_fallback<T>(
+    capture_kind: &'static str,
+    capture_label: &'static str,
+    primary_capture: impl FnOnce() -> io::Result<T>,
+    fallback_capture: impl FnOnce() -> io::Result<T>,
+) -> io::Result<T> {
+    let primary_started = Instant::now();
+    match primary_capture() {
+        Ok(result) => Ok(result),
+        Err(primary_err) if primary_err.kind() == io::ErrorKind::PermissionDenied => {
+            trace_capture_permission_denied(capture_kind, "sck-rs", &primary_err);
+            Err(primary_err)
+        }
+        Err(primary_err) => {
+            tracing::info!(
+                target: "rustdog.screenshot",
+                event_name = "screenshot_capture_fallback",
+                capture_kind,
+                failed_backend = "sck-rs",
+                fallback_backend = "xcap",
+                primary_error_kind = ?primary_err.kind(),
+                primary_elapsed_ms = primary_started.elapsed().as_millis() as u64,
+                primary_error = %primary_err,
+                "native screenshot capture falling back to xcap"
+            );
+
+            let fallback_started = Instant::now();
+            match fallback_capture() {
+                Ok(result) => Ok(result),
+                Err(fallback_err) => {
+                    let final_error_kind = classify_capture_error(&primary_err, &fallback_err);
+                    if final_error_kind == io::ErrorKind::PermissionDenied {
+                        trace_capture_permission_denied(capture_kind, "xcap", &fallback_err);
+                    } else {
+                        tracing::error!(
+                            target: "rustdog.screenshot",
+                            event_name = "screenshot_capture_failed",
+                            capture_kind,
+                            primary_backend = "sck-rs",
+                            fallback_backend = "xcap",
+                            primary_error_kind = ?primary_err.kind(),
+                            fallback_error_kind = ?fallback_err.kind(),
+                            final_error_kind = ?final_error_kind,
+                            fallback_elapsed_ms = fallback_started.elapsed().as_millis() as u64,
+                            primary_error = %primary_err,
+                            fallback_error = %fallback_err,
+                            "all native screenshot backends failed"
+                        );
+                    }
+
+                    Err(io::Error::new(
+                        final_error_kind,
+                        format!(
+                            "sck-rs {capture_label}失败: {primary_err}; xcap fallback 也失败: {fallback_err}"
+                        ),
+                    ))
+                }
+            }
+        }
+    }
+}
+
+/// macOS 原生 capture 没有可用的取消句柄,因此必须在 daemon 外层设定返回期限。
+#[cfg(target_os = "macos")]
+const MACOS_CAPTURE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// 每个 backend 最多允许一个未返回的 native capture worker。
+///
+/// `capture_image` 超时后无法安全地强制终止 Objective-C 调用。保留这个标记,
+/// 让后续请求立刻走下一个 backend,而不是为同一个卡住的 backend 持续创建线程。
+#[cfg(target_os = "macos")]
+static SCK_CAPTURE_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
+#[cfg(target_os = "macos")]
+static XCAP_CAPTURE_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
+
+/// 在独立线程中执行可能阻塞的 native capture,并将控制面等待时间限制为指定期限。
+///
+/// ponytail: 原生 API 没有取消接口,超时 worker 可能存活到 API 自行返回;
+/// 每个 backend 的 atomic gate 把上限固定为一个 worker,未来依赖支持取消后可替换为 handle cancel。
+#[cfg(target_os = "macos")]
+fn capture_with_timeout<T>(
+    capture_kind: &'static str,
+    backend: &'static str,
+    in_flight: &'static AtomicBool,
+    timeout: Duration,
+    capture: impl FnOnce() -> io::Result<T> + Send + 'static,
+) -> io::Result<T>
+where
+    T: Send + 'static,
+{
+    if in_flight
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        let error = io::Error::new(
+            io::ErrorKind::TimedOut,
+            format!("{backend} screenshot capture 的上一轮仍未返回"),
+        );
+        trace_capture_timeout(capture_kind, backend, timeout, "previous_capture_in_flight");
+        return Err(error);
+    }
+
+    let (sender, receiver) = mpsc::sync_channel(1);
+    thread::Builder::new()
+        .name(format!("rdog-{backend}-capture"))
+        .spawn(move || {
+            let result = capture();
+            in_flight.store(false, Ordering::Release);
+            let _ = sender.send(result);
         })
-    })
+        .map_err(|err| {
+            in_flight.store(false, Ordering::Release);
+            io::Error::other(format!("无法启动 {backend} screenshot worker: {err}"))
+        })?;
+
+    match receiver.recv_timeout(timeout) {
+        Ok(result) => result,
+        Err(err) => {
+            let (message, reason) = match err {
+                mpsc::RecvTimeoutError::Timeout => (
+                    format!(
+                        "{backend} screenshot capture 超时: {} ms",
+                        timeout.as_millis()
+                    ),
+                    "deadline_exceeded",
+                ),
+                mpsc::RecvTimeoutError::Disconnected => (
+                    format!("{backend} screenshot worker 在返回结果前断开"),
+                    "worker_disconnected",
+                ),
+            };
+            trace_capture_timeout(capture_kind, backend, timeout, reason);
+            Err(io::Error::new(io::ErrorKind::TimedOut, message))
+        }
+    }
+}
+
+/// 记录 native backend 没有在控制面等待期限内返回的事实,包括无法新建 worker 的 gate 命中。
+#[cfg(target_os = "macos")]
+fn trace_capture_timeout(
+    capture_kind: &'static str,
+    backend: &'static str,
+    timeout: Duration,
+    timeout_reason: &'static str,
+) {
+    tracing::warn!(
+        target: "rustdog.screenshot",
+        event_name = "screenshot_capture_timeout",
+        capture_kind,
+        backend,
+        timeout_ms = timeout.as_millis() as u64,
+        timeout_reason,
+        "native screenshot capture timed out"
+    );
+}
+
+/// 权限拒绝是终态类别。单独记录它,避免被泛化为普通 backend 失败而触发无意义重试。
+#[cfg(target_os = "macos")]
+fn trace_capture_permission_denied(
+    capture_kind: &'static str,
+    source: &'static str,
+    error: &io::Error,
+) {
+    tracing::warn!(
+        target: "rustdog.screenshot",
+        event_name = "screenshot_capture_permission_denied",
+        capture_kind,
+        source,
+        error_kind = ?error.kind(),
+        error = %error,
+        "macOS Screen Recording permission denied"
+    );
 }
 
 #[cfg(target_os = "macos")]
@@ -1401,15 +1862,17 @@ fn capture_all_with_xcap() -> io::Result<Vec<CapturedDisplay>> {
 }
 
 #[cfg(target_os = "macos")]
-fn ensure_screen_recording_permission() -> io::Result<()> {
+fn ensure_screen_recording_permission(capture_kind: &'static str) -> io::Result<()> {
     if preflight_screen_recording_permission() {
         return Ok(());
     }
 
-    Err(io::Error::new(
+    let error = io::Error::new(
         io::ErrorKind::PermissionDenied,
         "macOS Screen Recording permission denied for rdog process",
-    ))
+    );
+    trace_capture_permission_denied(capture_kind, "preflight", &error);
+    Err(error)
 }
 
 #[cfg(target_os = "macos")]

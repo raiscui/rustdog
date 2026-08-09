@@ -209,10 +209,7 @@ fn parse_observe_payload_should_accept_compact_form() {
     let target_only = parse_observe_payload("app:Calculator").unwrap();
     assert_eq!(target_only.mode, ObserveMode::Hybrid);
     assert_eq!(
-        target_only
-            .target
-            .as_ref()
-            .and_then(|t| t.app.as_deref()),
+        target_only.target.as_ref().and_then(|t| t.app.as_deref()),
         Some("Calculator")
     );
 
@@ -268,4 +265,84 @@ fn parse_observe_payload_should_reject_too_many_compact_fields() {
 fn parse_observe_payload_should_reject_unknown_mode_in_compact_form() {
     let err = parse_observe_payload("desktop").expect_err("unknown mode must fail");
     assert!(err.to_string().contains("desktop"));
+}
+
+// --- epoch (feature/observe-epoch-stale-reject) ---
+
+#[test]
+fn render_observe_response_should_expose_epoch_at_top_level() {
+    // epoch 字段应该出现在响应顶层,等于 primary observation 的 created_at_unix_ms.
+    // 客户端用这个 epoch 跟 @computer-act 一起回传, daemon 验证动作是否 stale.
+    let request = ObserveRequest {
+        mode: ObserveMode::Ax,
+        include_screenshot: false,
+        include_windows: false,
+        ..ObserveRequest::for_mode(ObserveMode::Ax)
+    };
+    let snapshot = AxSnapshot::complete("macos", vec![fake_ax_window()], false)
+        .with_observation("@observe ax")
+        .unwrap();
+    let primary_observation = snapshot
+        .observation
+        .clone()
+        .expect("snapshot must carry observation header");
+    let produced = ProducedSections {
+        savefile_frames: Vec::new(),
+        visual: None,
+        windows: None,
+        window_observation: None,
+        primary_observation: Some(primary_observation.clone()),
+        accessibility: Some(snapshot),
+        display_scope_resolution: None,
+    };
+
+    let bundle = build_observe_bundle_from_sections(&request, produced).unwrap();
+    let epoch = bundle.value["epoch"]
+        .as_u64()
+        .expect("epoch should be u64 at top level");
+    assert_eq!(
+        epoch, primary_observation.created_at_unix_ms,
+        "epoch 必须等于 primary observation 的 created_at_unix_ms"
+    );
+    // epoch 与 observed_at_unix_ms 应该类同 (同时间产生), 允许差 1ms 内
+    let observed_at = bundle.value["observed_at_unix_ms"]
+        .as_u64()
+        .expect("observed_at_unix_ms should be u64");
+    assert!(
+        observed_at.abs_diff(epoch) <= 1,
+        "epoch ({epoch}) 应该与 observed_at_unix_ms ({observed_at}) 一致"
+    );
+}
+
+#[test]
+fn build_observe_response_should_expose_epoch_even_without_primary_observation() {
+    // 没有 primary observation 时, epoch 退化到 observed_at_unix_ms, 客户端拿到
+    // 一个非零 epoch, 仍可参与 round-trip (后续 compare 注定不匹配, fast-reject).
+    let request = ObserveRequest {
+        mode: ObserveMode::Ax,
+        include_screenshot: false,
+        include_windows: false,
+        ..ObserveRequest::for_mode(ObserveMode::Ax)
+    };
+    let produced = ProducedSections {
+        savefile_frames: Vec::new(),
+        visual: None,
+        windows: None,
+        window_observation: None,
+        primary_observation: None,
+        accessibility: None,
+        display_scope_resolution: None,
+    };
+
+    let bundle = build_observe_bundle_from_sections(&request, produced).unwrap();
+    let epoch = bundle.value["epoch"]
+        .as_u64()
+        .expect("epoch should fallback to observed_at_unix_ms");
+    let observed_at = bundle.value["observed_at_unix_ms"]
+        .as_u64()
+        .expect("observed_at_unix_ms should be u64");
+    assert_eq!(
+        epoch, observed_at,
+        "无 primary observation 时, epoch 应该等于 observed_at_unix_ms"
+    );
 }

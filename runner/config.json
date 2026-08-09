@@ -1,0 +1,43 @@
+{
+  "_comment": "5 model x 8 case macOS ops live matrix 配置 (2026-08-09 已对齐 archive 载体: 老 8 case + per-model max-iter + 严格验证). 加新 model/case 必须确认完整目标列表 (不假装跑过子集).",
+  "schema": "rdog.eval-macos-ops.config.v1",
+  "rdogBinary": {
+    "_comment": "强制 Pi bash tool 用 current binary. prepend target/debug 到 PATH, 让 which rdog 指向这里. SHA-256 写入 ledger manifest.",
+    "path": "target/debug/rdog",
+    "config": "rdog_macos.toml",
+    "namespace": "mac.lab"
+  },
+  "daemon": {
+    "_comment": "managed local-default daemon lifecycle. runner 启动 daemon, 5x8 跑完 kill.",
+    "managed": true,
+    "config": "rdog_macos.toml"
+  },
+  "models": [
+    {"id": "deepseek",             "provider_key": "deepseek",             "profile": "rdog-control-bash", "maxCaseAttempts": 3, "maxToolIterations": 30},
+    {"id": "minimax-cn",           "provider_key": "minimax-cn",           "profile": "rdog-control-bash", "maxCaseAttempts": 3, "maxToolIterations": 30},
+    {"id": "qwen37-flash",         "provider_key": "qwen37-flash",         "profile": "rdog-control-bash", "maxCaseAttempts": 3, "maxToolIterations": 16},
+    {"id": "qwen36-flash",         "provider_key": "qwen36-flash",         "profile": "rdog-control-bash", "maxCaseAttempts": 3, "maxToolIterations": 16},
+    {"id": "minimax-m27-highspeed","provider_key": "minimax-m27-highspeed","profile": "rdog-control-bash", "maxCaseAttempts": 3, "maxToolIterations": 16}
+  ],
+  "cases": [
+    "textedit-type-text",
+    "calendar-window-check",
+    "safari-navigate-example",
+    "preview-open-image",
+    "terminal-window-check",
+    "terminal-run-command",
+    "safari-new-tab-navigate",
+    "textedit-multi-window"
+  ],
+  "ledger": {
+    "schema": "rdog.macos-ops.interaction-ledger.v1",
+    "manifestFields": ["rustdog_commit", "rdogBinary_path", "rdogBinary_sha256", "skill_sha256", "runner_version"],
+    "decisionRecordFields": ["model_id", "case_id", "attempt", "seq", "kind", "classification", "rdog_response", "rdog_error", "artifact_path"]
+  },
+  "immutableBaseline": {
+    "_comment": "2026-08-09 对齐 archive 载体后的 5 model x 8 case baseline (严格验证 40/40, RPC 计数口径). 后续 run 以 attempts 为硬指标, decisions/requests 是同口径对比.",
+    "agentDecisions": 648,
+    "rdogRequests": 315,
+    "attempts": 42
+  }
+}

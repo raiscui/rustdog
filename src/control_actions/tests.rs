@@ -20,7 +20,12 @@ struct FakeExecutor {
 }
 
 impl ControlActionExecutor for FakeExecutor {
-    fn execute(&self, command: &ControlCommand, _shell: &str, _cancel: Option<&crate::cancellation::CancellationToken>) -> io::Result<ActionExecutionResult> {
+    fn execute(
+        &self,
+        command: &ControlCommand,
+        _shell: &str,
+        _cancel: Option<&crate::cancellation::CancellationToken>,
+    ) -> io::Result<ActionExecutionResult> {
         self.calls
             .lock()
             .expect("fake executor lock should work")
@@ -89,7 +94,7 @@ fn execute_control_command_should_run_script_via_shell() {
     let executor = SystemControlActionExecutor::default();
     let (shell, script, expected_stdout) = script_test_case();
     let output = executor
-        .execute(&ControlCommand::Script(script.to_owned()),shell, None)
+        .execute(&ControlCommand::Script(script.to_owned()), shell, None)
         .unwrap();
 
     assert_eq!(output.exit_code, 0);
@@ -301,6 +306,38 @@ fn execute_key_should_publish_event_after_successful_key_plan() {
 }
 
 #[test]
+fn is_single_char_key_should_accept_chars_and_reject_combos() {
+    // 单字符: 数字/字母/运算符 都是 AX press 候选。
+    assert!(is_single_char_key("1"));
+    assert!(is_single_char_key("a"));
+    assert!(is_single_char_key("+"));
+    assert!(is_single_char_key("*"));
+    assert!(is_single_char_key("/"));
+    assert!(is_single_char_key("="));
+
+    // 修饰键组合 / 命名键 / 空 不适用 AX press。
+    assert!(!is_single_char_key("Cmd+T"));
+    assert!(!is_single_char_key("Shift+8"));
+    assert!(!is_single_char_key("Esc"));
+    assert!(!is_single_char_key("Return"));
+    assert!(!is_single_char_key(""));
+}
+
+#[test]
+fn try_ax_press_single_char_should_fallback_when_not_single_char() {
+    // 快捷键/命名键不进入 AX press, 直接返回 None (fallback 到 enigo)。
+    let combo = KeyRequest::legacy("Cmd+T", 200, KeyMode::PressRelease);
+    assert!(try_ax_press_single_char(&combo)
+        .expect("fallback 不是错误")
+        .is_none());
+
+    let named = KeyRequest::legacy("Esc", 200, KeyMode::PressRelease);
+    assert!(try_ax_press_single_char(&named)
+        .expect("fallback 不是错误")
+        .is_none());
+}
+
+#[test]
 fn execute_key_should_not_publish_event_when_key_plan_fails() {
     let sink = RecordingKeyInputEventSink::default();
     let err = execute_key_with_dependencies(
@@ -351,6 +388,45 @@ fn structured_global_key_success_response_should_report_structured_global_succes
     assert_eq!(response_value["status"].as_str(), Some("ok"));
     assert!(response_value.get("target_pid").is_none());
     assert!(response_value.get("window_id").is_none());
+}
+
+#[test]
+fn clear_key_should_include_continue_hint_even_in_legacy_mode() {
+    // 清除类按键 (escape/backspace/delete) 即使 legacy 模式也返回结构化响应 + hint,
+    // 防止模型"快捷键清除后流程断裂"。非清除类按键保持 legacy 裸 0 (None)。
+    for key in ["Escape", "esc", "Backspace", "Delete", "clear"] {
+        let request = KeyRequest::legacy(key, 200, KeyMode::PressRelease);
+        let response_json = structured_global_key_success_response(&request)
+            .expect("clear key should serialize")
+            .expect("clear key should produce structured response even in legacy mode");
+        let response_value: serde_json::Value =
+            serde_json::from_str(&response_json).expect("response json should parse");
+        assert_eq!(response_value["key"].as_str(), Some(key));
+        let hint = response_value["hint"]
+            .as_str()
+            .expect("clear key must hint");
+        assert!(
+            hint.contains("not finished") && hint.contains("final confirm"),
+            "hint must guide continue: {hint}"
+        );
+    }
+
+    // 非清除类按键: legacy 模式保持裸 0 (None)。
+    let request = KeyRequest::legacy("F11", 200, KeyMode::PressRelease);
+    assert!(structured_global_key_success_response(&request)
+        .expect("serialize should work")
+        .is_none());
+
+    // 单字符 c / C 不加 hint (文本输入场景 c 是普通字符)。
+    for key in ["c", "C"] {
+        let request = KeyRequest::legacy(key, 200, KeyMode::PressRelease);
+        assert!(
+            structured_global_key_success_response(&request)
+                .expect("serialize should work")
+                .is_none(),
+            "{key} 不应加清除 hint"
+        );
+    }
 }
 
 #[test]
@@ -493,6 +569,70 @@ fn parse_key_action_should_reject_unsupported_key_names() {
 }
 
 #[test]
+fn parse_key_action_should_support_literal_plus_as_main_key() {
+    // 纯 `+` 是字面加号, 不能因为 split('+') 而被当作空和弦
+    let action = parse_key_action("+").unwrap();
+    assert_eq!(
+        action,
+        KeyAction {
+            modifiers: Vec::new(),
+            main_key: Key::Unicode('+'),
+        }
+    );
+
+    // `Cmd++` = Cmd 修饰 + 字面 `+` 主键
+    let action = parse_key_action("cmd++").unwrap();
+    assert_eq!(
+        action,
+        KeyAction {
+            modifiers: vec![Key::Meta],
+            main_key: Key::Unicode('+'),
+        }
+    );
+
+    // 常规和弦不受影响: Shift+= 仍是修饰键 + `=`
+    let action = parse_key_action("shift+=").unwrap();
+    assert_eq!(
+        action,
+        KeyAction {
+            modifiers: vec![Key::Shift],
+            main_key: Key::Unicode('='),
+        }
+    );
+}
+
+#[test]
+fn button_text_should_match_operator_semantic_aliases() {
+    // 数字/字母精确匹配
+    assert!(button_text_matches_key("5", "5"));
+    assert!(!button_text_matches_key("55", "5"));
+    assert!(!button_text_matches_key("5", "6"));
+
+    // 运算符与本地化按钮描述 (计算器) 的语义别名匹配
+    for (key, texts) in [
+        ("+", &["加", "加号", "add", "plus"][..]),
+        ("-", &["减", "减号", "subtract", "minus"][..]),
+        ("*", &["乘", "乘号", "multiply", "times"][..]),
+        ("/", &["除", "除号", "divide"][..]),
+        ("=", &["等于", "等号", "equals", "equal"][..]),
+        (".", &["点", "小数点", "decimal", "period"][..]),
+        ("%", &["百分比", "percent"][..]),
+    ] {
+        for text in texts {
+            assert!(
+                button_text_matches_key(text, key),
+                "{key} 应匹配按钮文本 {text}"
+            );
+        }
+    }
+
+    // 不相关的按钮文本不应误匹配
+    assert!(!button_text_matches_key("全部清除", "+"));
+    assert!(!button_text_matches_key("7", "+"));
+    assert!(!button_text_matches_key("更改正负号", "-"));
+}
+
+#[test]
 fn build_key_execution_plan_should_default_to_press_release_with_hold() {
     let plan = build_key_execution_plan(&KeyRequest::legacy(
         "right-control+c",
@@ -564,7 +704,6 @@ fn to_io_error_should_upgrade_macos_accessibility_failures_to_permission_denied(
     assert!(err.to_string().contains("重启该进程"));
 }
 
-
 // ============================================================================
 // Phase F-3.5: `@open-app` PermissionDenied / app_not_found / ok error envelope
 // 注入 mock (PermissionDenied live trigger 验证 trait 注入路径)
@@ -578,8 +717,6 @@ fn fake_exit_status(code: u8) -> std::process::ExitStatus {
     use std::os::unix::process::ExitStatusExt;
     std::process::ExitStatus::from_raw(i32::from(code) << 8)
 }
-
-
 
 /// Mock: 模拟 `Command::new("open")` 进程 spawn 失败 (PATH 缺失或不存在的 binary),
 /// 这是 daemon 真实环境触发 PermissionDenied 的路径。
@@ -605,7 +742,8 @@ impl OpenAppCommand for MockOpenAppAppNotFound {
             status,
             stdout: Vec::new(),
             stderr: b"Unable to find application
-".to_vec(),
+"
+            .to_vec(),
         })
     }
 }
@@ -760,7 +898,6 @@ fn execute_open_app_emits_ok_envelope_when_open_succeeds() {
     assert!(payload.get("evidence").is_none());
 }
 
-
 // ============================================================================
 // Phase F-3.5 follow-up: `@cancel#seq` self-target bug fix unit tests
 //
@@ -807,10 +944,7 @@ fn execute_cancel_emits_unknown_target_seq_when_target_not_in_registry() {
         payload.get("dispatched_to"),
         Some(&serde_json::json!("@cancel#seq"))
     );
-    assert_eq!(
-        payload.get("target_seq"),
-        Some(&serde_json::json!(999))
-    );
+    assert_eq!(payload.get("target_seq"), Some(&serde_json::json!(999)));
 
     // evidence 字段必须说明 registry state (设计区别于其它 error_code)
     let evidence = payload
@@ -836,8 +970,8 @@ fn execute_cancel_emits_ok_when_target_signal_succeeds() {
     let _token = registry.register(42);
 
     let request = CancelRequest { target_seq: 42 };
-    let result = execute_cancel(&request, &registry)
-        .expect("executor itself should not error on success");
+    let result =
+        execute_cancel(&request, &registry).expect("executor itself should not error on success");
 
     assert_eq!(result.exit_code, 0);
 

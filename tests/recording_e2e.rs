@@ -81,7 +81,9 @@ fn read_response_line(stream: &mut TcpStream, timeout: Duration) -> String {
     let deadline = Instant::now() + timeout;
     let mut output = String::new();
     let mut buffer = [0_u8; 4096];
-    stream.set_read_timeout(Some(Duration::from_millis(200))).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_millis(200)))
+        .unwrap();
     while Instant::now() < deadline {
         match stream.read(&mut buffer) {
             Ok(0) => return output,
@@ -92,7 +94,8 @@ fn read_response_line(stream: &mut TcpStream, timeout: Duration) -> String {
                 if matches!(
                     err.kind(),
                     std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
-                ) => {
+                ) =>
+            {
                 return output;
             }
             Err(err) => panic!("read should not fail: {err}"),
@@ -233,7 +236,9 @@ fn recording_auto_stop_pipeline_commits_bundle_and_marks_auto_duration() {
 
     // 5. Cleanup.
     client.shutdown(std::net::Shutdown::Both).ok();
-    daemon.kill().expect("daemon should stop after test cleanup");
+    daemon
+        .kill()
+        .expect("daemon should stop after test cleanup");
     let _ = daemon.wait();
     let _ = fs::remove_dir_all(&recording_root);
 }
@@ -259,13 +264,14 @@ fn recording_duration_too_small_returns_4121_without_starting_session() {
     let status_resp = send_line_and_read_response(&mut client, r#"@record-status"#);
     let status_body = parse_response_value(&status_resp).unwrap();
     assert!(
-        status_body.contains(r#""status":"idle""#)
-            && !status_body.contains(r#""last_session""#),
+        status_body.contains(r#""status":"idle""#) && !status_body.contains(r#""last_session""#),
         "no session should be active after rejected start: {status_body}",
     );
 
     client.shutdown(std::net::Shutdown::Both).ok();
-    daemon.kill().expect("daemon should stop after test cleanup");
+    daemon
+        .kill()
+        .expect("daemon should stop after test cleanup");
     let _ = daemon.wait();
     let _ = fs::remove_dir_all(&recording_root);
 }
@@ -281,7 +287,9 @@ fn recording_manual_cancel_before_deadline_leaves_no_bundle() {
         r#"@record-start:{"profile":"semantic","duration_ms":1000}"#,
     );
     assert!(
-        parse_response_value(&start_resp).unwrap().contains(r#""duration_ms":1000"#),
+        parse_response_value(&start_resp)
+            .unwrap()
+            .contains(r#""duration_ms":1000"#),
         "start should echo duration_ms: {start_resp}",
     );
 
@@ -357,7 +365,9 @@ fn recording_manual_cancel_before_deadline_leaves_no_bundle() {
     );
 
     client.shutdown(std::net::Shutdown::Both).ok();
-    daemon.kill().expect("daemon should stop after test cleanup");
+    daemon
+        .kill()
+        .expect("daemon should stop after test cleanup");
     let _ = daemon.wait();
     let _ = fs::remove_dir_all(&recording_root);
 }
@@ -375,7 +385,9 @@ fn recording_manual_stop_before_deadline_yields_manual_trigger_and_bundle() {
         r#"@record-start:{"profile":"semantic","duration_ms":1000}"#,
     );
     assert!(
-        parse_response_value(&start_resp).unwrap().contains(r#""duration_ms":1000"#),
+        parse_response_value(&start_resp)
+            .unwrap()
+            .contains(r#""duration_ms":1000"#),
         "start should echo duration_ms: {start_resp}",
     );
 
@@ -458,7 +470,9 @@ fn recording_manual_stop_before_deadline_yields_manual_trigger_and_bundle() {
     );
 
     client.shutdown(std::net::Shutdown::Both).ok();
-    daemon.kill().expect("daemon should stop after test cleanup");
+    daemon
+        .kill()
+        .expect("daemon should stop after test cleanup");
     let _ = daemon.wait();
     let _ = fs::remove_dir_all(&recording_root);
 }
@@ -470,13 +484,16 @@ fn recording_auto_stop_survives_owner_disconnect_and_reconnect() {
     // 1. Open a connection, start a 200ms auto-stop, then close the
     //    socket without sending stop. This simulates the owner
     //    connection dropping.
-    let mut start_client = TcpStream::connect(("127.0.0.1", port)).expect("first client should connect");
+    let mut start_client =
+        TcpStream::connect(("127.0.0.1", port)).expect("first client should connect");
     let start_resp = send_line_and_read_response(
         &mut start_client,
         r#"@record-start:{"profile":"semantic","duration_ms":200}"#,
     );
     assert!(
-        parse_response_value(&start_resp).unwrap().contains(r#""duration_ms":200"#),
+        parse_response_value(&start_resp)
+            .unwrap()
+            .contains(r#""duration_ms":200"#),
         "start should echo duration_ms: {start_resp}",
     );
     drop(start_client);
@@ -488,7 +505,8 @@ fn recording_auto_stop_survives_owner_disconnect_and_reconnect() {
     //    status. The next handler call observes the FIRED flag and
     //    runs the auto-stop inline; the bundle is committed even
     //    though the original connection is gone.
-    let mut probe_client = TcpStream::connect(("127.0.0.1", port)).expect("probe client should connect");
+    let mut probe_client =
+        TcpStream::connect(("127.0.0.1", port)).expect("probe client should connect");
     let status_resp = send_line_and_read_response(&mut probe_client, r#"@record-status"#);
     let status_body = parse_response_value(&status_resp).unwrap();
     assert!(
@@ -538,7 +556,9 @@ fn recording_auto_stop_survives_owner_disconnect_and_reconnect() {
     );
 
     probe_client.shutdown(std::net::Shutdown::Both).ok();
-    daemon.kill().expect("daemon should stop after test cleanup");
+    daemon
+        .kill()
+        .expect("daemon should stop after test cleanup");
     let _ = daemon.wait();
     let _ = fs::remove_dir_all(&recording_root);
 }

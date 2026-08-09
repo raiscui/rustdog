@@ -2,7 +2,10 @@ use super::{
     assign_once, invalid_data, parse_ax_depth, parse_ax_max_elements, parse_ax_mode_payload,
     parse_ax_target, parse_bool_literal, required_field, resolve_current_ax_target_rect,
     resolve_observation_ref, resolve_target_id_in_snapshot, AxElement, AxMode, AxRect, AxSnapshot,
-    AxTarget, AxTreeRequest, AxWindow, AX_SCHEMA,
+    AxTarget, AxTreeRequest, AxTreeScope, AxWindow, AX_SCHEMA,
+};
+use crate::control_ax::{
+    parse_compact_opt_bool, parse_compact_opt_mode, parse_compact_opt_u16, parse_compact_opt_u8,
 };
 use crate::control_display_scope::{
     display_intersects_rect, display_scope_report, parse_display_scope, resolve_display_scope,
@@ -10,16 +13,23 @@ use crate::control_display_scope::{
 };
 use crate::control_observation::ObservationHeader;
 use crate::control_protocol::{
-    normalize_object_field_name, object_inner, parse_quoted_payload, split_object_field,
-    split_object_fields,
+    normalize_object_field_name, object_inner, parse_compact_fields, parse_quoted_payload,
+    resolve_compact_selector, split_object_field, split_object_fields, CompactWindowSelector,
 };
+use crate::control_window::resolve_unique_app_window_id;
 use crate::screenshot::current_display_summaries;
 use serde::Serialize;
 use std::io;
 
 const DEFAULT_AX_FIND_LIMIT: u16 = 20;
-const DEFAULT_AX_FIND_MODE: AxMode = AxMode::Interactive;
+// 2026-08-03 (macos-ops 回归): 对象语法 @ax-find 默认 Interactive depth=2,
+// 抓不到 Safari 地址栏 (AXTextField 在 depth 3), 导致导航类场景 0 匹配。
+// 提到 Full (depth=4) 与 compact 语法 (depth=8) 的行为对齐, 覆盖深层控件。
+const DEFAULT_AX_FIND_MODE: AxMode = AxMode::Full;
 const DEFAULT_AX_GET_MODE: AxMode = AxMode::Interactive;
+const COMPACT_AX_FIND_DEPTH: u8 = 8;
+const COMPACT_AX_FIND_MAX_ELEMENTS: u16 = 5_000;
+const COMPACT_AX_FIND_LIMIT: u16 = 50;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AxFindRequest {
@@ -33,6 +43,7 @@ pub struct AxFindRequest {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AxWindowIdentity {
     pub window_id: Option<String>,
+    pub app: Option<String>,
     pub ref_id: Option<String>,
     pub observation_id: Option<String>,
 }
@@ -41,6 +52,9 @@ impl AxWindowIdentity {
     pub fn resolve_window_id(&self) -> io::Result<String> {
         if let Some(window_id) = self.window_id.as_ref() {
             return Ok(window_id.clone());
+        }
+        if let Some(app) = self.app.as_deref() {
+            return resolve_unique_app_window_id(app);
         }
         let observation_id = self
             .observation_id
@@ -222,6 +236,102 @@ impl AxGetResponse {
 }
 
 pub fn parse_ax_find_payload(input: &str) -> io::Result<AxFindRequest> {
+    let trimmed = input.trim();
+    if !trimmed.starts_with('{') {
+        // 2026-08-04 (LLM 兼容, 前缀路由): compact 短格式接受命名与位置混合,
+        // 例如 `app:Safari,role:AXTextField`、`app:Safari,AXButton,limit:10`。
+        // 带前缀字段按名路由, 无前缀字段按位置回退 (第1=窗口, 第2=角色)。
+        let mut fields = parse_compact_fields("@ax-find", trimmed)?;
+        let root = fields
+            .take_named("@ax-find", "root")?
+            .map(|value| parse_ax_find_root_compact(&value))
+            .transpose()?
+            .unwrap_or(AxTreeScope::Windows);
+        let selector = resolve_compact_selector("@ax-find", &mut fields)?;
+        let role = fields.take_named_or_positional("@ax-find", "role", "role")?;
+        let include_values = parse_compact_opt_bool(
+            "@ax-find",
+            "include_values",
+            fields.take_named("@ax-find", "include_values")?,
+        )?;
+        let limit =
+            parse_compact_opt_u16("@ax-find", "limit", fields.take_named("@ax-find", "limit")?)?;
+        let depth =
+            parse_compact_opt_u8("@ax-find", "depth", fields.take_named("@ax-find", "depth")?)?;
+        let max_elements = parse_compact_opt_u16(
+            "@ax-find",
+            "max_elements",
+            fields.take_named("@ax-find", "max_elements")?,
+        )?;
+        let mode = parse_compact_opt_mode("@ax-find", fields.take_named("@ax-find", "mode")?)?;
+        fields.ensure_empty("@ax-find")?;
+
+        let role = role.ok_or_else(|| {
+            invalid_data(
+                "@ax-find 短格式缺少角色, 例如 `app:APP,AXButton` 或 `app:APP,role:AXButton`",
+            )
+        })?;
+        let preset = mode.map(|mode| mode.preset());
+        let (window, app_menu_app) = match (root, selector) {
+            (AxTreeScope::Windows, CompactWindowSelector::WindowId(window_id)) => (
+                Some(AxWindowIdentity {
+                    window_id: Some(window_id),
+                    app: None,
+                    ref_id: None,
+                    observation_id: None,
+                }),
+                None,
+            ),
+            (AxTreeScope::Windows, CompactWindowSelector::App(app)) => (
+                Some(AxWindowIdentity {
+                    window_id: None,
+                    app: Some(app),
+                    ref_id: None,
+                    observation_id: None,
+                }),
+                None,
+            ),
+            (AxTreeScope::AppMenu, CompactWindowSelector::App(app)) => (None, Some(app)),
+            (AxTreeScope::AppMenu, CompactWindowSelector::WindowId(_)) => {
+                return Err(invalid_data(
+                    "@ax-find root=app-menu 需要 app:APP,不能使用 window_id",
+                ));
+            }
+        };
+        return Ok(AxFindRequest {
+            tree: AxTreeRequest {
+                scope: root,
+                app_menu_app,
+                depth: depth.unwrap_or(
+                    preset
+                        .as_ref()
+                        .map(|preset| preset.depth)
+                        .unwrap_or(COMPACT_AX_FIND_DEPTH),
+                ),
+                max_elements: max_elements.unwrap_or(
+                    preset
+                        .as_ref()
+                        .map(|preset| preset.max_elements)
+                        .unwrap_or(COMPACT_AX_FIND_MAX_ELEMENTS),
+                ),
+                include_values: include_values.unwrap_or(
+                    preset
+                        .as_ref()
+                        .map(|preset| preset.include_values)
+                        .unwrap_or(true),
+                ),
+                ..AxTreeRequest::default()
+            },
+            query: AxFindQuery {
+                role: Some(role),
+                ..AxFindQuery::default()
+            },
+            window,
+            display_scope: None,
+            limit: limit.unwrap_or(COMPACT_AX_FIND_LIMIT),
+        });
+    }
+
     let inner = object_inner(input, "@ax-find")?;
     if inner.is_empty() {
         return Err(invalid_data("@ax-find 对象 payload 不能为空"));
@@ -232,7 +342,9 @@ pub fn parse_ax_find_payload(input: &str) -> io::Result<AxFindRequest> {
     let mut max_elements = None::<u16>;
     let mut include_values = None::<bool>;
     let mut limit = None::<u16>;
+    let mut root = None::<AxTreeScope>;
     let mut window = None::<AxWindowIdentity>;
+    let mut app = None::<String>;
     let mut display_scope = None::<DisplayScope>;
     let mut query = AxFindQuery::default();
 
@@ -242,6 +354,12 @@ pub fn parse_ax_find_payload(input: &str) -> io::Result<AxFindRequest> {
         let raw_value = raw_value.trim();
 
         match field_name.as_str() {
+            "root" => assign_once(
+                &mut root,
+                "root",
+                "@ax-find",
+                parse_ax_find_root_payload(raw_value)?,
+            )?,
             "mode" => assign_once(
                 &mut mode,
                 "mode",
@@ -268,6 +386,29 @@ pub fn parse_ax_find_payload(input: &str) -> io::Result<AxFindRequest> {
                 "@ax-find",
                 parse_ax_window_identity(raw_value)?,
             )?,
+            // 2026-08-04 (LLM 兼容): 对象语法接受顶层 app / window_id,
+            // 自动归一化为 window 选择器, 与 compact 的 `app:APP` 语义一致。
+            // 模型常把 compact 思维带进对象 (如 {app:"Safari",role:"AXButton"})。
+            "app" => assign_once(
+                &mut app,
+                "app",
+                "@ax-find",
+                parse_non_empty_string("@ax-find.app", raw_value)?,
+            )?,
+            "window_id" => {
+                let window_id = parse_non_empty_string("@ax-find.window_id", raw_value)?;
+                assign_once(
+                    &mut window,
+                    "window_id",
+                    "@ax-find",
+                    AxWindowIdentity {
+                        window_id: Some(window_id),
+                        app: None,
+                        ref_id: None,
+                        observation_id: None,
+                    },
+                )?;
+            }
             "scope" => assign_once(
                 &mut display_scope,
                 "scope",
@@ -365,10 +506,47 @@ pub fn parse_ax_find_payload(input: &str) -> io::Result<AxFindRequest> {
         }
     }
 
+    let root = root.unwrap_or(AxTreeScope::Windows);
+    let (window, app_menu_app) = match root {
+        AxTreeScope::Windows => {
+            if let Some(app) = app {
+                assign_once(
+                    &mut window,
+                    "app",
+                    "@ax-find",
+                    AxWindowIdentity {
+                        window_id: None,
+                        app: Some(app),
+                        ref_id: None,
+                        observation_id: None,
+                    },
+                )?;
+            }
+            (window, None)
+        }
+        AxTreeScope::AppMenu => {
+            if window.is_some() {
+                return Err(invalid_data(
+                    "@ax-find root=app-menu 使用 app 筛选,不能携带 window",
+                ));
+            }
+            let app = app.ok_or_else(|| {
+                invalid_data("@ax-find root=app-menu 需要 app,例如 app:\"Finder\"")
+            })?;
+            if query.process.is_some() || query.process_contains.is_some() {
+                return Err(invalid_data(
+                    "@ax-find root=app-menu 的 app 不能与 process / process_contains 混用",
+                ));
+            }
+            (None, Some(app))
+        }
+    };
     query.validate()?;
     let preset = mode.unwrap_or(DEFAULT_AX_FIND_MODE).preset();
     Ok(AxFindRequest {
         tree: AxTreeRequest {
+            scope: root,
+            app_menu_app,
             depth: depth.unwrap_or(preset.depth),
             max_elements: max_elements.unwrap_or(preset.max_elements),
             include_values: include_values.unwrap_or(preset.include_values),
@@ -379,6 +557,24 @@ pub fn parse_ax_find_payload(input: &str) -> io::Result<AxFindRequest> {
         display_scope,
         limit: limit.unwrap_or(DEFAULT_AX_FIND_LIMIT),
     })
+}
+
+fn parse_ax_find_root_compact(input: &str) -> io::Result<AxTreeScope> {
+    parse_ax_find_root(input)
+}
+
+fn parse_ax_find_root_payload(input: &str) -> io::Result<AxTreeScope> {
+    parse_ax_find_root(&parse_quoted_payload(input)?)
+}
+
+fn parse_ax_find_root(input: &str) -> io::Result<AxTreeScope> {
+    match input.trim().to_ascii_lowercase().as_str() {
+        "window" | "windows" => Ok(AxTreeScope::Windows),
+        "app-menu" | "app_menu" | "menu" => Ok(AxTreeScope::AppMenu),
+        other => Err(invalid_data(format!(
+            "@ax-find root 只支持 window 或 app-menu: {other}"
+        ))),
+    }
 }
 
 fn parse_ax_window_identity(input: &str) -> io::Result<AxWindowIdentity> {
@@ -437,6 +633,7 @@ fn parse_ax_window_identity(input: &str) -> io::Result<AxWindowIdentity> {
 
     Ok(AxWindowIdentity {
         window_id,
+        app: None,
         ref_id,
         observation_id,
     })
@@ -841,16 +1038,64 @@ mod tests {
     }
 
     #[test]
-    fn parse_ax_find_payload_should_use_light_mode_defaults() {
+    fn parse_ax_find_payload_should_use_full_mode_defaults() {
         let request = parse_ax_find_payload(r#"{role:"AXButton",name_contains:"can"}"#).unwrap();
-        assert_eq!(request.tree.depth, AxMode::Interactive.preset().depth);
+        assert_eq!(request.tree.depth, AxMode::Full.preset().depth);
         assert_eq!(
             request.tree.max_elements,
-            AxMode::Interactive.preset().max_elements
+            AxMode::Full.preset().max_elements
         );
-        assert!(!request.tree.include_values);
+        // Full 模式默认 include_values=true, 供 @type-text 三步流程读回 value 验证。
+        assert!(request.tree.include_values);
         assert_eq!(request.limit, DEFAULT_AX_FIND_LIMIT);
         assert_eq!(request.query.name_contains.as_deref(), Some("can"));
+    }
+
+    #[test]
+    fn parse_ax_find_payload_should_accept_compact_window_or_app_role() {
+        let direct = parse_ax_find_payload("pid:123/window:0,AXStaticText").unwrap();
+        let direct_window = direct.window.unwrap();
+        assert_eq!(direct_window.window_id.as_deref(), Some("pid:123/window:0"));
+        assert!(direct_window.app.is_none());
+        assert_eq!(direct.query.role.as_deref(), Some("AXStaticText"));
+        assert_eq!(direct.tree.depth, COMPACT_AX_FIND_DEPTH);
+        assert_eq!(direct.tree.max_elements, COMPACT_AX_FIND_MAX_ELEMENTS);
+        assert!(direct.tree.include_values);
+        assert_eq!(direct.limit, COMPACT_AX_FIND_LIMIT);
+
+        let app = parse_ax_find_payload("app:Calculator,AXStaticText").unwrap();
+        let app_window = app.window.unwrap();
+        assert_eq!(app_window.app.as_deref(), Some("Calculator"));
+        assert!(app_window.window_id.is_none());
+
+        assert!(parse_ax_find_payload("app:Calculator App,AXStaticText").is_err());
+        assert!(parse_ax_find_payload("app:Calculator,AXButton,extra").is_err());
+    }
+
+    #[test]
+    fn parse_ax_find_payload_should_accept_app_menu_root_without_window_fallback() {
+        let object =
+            parse_ax_find_payload(r#"{root:"app-menu",app:"Finder",role:"AXMenuItem",limit:8}"#)
+                .expect("app menu object query should parse");
+        assert_eq!(object.tree.scope, AxTreeScope::AppMenu);
+        assert!(object.window.is_none());
+        assert_eq!(object.tree.app_menu_app.as_deref(), Some("Finder"));
+        assert!(object.query.process.is_none());
+        assert_eq!(object.query.role.as_deref(), Some("AXMenuItem"));
+        assert_eq!(object.limit, 8);
+
+        let compact = parse_ax_find_payload("root:app-menu,app:Finder,AXMenuItem")
+            .expect("app menu compact query should parse");
+        assert_eq!(compact.tree.scope, AxTreeScope::AppMenu);
+        assert!(compact.window.is_none());
+        assert_eq!(compact.tree.app_menu_app.as_deref(), Some("Finder"));
+        assert!(compact.query.process.is_none());
+
+        assert!(parse_ax_find_payload(r#"{root:"app-menu",role:"AXMenuItem"}"#).is_err());
+        assert!(parse_ax_find_payload(
+            r#"{root:"app-menu",app:"Finder",window:{window_id:"pid:1/window:0"},role:"AXMenuItem"}"#
+        )
+        .is_err());
     }
 
     #[test]

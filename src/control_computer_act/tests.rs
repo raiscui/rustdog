@@ -7,12 +7,12 @@
 use serde_json::json;
 
 use super::{route_computer_act_action, RoutedCommand};
+use crate::control_mouse::{
+    DragRequest, MouseButtonName, MouseCoordinateSpace, MouseEndpoint, MouseMoveRequest,
+    MousePoint, MouseRefTarget, WheelRequest,
+};
 use crate::control_protocol::{
     ControlCommand, KeyMode, OpenAppRequest, PasteRequestKind, WaitRequest,
-};
-use crate::control_mouse::{
-    DragRequest, MouseButtonName, MouseCoordinateSpace, MouseEndpoint, MousePoint,
-    MouseMoveRequest, MouseRefTarget, WheelRequest,
 };
 
 fn route(action: &str, args: serde_json::Value) -> RoutedCommand {
@@ -73,7 +73,10 @@ fn click_routes_to_click_with_count_1_and_left_button() {
             assert_eq!(req.count, 1);
             assert_eq!(req.button, MouseButtonName::Left);
             assert_eq!(req.hold_ms, 80);
-            assert!(matches!(req.target, Some(MouseEndpoint::Coordinate(MousePoint { x: 100, y: 200 }))));
+            assert!(matches!(
+                req.target,
+                Some(MouseEndpoint::Coordinate(MousePoint { x: 100, y: 200 }))
+            ));
         }
         c => panic!("expected Click, got {c:?}"),
     }
@@ -151,7 +154,10 @@ fn hover_routes_to_mouse_move() {
         ControlCommand::MouseMove(MouseMoveRequest { x, y, target, .. }) => {
             assert_eq!(x, Some(300));
             assert_eq!(y, Some(400));
-            assert!(matches!(target, Some(MouseEndpoint::Coordinate(MousePoint { x: 300, y: 400 }))));
+            assert!(matches!(
+                target,
+                Some(MouseEndpoint::Coordinate(MousePoint { x: 300, y: 400 }))
+            ));
         }
         c => panic!("expected MouseMove, got {c:?}"),
     }
@@ -164,14 +170,12 @@ fn type_routes_to_paste_when_no_target() {
     let r = route("type", json!({"content": "hello world"}));
     assert_eq!(r.dispatched_to, "@type-text");
     match r.command {
-        ControlCommand::Paste(req) => {
-            match req.kind {
-                PasteRequestKind::LegacyTextInjection(text) => {
-                    assert_eq!(text, "hello world");
-                }
-                _ => panic!("expected LegacyTextInjection, got other kind"),
+        ControlCommand::Paste(req) => match req.kind {
+            PasteRequestKind::LegacyTextInjection(text) => {
+                assert_eq!(text, "hello world");
             }
-        }
+            _ => panic!("expected LegacyTextInjection, got other kind"),
+        },
         c => panic!("expected Paste, got {c:?}"),
     }
 }
@@ -197,7 +201,10 @@ fn hotkey_routes_to_key() {
 #[test]
 fn hotkey_click_routes_to_composite_3_steps() {
     // ticket 08 + 21: hotkey_click 实现为 ControlCommand::Composite([key down, click, key up])
-    let r = route("hotkey_click", json!({"start_box": [10, 20], "key": "shift"}));
+    let r = route(
+        "hotkey_click",
+        json!({"start_box": [10, 20], "key": "shift"}),
+    );
     assert_eq!(r.dispatched_to, "@key+@click+@key");
     match r.command {
         ControlCommand::Composite(cmds) => {
@@ -242,7 +249,14 @@ fn scroll_routes_to_wheel_with_negative_delta_y_for_down() {
     );
     assert_eq!(r.dispatched_to, "@wheel");
     match r.command {
-        ControlCommand::Wheel(WheelRequest { delta_x, delta_y, x, y, coordinate_space, .. }) => {
+        ControlCommand::Wheel(WheelRequest {
+            delta_x,
+            delta_y,
+            x,
+            y,
+            coordinate_space,
+            ..
+        }) => {
             assert_eq!(x, Some(100));
             assert_eq!(y, Some(200));
             assert_eq!(delta_x, 0);
@@ -263,9 +277,21 @@ fn drag_routes_to_drag_with_from_to() {
     );
     assert_eq!(r.dispatched_to, "@drag");
     match r.command {
-        ControlCommand::Drag(DragRequest { from, to, duration_ms, steps, .. }) => {
-            assert!(matches!(from, MouseEndpoint::Coordinate(MousePoint { x: 100, y: 200 })));
-            assert!(matches!(to, MouseEndpoint::Coordinate(MousePoint { x: 400, y: 500 })));
+        ControlCommand::Drag(DragRequest {
+            from,
+            to,
+            duration_ms,
+            steps,
+            ..
+        }) => {
+            assert!(matches!(
+                from,
+                MouseEndpoint::Coordinate(MousePoint { x: 100, y: 200 })
+            ));
+            assert!(matches!(
+                to,
+                MouseEndpoint::Coordinate(MousePoint { x: 400, y: 500 })
+            ));
             assert_eq!(duration_ms, 450);
             assert_eq!(steps, 24);
         }
@@ -296,4 +322,129 @@ fn unknown_action_returns_error() {
         result,
         Err(super::ComputerActRouteError::UnknownAction(_))
     ));
+}
+
+use super::check_observation_epoch_fast_reject;
+use crate::control_observation::{
+    record_observation, ObservationRoot, ObservationRefEntry,
+};
+use crate::control_protocol::ComputerActRequest;
+
+fn make_request(observation_id: Option<&str>, epoch: Option<u64>) -> ComputerActRequest {
+    ComputerActRequest {
+        schema: "rdog.computer-act.v1".to_string(),
+        action: "wait".to_string(),
+        args: json!({"duration_ms": 100}),
+        verify: None,
+        observation_id: observation_id.map(str::to_owned),
+        timeout_ms: None,
+        trace: None,
+        epoch,
+    }
+}
+
+fn record_observation_at(now_ms: u64, refs: Vec<ObservationRefEntry>) -> String {
+    let root = ObservationRoot {
+        schema: "rdog.observation.root.v1".to_string(),
+        platform: "test".to_string(),
+        coordinate_space: "os-logical".to_string(),
+    };
+    let header = record_observation("test", "@computer-act", root, refs)
+        .expect("record_observation should succeed");
+    header.observation_id
+}
+
+#[test]
+fn epoch_check_returns_none_when_epoch_not_provided() {
+    // 没传 epoch: 走原路径, fast-reject 钩子 no-op
+    let request = make_request(Some("obs-123"), None);
+    assert!(check_observation_epoch_fast_reject(&request).is_none());
+}
+
+#[test]
+fn epoch_check_returns_none_when_observation_id_missing() {
+    // 传了 epoch 但没 observation_id: 没有验证依据, no-op
+    let request = make_request(None, Some(1700000000000));
+    assert!(check_observation_epoch_fast_reject(&request).is_none());
+}
+
+#[test]
+fn epoch_check_passes_when_epoch_matches_header() {
+    // 记录 observation, epoch 用真实 created_at_unix_ms: 应该通过
+    let observation_id = record_observation_at(
+        1700000001000,
+        vec![ObservationRefEntry {
+            ref_id: "@e1".to_string(),
+            backend_id: "pid:1/path:0".to_string(),
+            kind: "ax".to_string(),
+        }],
+    );
+    // created_at_unix_ms 由 global store 用 current_unix_ms 自动算, 不能直接控制.
+    // 通过先 record 再读 header 拿真实 epoch, 然后用真实 epoch 校验.
+    let header = crate::control_observation::resolve_observation_header(&observation_id)
+        .expect("header should resolve");
+    let request = make_request(Some(&observation_id), Some(header.created_at_unix_ms));
+    assert!(
+        check_observation_epoch_fast_reject(&request).is_none(),
+        "matching epoch should pass through"
+    );
+}
+
+#[test]
+fn epoch_check_rejects_when_epoch_mismatches() {
+    let observation_id = record_observation_at(
+        1700000002000,
+        vec![ObservationRefEntry {
+            ref_id: "@e1".to_string(),
+            backend_id: "pid:1/path:0".to_string(),
+            kind: "ax".to_string(),
+        }],
+    );
+    // 用错 epoch: 应该 fast-reject, 错误 envelope, exit_code 64
+    let request = make_request(Some(&observation_id), Some(42));
+    let result = check_observation_epoch_fast_reject(&request)
+        .expect("mismatched epoch must produce envelope");
+    assert_eq!(result.exit_code, 64);
+    let envelope: serde_json::Value = serde_json::from_str(
+        result.response_value_json.as_deref().expect("envelope is JSON"),
+    )
+    .expect("envelope should be JSON");
+    assert_eq!(envelope["ok"], false);
+    assert_eq!(envelope["error_code"], "stale_observation_epoch");
+    assert_eq!(envelope["retry"]["strategy"], "re_observe_then_retry");
+    assert_eq!(
+        envelope["evidence"]["presented_epoch"],
+        serde_json::Value::Number(42u64.into())
+    );
+    assert_eq!(
+        envelope["evidence"]["observation_id"],
+        serde_json::Value::String(observation_id.clone())
+    );
+    assert!(
+        envelope["evidence"]["current_epoch"].is_number(),
+        "current_epoch 应该被写入 evidence, 实际: {}",
+        envelope["evidence"]
+    );
+}
+
+#[test]
+fn epoch_check_rejects_when_observation_absent() {
+    // observation_id 不存在 -> resolve_observation_header 返回 OBSERVATION_EXPIRED
+    let request = make_request(Some("obs-does-not-exist-9999"), Some(1700000003000));
+    let result = check_observation_epoch_fast_reject(&request)
+        .expect("missing observation must produce envelope");
+    assert_eq!(result.exit_code, 64);
+    let envelope: serde_json::Value = serde_json::from_str(
+        result.response_value_json.as_deref().expect("envelope is JSON"),
+    )
+    .expect("envelope should be JSON");
+    assert_eq!(envelope["error_code"], "stale_observation_epoch");
+    assert_eq!(
+        envelope["evidence"]["observation_id"],
+        serde_json::Value::String("obs-does-not-exist-9999".to_string())
+    );
+    assert!(
+        envelope["evidence"].get("current_epoch").is_none(),
+        "observation 不存在时不应有 current_epoch 字段"
+    );
 }

@@ -781,6 +781,25 @@ Phase F-2 收口, 详见 commit 4c74a01 + WORKLOG `[2026-07-17 16:30:00]` entry.
 smoke 更新:
 - smoke_computer_act_verify.sh test 3: 改 VerifyFailed 期望
 - smoke_computer_act_trace.sh test 3: 改 VerifyFailed 期望 (保留 trace_summary.verify status=ok + trace_savefile)
+SUPERSEDED BY outcome 三态 (`feature/computer-act-outcome-3state`, commit 跟本 session):
+- 替代原因: Phase F-2 把 verify_failed 塞 ok:false 让 client 误以为 dispatch 失败, 实际
+  dispatch 是 ok 的, 只是 postcondition 没满足. 借鉴 pi-computer-use `ActOutcome` 改成
+  三态 outcome (worked / didnt / unknown).
+- 改动: 删 mod.rs verify_failed envelope rewrite (83 行), 新 outcome.rs (174 行含 7 单测),
+  mod.rs 加 outcome 字段写入 (43 行), verify.rs 加 verification.status 字段 (25 行 + 3 单测),
+  error_envelope.rs 删 verify_failed_envelope_json helper (23 行 + 2 测试).
+- 新语义:
+  - `ok: true` 永远表示 dispatch 成功 (无论 verify 结果)
+  - `outcome: "worked" | "didnt" | "unknown"` 表示 postcondition 三态
+  - `outcome: "didnt"` 替代 `ok: false + error_code: verify_failed`
+  - `verification.status: "verified" | "preexisting" | "failed"` (ax_diff 决策)
+- smoke 更新: verify.sh test 3 / trace.sh test 3 改成期望 ok:true + outcome:"didnt"
+  + verification.status:"failed", 删 retry.strategy / retry.hint 断言
+- 破坏性变更: 现有依赖 ok:false 判定 verify 失败的 caller 必须改读 outcome / verification.status.
+  commit message 顶部 + WORKLOG 已写明.
+- ComputerActErrorCode::VerifyFailed enum 保留 (供 retry_strategy / hint reference, ticket 13 ADR 占位),
+  helper 函数 + 2 测试已删 (dead code, 0 caller).
+
 
 ### LP-ticket-15-deferred-7: ObservationExpired + TargetNotFound live trigger (Phase I 候选)
 剩 2 个 variant 完全没触发路径, 依赖 Phase I 真实 observe 集成:
@@ -797,3 +816,26 @@ zenoh router down / unixpipe broken / zenoh timeout 等场景.
 
 触发条件: 需要 client 端断开测试, 或 daemon 端临时 kill zenoh session,
 可以 mock 但 live trigger 比较难稳定.
+
+## [2026-08-06 15:06:56] [Session ID: omx-1785926019233-oohizd] 候选: Rust binary 既有 warning 清理
+
+### 证据
+- `cargo build --package rustdog --bin rdog` 成功,但报告 17 条 warning。
+- 涉及 `control_actions`、`control_ax`、`control_computer_act`、`control_protocol` 等未在当前 logger diff 中修改的模块,主要是 cfg 后未使用 import、未使用变量和尚未有触发路径的 enum variant/helper。
+
+### 建议
+- 单独按模块做 cfg import 收口与 dead-code 边界整理,每次保持功能不变并跑完整 binary tests。
+- 不与当前 logger 初始化修复混合提交,避免把已验证的启动修复掩盖在无关重构中。
+
+## [2026-08-07 11:25:39] [Session ID: omx-1786061963768-e7in9l] 待办: Zenoh client 关闭时的 admin transport event 日志
+
+- 在本轮 current daemon live matrix 中,每次 Zenoh control client 正常关闭后 stderr 会出现 `ERROR zenoh::api::admin: Unable to publish transport event: session closed`。
+- 对应 control response 和进程退出状态正常,当前没有静态或动态证据证明它影响 parser、评测成功率或 ledger 统计。
+- 后续应以最小 control client 复现并定位 event publisher 的生命周期,再决定是修复、降级日志还是保留诊断事件。
+
+## [2026-08-09 20:30:00] [Session ID: omx-1786268168901-f711dm] 待办: 清理历史遗留 zenoh guard / unixpipe FIFO
+
+- 现象: ~/.local/state/rustdog/zenoh-guards/ 有数千个历史 guard 文件 (channel/dup/entry/key/pty/tri 等测试残留, 来自多轮 daemon 生命周期测试), $TMPDIR 下也有大量未托管 FIFO 候选
+- 影响: 不阻塞功能 (daemon 启动只认自己的 mac.lab guard, 已实测多轮), 但 `rdog control` 无 target 时错误提示会列出全部 FIFO 候选 (几百行噪音), ls 该目录也慢
+- 清理方案 (需要时): 确认无活跃 daemon 后, 删除 zenoh-guards 中 PID 已不存在的 guard + 清 $TMPDIR/rdog-*.pipe
+- 触发条件: 用户觉得 FIFO 候选噪音影响诊断时再做, 或定期清理

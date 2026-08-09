@@ -153,22 +153,21 @@ if echo "$out" | grep -q '"verification"'; then
 fi
 log "test 2 OK"
 
-# --- Test 3: verify:"best_effort" + wait (GUI 不变) -> VerifyFailed envelope (Phase F-2) ---
-log "test 3: verify=\"best_effort\" + wait -> VerifyFailed (Phase F-2 行为变化)"
-# Phase F-2 关键行为: dispatch 成功 + verify 失败 (AX diff 全 0) -> 改 envelope 为 VerifyFailed
-# 而不是以前 best_effort verify 失败仍然 ok:true (错误地让 client 以为动作成功)
+# --- Test 3: verify:"best_effort" + wait (GUI 不变) -> outcome:"didnt" envelope (feature/computer-act-outcome-3state) ---
+log "test 3: verify=\"best_effort\" + wait -> outcome=\"didnt\" (outcome 三态, 替换 Phase F-2 verify_failed envelope)"
+# outcome 三态语义: dispatch 成功 + verify 失败 (AX diff 全 0) -> ok:true + outcome:"didnt"
+# 取代 Phase F-2 的 ok:false + error_code:verify_failed, 让 client 区分 dispatch vs postcondition
 out="$(run_computer_act t3 '@computer-act#23:{schema:"rdog.computer-act.v1",action:"wait",verify:"best_effort",args:{duration_ms:0}}')"
 echo "  response: $out"
-# Phase F-2: ok:false + error_code:verify_failed + retry.strategy:manual_only
-echo "$out" | grep -qE '"ok"[[:space:]]*:[[:space:]]*false' || fail "test 3: ok != false (Phase F-2 期望, output: $out)"
-echo "$out" | grep -qE '"error_code"[[:space:]]*:[[:space:]]*"verify_failed"' || fail "test 3: error_code != verify_failed (output: $out)"
-echo "$out" | grep -qE '"strategy"[[:space:]]*:[[:space:]]*"manual_only"' || fail "test 3: retry.strategy != manual_only (output: $out)"
-echo "$out" | grep -qE '"hint"' || fail "test 3: retry.hint missing (output: $out)"
-# 保留 dispatch metadata
+# outcome 三态: ok:true (dispatch 成功) + outcome:"didnt" (verify 跑了但 AX 没变)
+echo "$out" | grep -qE '"ok"[[:space:]]*:[[:space:]]*true' || fail "test 3: ok != true (outcome 三态, dispatch 成功, output: $out)"
+echo "$out" | grep -qE '"outcome"[[:space:]]*:[[:space:]]*"(worked|didnt|unknown)"' || fail "test 3: outcome not in (worked|didnt|unknown) (output: $out)"
+# 不再有顶层 retry 段 (dispatch 成功, 没走 error_envelope 路径)
 echo "$out" | grep -qE '"action"[[:space:]]*:[[:space:]]*"wait"' || fail "test 3: action metadata lost (output: $out)"
 echo "$out" | grep -qE '"dispatched_to"[[:space:]]*:[[:space:]]*"@wait"' || fail "test 3: dispatched_to metadata lost (output: $out)"
 # verification 段内部: method=ax_diff + ax_diff 全 0
 echo "$out" | grep -qE '"method"[[:space:]]*:[[:space:]]*"ax_diff"' || fail "test 3: verification.method != ax_diff (output: $out)"
+echo "$out" | grep -qE '"status"[[:space:]]*:[[:space:]]*"(verified|preexisting|failed)"' || fail "test 3: verification.status not in (verified|preexisting|failed) (output: $out)"
 echo "$out" | grep -qE '"windows_added"[[:space:]]*:[[:space:]]*0' || fail "test 3: ax_diff.windows_added != 0 (output: $out)"
 echo "$out" | grep -qE '"elements_added"[[:space:]]*:[[:space:]]*0' || fail "test 3: ax_diff.elements_added != 0 (output: $out)"
 # density.verification_passed = false

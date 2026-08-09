@@ -285,7 +285,11 @@ mod tests {
     #[test]
     fn trace_summary_verify_skipped_when_policy_none() {
         let summary = TraceSummary::build(5, TraceStatus::Skipped, 0, 100, true, None, false);
-        let verify_step = summary.steps.iter().find(|s| s.kind == TraceStepKind::Verify).unwrap();
+        let verify_step = summary
+            .steps
+            .iter()
+            .find(|s| s.kind == TraceStepKind::Verify)
+            .unwrap();
         assert_eq!(verify_step.status, TraceStatus::Skipped);
         assert_eq!(verify_step.elapsed_ms, 0);
     }
@@ -293,7 +297,11 @@ mod tests {
     #[test]
     fn trace_summary_dispatch_failed_on_error() {
         let summary = TraceSummary::build(5, TraceStatus::Ok, 5, 100, false, None, false);
-        let dispatch_step = summary.steps.iter().find(|s| s.kind == TraceStepKind::Dispatch).unwrap();
+        let dispatch_step = summary
+            .steps
+            .iter()
+            .find(|s| s.kind == TraceStepKind::Dispatch)
+            .unwrap();
         assert_eq!(dispatch_step.status, TraceStatus::Failed);
     }
 
@@ -301,7 +309,11 @@ mod tests {
     fn trace_summary_implicit_observe_status_skipped_when_zero_ms() {
         // 没触发 implicit_observe → elapsed=0 → status=skipped
         let summary = TraceSummary::build(0, TraceStatus::Ok, 5, 100, true, None, false);
-        let implicit = summary.steps.iter().find(|s| s.kind == TraceStepKind::ImplicitObserve).unwrap();
+        let implicit = summary
+            .steps
+            .iter()
+            .find(|s| s.kind == TraceStepKind::ImplicitObserve)
+            .unwrap();
         assert_eq!(implicit.status, TraceStatus::Skipped);
     }
 

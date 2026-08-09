@@ -981,8 +981,8 @@ fn control_one_shot_without_target_should_report_missing_local_daemon_for_unknow
         "control one-shot without local daemon should fail"
     );
     assert!(
-        combined.contains("本地 daemon"),
-        "stdout+stderr should explain missing local daemon, got: {combined}"
+        combined.contains("active managed local-default registry"),
+        "stdout+stderr should explain missing managed local-default registry, got: {combined}"
     );
 }
 

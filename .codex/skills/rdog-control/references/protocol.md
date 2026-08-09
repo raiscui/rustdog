@@ -11,6 +11,7 @@
 | `@bootstrap` | read-only liveness + capabilities + optional observe preflight |
 | `@capabilities` | structured capability report request |
 | `@cmd#42:"printf READY"` | explicit protocol request with request id |
+| `@cmd#42:printf READY` | explicit request with one-line raw shell payload |
 | `printf PLAIN_OK` | bare one-shot shell line |
 
 Explicit request ids apply only to `@...` requests.
@@ -27,6 +28,7 @@ Bare shell lines do not have request ids.
 @capabilities#7
 @cmd:"printf READY"
 @cmd#42:"printf READY"
+@cmd#42:printf READY
 @script:"git status --short"
 @paste:"hello"
 @key:"F11"
@@ -39,6 +41,7 @@ Bare shell lines do not have request ids.
 @screenshot#10:{include_ax:true,ax_required:false,ax_mode:"interactive"}
 @observe#19:{mode:"hybrid",include_screenshot:true,include_ax:true,include_windows:true,ax_required:false,ax_mode:"interactive"}
 @window-find#11:{app:"TextEdit",title_contains:"release-notes",limit:5,include_state:true,include_recipes:true}
+@window-find:APP
 @window-activate#12:{target:{ref:"@e1",observation_id:"obs-123"}}
 @window-activate#13:{window_id:"pid:123/window:0"}
 @window-resize#18:{target:{ref:"@e1",observation_id:"obs-123"},size:{width:1200,height:800,unit:"os-logical",box:"outer"},origin:"keep",verify:true}
@@ -51,6 +54,9 @@ Bare shell lines do not have request ids.
 @ax-get#21:{target:{ref:"@e2",observation_id:"obs-123"},depth:2,include_values:false}
 @ax-tree#22:{mode:"interactive"}
 @ax-press#23:{target:{ref:"@e2",observation_id:"obs-123"}}
+@ax-find:app:Calculator,AXStaticText
+@ax-press:app:Calculator,1
+@ax-press-sequence:app:Calculator,1,+,2,=,
 @selector-get#30:{selector_id:"sel-v1-29b3963a312473d5",include_history:true}
 @selector-resolve#31:{selector_id:"sel-v1-29b3963a312473d5",limit:10,dry_run:true,include_explanations:true}
 @selector-refind#32:{selector_id:"sel-v1-29b3963a312473d5",policy:"safe",min_confidence:0.9,include_explanations:true}
@@ -86,6 +92,28 @@ Bare shell lines do not have request ids.
 
 For agents, prefer object payloads when fields matter.
 Human shorthand is fine for temporary terminal use.
+
+### Key Actions
+
+Outside a `@pty` session, `@key` sends a local key action. The compact form
+accepts one key or chord, such as `@key:Cmd+R`. The object form accepts only
+`key` (required), `hold_ms`, `mode`, `modifiers`, `delivery`, `pid`, and
+`window_id`:
+
+```text
+@key:{key:"R",modifiers:["Cmd"],mode:"press_release",hold_ms:200}
+@key:{key:"R",delivery:"pid-targeted",pid:123}
+@key:{key:"R",delivery:"window-targeted",window_id:"pid:123/window:0"}
+```
+
+`delivery` defaults to `global`. `pid-targeted` requires `pid`, and
+`window-targeted` requires `window_id`; neither may be combined with the other
+target field. `target`, `keys`, and `shortcut` are not valid `@key` fields.
+There is no implicit application-name target resolution.
+
+`@ax-press` always means AXPress and does not accept a top-level `action` field.
+Use `@ax-action` for another allowlisted AX action, such as `AXConfirm` or
+`AXShowDefaultUI`.
 
 ## Response Shapes
 
@@ -347,6 +375,10 @@ Common requests:
 - `matches[].state`
 - `matches[].recipes`
 
+`@window-find:APP` is a compact alias for `{app:"APP"}`. It accepts exactly one
+positional app atom. Keep `app:APP` for the existing named compact form; do not
+mix the two forms or add a second positional atom.
+
 Current `window_id` shape:
 
 ```text
@@ -423,6 +455,66 @@ Use `ax_mode` on `@screenshot`.
 Use `mode` on AX-only commands such as `@ax-tree`, `@ax-find`, and `@ax-get`.
 All AX rectangles use `coordinate_space:"os-logical"`, same as the screenshot manifest.
 `@ax-find.window` is optional. When present, it accepts either `window_id` or `ref + observation_id` and captures only that AXWindow subtree before applying display scope and query filters.
+
+Compact `@ax-find` and `@ax-press` accept `app:APP,value` or `pid:PID/window:INDEX,value`. `app:APP` performs a fresh exact window query and proceeds only when one interactable window exists. `@ax-press` fixes the role to `AXButton` and treats `value` as its description.
+
+### Compact 前缀路由 (LLM 兼容)
+
+compact 短格式支持"前缀路由":每个逗号字段可以是 `前缀:值`(按前缀路由到
+对应槽位)或无前缀裸值(按位置回退:第 1 个=窗口选择器,第 2 个=主值)。
+命名与位置混合合法, 同一槽位重复提供时拒绝。
+
+支持的字段前缀:
+
+| 前缀 | 槽位 | 示例 |
+| --- | --- | --- |
+| `app:` / `pid:` | 窗口选择器 | `app:Safari` / `pid:123/window:0` |
+| `role:` | 角色 (AXButton 等) | `@ax-find:app:Safari,role:AXTextField` |
+| `description:` | 按钮/元素描述 | `@ax-press:app:APP,description:删除` |
+| `value:` / `name:` | 值 / 名称匹配 | `@ax-find:app:APP,name:foo` |
+| `include_values:` / `limit:` / `depth:` / `max_elements:` / `mode:` | AX 查询选项 | `@ax-find:app:Safari,AXStaticText,include_values:true,limit:10` |
+| `expected_value:` / `max_attempts:` | guarded press | `@ax-press:app:APP,删除,role:AXStaticText,expected_value:0,max_attempts:3` |
+
+位置等价写法仍然有效: `@ax-find:app:Safari,AXTextField` ≡
+`@ax-find:app:Safari,role:AXTextField`。
+
+对象语法同样接受顶层 `app:` / `window_id:` 字段, 自动归一化为
+`window:`(AX 查询类)或 `target:`(AX 动作类)选择器:
+`@ax-find:{app:"Safari",role:"AXStaticText"}` 与
+`@ax-find:{window:{app:"Safari"},role:"AXStaticText"}` 等价。
+
+`@ax-press-sequence` accepts the same selector followed by 1 to 32 button descriptions. Each comma item is one button. Single-item arithmetic aliases `+`, `-`, `*`, `×`, `/`, `÷`, and `=` normalize to the current macOS AX descriptions; a numeric expression cannot be one item. One trailing comma is ignored, while interior empty items remain invalid. The command resolves `app:APP` once before the first side effect, binds every step to that `window_id`, preserves order, and stops at the first failure. Its response includes a compact `steps` timeline with `performed` on every attempted step and `failed_index` on failure. Run post-action `@ax-find` separately for fresh result evidence.
+
+### Text Input (文字输入)
+
+输入文字到可编辑控件(文本框 / 文本区 / 地址栏)时,优先使用 AXValue 直写,
+不要优先依赖键盘模拟或剪贴板。
+
+首选 —— `@type-text` 的 `ax-value` 模式(纯 AXValue 写入):
+
+```text
+@type-text#510:{target:{id:"pid:123/window:0/path:0.0"},text:"hello rdog 42",mode:"ax-value"}
+@response {"id":510,"value":{"kind":"type-text","backend":"macos-accessibility","target_id":"pid:123/window:0/path:0.0","mode":"ax-value","delivered_via":"ax-value","text":"hello rdog 42","performed":true,"status":"ok","used_clipboard":false}}
+```
+
+- `target.id` 来自对文本控件的 `@ax-find`(role 通常是 `AXTextArea` / `AXTextField` / `AXComboBox` / `AXStaticText` 等可写控件)。
+- `mode:"ax-value"` 直接设置 AXValue,不产生键盘事件、不使用剪贴板
+  (`used_clipboard:false`)。因此不受以下环境影响:
+  - 系统输入法 / 输入法切换状态
+  - macOS 自动大写句首、拼写改写等文本替换
+  - 用户正在进行的输入、焦点闪烁或快捷键干扰
+- 成功后必须再用一次独立 `@ax-find` 读回目标控件的 value,作为 fresh 验证。
+
+`@type-text` 的 mode 优先级(自上而下):
+
+| mode | 行为 | 何时用 |
+| --- | --- | --- |
+| `ax-value`(默认推荐) | AXValue 直写,零键盘/剪贴板副作用 | 一切可写 AX 控件,首选 |
+| `targeted-keyboard` | 定向到目标控件的键盘事件模拟 | AXValue 不可写时的备选 |
+| `clipboard` | 剪贴板粘贴 | 仅当 AX 与定向键盘都不支持 |
+| `auto` | daemon 自动选择 | 不显式指定时;需要 ax-value 语义时应显式写 `ax-value` |
+
+`@ax-set-value` 是同类 AXValue 直写命令,适合"覆盖整个值"或追加场景:
 
 For `@ax-focus` with `activate:true`, inspect the nested `activation` report. AX focus is not performed unless `activation.verify.status` is `passed`; activation failure returns `performed:false` and preserves the `WINDOW_*` error code.
 
@@ -559,9 +651,11 @@ During PTY streaming, input bytes are transparent:
 - Inside a `@pty` session, `@key` and `@script` are streamed as remote stdin text
   (the bytes go to the running program, not to the local OS).
 - Outside a `@pty` session, `@key` is a **local** control action that supports key
-  chords via `+` syntax, e.g. `@key:"Cmd+R"` triggers a Cmd+R keystroke on the
-  local machine. See the "Local Key Chords" section in `SKILL.md` for the
+  chords via `+` syntax, e.g. `@key:Cmd+R` triggers a Cmd+R keystroke on the
+  local machine. See the "Local @key Actions" section in `SKILL.md` for the
   full modifier / main-key grammar and examples.
+- Compact bare payloads accept non-empty key names without whitespace. Quoted string
+  and object payloads remain supported; use them for whitespace or delivery options.
 - `~.` is not intercepted
 - `Ctrl-C` and `Ctrl-D` go to the remote PTY program
 

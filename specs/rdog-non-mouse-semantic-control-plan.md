@@ -102,6 +102,10 @@
   1. AXValue replace
   2. targeted keyboard
   3. clipboard,但只有 `allow_clipboard:true` 时才允许
+- `mode:"auto"` 只会在当前投递方式返回 `InvalidInput` 或 `Unsupported` 时进入下一层。
+  Accessibility 权限不足、CGEvent 传输失败和其他基础设施错误必须原样返回,不能借回退路径绕过安全边界。
+- 显式 `mode:"ax-value"` 与 `@ax-set-value` 始终 fail-closed。AXValue 不可写时,
+  请求失败而不是自动投递键盘或剪贴板。
 - `mode:"clipboard"` 必须显式 `allow_clipboard:true`。
 - clipboard 路径只会在目标写入期间临时借用系统剪贴板,并且只在剪贴板仍保持 rdog 写入内容时恢复旧值。
 - clipboard 路径不是无热键方案。

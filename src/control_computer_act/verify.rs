@@ -44,9 +44,7 @@ impl VerifyPolicy {
             "always" => Ok(Self::Always),
             other => Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                format!(
-                    "@computer-act.verify 不支持: {other}; 必须是 none / best_effort / always"
-                ),
+                format!("@computer-act.verify 不支持: {other}; 必须是 none / best_effort / always"),
             )),
         }
     }
@@ -127,9 +125,7 @@ impl AxDiffSummary {
 ///
 /// 任意一步 IO 失败不会 panic,而是 fallback 到 empty summary + `verify_unavailable` 标记。
 /// 这是为了不让 verify 错误污染 `ok:true` 的 dispatch 结果 (跟 dispatch 错误分离)。
-pub(crate) fn run_best_effort_verify(
-    dispatch_ms: u64,
-) -> AxDiffSummary {
+pub(crate) fn run_best_effort_verify(dispatch_ms: u64) -> AxDiffSummary {
     let verify_start = Instant::now();
 
     // pre-AX: 用默认 AxTreeRequest (Windows scope / depth / max_elements 默认值)
@@ -210,9 +206,7 @@ pub(crate) struct AlwaysVerifySummary {
 /// 6. 返回 `AlwaysVerifySummary`
 ///
 /// 任意一步失败 fallback 到 empty summary (verify 错误不污染 dispatch 结果)。
-pub(crate) fn run_always_verify(
-    dispatch_ms: u64,
-) -> AlwaysVerifySummary {
+pub(crate) fn run_always_verify(dispatch_ms: u64) -> AlwaysVerifySummary {
     use std::time::Instant;
     let verify_start = Instant::now();
 
@@ -399,6 +393,25 @@ pub(crate) fn render_always_verification(summary: &AlwaysVerifySummary) -> Value
 /// ```
 ///
 /// `None` policy 直接返回 `None`,caller 不写 verification 字段 (ticket 12 acceptance)。
+/// 通过 `AxDiffSummary` 推导 `verification.status` (feature/computer-act-outcome-3state)。
+///
+/// - `changed > 0` → "verified" (AX diff 显示有变化, 动作生效)
+/// - `changed == 0` 且 `added + removed > 0` → "preexisting"
+///   (AX 拓扑变了但具体 field 没变化; 罕见, 但保留语义)
+/// - `changed == 0` 且 `added + removed == 0` → "failed" (AX 完全没动)
+fn verification_status_for_diff(summary: &AxDiffSummary) -> &'static str {
+    let changed = summary.windows_modified + summary.elements_modified;
+    let morphed = summary.windows_added + summary.windows_removed
+        + summary.elements_added + summary.elements_removed;
+    if changed > 0 {
+        "verified"
+    } else if morphed > 0 {
+        "preexisting"
+    } else {
+        "failed"
+    }
+}
+
 pub(crate) fn render_verification(
     policy: VerifyPolicy,
     diff_summary: Option<&AxDiffSummary>,
@@ -408,8 +421,14 @@ pub(crate) fn render_verification(
         VerifyPolicy::None => None,
         VerifyPolicy::BestEffort => {
             let summary = diff_summary?;
+            // feature/computer-act-outcome-3state: 跟 outcome 字段对齐, 同步给客户端
+            // 3 态语义. status="verified" / "preexisting" / "failed" 三档与 pi-computer-use
+            // 同构; "preexisting" 表示 result preexisted before dispatch (verify 通过但
+            // 不是这次动作引起的, 客户端应视为可疑信号 — 详 ticket 13 后续 ADR).
+            let status = verification_status_for_diff(summary);
             Some(serde_json::json!({
                 "method": "ax_diff",
+                "status": status,
                 "ax_diff": {
                     "windows_added": summary.windows_added,
                     "windows_removed": summary.windows_removed,
@@ -498,14 +517,17 @@ mod tests {
     fn render_verification_none_returns_none() {
         // ticket 12 acceptance: None policy 不写 verification 字段。
         assert!(render_verification(VerifyPolicy::None, None, None).is_none());
-        assert!(render_verification(VerifyPolicy::None, Some(&AxDiffSummary::empty(0, 0)), None).is_none());
+        assert!(
+            render_verification(VerifyPolicy::None, Some(&AxDiffSummary::empty(0, 0)), None)
+                .is_none()
+        );
     }
 
     #[test]
     fn render_verification_best_effort_emits_method_and_summary() {
         let summary = AxDiffSummary::empty(100, 30);
-        let rendered =
-            render_verification(VerifyPolicy::BestEffort, Some(&summary), None).expect("must produce value");
+        let rendered = render_verification(VerifyPolicy::BestEffort, Some(&summary), None)
+            .expect("must produce value");
         assert_eq!(rendered["method"], "ax_diff");
         assert_eq!(rendered["ax_diff"]["windows_added"], 0);
         assert_eq!(rendered["ax_diff"]["elements_added"], 0);
@@ -588,7 +610,12 @@ mod tests {
     fn render_verification_always_without_summary_returns_none() {
         // 防御:caller 漏传 always_summary 时不要 panic
         assert!(render_verification(VerifyPolicy::Always, None, None).is_none());
-        assert!(render_verification(VerifyPolicy::Always, Some(&AxDiffSummary::empty(0, 0)), None).is_none());
+        assert!(render_verification(
+            VerifyPolicy::Always,
+            Some(&AxDiffSummary::empty(0, 0)),
+            None
+        )
+        .is_none());
     }
 
     #[test]
@@ -599,5 +626,47 @@ mod tests {
         assert_eq!(summary.screenshot_truncated, false);
         assert!(summary.windows.is_null());
         assert_eq!(summary.ax_diff.dispatch_ms, 50);
+    }
+    // ====== verification_status_for_diff tests (feature/computer-act-outcome-3state) ======
+
+    #[test]
+    fn verification_status_verified_when_modified_greater_than_zero() {
+        // changed > 0 → "verified" (AX diff 显示有变化, 动作生效)
+        let summary = AxDiffSummary {
+            windows_added: 0,
+            windows_removed: 0,
+            windows_modified: 1,
+            elements_added: 0,
+            elements_removed: 0,
+            elements_modified: 2,
+            verify_ms: 0,
+            dispatch_ms: 0,
+            full_report: Value::Null,
+        };
+        assert_eq!(verification_status_for_diff(&summary), "verified");
+    }
+
+    #[test]
+    fn verification_status_preexisting_when_added_or_removed_but_not_modified() {
+        // changed == 0 但 added/removed > 0 → "preexisting" (AX 拓扑变了但 field 没变)
+        let summary = AxDiffSummary {
+            windows_added: 1,
+            windows_removed: 0,
+            windows_modified: 0,
+            elements_added: 2,
+            elements_removed: 1,
+            elements_modified: 0,
+            verify_ms: 0,
+            dispatch_ms: 0,
+            full_report: Value::Null,
+        };
+        assert_eq!(verification_status_for_diff(&summary), "preexisting");
+    }
+
+    #[test]
+    fn verification_status_failed_when_no_changes() {
+        // 全 0 → "failed" (AX 完全没动)
+        let summary = AxDiffSummary::empty(0, 0);
+        assert_eq!(verification_status_for_diff(&summary), "failed");
     }
 }

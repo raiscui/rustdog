@@ -145,6 +145,21 @@ fn parse_should_support_key_paste_script_cmd_and_screenshot() {
 }
 
 #[test]
+fn parse_should_accept_raw_single_line_cmd_and_reject_ambiguous_payloads() {
+    assert_eq!(
+        parse_control_line("@cmd#42:printf READY").unwrap(),
+        ControlParseResult::Control(ControlRequest {
+            request_id: Some(42),
+            command: ControlCommand::Script("printf READY".to_owned()),
+        })
+    );
+    assert!(parse_control_line(r#"@cmd:{exec:"printf READY"}"#).is_err());
+    assert!(parse_control_line("@cmd:\necho READY").is_err());
+    assert!(parse_control_line("@cmd:printf READY\nprintf AGAIN").is_err());
+    assert!(parse_control_line("@cmd:echo READY\n").is_ok());
+}
+
+#[test]
 fn parse_should_support_screenshot_display_layout_and_coordinate_space() {
     assert_eq!(
             parse_control_line(
@@ -475,6 +490,7 @@ fn parse_should_support_ax_tree_and_ax_commands() {
             request_id: Some(1),
             command: ControlCommand::AxTree(AxTreeRequest {
                 scope: AxTreeScope::Windows,
+                app_menu_app: None,
                 depth: 4,
                 max_elements: 1000,
                 include_values: DEFAULT_AX_INCLUDE_VALUES,
@@ -488,6 +504,7 @@ fn parse_should_support_ax_tree_and_ax_commands() {
             request_id: Some(4),
             command: ControlCommand::AxTree(AxTreeRequest {
                 scope: AxTreeScope::Windows,
+                app_menu_app: None,
                 depth: crate::control_ax::AX_INTERACTIVE_DEPTH,
                 max_elements: crate::control_ax::AX_INTERACTIVE_MAX_ELEMENTS,
                 include_values: crate::control_ax::AX_INTERACTIVE_INCLUDE_VALUES,
@@ -703,6 +720,26 @@ fn parse_should_support_window_commands() {
                     display: DisplaySelector::Id("d2".to_owned()),
                 }),
                 verify: WindowResizeVerify { tolerance_px: 2 },
+            }),
+        })
+    );
+}
+
+#[test]
+fn parse_should_support_single_positional_window_find_app() {
+    assert_eq!(
+        parse_control_line("@window-find:Terminal").unwrap(),
+        ControlParseResult::Control(ControlRequest {
+            request_id: None,
+            command: ControlCommand::WindowFind(WindowFindRequest {
+                query: WindowQuery {
+                    app: Some("Terminal".to_owned()),
+                    ..WindowQuery::default()
+                },
+                display_scope: None,
+                limit: 20,
+                include_state: true,
+                include_recipes: true,
             }),
         })
     );
@@ -1010,36 +1047,296 @@ fn parse_should_support_compact_bare_key_payloads() {
     assert!(parse_control_line("@key:Page Down").is_err());
 }
 
-
-    #[test]
-    fn parse_compact_window_selector_should_reject_non_ascii_app_name() -> io::Result<()> {
-        use crate::control_protocol::parsers::parse_compact_window_selector;
-        // ponytail: ASCII gate; macOS Launch Services 0-matches Chinese app names.
-        let chinese_error = parse_compact_window_selector("@ax-find", "app:计算器")
-            .expect_err("non-ASCII app name must be rejected at parser layer");
-        let msg = chinese_error.to_string();
-        assert!(msg.contains("ASCII"), "error must mention ASCII: {msg}");
-        assert!(msg.contains("app:计算器"), "error must echo input: {msg}");
-        // ASCII app name still parses correctly.
-        let ascii = parse_compact_window_selector("@ax-find", "app:Calculator")?;
-        match ascii {
-            crate::control_protocol::parsers::CompactWindowSelector::App(app) => {
-                assert_eq!(app, "Calculator");
-            }
-            other => panic!("expected App variant, got {other:?}"),
+#[test]
+fn parse_compact_window_selector_should_reject_non_ascii_app_name() -> io::Result<()> {
+    use crate::control_protocol::parsers::parse_compact_window_selector;
+    // ponytail: ASCII gate; macOS Launch Services 0-matches Chinese app names.
+    let chinese_error = parse_compact_window_selector("@ax-find", "app:计算器")
+        .expect_err("non-ASCII app name must be rejected at parser layer");
+    let msg = chinese_error.to_string();
+    assert!(msg.contains("ASCII"), "error must mention ASCII: {msg}");
+    assert!(msg.contains("app:计算器"), "error must echo input: {msg}");
+    // ASCII app name still parses correctly.
+    let ascii = parse_compact_window_selector("@ax-find", "app:Calculator")?;
+    match ascii {
+        crate::control_protocol::parsers::CompactWindowSelector::App(app) => {
+            assert_eq!(app, "Calculator");
         }
-        Ok(())
+        other => panic!("expected App variant, got {other:?}"),
     }
+    Ok(())
+}
 
-    #[test]
-    fn parse_compact_window_selector_should_reject_mixed_ascii_app_name() -> io::Result<()> {
-        use crate::control_protocol::parsers::parse_compact_window_selector;
-        // Mixed ASCII + non-ASCII (e.g. Japanese kanji mixed with ASCII) is also non-ASCII.
-        let err = parse_compact_window_selector("@ax-find", "app:電卓App")
-            .expect_err("mixed script app name must be rejected");
-        assert!(err.to_string().contains("ASCII"));
-        Ok(())
-    }
+#[test]
+fn parse_compact_window_selector_should_reject_mixed_ascii_app_name() -> io::Result<()> {
+    use crate::control_protocol::parsers::parse_compact_window_selector;
+    // Mixed ASCII + non-ASCII (e.g. Japanese kanji mixed with ASCII) is also non-ASCII.
+    let err = parse_compact_window_selector("@ax-find", "app:電卓App")
+        .expect_err("mixed script app name must be rejected");
+    assert!(err.to_string().contains("ASCII"));
+    Ok(())
+}
+
+#[test]
+fn compact_should_reject_window_suffix_with_actionable_hint() {
+    // 模型误用 `@window:N` 后缀时, 必须显式报错提示正确语法, 不能静默 0 匹配。
+    let err = parse_control_line(r#"@ax-find:app:Calculator,AXButton@window:0"#)
+        .expect_err("compact @window: suffix must be rejected");
+    let msg = err.to_string();
+    assert!(msg.contains("@window:"), "error must echo suffix: {msg}");
+    assert!(
+        msg.contains("app:APP,ROLE"),
+        "error must suggest correct compact syntax: {msg}"
+    );
+
+    // 同样的误用出现在 @ax-press 的 description 位置也要被拒绝。
+    let err = parse_control_line(r#"@ax-press:app:Calculator,1@window:0"#)
+        .expect_err("compact @window: suffix must be rejected for press too");
+    assert!(err.to_string().contains("@window:"));
+}
+
+#[test]
+fn compact_should_route_named_prefix_fields() {
+    // role: 前缀路由到角色槽位 (模型把对象语法字段名带进 compact)。
+    let result = parse_control_line(r#"@ax-find:app:Calculator,role:AXButton"#).unwrap();
+    let ControlParseResult::Control(ControlRequest {
+        command: ControlCommand::AxFind(request),
+        ..
+    }) = result
+    else {
+        panic!("应解析为 AxFind");
+    };
+    assert_eq!(request.query.role.as_deref(), Some("AXButton"));
+    assert_eq!(
+        request.window.as_ref().and_then(|w| w.app.as_deref()),
+        Some("Calculator")
+    );
+
+    // description: 前缀路由到 @ax-press 的按钮描述。
+    let result = parse_control_line(r#"@ax-press:app:Calculator,description:加"#).unwrap();
+    let ControlParseResult::Control(ControlRequest {
+        command: ControlCommand::AxPress(request),
+        ..
+    }) = result
+    else {
+        panic!("应解析为 AxPress");
+    };
+    assert_eq!(request.target.description.as_deref(), Some("加"));
+    assert_eq!(request.target.app.as_deref(), Some("Calculator"));
+}
+
+#[test]
+fn compact_should_accept_trailing_named_options() {
+    // 模型把对象选项追加到 compact 尾部: include_values/limit/depth/max_elements/mode。
+    let result =
+        parse_control_line(r#"@ax-find:app:Calculator,AXStaticText,include_values:true,limit:10"#)
+            .unwrap();
+    let ControlParseResult::Control(ControlRequest {
+        command: ControlCommand::AxFind(request),
+        ..
+    }) = result
+    else {
+        panic!("应解析为 AxFind");
+    };
+    assert_eq!(request.query.role.as_deref(), Some("AXStaticText"));
+    assert!(request.tree.include_values);
+    assert_eq!(request.limit, 10);
+
+    // depth / max_elements / mode 也生效。
+    let result = parse_control_line(
+        r#"@ax-find:app:Calculator,AXButton,depth:6,max_elements:100,mode:full"#,
+    )
+    .unwrap();
+    let ControlParseResult::Control(ControlRequest {
+        command: ControlCommand::AxFind(request),
+        ..
+    }) = result
+    else {
+        panic!("应解析为 AxFind");
+    };
+    assert_eq!(request.tree.depth, 6);
+    assert_eq!(request.tree.max_elements, 100);
+}
+
+#[test]
+fn compact_should_reject_unknown_prefix_with_prefix_list() {
+    // 未知前缀必须报错并列出合法前缀, 不能静默 0 匹配。
+    let err = parse_control_line(r#"@ax-find:app:Calculator,roll:AXButton"#)
+        .expect_err("unknown prefix must be rejected");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("未知字段前缀"),
+        "error must mention prefix: {msg}"
+    );
+    assert!(
+        msg.contains("role"),
+        "error must list legal prefixes: {msg}"
+    );
+}
+
+#[test]
+fn compact_should_reject_conflicting_positional_and_named() {
+    // 位置字段与命名字段同时给同一槽位 -> 报错 (模型二选一)。
+    let err = parse_control_line(r#"@ax-find:app:Calculator,AXButton,role:AXStaticText"#)
+        .expect_err("conflicting role must be rejected");
+    assert!(
+        err.to_string().contains("冲突"),
+        "error must mention conflict: {err}"
+    );
+}
+
+#[test]
+fn object_syntax_should_accept_top_level_app() {
+    // 对象语法顶层 app 归一化为 window 选择器 (模型把 compact 思维带进对象)。
+    let result = parse_control_line(r#"@ax-find:{app:"Calculator",role:"AXStaticText"}"#).unwrap();
+    let ControlParseResult::Control(ControlRequest {
+        command: ControlCommand::AxFind(request),
+        ..
+    }) = result
+    else {
+        panic!("应解析为 AxFind");
+    };
+    assert_eq!(request.query.role.as_deref(), Some("AXStaticText"));
+    assert_eq!(
+        request.window.as_ref().and_then(|w| w.app.as_deref()),
+        Some("Calculator")
+    );
+
+    // @ax-press 对象语法顶层字段归一化到 target。
+    let result = parse_control_line(r#"@ax-press:{app:"Calculator",description:"加"}"#).unwrap();
+    let ControlParseResult::Control(ControlRequest {
+        command: ControlCommand::AxPress(request),
+        ..
+    }) = result
+    else {
+        panic!("应解析为 AxPress");
+    };
+    assert_eq!(request.target.app.as_deref(), Some("Calculator"));
+    assert_eq!(request.target.description.as_deref(), Some("加"));
+}
+
+#[test]
+fn guarded_press_should_accept_named_fields() {
+    // guarded press 5 字段支持命名写法, 与位置式等价。
+    let result = parse_control_line(
+        r#"@ax-press:app:Calculator,description:删除,role:AXStaticText,expected_value:0,max_attempts:3"#,
+    )
+    .unwrap();
+    let ControlParseResult::Control(ControlRequest {
+        command: ControlCommand::AxPress(request),
+        ..
+    }) = result
+    else {
+        panic!("应解析为 AxPress");
+    };
+    assert_eq!(request.target.description.as_deref(), Some("删除"));
+    let postcondition = request
+        .postcondition
+        .expect("guarded fields must set postcondition");
+    assert_eq!(postcondition.role, "AXStaticText");
+    assert_eq!(postcondition.expected_value, "0");
+    assert_eq!(postcondition.max_attempts, 3);
+}
+
+#[test]
+fn press_sequence_should_accept_named_description_fields() {
+    // @ax-press-sequence 支持 description: 前缀追加 (重复出现合法)。
+    let result = parse_control_line(
+        r#"@ax-press-sequence:app:Calculator,description:8,description:加,description:等于"#,
+    )
+    .unwrap();
+    let ControlParseResult::Control(ControlRequest {
+        command: ControlCommand::AxPressSequence(request),
+        ..
+    }) = result
+    else {
+        panic!("应解析为 AxPressSequence");
+    };
+    let descriptions = request
+        .targets
+        .iter()
+        .map(|target| target.description.as_deref().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(descriptions, ["8", "加", "等于"]);
+}
+
+#[test]
+fn window_find_should_accept_space_separated_and_compact_payloads() {
+    // 空格分隔参数 (模型把 shell 习惯带进协议): @window-find app:Terminal
+    let result = parse_control_line("@window-find app:Terminal").unwrap();
+    let ControlParseResult::Control(ControlRequest {
+        command: ControlCommand::WindowFind(request),
+        ..
+    }) = result
+    else {
+        panic!("应解析为 WindowFind");
+    };
+    assert_eq!(request.query.app.as_deref(), Some("Terminal"));
+
+    // 空格 + JSON 参数也归一化。
+    let result = parse_control_line(r#"@window-find {"app":"Terminal"}"#).unwrap();
+    let ControlParseResult::Control(ControlRequest {
+        command: ControlCommand::WindowFind(request),
+        ..
+    }) = result
+    else {
+        panic!("应解析为 WindowFind");
+    };
+    assert_eq!(request.query.app.as_deref(), Some("Terminal"));
+
+    // compact 冒号写法 + 带引号值。
+    let result = parse_control_line(r#"@window-find:app:"Terminal""#).unwrap();
+    let ControlParseResult::Control(ControlRequest {
+        command: ControlCommand::WindowFind(request),
+        ..
+    }) = result
+    else {
+        panic!("应解析为 WindowFind");
+    };
+    assert_eq!(request.query.app.as_deref(), Some("Terminal"));
+
+    // pid compact。
+    let result = parse_control_line("@window-find:pid:123/window:0").unwrap();
+    let ControlParseResult::Control(ControlRequest {
+        command: ControlCommand::WindowFind(request),
+        ..
+    }) = result
+    else {
+        panic!("应解析为 WindowFind");
+    };
+    assert_eq!(request.query.pid, Some(123));
+}
+
+#[test]
+fn bare_window_find_should_return_all_windows() {
+    // 裸 @window-find (无参数) 返回全部窗口查询, 模型无需知道参数写法。
+    let result = parse_control_line("@window-find").unwrap();
+    let ControlParseResult::Control(ControlRequest {
+        command: ControlCommand::WindowFind(request),
+        ..
+    }) = result
+    else {
+        panic!("裸 @window-find 应解析为 WindowFind");
+    };
+    assert!(request.query.app.is_none(), "空 query = 匹配全部窗口");
+    assert!(request.query.pid.is_none());
+    assert!(request.query.title.is_none());
+    assert_eq!(request.limit, 20);
+}
+
+#[test]
+fn key_should_accept_space_separated_payload() {
+    // 空格参数兼容对 @key 同样生效: @key 1 等价 @key:1。
+    let result = parse_control_line("@key 1").unwrap();
+    let ControlParseResult::Control(ControlRequest {
+        command: ControlCommand::Key(request),
+        ..
+    }) = result
+    else {
+        panic!("应解析为 Key");
+    };
+    assert_eq!(request.key, "1");
+}
 
 #[test]
 fn parse_should_reject_unknown_or_empty_or_multiline_payloads_or_bad_request_ids() {
@@ -1105,6 +1402,29 @@ fn record_status_without_payload_is_accepted() {
 }
 
 #[test]
+fn parse_should_handle_single_char_operator_keys() {
+    // 运算符单字符(+,*,/,=)是 AX press 的主要候选,必须能被 @key 解析
+    for (line, expected) in [
+        (r#"@key:"+""#, "+"),
+        (r#"@key:{key:"+"}"#, "+"),
+        (r#"@key:"*""#, "*"),
+        (r#"@key:"/""#, "/"),
+        (r#"@key:"=""#, "="),
+        (r#"@key:{key:"-"}"#, "-"),
+    ] {
+        let result = parse_control_line(line).unwrap();
+        let ControlParseResult::Control(ControlRequest {
+            command: ControlCommand::Key(request),
+            ..
+        }) = result
+        else {
+            panic!("@{line} 应解析为 Key 控制指令");
+        };
+        assert_eq!(request.key, expected, "line={line}");
+    }
+}
+
+#[test]
 fn record_stop_and_cancel_without_payload_are_accepted() {
     // Symmetric handling for `@record-stop` and `@record-cancel` so the
     // CLI can drop the `{}` suffix without breaking.
@@ -1124,4 +1444,118 @@ fn record_stop_and_cancel_without_payload_are_accepted() {
             ..
         })
     ));
+}
+
+#[test]
+fn key_object_should_accept_modifiers_field() {
+    // OpenAI 风格 modifiers 数组归一化为组合键字符串。
+    let result = parse_control_line(r#"@key:{key:"k",modifiers:["Cmd"]}"#).unwrap();
+    let ControlParseResult::Control(ControlRequest {
+        command: ControlCommand::Key(request),
+        ..
+    }) = result
+    else {
+        panic!("应解析为 Key");
+    };
+    assert_eq!(request.key, "Cmd+k");
+
+    // 多修饰符 + 单字符串形式。
+    let result = parse_control_line(r#"@key:{key:"t",modifiers:"Cmd+Shift"}"#).unwrap();
+    let ControlParseResult::Control(ControlRequest {
+        command: ControlCommand::Key(request),
+        ..
+    }) = result
+    else {
+        panic!("应解析为 Key");
+    };
+    assert_eq!(request.key, "Cmd+Shift+t");
+
+    // 空数组 = 无修饰符, key 原样。
+    let result = parse_control_line(r#"@key:{key:"1",modifiers:[]}"#).unwrap();
+    let ControlParseResult::Control(ControlRequest {
+        command: ControlCommand::Key(request),
+        ..
+    }) = result
+    else {
+        panic!("应解析为 Key");
+    };
+    assert_eq!(request.key, "1");
+}
+
+#[test]
+fn screenshot_window_target_should_accept_stable_window_locators() {
+    let direct = parse_control_line(r#"@screenshot:{window:{window_id:"pid:1/window:0"}}"#)
+        .expect("nested window id should parse");
+    assert_eq!(
+        direct,
+        ControlParseResult::Control(ControlRequest {
+            request_id: None,
+            command: ControlCommand::Screenshot(ScreenshotRequest {
+                target: ScreenshotTarget::Window,
+                window: Some(ScreenshotWindowTarget {
+                    window_id: Some("pid:1/window:0".to_owned()),
+                    ref_id: None,
+                    observation_id: None,
+                }),
+                ..ScreenshotRequest::default()
+            }),
+        })
+    );
+
+    let observed = parse_control_line(
+        r#"@screenshot#12:{target:"window",window:{ref:"@e3",observation_id:"obs-7"}}"#,
+    )
+    .expect("fresh observation window locator should parse");
+    assert_eq!(
+        observed,
+        ControlParseResult::Control(ControlRequest {
+            request_id: Some(12),
+            command: ControlCommand::Screenshot(ScreenshotRequest {
+                target: ScreenshotTarget::Window,
+                window: Some(ScreenshotWindowTarget {
+                    window_id: None,
+                    ref_id: Some("@e3".to_owned()),
+                    observation_id: Some("obs-7".to_owned()),
+                }),
+                ..ScreenshotRequest::default()
+            }),
+        })
+    );
+
+    let top_level = parse_control_line(r#"@screenshot:{window_id:"pid:2/window:1"}"#)
+        .expect("top-level window id should normalize");
+    let ControlParseResult::Control(ControlRequest {
+        command: ControlCommand::Screenshot(request),
+        ..
+    }) = top_level
+    else {
+        panic!("应解析为 Screenshot");
+    };
+    assert_eq!(request.target, ScreenshotTarget::Window);
+    assert_eq!(
+        request.window.and_then(|window| window.window_id),
+        Some("pid:2/window:1".to_owned())
+    );
+
+    let err = parse_control_line(r#"@screenshot:{target:"window",ref:"@e3"}"#)
+        .expect_err("window ref must be nested and paired with observation id");
+    assert!(err.to_string().contains("只能写在 window 对象中"));
+}
+
+#[test]
+fn ax_target_should_accept_app_field() {
+    // AxTarget struct 有 app 字段, 但 parse_ax_target 漏了解析 (LLM 兼容缺口)。
+    let result = parse_control_line(
+        r#"@type-text:{target:{app:"Terminal",role:"AXTextArea"},text:"echo hi",mode:"ax-value"}"#,
+    )
+    .unwrap();
+    let ControlParseResult::Control(ControlRequest {
+        command: ControlCommand::TypeText(request),
+        ..
+    }) = result
+    else {
+        panic!("应解析为 TypeText");
+    };
+    assert_eq!(request.target.app.as_deref(), Some("Terminal"));
+    assert_eq!(request.target.role.as_deref(), Some("AXTextArea"));
 }

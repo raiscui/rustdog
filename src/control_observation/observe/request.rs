@@ -359,7 +359,9 @@ fn parse_observe_mode_bare(input: &str) -> io::Result<ObserveMode> {
         "visual" => Ok(ObserveMode::Visual),
         "ax" => Ok(ObserveMode::Ax),
         "window" => Ok(ObserveMode::Window),
-        other => Err(invalid_data(format!("@observe 短格式 mode 不支持: {other}"))),
+        other => Err(invalid_data(format!(
+            "@observe 短格式 mode 不支持: {other}"
+        ))),
     }
 }
 

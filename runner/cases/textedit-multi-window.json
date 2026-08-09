@@ -1,0 +1,9 @@
+{
+  "id": "textedit-multi-window",
+  "task": "打开文本编辑应用，使用快捷键 Command+N 新建第二个文稿窗口，确认文稿窗口数量从 1 增加到 2",
+  "expected": "真实打开 TextEdit，通过快捷键 Command+N 新建文稿，fresh window 证据确认窗口数从 1 增加到 2。",
+  "expectedResult": "两个文稿窗口",
+  "app": "TextEdit",
+  "setup": "textedit-empty-doc",
+  "verify": "window-count-increase"
+}
