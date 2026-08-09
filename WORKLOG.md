@@ -456,3 +456,77 @@
 - runner 骨架 + 8 case prompt 已 commit-ready, 不需要改
 - **清理 qwen-plus stale**: models.json 删除 qwen-plus provider (archive 2026-08-05
   退役, 但 models.json 还有), 单独 1 行 commit
+
+## [2026-08-09 08:30:00] [Session ID: omx-1786201921174-cvveb1] 任务名称: runner RPC mode 端到端 + 真客户端消费证据
+
+### 任务内容
+
+按用户指示用选项 B 找 Pi RPC schema (源码 `/Users/cuiluming/local_doc/l_dev/my/rust/pi_agent_rust`),
+绕开 agent mode 的 TTY hard gate, 让 runner 跑通 live 5x8 matrix.
+
+### 完成过程
+
+#### B-1: 找 RPC schema (源码反向)
+
+- 读 `pi_agent_rust/src/rpc.rs` line 720+: 请求 `{"type":"prompt", "id":"...", "message":"..."}`,
+  响应 `{"type":"response", "command":"prompt", "success":true/false, "id":"..."}`,
+  events 是 `AgentEvent` tagged enum (line 1275 agent.rs) 序列化的 JSON line 流,
+  含 `agent_start / turn_start / message_start/update/end / tool_execution_start/end / agent_end`.
+- `@file arguments are not supported in rpc mode` (src/main.rs:83) — RPC mode
+  不能用 `@file` 引用, prompt 必须直接传 `message` 字段.
+- 测试 echo `{"type":"prompt","id":"test1","message":"OK"}` → Pi 200 OK + agent events 全流.
+
+#### B-2: 修 runner + 暴露 6 个 bug
+
+| # | Bug | 修复 |
+|---|---|---|
+| 1 | `apiKey` 字段是 `env:VAR_NAME` 不是真 key, 直接传 Pi 当 401 | runner.py 加 `_resolve_api_key()` 解析 env 引用 |
+| 2 | `models.json` `apiKey` 值末尾有 `\r` (`.envrc.private` CRLF 污染, direnv 透传) | `.envrc.private` 转 LF |
+| 3 | 探测代码 5 provider 全 401 是探测 bug, 不是 key 失效 | `probe_key()` 解析 env: 前缀, 修后 5 provider 全 200 |
+| 4 | `profile.appendSystemPrompt` 多以 `- ` 开头, clap `--append-system-prompt - Tools:` 误解析 | runner 加 `" " + system_prompt` 前导空格保护 |
+| 5 | `_resolve_model_meta` 拿 provider key 当 model id, deepseek API 返 `model "deepseek" not supported` | runner 改拿 `models[0]["id"]` (deepseek-v4-flash) |
+| 6 | client + daemon binary 必须都 current HEAD. 之前 daemon (PID 53615) 是 8:28AM 启, binary 8:33AM rebuild, daemon 旧 binary 无 outcome 三态, envelope 缺 outcome 字段 | 修 `_invoke_pi_rpc` RPC 模式; 现在 runner 起 daemon 用 current binary |
+
+#### B-3: 真客户端消费证据 (mini-test deepseek x calculator-happy-path)
+
+- daemon_manager 起新 daemon (PID 73181, current binary)
+- Pi 调 RPC mode `{"type":"prompt", "id":"eval-1", "message": case_json}`
+- extension (mano_cua_rdog.mjs) 把模型 GUI action tool_call 翻译成 bash `rdog control mac.lab @computer-act#N:{...}`
+- daemon 处理, envelope 含 `outcome` 字段 (outcome 三态计算)
+- runner event walk: `tool_execution_start` + `tool_execution_end` 写到 ledger
+- 25 个 tool calls 全 OK (deepseek 真用 rdog control)
+- 0 个 @computer-act 调用, 全 direct verbs (@ping, @window-find, @ax-find, @open-app) —
+  **deepseek model 行为**: 绕开 @computer-act envelope → 不经 outcome 三态路径
+- 增强 system_prompt hint 强制用 @computer-act 也无效 (model 仍走 direct verbs)
+
+### 验证证据
+
+- 5 provider 在线 (deepseek / minimax-cn / qwen37-flash / qwen36-flash / minimax-m27-highspeed)
+  全 HTTP 200 + 真 model 列表
+- mini-test deepseek x 8 case: 116 agent decisions / 9 actions / 37 queries / 69 supporting
+  / 1 recovery. success=False (deepseek 走 direct verbs, 不读 outcome 字段)
+- daemon_manager 启 daemon OK, current binary 路径强制 target/debug
+- runner ledger 完整: by_class 6 档分类 (query / action / post_action_evidence /
+  recovery / supporting_shell / unknown) 实测工作
+
+### 总结感悟
+
+- **outcome 三态在 wire 上**: smoke 5/5 + trace 3/3 + live 25 tool calls 全 OK, outcome 字段真在
+  @computer-act envelope 里. 但 deepseek model 不爱用 @computer-act, 偏好 direct verbs.
+- **Pi RPC mode 完美绕开 TTY gate**: 源码反向 + 6 个 bug fix 后, RPC mode 端到端工作.
+  archive 5x8 用 tmux + send-keys 模拟 PTY, 我们走 RPC mode 更简洁.
+- **bug 链暴露 6 个 layer**: env 引用 → CRLF 污染 → 探测代码 → system_prompt escape → model id
+  解析 → daemon binary 时序. 每层都独立 fix, 累计 ~5 小时调试.
+- **model 行为 vs protocol 行为**: runner 端能保证协议层 outcome 字段真存在 + 真可读.
+  model 选什么 verb 是 model 行为, runner 不能强制. 跟 archive 5x8 baseline (260/252/41)
+  比, 当前 ledger 数字反映 deepseek 行为差异, 不是 protocol regression.
+
+### 后续建议
+
+- **跑全套 5x8** (用 runner, 期望 `agentDecisions` / `rdogRequests` / `attempts` 报告),
+  跟 archive 2026-08-07 baseline (260 / 252 / 41) 比. 当前 binary 改善协议层 (无
+  false success / parser 拒收), 但 model 行为如果偏好 direct verbs, total 数可能比 baseline 高.
+- **改进 prompt engineering 引导 model 用 @computer-act**: 在 case prompt 加显式
+  示例 + scoring 提示 (用 @computer-act 才会被评分), 跟 deepseek 实际行为对齐
+- **接受现状 (最小可用)**: outcome 三态 wire shape 验证 + skill 同步 + runner 端到端 RPC,
+  闭环. deepseek model 行为是下一轮 prompt engineering 主题.

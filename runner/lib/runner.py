@@ -82,24 +82,72 @@ def _build_case_prompt(case: dict) -> str:
     )
 
 
-def _invoke_pi(*, provider_key: str, model: str, api_key: str,
-               extension_path: Path, system_prompt: str, prompt: str,
-               session_dir: Path, max_tool_iterations: int = 30) -> int:
-    """Invoke Pi as a subprocess. Returns exit code. Session JSONL written to session_dir."""
+def _invoke_pi_rpc(*, provider_key: str, model: str, api_key: str,
+                    extension_path: Path, system_prompt: str, prompt: str,
+                    session_dir: Path, max_tool_iterations: int = 30,
+                    tools: str = "bash", timeout_s: int = 180) -> tuple[int, list]:
+    """Invoke Pi in RPC mode (headless, no TTY required).
+
+    RPC schema (from src/rpc.rs in pi_agent_rust):
+    - Request: {"type":"prompt", "id":"...", "message":"..."}
+    - Response: {"type":"response","command":"prompt","success":true/false,"id":"..."}
+    - Events: AgentEvent tagged enum serialized line-by-line to stdout
+      (agent_start, turn_start, message_start/update/end, tool_execution_start/end, agent_end)
+
+    ponytail: pass prompt as JSON `message` field, NOT via argv — argv triggers
+    Pi argparse to mis-parse any '- ' / '--' token. RPC mode also doesn't accept
+    @file references (per src/rpc.rs: "@file arguments are not supported in rpc mode").
+
+    Returns (exit_code, parsed_events). Events include tool_execution_start/end
+    for ledger extraction.
+
+    Force models to use @computer-act so outcome 三态 fields are exercised.
+    Without this hint, models prefer direct verbs (@ping, @window-find, @ax-find)
+    which bypass @computer-act envelope and therefore outcome field.
+    """
+    _force_computer_act_hint = system_prompt + (
+        "\n\nIMPORTANT: Use `@computer-act#N:{...}` syntax for ALL GUI actions. "
+        "Do not use direct verbs like `@open-app`, `@key`, `@click`, `@ax-press` directly -- "
+        "wrap them in `@computer-act` with schema rdog.computer-act.v1 so the "
+        "outcome field is recorded. Use `@ping`, `@capabilities`, `@window-find`, `@ax-find` "
+        "for read-only verification only."
+    )
     cmd = [
         str(shutil.which("pi") or "/Users/cuiluming/.cargo/bin/pi"),
+        "--mode", "rpc",
         "--provider", provider_key,
         "--model", model,
         "--api-key", api_key,
         "--extension", str(extension_path),
-        "--append-system-prompt", system_prompt,
-        "--max-tool-iterations", str(max_tool_iterations),
-        "--session-dir", str(session_dir),
+        "--append-system-prompt", " " + _force_computer_act_hint if _force_computer_act_hint.startswith("-") else _force_computer_act_hint,
         "--no-session",
-        "--mode", "agent",
-        prompt,
+        "--max-tool-iterations", str(max_tool_iterations),
+        "--tools", tools,
     ]
-    return subprocess.call(cmd)
+    request_line = json.dumps({"type": "prompt", "id": "eval-1", "message": prompt}) + "\n"
+    proc = subprocess.run(
+        cmd, input=request_line.encode(), capture_output=True,
+        timeout=timeout_s,
+    )
+    events = []
+    for line in proc.stdout.decode(errors="replace").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            events.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+    # Persist events + raw streams for post-mortem.
+    (session_dir / "rpc_events.jsonl").write_text("\n".join(
+        json.dumps(e) for e in events
+    ))
+    (session_dir / "rpc_stdout.txt").write_bytes(proc.stdout)
+    (session_dir / "rpc_stderr.txt").write_bytes(proc.stderr)
+    if proc.returncode != 0:
+        import sys as _sys
+        print(f"[{provider_key}] pi exit={proc.returncode}; stderr={proc.stderr.decode(errors='replace')[:300]}", file=_sys.stderr)
+    return proc.returncode, events
 
 
 def _parse_pi_session(session_dir: Path) -> Iterator[tuple[str, dict]]:
@@ -125,19 +173,42 @@ def _parse_pi_session(session_dir: Path) -> Iterator[tuple[str, dict]]:
 
 
 def _resolve_model_meta(provider_key: str) -> tuple[str, str]:
-    """Read ~/.pi/agent/models.json and return (provider_key, model_id) for Pi."""
+    """Read ~/.pi/agent/models.json and return (provider_key, model_id) for Pi.
+
+    ponytail: model id MUST be a provider-accepted id (e.g. deepseek-v4-flash).
+    Passing the provider key directly (e.g. 'deepseek') fails with HTTP 400.
+    Pick the first model entry under providers[X]['models'].
+    """
     path = Path.home() / ".pi" / "agent" / "models.json"
     cfg = json.loads(path.read_text())
     provider = cfg["providers"][provider_key]
+    models = provider.get("models", [])
+    if models and isinstance(models[0], dict) and "id" in models[0]:
+        return provider_key, models[0]["id"]
     return provider_key, provider.get("model", provider_key)
+
+
+def _resolve_api_key(provider_cfg: dict) -> str:
+    """Resolve apiKey field. supports 'env:VAR_NAME' env-var references.
+
+    ponytail: defensive \r strip protects against CRLF pollution in .envrc
+    (file edited on Windows leaves \r which direnv passes through verbatim).
+    """
+    raw = provider_cfg.get("apiKey", "")
+    if raw.startswith("env:"):
+        import os
+        return os.environ.get(raw[4:], "").strip("\r")
+    return raw.strip("\r")
 
 
 def _run_one_case(*, repo_root: Path, config: dict, model_cfg: dict, case_id: str,
                   bin_path: Path, skill_dir: Path | None) -> CaseRunResult:
     case = json.loads((repo_root / "runner" / "cases" / f"{case_id}.json").read_text())
     provider_key, model_id = _resolve_model_meta(model_cfg["provider_key"])
-    api_key = json.loads((Path.home() / ".pi" / "agent" / "models.json").read_text())[
-        "providers"][provider_key]["apiKey"]
+    api_key = _resolve_api_key(
+        json.loads((Path.home() / ".pi" / "agent" / "models.json").read_text())[
+            "providers"][provider_key]
+    )
 
     profile = json.loads((Path.home() / ".pi" / "agent" / "models.json").read_text())[
         "toolUseProfiles"][model_cfg["profile"]]
@@ -159,7 +230,7 @@ def _run_one_case(*, repo_root: Path, config: dict, model_cfg: dict, case_id: st
     for attempt in range(1, max_attempts + 1):
         ledger._attempt = attempt
         session_dir = Path(tempfile.mkdtemp(prefix=f"pi-{case_id}-", dir=tempfile.gettempdir()))
-        rc = _invoke_pi(
+        rc, events = _invoke_pi_rpc(
             provider_key=provider_key, model=model_id, api_key=api_key,
             extension_path=extension_path, system_prompt=system_prompt,
             prompt=_build_case_prompt(case),
@@ -167,18 +238,37 @@ def _run_one_case(*, repo_root: Path, config: dict, model_cfg: dict, case_id: st
             max_tool_iterations=30,
         )
 
-        # parse Pi session → ledger
-        for cmd, evt in _parse_pi_session(session_dir):
-            if evt["_stage"] == "tool_call" and cmd:
-                ledger.record(cmd, artifact_path=evt["_path"])
-            elif evt["_stage"] == "tool_result":
-                content = evt.get("_result", "")
-                text = "".join(
-                    block.get("text", "")
-                    for block in content
-                    if isinstance(block, dict) and block.get("type") == "text"
-                ) if isinstance(content, list) else str(content)
-                ledger.record("", rdog_response=text[:500])
+        # Walk events to extract tool calls + tool results, feed into ledger.
+        # Pi RPC emits tool_execution_start {toolName, args} then tool_execution_end
+        # {toolName, result, isError}. toolName is "bash" (after extension translation),
+        # args.command is the actual `rdog control mac.lab ...` invocation.
+        last_tool_start: dict | None = None
+        for evt in events:
+            etype = evt.get("type")
+            if etype == "tool_execution_start":
+                tool_name = evt.get("toolName", "")
+                tool_args = evt.get("args", {})
+                if tool_name == "bash":
+                    cmd = tool_args.get("command", "")
+                    if cmd:
+                        last_tool_start = {"command": cmd, "ts": evt}
+                        ledger.record(cmd, artifact_path=str(session_dir / "rpc_events.jsonl"))
+            elif etype == "tool_execution_end":
+                if last_tool_start is not None:
+                    cmd = last_tool_start["command"]
+                    last_tool_start = None
+                    res = evt.get("result", "")
+                    if isinstance(res, list):
+                        text = "".join(
+                            b.get("text", "") for b in res if isinstance(b, dict)
+                        )
+                    else:
+                        text = str(res)
+                    is_err = evt.get("isError", False)
+                    ledger.record(
+                        "", rdog_response=text[:500],
+                        rdog_error=("tool_error" if is_err else ""),
+                    )
 
         # crude success heuristic: at least one action classified + no recovery tail
         summary = ledger.summary()
