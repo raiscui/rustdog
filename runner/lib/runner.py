@@ -85,7 +85,7 @@ def _build_case_prompt(case: dict) -> str:
 def _invoke_pi_rpc(*, provider_key: str, model: str, api_key: str,
                     extension_path: Path, system_prompt: str, prompt: str,
                     session_dir: Path, max_tool_iterations: int = 30,
-                    tools: str = "bash", timeout_s: int = 180) -> tuple[int, list]:
+                    tools: str = "bash", timeout_s: int = 90) -> tuple[int, list]:
     """Invoke Pi in RPC mode (headless, no TTY required).
 
     RPC schema (from src/rpc.rs in pi_agent_rust):
@@ -125,10 +125,17 @@ def _invoke_pi_rpc(*, provider_key: str, model: str, api_key: str,
         "--tools", tools,
     ]
     request_line = json.dumps({"type": "prompt", "id": "eval-1", "message": prompt}) + "\n"
-    proc = subprocess.run(
-        cmd, input=request_line.encode(), capture_output=True,
-        timeout=timeout_s,
-    )
+    try:
+        proc = subprocess.run(
+            cmd, input=request_line.encode(), capture_output=True,
+            timeout=timeout_s,
+        )
+    except subprocess.TimeoutExpired:
+        return 124, [{
+            "type": "agent_end",
+            "error": f"Pi call timed out after {timeout_s}s (max-tool-iterations={max_tool_iterations})",
+            "messages": [],
+        }]
     events = []
     for line in proc.stdout.decode(errors="replace").splitlines():
         line = line.strip()
@@ -235,7 +242,7 @@ def _run_one_case(*, repo_root: Path, config: dict, model_cfg: dict, case_id: st
             extension_path=extension_path, system_prompt=system_prompt,
             prompt=_build_case_prompt(case),
             session_dir=session_dir,
-            max_tool_iterations=30,
+            max_tool_iterations=8,
         )
 
         # Walk events to extract tool calls + tool results, feed into ledger.
