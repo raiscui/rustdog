@@ -21,3 +21,19 @@
 ### 总结感悟
 - codesign canonical 输出格式随 identifier 内容变化, 断言必须归一化
 - 评测载体 (runner/case/prompt/binary) 与模型能力必须分开归因
+
+## [2026-08-09 22:48:00] [Session ID: omx-1786268168901-f711dm] 任务名称: LATER_PLANS 待办执行 (guard 清理 + warning 清理 + admin 日志定位)
+
+### 任务内容
+- zenoh guard/FIFO 清理: 5506 guard + 476 FIFO 回收, 诊断噪音消失
+- warning 清理: 16 个 src 文件, 48 warning -> 0, 798 测试全过
+- admin transport event: 定位 zenoh 源码触发点, 4 场景无法复现, 结论不修
+
+### 完成过程
+- FIFO 清理用 find -type p (FIFO 不满足 -f); guard 清理按内容 PID 存活判断
+- warning 分类处理: unused imports (cfg(test) 隔离测试专用符号) / unused vars (_ 前缀) / recording 模块 allow(dead_code) / 2 个孤儿测试补 #[test]
+- admin 调研: 静态定位 zenoh-1.8.0 admin.rs:229; 动态复现 20x unixpipe + 5x UDP + kill 均干净
+
+### 总结感悟
+- "warning 里 unused 的符号" 常常只是当前编译目标不用, 删除前必须 grep 全部 cfg 引用
+- LATER_PLANS 记录的噪音源 (FIFO) 与真实匹配模式 (.pipe_uplink) 不一致时, 先读扫描代码再清理
