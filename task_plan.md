@@ -1013,3 +1013,36 @@ feature/computer-act-outcome-3state 分支已推到 origin. 后续决策:
 - runner/config.json immutableBaseline: 260/252/41 (archive 旧) → 648/315/42 (2026-08-09 对齐后, 严格验证 40/40, RPC 口径)
 - 注释同步更新: attempts 为硬指标, decisions/requests 同口径对比
 - json 合法 + dry-run OK
+
+## [2026-08-09 21:10:00] [Session ID: omx-1786268168901-f711dm] [阶段完成]: A3.2 merge 主分支
+
+### 完成
+- main 合并 feature/computer-act-outcome-3state (merge commit 2ca1513, 已 push origin/main)
+- 冲突解决: src/control_protocol/tests.rs (两边独立测试全保留), tests/recording_e2e.rs (用 feature fmt 版, 无逻辑差异), docs/adr/0007 + specs/rdog-recording-auto-stop.md (保留 main 版, 对应 auto-stop 实现), WORKLOG/task_plan (append-only 保留两边)
+- 验证: cargo check --all-targets OK, 全量单测 796 passed, control_protocol 102 passed, recording_e2e 5 passed
+- feature 分支保留 (main 祖先), 未删除
+
+## [2026-08-09 21:10:00] [Session ID: omx-1786268168901-f711dm] [记录类型]: 报备 - macOS cargo install 重授权问题取证
+
+### 目标
+回答: 为何每次 `cargo install --path ./` 后 macOS 权限要重新授权, 给出可复跑方案。
+
+### 现象
+- ~/.cargo/bin/rdog 为默认 adhoc 签名, DR = cdhash H"7bd8..."(重编必变)
+- target/debug/rdog 同样: Identifier=rdog-d30dc1fc957d52d3 自动生成, DR 钉 cdhash
+
+### 假设与验证
+- 假设: TCC 按 code requirement(DR)记录授权, 默认 adhoc DR 含 cdhash, 内容变 → 身份变 → 重授权
+- 本机验证: 两个内容不同的二进制(sha256 不同), 用 `codesign -f -s - --identifier "rdog-stable" --requirements '=designated => identifier "rdog-stable"'` 重签后, DR 字节级一致 (Internal requirements count=1 size=52 相同, diff 仅路径行)
+- 结论: 固定 identifier + 自定义 DR 可实现跨构建稳定身份, 授权保留
+
+### 待交付
+- 给用户: 推荐 install 后重签方案 + 一次性授权成本 + 验证方法; 备选自签名证书
+
+## [2026-08-09 21:30:00] [Session ID: omx-1786268168901-f711dm] [记录类型]: 报备 - to-spec 发布签名身份方案
+
+### 动作
+- 按 to-spec 流程合成签名身份方案 spec
+- 发布 GitHub issue #40 (raiscui/rustdog), 打 ready-for-agent
+- 落盘 specs/rdog-stable-signing-identity.md, AGENTS.md 索引登记
+- 测试缝: 签名身份不变量 (DR 字节级一致), 权限保留为人工一次性验收

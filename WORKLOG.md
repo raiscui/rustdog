@@ -952,3 +952,35 @@ deepseek 1 model 跟 archive 5 model per-run 对比:
 - 仓库内 runner 原 success 判定 (有 action + 无 recovery) 是弱启发式, 移植外部严格验证后才可与 archive 可比
 - RPC tool result 结构 {content:[{text}]} 是 Pi 的封装格式, 解析时不能只处理裸 list
 - 操作坑: models.json 的 apiKey 用 env: 引用, tmux server 环境无 key 会秒败; DASHSCOPE key 在 xtalk/.envrc
+
+## [2026-08-09 21:12:00] [Session ID: omx-1786268168901-f711dm] 任务名称: macOS cargo install 重授权问题取证与方案
+
+### 任务内容
+- 定位根因: 默认 adhoc 签名 DR 钉 cdhash, 重编即变, TCC 视为新程序
+- 本机验证固定 DR 方案: 两个不同内容二进制签相同 identifier 后 DR 字节级一致
+- 给出方案: install 后 `codesign -f -s - --identifier "rdog" --requirements '=designated => identifier "rdog"'`, 首次重授权一次, 之后稳定
+
+### 完成过程
+- codesign -dvv / -d --requirements 取证
+- /tmp 副本演示: 修改内容后重签, diff DR 仅路径行不同
+- 未改动 repo 源码, 未提交代码(纯咨询+取证)
+
+### 总结感悟
+- TCC 授权身份 = code requirement, 稳定身份三要素: 固定 identifier + 自定义 DR(或证书)
+- `--requirements` 内联文本必须以 `=` 前缀, 否则被当文件路径
+
+## [2026-08-09 21:32:00] [Session ID: omx-1786268168901-f711dm] 任务名称: to-spec 生成 macOS 稳定签名身份 spec
+
+### 任务内容
+- 合成 spec: 问题/方案/11 条用户故事/实施决策/测试决策/边界
+- 发布 GitHub issue #40 + ready-for-agent label
+- 落盘 specs/rdog-stable-signing-identity.md, AGENTS.md 长期索引登记
+
+### 完成过程
+- 读 docs/agents/issue-tracker.md + triage-labels.md 确认发布约定
+- gh issue create + edit, 验证 labels 正确
+- 按 specs/ 现有风格落盘并登记索引
+
+### 总结感悟
+- 无 runtime 改动的 dev-workflow 方案, 测试缝选"DR 不变量"而非运行时测试
+- 权限保留的最终验收必须人工, spec 中明确写明自动化覆盖边界

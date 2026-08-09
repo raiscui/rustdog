@@ -292,3 +292,7 @@ Issues 和 Wayfinder maps 使用 GitHub Issues。详见 `docs/agents/issue-track
   - 主题: Wayfinder resolution spec overdesign 简化方案(ticket #13 交付物)
   - 用途: 固化 4 个 closed spec (#4 / #9 / #8 / #7) 累积抽象的删减/合并方案,每个简化标注 ceiling 与 upgrade trigger
   - 何时阅读: 准备重写已 close Wayfinder spec、引入 v2 协议、需要 warning/reporting/多 soak 等当前被删除的抽象、或评审 macOS 首版 release readiness 之前确认简化已落地前
+- `specs/rdog-stable-signing-identity.md`
+  - 主题: 稳定的 codesign 身份方案 (GitHub issue #40), 解决 `cargo install` 重编后 macOS TCC 授权失效
+  - 用途: 固定"install 后用固定 identifier + 自定义 DR (`designated => identifier \"rdog\"`) 重签, DR 跨构建字节级稳定, TCC 授权保留"的决策, 以及一次性迁移成本与验收方法
+  - 何时阅读: 修改本地安装/发布流程、封装 `install-signed` 脚本、排查 daemon 权限反复失效, 或评审 macOS 授权生命周期方案前
