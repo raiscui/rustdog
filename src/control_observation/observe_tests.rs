@@ -198,8 +198,6 @@ fn fake_ax_window() -> AxWindow {
 
 #[test]
 fn parse_observe_payload_should_accept_compact_form() {
-    use crate::control_observation::observe::ObserveTarget;
-
     // Mode-only compact: "@observe:window" should set mode, no target.
     let mode_only = parse_observe_payload("window").unwrap();
     assert_eq!(mode_only.mode, ObserveMode::Window);

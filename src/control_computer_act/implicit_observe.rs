@@ -261,7 +261,8 @@ fn global_cache() -> &'static Mutex<ComputerActObservationCache> {
 /// 真实 daemon 启动时调用一次,显式初始化 cache (用默认 TTL 5s)。
 ///
 /// 跟 `initialize_durable_observation_state` 同模式;幂等。
-#[cfg_attr(not(test), allow(dead_code))]
+// 预留接线点: daemon 启动路径尚未调用, 接入前保持 allow, 避免噪音。
+#[allow(dead_code)]
 pub fn initialize_computer_act_observation_state() {
     let _ = COMPUTER_ACT_OBSERVATION_CACHE
         .get_or_init(|| Mutex::new(ComputerActObservationCache::new()));
@@ -302,7 +303,8 @@ pub(crate) fn resolve_or_re_observe_with_wall_clock(args: &Value) -> ImplicitObs
 
 /// 测试 / 单元路径: caller 提供 mock clock。预留 API 给后续 ticket 18 / Phase I
 /// real observe 集成 (那时 caller 需要显式控制 now 而不靠 wall clock)。
-#[cfg_attr(not(test), allow(dead_code))]
+// 预留接线点, 同 initialize_* 处理。
+#[allow(dead_code)]
 pub(crate) fn resolve_or_re_observe_at(args: &Value, now_ms: u64) -> ImplicitObserveOutcome {
     let mut guard = global_cache()
         .lock()
@@ -372,7 +374,8 @@ pub(crate) fn render_top_level_observation_id(outcome: &ImplicitObserveOutcome) 
 /// 后续 Phase I real observe 集成 (ticket 21+) 时,这一层再补
 /// `replace_start_box_with_target_ref(args, &outcome)`: 把 start_box 拆掉,换
 /// 成 `target.ref + target.observation_id`,让 click/hover/drag 走真实 ref 路径。
-#[cfg_attr(not(test), allow(dead_code))]
+// 预留接线点, 同 initialize_* 处理。
+#[allow(dead_code)]
 pub(crate) fn apply_implicit_observe_to_args(
     _args: &mut Value,
     _outcome: &ImplicitObserveOutcome,

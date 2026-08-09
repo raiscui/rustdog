@@ -9,7 +9,6 @@
 use std::{
     fs,
     path::PathBuf,
-    sync::Arc,
 };
 
 use serde_json::Value;

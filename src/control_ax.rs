@@ -1,11 +1,7 @@
 use crate::{
-    control_observation::selector::{
-        AppSelector, DurableSelectorDraft, ElementSelector, SelectorEnvelope, SelectorKind,
-        SelectorRect, SelectorRedaction, WindowSelector,
-    },
     control_observation::{
         observation_ref_name, record_observation_with_selectors, resolve_observation_ref,
-        stale_observation_ref_error, ObservationRefEntry, ObservationRoot,
+        ObservationRefEntry, ObservationRoot,
     },
     control_protocol::{
         normalize_object_field_name, object_inner, parse_compact_fields, parse_quoted_payload,
@@ -28,12 +24,16 @@ pub mod input;
 pub use self::input::{perform_default_key_delivery, perform_default_type_text};
 use self::input::{remap_type_text_ax_value_error, remap_type_text_targeted_keyboard_error};
 use self::tree::{
-    app_selector_for_window, ax_snapshot_status_error, capture_ax_find_snapshot_with,
-    capture_semantic_target_snapshot, capture_semantic_target_snapshot_with, collect_element_refs,
-    collect_matching_element_ids, direct_ax_target_id, element_selector_draft,
-    find_ax_element_by_id, materialize_app_window_target, materialize_app_window_target_with,
-    reserve_existing_ref_index, selector_rect_from_ax_rect, window_selector_draft,
+    app_selector_for_window, ax_snapshot_status_error, capture_semantic_target_snapshot,
+    collect_element_refs, direct_ax_target_id, materialize_app_window_target,
+    materialize_app_window_target_with, reserve_existing_ref_index, window_selector_draft,
     window_selector_for_ax_window,
+};
+// 这些 tree helper 仅在测试代码里使用, 单独用 cfg(test) 导入,
+// 避免非测试编译出现 unused import。
+#[cfg(test)]
+use self::tree::{
+    capture_ax_find_snapshot_with, capture_semantic_target_snapshot_with,
 };
 pub use self::types::*;
 

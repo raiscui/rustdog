@@ -63,7 +63,7 @@ pub(crate) use trace::{
 // ticket 15 error envelope E2 (ADR-0004 §Considered Options E2)
 #[path = "error_envelope.rs"]
 pub(crate) mod error_envelope;
-pub(crate) use error_envelope::{error_envelope, ComputerActErrorCode, RetryStrategy};
+pub(crate) use error_envelope::{error_envelope, ComputerActErrorCode};
 
 // ticket 16 per-action timeout table (ADR-0005 §3)
 #[path = "timeout.rs"]
@@ -74,7 +74,7 @@ pub(crate) use timeout::{resolve_timeout, TimeoutWatcher};
 // 源自 pi-computer-use `ActOutcome`, 替代 Phase F-2 把 verify_failed 塞 ok:false 的写法.
 #[path = "outcome.rs"]
 mod outcome;
-pub(crate) use outcome::{compute_outcome, render_outcome, ComputerActOutcome, OutcomeInputs};
+pub(crate) use outcome::{compute_outcome, render_outcome, OutcomeInputs};
 
 /// `control_computer_act` 把 action + args 翻译成的中间结果。
 ///
@@ -525,7 +525,7 @@ fn stale_observation_epoch_envelope(
 ///    字段占位 (`null`)
 pub(crate) fn execute_computer_act(
     request: &ComputerActRequest,
-    cancel: Option<&CancellationToken>,
+    _cancel: Option<&CancellationToken>,
 ) -> io::Result<ActionExecutionResult> {
     use serde_json::json;
     use std::time::Instant;

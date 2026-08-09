@@ -12,7 +12,6 @@ use crate::{
     // PermissionDenied), 让手写 JSON payload 跟其它 error_code 走同一 envelope 形状。
     control_computer_act::error_envelope::{
         cancelled_envelope_json, permission_denied_envelope_json,
-        platform_unsupported_envelope_json,
     },
     control_frames::{default_savefile_directory, SaveFileFrame},
     control_gui_bench::build_gui_bench_response_json,

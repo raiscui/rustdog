@@ -143,8 +143,6 @@ fn mark_by_non_owner_returns_record_not_owner() {
     let mut handler = RecordingHandler::new(journal, bundle);
     let _ = handler.handle(Some(50), ConnectionId(1), RecordRequest::Start { profile: super::session::Profile::Semantic, duration_ms: None });
     let mark = handler.handle(Some(51), ConnectionId(2), RecordRequest::Mark { label: Some("x".to_owned()), redaction_active: false });
-    let mark = handler.handle(Some(51), ConnectionId(2), RecordRequest::Mark { label: Some("x".to_owned()), redaction_active: false });
-    let value = first_response_value(&mark);
     let value = first_response_value(&mark);
     assert_eq!(value["error_code"], "RECORD_NOT_OWNER");
 }

@@ -8,12 +8,12 @@
 //! 状态变更但更接近 press 的 verb (press / focus / value / scroll / action)
 //! 留在 control_ax.rs 或后续 commit 搬到 press.rs。
 
-use crate::control_protocol::{KeyDelivery, KeyMode, KeyRequest};
+use crate::control_protocol::{KeyDelivery, KeyRequest};
 use std::io;
 
 use super::types::*;
 use super::{
-    invalid_input, platform_key_delivery, platform_type_text, to_invalid_input, AxBackend,
+    platform_key_delivery, AxBackend,
 };
 
 // ---- perform_default_key_delivery (was lines 1076-1083) ----

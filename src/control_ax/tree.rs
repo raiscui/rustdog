@@ -15,24 +15,19 @@ use crate::{
         SelectorRect, SelectorRedaction, WindowSelector,
     },
     control_observation::{
-        observation_ref_name, record_observation_with_selectors, resolve_observation_ref,
-        stale_observation_ref_error, ObservationRefEntry, ObservationRoot,
+        observation_ref_name, resolve_observation_ref, stale_observation_ref_error,
+        ObservationRefEntry,
     },
-    control_protocol::{
-        normalize_object_field_name, object_inner, parse_compact_atom,
-        parse_compact_window_selector, parse_quoted_payload, split_object_field,
-        split_object_fields, CompactWindowSelector, KeyDelivery, KeyMode, KeyRequest,
-    },
-    control_window::{resolve_unique_app_window_id, WindowActionReport, WindowActionVerifyReport},
+    control_window::resolve_unique_app_window_id,
 };
 use serde_json::json;
 use std::io;
 
-use super::query::{AxFindQuery, AxFindRequest, AxGetRequest};
+use super::query::AxFindRequest;
 use super::types::*;
 use super::{
-    invalid_data, invalid_input, platform_capture_current_subtree, platform_capture_current_window,
-    platform_resolve_current_target_rect, to_invalid_input, AxBackend,
+    invalid_input, platform_capture_current_window, platform_resolve_current_target_rect,
+    to_invalid_input, AxBackend,
 };
 
 // ---- commit 2 留下的 capture / platform-info functions ----

@@ -343,7 +343,7 @@ fn make_request(observation_id: Option<&str>, epoch: Option<u64>) -> ComputerAct
     }
 }
 
-fn record_observation_at(now_ms: u64, refs: Vec<ObservationRefEntry>) -> String {
+fn record_observation_at(_now_ms: u64, refs: Vec<ObservationRefEntry>) -> String {
     let root = ObservationRoot {
         schema: "rdog.observation.root.v1".to_string(),
         platform: "test".to_string(),

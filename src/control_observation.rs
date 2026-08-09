@@ -1136,7 +1136,6 @@ mod tests {
     }
 
     #[test]
-    #[test]
     fn facade_record_observation_preserves_observation_header_count() {
         // ponytail: 1 runnable check that proves the façade does not collapse
         // producer-supplied refs. W-OB-02 locked the façade as the single producer
@@ -1180,6 +1179,7 @@ mod tests {
         assert_eq!(header.selector_count, 3);
     }
 
+    #[test]
     fn prototype_observation_store_keeps_evict_local_during_record_path() {
         // ponytail: 1 runnable check that proves TTL evict can stay inside the store.
         // Repeated `record` only evicts when capacity is exceeded; the previous

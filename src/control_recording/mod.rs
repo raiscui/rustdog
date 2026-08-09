@@ -6,6 +6,10 @@
 //! implementations. macOS uses `CGEventTap` (kCGSessionEventTap +
 //! kCGEventTapOptionListenOnly); non-macOS platforms return
 //! `RecorderError::Unavailable`.
+//!
+//! 录制功能按 specs 规划逐步接入主流程, 接入前允许 dead code, 避免
+//! 每次编译的 never-used 噪音掩盖真正的问题。
+#![allow(dead_code)]
 
 #![allow(missing_docs)]
 

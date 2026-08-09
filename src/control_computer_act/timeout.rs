@@ -18,7 +18,6 @@
 //! (跟 ticket 03 cancellation 整合)。Background thread leak 由 daemon 退出清理。
 
 use crate::cancellation::CancellationToken;
-use crate::control_computer_act::ComputerActErrorCode;
 use serde_json::Value;
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};

@@ -341,7 +341,6 @@ fn record_observation_should_handle_two_thousand_ref_selector_pairs() {
 }
 
 #[test]
-#[test]
 fn prototype_observation_durable_selector_history_should_be_filtered_by_visibility() {
     // ponytail: 1 runnable check that documents the expected eviction contract from W-OS-02.
     // Currently `selector_history` returns rows by index order; this test is RED until
@@ -385,6 +384,7 @@ fn prototype_observation_durable_selector_history_should_be_filtered_by_visibili
     let _ = fs::remove_dir_all(dir);
 }
 
+#[test]
 fn prune_should_keep_latest_evicted_selector_record() {
     let dir = temp_dir("durable-latest-stable");
     let mut store = JsonlDurableObservationStore::open(

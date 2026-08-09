@@ -183,7 +183,8 @@ pub(crate) struct AlwaysVerifySummary {
     /// post-action 全量 observe 的 JSON 值 (来自 `ObserveBundle.value`)。
     /// ticket 14 不直接渲染 (response 只取 screenshot_id / ax_tree_id / windows 字段),
     /// 但保留给 ticket 18 trace / 后续可能加 `verification.observation.full` 扩展。
-    #[cfg_attr(not(test), allow(dead_code))]
+    /// 接入前保持 allow, 避免 test 编译的 dead-code 噪音。
+    #[allow(dead_code)]
     pub observation_block: Value,
     /// screenshot_id (来自 observe.visual 段或 observation 段)
     pub screenshot_id: Option<String>,

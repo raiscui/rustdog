@@ -10,7 +10,6 @@ use crate::{
     control_invocation::{
         resolve_control_invocation, send_control_lines_for_invocation,
     },
-    input::Transport,
 };
 
 /// CLI 5 个子命令的 high-level 视图, 由 input.rs 直接 derive。
