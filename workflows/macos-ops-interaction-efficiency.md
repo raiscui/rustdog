@@ -69,7 +69,7 @@ baseline 存在 `../pi-rdog-calculator-eval/results/macos-ops-interaction/<basel
 
 一个候选通过认证，必须同时满足:
 
-- 全部 5 个活动模型 × 8 个当前 case 都成功。
+- 全部 6 个活动模型 × 8 个当前 case 都成功 (5 个远程 + LFM2.5-2.6B-OptiQ-4bit 本地)。
 - 每个成功都具备真实 rdog 调用和新鲜结果证据。
 - 未变化 case 的请求数不高于其 baseline。
 - 矩阵总请求数严格下降。
@@ -95,7 +95,7 @@ baseline 存在 `../pi-rdog-calculator-eval/results/macos-ops-interaction/<basel
 6. 达到候选门槛后，生成一份 decision brief。它包含共享摩擦点、代码位置、触发样本数、按角色分组的请求差额、协议错误差额、影响面、ledger 链接，以及批准、拒绝、暂缓三个决定。
 7. 在获得批准前，不修改 rdog 协议行为或 canonical skill 控制策略。
 8. 批准后，优先复用或改进共享 parser、协议或通用 primitive。仅当协议已能准确表达意图时，才缩短 skill 的通用决策路径。runner 只测量和门禁，不补偿协议缺口。
-9. 为改动补最小回归测试。先跑定向测试，再运行全部 5 × 8 live matrix，并重新生成 ledger 与比较摘要。
+9. 为改动补最小回归测试。先跑定向测试，再运行全部 6 × 8 live matrix，并重新生成 ledger 与比较摘要。
 10. 通过认证后，将 candidate ledger 和 comparison manifest 提升为新的不可变 baseline。失败则保留 artifacts，baseline 不变。
 
 ## 实现边界
@@ -105,7 +105,7 @@ baseline 存在 `../pi-rdog-calculator-eval/results/macos-ops-interaction/<basel
 - `runner/run_macos_ops_eval.py`: attempt 生命周期、artifact 落盘与 suite result。
 - `vendor/pi_events.py`: Pi JSONL 的纯解析与聚合。
 - `runner/test_run_macos_ops_eval.py`: runner 的回归测试入口。
-- `runner/eval-macos-ops.sh`: 5 个活动模型的完整 live matrix 入口。
+- `runner/eval-macos-ops.sh`: 6 个活动模型的完整 live matrix 入口 (deepseek / minimax / qwen37 / qwen36 / m27hs / lfm25)。
 - `.codex/skills/rdog-control/SKILL.md`: 唯一 canonical skill。
 
 没有证据证明现有 protocol 或 primitive 缺口前，不新增 command、app recipe、case 特例或独立补偿层。
@@ -117,5 +117,5 @@ baseline 存在 `../pi-rdog-calculator-eval/results/macos-ops-interaction/<basel
 - 可重复生成的 ledger 与 comparison manifest。
 - 通过 fail-closed 计量和分类测试的 runner。
 - 一份经批准、带静态和动态证据的共享层改动，或一份证明当前没有合格候选的 brief。
-- 一次完整 5 × 8 live matrix 的认证结果及其新鲜证据。
+- 一次完整 6 × 8 live matrix 的认证结果及其新鲜证据。
 - 若候选通过，新的 immutable baseline；若未通过，完整失败 artifacts 和未变的旧 baseline。

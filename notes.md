@@ -423,3 +423,71 @@ TextEdit pid:6586/window:0 focused+contains MAIN_DOC; @window-resize + fresh ver
 - ❌ 不要 pipe `@response` 到 jq/grep/tail (跟 profile 规则冲突)
 - ❌ 不要用 `app:TextEdit` 跑 resize (必须用 window_id, 6 窗口要唯一定位)
 - ❌ 不要复用旧的 @e1 ref 跨 daemon restart (refs 是 short-lived)
+
+## [2026-08-11 14:38:00] [Session ID: omx-1786429420551-ysl4w1] 上游 Pi 包结构确认
+
+### 来源
+- `/Users/cuiluming/Library/pnpm/pi`
+- `/Users/cuiluming/Library/pnpm/global/5/node_modules/@earendil-works/pi-coding-agent/package.json`
+- `pnpm view @earendil-works/pi-coding-agent@0.84.1 repository homepage version dist.tarball --json`
+
+### 事实
+- `/Users/cuiluming/Library/pnpm/pi` 是 pnpm 生成的 POSIX 启动脚本,执行全局安装包的 `dist/cli.js`。
+- 当前全局包版本是 `0.84.1`。
+- 上游源码仓库是 `https://github.com/earendil-works/pi`,包目录是 `packages/coding-agent`。
+- 包要求 Node `>=22.19.0`;当前环境 Node `v24.18.0`。
+- 旧 `~/.pi/agent/models.json` 中的 `toolUseProfiles` / `extensions` 不能直接视为上游支持的配置契约,应先做源码级能力盘点。
+
+### 当前建议
+- clone 上游仓库到独立工作树,固定 commit/tag 后在 `packages/coding-agent` 开发。
+- 先迁移 macOS ops 所需最小路径,用请求体 diff 和单 case canary 验证新旧 Pi 链路一致,再决定是否跑完整矩阵。
+
+## [2026-08-11 15:31:00] [Session ID: omx-1786429420551-ysl4w1] upstream Pi 迁移与现有 macOS ops runner 的差异
+
+### 静态证据
+- `runner/run_macos_ops_eval.py::load_config()` 把 `toolUseProfiles`、模型 `toolUseProfile` 和 `generation.temperature` 作为硬校验条件。
+- `build_pi_command()` 当前只传 `--no-extensions`,没有 upstream 迁移后必须显式固定的 `--no-skills --skill <canonical> --tools bash,read`。
+- 已认证 `macos-ops-20260807-live-5x8` baseline 中 DeepSeek 8 case 均为 success。
+- `workflows/macos-ops-interaction-efficiency.md` 的 6 x 8 全成功要求,触发范围是 rdog 协议、canonical skill 或 case 变化;本轮只迁移 Pi 和 runner,不修改这些共享控制面。
+
+### 推导的迁移验收边界
+- upstream Pi 迁移必须新增独立 config schema,以隔离 `PI_CODING_AGENT_DIR`、原生 `providers`、`samplingParams` 和 CLI 资源 allowlist 为单一真相源。
+- local mock provider 用于证明真实 request 的 tools/skill 注入;strong-model case 用于证明 rdog actions 的端到端行为。
+- 5 x 8 remote matrix 是最终迁移回归;LFM2.5 只运行旧有成功的 fixed case 作为非阻塞能力观测,不替代接入验收。
+
+## [2026-08-11 15:45:00] [Session ID: omx-1786429420551-ysl4w1] 确认: upstream Pi 预选 tools 与完整 skill preload 操作契约
+
+### 目标
+- 保留旧 `toolUseProfiles` 的两个行为: 启动前固定工具 allowlist,以及将 canonical `rdog-control` 的完整 `SKILL.md` 放入 system prompt。
+- 不保留旧 fork 的 `toolUseProfiles` / `toolUseProfile` 字段和 profile 绑定机制。
+
+### runner 配置单一真相源
+
+```json
+{
+  "agent": {
+    "tools": ["bash", "read"],
+    "appendSystemPromptFiles": [
+      "/Users/cuiluming/local_doc/l_dev/my/rust/rustdog/.codex/skills/rdog-control/SKILL.md"
+    ]
+  }
+}
+```
+
+### 固定 Pi 命令片段
+
+```bash
+/Users/cuiluming/Library/pnpm/pi \
+  --no-extensions \
+  --no-skills \
+  --no-context-files \
+  --tools bash,read \
+  --append-system-prompt /Users/cuiluming/local_doc/l_dev/my/rust/rustdog/.codex/skills/rdog-control/SKILL.md \
+  --mode json --print
+```
+
+### 边界与验证
+- `--skill` 只把 skill 名称、描述和路径放进 `<available_skills>`;它不能代替完整 preload。
+- upstream `resource-loader.js::resolvePromptInput()` 对存在的 `--append-system-prompt` 路径执行 `readFileSync`,因此完整 `SKILL.md` 内容会进入 system prompt。
+- 实现后的 mock provider 必须捕获 tools 恰为 `bash`、`read`,并在 system message 中匹配 canonical `SKILL.md` 的固定片段。
+- 这只保证 prompt/config 链路;LFM2.5 的任务成功率仍以独立能力观测记录,不能混入配置正确性结论。
