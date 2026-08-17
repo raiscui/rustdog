@@ -478,17 +478,9 @@
 - 复现命令: 外部 runner `eval-macos-ops.sh <model>`, 前置: `rdog daemon --transport zenoh` + shell env 注入 API key (tmux server 无 key 会 44ms 秒败, usageTotals=0, 看 pi-stderr "No API key found")
 - 边界: 只验证了 macOS ops 8 老 case; 新 case 集 + 仓库内 runner 的组合仍是 20/40 → 25/40
 
-## [2026-08-11 15:50:00] [Session ID: omx-1786429420551-ysl4w1] 候选: upstream Pi 用 CLI 保留 tool profile 的行为
+## [2026-08-13] upstream Pi 迁移经验已 Capture
 
-### 已有证据
-- 上游 `@earendil-works/pi-coding-agent@0.84.1` 的 `--tools` 是正式工具 allowlist。
-- `resource-loader.js::resolvePromptInput()` 对存在的 `--append-system-prompt` 路径执行 `readFileSync`,因此配置可声明 canonical `SKILL.md` 并由 runner 预加载全文。
-- 已完成的 research ticket #42 用真实 mock provider 验证了 `--tools`、`--skill` 和显式 extension 的 headless request 注入,但没有单独捕获 `--append-system-prompt` 的 payload。
-
-### 适用边界
-- 适用于把旧 Pi `toolUseProfiles` 迁移到 upstream Pi 的非交互评测路径。
-- 不适用于需要根据运行时状态修改 prompt 的场景;那时应评估 `before_agent_start` extension hook。
-
-### 证据缺口与复现条件
-- 实现 runner 前,以 mock OpenAI-compatible provider 运行 `--tools bash,read --append-system-prompt <canonical SKILL.md>`。
-- 必须断言真实 request tools 恰为 `bash`、`read`,并在 system message 匹配 canonical skill 的固定片段后,才可升级为正式 solution。
+- upstream Pi v0.84.1 的 macOS ops CLI、agent 目录隔离、`models.json` schema、`--tools bash,read` 和 `--append-system-prompt` 合同已由正式 solution 承接。
+- 原候选缺少的 `--append-system-prompt` 真实 payload 证据已由 mock provider contract 补齐,不再作为 `EXPERIENCE.md` inbox 候选保留。
+- 详见 [`docs/solutions/tooling-decisions/upstream-pi-macos-ops-cli-contract.md`](docs/solutions/tooling-decisions/upstream-pi-macos-ops-cli-contract.md)。
+- Pi JSONL v3 的 route、多轮和 `turnIndex` 兼容规则见 [`docs/solutions/conventions/pi-jsonl-v3-semantic-aggregation.md`](docs/solutions/conventions/pi-jsonl-v3-semantic-aggregation.md)。

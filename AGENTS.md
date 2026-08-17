@@ -49,6 +49,21 @@ Issues 和 Wayfinder maps 使用 GitHub Issues。详见 `docs/agents/issue-track
   - 用途: 避免 TextEdit 等会恢复窗口的 app 因 setup/prompt/verifier 状态不一致,被误判为模型能力失败
   - 何时阅读: 修改 macOS ops 多窗口 case、窗口计数 verifier、TextEdit setup/retry/cleanup,或分析多窗口模型失败前
 
+- `docs/solutions/logic-errors/gui-resource-epoch-read-write-race.md`
+  - 主题: GUI observation capture 与同 PID mutation 的 stale-write/read-write 并发契约
+  - 用途: 固定 daemon-owned PID lane、capture-start token、dispatch 前后双递增和 stale response 的已验证原因
+  - 何时阅读: 修改 `src/control_resource_lane.rs`、PID-backed observation producer、`@computer-act` ref mutation 或 resource epoch 语义前
+
+- `docs/solutions/tooling-decisions/upstream-pi-macos-ops-cli-contract.md`
+  - 主题: upstream Pi v0.84.1 macOS ops 的 CLI 工具 allowlist、skill preload、agent 隔离和 models.json 边界
+  - 用途: 固定 `--tools bash,read`、绝对 `--append-system-prompt`、`PI_CODING_AGENT_DIR` 与旧 Rust Pi profile 字段的迁移口径
+  - 何时阅读: 修改 upstream Pi 评测命令、provider/model 配置、skill 注入或切换 `/Users/cuiluming/Library/pnpm/pi` 入口前
+
+- `docs/solutions/conventions/pi-jsonl-v3-semantic-aggregation.md`
+  - 主题: legacy Rust Pi 与 upstream Pi v3 JSONL 的 provider route、多轮和工具事件聚合
+  - 用途: 固定 `message_end`、`turn_end`、session/assistant route 和缺失 `turnIndex` 的 fail-closed 语义
+  - 何时阅读: 修改 `vendor/pi_events.py`、`multiTurnVerified`、provider route 判定、对话轮数统计或 Pi artifact 回放前
+
 - `EXPERIENCE.md`
   - 主题: 本项目已经验证过的协议、运行时与GUI安全经验边界,以及 rdog parser 兼容 LLM 多样化写法的机制与踩坑
   - 用途: 待整理经验收件箱, 同时保留已承接协议/运行时经验的索引性描述; 满足成熟度门禁的经验分流到 `docs/solutions/`; 帮助后续改协议时避免把 `@exit`、显式协议请求和裸 shell 行再次混淆;沉淀跨平台修复、Zenoh、log路径、AX hit-test窗口归属、app-menu capture selector 与 screenshot backend gate 等隐性契约教训;改 parser 时先读 compact 前缀路由/空格参数/引号剥离/响应自包含机制,避免破坏 LLM 兼容
@@ -172,6 +187,11 @@ Issues 和 Wayfinder maps 使用 GitHub Issues。详见 `docs/agents/issue-track
   - 主题: computer-use 类 GUI/Web 任务的高密度 primitive 与 bench suite 规划
   - 用途: 固定 `@gui-probe`、`@web-find`、`@web-act`、`@gui-act`、`@gui-bench` 的演进方向,以及用 `backend_request_count` / `agent_decision_points` 等指标衡量任务密度
   - 何时阅读: 准备减少 agent 手动串联 `@ping` / `@capabilities` / `@window-find` / `@ax-get` 等低级请求,实现 Web/GUI 高密度任务 primitive 或 bench baseline 前
+
+- `docs/pi-computer-use-comparison.md`
+  - 主题: `pi-computer-use` v0.5.0 与 rustdog 当前 computer-use 架构的源码级对比
+  - 用途: 固定 resource-keyed epoch、successor observation、checked transaction、可信 diff 和输出预算的可借鉴边界,并记录不应复制的 Pi tool/session 模型
+  - 何时阅读: 设计 GUI mutation 并发控制、动作后 fresh evidence、单资源 transaction、observation cached query 或统一响应预算前
 
 - `specs/rdog-ui-script-control-plan.md`
   - 主题: UI script / control-flow JSON DSL 规划
