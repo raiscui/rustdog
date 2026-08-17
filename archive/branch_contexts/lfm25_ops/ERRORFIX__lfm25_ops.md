@@ -73,3 +73,33 @@
 - `ruff check run_macos_ops_eval.py test_run_macos_ops_eval.py`: 无问题。
 - M3 artifact `/tmp/pi-rdog-macos-ops-minimax-multiwindow-fixed-20260812-210439`: before 2 -> after 3,通过。
 - Qwen 3.7 artifact `/tmp/pi-rdog-macos-ops-qwen37-multiwindow-fixed-20260812-210555`: before 2 -> after 3,通过。
+
+## [2026-08-13 15:25:26] [Session ID: omx-1786429420551-ysl4w1] 错误修复: 定向 runner 测试缺少导入路径
+
+### 现象
+- 首次从 evaluator 仓库根目录运行 Pi 事件与 upstream CLI 合同的定向测试时,Python 报 `ModuleNotFoundError`。
+
+### 原因
+- 测试模块从 `runner` 和 `vendor` 目录导入共享实现,直接以仓库根目录的默认 `sys.path` 启动不会包含这两个目录。
+
+### 修复
+- 使用与 runner 模块布局一致的显式导入路径运行定向测试:
+  `PYTHONPATH=runner:vendor python3 -m unittest -v runner.test_pi_events runner.test_upstream_pi_contract`。
+
+### 验证
+- 修正后的命令通过,共 5 项测试,没有失败或错误。
+
+## [2026-08-13 15:29:00] [Session ID: omx-1786429420551-ysl4w1] 验证修正: 跨仓库命令工作目录错误
+
+### 现象
+- 归档前把 rustdog solution 校验和 evaluator 的 `agents/upstream/models.json` 检查放在 evaluator 工作目录执行,导致两个 solution 路径和该 JSON 路径报告不存在。
+
+### 原因
+- 两类验证属于不同仓库,命令没有按文件归属切换工作目录。
+
+### 修复
+- rustdog solution 校验在 `/Users/cuiluming/local_doc/l_dev/my/rust/rustdog` 执行。
+- evaluator 的 JSON、Python、Ruff 和编译检查在 `/Users/cuiluming/local_doc/l_dev/my/rust/pi-rdog-calculator-eval` 执行。
+
+### 验证
+- 同一轮中的 evaluator 定向测试实际已通过 5 项;随后已在 evaluator 工作目录补齐 `runner/agents/upstream/models.json`、Ruff、Python 编译和 `git diff --check` 验证。

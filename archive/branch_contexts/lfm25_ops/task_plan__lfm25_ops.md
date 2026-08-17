@@ -941,3 +941,98 @@ LFM2.5 30% attempt 第一轮 read skill 文件 (路径错误失败) + find / 超
 ### 已保留的未跟踪文件
 - rustdog: `.tmp/`、`RDOG_HANDOFF__2026-08-09_textedit-main-doc-resize.md`。
 - evaluator: `runner/agents/upstream/auth.json`、`runner/agents/upstream/models-store.json`。两者均为空本机状态,不应提交。
+
+## [2026-08-13 00:35:00] [Session ID: omx-1786429420551-ysl4w1] 持续学习: upstream Pi 迁移与多窗口契约
+
+### 目标
+- 回读当前 `__lfm25_ops` 支线事实账本,对 upstream Pi 迁移和 TextEdit 多窗口修订执行 Compound Gate。
+- 刷新受影响的长期文档,处置 `EXPERIENCE.md` 候选,并仅在完成验证后归档已消费的支线上下文。
+
+### 步骤
+- [ ] 读取支线六文件、已有 solution、相关 workflow 与 continuous-learning 规则,形成事实分组。
+- [ ] 执行 Gate、重叠检查和 Scoped Refresh,决定 Capture / inbox / skip。
+- [ ] 验证长期产物,归档已消费且不再活跃的上下文,更新账本并交付。
+
+### 当前状态
+**阶段1** - 回读当前支线事实与长期知识入口。
+
+## [2026-08-13 14:55:14] [Session ID: omx-1786429420551-ysl4w1] 持续学习阶段更新: Capture 与 Scoped Refresh 处置
+
+### 事实分组
+- `macos-ops-multi-window-runtime-baseline.md` 与本轮证据主题重叠度低,保持 `Keep`,不重复创建同义文档。
+- upstream Pi v0.84.1 的工具 allowlist、skill preload、配置隔离和旧字段边界已具备当前静态证据、mock provider 动态证据和 89 项回归测试,满足七项 Gate,创建一份 Knowledge track solution。
+- upstream Pi v3 JSONL 的 route 与多轮判定有当前 parser 实现、4 项定向回归测试和真实 artifact 回放证据,满足七项 Gate,创建一份 Knowledge track solution。
+- `EXPERIENCE.md` 中 upstream CLI 候选的原始 `--append-system-prompt` payload 缺口已由 2026-08-12 mock provider contract 验证关闭,该候选升级为正式 solution,不再留作 inbox 候选。
+
+### 处置
+- [x] Capture: upstream Pi macOS ops CLI 合同。
+- [x] Capture: Pi JSONL v3 语义聚合合同。
+- [x] Scoped Refresh: 多窗口 runtime baseline solution 保持有效,不改正文。
+- [ ] 验证两份 solution、更新索引与账本,然后归档已消费支线上下文。
+
+### 当前状态
+**阶段2** - 正在写入长期 solution 并同步发现入口。
+
+## [2026-08-13 15:18:00] [Session ID: omx-1786429420551-ysl4w1] 持续学习行动记录: 写入长期 solution 与发现入口
+
+### 行动目的
+- 将已由 upstream Pi v0.84.1 代码、评测器合同、mock provider 和真实 artifact 共同验证的两条知识写入正式 Knowledge track。
+- 清理 `EXPERIENCE.md` 中已完成证据补齐的 upstream CLI 候选,避免同一结论同时存在于 inbox 和 solution。
+- 在 `AGENTS.md` 增加按路径、用途和触发时机可发现的索引,不新增 skill 或 glossary。
+
+### 本次编辑范围
+- 新增 `docs/solutions/tooling-decisions/upstream-pi-macos-ops-cli-contract.md`。
+- 新增 `docs/solutions/conventions/pi-jsonl-v3-semantic-aggregation.md`。
+- 更新 `EXPERIENCE.md` 与 `AGENTS.md`。
+
+### 当前状态
+**阶段2** - 长期产物正在写入,之后运行 frontmatter、claims、单元测试和 diff 校验。
+
+## [2026-08-13 15:25:26] [Session ID: omx-1786429420551-ysl4w1] 持续学习收尾计划: 归档已消费支线
+
+### 行动目的
+- 两份 Knowledge track solution、发现入口和收件箱处置已经完成,支线不再承载活跃实现工作。
+- 先补齐实际验证、测试命令修正和归档映射,再移动整组 `__lfm25_ops` 文件,让后续检索从长期 solution 或 manifest 开始。
+
+### 待执行步骤
+- [ ] 追加 WORKLOG,记录 Capture、Scoped Refresh、验证和保留的后续事项。
+- [ ] 追加 ERRORFIX,记录首次定向测试遗漏 `PYTHONPATH` 的复现与修正命令。
+- [ ] 创建归档 manifest,然后移动已消费的支线六文件。
+- [ ] 复跑 solution 校验、定向测试和 `git diff --check`,核对归档后的工作树。
+
+### 当前状态
+**阶段3** - 正在补齐归档前的事实账本。
+
+## [2026-08-13 15:28:00] [Session ID: omx-1786429420551-ysl4w1] 持续学习验证完成: 准备归档
+
+### 状态变更
+- [x] 阶段1: 读取支线六文件、已有 solution、相关 workflow 与 continuous-learning 规则,形成事实分组。
+- [x] 阶段2: 执行 Gate、重叠检查和 Scoped Refresh,完成两份 Capture,并同步 `AGENTS.md` 与 `EXPERIENCE.md`。
+- [x] 阶段3: 写入 WORKLOG、ERRORFIX 和归档 manifest,完成长期产物验证。
+- [x] 阶段4: 移动已消费支线文件,复核归档后的工作树和 manifest 映射。
+
+### 最终状态
+**长期产物验证完成,`lfm25_ops` 支线已归档。** 未实施的认证收口事项保留在归档后的 `LATER_PLANS__lfm25_ops.md` 中。
+
+## [2026-08-13 15:31:00] [Session ID: omx-1786429420551-ysl4w1] 归档前状态修正
+
+### 修正原因
+- 上一条状态在实际 `mv` 前提前写成“已归档”。归档前的跨仓库路径检查已修正并分别通过,但文件此刻仍在工作区。
+
+### 当前状态
+- [x] 两份 solution 的 frontmatter 与 claims 校验通过,无 flags。
+- [x] evaluator 的 5 项定向测试、Ruff、Python 编译与 `runner/agents/upstream/models.json` JSON 校验通过。
+- [ ] 正在移动五份已消费的 `__lfm25_ops` 账本文件到 `archive/branch_contexts/lfm25_ops/`。
+
+**阶段4** - 正在执行实际归档移动,完成后复核 manifest 映射和 Git 状态。
+
+## [2026-08-13 15:34:00] [Session ID: omx-1786429420551-ysl4w1] 归档完成
+
+### 验证结果
+- [x] 五份支线账本已移动到 `archive/branch_contexts/lfm25_ops/`。
+- [x] 归档 manifest 已创建,原路径与新路径一一对应。
+- [x] rustdog solution 校验、evaluator 定向测试、Ruff、Python 编译、JSON 校验和 `git diff --check` 均已完成。
+- [x] 用户已有 `.tmp/` 与 `RDOG_HANDOFF__2026-08-09_textedit-main-doc-resize.md` 未被移动或修改。
+
+### 最终状态
+**持续学习完成,支线已归档。** 未实施的认证收口事项仍保存在归档后的 `LATER_PLANS__lfm25_ops.md`。

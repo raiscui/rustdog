@@ -295,3 +295,26 @@
 ### 总结感悟
 - 评测器配置与 Rustdog 的迁移说明必须分仓库提交,避免 consumer implementation 与 producer 文档混在同一个历史节点。
 - `runner/agents/upstream/auth.json` 与 `models-store.json` 是空的本机状态文件,不应进入版本库。
+
+## [2026-08-13 15:25:26] [Session ID: omx-1786429420551-ysl4w1] 任务名称: upstream Pi macOS ops 迁移持续学习
+
+### 任务内容
+- 对 `__lfm25_ops` 支线执行 Compound Gate、Compound Capture 和 Scoped Refresh。
+- 将已验证的上游 Pi CLI 合同与 Pi JSONL v3 聚合合同写入正式长期知识,并同步发现入口。
+- 归档已消费的支线六文件,保留尚未实施的认证收口事项。
+
+### 完成过程
+- 新增 `docs/solutions/tooling-decisions/upstream-pi-macos-ops-cli-contract.md`,固定 `/Users/cuiluming/Library/pnpm/pi`、`--tools bash,read`、绝对 `--append-system-prompt`、隔离 `PI_CODING_AGENT_DIR` 与 upstream `models.json` schema 的边界。
+- 新增 `docs/solutions/conventions/pi-jsonl-v3-semantic-aggregation.md`,固定 legacy 与 upstream v3 对 completed `message_end`、route、`turn_end` 和 `turnIndex` 的 fail-closed 聚合规则。
+- 对 `docs/solutions/logic-errors/macos-ops-multi-window-runtime-baseline.md` 执行 Scoped Refresh,当前证据继续支持其运行时 N 到 N+1 合同,处置为 Keep。
+- 更新 `AGENTS.md` 的长期知识入口,并从 `EXPERIENCE.md` 移除已由 mock provider 合同补齐证据的候选正文,只保留指向正式 solution 的索引结论。
+- 不创建 skill 或 glossary。现有 runner 定向测试已承载可执行验证步骤,本轮也没有新的项目术语。
+
+### 验证
+- 两份新增 solution 的 frontmatter 校验均输出 `OK`。
+- 两份新增 solution 的 claims 校验均输出 `OK`,没有 flags。
+- `PYTHONPATH=runner:vendor python3 -m unittest -v runner.test_pi_events runner.test_upstream_pi_contract` 通过,共 5 项测试。
+- `git diff --check` 通过。
+
+### 保留事项
+- `LATER_PLANS__lfm25_ops.md` 中的无 recoverable signal 基线、LFM2.5 重新全矩阵和 Qwen 3.7 短格式兼容性仍未实施,随支线账本归档保留。
