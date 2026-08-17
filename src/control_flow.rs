@@ -9,7 +9,10 @@ use std::{
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use serde::Deserialize;
 
-use crate::control_frames::{ControlExecutionOutcome, ControlFrame, SaveFileFrame};
+use crate::{
+    control_frames::{ControlExecutionOutcome, ControlFrame, SaveFileFrame},
+    control_protocol::{parse_control_line, ControlCommand, ControlParseResult},
+};
 
 mod process;
 
@@ -22,6 +25,7 @@ pub(crate) const DEFAULT_FLOW_MAX_STEPS: usize = 64;
 pub(crate) const MAX_FLOW_STEPS: usize = 256;
 pub(crate) const DEFAULT_FLOW_MAX_OUTPUT_BYTES: usize = 1024 * 1024;
 pub(crate) const MAX_FLOW_OUTPUT_BYTES: usize = 8 * 1024 * 1024;
+pub(crate) const MAX_GUI_TRANSACTION_ACTIONS: usize = 20;
 
 /// daemon-side `@flow` 的第一层结构。
 ///
@@ -54,6 +58,27 @@ pub(crate) struct FlowPolicy {
     pub(crate) max_steps: usize,
     #[serde(default = "default_flow_max_output_bytes")]
     pub(crate) max_output_bytes: usize,
+    #[serde(default)]
+    pub(crate) execution: FlowExecutionPolicy,
+}
+
+/// `@flow` 内的 GUI 执行模式。
+///
+/// 严格后台只改变 side-effect gate,不改变 observe/query 或 AX value 的读取和
+/// 语义操作。默认 interactive 保持现有 flow 行为,避免无请求地收紧旧调用。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct FlowExecutionPolicy {
+    #[serde(default)]
+    pub(crate) strict_background: bool,
+}
+
+impl Default for FlowExecutionPolicy {
+    fn default() -> Self {
+        Self {
+            strict_background: false,
+        }
+    }
 }
 
 impl Default for FlowPolicy {
@@ -66,6 +91,7 @@ impl Default for FlowPolicy {
             timeout_ms: DEFAULT_FLOW_TIMEOUT_MS,
             max_steps: DEFAULT_FLOW_MAX_STEPS,
             max_output_bytes: DEFAULT_FLOW_MAX_OUTPUT_BYTES,
+            execution: FlowExecutionPolicy::default(),
         }
     }
 }
@@ -108,10 +134,22 @@ pub(crate) enum FlowStep {
     Cmd(FlowCmdStep),
     Script(FlowScriptStep),
     ControlLine(String),
+    GuiTransaction(FlowGuiTransactionStep),
     SleepMs(u64),
     Expect(FlowExpectStep),
     SaveArtifact(FlowSaveArtifactStep),
     Exit,
+}
+
+/// 同一 GUI resource 的 checked action 序列。
+///
+/// 第一条 action 必须携带真实 `{ref, observation_id}`、request-level
+/// `observation_id` 和 `epoch`。后续 action 的三个字段都从 `$successor` 绑定,
+/// 避免 agent 在一个事务中手工复制漂移 ref。
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct FlowGuiTransactionStep {
+    pub(crate) actions: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -197,7 +235,18 @@ pub(crate) struct FlowRunReport {
     pub(crate) captures: BTreeMap<String, FlowCommandResult>,
     pub(crate) response_lines: Vec<String>,
     pub(crate) artifacts: Vec<String>,
+    pub(crate) checked_transactions: Vec<FlowTransactionReport>,
     pub(crate) trace_record_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct FlowTransactionReport {
+    pub(crate) step_index: usize,
+    pub(crate) total_actions: usize,
+    pub(crate) completed_actions: usize,
+    pub(crate) stopped_at: Option<usize>,
+    pub(crate) successor_target: Option<serde_json::Value>,
+    pub(crate) error: Option<String>,
 }
 
 impl FlowRunReport {
@@ -241,6 +290,20 @@ impl FlowRunReport {
             "captures": captures,
             "response_count": self.response_lines.len(),
             "artifacts": self.artifacts,
+            "checked_transactions": self
+                .checked_transactions
+                .iter()
+                .map(|transaction| {
+                    serde_json::json!({
+                        "step_index": transaction.step_index,
+                        "total_actions": transaction.total_actions,
+                        "completed_actions": transaction.completed_actions,
+                        "stopped_at": transaction.stopped_at,
+                        "successor_target": transaction.successor_target,
+                        "error": transaction.error,
+                    })
+                })
+                .collect::<Vec<_>>(),
             "trace_record_count": self.trace_record_count,
         })
     }
@@ -371,6 +434,13 @@ fn execute_flow_runtime(
                         .to_owned(),
                 ),
             },
+            FlowStep::GuiTransaction(step) => match control_line_executor.as_deref_mut() {
+                Some(executor) => state.execute_gui_transaction(index, step, executor),
+                None => Err(
+                    "GuiTransaction runtime 需要 control_core executor,当前 shell lane 未提供"
+                        .to_owned(),
+                ),
+            },
             FlowStep::SaveArtifact(step) => state.save_artifact(request_id, index, step),
         };
 
@@ -428,10 +498,23 @@ fn validate_flow_request(request: FlowRequest) -> io::Result<FlowRequest> {
             }
             FlowStep::ControlLine(line) => {
                 validate_control_line_step(index, line)?;
+                validate_flow_execution_policy(index, line, &request.policy.execution)?;
                 // ticket 19: 标记 @computer-act ControlLine 让后续 policy 校验
                 if control_line_kind(line).as_deref() == Some("computer-act") {
                     has_computer_act_step = true;
                 }
+            }
+            FlowStep::GuiTransaction(step) => {
+                validate_gui_transaction_step(index, step)?;
+                for (action_index, line) in step.actions.iter().enumerate() {
+                    validate_flow_execution_policy(index, line, &request.policy.execution)
+                        .map_err(|err| {
+                            invalid_data(format!(
+                                "@flow.steps[{index}].GuiTransaction.actions[{action_index}] 严格后台校验失败: {err}"
+                            ))
+                        })?;
+                }
+                has_computer_act_step = true;
             }
             FlowStep::SleepMs(ms) => validate_step_timeout(index, "SleepMs", Some(*ms))?,
             FlowStep::Expect(step) => validate_expect_step(index, step)?,
@@ -570,6 +653,348 @@ fn validate_expect_step(index: usize, step: &FlowExpectStep) -> io::Result<()> {
     Ok(())
 }
 
+/// 校验 checked GUI transaction 的固定边界。
+///
+/// 首 action 必须是真实 ref + observation + request-level epoch。后续 action
+/// 只能消费上一步返回的 successor,这样事务不会偷偷退化成多个独立坐标动作。
+fn validate_gui_transaction_step(index: usize, step: &FlowGuiTransactionStep) -> io::Result<()> {
+    if step.actions.is_empty() {
+        return Err(invalid_data(format!(
+            "@flow.steps[{index}].GuiTransaction.actions 不能为空"
+        )));
+    }
+    if step.actions.len() > MAX_GUI_TRANSACTION_ACTIONS {
+        return Err(invalid_data(format!(
+            "@flow.steps[{index}].GuiTransaction.actions 数量 {} 超过上限 {MAX_GUI_TRANSACTION_ACTIONS}",
+            step.actions.len()
+        )));
+    }
+
+    let first = step.actions.first().expect("actions checked non-empty");
+    let first_request = parse_gui_transaction_action(index, 0, first)?;
+    let target = first_request
+        .args
+        .get("target")
+        .and_then(serde_json::Value::as_object)
+        .ok_or_else(|| {
+            invalid_data(format!(
+                "@flow.steps[{index}].GuiTransaction.actions[0] 必须携带 args.target {{ref,observation_id}}"
+            ))
+        })?;
+    require_transaction_target_field(index, 0, target, "ref")?;
+    require_transaction_target_field(index, 0, target, "observation_id")?;
+    let target_observation_id = target
+        .get("observation_id")
+        .and_then(serde_json::Value::as_str)
+        .expect("target observation_id validated");
+    if first_request.observation_id.as_deref() != Some(target_observation_id) {
+        return Err(invalid_data(format!(
+            "@flow.steps[{index}].GuiTransaction.actions[0] 顶层 observation_id 必须与 args.target.observation_id 一致"
+        )));
+    }
+    if first_request.epoch.is_none() {
+        return Err(invalid_data(format!(
+            "@flow.steps[{index}].GuiTransaction.actions[0] 必须携带 request-level epoch"
+        )));
+    }
+    if target
+        .keys()
+        .any(|key| key != "ref" && key != "observation_id")
+    {
+        return Err(invalid_data(format!(
+            "@flow.steps[{index}].GuiTransaction.actions[0].args.target 只支持 ref 和 observation_id"
+        )));
+    }
+
+    for (action_index, line) in step.actions.iter().enumerate().skip(1) {
+        if !has_successor_marker(line) {
+            return Err(invalid_data(format!(
+                "@flow.steps[{index}].GuiTransaction.actions[{action_index}] 必须使用 target:$successor,observation_id:$successor 和 epoch:$successor"
+            )));
+        }
+        validate_successor_template(index, action_index, line)?;
+        let template_successor = serde_json::json!({
+            "ref": "@successor",
+            "observation_id": "successor-observation",
+            "epoch": 0,
+        });
+        let materialized = materialize_successor_action(line, &template_successor).map_err(|err| {
+            invalid_data(format!(
+                "@flow.steps[{index}].GuiTransaction.actions[{action_index}] successor 模板无效: {err}"
+            ))
+        })?;
+        parse_gui_transaction_action(index, action_index, &materialized)?;
+    }
+
+    Ok(())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FlowExecutionPolicyViolation {
+    code: &'static str,
+    message: String,
+}
+
+fn validate_flow_execution_policy(
+    index: usize,
+    line: &str,
+    policy: &FlowExecutionPolicy,
+) -> io::Result<()> {
+    if !policy.strict_background {
+        return Ok(());
+    }
+    enforce_strict_background_line(line, policy).map_err(|violation| {
+        invalid_data(format!(
+            "@flow.steps[{index}] {}: {}",
+            violation.code, violation.message
+        ))
+    })
+}
+
+fn enforce_strict_background_line(
+    line: &str,
+    policy: &FlowExecutionPolicy,
+) -> Result<(), FlowExecutionPolicyViolation> {
+    if !policy.strict_background {
+        return Ok(());
+    }
+
+    let parsed = match parse_control_line(line) {
+        Ok(parsed) => parsed,
+        Err(_) if has_successor_marker(line) => {
+            return enforce_strict_background_template(line);
+        }
+        Err(err) => {
+            return Err(FlowExecutionPolicyViolation {
+                code: "invalid_execution_request",
+                message: format!("严格后台策略无法解析 control request: {err}"),
+            })
+        }
+    };
+    let ControlParseResult::Control(request) = parsed else {
+        return Ok(());
+    };
+    command_execution_policy_violation(&request.command).map_or(Ok(()), Err)
+}
+
+fn enforce_strict_background_template(line: &str) -> Result<(), FlowExecutionPolicyViolation> {
+    let action = template_field(line, "action").unwrap_or_default();
+    if matches!(
+        action.as_str(),
+        "click"
+            | "doubleclick"
+            | "triple_click"
+            | "right_single"
+            | "hover"
+            | "scroll"
+            | "drag"
+            | "hotkey"
+            | "hotkey_click"
+    ) {
+        return Err(FlowExecutionPolicyViolation {
+            code: "physical_input_prohibited",
+            message: format!(
+                "strict_background 禁止 @computer-act action={action},因为它需要 physical input"
+            ),
+        });
+    }
+    if matches!(action.as_str(), "open_app" | "open_url") {
+        return Err(FlowExecutionPolicyViolation {
+            code: "foreground_prohibited",
+            message: format!(
+                "strict_background 禁止 @computer-act action={action},因为它可能激活前台窗口"
+            ),
+        });
+    }
+    if action == "type" {
+        let mode = template_field(line, "mode").unwrap_or_else(|| "ax-value".to_owned());
+        if mode != "ax-value" && mode != "ax_value" {
+            return Err(FlowExecutionPolicyViolation {
+                code: "physical_input_prohibited",
+                message: format!("strict_background 只允许 type 的 AX value 模式,当前 mode={mode}"),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn command_execution_policy_violation(
+    command: &ControlCommand,
+) -> Option<FlowExecutionPolicyViolation> {
+    match command {
+        ControlCommand::Key(_) | ControlCommand::Paste(_) => Some(
+            FlowExecutionPolicyViolation {
+                code: "physical_input_prohibited",
+                message: "strict_background 禁止 raw keyboard 或 legacy paste".to_owned(),
+            },
+        ),
+        ControlCommand::MouseMove(_)
+        | ControlCommand::MouseButton(_)
+        | ControlCommand::Click(_)
+        | ControlCommand::Drag(_)
+        | ControlCommand::Wheel(_) => Some(FlowExecutionPolicyViolation {
+            code: "physical_input_prohibited",
+            message: "strict_background 禁止 raw pointer action".to_owned(),
+        }),
+        ControlCommand::WindowActivate(_)
+        | ControlCommand::WindowResize(_)
+        | ControlCommand::OpenApp(_) => Some(FlowExecutionPolicyViolation {
+            code: "foreground_prohibited",
+            message: "strict_background 禁止 activate/raise/open-app; window-resize 也不能隐式恢复前台窗口".to_owned(),
+        }),
+        ControlCommand::AxFocus(request) if request.activate => Some(
+            FlowExecutionPolicyViolation {
+                code: "foreground_prohibited",
+                message: "strict_background 禁止 @ax-focus activate:true".to_owned(),
+            },
+        ),
+        ControlCommand::TypeText(request)
+            if !matches!(request.mode, crate::control_ax::TypeTextMode::AxValue) =>
+        {
+            Some(FlowExecutionPolicyViolation {
+                code: "physical_input_prohibited",
+                message: "strict_background 只允许 @type-text 的 AX value 模式".to_owned(),
+            })
+        }
+        ControlCommand::ComputerAct(request) => computer_act_policy_violation(request),
+        ControlCommand::Composite(commands) => commands
+            .iter()
+            .find_map(command_execution_policy_violation),
+        _ => None,
+    }
+}
+
+fn computer_act_policy_violation(
+    request: &crate::control_protocol::ComputerActRequest,
+) -> Option<FlowExecutionPolicyViolation> {
+    if matches!(
+        request.action.as_str(),
+        "click"
+            | "doubleclick"
+            | "triple_click"
+            | "right_single"
+            | "hover"
+            | "scroll"
+            | "drag"
+            | "hotkey"
+            | "hotkey_click"
+    ) {
+        return Some(FlowExecutionPolicyViolation {
+            code: "physical_input_prohibited",
+            message: format!(
+                "strict_background 禁止 @computer-act action={},因为它需要 physical input",
+                request.action
+            ),
+        });
+    }
+    if matches!(request.action.as_str(), "open_app" | "open_url") {
+        return Some(FlowExecutionPolicyViolation {
+            code: "foreground_prohibited",
+            message: format!(
+                "strict_background 禁止 @computer-act action={},因为它可能激活前台窗口",
+                request.action
+            ),
+        });
+    }
+    if request.action == "type" {
+        let mode = request
+            .args
+            .get("mode")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("ax-value");
+        if request.args.get("target").is_none() || !matches!(mode, "ax-value" | "ax_value") {
+            return Some(FlowExecutionPolicyViolation {
+                code: "physical_input_prohibited",
+                message: "strict_background 只允许带 target 的 AX value type,禁止 legacy/keyboard/clipboard 输入".to_owned(),
+            });
+        }
+    }
+    None
+}
+
+fn template_field(line: &str, field: &str) -> Option<String> {
+    let normalized = line
+        .chars()
+        .filter(|ch| !ch.is_whitespace())
+        .collect::<String>();
+    for prefix in [format!("{field}:\""), format!("\"{field}\":\"")] {
+        if let Some(prefix_start) = normalized.find(&prefix) {
+            let start = prefix_start + prefix.len();
+            let end = normalized[start..].find('"')? + start;
+            return Some(normalized[start..end].to_owned());
+        }
+    }
+    None
+}
+
+fn parse_gui_transaction_action(
+    step_index: usize,
+    action_index: usize,
+    line: &str,
+) -> io::Result<crate::control_protocol::ComputerActRequest> {
+    let parsed = parse_control_line(line).map_err(|err| {
+        invalid_data(format!(
+            "@flow.steps[{step_index}].GuiTransaction.actions[{action_index}] 解析失败: {err}"
+        ))
+    })?;
+    let ControlParseResult::Control(request) = parsed else {
+        return Err(invalid_data(format!(
+            "@flow.steps[{step_index}].GuiTransaction.actions[{action_index}] 必须是显式 @computer-act request"
+        )));
+    };
+    if !matches!(request.command, ControlCommand::ComputerAct(_)) {
+        return Err(invalid_data(format!(
+            "@flow.steps[{step_index}].GuiTransaction.actions[{action_index}] 只能使用 @computer-act"
+        )));
+    }
+    match request.command {
+        ControlCommand::ComputerAct(request) => Ok(request),
+        _ => unreachable!("command kind checked above"),
+    }
+}
+
+fn require_transaction_target_field(
+    step_index: usize,
+    action_index: usize,
+    target: &serde_json::Map<String, serde_json::Value>,
+    field: &str,
+) -> io::Result<()> {
+    let valid = target
+        .get(field)
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|value| !value.trim().is_empty());
+    if valid {
+        Ok(())
+    } else {
+        Err(invalid_data(format!(
+            "@flow.steps[{step_index}].GuiTransaction.actions[{action_index}].args.target.{field} 必须是非空字符串"
+        )))
+    }
+}
+
+fn validate_successor_template(
+    step_index: usize,
+    action_index: usize,
+    line: &str,
+) -> io::Result<()> {
+    // 模板先做最小结构检查。具体 ref/observation/epoch 在 runtime 绑定上一响应时注入。
+    let has_target = line.contains("target:\"$successor\"")
+        || line.contains("target:'$successor'")
+        || line.contains("\"target\":\"$successor\"");
+    let has_observation_id = line.contains("observation_id:\"$successor\"")
+        || line.contains("observation_id:'$successor'")
+        || line.contains("\"observation_id\":\"$successor\"");
+    let has_epoch = line.contains("epoch:$successor")
+        || line.contains("epoch:\"$successor\"")
+        || line.contains("\"epoch\":\"$successor\"");
+    if !has_target || !has_observation_id || !has_epoch {
+        return Err(invalid_data(format!(
+            "@flow.steps[{step_index}].GuiTransaction.actions[{action_index}] successor 模板必须同时包含 target:$successor、observation_id:$successor 和 epoch:$successor"
+        )));
+    }
+    Ok(())
+}
+
 fn validate_save_artifact_step(index: usize, step: &FlowSaveArtifactStep) -> io::Result<()> {
     require_non_empty_flow_string(index, "SaveArtifact.path", &step.path)?;
     validate_optional_non_empty(index, "SaveArtifact.mime", step.mime.as_deref())?;
@@ -631,6 +1056,7 @@ impl FlowStep {
             Self::Cmd(_) => "Cmd",
             Self::Script(_) => "Script",
             Self::ControlLine(_) => "ControlLine",
+            Self::GuiTransaction(_) => "GuiTransaction",
             Self::SleepMs(_) => "SleepMs",
             Self::Expect(_) => "Expect",
             Self::SaveArtifact(_) => "SaveArtifact",
@@ -649,8 +1075,10 @@ struct FlowRuntimeState {
     response_lines: Vec<String>,
     response_values: Vec<serde_json::Value>,
     artifacts: Vec<String>,
+    checked_transactions: Vec<FlowTransactionReport>,
     trace_records: Vec<serde_json::Value>,
     outbound_frames: Vec<ControlFrame>,
+    execution_policy: FlowExecutionPolicy,
 }
 
 struct FlowRuntimeOutput {
@@ -671,8 +1099,10 @@ impl FlowRuntimeState {
             response_lines: Vec::new(),
             response_values: Vec::new(),
             artifacts: Vec::new(),
+            checked_transactions: Vec::new(),
             trace_records: Vec::new(),
             outbound_frames: Vec::new(),
+            execution_policy: request.policy.execution,
         }
     }
 
@@ -825,6 +1255,22 @@ impl FlowRuntimeState {
         line: &str,
         executor: &mut dyn FnMut(&str) -> ControlExecutionOutcome,
     ) -> Result<(), String> {
+        if let Err(violation) = enforce_strict_background_line(line, &self.execution_policy) {
+            let response = serde_json::json!({
+                "ok": false,
+                "error_code": violation.code,
+                "error_message": violation.message,
+                "retry": {
+                    "strategy": "never",
+                    "hint": "strict_background 只允许语义 AX 操作,请改用 AX value/action 或关闭该 flow policy"
+                },
+                "evidence": {
+                    "execution_policy": "strict_background"
+                }
+            });
+            self.record_response_line(format!("@response {response}"));
+            return Err(format!("{}: {}", violation.code, violation.message));
+        }
         let outcome = executor(line);
         for frame in outcome.outbound_frames {
             match frame {
@@ -846,6 +1292,97 @@ impl FlowRuntimeState {
             }
         }
         Ok(())
+    }
+
+    fn execute_gui_transaction(
+        &mut self,
+        step_index: usize,
+        step: &FlowGuiTransactionStep,
+        executor: &mut dyn FnMut(&str) -> ControlExecutionOutcome,
+    ) -> Result<(), String> {
+        let mut successor_target = None;
+        let mut completed_actions = 0;
+
+        for (action_index, line) in step.actions.iter().enumerate() {
+            let materialized = if has_successor_marker(line) {
+                let target = successor_target.as_ref().ok_or_else(|| {
+                    format!(
+                        "GuiTransaction action {action_index} 需要上一条 action 的 successor_target"
+                    )
+                })?;
+                materialize_successor_action(line, target)?
+            } else {
+                line.clone()
+            };
+
+            let response_count_before = self.response_values.len();
+            self.execute_control_line(step_index, &materialized, executor)?;
+            let Some(response) = self.response_values.get(response_count_before) else {
+                return self.fail_gui_transaction(
+                    step_index,
+                    step,
+                    completed_actions,
+                    Some(action_index),
+                    successor_target,
+                    "action 没有产生可检查的 @response".to_owned(),
+                );
+            };
+
+            let response_code = response_code(response).unwrap_or(64);
+            if response_code != 0 {
+                return self.fail_gui_transaction(
+                    step_index,
+                    step,
+                    completed_actions,
+                    Some(action_index),
+                    successor_target,
+                    format!("action response code 为 {response_code}"),
+                );
+            }
+
+            successor_target = response_successor_target(response);
+            if successor_target.is_none() {
+                return self.fail_gui_transaction(
+                    step_index,
+                    step,
+                    completed_actions,
+                    Some(action_index),
+                    successor_target,
+                    "action 成功但没有 successor_target,事务拒绝继续".to_owned(),
+                );
+            }
+            completed_actions += 1;
+        }
+
+        self.checked_transactions.push(FlowTransactionReport {
+            step_index,
+            total_actions: step.actions.len(),
+            completed_actions,
+            stopped_at: None,
+            successor_target,
+            error: None,
+        });
+        Ok(())
+    }
+
+    fn fail_gui_transaction(
+        &mut self,
+        step_index: usize,
+        step: &FlowGuiTransactionStep,
+        completed_actions: usize,
+        stopped_at: Option<usize>,
+        successor_target: Option<serde_json::Value>,
+        error: String,
+    ) -> Result<(), String> {
+        self.checked_transactions.push(FlowTransactionReport {
+            step_index,
+            total_actions: step.actions.len(),
+            completed_actions,
+            stopped_at,
+            successor_target,
+            error: Some(error.clone()),
+        });
+        Err(error)
     }
 
     fn save_artifact(
@@ -953,6 +1490,7 @@ impl FlowRuntimeState {
             captures: self.captures,
             response_lines: self.response_lines,
             artifacts: self.artifacts,
+            checked_transactions: self.checked_transactions,
             trace_record_count,
         };
         FlowRuntimeOutput {
@@ -1048,6 +1586,115 @@ fn require_expect_contains<'a>(index: usize, step: &'a FlowExpectStep) -> Result
 fn parse_response_value(line: &str) -> Option<serde_json::Value> {
     let payload = line.trim_start().strip_prefix("@response ")?;
     serde_json::from_str::<serde_json::Value>(payload).ok()
+}
+
+fn has_successor_marker(line: &str) -> bool {
+    (line.contains("target:\"$successor\"")
+        || line.contains("target:'$successor'")
+        || line.contains("\"target\":\"$successor\""))
+        && (line.contains("observation_id:\"$successor\"")
+            || line.contains("observation_id:'$successor'")
+            || line.contains("\"observation_id\":\"$successor\""))
+        && (line.contains("epoch:$successor")
+            || line.contains("epoch:\"$successor\"")
+            || line.contains("\"epoch\":\"$successor\""))
+}
+
+/// 将 successor target 注入下一条 `@computer-act` 模板。
+///
+/// 只替换约定的三个占位符,保留 action id 和其余 args 原文。epoch 放在 request
+/// 顶层,不放进 target,以匹配现有 computer-act parser 和 type action 的严格字段边界。
+fn materialize_successor_action(
+    line: &str,
+    successor_target: &serde_json::Value,
+) -> Result<String, String> {
+    let target = successor_target
+        .as_object()
+        .ok_or_else(|| "successor_target 不是对象".to_owned())?;
+    let ref_id = target
+        .get("ref")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "successor_target 缺少非空 ref".to_owned())?;
+    let observation_id = target
+        .get("observation_id")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "successor_target 缺少非空 observation_id".to_owned())?;
+    let epoch = target
+        .get("epoch")
+        .and_then(serde_json::Value::as_u64)
+        .ok_or_else(|| "successor_target 缺少非负整数 epoch".to_owned())?;
+
+    let target_object = format!(
+        "{{ref:\"{}\",observation_id:\"{}\"}}",
+        escape_flow_string(ref_id),
+        escape_flow_string(observation_id)
+    );
+    let materialized = replace_successor_token(line, "target", &target_object)?;
+    let materialized = replace_successor_token(
+        &materialized,
+        "observation_id",
+        &format!("\"{}\"", escape_flow_string(observation_id)),
+    )?;
+    replace_successor_token(&materialized, "epoch", &epoch.to_string())
+}
+
+fn replace_successor_token(line: &str, field: &str, replacement: &str) -> Result<String, String> {
+    let candidates = [
+        format!("{field}:$successor"),
+        format!("{field}:\"$successor\""),
+        format!("{field}:'$successor'"),
+        format!("\"{field}\":\"$successor\""),
+    ];
+    let mut matches = candidates
+        .iter()
+        .filter_map(|candidate| line.find(candidate).map(|index| (index, candidate)))
+        .collect::<Vec<_>>();
+    if matches.len() != 1 {
+        return Err(format!("successor 模板的 {field} 占位符必须恰好出现一次"));
+    }
+    let (index, candidate) = matches.remove(0);
+    let mut output = String::with_capacity(line.len() + replacement.len());
+    output.push_str(&line[..index]);
+    output.push_str(field);
+    output.push(':');
+    output.push_str(replacement);
+    output.push_str(&line[index + candidate.len()..]);
+    Ok(output)
+}
+
+fn escape_flow_string(value: &str) -> String {
+    value
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n")
+        .replace('\r', "\\r")
+        .replace('\t', "\\t")
+}
+
+fn response_code(response: &serde_json::Value) -> Option<i32> {
+    if let Some(code) = response.get("code").and_then(serde_json::Value::as_i64) {
+        return i32::try_from(code).ok();
+    }
+    let value = response.get("value").unwrap_or(response);
+    if let Some(ok) = value.get("ok").and_then(serde_json::Value::as_bool) {
+        return Some(if ok { 0 } else { 64 });
+    }
+    value.as_i64().and_then(|code| i32::try_from(code).ok())
+}
+
+fn response_successor_target(response: &serde_json::Value) -> Option<serde_json::Value> {
+    let value = response.get("value").unwrap_or(response);
+    let target = value.get("successor_target")?.as_object()?;
+    let ref_id = target.get("ref")?.as_str()?.to_owned();
+    let observation_id = target.get("observation_id")?.as_str()?.to_owned();
+    let epoch = target.get("epoch")?.as_u64()?;
+    Some(serde_json::json!({
+        "ref": ref_id,
+        "observation_id": observation_id,
+        "epoch": epoch,
+    }))
 }
 
 /// ticket 20: JSON-pointer-like path navigation。 支持 `$.foo.bar` / `$.foo[0].bar`。

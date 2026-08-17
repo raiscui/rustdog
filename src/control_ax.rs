@@ -1,17 +1,21 @@
 use crate::{
     control_observation::{
-        observation_ref_name, record_observation_with_selectors, resolve_observation_ref,
-        ObservationRefEntry, ObservationRoot,
+        observation_ref_name, record_observation_with_selectors_from_capture,
+        resolve_observation_ref, ObservationRefEntry, ObservationRoot,
     },
     control_protocol::{
         normalize_object_field_name, object_inner, parse_compact_fields, parse_quoted_payload,
         resolve_compact_selector, split_object_field, split_object_fields, CompactWindowSelector,
         KeyDelivery, KeyMode, KeyRequest,
     },
+    control_resource_lane::capture_resource_epochs,
     control_window::{resolve_unique_app_window_id, WindowActionReport, WindowActionVerifyReport},
 };
 use serde_json::json;
 use std::io;
+
+#[cfg(test)]
+use crate::control_observation::record_observation_with_selectors;
 
 pub mod tree;
 pub mod types;
@@ -23,6 +27,7 @@ pub use self::tree::{
 pub mod input;
 pub use self::input::{perform_default_key_delivery, perform_default_type_text};
 use self::input::{remap_type_text_ax_value_error, remap_type_text_targeted_keyboard_error};
+pub(crate) use self::tree::ax_window_id_from_backend_id;
 use self::tree::{
     app_selector_for_window, ax_snapshot_status_error, capture_semantic_target_snapshot,
     collect_element_refs, direct_ax_target_id, materialize_app_window_target,
@@ -32,9 +37,7 @@ use self::tree::{
 // 这些 tree helper 仅在测试代码里使用, 单独用 cfg(test) 导入,
 // 避免非测试编译出现 unused import。
 #[cfg(test)]
-use self::tree::{
-    capture_ax_find_snapshot_with, capture_semantic_target_snapshot_with,
-};
+use self::tree::{capture_ax_find_snapshot_with, capture_semantic_target_snapshot_with};
 pub use self::types::*;
 
 impl AxMode {
@@ -228,6 +231,7 @@ impl AxSnapshot {
             permission_status: "granted".to_owned(),
             coordinate_space: "os-logical",
             observation: None,
+            resource_epoch_capture: None,
             window_count: windows.len(),
             element_count,
             truncated,
@@ -255,6 +259,7 @@ impl AxSnapshot {
             permission_status: permission_status.into(),
             coordinate_space: "os-logical",
             observation: None,
+            resource_epoch_capture: None,
             window_count: 0,
             element_count: 0,
             truncated: false,
@@ -298,7 +303,11 @@ impl AxSnapshot {
             );
         }
 
-        self.observation = Some(record_observation_with_selectors(
+        let resource_capture = self
+            .resource_epoch_capture
+            .take()
+            .unwrap_or_else(capture_resource_epochs);
+        self.observation = Some(record_observation_with_selectors_from_capture(
             "ax",
             source_command,
             ObservationRoot {
@@ -308,6 +317,7 @@ impl AxSnapshot {
             },
             refs,
             selector_drafts,
+            &resource_capture,
         )?);
         Ok(self)
     }
@@ -678,7 +688,10 @@ pub trait AxBackend {
 
 impl AxBackend for SystemAxBackend {
     fn snapshot(&self, request: &AxTreeRequest) -> io::Result<AxSnapshot> {
-        platform_snapshot(request)
+        let resource_capture = capture_resource_epochs();
+        let mut snapshot = platform_snapshot(request)?;
+        snapshot.resource_epoch_capture = Some(resource_capture);
+        Ok(snapshot)
     }
 
     fn perform_action(&self, request: &AxActionRequest) -> io::Result<AxPerformedActionReport> {

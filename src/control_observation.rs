@@ -24,6 +24,10 @@ pub use refind::{
 };
 
 use crate::config::ObservationConfig;
+use crate::control_resource_lane::{
+    capture_resource_epochs, resource_key_from_backend_id, ResourceEpochCapture,
+    ResourceEpochSnapshot,
+};
 use durable::{
     DurableObservationIdentity, DurableObservationPrivacy, DurableSelectorHint,
     DurableSelectorLastSeen, JsonlDurableObservationStore,
@@ -90,6 +94,7 @@ pub struct SelectorResolveRequest {
 struct StoredObservation {
     header: ObservationHeader,
     refs: HashMap<String, ObservationRefEntry>,
+    resource_epochs: HashMap<String, ResourceEpochSnapshot>,
 }
 
 #[derive(Debug)]
@@ -124,6 +129,7 @@ impl ObservationStore {
         }
     }
 
+    #[cfg(test)]
     pub fn record(
         &mut self,
         scope: &str,
@@ -132,6 +138,28 @@ impl ObservationStore {
         refs: Vec<ObservationRefEntry>,
         selector_count: usize,
         now_ms: u64,
+    ) -> ObservationHeader {
+        let resource_capture = capture_resource_epochs();
+        self.record_from_capture(
+            scope,
+            source_command,
+            root,
+            refs,
+            selector_count,
+            now_ms,
+            &resource_capture,
+        )
+    }
+
+    fn record_from_capture(
+        &mut self,
+        scope: &str,
+        source_command: &str,
+        root: ObservationRoot,
+        refs: Vec<ObservationRefEntry>,
+        selector_count: usize,
+        now_ms: u64,
+        resource_capture: &ResourceEpochCapture,
     ) -> ObservationHeader {
         self.evict_expired(now_ms);
 
@@ -150,6 +178,14 @@ impl ObservationStore {
             selector_count,
         };
 
+        let resource_epochs = refs
+            .iter()
+            .filter_map(|entry| resource_key_from_backend_id(&entry.backend_id))
+            .map(|resource_key| {
+                let snapshot = resource_capture.snapshot(&resource_key);
+                (resource_key, snapshot)
+            })
+            .collect::<HashMap<_, _>>();
         let refs = refs
             .into_iter()
             .map(|entry| (entry.ref_id.clone(), entry))
@@ -160,6 +196,7 @@ impl ObservationStore {
             StoredObservation {
                 header: header.clone(),
                 refs,
+                resource_epochs,
             },
         );
         self.evict_over_capacity();
@@ -219,6 +256,24 @@ impl ObservationStore {
         Ok((observation.header.clone(), entry))
     }
 
+    /// 解析 ref 对应物理资源在 observation 创建时的 write epoch 快照。
+    pub fn resolve_resource_epoch(
+        &mut self,
+        observation_id: &str,
+        ref_id: &str,
+        now_ms: u64,
+    ) -> io::Result<Option<ResourceEpochSnapshot>> {
+        let (_, entry) = self.resolve_ref_with_header(observation_id, ref_id, now_ms)?;
+        let Some(resource_key) = resource_key_from_backend_id(&entry.backend_id) else {
+            return Ok(None);
+        };
+        Ok(self
+            .observations
+            .get(observation_id)
+            .and_then(|observation| observation.resource_epochs.get(&resource_key))
+            .cloned())
+    }
+
     /// 只解析 observation header (不要求 ref_id)。
     ///
     /// 用于 `feature/observe-epoch-stale-reject`: 客户端把 `epoch` 跟
@@ -227,7 +282,11 @@ impl ObservationStore {
     /// 2. observation 的 `created_at_unix_ms` 等于客户端回传的 epoch
     ///
     /// 任何一条不满足即 fail closed,避免 stale write 落到过期 observation 上。
-    pub fn resolve_header(&mut self, observation_id: &str, now_ms: u64) -> io::Result<ObservationHeader> {
+    pub fn resolve_header(
+        &mut self,
+        observation_id: &str,
+        now_ms: u64,
+    ) -> io::Result<ObservationHeader> {
         self.evict_expired(now_ms);
         let Some(observation) = self.observations.get(observation_id) else {
             return Err(observation_ref_error(
@@ -318,16 +377,37 @@ pub fn record_observation_with_selectors(
     refs: Vec<ObservationRefEntry>,
     selector_drafts: Vec<DurableSelectorDraft>,
 ) -> io::Result<ObservationHeader> {
+    let resource_capture = capture_resource_epochs();
+    record_observation_with_selectors_from_capture(
+        scope,
+        source_command,
+        root,
+        refs,
+        selector_drafts,
+        &resource_capture,
+    )
+}
+
+/// 使用真实采集开始时取得的资源版本记录 observation。
+pub fn record_observation_with_selectors_from_capture(
+    scope: &str,
+    source_command: &str,
+    root: ObservationRoot,
+    refs: Vec<ObservationRefEntry>,
+    selector_drafts: Vec<DurableSelectorDraft>,
+    resource_capture: &ResourceEpochCapture,
+) -> io::Result<ObservationHeader> {
     let refs_for_durable = refs.clone();
     let selector_count = selector_drafts.len();
     with_global_store(|store| {
-        Ok(store.record(
+        Ok(store.record_from_capture(
             scope,
             source_command,
             root,
             refs,
             selector_count,
             current_unix_ms(),
+            resource_capture,
         ))
     })
     .and_then(|header| {
@@ -353,6 +433,15 @@ pub fn resolve_observation_ref_with_header(
 ) -> io::Result<(ObservationHeader, ObservationRefEntry)> {
     with_global_store(|store| {
         store.resolve_ref_with_header(observation_id, ref_id, current_unix_ms())
+    })
+}
+
+pub fn resolve_observation_resource_epoch(
+    observation_id: &str,
+    ref_id: &str,
+) -> io::Result<Option<ResourceEpochSnapshot>> {
+    with_global_store(|store| {
+        store.resolve_resource_epoch(observation_id, ref_id, current_unix_ms())
     })
 }
 

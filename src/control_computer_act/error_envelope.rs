@@ -73,6 +73,7 @@ pub(crate) enum ComputerActErrorCode {
     PermissionDenied,
     ObservationExpired,
     StaleObservationEpoch,
+    StaleResourceEpoch,
     TargetNotFound,
     VerifyFailed,
     InvalidArgs,
@@ -90,6 +91,7 @@ impl ComputerActErrorCode {
             Self::PermissionDenied => "permission_denied",
             Self::ObservationExpired => "observation_expired",
             Self::StaleObservationEpoch => "stale_observation_epoch",
+            Self::StaleResourceEpoch => "stale_resource_epoch",
             Self::TargetNotFound => "target_not_found",
             Self::VerifyFailed => "verify_failed",
             Self::InvalidArgs => "invalid_args",
@@ -108,6 +110,7 @@ impl ComputerActErrorCode {
             Self::PermissionDenied => RetryStrategy::Never,
             Self::ObservationExpired => RetryStrategy::ReObserveThenRetry,
             Self::StaleObservationEpoch => RetryStrategy::ReObserveThenRetry,
+            Self::StaleResourceEpoch => RetryStrategy::ReObserveThenRetry,
             Self::TargetNotFound => RetryStrategy::ChangeLocator,
             Self::VerifyFailed => RetryStrategy::ManualOnly,
             Self::InvalidArgs => RetryStrategy::Never,
@@ -129,6 +132,9 @@ impl ComputerActErrorCode {
             Self::ObservationExpired => "重新调 @observe 拿新 observation_id, 然后重试同一动作",
             Self::StaleObservationEpoch => {
                 "重新调 @observe 拿新 epoch, 然后重试同一动作; 旧的 epoch 已不再匹配当前观察"
+            }
+            Self::StaleResourceEpoch => {
+                "同一应用已被其他 mutation 修改;重新调 @observe 获取该 PID 的最新状态后重试"
             }
             Self::TargetNotFound => {
                 "改用更宽的 selector 或换坐标定位 (e.g., 从 start_box 改 target.ref)"

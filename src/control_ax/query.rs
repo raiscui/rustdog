@@ -87,6 +87,10 @@ pub struct AxFindQuery {
 
 impl AxFindQuery {
     fn validate(&self) -> io::Result<()> {
+        self.validate_with_context("@ax-find")
+    }
+
+    pub(crate) fn validate_with_context(&self, context: &str) -> io::Result<()> {
         if self.process.is_none()
             && self.process_contains.is_none()
             && self.window_title.is_none()
@@ -101,7 +105,7 @@ impl AxFindQuery {
             && self.value_contains.is_none()
             && self.action.is_none()
         {
-            return Err(invalid_data("@ax-find 至少需要一个查询字段"));
+            return Err(invalid_data(format!("{context} 至少需要一个查询字段")));
         }
 
         Ok(())
@@ -910,7 +914,7 @@ fn collect_element_matches(
     }
 }
 
-fn matches_query(window: &AxWindow, element: &AxElement, query: &AxFindQuery) -> bool {
+pub(crate) fn matches_query(window: &AxWindow, element: &AxElement, query: &AxFindQuery) -> bool {
     matches_exact(&query.process, Some(window.process_name.as_str()))
         && matches_contains(&query.process_contains, Some(window.process_name.as_str()))
         && matches_exact(&query.window_title, window.title.as_deref())

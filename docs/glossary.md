@@ -99,3 +99,14 @@ delivered with the matching seq number. See ADR-0005.
 Per-flow opt-in flag (default false) that allows `@computer-act` to be
 embedded as a `ControlLine` step inside a `@flow` body. Mirrors the
 existing deny-by-default style of `@flow` policy flags.
+
+**`@flow` `GuiTransaction`**:
+A checked, sequential `@computer-act` chain for one successor observation
+lineage. The first action provides `{ref,observation_id,epoch}`; later actions
+use `$successor`. It stops at the first failed response or missing successor and
+is limited to 20 actions.
+
+**`@flow` `policy.execution.strict_background`**:
+Per-flow execution mode that denies foreground activation and physical keyboard
+or pointer delivery before dispatch. It keeps semantic AX action and AX-value
+text mutation available. It is not a daemon-wide `headless` flag.

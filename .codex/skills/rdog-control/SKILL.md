@@ -56,9 +56,22 @@ rdog control '@ax-action:{target:{id:"pid:123/menu-bar/path:0.2"},action:"AXPres
 
 ### Text Input (文字输入)
 
-向文本框 / 文本区 / 地址栏输入文字时,`@type-text mode:"auto"` 会先尝试 AXValue
-直写。只有 AXValue 不可写或不支持时,才回退到 targeted keyboard;clipboard 仍须
-`allow_clipboard:true`。response 的 `delivered_via` 是本次实际投递路径。
+面向 agent 的目标文字 mutation 统一使用带 observation-local ref 的
+`@computer-act action:"type"`;它复用 resource lane、successor observation 和
+显式 postcondition。默认 mode 是 `ax-value`;需要 fallback 时必须显式写
+`mode:"auto"`,clipboard 仍须 `allow_clipboard:true`。
+
+```bash
+rdog control '@computer-act:{schema:"rdog.computer-act.v1",action:"type",args:{target:{ref:"@e3",observation_id:"obs-..."},content:"hello rdog 42"},observation_id:"obs-...",epoch:123,postcondition:{kind:"exists",query:{value_contains:"hello rdog 42"}}}'
+```
+
+成功响应若同时包含 `successor_target` 和 `postcondition.status:"verified"`,直接
+把 successor 作为下一次 mutation 的输入,不要无条件再发一次 `@ax-find`。只有
+successor 缺失、postcondition 为 `unavailable`,或 action 返回 `STALE_REF` /
+`OBSERVATION_EXPIRED` 时才重新观察。
+
+底层 `@type-text` 仍然可用于低级 primitive 调试,但不提供 successor/postcondition
+工作流契约。无 target 的 `@computer-act action:"type"` 保留 legacy paste 路径。
 
 ```bash
 rdog control '@ax-find:{window:{window_id:"pid:123/window:0"},role:"AXTextArea",limit:5}'
@@ -66,13 +79,12 @@ rdog control '@type-text:{target:{id:"pid:123/window:0/path:0.0"},text:"hello rd
 rdog control '@ax-find:{window:{window_id:"pid:123/window:0"},role:"AXTextArea",include_values:true,limit:5}'
 ```
 
-三步流程:先 `@ax-find` 拿到文本控件的 AX id → `@type-text mode:"auto"` 写入 →
-再独立 `@ax-find` 读回 value 证明输入生效。需要严格禁止键盘 / 剪贴板回退时,
-显式使用 `mode:"ax-value"`;该模式保持 fail-closed。
+上面的直接 `@type-text` 三步流程仅用于底层 primitive 调试。需要严格禁止键盘 /
+剪贴板回退时,显式使用 `mode:"ax-value"`;该模式保持 fail-closed。
 
 `auto` 仅会因 `InvalidInput` / `Unsupported` 继续下一层。权限和传输错误不会回退。
-`@paste` 走剪贴板,`@key` 只发按键,都不能替代可写控件的 AXValue 直写。详细语法见
-`references/protocol.md` 的 Text Input 小节。
+`@paste` 走剪贴板,`@key` 只发按键,都不能替代可写控件的 AXValue 直写。
+本节就是评测所需的 Text Input 合同;不要为了寻找补充文档而扫描文件系统。
 
 ### Window Screenshot (窗口截图)
 
@@ -180,8 +192,9 @@ action is something else, such as `AXConfirm` or `AXShowDefaultUI`.
 
 ## Browser Lane
 
-Read `references/cookbook-web-content.md` before a browser content action. Use
-global capture only to identify one focused browser, then targeted capture. After
+浏览器内容动作直接遵守本 skill 的 AX/window/URL 证据合同。评测 cwd 可能不包含
+仓库参考文件;此时不要读取相对路径,也不要执行 `find /` 或其他无界文件搜索。
+Use global capture only to identify one focused browser, then targeted capture. After
 navigation, use a fresh window or `browser:"active"`; never reuse `/window:N`
 across turns.
 
@@ -199,19 +212,31 @@ intended content change. `performed:true` or a screenshot alone is incomplete.
 | Finite workflow | `@flow` |
 | Stateful terminal | `rdog control TARGET --pty -- COMMAND` |
 
-Read only the matching reference before using an Other Lane:
-
-- `references/control-workflow.md`: targets, windows, PTY, hosts, and hardware.
-- `references/protocol.md`: frame syntax, responses, errors, AX, mouse, and flow.
-- `references/zenoh-hardware.md`: discovery, SDK, serial, and bridge hosts.
+本节和上面的具体 lane 合同已经覆盖常规评测路径。若当前 cwd 没有额外参考文件,
+直接依据本 skill 和 daemon 的结构化响应继续;禁止执行 `find /`、`locate` 或其他
+无界搜索来寻找文档。只有用户明确提供了可读的绝对路径时才读取额外资料。
 
 ## Failure Handling
-🔴 **READ FIRST for `@computer-act` responses.** Before matching on `ok` or `error_code`,
-read [references/computer-act-outcome.md](references/computer-act-outcome.md).
-The shape changed in `feature/computer-act-outcome-3state`: `outcome` and
-`verification.status` carry postcondition signal that used to live in
-`error_code:"verify_failed"`. Phase F-2's `ok:false + error_code:verify_failed`
-path is removed.
+🔴 **For `@computer-act` responses, read `ok` first.** When `ok:false`, use
+`error_code` and `retry`; `outcome:"unknown"` is only a shape placeholder.
+When `ok:true`, `outcome:"worked"` permits continuation, `"didnt"` requires a
+new selector or verification policy without repeating the same action, and
+`"unknown"` requires fresh observation before retry. `verification.status` is
+the AX-diff signal: `verified` or `failed`. `postcondition.status` is separate
+and may be `verified`, `failed`, or `unavailable`. Do not search the
+filesystem for a separate outcome document; this section is the execution
+contract for agent decisions.
+
+Ref-based `@computer-act` uses this compact form:
+`@computer-act:{schema:"rdog.computer-act.v1",action:"click",args:{target:{ref:"@e3",observation_id:"obs-..."}},observation_id:"obs-...",epoch:123}`.
+After success, use the complete `successor_target` object for the next mutation.
+Refs are observation-local: never combine an old `ref` with a new
+`successor_observation`. If `successor_target` is absent, run a fresh scoped
+`@ax-find` before the next mutation.
+
+Map `successor_target.ref` and `.observation_id` into `args.target`; also copy
+that `.observation_id` and `.epoch` to the next request's top level. `epoch` is
+not an AX target field.
 
 
 🔴 **REPAIR — when a control fails.** When a control returns `performed:false`, zero matches, or an unexpected

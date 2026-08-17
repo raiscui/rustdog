@@ -27,6 +27,9 @@ use std::io;
 use std::path::PathBuf;
 
 pub(crate) mod diff;
+// fixture prototype 先不进入生产 response seam; 非测试构建暂时抑制其未接入 warning。
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) mod changes_first;
 mod normalize;
 mod output;
 mod types;

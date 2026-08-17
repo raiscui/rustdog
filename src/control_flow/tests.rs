@@ -203,3 +203,231 @@ fn flow_expect_step_response_path_contains_kind_deserializes() {
     assert_eq!(step.path.as_deref(), Some("$.error.error_code"));
     assert_eq!(step.contains.as_deref(), Some("invalid"));
 }
+
+fn gui_transaction_request(actions: &[&str]) -> FlowRequest {
+    let payload = serde_json::json!({
+        "schema": "rdog.flow.v1",
+        "policy": {"allow_computer_act": true},
+        "steps": [{"GuiTransaction": {"actions": actions}}],
+    });
+    parse_flow_payload(&payload.to_string()).expect("GUI transaction payload should parse")
+}
+
+fn transaction_response(id: u64, ok: bool, successor: Option<(&str, &str, u64)>) -> String {
+    let successor = successor.map(|(ref_id, observation_id, epoch)| {
+        serde_json::json!({
+            "ref": ref_id,
+            "observation_id": observation_id,
+            "epoch": epoch,
+        })
+    });
+    format!(
+        "@response {}",
+        serde_json::json!({
+            "id": id,
+            "value": {
+                "ok": ok,
+                "successor_target": successor,
+            }
+        })
+    )
+}
+
+#[test]
+fn checked_gui_transaction_consumes_successor_chain() {
+    let actions = [
+        r#"@computer-act#1:{schema:"rdog.computer-act.v1",action:"click",args:{target:{ref:"@e1",observation_id:"obs-1"}},observation_id:"obs-1",epoch:7}"#,
+        r#"@computer-act#2:{schema:"rdog.computer-act.v1",action:"click",args:{target:"$successor"},observation_id:"$successor",epoch:$successor}"#,
+    ];
+    let request = gui_transaction_request(&actions);
+    let mut seen = Vec::new();
+    let responses = [
+        transaction_response(1, true, Some(("@e2", "obs-2", 9))),
+        transaction_response(2, true, Some(("@e3", "obs-3", 11))),
+    ];
+    let mut response_index = 0;
+    let output = execute_flow_runtime(
+        None,
+        &request,
+        "sh",
+        Some(&mut |line| {
+            seen.push(line.to_owned());
+            let response = responses[response_index].clone();
+            response_index += 1;
+            ControlExecutionOutcome::from_response_line(response)
+        }),
+    );
+
+    assert!(
+        output.report.is_success(),
+        "transaction should pass: {:?}",
+        output.report
+    );
+    assert_eq!(output.report.checked_transactions[0].completed_actions, 2);
+    assert_eq!(seen.len(), 2);
+    assert!(seen[1].contains("target:{ref:\"@e2\",observation_id:\"obs-2\"}"));
+    assert!(seen[1].contains("observation_id:\"obs-2\""));
+    assert!(seen[1].contains("epoch:9"));
+    assert!(!seen[1].contains("$successor"));
+}
+
+#[test]
+fn checked_gui_transaction_stops_on_nonzero_response() {
+    let actions = [
+        r#"@computer-act#1:{schema:"rdog.computer-act.v1",action:"click",args:{target:{ref:"@e1",observation_id:"obs-1"}},observation_id:"obs-1",epoch:7}"#,
+        r#"@computer-act#2:{schema:"rdog.computer-act.v1",action:"click",args:{target:"$successor"},observation_id:"$successor",epoch:$successor}"#,
+    ];
+    let request = gui_transaction_request(&actions);
+    let mut calls = 0;
+    let output = execute_flow_runtime(
+        None,
+        &request,
+        "sh",
+        Some(&mut |_line| {
+            calls += 1;
+            if calls == 1 {
+                ControlExecutionOutcome::from_response_line(transaction_response(
+                    1,
+                    true,
+                    Some(("@e2", "obs-2", 9)),
+                ))
+            } else {
+                ControlExecutionOutcome::from_response_line(transaction_response(2, false, None))
+            }
+        }),
+    );
+
+    let failure = output.report.failed_step.expect("transaction should fail");
+    assert_eq!(failure.index, 0);
+    assert_eq!(output.report.checked_transactions[0].completed_actions, 1);
+    assert_eq!(output.report.checked_transactions[0].stopped_at, Some(1));
+    assert_eq!(calls, 2);
+}
+
+#[test]
+fn checked_gui_transaction_fails_closed_when_successor_is_missing() {
+    let actions = [
+        r#"@computer-act#1:{schema:"rdog.computer-act.v1",action:"click",args:{target:{ref:"@e1",observation_id:"obs-1"}},observation_id:"obs-1",epoch:7}"#,
+        r#"@computer-act#2:{schema:"rdog.computer-act.v1",action:"click",args:{target:"$successor"},observation_id:"$successor",epoch:$successor}"#,
+    ];
+    let request = gui_transaction_request(&actions);
+    let output = execute_flow_runtime(
+        None,
+        &request,
+        "sh",
+        Some(&mut |_line| {
+            ControlExecutionOutcome::from_response_line(transaction_response(1, true, None))
+        }),
+    );
+
+    let failure = output
+        .report
+        .failed_step
+        .expect("missing successor should fail");
+    assert!(failure.message.contains("successor_target"));
+    assert_eq!(output.report.checked_transactions[0].completed_actions, 0);
+    assert_eq!(output.report.checked_transactions[0].stopped_at, Some(0));
+}
+
+#[test]
+fn checked_gui_transaction_rejects_missing_initial_target_or_epoch() {
+    let missing_target = parse_flow_payload(
+        r#"{"schema":"rdog.flow.v1","policy":{"allow_computer_act":true},"steps":[{"GuiTransaction":{"actions":["@computer-act:{schema:\"rdog.computer-act.v1\",action:\"click\",args:{start_box:[1,2]},epoch:7}"]}}]}"#,
+    )
+    .expect_err("coordinate-only first action must be rejected");
+    assert!(missing_target.to_string().contains("args.target"));
+
+    let missing_epoch = parse_flow_payload(
+        r#"{"schema":"rdog.flow.v1","policy":{"allow_computer_act":true},"steps":[{"GuiTransaction":{"actions":["@computer-act:{schema:\"rdog.computer-act.v1\",action:\"click\",args:{target:{ref:\"@e1\",observation_id:\"obs-1\"}},observation_id:\"obs-1\"}"]}}]}"#,
+    )
+    .expect_err("first action without epoch must be rejected");
+    assert!(missing_epoch.to_string().contains("epoch"));
+
+    let mismatched_observation = parse_flow_payload(
+        r#"{"schema":"rdog.flow.v1","policy":{"allow_computer_act":true},"steps":[{"GuiTransaction":{"actions":["@computer-act:{schema:\"rdog.computer-act.v1\",action:\"click\",args:{target:{ref:\"@e1\",observation_id:\"obs-1\"}},observation_id:\"obs-other\",epoch:7}"]}}]}"#,
+    )
+    .expect_err("mismatched request-level observation_id must be rejected");
+    assert!(mismatched_observation.to_string().contains("必须与"));
+}
+
+#[test]
+fn checked_gui_transaction_rejects_non_computer_act_successor_action() {
+    for successor in [
+        r#"@cmd:echo target:"$successor" observation_id:"$successor" epoch:$successor"#,
+        r#"@script:echo target:"$successor" observation_id:"$successor" epoch:$successor"#,
+        r#"echo target:"$successor" observation_id:"$successor" epoch:$successor"#,
+        r#"@wait:{duration_ms:1,target:"$successor",observation_id:"$successor",epoch:$successor}"#,
+    ] {
+        let first = r#"@computer-act:{schema:"rdog.computer-act.v1",action:"click",args:{target:{ref:"@e1",observation_id:"obs-1"}},observation_id:"obs-1",epoch:7}"#;
+        let payload = serde_json::json!({
+            "schema": "rdog.flow.v1",
+            "policy": {"allow_computer_act": true},
+            "steps": [{"GuiTransaction": {"actions": [first, successor]}}],
+        });
+        let error = parse_flow_payload(&payload.to_string())
+            .expect_err("transaction must reject every non-computer-act successor action");
+        assert!(error.to_string().contains("GuiTransaction.actions[1]"));
+    }
+}
+
+#[test]
+fn checked_gui_transaction_rejects_whitespace_successor_template() {
+    let error = parse_flow_payload(
+        r#"{"schema":"rdog.flow.v1","policy":{"allow_computer_act":true},"steps":[{"GuiTransaction":{"actions":["@computer-act:{schema:\"rdog.computer-act.v1\",action:\"click\",args:{target:{ref:\"@e1\",observation_id:\"obs-1\"}},observation_id:\"obs-1\",epoch:7}","@computer-act:{schema:\"rdog.computer-act.v1\",action:\"click\",args:{target : \"$successor\"},observation_id : \"$successor\",epoch : $successor}"]}}]}"#,
+    )
+    .expect_err("unsupported whitespace template must fail during parsing");
+    assert!(error.to_string().contains("successor"));
+}
+
+#[test]
+fn checked_gui_transaction_enforces_action_limit() {
+    let first = r#"@computer-act:{schema:"rdog.computer-act.v1",action:"click",args:{target:{ref:"@e1",observation_id:"obs-1"}},observation_id:"obs-1",epoch:7}"#;
+    let successor = r#"@computer-act:{schema:"rdog.computer-act.v1",action:"click",args:{target:"$successor"},observation_id:"$successor",epoch:$successor}"#;
+    let actions = std::iter::once(first)
+        .chain(std::iter::repeat_n(successor, MAX_GUI_TRANSACTION_ACTIONS))
+        .collect::<Vec<_>>();
+    let payload = serde_json::json!({
+        "schema": "rdog.flow.v1",
+        "policy": {"allow_computer_act": true},
+        "steps": [{"GuiTransaction": {"actions": actions}}],
+    });
+    let error = parse_flow_payload(&payload.to_string())
+        .expect_err("transaction over limit must be rejected");
+    assert!(error.to_string().contains("超过上限"));
+}
+
+#[test]
+fn strict_background_rejects_raw_keyboard_before_execution() {
+    let error = parse_flow_payload(
+        r#"{"schema":"rdog.flow.v1","policy":{"allow_computer_act":true,"execution":{"strict_background":true}},"steps":[{"ControlLine":"@key:\"A\""}]}"#,
+    )
+    .expect_err("strict background must reject raw keyboard");
+    assert!(error.to_string().contains("physical_input_prohibited"));
+}
+
+#[test]
+fn strict_background_rejects_foreground_activation_before_execution() {
+    let error = parse_flow_payload(
+        r#"{"schema":"rdog.flow.v1","policy":{"execution":{"strict_background":true}},"steps":[{"ControlLine":"@window-activate:{window_id:\"pid:1/window:0\"}"}]}"#,
+    )
+    .expect_err("strict background must reject window activation");
+    assert!(error.to_string().contains("foreground_prohibited"));
+}
+
+#[test]
+fn strict_background_allows_semantic_ax_value_type() {
+    let request = parse_flow_payload(
+        r#"{"schema":"rdog.flow.v1","policy":{"allow_computer_act":true,"execution":{"strict_background":true}},"steps":[{"ControlLine":"@computer-act:{schema:\"rdog.computer-act.v1\",action:\"type\",args:{target:{ref:\"@e1\",observation_id:\"obs-1\"},content:\"hello\",mode:\"ax-value\"},epoch:7}"}]}"#,
+    )
+    .expect("strict background should allow semantic AX value type");
+    assert!(request.policy.execution.strict_background);
+}
+
+#[test]
+fn strict_background_rejects_physical_successor_before_execution() {
+    let error = parse_flow_payload(
+        r#"{"schema":"rdog.flow.v1","policy":{"allow_computer_act":true,"execution":{"strict_background":true}},"steps":[{"GuiTransaction":{"actions":["@computer-act:{schema:\"rdog.computer-act.v1\",action:\"type\",args:{target:{ref:\"@e1\",observation_id:\"obs-1\"},content:\"hello\",mode:\"ax-value\"},observation_id:\"obs-1\",epoch:7}","@computer-act:{schema:\"rdog.computer-act.v1\",action:\"click\",args:{target:\"$successor\"},observation_id:\"$successor\",epoch:$successor}"]}}]}"#,
+    )
+    .expect_err("strict background must reject physical successor actions during parsing");
+    assert!(error.to_string().contains("physical_input_prohibited"));
+}

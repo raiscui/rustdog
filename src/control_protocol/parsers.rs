@@ -187,7 +187,11 @@ impl ParsedCompactFields {
     }
 
     /// 按位置顺序取一个无前缀字段值。
-    pub(crate) fn take_positional(&mut self, _kind: &str, _what: &str) -> io::Result<Option<String>> {
+    pub(crate) fn take_positional(
+        &mut self,
+        _kind: &str,
+        _what: &str,
+    ) -> io::Result<Option<String>> {
         if self.positional.is_empty() {
             return Ok(None);
         }

@@ -1,6 +1,6 @@
 # Spec: `@computer-act` for computer-use VLMs
 
-> Companion to ADRs `0001`–`0006`. This document is the **what**; the ADRs
+> Companion to ADRs `0001`–`0008`. This document is the **what**; the ADRs
 > are the **why**. Read this for build scope; read the ADRs for design
 > rationale.
 
@@ -48,7 +48,7 @@ itself never sees model syntax.
 
 ## Implementation Decisions
 
-(All decisions are recorded in detail in ADRs `0001`–`0006`. Summary below.)
+(All decisions are recorded in detail in ADRs `0001`–`0008`. Summary below.)
 
 **Surface** (ADR-0002): one new command `@computer-act`. Three other
 control-flow signals (`finish`, `stop`, `call_user`) stay in the client
@@ -82,9 +82,49 @@ dispatch; mismatched epoch returns `stale_observation_epoch` envelope with
 keeps the existing TTL-only path unchanged, so this is a pure backward-
 compatible addition.
 
+This wire `epoch` identifies the observation only. It is not the resource
+write version. The daemon separately stores a per-PID resource epoch snapshot
+for every PID-backed ref in an observation. A ref-based mutation enters the
+PID lane, compares that snapshot, and increments the resource epoch both
+before and after dispatch. Observations captured before or during a mutation
+therefore become stale after it finishes, including failed or uncertain
+dispatches. Rejection returns `stale_resource_epoch` with
+`retry.strategy = "re_observe_then_retry"`.
+
+The resource epoch and lane are daemon-internal; no second client-owned state
+identifier is added. Coordinate-only actions and refs without a reliable PID
+remain outside the per-PID lane rather than guessing resource ownership.
+Different PID lanes may execute concurrently; one PID is serialized.
+
 **Verify** (ADR-0004): three tiers — `none` (no observation overhead),
 `best_effort` (AX-tree diff only), `always` (full observation +
 screenshot + AX tree + window state). Tier is selected per request.
+
+`postcondition` is separate from `verify`. Version 1 accepts
+`{kind:"exists"|"not_exists",query:{...}}`; query fields reuse the existing
+AX locator vocabulary (`process`, window title, role, subrole, name,
+description, value, action, and their supported contains forms). Empty queries,
+unknown fields, and unknown kinds are rejected at parse time.
+
+For a PID-backed ref mutation, dispatch completion is followed by one AX
+successor capture after the resource lane reaches its stable epoch. That same
+snapshot is stored as an observation, evaluated against `postcondition`, and
+used as the post side of AX diff. `verify:"always"` may additionally capture
+screenshot/window evidence, but does not capture AX a second time. The response
+returns `successor_observation` when capture succeeds. If capture is unavailable,
+dispatch success remains `ok:true`, while the postcondition status and outcome
+are `unavailable` and `unknown`.
+
+`successor_observation` 只描述新 observation 的 header。`@eN` 是
+observation-local ref,不能把旧 ref 直接绑定到新 header。对于 ref-based mutation,
+若原 backend 仍存在于 successor snapshot,response 额外返回
+`successor_target:{ref,observation_id,epoch}`。下一次 mutation 必须把其中的
+`ref`、`observation_id` 放入 `args.target`,并把同一个 `observation_id`、`epoch`
+放入请求顶层。字段缺失时 fresh `@ax-find`,禁止拼接旧 ref 和新 observation。
+
+ref-based mutation 的 pre/successor AX snapshot 限定在该 backend 所属窗口。这样
+pre/post 保持同一 scope,也不会因为无关应用先耗尽全局 `max_elements` 而丢失目标。
+无法从 backend 确定窗口时保留全局 capture。
 
 **Errors** (ADR-0004): `E2` envelope — `error_code` + `error_message`
 + `retry.strategy` + `retry.hint` + `evidence`. Strategies are
@@ -102,9 +142,10 @@ error_code:verify_failed` 改写路径, 让 dispatch 成功 vs postcondition 满
 (即使 `ok: false` 也保留 `outcome: "unknown"` 占位, 让 client 明确 dispatch 失败时
 不需要看 outcome).
 
-`verification` 段同时增加 `status: "verified" | "preexisting" | "failed"` 字段
-(best_effort + always 都用 ax_diff 决策: modified > 0 → verified; modified == 0
-但 added/removed > 0 → preexisting; 全 0 → failed).
+`verification` 段的 AX diff 使用 `status: "verified" | "failed"`: 任意结构或字段
+变化为 verified,完全无变化为 failed。AX diff 不能证明业务结果在动作前已存在,
+因此不再伪造 `preexisting`。结构化 postcondition 使用
+`verified | failed | unavailable`,并优先决定 outcome。
 
 `ComputerActErrorCode::VerifyFailed` enum variant 保留供 retry_strategy reference,
 但不再用作顶层 error_code (改由 `outcome: "didnt"` + `verification.status: "failed"` 表达).
@@ -125,6 +166,39 @@ via `@cancel#seq:{target_seq:N}`.
 `@capabilities`. It **is** allowed inside `@flow` as a `ControlLine`
 step, gated by `policy.allow_computer_act: true` (default false). Flow
 gains two new `Expect.kind` values for structured response assertions.
+
+`@flow.GuiTransaction` is the narrow checked batching form for a dependency
+chain on one PID-backed target. It is not a parallel batch and it does not add a
+second computer-use protocol: the first `@computer-act` uses a real ref target
+and epoch, later actions consume `$successor`, and the flow stops at the first
+error or unavailable successor. The maximum action count is 20.
+
+When `@flow.policy.execution.strict_background:true`, foreground activation,
+raw pointer, raw keyboard, legacy paste, and non-AX-value text delivery are
+rejected before dispatch with `foreground_prohibited` or
+`physical_input_prohibited`. Existing `permission_denied` responses remain the
+authoritative capability blocker; strict background does not hide or downgrade
+them.
+
+**Canonical ref mutation** (ADR-0008): a target-backed `action:"type"` is the
+canonical structured text mutation. It accepts `args.target:{ref,observation_id}`
+and the request-level `epoch`, plus `content`, optional `mode`, and the explicit
+`allow_clipboard` gate. The default mode is `ax-value`; `auto` and clipboard
+fallback must be selected explicitly. Clipboard mode is rejected unless
+`allow_clipboard:true` is present. A type request without `args.target` keeps the
+legacy paste path and does not claim resource-lane, successor, or postcondition
+semantics.
+
+The target-backed type path reuses the same executor as other ref mutations. A
+successful request may return `successor_target` and a structured postcondition
+result in the same response. When both are present and the postcondition is
+`verified`, the caller may consume that response as the next observation and must
+not issue an unconditional extra `@ax-find`; a fresh query is only needed when
+the successor is absent, unavailable, or the action returned stale/expired.
+
+The certified interaction ledger remains v1 and immutable. Benchmark exposure
+and query-budget checks are runner/skill gates, not a second ledger schema and
+not a daemon-wide ban on successful follow-up queries.
 
 **Observability** (ADR-0006): every response carries a `density` block
 (shared field names with `@gui-probe`) and a 4-entry `trace_summary`.

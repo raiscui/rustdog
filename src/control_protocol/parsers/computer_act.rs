@@ -1,7 +1,10 @@
 use std::io;
 
 use super::{object_inner, parse_quoted_payload, split_object_field, split_object_fields};
-use crate::control_protocol::ComputerActRequest;
+use crate::control_ax::AxFindQuery;
+use crate::control_protocol::{
+    ComputerActPostcondition, ComputerActPostconditionKind, ComputerActRequest,
+};
 
 /// 当前唯一支持的 schema 版本;后续 v2/v3 走新 schema id, 不破坏 v1 client。
 pub(crate) const COMPUTER_ACT_SCHEMA_V1: &str = "rdog.computer-act.v1";
@@ -41,6 +44,7 @@ pub(crate) fn parse_computer_act_payload(input: &str) -> io::Result<ComputerActR
     let mut action: Option<String> = None;
     let mut args: Option<String> = None;
     let mut verify: Option<String> = None;
+    let mut postcondition: Option<ComputerActPostcondition> = None;
     let mut observation_id: Option<String> = None;
     let mut timeout_ms: Option<u64> = None;
     let mut trace: Option<String> = None;
@@ -98,6 +102,15 @@ pub(crate) fn parse_computer_act_payload(input: &str) -> io::Result<ComputerActR
                     ));
                 }
                 verify = Some(parse_quoted_payload(raw_value)?);
+            }
+            "postcondition" => {
+                if postcondition.is_some() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "@computer-act payload 的 `postcondition` 字段重复",
+                    ));
+                }
+                postcondition = Some(parse_postcondition(raw_value)?);
             }
             "observation_id" => {
                 if observation_id.is_some() {
@@ -210,11 +223,99 @@ pub(crate) fn parse_computer_act_payload(input: &str) -> io::Result<ComputerActR
         action,
         args: args_value,
         verify,
+        postcondition,
         observation_id,
         timeout_ms,
         trace,
         epoch,
     })
+}
+
+fn parse_postcondition(raw: &str) -> io::Result<ComputerActPostcondition> {
+    let value: serde_json::Value =
+        serde_json::from_str(&rdog_dict_to_json_string(raw)).map_err(|err| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("@computer-act.postcondition 不是合法对象: {err}"),
+            )
+        })?;
+    let object = value.as_object().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "@computer-act.postcondition 必须是对象",
+        )
+    })?;
+    if object.keys().any(|key| key != "kind" && key != "query") {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "@computer-act.postcondition 只支持 kind 和 query 字段",
+        ));
+    }
+    let kind = match object.get("kind").and_then(serde_json::Value::as_str) {
+        Some("exists") => ComputerActPostconditionKind::Exists,
+        Some("not_exists") => ComputerActPostconditionKind::NotExists,
+        Some(other) => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("@computer-act.postcondition.kind 不支持: {other}"),
+            ))
+        }
+        None => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "@computer-act.postcondition 缺少字符串 kind",
+            ))
+        }
+    };
+    let query = parse_postcondition_query(object.get("query"))?;
+    query.validate_with_context("@computer-act.postcondition.query")?;
+    Ok(ComputerActPostcondition { kind, query })
+}
+
+fn parse_postcondition_query(value: Option<&serde_json::Value>) -> io::Result<AxFindQuery> {
+    let object = value
+        .and_then(serde_json::Value::as_object)
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "@computer-act.postcondition.query 必须是对象",
+            )
+        })?;
+    let mut query = AxFindQuery::default();
+    for (field, value) in object {
+        let value = value
+            .as_str()
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("@computer-act.postcondition.query.{field} 必须是非空字符串"),
+                )
+            })?;
+        let slot = match field.as_str() {
+            "process" => &mut query.process,
+            "process_contains" => &mut query.process_contains,
+            "window_title" => &mut query.window_title,
+            "window_title_contains" => &mut query.window_title_contains,
+            "role" => &mut query.role,
+            "subrole" => &mut query.subrole,
+            "name" => &mut query.name,
+            "name_contains" => &mut query.name_contains,
+            "description" => &mut query.description,
+            "description_contains" => &mut query.description_contains,
+            "value" => &mut query.value,
+            "value_contains" => &mut query.value_contains,
+            "action" => &mut query.action,
+            other => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("@computer-act.postcondition.query 包含未知字段: {other}"),
+                ))
+            }
+        };
+        *slot = Some(value.to_owned());
+    }
+    Ok(query)
 }
 
 /// 把 rdog dict 语法 (unquoted keys) 转换成标准 JSON 字符串。

@@ -5,14 +5,228 @@ use crate::{
         MouseSelectorTarget, DEFAULT_MOUSE_CLICK_HOLD_MS, DEFAULT_MOUSE_CLICK_INTERVAL_MS,
     },
     control_observation::{
-        record_observation, ObservationRefEntry, ObservationRoot, SelectorRefindPolicy,
+        record_observation, resolve_observation_resource_epoch, ObservationRefEntry,
+        ObservationRoot, SelectorRefindPolicy,
     },
+    control_protocol::{parse_control_line, ComputerActRequest, ControlParseResult},
+    control_resource_lane::with_resource_write,
 };
 use std::cell::Cell;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
 };
+
+#[test]
+fn ax_get_ref_capture_uses_the_observation_target_window() {
+    let observation = record_observation(
+        "ax",
+        "@ax-find",
+        ObservationRoot {
+            schema: "rdog.ax.v1".to_string(),
+            platform: "test".to_string(),
+            coordinate_space: "os-logical".to_string(),
+        },
+        vec![ObservationRefEntry {
+            ref_id: "@e-target".to_string(),
+            backend_id: "pid:73060/window:0/path:0.0".to_string(),
+            kind: "element".to_string(),
+        }],
+    )
+    .expect("测试 observation 应创建成功");
+    let request = crate::control_ax::AxGetRequest {
+        target: crate::control_ax::AxTarget {
+            ref_id: Some("@e-target".to_string()),
+            observation_id: Some(observation.observation_id),
+            ..crate::control_ax::AxTarget::default()
+        },
+        depth: 1,
+        max_elements: 20,
+        include_values: true,
+    };
+    let global_called = Cell::new(false);
+
+    let snapshot = capture_ax_get_snapshot_with(
+        &request,
+        |_| {
+            global_called.set(true);
+            Ok(crate::control_ax::AxSnapshot::complete(
+                "test",
+                Vec::new(),
+                true,
+            ))
+        },
+        |window_id, _| {
+            assert_eq!(window_id, "pid:73060/window:0");
+            Ok(crate::control_ax::AxSnapshot::complete(
+                "test",
+                Vec::new(),
+                false,
+            ))
+        },
+    )
+    .expect("@ax-get 应使用 observation ref 所属窗口");
+
+    assert!(!global_called.get());
+    assert!(!snapshot.truncated);
+}
+
+#[test]
+fn direct_ax_focus_ref_mutation_makes_old_computer_act_stale() {
+    let observation = record_observation(
+        "ax",
+        "@ax-find",
+        ObservationRoot {
+            schema: "rdog.ax.v1".to_owned(),
+            platform: "test".to_owned(),
+            coordinate_space: "os-logical".to_owned(),
+        },
+        vec![ObservationRefEntry {
+            ref_id: "@e-direct-write".to_owned(),
+            backend_id: "pid:991234/window:0/path:0.0".to_owned(),
+            kind: "element".to_owned(),
+        }],
+    )
+    .expect("测试 observation 应创建成功");
+    let observation_id = observation.observation_id;
+    let snapshot = resolve_observation_resource_epoch(&observation_id, "@e-direct-write")
+        .expect("资源快照应可解析")
+        .expect("PID-backed ref 应有资源快照");
+
+    let command = ControlCommand::AxFocus(crate::control_ax::AxFocusRequest {
+        target: Some(crate::control_ax::AxTarget {
+            ref_id: Some("@e-direct-write".to_owned()),
+            observation_id: Some(observation_id.clone()),
+            ..crate::control_ax::AxTarget::default()
+        }),
+        window_id: None,
+        activate: false,
+    });
+    let _dispatch_result =
+        SystemControlActionExecutor::default().execute(&command, "/bin/sh", None);
+
+    assert!(with_resource_write(&snapshot, || Ok(())).is_err());
+
+    let request = ComputerActRequest {
+        schema: "rdog.computer-act.v1".to_owned(),
+        action: "click".to_owned(),
+        args: serde_json::json!({
+            "target": {
+                "ref": "@e-direct-write",
+                "observation_id": observation_id,
+            }
+        }),
+        verify: None,
+        postcondition: None,
+        observation_id: Some(observation_id),
+        timeout_ms: None,
+        trace: None,
+        epoch: Some(observation.created_at_unix_ms),
+    };
+    let result = crate::control_computer_act::execute_computer_act(&request, None)
+        .expect("旧 computer-act 应返回 stale envelope");
+    let envelope: serde_json::Value = serde_json::from_str(
+        result
+            .response_value_json
+            .as_deref()
+            .expect("stale response 应包含 JSON"),
+    )
+    .expect("stale response JSON 应合法");
+
+    assert_eq!(result.exit_code, 64);
+    assert_eq!(envelope["error_code"], "stale_resource_epoch");
+    assert_eq!(envelope["retry"]["strategy"], "re_observe_then_retry");
+}
+
+#[test]
+fn direct_ref_mutation_executor_routes_cover_ax_window_and_web_commands() {
+    let observation = record_observation(
+        "ax",
+        "@ax-find",
+        ObservationRoot {
+            schema: "rdog.ax.v1".to_owned(),
+            platform: "test".to_owned(),
+            coordinate_space: "os-logical".to_owned(),
+        },
+        vec![
+            ObservationRefEntry {
+                ref_id: "@e-ax".to_owned(),
+                backend_id: "pid:991235/window:0/path:0.0".to_owned(),
+                kind: "element".to_owned(),
+            },
+            ObservationRefEntry {
+                ref_id: "@e-activate".to_owned(),
+                backend_id: "pid:991236/window:0".to_owned(),
+                kind: "window".to_owned(),
+            },
+            ObservationRefEntry {
+                ref_id: "@e-close".to_owned(),
+                backend_id: "pid:991237/window:0".to_owned(),
+                kind: "window".to_owned(),
+            },
+            ObservationRefEntry {
+                ref_id: "@e-resize".to_owned(),
+                backend_id: "pid:991238/window:0".to_owned(),
+                kind: "window".to_owned(),
+            },
+            ObservationRefEntry {
+                ref_id: "@e-web".to_owned(),
+                backend_id: "pid:991239/window:0/path:0.1".to_owned(),
+                kind: "element".to_owned(),
+            },
+            ObservationRefEntry {
+                ref_id: "@e-no-pid".to_owned(),
+                backend_id: "window:local/path:0".to_owned(),
+                kind: "element".to_owned(),
+            },
+        ],
+    )
+    .expect("测试 observation 应创建成功");
+    let observation_id = observation.observation_id;
+    let lines = [
+        format!(
+            r#"@ax-focus:{{target:{{ref:"@e-ax",observation_id:"{observation_id}"}},activate:false}}"#
+        ),
+        format!(
+            r#"@window-activate:{{target:{{ref:"@e-activate",observation_id:"{observation_id}"}},recipe:"to_interact",allow_ambiguous:false,select:"frontmost"}}"#
+        ),
+        format!(
+            r#"@window-close:{{target:{{ref:"@e-close",observation_id:"{observation_id}"}},strategy:"graceful"}}"#
+        ),
+        format!(
+            r#"@window-resize:{{target:{{ref:"@e-resize",observation_id:"{observation_id}"}},size:{{width:1200,height:800,unit:"os-logical",box:"outer"}},origin:"keep",verify:true}}"#
+        ),
+        format!(
+            r#"@web-act:{{target:{{window_ref:"@e-web",observation_id:"{observation_id}"}},match:{{text:"首页"}},action:"press"}}"#
+        ),
+    ];
+
+    for line in lines {
+        let ControlParseResult::Control(request) =
+            parse_control_line(&line).expect("ref mutation command 应解析成功")
+        else {
+            panic!("ref mutation command 应进入 control lane");
+        };
+        let snapshot = resource_epoch_for_command(&request.command)
+            .unwrap_or_else(|| panic!("PID-backed mutation 未进入 resource lane: {line}"));
+        let _dispatch_result =
+            SystemControlActionExecutor::default().execute(&request.command, "/bin/sh", None);
+        assert!(
+            with_resource_write(&snapshot, || Ok(())).is_err(),
+            "真实 executor 分支没有推进 resource epoch: {line}"
+        );
+    }
+
+    let no_pid_line = format!(
+        r#"@ax-focus:{{target:{{ref:"@e-no-pid",observation_id:"{observation_id}"}},activate:false}}"#
+    );
+    let ControlParseResult::Control(no_pid_request) =
+        parse_control_line(&no_pid_line).expect("non-PID ref command 应保持可解析")
+    else {
+        panic!("non-PID ref command 应进入 control lane");
+    };
+    assert!(resource_epoch_for_command(&no_pid_request.command).is_none());
+}
 
 #[derive(Default)]
 struct FakeExecutor {

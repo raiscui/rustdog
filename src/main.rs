@@ -32,6 +32,7 @@ mod control_invocation;
 mod control_mouse;
 mod control_observation;
 mod control_protocol;
+mod control_resource_lane;
 mod control_session;
 mod control_transport;
 mod control_web;

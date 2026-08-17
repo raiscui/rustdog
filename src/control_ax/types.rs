@@ -11,7 +11,10 @@
 
 use serde::Serialize;
 
-use crate::{control_observation::ObservationHeader, control_window::WindowActionReport};
+use crate::{
+    control_observation::ObservationHeader, control_resource_lane::ResourceEpochCapture,
+    control_window::WindowActionReport,
+};
 
 // ---- was lines 22-40 ----
 pub const AX_SCHEMA: &str = "rdog.ax.v1";
@@ -212,6 +215,8 @@ pub struct AxSnapshot {
     pub coordinate_space: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub observation: Option<ObservationHeader>,
+    #[serde(skip)]
+    pub(crate) resource_epoch_capture: Option<ResourceEpochCapture>,
     pub window_count: usize,
     pub element_count: usize,
     pub truncated: bool,

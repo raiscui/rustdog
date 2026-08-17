@@ -21,12 +21,76 @@ fn parse_should_accept_minimal_computer_act_request() {
                 Some(100)
             );
             assert!(req.verify.is_none());
+            assert!(req.postcondition.is_none());
             assert!(req.observation_id.is_none());
             assert!(req.timeout_ms.is_none());
             assert!(req.trace.is_none());
         }
         _ => panic!("expected ComputerAct command"),
     }
+}
+
+#[test]
+fn parse_should_accept_exists_postcondition() {
+    let result = parse_control_line(
+        r#"@computer-act#3:{schema:"rdog.computer-act.v1",action:"click",args:{start_box:[1,2]},postcondition:{kind:"exists",query:{role:"AXStaticText",value:"42"}}}"#,
+    )
+    .expect("exists postcondition should parse");
+    let request = match result {
+        ControlParseResult::Control(request) => request,
+        _ => panic!("expected Control result"),
+    };
+    let ControlCommand::ComputerAct(request) = request.command else {
+        panic!("expected ComputerAct command");
+    };
+    let condition = request.postcondition.expect("postcondition should exist");
+    assert_eq!(condition.kind, ComputerActPostconditionKind::Exists);
+    assert_eq!(condition.query.role.as_deref(), Some("AXStaticText"));
+    assert_eq!(condition.query.value.as_deref(), Some("42"));
+}
+
+#[test]
+fn parse_should_accept_not_exists_postcondition() {
+    let result = parse_control_line(
+        r#"@computer-act#4:{schema:"rdog.computer-act.v1",action:"click",args:{start_box:[1,2]},postcondition:{kind:"not_exists",query:{name_contains:"Loading"}}}"#,
+    )
+    .expect("not_exists postcondition should parse");
+    let request = match result {
+        ControlParseResult::Control(request) => request,
+        _ => panic!("expected Control result"),
+    };
+    let ControlCommand::ComputerAct(request) = request.command else {
+        panic!("expected ComputerAct command");
+    };
+    let condition = request.postcondition.expect("postcondition should exist");
+    assert_eq!(condition.kind, ComputerActPostconditionKind::NotExists);
+    assert_eq!(condition.query.name_contains.as_deref(), Some("Loading"));
+}
+
+#[test]
+fn parse_should_reject_invalid_postconditions() {
+    for payload in [
+        r#"{kind:"changed",query:{role:"AXButton"}}"#,
+        r#"{kind:"exists",query:{}}"#,
+        r#"{kind:"exists",query:{unknown:"x"}}"#,
+    ] {
+        let line = format!(
+            r#"@computer-act#5:{{schema:"rdog.computer-act.v1",action:"click",args:{{start_box:[1,2]}},postcondition:{payload}}}"#
+        );
+        assert!(
+            parse_control_line(&line).is_err(),
+            "should reject {payload}"
+        );
+    }
+}
+
+#[test]
+fn parse_should_reject_duplicate_postcondition() {
+    let err = parse_control_line(
+        r#"@computer-act#6:{schema:"rdog.computer-act.v1",action:"click",args:{start_box:[1,2]},postcondition:{kind:"exists",query:{role:"AXButton"}},postcondition:{kind:"not_exists",query:{role:"AXButton"}}}"#,
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("postcondition"));
 }
 
 #[test]

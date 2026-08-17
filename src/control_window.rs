@@ -6,13 +6,14 @@ use crate::{
         SelectorRedaction, WindowSelector,
     },
     control_observation::{
-        observation_ref_name, record_observation_with_selectors, ObservationHeader,
+        observation_ref_name, record_observation_with_selectors_from_capture, ObservationHeader,
         ObservationRefEntry, ObservationRoot,
     },
     control_protocol::{
         normalize_object_field_name, object_inner, parse_quoted_payload, split_object_field,
         split_object_fields,
     },
+    control_resource_lane::ResourceEpochCapture,
 };
 use serde::Serialize;
 use serde_json::json;
@@ -1249,6 +1250,7 @@ pub(crate) fn attach_window_observation(
     candidates: &mut [WindowCandidate],
     source_command: &str,
     platform: &str,
+    resource_capture: &ResourceEpochCapture,
 ) -> io::Result<ObservationHeader> {
     let mut refs = Vec::with_capacity(candidates.len());
     let mut selector_drafts = Vec::with_capacity(candidates.len());
@@ -1265,7 +1267,7 @@ pub(crate) fn attach_window_observation(
         ));
     }
 
-    record_observation_with_selectors(
+    record_observation_with_selectors_from_capture(
         "window",
         source_command,
         ObservationRoot {
@@ -1275,6 +1277,7 @@ pub(crate) fn attach_window_observation(
         },
         refs,
         selector_drafts,
+        resource_capture,
     )
 }
 
@@ -2180,7 +2183,10 @@ mod tests {
             state: None,
             recipes: None,
         }];
-        let observation = attach_window_observation(&mut matches, "@window-find", "macos").unwrap();
+        let resource_capture = crate::control_resource_lane::capture_resource_epochs();
+        let observation =
+            attach_window_observation(&mut matches, "@window-find", "macos", &resource_capture)
+                .unwrap();
         let response = WindowFindResponse {
             kind: "window-find",
             schema: WINDOW_SCHEMA,

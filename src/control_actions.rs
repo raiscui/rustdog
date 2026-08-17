@@ -1,12 +1,12 @@
 use crate::{
     cancellation::CancellationToken,
     control_ax::{
-        build_ax_find_response_json, build_ax_get_response_json, capture_ax_find_snapshot,
-        capture_default_ax_snapshot, perform_default_ax_action, perform_default_ax_focus,
-        perform_default_ax_press, perform_default_ax_press_sequence,
-        perform_default_ax_press_with_postcondition, perform_default_ax_scroll,
-        perform_default_ax_set_value, perform_default_key_delivery, perform_default_type_text,
-        window_activation_verified, AxFocusReport,
+        ax_window_id_from_backend_id, build_ax_find_response_json, build_ax_get_response_json,
+        capture_ax_find_snapshot, capture_current_ax_window_snapshot, capture_default_ax_snapshot,
+        perform_default_ax_action, perform_default_ax_focus, perform_default_ax_press,
+        perform_default_ax_press_sequence, perform_default_ax_press_with_postcondition,
+        perform_default_ax_scroll, perform_default_ax_set_value, perform_default_key_delivery,
+        perform_default_type_text, window_activation_verified, AxFocusReport,
     },
     // Phase F-1: 三个 error_envelope wrapper helper (Cancelled / PlatformUnsupported /
     // PermissionDenied), 让手写 JSON payload 跟其它 error_code 走同一 envelope 形状。
@@ -21,11 +21,12 @@ use crate::{
         prepare_mouse_move_request, prepare_wheel_request, MouseExecutionPlan,
         PreparedMouseRequest,
     },
-    control_observation::resolve_observation_ref,
+    control_observation::{resolve_observation_ref, resolve_observation_resource_epoch},
     control_protocol::{
         CancelRequest, ControlCommand, KeyMode, KeyRequest, KeyResponseMode, OpenAppRequest,
         PasteRequest, PasteRequestKind, WaitRequest, DEFAULT_KEY_HOLD_MS,
     },
+    control_resource_lane::{with_resource_write, ResourceEpochSnapshot},
     control_web::{build_default_web_act_response_json, build_default_web_find_response_json},
     control_window::{
         execute_default_window_activate, execute_default_window_close, execute_default_window_find,
@@ -126,7 +127,6 @@ impl SystemControlActionExecutor {
         self
     }
 
-
     /// 暴露内部 cancel_registry 引用, 让 dispatcher (zenoh_control / 控制平面)
     /// 跟 executor 共享同一 registry 实例, 避免 ticket 03 跨实例 bug。
     ///
@@ -150,6 +150,96 @@ impl Clone for SystemControlActionExecutor {
     }
 }
 
+/// 直达 primitive 也必须消费 observation 记录的 PID 版本。
+///
+/// 无 ref 或无法解析 PID 的请求没有可靠资源归属,保持既有执行路径。
+fn resource_epoch_for_ref(
+    observation_id: Option<&str>,
+    ref_id: Option<&str>,
+) -> Option<ResourceEpochSnapshot> {
+    resolve_observation_resource_epoch(observation_id?, ref_id?)
+        .ok()
+        .flatten()
+}
+
+fn resource_epoch_for_ax_target(
+    target: &crate::control_ax::AxTarget,
+) -> Option<ResourceEpochSnapshot> {
+    resource_epoch_for_ref(target.observation_id.as_deref(), target.ref_id.as_deref())
+}
+
+fn resource_epoch_for_window_target(
+    target: &crate::control_window::WindowCommandTarget,
+) -> Option<ResourceEpochSnapshot> {
+    resource_epoch_for_ref(target.observation_id.as_deref(), target.ref_id.as_deref())
+}
+
+fn resource_epoch_for_web_target(
+    target: &crate::control_web::WebFindTarget,
+) -> Option<ResourceEpochSnapshot> {
+    resource_epoch_for_ref(
+        target.observation_id.as_deref(),
+        target.window_ref.as_deref(),
+    )
+}
+
+/// 在统一 executor 入口解析所有直达 ref mutation 的 PID resource snapshot。
+///
+/// 这里是直达 primitive 的唯一路由表。新增 ref mutation 时只需在此登记,
+/// 后面的 dispatch 会自动经过同一条 daemon-owned resource lane。
+fn resource_epoch_for_command(command: &ControlCommand) -> Option<ResourceEpochSnapshot> {
+    match command {
+        ControlCommand::AxFocus(request) => request
+            .target
+            .as_ref()
+            .and_then(resource_epoch_for_ax_target),
+        ControlCommand::AxScroll(request) => resource_epoch_for_ax_target(&request.target),
+        ControlCommand::AxAction(request) => resource_epoch_for_ax_target(&request.target),
+        ControlCommand::AxPress(request) => resource_epoch_for_ax_target(&request.target),
+        ControlCommand::AxSetValue(request) => resource_epoch_for_ax_target(&request.target),
+        ControlCommand::TypeText(request) => resource_epoch_for_ax_target(&request.target),
+        ControlCommand::WindowActivate(request) => {
+            resource_epoch_for_window_target(&request.target)
+        }
+        ControlCommand::WindowClose(request) => resource_epoch_for_window_target(&request.target),
+        ControlCommand::WindowResize(request) => resource_epoch_for_window_target(&request.target),
+        ControlCommand::WebAct(request) => resource_epoch_for_web_target(&request.find.target),
+        _ => None,
+    }
+}
+
+fn execute_ref_mutation(
+    snapshot: Option<ResourceEpochSnapshot>,
+    dispatch: impl FnOnce() -> io::Result<ActionExecutionResult>,
+) -> io::Result<ActionExecutionResult> {
+    let Some(snapshot) = snapshot else {
+        return dispatch();
+    };
+    match with_resource_write(&snapshot, dispatch) {
+        Ok(result) => result,
+        Err(stale) => Ok(ActionExecutionResult {
+            exit_code: 64,
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+            response_value_json: Some(
+                serde_json::json!({
+                    "ok": false,
+                    "error_code": "stale_resource_epoch",
+                    "error_message": format!(
+                        "资源 {} 的 write epoch 已从 {} 变化为 {},拒绝陈旧 mutation",
+                        stale.resource_key, stale.expected_epoch, stale.current_epoch
+                    ),
+                    "retry": {
+                        "strategy": "re_observe_then_retry",
+                        "hint": "重新调 @observe 获取该 PID 的最新状态后重试"
+                    }
+                })
+                .to_string(),
+            ),
+        }),
+    }
+}
+
 impl ControlActionExecutor for SystemControlActionExecutor {
     fn execute(
         &self,
@@ -157,7 +247,8 @@ impl ControlActionExecutor for SystemControlActionExecutor {
         shell: &str,
         cancel: Option<&CancellationToken>,
     ) -> io::Result<ActionExecutionResult> {
-        match command {
+        execute_ref_mutation(resource_epoch_for_command(command), || {
+            match command {
             ControlCommand::Key(request) => {
                 execute_key(
                     request,
@@ -258,6 +349,7 @@ impl ControlActionExecutor for SystemControlActionExecutor {
                 "@computer-act Composite 由 dispatch_underlying 处理,不应进入默认 executor 分支",
             )),
         }
+        })
     }
 }
 
@@ -983,13 +1075,34 @@ fn execute_ax_find(
 }
 
 fn execute_ax_get(request: &crate::control_ax::AxGetRequest) -> io::Result<ActionExecutionResult> {
-    let snapshot = capture_default_ax_snapshot(&request.tree_request())?;
+    let snapshot = capture_ax_get_snapshot_with(
+        request,
+        capture_default_ax_snapshot,
+        capture_current_ax_window_snapshot,
+    )?;
     Ok(ActionExecutionResult {
         exit_code: 0,
         stdout: Vec::new(),
         stderr: Vec::new(),
         response_value_json: Some(build_ax_get_response_json(&snapshot, request)?),
     })
+}
+
+fn capture_ax_get_snapshot_with(
+    request: &crate::control_ax::AxGetRequest,
+    capture_global: impl FnOnce(
+        &crate::control_ax::AxTreeRequest,
+    ) -> io::Result<crate::control_ax::AxSnapshot>,
+    capture_window: impl FnOnce(
+        &str,
+        &crate::control_ax::AxTreeRequest,
+    ) -> io::Result<crate::control_ax::AxSnapshot>,
+) -> io::Result<crate::control_ax::AxSnapshot> {
+    let tree_request = request.tree_request();
+    match target_window_id_from_ax_target(Some(&request.target))? {
+        Some(window_id) => capture_window(&window_id, &tree_request),
+        None => capture_global(&tree_request),
+    }
 }
 
 fn execute_ax_press(
@@ -1117,14 +1230,14 @@ fn target_window_id_from_ax_target(
     };
 
     if let Some(id) = target.id.as_deref() {
-        return Ok(id.split("/path:").next().map(str::to_owned));
+        return Ok(ax_window_id_from_backend_id(id).map(str::to_owned));
     }
 
     if let (Some(observation_id), Some(ref_id)) =
         (target.observation_id.as_deref(), target.ref_id.as_deref())
     {
         let entry = resolve_observation_ref(observation_id, ref_id)?;
-        return Ok(entry.backend_id.split("/path:").next().map(str::to_owned));
+        return Ok(ax_window_id_from_backend_id(&entry.backend_id).map(str::to_owned));
     }
 
     Ok(None)

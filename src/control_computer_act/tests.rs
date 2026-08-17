@@ -7,6 +7,7 @@
 use serde_json::json;
 
 use super::{route_computer_act_action, RoutedCommand};
+use crate::control_ax::TypeTextMode;
 use crate::control_mouse::{
     DragRequest, MouseButtonName, MouseCoordinateSpace, MouseEndpoint, MouseMoveRequest,
     MousePoint, MouseRefTarget, WheelRequest,
@@ -180,6 +181,82 @@ fn type_routes_to_paste_when_no_target() {
     }
 }
 
+#[test]
+fn type_with_ref_target_routes_to_ax_value_type_text() {
+    let r = route(
+        "type",
+        json!({
+            "target": {"ref": "@e3", "observation_id": "obs-1"},
+            "content": "hello world"
+        }),
+    );
+    assert_eq!(r.dispatched_to, "@type-text");
+    match r.command {
+        ControlCommand::TypeText(req) => {
+            assert_eq!(req.target.ref_id.as_deref(), Some("@e3"));
+            assert_eq!(req.target.observation_id.as_deref(), Some("obs-1"));
+            assert_eq!(req.text, "hello world");
+            assert_eq!(req.mode, TypeTextMode::AxValue);
+            assert!(!req.allow_clipboard);
+        }
+        c => panic!("expected TypeText, got {c:?}"),
+    }
+}
+
+#[test]
+fn type_ref_target_accepts_explicit_auto_and_clipboard_gate() {
+    let r = route(
+        "type",
+        json!({
+            "target": {"ref": "@e3", "observation_id": "obs-1"},
+            "content": "hello world",
+            "mode": "auto",
+            "allow_clipboard": true
+        }),
+    );
+    match r.command {
+        ControlCommand::TypeText(req) => {
+            assert_eq!(req.mode, TypeTextMode::Auto);
+            assert!(req.allow_clipboard);
+        }
+        c => panic!("expected TypeText, got {c:?}"),
+    }
+
+    let error = match route_computer_act_action(
+        "type",
+        &json!({
+            "target": {"ref": "@e3", "observation_id": "obs-1"},
+            "content": "hello world",
+            "mode": "clipboard"
+        }),
+    ) {
+        Err(error) => error,
+        Ok(_) => panic!("clipboard must require explicit allow_clipboard"),
+    };
+    assert!(matches!(
+        error,
+        super::ComputerActRouteError::InvalidArgs(_)
+    ));
+}
+
+#[test]
+fn type_ref_target_rejects_semantic_target_fields() {
+    let error = match route_computer_act_action(
+        "type",
+        &json!({
+            "target": {"ref": "@e3", "observation_id": "obs-1", "role": "AXTextArea"},
+            "content": "hello world"
+        }),
+    ) {
+        Err(error) => error,
+        Ok(_) => panic!("ref-backed target must not mix semantic fields"),
+    };
+    assert!(matches!(
+        error,
+        super::ComputerActRouteError::InvalidArgs(_)
+    ));
+}
+
 // --- hotkey ---
 
 #[test]
@@ -324,11 +401,20 @@ fn unknown_action_returns_error() {
     ));
 }
 
-use super::check_observation_epoch_fast_reject;
+use super::{
+    check_observation_epoch_fast_reject, dispatch_with_resource_epoch, execute_computer_act,
+};
+use crate::control_ax::{AxElement, AxSnapshot, AxWindow};
 use crate::control_observation::{
-    record_observation, ObservationRoot, ObservationRefEntry,
+    record_observation, record_observation_with_selectors_from_capture, resolve_observation_header,
+    resolve_observation_resource_epoch, ObservationRefEntry, ObservationRoot,
 };
 use crate::control_protocol::ComputerActRequest;
+use crate::control_resource_lane::{capture_resource_epochs, with_resource_write};
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    Arc, Barrier,
+};
 
 fn make_request(observation_id: Option<&str>, epoch: Option<u64>) -> ComputerActRequest {
     ComputerActRequest {
@@ -336,6 +422,7 @@ fn make_request(observation_id: Option<&str>, epoch: Option<u64>) -> ComputerAct
         action: "wait".to_string(),
         args: json!({"duration_ms": 100}),
         verify: None,
+        postcondition: None,
         observation_id: observation_id.map(str::to_owned),
         timeout_ms: None,
         trace: None,
@@ -406,7 +493,10 @@ fn epoch_check_rejects_when_epoch_mismatches() {
         .expect("mismatched epoch must produce envelope");
     assert_eq!(result.exit_code, 64);
     let envelope: serde_json::Value = serde_json::from_str(
-        result.response_value_json.as_deref().expect("envelope is JSON"),
+        result
+            .response_value_json
+            .as_deref()
+            .expect("envelope is JSON"),
     )
     .expect("envelope should be JSON");
     assert_eq!(envelope["ok"], false);
@@ -435,7 +525,10 @@ fn epoch_check_rejects_when_observation_absent() {
         .expect("missing observation must produce envelope");
     assert_eq!(result.exit_code, 64);
     let envelope: serde_json::Value = serde_json::from_str(
-        result.response_value_json.as_deref().expect("envelope is JSON"),
+        result
+            .response_value_json
+            .as_deref()
+            .expect("envelope is JSON"),
     )
     .expect("envelope should be JSON");
     assert_eq!(envelope["error_code"], "stale_observation_epoch");
@@ -447,4 +540,335 @@ fn epoch_check_rejects_when_observation_absent() {
         envelope["evidence"].get("current_epoch").is_none(),
         "observation 不存在时不应有 current_epoch 字段"
     );
+}
+
+#[test]
+fn same_observation_pid_allows_only_one_concurrent_mutation() {
+    let observation_id = record_observation_at(
+        0,
+        vec![ObservationRefEntry {
+            ref_id: "@e-resource-lane".to_string(),
+            backend_id: "pid:910001/window:0/path:1".to_string(),
+            kind: "ax".to_string(),
+        }],
+    );
+    let snapshot = resolve_observation_resource_epoch(&observation_id, "@e-resource-lane")
+        .expect("resource snapshot should resolve")
+        .expect("PID ref should have resource snapshot");
+    let start = Arc::new(Barrier::new(2));
+    let dispatched = Arc::new(AtomicUsize::new(0));
+
+    let spawn = |start: Arc<Barrier>, dispatched: Arc<AtomicUsize>| {
+        let snapshot = snapshot.clone();
+        std::thread::spawn(move || {
+            start.wait();
+            dispatch_with_resource_epoch(Some(&snapshot), || {
+                dispatched.fetch_add(1, Ordering::SeqCst);
+                std::thread::sleep(std::time::Duration::from_millis(20));
+                Ok(crate::control_actions::ActionExecutionResult {
+                    exit_code: 0,
+                    stdout: Vec::new(),
+                    stderr: Vec::new(),
+                    response_value_json: Some("{}".to_string()),
+                })
+            })
+            .expect("resource dispatch should return a response")
+        })
+    };
+    let first = spawn(start.clone(), dispatched.clone());
+    let second = spawn(start, dispatched.clone());
+    let results = [
+        first.join().expect("first mutation thread should finish"),
+        second.join().expect("second mutation thread should finish"),
+    ];
+
+    assert_eq!(dispatched.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        results
+            .iter()
+            .filter(|result| result.exit_code == 0)
+            .count(),
+        1
+    );
+    let stale = results
+        .iter()
+        .find(|result| result.exit_code == 64)
+        .expect("one mutation should be rejected as stale");
+    let envelope: serde_json::Value = serde_json::from_str(
+        stale
+            .response_value_json
+            .as_deref()
+            .expect("stale response should contain JSON"),
+    )
+    .expect("stale response should be valid JSON");
+    assert_eq!(envelope["error_code"], "stale_resource_epoch");
+    assert_eq!(envelope["evidence"]["resource_key"], "pid:910001");
+}
+
+#[test]
+fn new_observation_captures_incremented_resource_epoch() {
+    let first_observation = record_observation_at(
+        0,
+        vec![ObservationRefEntry {
+            ref_id: "@e-before-write".to_string(),
+            backend_id: "pid:910002/window:0/path:1".to_string(),
+            kind: "ax".to_string(),
+        }],
+    );
+    let before = resolve_observation_resource_epoch(&first_observation, "@e-before-write")
+        .expect("first resource snapshot should resolve")
+        .expect("PID ref should have resource snapshot");
+    dispatch_with_resource_epoch(Some(&before), || {
+        Ok(crate::control_actions::ActionExecutionResult {
+            exit_code: 0,
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+            response_value_json: Some("{}".to_string()),
+        })
+    })
+    .expect("first mutation should dispatch");
+
+    let second_observation = record_observation_at(
+        0,
+        vec![ObservationRefEntry {
+            ref_id: "@e-after-write".to_string(),
+            backend_id: "pid:910002/window:0/path:2".to_string(),
+            kind: "ax".to_string(),
+        }],
+    );
+    let after = resolve_observation_resource_epoch(&second_observation, "@e-after-write")
+        .expect("second resource snapshot should resolve")
+        .expect("PID ref should have resource snapshot");
+
+    assert_eq!(after.epoch, before.epoch + 2);
+}
+
+#[test]
+fn successor_observation_can_drive_next_same_pid_mutation() {
+    let old_observation = record_observation_at(
+        0,
+        vec![ObservationRefEntry {
+            ref_id: "@e-old".to_string(),
+            backend_id: "pid:910005/window:0/path:1".to_string(),
+            kind: "ax".to_string(),
+        }],
+    );
+    let old_epoch = resolve_observation_resource_epoch(&old_observation, "@e-old")
+        .expect("old resource snapshot should resolve")
+        .expect("PID ref should have resource snapshot");
+    dispatch_with_resource_epoch(Some(&old_epoch), || {
+        Ok(crate::control_actions::ActionExecutionResult {
+            exit_code: 0,
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+            response_value_json: Some("{}".to_string()),
+        })
+    })
+    .expect("first mutation should dispatch");
+
+    let successor = AxSnapshot::complete(
+        "test",
+        vec![AxWindow {
+            id: "pid:910005/window:0".to_string(),
+            ref_id: None,
+            pid: 910005,
+            process_name: "fixture".to_string(),
+            title: Some("fixture".to_string()),
+            role: "AXWindow".to_string(),
+            subrole: None,
+            rect: None,
+            focused: Some(true),
+            elements: vec![AxElement {
+                id: "pid:910005/window:0/path:2".to_string(),
+                ref_id: None,
+                role: "AXButton".to_string(),
+                subrole: None,
+                name: Some("Next".to_string()),
+                value: None,
+                value_redacted: false,
+                description: None,
+                rect: None,
+                enabled: Some(true),
+                actions: vec!["AXPress".to_string()],
+                ax_path: vec![2],
+                children: Vec::new(),
+            }],
+        }],
+        false,
+    )
+    .with_observation("@computer-act")
+    .expect("successor observation should be recorded");
+    let header = successor
+        .observation
+        .expect("successor should contain observation header");
+    let successor_epoch = resolve_observation_resource_epoch(&header.observation_id, "@e2")
+        .expect("successor resource snapshot should resolve")
+        .expect("successor element should have PID resource snapshot");
+
+    assert_eq!(successor_epoch.epoch, old_epoch.epoch + 2);
+    assert!(with_resource_write(&old_epoch, || -> std::io::Result<()> {
+        panic!("old observation must remain stale")
+    })
+    .is_err());
+    assert!(with_resource_write(&successor_epoch, || Ok(())).is_ok());
+}
+
+#[test]
+fn successor_target_uses_the_new_snapshot_ref_for_the_same_backend() {
+    let successor = AxSnapshot::complete(
+        "test",
+        vec![
+            AxWindow {
+                id: "pid:910006/window:0".to_string(),
+                ref_id: None,
+                pid: 910006,
+                process_name: "other".to_string(),
+                title: Some("other".to_string()),
+                role: "AXWindow".to_string(),
+                subrole: None,
+                rect: None,
+                focused: Some(false),
+                elements: vec![AxElement {
+                    id: "pid:910006/window:0/path:0".to_string(),
+                    ref_id: None,
+                    role: "AXButton".to_string(),
+                    subrole: None,
+                    name: Some("Other".to_string()),
+                    value: None,
+                    value_redacted: false,
+                    description: None,
+                    rect: None,
+                    enabled: Some(true),
+                    actions: vec!["AXPress".to_string()],
+                    ax_path: vec![0],
+                    children: Vec::new(),
+                }],
+            },
+            AxWindow {
+                id: "pid:910007/window:0".to_string(),
+                ref_id: None,
+                pid: 910007,
+                process_name: "target".to_string(),
+                title: Some("target".to_string()),
+                role: "AXWindow".to_string(),
+                subrole: None,
+                rect: None,
+                focused: Some(true),
+                elements: vec![AxElement {
+                    id: "pid:910007/window:0/path:0".to_string(),
+                    ref_id: None,
+                    role: "AXTextArea".to_string(),
+                    subrole: None,
+                    name: None,
+                    value: Some(String::new()),
+                    value_redacted: false,
+                    description: None,
+                    rect: None,
+                    enabled: Some(true),
+                    actions: Vec::new(),
+                    ax_path: vec![0],
+                    children: Vec::new(),
+                }],
+            },
+        ],
+        false,
+    )
+    .with_observation("@computer-act")
+    .expect("successor observation should be recorded");
+
+    let target = super::build_successor_target(&successor, "pid:910007/window:0/path:0")
+        .expect("successor should expose the exact target ref");
+
+    assert_eq!(target["ref"], "@e4");
+    assert_eq!(
+        target["observation_id"],
+        successor.observation.unwrap().observation_id
+    );
+    assert!(target["epoch"].is_u64());
+}
+
+#[test]
+fn observation_keeps_capture_start_epoch_when_write_finishes_during_capture() {
+    let resource_key = "pid:910003";
+    let capture = capture_resource_epochs();
+    let capture_snapshot = capture.snapshot(resource_key);
+
+    with_resource_write(&capture_snapshot, || Ok(()))
+        .expect("capture-start snapshot should still be current")
+        .expect("injected mutation should succeed");
+
+    let header = record_observation_with_selectors_from_capture(
+        "ax",
+        "@ax-tree",
+        ObservationRoot {
+            schema: "rdog.ax.v1".to_string(),
+            platform: "test".to_string(),
+            coordinate_space: "os-logical".to_string(),
+        },
+        vec![ObservationRefEntry {
+            ref_id: "@e-capture-start".to_string(),
+            backend_id: format!("{resource_key}/window:0/path:1"),
+            kind: "ax".to_string(),
+        }],
+        Vec::new(),
+        &capture,
+    )
+    .expect("observation should record from capture-start token");
+    let recorded = resolve_observation_resource_epoch(&header.observation_id, "@e-capture-start")
+        .expect("recorded resource snapshot should resolve")
+        .expect("PID ref should have resource snapshot");
+
+    assert_eq!(recorded, capture_snapshot);
+    assert!(with_resource_write(&recorded, || -> std::io::Result<()> {
+        panic!("old captured UI must not dispatch after a concurrent mutation")
+    })
+    .is_err());
+}
+
+#[test]
+fn stale_resource_epoch_top_level_response_preserves_retry_contract() {
+    let observation_id = record_observation_at(
+        0,
+        vec![ObservationRefEntry {
+            ref_id: "@e-top-level-stale".to_string(),
+            backend_id: "pid:910004/window:0/path:1".to_string(),
+            kind: "ax".to_string(),
+        }],
+    );
+    let snapshot = resolve_observation_resource_epoch(&observation_id, "@e-top-level-stale")
+        .expect("resource snapshot should resolve")
+        .expect("PID ref should have resource snapshot");
+    with_resource_write(&snapshot, || Ok(()))
+        .expect("first mutation should consume the epoch")
+        .expect("first mutation should succeed");
+    let header = resolve_observation_header(&observation_id).expect("header should resolve");
+    let request = ComputerActRequest {
+        schema: "rdog.computer-act.v1".to_string(),
+        action: "click".to_string(),
+        args: json!({
+            "target": {
+                "ref": "@e-top-level-stale",
+                "observation_id": observation_id,
+            }
+        }),
+        verify: None,
+        postcondition: None,
+        observation_id: Some(header.observation_id),
+        timeout_ms: None,
+        trace: None,
+        epoch: Some(header.created_at_unix_ms),
+    };
+
+    let result = execute_computer_act(&request, None).expect("stale response should be returned");
+    let envelope: serde_json::Value = serde_json::from_str(
+        result
+            .response_value_json
+            .as_deref()
+            .expect("top-level response should contain JSON"),
+    )
+    .expect("top-level response should be valid JSON");
+
+    assert_eq!(result.exit_code, 64);
+    assert_eq!(envelope["error_code"], "stale_resource_epoch");
+    assert_eq!(envelope["retry"]["strategy"], "re_observe_then_retry");
 }

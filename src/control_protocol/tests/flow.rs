@@ -2,9 +2,9 @@ use std::collections::BTreeMap;
 
 use super::*;
 use crate::control_flow::{
-    FlowCmdStep, FlowExpectKind, FlowExpectStep, FlowOptions, FlowPolicy, FlowRequest,
-    FlowSaveArtifactStep, FlowScriptStep, FlowStep, FlowTraceMode, DEFAULT_FLOW_MAX_OUTPUT_BYTES,
-    DEFAULT_FLOW_MAX_STEPS, DEFAULT_FLOW_TIMEOUT_MS,
+    FlowCmdStep, FlowExecutionPolicy, FlowExpectKind, FlowExpectStep, FlowOptions, FlowPolicy,
+    FlowRequest, FlowSaveArtifactStep, FlowScriptStep, FlowStep, FlowTraceMode,
+    DEFAULT_FLOW_MAX_OUTPUT_BYTES, DEFAULT_FLOW_MAX_STEPS, DEFAULT_FLOW_TIMEOUT_MS,
 };
 
 #[test]
@@ -32,6 +32,7 @@ fn parse_should_support_flow_request_with_request_id() {
             timeout_ms: 60_000,
             max_steps: 32,
             max_output_bytes: 4096,
+            execution: FlowExecutionPolicy::default(),
         }
     );
     assert_eq!(
@@ -106,6 +107,7 @@ fn parse_should_default_flow_policy_and_options_for_control_only_flow() {
                     timeout_ms: DEFAULT_FLOW_TIMEOUT_MS,
                     max_steps: DEFAULT_FLOW_MAX_STEPS,
                     max_output_bytes: DEFAULT_FLOW_MAX_OUTPUT_BYTES,
+                    execution: FlowExecutionPolicy::default(),
                 },
                 steps: vec![FlowStep::ControlLine("@ping".to_owned())],
                 options: FlowOptions {

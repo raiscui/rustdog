@@ -18,18 +18,13 @@ use crate::control_ax::{
     parse_ax_action_payload, parse_ax_find_payload, parse_ax_focus_payload, parse_ax_get_payload,
     parse_ax_press_payload, parse_ax_press_sequence_payload, parse_ax_scroll_payload,
     parse_ax_set_value_payload, parse_ax_tree_payload, parse_type_text_payload, AxActionRequest,
-    AxFindRequest, AxFocusRequest, AxGetRequest, AxMode, AxPressRequest, AxPressSequenceRequest,
-    AxScrollRequest, AxSetValueRequest, AxTreeRequest, TypeTextRequest, DEFAULT_AX_DEPTH,
-    DEFAULT_AX_INCLUDE_VALUES, DEFAULT_AX_MAX_ELEMENTS,
+    AxFindQuery, AxFindRequest, AxFocusRequest, AxGetRequest, AxMode, AxPressRequest,
+    AxPressSequenceRequest, AxScrollRequest, AxSetValueRequest, AxTreeRequest, TypeTextRequest,
+    DEFAULT_AX_DEPTH, DEFAULT_AX_INCLUDE_VALUES, DEFAULT_AX_MAX_ELEMENTS,
 };
 use crate::control_bootstrap::{parse_bootstrap_payload, BootstrapRequest};
 use crate::control_flow::{parse_flow_payload, FlowRequest};
 use crate::control_frames::SaveFileFrame;
-use crate::control_recording::control_handler::RecordRequest;
-use crate::control_recording::protocol::{
-    parse_record_cancel_payload, parse_record_mark_payload, parse_record_start_payload,
-    parse_record_status_payload, parse_record_stop_payload,
-};
 use crate::control_gui_bench::{parse_gui_bench_payload, GuiBenchRequest};
 use crate::control_mouse::{
     parse_click_payload, parse_drag_payload, parse_mouse_button_payload, parse_mouse_move_payload,
@@ -39,6 +34,11 @@ use crate::control_mouse::{
 use crate::control_observation::{
     parse_observe_payload, ObserveRequest, SelectorGetRequest, SelectorRefindPolicy,
     SelectorRefindRequest, SelectorRefindSource, SelectorResolveRequest,
+};
+use crate::control_recording::control_handler::RecordRequest;
+use crate::control_recording::protocol::{
+    parse_record_cancel_payload, parse_record_mark_payload, parse_record_start_payload,
+    parse_record_status_payload, parse_record_stop_payload,
 };
 use crate::control_web::{
     parse_web_act_payload, parse_web_find_payload, WebActRequest, WebFindRequest,
@@ -174,10 +174,23 @@ pub struct ComputerActRequest {
     pub action: String,
     pub args: serde_json::Value,
     pub verify: Option<String>,
+    pub postcondition: Option<ComputerActPostcondition>,
     pub observation_id: Option<String>,
     pub timeout_ms: Option<u64>,
     pub trace: Option<String>,
     pub epoch: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ComputerActPostconditionKind {
+    Exists,
+    NotExists,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ComputerActPostcondition {
+    pub kind: ComputerActPostconditionKind,
+    pub query: AxFindQuery,
 }
 
 /// `@paste` 的结构化请求。
@@ -473,19 +486,25 @@ pub fn parse_control_line(line: &str) -> io::Result<ControlParseResult> {
     if kind.eq_ignore_ascii_case("record-status") && !has_payload {
         return Ok(ControlParseResult::Control(ControlRequest {
             request_id,
-            command: ControlCommand::Record(crate::control_recording::protocol::parse_record_status_payload("")?),
+            command: ControlCommand::Record(
+                crate::control_recording::protocol::parse_record_status_payload("")?,
+            ),
         }));
     }
     if kind.eq_ignore_ascii_case("record-stop") && !has_payload {
         return Ok(ControlParseResult::Control(ControlRequest {
             request_id,
-            command: ControlCommand::Record(crate::control_recording::protocol::parse_record_stop_payload("")?),
+            command: ControlCommand::Record(
+                crate::control_recording::protocol::parse_record_stop_payload("")?,
+            ),
         }));
     }
     if kind.eq_ignore_ascii_case("record-cancel") && !has_payload {
         return Ok(ControlParseResult::Control(ControlRequest {
             request_id,
-            command: ControlCommand::Record(crate::control_recording::protocol::parse_record_cancel_payload("")?),
+            command: ControlCommand::Record(
+                crate::control_recording::protocol::parse_record_cancel_payload("")?,
+            ),
         }));
     }
 

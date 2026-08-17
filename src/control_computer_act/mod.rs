@@ -25,11 +25,17 @@ use serde_json::Value;
 
 use crate::cancellation::CancellationToken;
 use crate::control_actions::ActionExecutionResult;
-use crate::control_observation::resolve_observation_header;
+use crate::control_ax::{AxTarget, TypeTextMode, TypeTextRequest};
 use crate::control_mouse::MouseEndpoint;
 use crate::control_mouse::MouseRefTarget;
+use crate::control_observation::{
+    resolve_observation_header, resolve_observation_ref, resolve_observation_resource_epoch,
+};
 use crate::control_protocol::{
     ComputerActRequest, ControlCommand, KeyMode, KeyRequest, OpenAppRequest, WaitRequest,
+};
+use crate::control_resource_lane::{
+    with_resource_write, ResourceEpochSnapshot, StaleResourceEpoch,
 };
 
 // ticket 11 implicit_observe plumbing (TTL 5s, ADR-0005 L3)
@@ -43,8 +49,10 @@ pub(crate) use implicit_observe::{
 #[path = "verify.rs"]
 mod verify;
 pub(crate) use verify::{
-    parse_verify_policy, render_verification, run_always_verify, run_best_effort_verify,
-    VerifyPolicy,
+    build_successor_target, capture_pre_snapshot, capture_successor_snapshot,
+    evaluate_postcondition, parse_verify_policy, render_postcondition,
+    render_unavailable_postcondition, render_verification, run_always_verify,
+    run_best_effort_verify, VerifyPolicy,
 };
 
 // ticket 17 density metrics (ADR-0006 §Consequences)
@@ -74,7 +82,7 @@ pub(crate) use timeout::{resolve_timeout, TimeoutWatcher};
 // 源自 pi-computer-use `ActOutcome`, 替代 Phase F-2 把 verify_failed 塞 ok:false 的写法.
 #[path = "outcome.rs"]
 mod outcome;
-pub(crate) use outcome::{compute_outcome, render_outcome, OutcomeInputs};
+pub(crate) use outcome::{compute_outcome, render_outcome, EvidenceStatus, OutcomeInputs};
 
 /// `control_computer_act` 把 action + args 翻译成的中间结果。
 ///
@@ -299,10 +307,86 @@ fn route_type(args: &Value) -> Result<ControlCommand, ComputerActRouteError> {
         .and_then(|v| v.as_str())
         .ok_or_else(|| ComputerActRouteError::InvalidArgs("type 缺少 content".to_string()))?
         .to_string();
-    // ticket 04 skeleton: 总是走 @paste (无 target),后续 ticket 07 加 ref→@type-text 分流。
-    Ok(ControlCommand::Paste(
-        crate::control_protocol::PasteRequest::legacy_text(content),
-    ))
+
+    let Some(target_value) = args.get("target") else {
+        // 无 target 仍保留旧的前台输入路径,但它没有 resource lane 或 postcondition 契约。
+        if args.get("mode").is_some() || args.get("allow_clipboard").is_some() {
+            return Err(ComputerActRouteError::InvalidArgs(
+                "无 target 的 type 只能使用 legacy paste,不能指定 mode 或 allow_clipboard"
+                    .to_string(),
+            ));
+        }
+        return Ok(ControlCommand::Paste(
+            crate::control_protocol::PasteRequest::legacy_text(content),
+        ));
+    };
+
+    let target = target_value.as_object().ok_or_else(|| {
+        ComputerActRouteError::InvalidArgs("type.target 必须是 {ref, observation_id}".to_string())
+    })?;
+    let ref_id = target
+        .get("ref")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            ComputerActRouteError::InvalidArgs(
+                "ref-backed type.target.ref 必须是非空字符串".to_string(),
+            )
+        })?;
+    let observation_id = target
+        .get("observation_id")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            ComputerActRouteError::InvalidArgs(
+                "ref-backed type.target.observation_id 必须是非空字符串".to_string(),
+            )
+        })?;
+    if target
+        .keys()
+        .any(|key| key != "ref" && key != "observation_id")
+    {
+        return Err(ComputerActRouteError::InvalidArgs(
+            "ref-backed type.target 只支持 ref 和 observation_id".to_string(),
+        ));
+    }
+
+    let mode = match args.get("mode").and_then(Value::as_str) {
+        None => TypeTextMode::AxValue,
+        Some("auto") => TypeTextMode::Auto,
+        Some("ax-value" | "ax_value") => TypeTextMode::AxValue,
+        Some("targeted-keyboard" | "targeted_keyboard") => TypeTextMode::TargetedKeyboard,
+        Some("clipboard") => TypeTextMode::Clipboard,
+        Some(other) => {
+            return Err(ComputerActRouteError::InvalidArgs(format!(
+                "type.mode 不支持: {other}"
+            )))
+        }
+    };
+    let allow_clipboard = match args.get("allow_clipboard") {
+        None => false,
+        Some(value) => value.as_bool().ok_or_else(|| {
+            ComputerActRouteError::InvalidArgs("type.allow_clipboard 必须是布尔值".to_string())
+        })?,
+    };
+    if matches!(mode, TypeTextMode::Clipboard) && !allow_clipboard {
+        return Err(ComputerActRouteError::InvalidArgs(
+            "type.mode:clipboard 需要显式 allow_clipboard:true".to_string(),
+        ));
+    }
+
+    // 有 target 的 type 复用既有 type-text executor,因此自动获得 PID lane、successor
+    // observation 和显式 postcondition 处理,不再复制一套文字输入实现。
+    Ok(ControlCommand::TypeText(TypeTextRequest {
+        target: AxTarget {
+            ref_id: Some(ref_id.to_owned()),
+            observation_id: Some(observation_id.to_owned()),
+            ..AxTarget::default()
+        },
+        text: content,
+        mode,
+        allow_clipboard,
+    }))
 }
 
 fn route_hotkey(args: &Value) -> Result<ControlCommand, ComputerActRouteError> {
@@ -516,6 +600,71 @@ fn stale_observation_epoch_envelope(
     }
 }
 
+/// 从 ref target 解析 observation 创建时的 PID write epoch 快照。
+///
+/// 坐标动作、visual ref 或未携带 target 的动作没有可靠 PID,保持原执行路径。
+fn resolve_request_resource_epoch(
+    request: &ComputerActRequest,
+) -> io::Result<Option<ResourceEpochSnapshot>> {
+    let Some(target) = request.args.get("target").and_then(Value::as_object) else {
+        return Ok(None);
+    };
+    let Some(ref_id) = target.get("ref").and_then(Value::as_str) else {
+        return Ok(None);
+    };
+    let Some(observation_id) = target.get("observation_id").and_then(Value::as_str) else {
+        return Ok(None);
+    };
+
+    resolve_observation_resource_epoch(observation_id, ref_id)
+}
+
+/// 记录 mutation 的真实 backend identity,用于在 successor snapshot 中返回新 ref。
+fn resolve_request_target_backend_id(request: &ComputerActRequest) -> Option<String> {
+    let target = request.args.get("target")?.as_object()?;
+    let ref_id = target.get("ref")?.as_str()?;
+    let observation_id = target.get("observation_id")?.as_str()?;
+    resolve_observation_ref(observation_id, ref_id)
+        .ok()
+        .map(|entry| entry.backend_id)
+}
+
+fn stale_resource_epoch_envelope(stale: &StaleResourceEpoch) -> ActionExecutionResult {
+    ActionExecutionResult {
+        exit_code: 64,
+        stdout: Vec::new(),
+        stderr: Vec::new(),
+        response_value_json: Some(
+            error_envelope(
+                ComputerActErrorCode::StaleResourceEpoch,
+                format!(
+                    "资源 {} 的 write epoch 已从 {} 变化为 {},拒绝陈旧 mutation",
+                    stale.resource_key, stale.expected_epoch, stale.current_epoch
+                ),
+                Some(serde_json::json!({
+                    "resource_key": stale.resource_key,
+                    "expected_epoch": stale.expected_epoch,
+                    "current_epoch": stale.current_epoch,
+                })),
+            )
+            .to_string(),
+        ),
+    }
+}
+
+fn dispatch_with_resource_epoch(
+    snapshot: Option<&ResourceEpochSnapshot>,
+    dispatch: impl FnOnce() -> io::Result<ActionExecutionResult>,
+) -> io::Result<ActionExecutionResult> {
+    let Some(snapshot) = snapshot else {
+        return dispatch();
+    };
+    match with_resource_write(snapshot, dispatch) {
+        Ok(result) => result,
+        Err(stale) => Ok(stale_resource_epoch_envelope(&stale)),
+    }
+}
+
 /// `execute_computer_act` 是 `@computer-act` 的 executor。
 ///
 /// 流程 (skeleton 范围):
@@ -574,7 +723,6 @@ pub(crate) fn execute_computer_act(
             });
         }
     };
-
     let routed = match route_computer_act_action(&request.action, &request.args) {
         Ok(r) => r,
         Err(ComputerActRouteError::UnknownAction(action)) => {
@@ -615,6 +763,16 @@ pub(crate) fn execute_computer_act(
         }
     };
 
+    // 资源快照只负责增加并发保护。解析失败仍交给原有 primitive 处理,
+    // 以保留 STALE_REF / OBSERVATION_EXPIRED 等既有精确错误语义。
+    let resource_epoch = resolve_request_resource_epoch(request).ok().flatten();
+    let target_backend_id = resolve_request_target_backend_id(request);
+    let pre_snapshot = if matches!(verify_policy, VerifyPolicy::None) {
+        None
+    } else {
+        capture_pre_snapshot(target_backend_id.as_deref()).ok()
+    };
+
     // ticket 16: timeout watcher (spawn background thread, 命中后 signal cancel_token)。
     // 跟 ticket 03 cancellation 整合: dispatch_underlying 拿 cancel, 命中后由
     // 底层 primitive 决定怎么处理 (e.g., @wait sleep_cancellable 返回 Err)。
@@ -625,9 +783,10 @@ pub(crate) fn execute_computer_act(
 
     // 调度到底层 primitive (ticket 13: 拆出 dispatch_ms,verify 用)
     let dispatch_start = Instant::now();
-    let underlying_result = dispatch_underlying(routed.command, effective_cancel)?;
+    let underlying_result = dispatch_with_resource_epoch(resource_epoch.as_ref(), || {
+        dispatch_underlying(routed.command, effective_cancel)
+    })?;
     let dispatch_ms = dispatch_start.elapsed().as_millis() as u64;
-    let duration_ms = start.elapsed().as_millis() as u64;
 
     // ticket 16: timeout 检查。如果 timeout_token fired 且 dispatch 仍 ok → 算 timeout。
     // 注意: 即使 dispatch 出错, 也可能是因为 cancel 触发了底层 primitive 早退;
@@ -659,16 +818,31 @@ pub(crate) fn execute_computer_act(
         });
     }
 
-    // ticket 13/14: verify 三档分别跑不同 verify 流程
+    let dispatch_ok = underlying_result.exit_code == 0;
+    let successor_required = resource_epoch.is_some() || request.postcondition.is_some();
+    let successor_snapshot =
+        if dispatch_ok && (successor_required || !matches!(verify_policy, VerifyPolicy::None)) {
+            capture_successor_snapshot(target_backend_id.as_deref()).ok()
+        } else {
+            None
+        };
+
+    // ticket 13/14: pre snapshot 与唯一 successor snapshot 跨越 dispatch。
     // - BestEffort: AX diff only (轻量)
     // - Always: full observe (screenshot + AX + windows + AX diff)
     // - None: 不跑 verify
     let verify_summary = match verify_policy {
-        VerifyPolicy::BestEffort => Some(run_best_effort_verify(dispatch_ms)),
+        VerifyPolicy::BestEffort => pre_snapshot
+            .as_ref()
+            .zip(successor_snapshot.as_ref())
+            .map(|(pre, successor)| run_best_effort_verify(pre, successor, dispatch_ms)),
         _ => None,
     };
     let always_summary = match verify_policy {
-        VerifyPolicy::Always => Some(run_always_verify(dispatch_ms)),
+        VerifyPolicy::Always => pre_snapshot
+            .as_ref()
+            .zip(successor_snapshot.as_ref())
+            .map(|(pre, successor)| run_always_verify(pre, successor, dispatch_ms)),
         _ => None,
     };
     let verify_ms = match verify_policy {
@@ -690,7 +864,7 @@ pub(crate) fn execute_computer_act(
     let underlying_value: serde_json::Value =
         serde_json::from_str(&underlying_json_str).unwrap_or_else(|_| json!({}));
 
-    let ok = underlying_result.exit_code == 0;
+    let ok = dispatch_ok;
 
     // ticket 17: 构造 ComputerActDensity (含 verification_passed) - 必须在 json! macro 之前
     let verification_passed = compute_verification_passed(
@@ -733,7 +907,7 @@ pub(crate) fn execute_computer_act(
         "ok": ok,
         "action": request.action,
         "dispatched_to": routed.dispatched_to,
-        "duration_ms": duration_ms,
+        "duration_ms": start.elapsed().as_millis() as u64,
         // ticket 11 填充 observation_id / observation_used;
         // ticket 12/13/14 填充 verification;
         // ticket 17 填充 density;
@@ -746,6 +920,30 @@ pub(crate) fn execute_computer_act(
         "density": render_density(&density_metrics),
         "trace_summary": trace_summary_json,
     });
+    if let Some(header) = successor_snapshot
+        .as_ref()
+        .and_then(|snapshot| snapshot.observation.as_ref())
+    {
+        payload["successor_observation"] = serde_json::to_value(header).unwrap_or(Value::Null);
+    }
+    if let Some(successor_target) = successor_snapshot
+        .as_ref()
+        .zip(target_backend_id.as_deref())
+        .and_then(|(snapshot, backend_id)| build_successor_target(snapshot, backend_id))
+    {
+        payload["successor_target"] = successor_target;
+    }
+
+    let postcondition_report = request.postcondition.as_ref().and_then(|condition| {
+        successor_snapshot
+            .as_ref()
+            .map(|snapshot| evaluate_postcondition(snapshot, condition))
+    });
+    if let Some(report) = postcondition_report.as_ref() {
+        payload["postcondition"] = render_postcondition(report);
+    } else if let Some(condition) = request.postcondition.as_ref() {
+        payload["postcondition"] = render_unavailable_postcondition(condition);
+    }
 
     // ticket 12/13/14: verify=none 时不写 verification 字段;best_effort 写 ax_diff 摘要;
     // always 走 AlwaysVerifySummary 路径 (full observe + ax_diff)。
@@ -764,9 +962,25 @@ pub(crate) fn execute_computer_act(
     let verify_ran = verify_summary.is_some() || always_summary.is_some();
     let outcome = compute_outcome(&OutcomeInputs {
         dispatch_ok: ok,
-        verify_requested,
-        verify_ran,
-        verify_passed: verification_passed,
+        successor_available: successor_required.then_some(successor_snapshot.is_some()),
+        postcondition: match (
+            request.postcondition.as_ref(),
+            postcondition_report.as_ref(),
+        ) {
+            (None, _) => EvidenceStatus::NotRequested,
+            (Some(_), None) => EvidenceStatus::Unavailable,
+            (Some(_), Some(report)) if report.status == "verified" => EvidenceStatus::Passed,
+            (Some(_), Some(_)) => EvidenceStatus::Failed,
+        },
+        verification: if !verify_requested {
+            EvidenceStatus::NotRequested
+        } else if !verify_ran {
+            EvidenceStatus::Unavailable
+        } else if verification_passed {
+            EvidenceStatus::Passed
+        } else {
+            EvidenceStatus::Failed
+        },
     });
     payload["outcome"] = render_outcome(outcome);
 
@@ -816,6 +1030,9 @@ pub(crate) fn execute_computer_act(
         }
         if let Some(evidence) = underlying_value.get("evidence") {
             payload["evidence"] = evidence.clone();
+        }
+        if let Some(retry) = underlying_value.get("retry") {
+            payload["retry"] = retry.clone();
         }
     } else if let Some(inner_dispatched) = underlying_value.get("dispatched_to") {
         // 嵌套 dispatched_to (e.g., @type-text 内部用 @paste) 暴露给客户端

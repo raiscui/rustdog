@@ -57,15 +57,21 @@ impl ComputerActOutcome {
 ///
 /// 故意 strait-laced: 只接 4 个 bool/字段, 不接 verify_policy 整个 enum.
 /// 理由: dispatch outcome 是 4 维 orthogonal 信号, 跟 policy 解耦更易测.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum EvidenceStatus {
+    NotRequested,
+    Unavailable,
+    Passed,
+    Failed,
+}
+
 pub(crate) struct OutcomeInputs {
     /// 底层 dispatch 是否成功 (execute_* 返回 exit_code == 0).
     pub dispatch_ok: bool,
-    /// verify policy 是否请求 verify (None policy = false).
-    pub verify_requested: bool,
-    /// verify 实际是否跑完 (timeout / cancel = false).
-    pub verify_ran: bool,
-    /// verify 实际是否通过 (verify_failed = false).
-    pub verify_passed: bool,
+    /// `Some` 表示本次要求 successor,值表示是否成功取得。
+    pub successor_available: Option<bool>,
+    pub postcondition: EvidenceStatus,
+    pub verification: EvidenceStatus,
 }
 
 /// 推导 outcome.
@@ -83,16 +89,19 @@ pub(crate) fn compute_outcome(inputs: &OutcomeInputs) -> ComputerActOutcome {
         // dispatch 失败: outcome 字段仍然写入 (按"未跑"对待), 客户端读 ok 决定是否重试.
         return ComputerActOutcome::Unknown;
     }
-    if !inputs.verify_requested {
-        return ComputerActOutcome::Worked;
+    match inputs.postcondition {
+        EvidenceStatus::Passed => return ComputerActOutcome::Worked,
+        EvidenceStatus::Failed => return ComputerActOutcome::Didnt,
+        EvidenceStatus::Unavailable => return ComputerActOutcome::Unknown,
+        EvidenceStatus::NotRequested => {}
     }
-    if !inputs.verify_ran {
+    if inputs.successor_available == Some(false) {
         return ComputerActOutcome::Unknown;
     }
-    if inputs.verify_passed {
-        ComputerActOutcome::Worked
-    } else {
-        ComputerActOutcome::Didnt
+    match inputs.verification {
+        EvidenceStatus::NotRequested | EvidenceStatus::Passed => ComputerActOutcome::Worked,
+        EvidenceStatus::Unavailable => ComputerActOutcome::Unknown,
+        EvidenceStatus::Failed => ComputerActOutcome::Didnt,
     }
 }
 
@@ -113,16 +122,30 @@ mod tests {
     ) -> OutcomeInputs {
         OutcomeInputs {
             dispatch_ok,
-            verify_requested,
-            verify_ran,
-            verify_passed,
+            successor_available: None,
+            postcondition: EvidenceStatus::NotRequested,
+            verification: if !verify_requested {
+                EvidenceStatus::NotRequested
+            } else if !verify_ran {
+                EvidenceStatus::Unavailable
+            } else if verify_passed {
+                EvidenceStatus::Passed
+            } else {
+                EvidenceStatus::Failed
+            },
         }
     }
 
     #[test]
     fn outcome_dispatch_failed_returns_unknown() {
-        assert_eq!(compute_outcome(&inputs(false, false, false, false)), ComputerActOutcome::Unknown);
-        assert_eq!(compute_outcome(&inputs(false, true, true, true)), ComputerActOutcome::Unknown);
+        assert_eq!(
+            compute_outcome(&inputs(false, false, false, false)),
+            ComputerActOutcome::Unknown
+        );
+        assert_eq!(
+            compute_outcome(&inputs(false, true, true, true)),
+            ComputerActOutcome::Unknown
+        );
     }
 
     #[test]
@@ -170,5 +193,26 @@ mod tests {
     fn outcome_render_returns_string_value() {
         let v = render_outcome(ComputerActOutcome::Didnt);
         assert_eq!(v, serde_json::Value::String("didnt".to_owned()));
+    }
+
+    #[test]
+    fn postcondition_has_priority_over_verify() {
+        let mut value = inputs(true, true, true, true);
+        value.postcondition = EvidenceStatus::Failed;
+        assert_eq!(compute_outcome(&value), ComputerActOutcome::Didnt);
+
+        value.postcondition = EvidenceStatus::Passed;
+        assert_eq!(compute_outcome(&value), ComputerActOutcome::Worked);
+    }
+
+    #[test]
+    fn unavailable_postcondition_or_required_successor_is_unknown() {
+        let mut value = inputs(true, false, false, false);
+        value.postcondition = EvidenceStatus::Unavailable;
+        assert_eq!(compute_outcome(&value), ComputerActOutcome::Unknown);
+
+        value.postcondition = EvidenceStatus::NotRequested;
+        value.successor_available = Some(false);
+        assert_eq!(compute_outcome(&value), ComputerActOutcome::Unknown);
     }
 }

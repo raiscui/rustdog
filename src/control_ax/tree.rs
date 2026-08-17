@@ -18,6 +18,7 @@ use crate::{
         observation_ref_name, resolve_observation_ref, stale_observation_ref_error,
         ObservationRefEntry,
     },
+    control_resource_lane::capture_resource_epochs,
     control_window::resolve_unique_app_window_id,
 };
 use serde_json::json;
@@ -55,6 +56,17 @@ pub fn capture_current_ax_subtree(
     request: &AxTreeRequest,
 ) -> io::Result<AxCapturedSubtree> {
     super::platform_capture_current_subtree(target_id, request)
+}
+
+/// 从 AX backend id 中提取标准窗口 id。
+///
+/// menu-bar 等非窗口 AX root 返回 `None`,由调用方保留全局 capture。
+pub(crate) fn ax_window_id_from_backend_id(backend_id: &str) -> Option<&str> {
+    let window_id = backend_id
+        .split_once("/path:")
+        .map_or(backend_id, |(window_id, _)| window_id);
+    let (pid, window_index) = window_id.strip_prefix("pid:")?.split_once("/window:")?;
+    (pid.parse::<i32>().is_ok() && window_index.parse::<usize>().is_ok()).then_some(window_id)
 }
 
 // ---- collect_element_refs (was lines 378-425) ----
@@ -229,7 +241,10 @@ pub fn capture_current_ax_window_snapshot(
     window_id: &str,
     request: &AxTreeRequest,
 ) -> io::Result<AxSnapshot> {
-    platform_capture_current_window(window_id, request)
+    let resource_capture = capture_resource_epochs();
+    let mut snapshot = platform_capture_current_window(window_id, request)?;
+    snapshot.resource_epoch_capture = Some(resource_capture);
+    Ok(snapshot)
 }
 
 // ---- capture_semantic_target_snapshot (was lines 876-886) ----

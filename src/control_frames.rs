@@ -1,9 +1,17 @@
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
+use sha2::{Digest, Sha256};
 use std::{
     fmt::Write as _,
     fs, io,
     path::{Path, PathBuf},
 };
+
+/// model-visible control response 的最后一道预算。
+///
+/// 命令自己的 `limit/depth/top_changes` 仍然有效,这里不替代它们,只防止任何
+/// 成功或错误 response 绕过统一边界把巨型文本直接送进 agent context。
+pub(crate) const CONTROL_RESPONSE_MAX_BYTES: usize = 48 * 1024;
+pub(crate) const CONTROL_RESPONSE_MAX_LINES: usize = 2_000;
 
 /// 控制面向外发送的统一 frame。
 ///
@@ -110,7 +118,7 @@ impl ControlExecutionOutcome {
     /// 构造一个只包含单条响应文本的 outcome。
     pub fn from_response_line(line: String) -> Self {
         Self {
-            outbound_frames: vec![ControlFrame::ResponseLine(line)],
+            outbound_frames: vec![ControlFrame::ResponseLine(bound_response_line(&line))],
         }
     }
 
@@ -142,11 +150,93 @@ impl ControlExecutionOutcome {
     }
 }
 
+fn bound_response_line(line: &str) -> String {
+    bound_response_line_with_limits(line, CONTROL_RESPONSE_MAX_BYTES, CONTROL_RESPONSE_MAX_LINES)
+}
+
+/// 在预算超限时生成一个仍然可解析的结构化 response。
+///
+/// 只保留 prefix preview 和内容 digest,不声称存在可恢复的 session-local 分页存储。
+/// 真正需要完整内容时,调用方应走已有 `@savefile` 或更窄的查询参数。
+fn bound_response_line_with_limits(line: &str, max_bytes: usize, max_lines: usize) -> String {
+    let total_bytes = line.len();
+    let total_lines = if line.is_empty() {
+        0
+    } else {
+        line.bytes().filter(|byte| *byte == b'\n').count() + 1
+    };
+    if total_bytes <= max_bytes && total_lines <= max_lines {
+        return line.to_owned();
+    }
+
+    let preview_source = prefix_lines(line, max_lines);
+    let preview_limit = max_bytes.saturating_sub(1024).max(1) / 2;
+    let preview = utf8_prefix(preview_source, preview_limit);
+    let digest = Sha256::digest(line.as_bytes());
+    let artifact_id = format!("sha256:{digest:x}");
+    let value = serde_json::json!({
+        "ok": false,
+        "error_code": "output_budget_exceeded",
+        "error_message": "control response 超出统一 model-visible 输出预算",
+        "output": {
+            "preview": preview,
+            "total_bytes": total_bytes,
+            "total_lines": total_lines,
+            "artifact_id": artifact_id,
+            "continuation": {
+                "available": false,
+                "hint": "请改用 @savefile 或缩小 limit/depth/top_changes 查询"
+            }
+        }
+    });
+    let request_id = response_request_id(line);
+    let envelope = match request_id {
+        Some(id) => serde_json::json!({"id": id, "value": value}),
+        None => serde_json::json!({"value": value}),
+    };
+    format!("@response {envelope}")
+}
+
+fn response_request_id(line: &str) -> Option<u64> {
+    let payload = line.trim_start().strip_prefix("@response ")?;
+    serde_json::from_str::<serde_json::Value>(payload)
+        .ok()?
+        .get("id")
+        .and_then(serde_json::Value::as_u64)
+}
+
+fn prefix_lines(input: &str, max_lines: usize) -> &str {
+    if max_lines == 0 {
+        return "";
+    }
+    let mut seen = 0;
+    for (index, byte) in input.bytes().enumerate() {
+        if byte == b'\n' {
+            seen += 1;
+            if seen >= max_lines {
+                return &input[..=index];
+            }
+        }
+    }
+    input
+}
+
+fn utf8_prefix(input: &str, max_bytes: usize) -> &str {
+    if input.len() <= max_bytes {
+        return input;
+    }
+    let mut end = max_bytes.min(input.len());
+    while end > 0 && !input.is_char_boundary(end) {
+        end -= 1;
+    }
+    &input[..end]
+}
+
 impl ControlFrame {
     /// 序列化成当前 transport 可直接发送的单条文本消息。
     pub fn to_wire_message(&self) -> String {
         match self {
-            Self::ResponseLine(line) => line.clone(),
+            Self::ResponseLine(line) => bound_response_line(line),
             Self::SaveFile(frame) => frame.to_wire_message(),
             Self::PtyReady(frame) => frame.to_wire_message(),
             Self::PtyOutput(frame) => frame.to_wire_message(),
@@ -1079,6 +1169,63 @@ mod tests {
             ControlFrame::parse_inbound_result_payload(&payload).expect("payload should parse");
 
         assert_eq!(parsed, outcome.outbound_frames);
+    }
+
+    #[test]
+    fn response_budget_keeps_small_success_and_error_lines_unchanged() {
+        let success = r#"@response {"id":7,"value":0}"#;
+        let error = r#"@response {"id":7,"code":64,"error":"bad input"}"#;
+
+        assert_eq!(bound_response_line_with_limits(success, 128, 2), success);
+        assert_eq!(bound_response_line_with_limits(error, 128, 2), error);
+    }
+
+    #[test]
+    fn response_budget_returns_utf8_safe_structured_preview() {
+        let original = format!(
+            "@response {{\"id\":7,\"value\":\"{}\"}}",
+            "界".repeat(20_000)
+        );
+        let bounded = ControlExecutionOutcome::from_response_line(original.clone())
+            .into_single_response_line();
+        assert!(bounded.len() < original.len());
+
+        let payload = bounded
+            .strip_prefix("@response ")
+            .expect("bounded response should keep response prefix");
+        let value: serde_json::Value =
+            serde_json::from_str(payload).expect("bounded response should remain valid JSON");
+        assert_eq!(value["id"], 7);
+        assert_eq!(value["value"]["error_code"], "output_budget_exceeded");
+        assert!(value["value"]["output"]["preview"].is_string());
+        assert!(value["value"]["output"]["artifact_id"]
+            .as_str()
+            .is_some_and(|id| id.starts_with("sha256:")));
+    }
+
+    #[test]
+    fn response_budget_records_total_lines_and_truncates_by_line() {
+        let original = "第一行\n第二行\n第三行\n第四行";
+        let bounded = bound_response_line_with_limits(original, 4096, 2);
+        let value: serde_json::Value = serde_json::from_str(
+            bounded
+                .strip_prefix("@response ")
+                .expect("bounded response should keep response prefix"),
+        )
+        .expect("bounded response should be valid JSON");
+        assert_eq!(value["value"]["output"]["total_lines"], 4);
+        assert!(value["value"]["output"]["preview"]
+            .as_str()
+            .is_some_and(|preview| preview.contains("第二行") && !preview.contains("第三行")));
+    }
+
+    #[test]
+    fn direct_response_frame_is_bounded_at_wire_boundary() {
+        let original = format!("@response {{\"value\":\"{}\"}}", "x".repeat(60_000));
+        let frame = ControlFrame::ResponseLine(original.clone());
+        let wire = frame.to_wire_message();
+        assert!(wire.len() < original.len());
+        assert!(wire.contains("output_budget_exceeded"));
     }
 
     #[test]

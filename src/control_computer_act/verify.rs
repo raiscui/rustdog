@@ -20,8 +20,12 @@ use serde_json::Value;
 use std::time::Instant;
 
 use crate::ax_diff::diff::compute_diff;
-use crate::control_ax::{capture_default_ax_snapshot, AxTreeRequest};
+use crate::control_ax::{
+    ax_window_id_from_backend_id, capture_current_ax_window_snapshot, capture_default_ax_snapshot,
+    query::matches_query, AxFindQuery, AxSnapshot, AxTreeRequest,
+};
 use crate::control_observation::{build_observe_bundle, ObserveRequest};
+use crate::control_protocol::{ComputerActPostcondition, ComputerActPostconditionKind};
 
 /// ADR-0004 V3: 三档 verify policy。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -125,24 +129,162 @@ impl AxDiffSummary {
 ///
 /// 任意一步 IO 失败不会 panic,而是 fallback 到 empty summary + `verify_unavailable` 标记。
 /// 这是为了不让 verify 错误污染 `ok:true` 的 dispatch 结果 (跟 dispatch 错误分离)。
-pub(crate) fn run_best_effort_verify(dispatch_ms: u64) -> AxDiffSummary {
-    let verify_start = Instant::now();
+fn capture_target_snapshot_with(
+    target_backend_id: Option<&str>,
+    capture_global: impl FnOnce(&AxTreeRequest) -> io::Result<AxSnapshot>,
+    capture_window: impl FnOnce(&str, &AxTreeRequest) -> io::Result<AxSnapshot>,
+) -> io::Result<AxSnapshot> {
+    let request = AxTreeRequest::default();
+    match target_backend_id.and_then(ax_window_id_from_backend_id) {
+        Some(window_id) => capture_window(window_id, &request),
+        None => capture_global(&request),
+    }
+}
 
-    // pre-AX: 用默认 AxTreeRequest (Windows scope / depth / max_elements 默认值)
-    let pre = capture_pre_snapshot();
-    let post = capture_post_snapshot();
+pub(crate) fn capture_pre_snapshot(target_backend_id: Option<&str>) -> io::Result<AxSnapshot> {
+    capture_target_snapshot_with(
+        target_backend_id,
+        capture_default_ax_snapshot,
+        capture_current_ax_window_snapshot,
+    )
+}
 
-    // 两边都失败 → empty summary
-    let (pre_value, post_value) = match (pre, post) {
-        (Ok(p), Ok(q)) => (
-            serde_json::to_value(&p).unwrap_or(Value::Null),
-            serde_json::to_value(&q).unwrap_or(Value::Null),
-        ),
-        _ => {
-            let verify_ms = verify_start.elapsed().as_millis() as u64;
-            return AxDiffSummary::empty(dispatch_ms, verify_ms);
+fn capture_successor_snapshot_with(
+    target_backend_id: Option<&str>,
+    capture_global: impl FnOnce(&AxTreeRequest) -> io::Result<AxSnapshot>,
+    capture_window: impl FnOnce(&str, &AxTreeRequest) -> io::Result<AxSnapshot>,
+) -> io::Result<AxSnapshot> {
+    let snapshot = capture_target_snapshot_with(target_backend_id, capture_global, capture_window)?;
+    if snapshot.capture_status != "complete" {
+        return Err(io::Error::other(format!(
+            "successor AX capture 不完整: {}",
+            snapshot.capture_status
+        )));
+    }
+    snapshot.with_observation("@computer-act")
+}
+
+pub(crate) fn capture_successor_snapshot(
+    target_backend_id: Option<&str>,
+) -> io::Result<AxSnapshot> {
+    capture_successor_snapshot_with(
+        target_backend_id,
+        capture_default_ax_snapshot,
+        capture_current_ax_window_snapshot,
+    )
+}
+
+/// 从 successor snapshot 中找回原目标的本地 ref。
+///
+/// `@eN` 只在单个 observation 内有效,因此下一次 mutation 必须使用这里返回的
+/// 新 ref,不能假定旧 ref 在全量 AX snapshot 中仍指向同一 backend。
+pub(crate) fn build_successor_target(snapshot: &AxSnapshot, backend_id: &str) -> Option<Value> {
+    fn find_element_ref<'a>(
+        elements: &'a [crate::control_ax::AxElement],
+        backend_id: &str,
+    ) -> Option<&'a str> {
+        elements.iter().find_map(|element| {
+            if element.id == backend_id {
+                element.ref_id.as_deref()
+            } else {
+                find_element_ref(&element.children, backend_id)
+            }
+        })
+    }
+
+    let header = snapshot.observation.as_ref()?;
+    let ref_id = snapshot.windows.iter().find_map(|window| {
+        if window.id == backend_id {
+            window.ref_id.as_deref()
+        } else {
+            find_element_ref(&window.elements, backend_id)
         }
-    };
+    })?;
+
+    Some(serde_json::json!({
+        "ref": ref_id,
+        "observation_id": header.observation_id,
+        "epoch": header.created_at_unix_ms,
+    }))
+}
+
+#[cfg(test)]
+mod successor_capture_tests {
+    use super::*;
+    use crate::control_ax::{AxElement, AxWindow};
+    use std::cell::Cell;
+
+    fn target_snapshot() -> AxSnapshot {
+        AxSnapshot::complete(
+            "test",
+            vec![AxWindow {
+                id: "pid:73060/window:0".to_string(),
+                ref_id: None,
+                pid: 73060,
+                process_name: "TextEdit".to_string(),
+                title: Some("Untitled".to_string()),
+                role: "AXWindow".to_string(),
+                subrole: None,
+                rect: None,
+                focused: Some(true),
+                elements: vec![AxElement {
+                    id: "pid:73060/window:0/path:0.0".to_string(),
+                    ref_id: None,
+                    role: "AXTextArea".to_string(),
+                    subrole: None,
+                    name: None,
+                    value: Some(String::new()),
+                    value_redacted: false,
+                    description: None,
+                    rect: None,
+                    enabled: Some(true),
+                    actions: Vec::new(),
+                    ax_path: vec![0, 0],
+                    children: Vec::new(),
+                }],
+            }],
+            false,
+        )
+    }
+
+    #[test]
+    fn successor_capture_uses_target_window_when_global_snapshot_would_be_truncated() {
+        let global_called = Cell::new(false);
+        let snapshot = capture_successor_snapshot_with(
+            Some("pid:73060/window:0/path:0.0"),
+            |_| {
+                global_called.set(true);
+                Ok(AxSnapshot::complete("test", Vec::new(), true))
+            },
+            |window_id, _| {
+                assert_eq!(window_id, "pid:73060/window:0");
+                Ok(target_snapshot())
+            },
+        )
+        .expect("窗口级 successor capture 应成功");
+
+        assert!(!global_called.get());
+        assert!(build_successor_target(&snapshot, "pid:73060/window:0/path:0.0").is_some());
+    }
+
+    #[test]
+    fn successor_target_is_not_fabricated_when_backend_is_absent() {
+        let snapshot = target_snapshot()
+            .with_observation("@computer-act")
+            .expect("测试 observation 应创建成功");
+
+        assert!(build_successor_target(&snapshot, "pid:73060/window:0/path:9").is_none());
+    }
+}
+
+pub(crate) fn run_best_effort_verify(
+    pre: &AxSnapshot,
+    successor: &AxSnapshot,
+    dispatch_ms: u64,
+) -> AxDiffSummary {
+    let verify_start = Instant::now();
+    let pre_value = serde_json::to_value(pre).unwrap_or(Value::Null);
+    let post_value = serde_json::to_value(successor).unwrap_or(Value::Null);
 
     let report = compute_diff(&pre_value, &post_value, 64);
     let verify_ms = verify_start.elapsed().as_millis() as u64;
@@ -161,12 +303,75 @@ pub(crate) fn run_best_effort_verify(dispatch_ms: u64) -> AxDiffSummary {
     }
 }
 
-fn capture_pre_snapshot() -> io::Result<crate::control_ax::AxSnapshot> {
-    capture_default_ax_snapshot(&AxTreeRequest::default())
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PostconditionReport {
+    pub kind: ComputerActPostconditionKind,
+    pub status: &'static str,
+    pub matched: bool,
+    pub match_count: usize,
 }
 
-fn capture_post_snapshot() -> io::Result<crate::control_ax::AxSnapshot> {
-    capture_default_ax_snapshot(&AxTreeRequest::default())
+pub(crate) fn evaluate_postcondition(
+    snapshot: &AxSnapshot,
+    condition: &ComputerActPostcondition,
+) -> PostconditionReport {
+    let match_count = snapshot
+        .windows
+        .iter()
+        .map(|window| count_window_matches(window, &condition.query))
+        .sum();
+    let matched = match_count > 0;
+    let verified = match condition.kind {
+        ComputerActPostconditionKind::Exists => matched,
+        ComputerActPostconditionKind::NotExists => !matched,
+    };
+    PostconditionReport {
+        kind: condition.kind,
+        status: if verified { "verified" } else { "failed" },
+        matched,
+        match_count,
+    }
+}
+
+fn count_window_matches(window: &crate::control_ax::AxWindow, query: &AxFindQuery) -> usize {
+    fn count_elements(
+        window: &crate::control_ax::AxWindow,
+        elements: &[crate::control_ax::AxElement],
+        query: &AxFindQuery,
+    ) -> usize {
+        elements
+            .iter()
+            .map(|element| {
+                usize::from(matches_query(window, element, query))
+                    + count_elements(window, &element.children, query)
+            })
+            .sum()
+    }
+    count_elements(window, &window.elements, query)
+}
+
+pub(crate) fn render_postcondition(report: &PostconditionReport) -> Value {
+    serde_json::json!({
+        "kind": match report.kind {
+            ComputerActPostconditionKind::Exists => "exists",
+            ComputerActPostconditionKind::NotExists => "not_exists",
+        },
+        "status": report.status,
+        "matched": report.matched,
+        "match_count": report.match_count,
+    })
+}
+
+pub(crate) fn render_unavailable_postcondition(condition: &ComputerActPostcondition) -> Value {
+    serde_json::json!({
+        "kind": match condition.kind {
+            ComputerActPostconditionKind::Exists => "exists",
+            ComputerActPostconditionKind::NotExists => "not_exists",
+        },
+        "status": "unavailable",
+        "matched": false,
+        "match_count": 0,
+    })
 }
 
 /// ticket 14: screenshot 体积阈值。超 2MB 标 `screenshot_truncated:true`,
@@ -207,51 +412,35 @@ pub(crate) struct AlwaysVerifySummary {
 /// 6. 返回 `AlwaysVerifySummary`
 ///
 /// 任意一步失败 fallback 到 empty summary (verify 错误不污染 dispatch 结果)。
-pub(crate) fn run_always_verify(dispatch_ms: u64) -> AlwaysVerifySummary {
+pub(crate) fn run_always_verify(
+    pre: &AxSnapshot,
+    successor: &AxSnapshot,
+    dispatch_ms: u64,
+) -> AlwaysVerifySummary {
     use std::time::Instant;
     let verify_start = Instant::now();
+    let mut ax_diff = run_best_effort_verify(pre, successor, dispatch_ms);
 
-    // 1. pre-AX
-    let pre = capture_default_ax_snapshot(&AxTreeRequest::default()).ok();
-
-    // 2. post-observe (Hybrid: screenshot + ax + windows)
-    // 注意: dispatch 已经由 caller 跑完,这里只跑 observe; 不重做 dispatch
-    let observe_request = ObserveRequest::default(); // Hybrid mode
+    // successor 已提供唯一 post-action AX。这里仅补 screenshot/windows。
+    let mut observe_request = ObserveRequest::default();
+    observe_request.include_ax = false;
     let observe_bundle = match build_observe_bundle(None, &observe_request) {
         Ok(b) => b,
-        Err(err) => {
-            // observe 失败 → fallback 到空 (verify 错误不污染 dispatch ok:true)
-            let _ = err; // 显式 drop
-            return empty_always_summary(dispatch_ms);
+        Err(_) => {
+            ax_diff.verify_ms = verify_start.elapsed().as_millis() as u64;
+            return AlwaysVerifySummary {
+                observation_block: Value::Null,
+                screenshot_id: None,
+                ax_tree_id: successor
+                    .observation
+                    .as_ref()
+                    .map(|header| header.observation_id.clone()),
+                windows: Value::Null,
+                screenshot_truncated: false,
+                ax_diff,
+            };
         }
     };
-
-    // 3. 计算 AX diff (pre vs post)
-    let diff_start = Instant::now();
-    let ax_diff = match pre.as_ref() {
-        Some(pre_snap) => {
-            let post_snap = observe_bundle.value.get("accessibility").cloned();
-            // 把 accessibility JSON (观察 value 的 accessibility 段) 反序列化成 AxSnapshot
-            // 这里只用 windows + status 字段做 diff,简化逻辑
-            let pre_value = serde_json::to_value(pre_snap).unwrap_or(Value::Null);
-            let post_value = post_snap.unwrap_or(Value::Null);
-            let report = compute_diff(&pre_value, &post_value, 64);
-            let full_report = serde_json::to_value(&report).unwrap_or(Value::Null);
-            AxDiffSummary {
-                windows_added: report.windows_added,
-                windows_removed: report.windows_removed,
-                windows_modified: report.windows_modified,
-                elements_added: report.elements_added,
-                elements_removed: report.elements_removed,
-                elements_modified: report.elements_modified,
-                verify_ms: 0, // 占位, 后面统一填
-                dispatch_ms,
-                full_report,
-            }
-        }
-        None => AxDiffSummary::empty(dispatch_ms, 0),
-    };
-    let diff_ms = diff_start.elapsed().as_millis() as u64;
 
     // 4. 抽取 screenshot_id / ax_tree_id / windows
     let screenshot_id = observe_bundle
@@ -268,12 +457,10 @@ pub(crate) fn run_always_verify(dispatch_ms: u64) -> AlwaysVerifySummary {
                 .and_then(|v| v.as_str())
                 .map(str::to_owned)
         });
-    let ax_tree_id = observe_bundle
-        .value
-        .get("observation")
-        .and_then(|v| v.get("observation_id"))
-        .and_then(|v| v.as_str())
-        .map(str::to_owned);
+    let ax_tree_id = successor
+        .observation
+        .as_ref()
+        .map(|header| header.observation_id.clone());
     let windows = observe_bundle
         .value
         .get("windows")
@@ -292,9 +479,7 @@ pub(crate) fn run_always_verify(dispatch_ms: u64) -> AlwaysVerifySummary {
     let screenshot_truncated = screenshot_bytes > ALWAYS_VERIFY_SCREENSHOT_LIMIT_BYTES;
 
     let total_verify_ms = verify_start.elapsed().as_millis() as u64;
-    // ax_diff 的 verify_ms 改成包含 diff_ms (不算 screenshot capture, 只算 diff 计算)
-    let mut ax_diff = ax_diff;
-    ax_diff.verify_ms = diff_ms;
+    ax_diff.verify_ms = total_verify_ms;
     ax_diff.dispatch_ms = dispatch_ms;
 
     AlwaysVerifySummary {
@@ -317,17 +502,6 @@ fn summary_with_total_verify(total_verify_ms: u64) -> AlwaysVerifySummary {
         windows: Value::Null,
         screenshot_truncated: false,
         ax_diff: AxDiffSummary::empty(0, total_verify_ms),
-    }
-}
-
-fn empty_always_summary(dispatch_ms: u64) -> AlwaysVerifySummary {
-    AlwaysVerifySummary {
-        observation_block: Value::Null,
-        screenshot_id: None,
-        ax_tree_id: None,
-        windows: Value::Null,
-        screenshot_truncated: false,
-        ax_diff: AxDiffSummary::empty(dispatch_ms, 0),
     }
 }
 
@@ -396,18 +570,18 @@ pub(crate) fn render_always_verification(summary: &AlwaysVerifySummary) -> Value
 /// `None` policy 直接返回 `None`,caller 不写 verification 字段 (ticket 12 acceptance)。
 /// 通过 `AxDiffSummary` 推导 `verification.status` (feature/computer-act-outcome-3state)。
 ///
-/// - `changed > 0` → "verified" (AX diff 显示有变化, 动作生效)
-/// - `changed == 0` 且 `added + removed > 0` → "preexisting"
-///   (AX 拓扑变了但具体 field 没变化; 罕见, 但保留语义)
-/// - `changed == 0` 且 `added + removed == 0` → "failed" (AX 完全没动)
+/// - 任意结构或字段变化 → "verified"
+/// - 完全无变化 → "failed"
+///
+/// AX diff 不能证明业务结果在动作前已存在,因此不生成 `preexisting`。
 fn verification_status_for_diff(summary: &AxDiffSummary) -> &'static str {
     let changed = summary.windows_modified + summary.elements_modified;
-    let morphed = summary.windows_added + summary.windows_removed
-        + summary.elements_added + summary.elements_removed;
-    if changed > 0 {
+    let morphed = summary.windows_added
+        + summary.windows_removed
+        + summary.elements_added
+        + summary.elements_removed;
+    if changed + morphed > 0 {
         "verified"
-    } else if morphed > 0 {
-        "preexisting"
     } else {
         "failed"
     }
@@ -422,10 +596,7 @@ pub(crate) fn render_verification(
         VerifyPolicy::None => None,
         VerifyPolicy::BestEffort => {
             let summary = diff_summary?;
-            // feature/computer-act-outcome-3state: 跟 outcome 字段对齐, 同步给客户端
-            // 3 态语义. status="verified" / "preexisting" / "failed" 三档与 pi-computer-use
-            // 同构; "preexisting" 表示 result preexisted before dispatch (verify 通过但
-            // 不是这次动作引起的, 客户端应视为可疑信号 — 详 ticket 13 后续 ADR).
+            // AX diff 只表达动作前后是否变化。业务条件由 postcondition 单独判断。
             let status = verification_status_for_diff(summary);
             Some(serde_json::json!({
                 "method": "ax_diff",
@@ -458,12 +629,86 @@ pub(crate) fn render_verification(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::control_ax::{AxElement, AxWindow};
+    use crate::control_protocol::{ComputerActPostcondition, ComputerActPostconditionKind};
 
     // --- VerifyPolicy parsing ---
 
     #[test]
     fn parse_verify_policy_none_for_missing_field() {
         assert_eq!(parse_verify_policy(None).unwrap(), VerifyPolicy::None);
+    }
+
+    #[test]
+    fn postcondition_exists_and_not_exists_share_ax_matcher() {
+        let snapshot = AxSnapshot::complete(
+            "test",
+            vec![AxWindow {
+                id: "pid:42/window:0".to_owned(),
+                ref_id: None,
+                pid: 42,
+                process_name: "Calculator".to_owned(),
+                title: Some("Calculator".to_owned()),
+                role: "AXWindow".to_owned(),
+                subrole: None,
+                rect: None,
+                focused: Some(true),
+                elements: vec![AxElement {
+                    id: "pid:42/window:0/path:1".to_owned(),
+                    ref_id: None,
+                    role: "AXStaticText".to_owned(),
+                    subrole: None,
+                    name: Some("Result".to_owned()),
+                    value: Some("42".to_owned()),
+                    value_redacted: false,
+                    description: None,
+                    rect: None,
+                    enabled: Some(true),
+                    actions: Vec::new(),
+                    ax_path: vec![1],
+                    children: Vec::new(),
+                }],
+            }],
+            false,
+        );
+        let query = AxFindQuery {
+            role: Some("AXStaticText".to_owned()),
+            value: Some("42".to_owned()),
+            ..AxFindQuery::default()
+        };
+
+        let exists = evaluate_postcondition(
+            &snapshot,
+            &ComputerActPostcondition {
+                kind: ComputerActPostconditionKind::Exists,
+                query: query.clone(),
+            },
+        );
+        assert_eq!(exists.status, "verified");
+        assert_eq!(exists.match_count, 1);
+
+        let not_exists = evaluate_postcondition(
+            &snapshot,
+            &ComputerActPostcondition {
+                kind: ComputerActPostconditionKind::NotExists,
+                query,
+            },
+        );
+        assert_eq!(not_exists.status, "failed");
+        assert!(not_exists.matched);
+
+        let absent = evaluate_postcondition(
+            &snapshot,
+            &ComputerActPostcondition {
+                kind: ComputerActPostconditionKind::NotExists,
+                query: AxFindQuery {
+                    name: Some("Missing".to_owned()),
+                    ..AxFindQuery::default()
+                },
+            },
+        );
+        assert_eq!(absent.status, "verified");
+        assert_eq!(absent.match_count, 0);
     }
 
     #[test]
@@ -619,17 +864,7 @@ mod tests {
         .is_none());
     }
 
-    #[test]
-    fn empty_always_summary_zeros_observation_fields() {
-        let summary = empty_always_summary(50);
-        assert_eq!(summary.screenshot_id, None);
-        assert_eq!(summary.ax_tree_id, None);
-        assert_eq!(summary.screenshot_truncated, false);
-        assert!(summary.windows.is_null());
-        assert_eq!(summary.ax_diff.dispatch_ms, 50);
-    }
     // ====== verification_status_for_diff tests (feature/computer-act-outcome-3state) ======
-
     #[test]
     fn verification_status_verified_when_modified_greater_than_zero() {
         // changed > 0 → "verified" (AX diff 显示有变化, 动作生效)
@@ -648,8 +883,8 @@ mod tests {
     }
 
     #[test]
-    fn verification_status_preexisting_when_added_or_removed_but_not_modified() {
-        // changed == 0 但 added/removed > 0 → "preexisting" (AX 拓扑变了但 field 没变)
+    fn verification_status_verified_when_added_or_removed() {
+        // 元素增加或删除同样是可验证的动作后变化。
         let summary = AxDiffSummary {
             windows_added: 1,
             windows_removed: 0,
@@ -661,7 +896,7 @@ mod tests {
             dispatch_ms: 0,
             full_report: Value::Null,
         };
-        assert_eq!(verification_status_for_diff(&summary), "preexisting");
+        assert_eq!(verification_status_for_diff(&summary), "verified");
     }
 
     #[test]

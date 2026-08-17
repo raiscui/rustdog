@@ -19,6 +19,14 @@ when embedded. To assert structured response fields inside flow steps
 gains two new members: `response_field_equals(path, value)` and
 `response_path_contains(path, substring)`.
 
+The current flow runtime also has a deliberately narrow `GuiTransaction` step:
+it chains a first real ref/epoch mutation to later `$successor` mutations and
+stops at the first checked failure. This is not the rejected general-purpose
+`ComputerAct` step type. A flow can additionally set
+`policy.execution.strict_background:true`; the shared flow gate rejects
+foreground activation and raw physical input before dispatch while preserving
+semantic AX paths.
+
 Every successful `@computer-act` response carries a `density` block
 (shared with `@gui-probe`) and a `trace_summary` (4 entries:
 `implicit_observe / ref_resolve / dispatch / verify`, each with
@@ -37,9 +45,10 @@ Accepted.
   subset. K1 follows the existing rdog convention; K3's "actions list"
   would be a misleading static claim.
 - **F1 / F2 / F3 `@flow` integration**: allow as ControlLine (F1) ✅ /
-  forbid / add `ComputerAct` step type. F1 is the smallest surface-area
-  change that keeps the high-density guarantee; F3 duplicates
-  `ControlLine` semantics.
+  forbid / add a general-purpose `ComputerAct` step type. The later
+  `GuiTransaction` addition is narrower than F3: it only owns successor
+  chaining and first-error stopping, while each action still executes through
+  the existing line-control parser.
 - **U1 / U2 / U3 trace**: savefile-only / summary inline + opt-in savefile
   (U2) ✅ / full inline. U2 keeps the response payload small while
   exposing the four steps the agent loop cares about.
@@ -48,9 +57,10 @@ Accepted.
 
 - `@capabilities` schema is unchanged; `K1` means rdog version discovery
   remains the path for "is `@computer-act` even compiled in?".
-- `@flow` schema gains `policy.allow_computer_act` (default false) and
-  `Expect.kind` gains two structured-field members. Backward-compatible
-  because the new fields are opt-in.
+- `@flow` schema gains `policy.allow_computer_act` (default false), optional
+  `policy.execution.strict_background`, checked `GuiTransaction`, and two
+  structured-field `Expect.kind` members. Existing callers remain interactive
+  unless they explicitly select the new policy or step.
 - `density` field names are now shared between `@gui-probe` (read-only
   high-density) and `@computer-act` (side-effecting high-density); a
   future density benchmark suite can consume both without per-command

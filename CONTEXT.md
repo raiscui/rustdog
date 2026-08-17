@@ -55,3 +55,38 @@ _Avoid_: Ordinary input fallback, unclassified plaintext
 **Replay Parameter**:
 Replay 开始前由调用方显式提供,用于补全录制期未保存或无法可靠重建的输入值。
 _Avoid_: Embedded secret, template variable, stored credential
+
+**Post-action Evidence**:
+状态变更成功后,针对同一目标取得的新观察证据,用于判断显式 postcondition 是否满足。
+它不是动作返回成功本身,也不包含失败后的重新定位查询。
+_Avoid_: Any query after an action, recovery read
+
+**Recovery Observation**:
+`STALE_REF`、`OBSERVATION_EXPIRED` 或目标丢失后,为恢复目标身份而执行的新观察。
+它用于下一次 mutation 的重新定位,不能被当作上一次动作成功的 evidence。
+_Avoid_: Post-action evidence, verification proof
+
+**Successor Observation**:
+资源 lane 完成 mutation 并提交稳定 write epoch 后,针对原目标窗口生成的新 observation。
+它携带下一次 mutation 可消费的 successor target,其 ref 仍然是 observation-local。
+_Avoid_: Stable global ref, old observation with a new epoch
+
+**Canonical Mutation Path**:
+Agent 执行带有 ref、observation_id 和 epoch 的状态变更时,统一使用
+`@computer-act` 的结构化 mutation 路径;底层 `@type-text` 等 primitive 由该路径调用。
+_Avoid_: Direct primitive as the agent workflow contract
+
+**Explicit Postcondition**:
+由调用方提供、用于判断 mutation 结果的结构化 AX 条件。
+服务器不从输入 content 自动推断该条件;缺少条件时只能报告 dispatch 成功和 outcome unknown。
+_Avoid_: Implicit equality with requested input
+
+**Ref-backed Type Mutation**:
+带有 observation-local ref、observation_id 和 epoch 的 `@computer-act action:"type"`。
+它经过 PID resource lane,可生成 successor observation 并执行显式 postcondition。
+_Avoid_: Untargeted paste, direct low-level type-text workflow
+
+**Legacy Paste Path**:
+`action:"type"` 未提供 target 时的低级 paste 路径。
+它不拥有目标资源的 successor/postcondition 契约,只能作为无目标输入能力使用。
+_Avoid_: Verified text mutation

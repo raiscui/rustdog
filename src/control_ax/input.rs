@@ -12,9 +12,7 @@ use crate::control_protocol::{KeyDelivery, KeyRequest};
 use std::io;
 
 use super::types::*;
-use super::{
-    platform_key_delivery, AxBackend,
-};
+use super::{platform_key_delivery, AxBackend};
 
 // ---- perform_default_key_delivery (was lines 1076-1083) ----
 pub fn perform_default_key_delivery(request: &KeyRequest) -> io::Result<Option<KeyDeliveryReport>> {

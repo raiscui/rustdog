@@ -6,6 +6,7 @@ use crate::{
         resolve_observation_window_ref, DisplayRect, DisplayScope, DisplaySelector,
     },
     control_observation::{resolve_observation_ref, stale_observation_ref_error},
+    control_resource_lane::capture_resource_epochs,
     screenshot::current_display_summaries,
 };
 use std::{
@@ -186,6 +187,7 @@ struct ResolvedWindow {
 pub(super) fn find(request: &WindowFindRequest) -> io::Result<WindowFindResponse> {
     ensure_trusted()?;
 
+    let resource_capture = capture_resource_epochs();
     let meta = WindowSnapshotMeta::now();
     let all_candidates = enumerate_candidates(request.include_state, request.include_recipes)?;
     let mut candidates = all_candidates.clone();
@@ -201,6 +203,7 @@ pub(super) fn find(request: &WindowFindRequest) -> io::Result<WindowFindResponse
         &mut candidates,
         "@window-find",
         "macos",
+        &resource_capture,
     )?);
 
     Ok(WindowFindResponse {
@@ -2473,7 +2476,10 @@ mod tests {
             state: None,
             recipes: None,
         }];
-        let observation = attach_window_observation(&mut matches, "@window-find", "macos").unwrap();
+        let resource_capture = capture_resource_epochs();
+        let observation =
+            attach_window_observation(&mut matches, "@window-find", "macos", &resource_capture)
+                .unwrap();
         let target_ref = matches[0].ref_id.clone().unwrap();
         let find_response = WindowFindResponse {
             kind: "window-find",

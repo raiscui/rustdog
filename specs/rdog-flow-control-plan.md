@@ -9,6 +9,7 @@ Current v1 supports:
 - `Cmd`
 - `Script`
 - `ControlLine`
+- `GuiTransaction`
 - `SleepMs`
 - `Expect`
 - `SaveArtifact`
@@ -40,6 +41,10 @@ Core fields:
 - `policy.timeout_ms`: whole-flow timeout.
 - `policy.max_steps`: maximum finite step count.
 - `policy.max_output_bytes`: per-stream stdout/stderr capture limit.
+- `policy.execution.strict_background`: defaults to `false`. When `true`, the
+  flow rejects window activation/resize/open-app plus raw pointer, raw keyboard,
+  legacy paste, and keyboard/clipboard text delivery before dispatch. Semantic
+  AX action and AX-value text mutation remain available.
 - `options.trace`: `summary` by default; `savefile` returns `flow-trace-<id>.jsonl`.
 
 ## Semantics
@@ -48,6 +53,13 @@ Core fields:
 - `SaveArtifact` can exfiltrate daemon-local files, so it requires `policy.allow_file_read:true`.
 - Controller-local files must be inlined or uploaded before the daemon can use them.
 - `ControlLine` executes through the existing line-control parser and core executor.
+- `GuiTransaction` is a checked sequence of at most 20 `@computer-act` actions.
+  The first action must carry a real `args.target:{ref,observation_id}`, matching
+  request-level `observation_id`, and request-level `epoch`. Every later action uses `target:"$successor"` and
+  top-level `observation_id:"$successor"`, and `epoch:$successor`; the daemon injects the previous response's
+  `successor_target:{ref,observation_id,epoch}`. A nonzero response or missing
+  successor stops the transaction and records `completed_actions` plus
+  `stopped_at` in the final flow summary.
 - Inner `ResponseLine` is consumed into flow state and is not forwarded directly.
 - Inner `SaveFile` and `SaveArtifact` become outer `@savefile` frames.
 - Final response is always one `@flow` summary.
@@ -106,9 +118,13 @@ sequenceDiagram
 
 - Parser/schema: `src/control_flow.rs`, `ControlCommand::Flow`, `src/control_protocol/tests/flow.rs`.
 - Runtime: `execute_flow_request` in `src/control_flow.rs`.
+- Checked transaction and strict-background gate: `src/control_flow.rs`.
 - Core integration: `src/control_core.rs::execute_explicit_control_request`.
 - Shell execution reuses `control_actions::build_shell_command`.
 - Result framing reuses `ControlExecutionOutcome`, `ControlFrame`, and `SaveFileFrame`.
+  Every model-visible response is capped at 48 KiB or 2000 wire lines. Overflow
+  returns a UTF-8-safe preview, total bytes/lines, and a SHA-256 content identity;
+  it deliberately does not invent session-local continuation state.
 
 ## Verification
 
