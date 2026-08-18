@@ -118,6 +118,8 @@ pub struct AxGetRequest {
     pub depth: u8,
     pub max_elements: u16,
     pub include_values: bool,
+    /// 只读缓存查询要求的资源 epoch。缺省时保持 live capture 语义。
+    pub epoch: Option<u64>,
 }
 
 impl AxGetRequest {
@@ -654,6 +656,7 @@ pub fn parse_ax_get_payload(input: &str) -> io::Result<AxGetRequest> {
     let mut depth = None::<u8>;
     let mut max_elements = None::<u16>;
     let mut include_values = None::<bool>;
+    let mut epoch = None::<u64>;
 
     for field in split_object_fields(inner)? {
         let (field_name, raw_value) = split_object_field(field)?;
@@ -686,6 +689,12 @@ pub fn parse_ax_get_payload(input: &str) -> io::Result<AxGetRequest> {
                 "@ax-get",
                 parse_bool_literal("@ax-get", "include_values", raw_value)?,
             )?,
+            "epoch" => assign_once(
+                &mut epoch,
+                "epoch",
+                "@ax-get",
+                parse_u64_literal("@ax-get", "epoch", raw_value)?,
+            )?,
             _ => {
                 return Err(invalid_data(format!(
                     "@ax-get 对象 payload 包含未知字段: {field_name}"
@@ -700,6 +709,7 @@ pub fn parse_ax_get_payload(input: &str) -> io::Result<AxGetRequest> {
         depth: depth.unwrap_or(preset.depth),
         max_elements: max_elements.unwrap_or(preset.max_elements),
         include_values: include_values.unwrap_or(preset.include_values),
+        epoch,
     })
 }
 
@@ -809,7 +819,11 @@ pub fn build_ax_get_response_json(
     snapshot: &AxSnapshot,
     request: &AxGetRequest,
 ) -> io::Result<String> {
-    let snapshot = snapshot.clone().with_observation("@ax-get")?;
+    let snapshot = if snapshot.observation.is_some() {
+        snapshot.clone()
+    } else {
+        snapshot.clone().with_observation("@ax-get")?
+    };
     let target_id = resolve_target_id_in_snapshot(&snapshot, &request.target)?;
     let target_ref = request.target.ref_id.clone();
 
@@ -985,6 +999,13 @@ fn parse_non_empty_string(kind: &str, input: &str) -> io::Result<String> {
         return Err(invalid_data(format!("{kind} 不能为空")));
     }
     Ok(value)
+}
+
+fn parse_u64_literal(kind: &str, field: &str, input: &str) -> io::Result<u64> {
+    input
+        .trim()
+        .parse::<u64>()
+        .map_err(|_| invalid_data(format!("{kind}.{field} 必须是非负整数")))
 }
 
 fn target_id_path_depth(target_id: &str) -> Option<u8> {
@@ -1226,5 +1247,13 @@ mod tests {
         let request =
             parse_ax_get_payload(r#"{target:{id:"pid:1/window:0/path:1.2.3"},depth:2}"#).unwrap();
         assert_eq!(request.tree_request().depth, 5);
+    }
+
+    #[test]
+    fn get_request_should_parse_optional_epoch_for_cached_queries() {
+        let request =
+            parse_ax_get_payload(r#"{target:{ref:"@e1",observation_id:"obs-1"},epoch:7}"#).unwrap();
+        assert_eq!(request.epoch, Some(7));
+        assert!(parse_ax_get_payload(r#"{target:{id:"pid:1/window:0"},epoch:-1}"#).is_err());
     }
 }

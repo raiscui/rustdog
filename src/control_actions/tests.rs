@@ -43,6 +43,7 @@ fn ax_get_ref_capture_uses_the_observation_target_window() {
         depth: 1,
         max_elements: 20,
         include_values: true,
+        epoch: None,
     };
     let global_called = Cell::new(false);
 
@@ -69,6 +70,26 @@ fn ax_get_ref_capture_uses_the_observation_target_window() {
 
     assert!(!global_called.get());
     assert!(!snapshot.truncated);
+}
+
+#[test]
+fn ax_tree_executor_uses_cached_observation_without_live_capture() {
+    let observed = crate::control_ax::AxSnapshot::complete("test", Vec::new(), false)
+        .with_observation("@ax-tree")
+        .expect("测试 observation 应创建成功");
+    let header = observed
+        .observation
+        .as_ref()
+        .expect("应有 observation header");
+    let request = crate::control_ax::AxTreeRequest {
+        observation_id: Some(header.observation_id.clone()),
+        epoch: Some(header.created_at_unix_ms),
+        ..crate::control_ax::AxTreeRequest::default()
+    };
+
+    let result = super::execute_ax_tree(&request).expect("缓存 @ax-tree 应直接返回");
+    let response = result.response_value_json.expect("应返回 AX tree JSON");
+    assert!(response.contains(r#""kind":"ax-tree""#));
 }
 
 #[test]

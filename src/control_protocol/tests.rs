@@ -494,6 +494,8 @@ fn parse_should_support_ax_tree_and_ax_commands() {
                 depth: 4,
                 max_elements: 1000,
                 include_values: DEFAULT_AX_INCLUDE_VALUES,
+                observation_id: None,
+                epoch: None,
             }),
         })
     );
@@ -508,6 +510,8 @@ fn parse_should_support_ax_tree_and_ax_commands() {
                 depth: crate::control_ax::AX_INTERACTIVE_DEPTH,
                 max_elements: crate::control_ax::AX_INTERACTIVE_MAX_ELEMENTS,
                 include_values: crate::control_ax::AX_INTERACTIVE_INCLUDE_VALUES,
+                observation_id: None,
+                epoch: None,
             }),
         })
     );

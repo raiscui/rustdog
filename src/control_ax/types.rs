@@ -65,6 +65,10 @@ pub struct AxTreeRequest {
     pub depth: u8,
     pub max_elements: u16,
     pub include_values: bool,
+    /// 只读缓存查询使用的 observation 身份。缺省时保持 live capture 语义。
+    pub observation_id: Option<String>,
+    /// 缓存查询要求的观察 epoch。必须与 observation_id 成对出现。
+    pub epoch: Option<u64>,
 }
 
 // ---- was lines 97-100 ----

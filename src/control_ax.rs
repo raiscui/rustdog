@@ -1,18 +1,25 @@
 use crate::{
     control_observation::{
         observation_ref_name, record_observation_with_selectors_from_capture,
-        resolve_observation_ref, ObservationRefEntry, ObservationRoot,
+        resolve_observation_ref, resolve_observation_resource_epoch, ObservationRefEntry,
+        ObservationRoot,
     },
     control_protocol::{
         normalize_object_field_name, object_inner, parse_compact_fields, parse_quoted_payload,
         resolve_compact_selector, split_object_field, split_object_fields, CompactWindowSelector,
         KeyDelivery, KeyMode, KeyRequest,
     },
-    control_resource_lane::capture_resource_epochs,
+    control_resource_lane::{capture_resource_epochs, resource_key_from_backend_id},
     control_window::{resolve_unique_app_window_id, WindowActionReport, WindowActionVerifyReport},
 };
 use serde_json::json;
-use std::io;
+use sha2::{Digest, Sha256};
+use std::{
+    collections::{HashMap, VecDeque},
+    io,
+    sync::{Mutex, OnceLock},
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 #[cfg(test)]
 use crate::control_observation::record_observation_with_selectors;
@@ -39,6 +46,205 @@ use self::tree::{
 #[cfg(test)]
 use self::tree::{capture_ax_find_snapshot_with, capture_semantic_target_snapshot_with};
 pub use self::types::*;
+
+/// observation 产生的完整 AX snapshot 缓存。
+///
+/// 该缓存只由 observation 注册路径写入,查询路径只读。真实资源 epoch
+/// 仍由 control_resource_lane 维护,这里保存 capture-start 时的快照用于校验。
+#[derive(Debug, Clone)]
+struct AxObservationCacheEntry {
+    snapshot: AxSnapshot,
+    resource_epochs: HashMap<String, u64>,
+    content_hash: String,
+    captured_at_unix_ms: u64,
+}
+
+#[derive(Debug, Default)]
+struct AxObservationCache {
+    entries: HashMap<String, AxObservationCacheEntry>,
+    order: VecDeque<String>,
+}
+
+impl AxObservationCache {
+    fn insert(&mut self, snapshot: AxSnapshot) {
+        let Some(observation) = snapshot.observation.as_ref() else {
+            return;
+        };
+        // observation store 才是资源 epoch 的单一真相源。`with_observation`
+        // 会消费 snapshot 内的 capture,因此这里不能重新读取当前 epoch。
+        let mut resource_epochs = HashMap::new();
+        let mut record_ref = |ref_id: Option<&String>, backend_id: &str| {
+            let Some(ref_id) = ref_id else { return };
+            let Some(resource_key) = resource_key_from_backend_id(backend_id) else {
+                return;
+            };
+            if let Ok(Some(epoch)) =
+                resolve_observation_resource_epoch(&observation.observation_id, ref_id)
+            {
+                resource_epochs.insert(resource_key, epoch.epoch);
+            }
+        };
+        for window in &snapshot.windows {
+            record_ref(window.ref_id.as_ref(), &window.id);
+            for element in &window.elements {
+                record_ref(element.ref_id.as_ref(), &element.id);
+            }
+        }
+        let content_hash =
+            Sha256::digest(snapshot.to_tree_value_json().unwrap_or_default().as_bytes());
+        let observation_id = observation.observation_id.clone();
+        self.order.retain(|id| id != &observation_id);
+        self.order.push_back(observation_id.clone());
+        self.entries.insert(
+            observation_id,
+            AxObservationCacheEntry {
+                snapshot,
+                resource_epochs,
+                content_hash: format!("sha256:{content_hash:x}"),
+                captured_at_unix_ms: current_unix_ms(),
+            },
+        );
+        while self.order.len() > 64 {
+            if let Some(oldest) = self.order.pop_front() {
+                self.entries.remove(&oldest);
+            }
+        }
+    }
+
+    fn get(&self, observation_id: &str) -> Option<&AxObservationCacheEntry> {
+        self.entries.get(observation_id)
+    }
+}
+
+static AX_OBSERVATION_CACHE: OnceLock<Mutex<AxObservationCache>> = OnceLock::new();
+
+fn ax_observation_cache() -> &'static Mutex<AxObservationCache> {
+    AX_OBSERVATION_CACHE.get_or_init(|| Mutex::new(AxObservationCache::default()))
+}
+
+fn current_unix_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system time should be after unix epoch")
+        .as_millis() as u64
+}
+
+fn cache_error(code: &str, message: impl Into<String>) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::InvalidInput,
+        json!({
+            "ok": false,
+            "error_code": code,
+            "error_message": message.into(),
+            "retry": {
+                "strategy": "re_observe_then_retry",
+                "hint": "重新调 @observe 获取新的 observation_id 和 epoch"
+            }
+        })
+        .to_string(),
+    )
+}
+
+fn register_ax_observation_snapshot(snapshot: &AxSnapshot) {
+    if snapshot.capture_status != "complete" || snapshot.permission_status != "granted" {
+        return;
+    }
+    if let Ok(mut cache) = ax_observation_cache().lock() {
+        cache.insert(snapshot.clone());
+    }
+}
+
+fn resolve_cached_snapshot(
+    observation_id: &str,
+    expected_epoch: u64,
+    resource_key: Option<&str>,
+) -> io::Result<AxSnapshot> {
+    crate::control_observation::resolve_observation_header(observation_id)
+        .map_err(|_| cache_error("stale_observation_cache", "observation 已过期或不存在"))?;
+    let current_resources = capture_resource_epochs();
+    let cache = ax_observation_cache()
+        .lock()
+        .map_err(|_| io::Error::other("AX observation cache lock poisoned"))?;
+    let Some(entry) = cache.get(observation_id) else {
+        return Err(cache_error(
+            "stale_observation_cache",
+            "observation 没有可用的完整 AX snapshot",
+        ));
+    };
+    let Some(observation) = entry.snapshot.observation.as_ref() else {
+        return Err(cache_error(
+            "stale_observation_cache",
+            "缓存 snapshot 缺少 observation identity",
+        ));
+    };
+    if observation.observation_id != observation_id {
+        return Err(cache_error(
+            "stale_observation_cache",
+            "缓存 snapshot 与请求 observation identity 不一致",
+        ));
+    }
+
+    if let Some(resource_key) = resource_key {
+        let Some(captured_epoch) = entry.resource_epochs.get(resource_key) else {
+            return Err(cache_error(
+                "cache_unavailable",
+                "目标 ref 不属于可缓存的 PID resource",
+            ));
+        };
+        if *captured_epoch != expected_epoch
+            || current_resources.snapshot(resource_key).epoch != *captured_epoch
+        {
+            return Err(cache_error(
+                "stale_observation_cache",
+                format!(
+                    "resource {resource_key} 的 capture epoch 已变化,缓存 content_hash={},captured_at={}",
+                    entry.content_hash, entry.captured_at_unix_ms
+                ),
+            ));
+        }
+    } else {
+        if observation.created_at_unix_ms != expected_epoch {
+            return Err(cache_error(
+                "stale_observation_cache",
+                "observation epoch 与缓存 header 不一致",
+            ));
+        }
+        if entry
+            .resource_epochs
+            .iter()
+            .any(|(resource_key, epoch)| current_resources.snapshot(resource_key).epoch != *epoch)
+        {
+            return Err(cache_error(
+                "stale_observation_cache",
+                "observation 内至少一个 PID resource 已发生 mutation",
+            ));
+        }
+    }
+    Ok(entry.snapshot.clone())
+}
+
+/// 为 @ax-tree 提供 observation-scoped 的完整只读 snapshot。
+pub fn resolve_cached_ax_tree(observation_id: &str, expected_epoch: u64) -> io::Result<AxSnapshot> {
+    resolve_cached_snapshot(observation_id, expected_epoch, None)
+}
+
+/// 为 @ax-get 提供绑定 ref 所属 PID resource 的只读 snapshot。
+pub fn resolve_cached_ax_get(
+    observation_id: &str,
+    ref_id: &str,
+    expected_epoch: u64,
+) -> io::Result<AxSnapshot> {
+    let entry = resolve_observation_ref(observation_id, ref_id)?;
+    let Some(resource_key) =
+        crate::control_resource_lane::resource_key_from_backend_id(&entry.backend_id)
+    else {
+        return Err(cache_error(
+            "cache_unavailable",
+            "目标 ref 没有可证明的 PID resource ownership",
+        ));
+    };
+    resolve_cached_snapshot(observation_id, expected_epoch, Some(&resource_key))
+}
 
 impl AxMode {
     pub fn preset(self) -> AxModePreset {
@@ -70,6 +276,8 @@ impl Default for AxTreeRequest {
             depth: DEFAULT_AX_DEPTH,
             max_elements: DEFAULT_AX_MAX_ELEMENTS,
             include_values: DEFAULT_AX_INCLUDE_VALUES,
+            observation_id: None,
+            epoch: None,
         }
     }
 }
@@ -319,6 +527,7 @@ impl AxSnapshot {
             selector_drafts,
             &resource_capture,
         )?);
+        register_ax_observation_snapshot(&self);
         Ok(self)
     }
 
@@ -1092,6 +1301,8 @@ pub fn parse_ax_tree_payload(input: &str) -> io::Result<AxTreeRequest> {
     let mut depth = None::<u8>;
     let mut max_elements = None::<u16>;
     let mut include_values = None::<bool>;
+    let mut observation_id = None::<String>;
+    let mut epoch = None::<u64>;
 
     for field in split_object_fields(inner)? {
         let (field_name, raw_value) = split_object_field(field)?;
@@ -1124,12 +1335,30 @@ pub fn parse_ax_tree_payload(input: &str) -> io::Result<AxTreeRequest> {
                 "@ax-tree",
                 parse_bool_literal("@ax-tree", "include_values", raw_value)?,
             )?,
+            "observation_id" => assign_once(
+                &mut observation_id,
+                "observation_id",
+                "@ax-tree",
+                parse_non_empty_string("@ax-tree.observation_id", raw_value)?,
+            )?,
+            "epoch" => assign_once(
+                &mut epoch,
+                "epoch",
+                "@ax-tree",
+                parse_u64_literal("@ax-tree", "epoch", raw_value)?,
+            )?,
             _ => {
                 return Err(invalid_data(format!(
                     "@ax-tree 对象 payload 包含未知字段: {field_name}"
                 )))
             }
         }
+    }
+
+    if observation_id.is_some() != epoch.is_some() {
+        return Err(invalid_data(
+            "@ax-tree observation_id 和 epoch 必须成对出现",
+        ));
     }
 
     let preset = mode.unwrap_or(AxMode::Full).preset();
@@ -1139,6 +1368,8 @@ pub fn parse_ax_tree_payload(input: &str) -> io::Result<AxTreeRequest> {
         depth: depth.unwrap_or(preset.depth),
         max_elements: max_elements.unwrap_or(preset.max_elements),
         include_values: include_values.unwrap_or(preset.include_values),
+        observation_id,
+        epoch,
     })
 }
 
@@ -1873,6 +2104,13 @@ fn parse_non_empty_string(kind: &str, input: &str) -> io::Result<String> {
     Ok(value)
 }
 
+fn parse_u64_literal(kind: &str, field: &str, input: &str) -> io::Result<u64> {
+    input
+        .trim()
+        .parse::<u64>()
+        .map_err(|_| invalid_data(format!("{kind}.{field} 必须是非负整数")))
+}
+
 fn matches_optional(expected: &Option<String>, actual: Option<&str>) -> bool {
     match expected {
         Some(expected) => actual == Some(expected.as_str()),
@@ -2273,6 +2511,8 @@ mod tests {
                 depth: 4,
                 max_elements: 1000,
                 include_values: false,
+                observation_id: None,
+                epoch: None,
             }
         );
         assert!(parse_ax_tree_payload(r#"{depth:0}"#).is_err());
@@ -2285,8 +2525,121 @@ mod tests {
                 depth: AX_WINDOWS_DEPTH,
                 max_elements: AX_WINDOWS_MAX_ELEMENTS,
                 include_values: AX_WINDOWS_INCLUDE_VALUES,
+                observation_id: None,
+                epoch: None,
             }
         );
+    }
+
+    #[test]
+    fn parse_ax_tree_payload_should_require_cached_fields_as_a_pair() {
+        let request =
+            parse_ax_tree_payload(r#"{observation_id:"obs-1",epoch:42,mode:"windows"}"#).unwrap();
+        assert_eq!(request.observation_id.as_deref(), Some("obs-1"));
+        assert_eq!(request.epoch, Some(42));
+        assert!(parse_ax_tree_payload(r#"{observation_id:"obs-1"}"#).is_err());
+        assert!(parse_ax_tree_payload(r#"{epoch:42}"#).is_err());
+    }
+
+    #[test]
+    fn cached_ax_snapshot_should_round_trip_and_reject_stale_epoch() {
+        let snapshot = AxSnapshot::complete(
+            "test",
+            vec![AxWindow {
+                id: "pid:991241/window:0".to_owned(),
+                ref_id: None,
+                pid: 991241,
+                process_name: "Test".to_owned(),
+                title: Some("Window".to_owned()),
+                role: "AXWindow".to_owned(),
+                subrole: None,
+                rect: None,
+                focused: None,
+                elements: Vec::new(),
+            }],
+            false,
+        );
+        let observed = snapshot.with_observation("@ax-tree").unwrap();
+        let observation = observed.observation.as_ref().unwrap();
+        let cached =
+            resolve_cached_ax_tree(&observation.observation_id, observation.created_at_unix_ms)
+                .unwrap();
+        assert_eq!(cached.windows[0].id, "pid:991241/window:0");
+
+        let stale = resolve_cached_ax_tree(
+            &observation.observation_id,
+            observation.created_at_unix_ms.saturating_add(1),
+        )
+        .unwrap_err();
+        assert!(stale.to_string().contains("stale_observation_cache"));
+    }
+
+    #[test]
+    fn cached_ax_get_should_reject_resource_epoch_after_write() {
+        let snapshot = AxSnapshot::complete(
+            "test",
+            vec![AxWindow {
+                id: "pid:991242/window:0".to_owned(),
+                ref_id: None,
+                pid: 991242,
+                process_name: "Test".to_owned(),
+                title: Some("Window".to_owned()),
+                role: "AXWindow".to_owned(),
+                subrole: None,
+                rect: None,
+                focused: None,
+                elements: vec![AxElement {
+                    id: "pid:991242/window:0/path:0".to_owned(),
+                    ref_id: None,
+                    role: "AXButton".to_owned(),
+                    subrole: None,
+                    name: Some("OK".to_owned()),
+                    value: None,
+                    value_redacted: false,
+                    description: None,
+                    rect: None,
+                    enabled: Some(true),
+                    actions: vec!["AXPress".to_owned()],
+                    ax_path: vec![0],
+                    children: Vec::new(),
+                }],
+            }],
+            false,
+        );
+        let observed = snapshot.with_observation("@ax-tree").unwrap();
+        let observation_id = observed
+            .observation
+            .as_ref()
+            .unwrap()
+            .observation_id
+            .clone();
+        let ref_id = observed.windows[0].elements[0].ref_id.clone().unwrap();
+        let epoch = crate::control_observation::resolve_observation_resource_epoch(
+            &observation_id,
+            &ref_id,
+        )
+        .unwrap()
+        .unwrap()
+        .epoch;
+        let resource = crate::control_resource_lane::snapshot_resource_epoch("pid:991242");
+        crate::control_resource_lane::with_resource_write(&resource, || Ok(()))
+            .unwrap()
+            .unwrap();
+
+        let stale = resolve_cached_ax_get(&observation_id, &ref_id, epoch).unwrap_err();
+        assert!(stale.to_string().contains("stale_observation_cache"));
+    }
+
+    #[test]
+    fn cached_ax_queries_should_fail_closed_for_unknown_observation_or_ref() {
+        let unknown = resolve_cached_ax_tree("obs-does-not-exist", 1).unwrap_err();
+        assert!(unknown.to_string().contains("stale_observation_cache"));
+        let snapshot = AxSnapshot::complete("test", Vec::new(), false)
+            .with_observation("@ax-tree")
+            .unwrap();
+        let observation_id = snapshot.observation.unwrap().observation_id;
+        let missing_ref = resolve_cached_ax_get(&observation_id, "@e404", 0).unwrap_err();
+        assert!(!missing_ref.to_string().is_empty());
     }
 
     #[test]

@@ -1053,7 +1053,18 @@ fn execute_mouse_plan_with_target_resolution(
 fn execute_ax_tree(
     request: &crate::control_ax::AxTreeRequest,
 ) -> io::Result<ActionExecutionResult> {
-    let snapshot = capture_default_ax_snapshot(request)?.with_observation("@ax-tree")?;
+    let snapshot = match (&request.observation_id, request.epoch) {
+        (Some(observation_id), Some(epoch)) => {
+            crate::control_ax::resolve_cached_ax_tree(observation_id, epoch)?
+        }
+        (None, None) => capture_default_ax_snapshot(request)?.with_observation("@ax-tree")?,
+        _ => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "缓存 @ax-tree 必须同时提供 observation_id 和 epoch",
+            ))
+        }
+    };
     Ok(ActionExecutionResult {
         exit_code: 0,
         stdout: Vec::new(),
@@ -1075,11 +1086,29 @@ fn execute_ax_find(
 }
 
 fn execute_ax_get(request: &crate::control_ax::AxGetRequest) -> io::Result<ActionExecutionResult> {
-    let snapshot = capture_ax_get_snapshot_with(
-        request,
-        capture_default_ax_snapshot,
-        capture_current_ax_window_snapshot,
-    )?;
+    let snapshot = match (request.target.observation_id.as_deref(), request.epoch) {
+        (Some(observation_id), Some(epoch)) => crate::control_ax::resolve_cached_ax_get(
+            observation_id,
+            request.target.ref_id.as_deref().ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "缓存 @ax-get 必须使用 observation-local ref",
+                )
+            })?,
+            epoch,
+        )?,
+        (None, None) => capture_ax_get_snapshot_with(
+            request,
+            capture_default_ax_snapshot,
+            capture_current_ax_window_snapshot,
+        )?,
+        _ => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "缓存 @ax-get 必须同时提供 target.observation_id 和 epoch",
+            ))
+        }
+    };
     Ok(ActionExecutionResult {
         exit_code: 0,
         stdout: Vec::new(),
