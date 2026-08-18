@@ -18,6 +18,9 @@ use std::{
 struct TraceBuffer(Arc<Mutex<Vec<u8>>>);
 
 #[cfg(target_os = "macos")]
+static TIMEOUT_TRACE_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+#[cfg(target_os = "macos")]
 struct TraceBufferWriter(TraceBuffer);
 
 #[cfg(target_os = "macos")]
@@ -47,6 +50,9 @@ impl<'writer> tracing_subscriber::fmt::MakeWriter<'writer> for TraceBuffer {
 
 #[cfg(target_os = "macos")]
 fn capture_trace<R>(operation: impl FnOnce() -> R) -> (R, String) {
+    let _guard = TIMEOUT_TRACE_TEST_LOCK
+        .lock()
+        .expect("timeout trace test lock should not be poisoned");
     let buffer = TraceBuffer::default();
     let subscriber = tracing_subscriber::fmt()
         .without_time()
@@ -69,6 +75,9 @@ fn capture_trace<R>(operation: impl FnOnce() -> R) -> (R, String) {
 #[cfg(target_os = "macos")]
 #[test]
 fn bounded_capture_should_timeout_once_and_keep_worker_count_bounded() {
+    let _guard = TIMEOUT_TRACE_TEST_LOCK
+        .lock()
+        .expect("timeout trace test lock should not be poisoned");
     static TEST_CAPTURE_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
     TEST_CAPTURE_IN_FLIGHT.store(false, Ordering::Release);
 
