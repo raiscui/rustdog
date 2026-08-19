@@ -117,6 +117,8 @@ pub struct ObservationConfig {
     pub state_dir: Option<PathBuf>,
     pub retention_observations: usize,
     pub retention_bytes: u64,
+    pub cleanup_interval_seconds: u64,
+    pub retention_days: u64,
     pub persist_values: bool,
     pub persist_screenshots: bool,
     pub write_ref_cache: bool,
@@ -241,6 +243,8 @@ impl Default for ObservationConfig {
             state_dir: None,
             retention_observations: 256,
             retention_bytes: 50 * 1024 * 1024,
+            cleanup_interval_seconds: 60 * 60,
+            retention_days: 7,
             persist_values: false,
             persist_screenshots: false,
             write_ref_cache: true,
@@ -336,6 +340,25 @@ pub fn write_example_configs_in_place(force: bool) -> io::Result<Vec<PathBuf>> {
     write_example_configs(force)
 }
 
+/// 用户级默认配置目录 (`~/.rdog/`)。
+///
+/// 解析优先级:
+/// - `$HOME/.rdog` (unix) / `%USERPROFILE%\.rdog` (Windows)
+///
+/// `$HOME` / `%USERPROFILE%` 未设置时返回 `None`,调用方跳过用户目录档,
+/// 保持与现有 cwd 行为一致 (不因用户目录缺失而失败)。
+pub fn resolve_user_config_dir() -> Option<PathBuf> {
+    if cfg!(windows) {
+        std::env::var_os("USERPROFILE")
+            .map(PathBuf::from)
+            .map(|home| home.join(".rdog"))
+    } else {
+        std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .map(|home| home.join(".rdog"))
+    }
+}
+
 fn build_figment(config_path: Option<&Path>) -> io::Result<Figment> {
     let mut figment = Figment::from(Serialized::defaults(DaemonConfig::default()));
 
@@ -354,6 +377,15 @@ fn build_figment(config_path: Option<&Path>) -> io::Result<Figment> {
 
         figment = figment.merge(Toml::file(&resolved_path));
     } else {
+        // 分层查找 (后 merge 覆盖前 merge):
+        // 1. 用户级默认目录 `~/.rdog/<platform>.toml` (本机默认 daemon 的配置真相源)
+        // 2. cwd 平台文件 + legacy 候选 (项目级覆盖)
+        if let Some(user_dir) = resolve_user_config_dir() {
+            let user_candidate = user_dir.join(default_platform_config_file_name());
+            if user_candidate.exists() {
+                figment = figment.merge(Toml::file(&user_candidate));
+            }
+        }
         for candidate_path in default_config_file_candidates() {
             if candidate_path.exists() {
                 // 新 `rdog_*` 文件是默认真相源。
@@ -411,14 +443,24 @@ fn example_config_templates() -> [(&'static str, &'static str); 3] {
 fn write_example_configs(force: bool) -> io::Result<Vec<PathBuf>> {
     let templates = example_config_templates();
 
+    // 默认写入用户级配置目录 `~/.rdog/`;该目录不存在时创建。
+    let target_dir = resolve_user_config_dir().ok_or_else(|| {
+        io::Error::new(
+            ErrorKind::NotFound,
+            "无法解析用户配置目录: 未设置 $HOME (unix) / %USERPROFILE% (Windows)",
+        )
+    })?;
+    fs::create_dir_all(&target_dir)?;
+
     if !force {
-        for (path, _) in templates {
-            if Path::new(path).exists() {
+        for (file_name, _) in templates {
+            let path = target_dir.join(file_name);
+            if path.exists() {
                 return Err(io::Error::new(
                     ErrorKind::AlreadyExists,
                     format!(
                         "配置文件已存在: {}。如需覆盖,请使用 `rdog config init --force`",
-                        path
+                        path.display()
                     ),
                 ));
             }
@@ -426,9 +468,10 @@ fn write_example_configs(force: bool) -> io::Result<Vec<PathBuf>> {
     }
 
     let mut written_paths = Vec::with_capacity(templates.len());
-    for (path, contents) in templates {
-        fs::write(path, contents)?;
-        written_paths.push(PathBuf::from(path));
+    for (file_name, contents) in templates {
+        let path = target_dir.join(file_name);
+        fs::write(&path, contents)?;
+        written_paths.push(path);
     }
 
     Ok(written_paths)
@@ -538,6 +581,20 @@ fn validate_observation_config(config: &ObservationConfig) -> io::Result<()> {
         return Err(io::Error::new(
             ErrorKind::InvalidInput,
             "observation.retention_bytes 不能小于 1 MiB",
+        ));
+    }
+
+    if config.cleanup_interval_seconds == 0 {
+        return Err(io::Error::new(
+            ErrorKind::InvalidInput,
+            "observation.cleanup_interval_seconds 必须大于 0",
+        ));
+    }
+
+    if config.retention_days == 0 {
+        return Err(io::Error::new(
+            ErrorKind::InvalidInput,
+            "observation.retention_days 必须大于 0",
         ));
     }
 
@@ -876,6 +933,103 @@ shell = "/bin/bash"
             });
         }
 
+        /// 写一份合法(启用 inbound)的配置文本,port 可调以便区分来源。
+        fn valid_inbound_config(port: u16) -> String {
+            format!(
+                r#"[inbound]
+enabled = true
+host = "127.0.0.1"
+port = {port}
+shell = "/bin/bash"
+"#
+            )
+        }
+
+        fn write_user_config(jail: &mut figment::Jail, contents: &str) -> PathBuf {
+            let home = jail.directory().to_path_buf();
+            jail.set_env("HOME", home.to_string_lossy().as_ref());
+            let user_dir = home.join(".rdog");
+            std::fs::create_dir_all(&user_dir).expect("user dir should be created");
+            let path = user_dir.join(default_platform_config_file_name());
+            std::fs::write(&path, contents).expect("user config should be written");
+            path
+        }
+
+        #[test]
+        fn should_load_user_config_dir_when_cwd_has_no_platform_file() {
+            Jail::expect_with(|jail| {
+                jail.clear_env();
+                write_user_config(jail, &valid_inbound_config(7777));
+
+                let config = load_daemon_config(None).map_err(to_figment_error)?;
+
+                assert_eq!(config.inbound.port, Some(7777));
+                Ok(())
+            });
+        }
+
+        #[test]
+        fn should_prefer_cwd_platform_file_over_user_config_dir() {
+            Jail::expect_with(|jail| {
+                jail.clear_env();
+                write_user_config(jail, &valid_inbound_config(7777));
+                jail.create_file(
+                    default_platform_config_file_name(),
+                    &valid_inbound_config(8888),
+                )?;
+
+                let config = load_daemon_config(None).map_err(to_figment_error)?;
+
+                assert_eq!(config.inbound.port, Some(8888));
+                Ok(())
+            });
+        }
+
+        #[test]
+        fn should_let_environment_override_user_config_dir() {
+            Jail::expect_with(|jail| {
+                jail.clear_env();
+                write_user_config(jail, &valid_inbound_config(7777));
+                jail.set_env("RDOG_INBOUND__PORT", "9999");
+
+                let config = load_daemon_config(None).map_err(to_figment_error)?;
+
+                assert_eq!(config.inbound.port, Some(9999));
+                Ok(())
+            });
+        }
+
+        #[test]
+        fn should_skip_user_config_dir_when_home_is_unset() {
+            Jail::expect_with(|jail| {
+                jail.clear_env();
+                jail.create_file(
+                    default_platform_config_file_name(),
+                    &valid_inbound_config(8888),
+                )?;
+
+                let config = load_daemon_config(None).map_err(to_figment_error)?;
+
+                assert_eq!(config.inbound.port, Some(8888));
+                Ok(())
+            });
+        }
+
+        #[test]
+        fn should_ignore_user_config_dir_when_explicit_config_is_given() {
+            Jail::expect_with(|jail| {
+                jail.clear_env();
+                write_user_config(jail, &valid_inbound_config(7777));
+                let explicit = jail.directory().join("explicit.toml");
+                std::fs::write(&explicit, valid_inbound_config(6666)).map_err(to_figment_error)?;
+
+                let config = load_daemon_config(Some(&explicit)).map_err(to_figment_error)?;
+
+                assert_eq!(config.inbound.port, Some(6666));
+                Ok(())
+            });
+        }
+
         #[test]
         fn should_fail_when_enabled_outbound_is_missing_host() {
             Jail::expect_with(|jail| {
@@ -1045,6 +1199,8 @@ durable_enabled = true
 state_dir = "custom-observations"
 retention_observations = 16
 retention_bytes = 2097152
+cleanup_interval_seconds = 17
+retention_days = 8
 persist_values = false
 persist_screenshots = false
 write_ref_cache = true
@@ -1067,6 +1223,8 @@ shell = "/bin/bash"
                 );
                 assert_eq!(config.observation.retention_observations, 32);
                 assert_eq!(config.observation.retention_bytes, 2_097_152);
+                assert_eq!(config.observation.cleanup_interval_seconds, 17);
+                assert_eq!(config.observation.retention_days, 8);
                 assert!(!config.observation.persist_values);
                 assert!(!config.observation.persist_screenshots);
                 assert!(config.observation.write_ref_cache);
@@ -1121,6 +1279,32 @@ shell = "/bin/bash"
 
                 assert_eq!(err.kind(), ErrorKind::InvalidInput);
                 assert!(err.to_string().contains("retention_bytes"));
+                Ok(())
+            });
+        }
+
+        #[test]
+        fn should_reject_zero_observation_cleanup_limits() {
+            Jail::expect_with(|jail| {
+                jail.clear_env();
+                jail.create_file(
+                    default_platform_config_file_name(),
+                    r#"[observation]
+cleanup_interval_seconds = 0
+retention_days = 0
+
+[inbound]
+enabled = true
+host = "127.0.0.1"
+port = 4444
+shell = "/bin/bash"
+"#,
+                )?;
+
+                let err = load_daemon_config(None).unwrap_err();
+
+                assert_eq!(err.kind(), ErrorKind::InvalidInput);
+                assert!(err.to_string().contains("cleanup_interval_seconds"));
                 Ok(())
             });
         }
@@ -1479,29 +1663,47 @@ shell = "/bin/bash"
         use super::*;
         use std::fs;
 
+        /// 把 HOME 指向 jail 目录,使 `~/.rdog` 解析到 `<jail>/.rdog`。
+        fn point_home_at_jail(jail: &mut figment::Jail) -> PathBuf {
+            let home = jail.directory().to_path_buf();
+            jail.set_env("HOME", home.to_string_lossy().as_ref());
+            home
+        }
+
+        fn user_config_dir(home: &Path) -> PathBuf {
+            home.join(".rdog")
+        }
+
         #[test]
-        fn should_create_all_platform_config_templates_when_files_are_missing() {
-            Jail::expect_with(|_| {
+        fn should_create_all_platform_config_templates_in_user_dir_when_files_are_missing() {
+            Jail::expect_with(|jail| {
+                jail.clear_env();
+                let home = point_home_at_jail(jail);
+                let user_dir = user_config_dir(&home);
+
                 let paths = write_example_configs_in_place(false).map_err(to_figment_error)?;
 
                 assert_eq!(
                     paths,
                     vec![
-                        PathBuf::from(WINDOWS_CONFIG_FILE_NAME),
-                        PathBuf::from(MACOS_CONFIG_FILE_NAME),
-                        PathBuf::from(LINUX_CONFIG_FILE_NAME),
+                        user_dir.join(WINDOWS_CONFIG_FILE_NAME),
+                        user_dir.join(MACOS_CONFIG_FILE_NAME),
+                        user_dir.join(LINUX_CONFIG_FILE_NAME),
                     ]
                 );
                 assert_eq!(
-                    fs::read_to_string(WINDOWS_CONFIG_FILE_NAME).map_err(to_figment_error)?,
+                    fs::read_to_string(user_dir.join(WINDOWS_CONFIG_FILE_NAME))
+                        .map_err(to_figment_error)?,
                     WINDOWS_EXAMPLE_CONFIG_TEMPLATE
                 );
                 assert_eq!(
-                    fs::read_to_string(MACOS_CONFIG_FILE_NAME).map_err(to_figment_error)?,
+                    fs::read_to_string(user_dir.join(MACOS_CONFIG_FILE_NAME))
+                        .map_err(to_figment_error)?,
                     MACOS_EXAMPLE_CONFIG_TEMPLATE
                 );
                 assert_eq!(
-                    fs::read_to_string(LINUX_CONFIG_FILE_NAME).map_err(to_figment_error)?,
+                    fs::read_to_string(user_dir.join(LINUX_CONFIG_FILE_NAME))
+                        .map_err(to_figment_error)?,
                     LINUX_EXAMPLE_CONFIG_TEMPLATE
                 );
                 Ok(())
@@ -1511,11 +1713,17 @@ shell = "/bin/bash"
         #[test]
         fn should_reject_existing_platform_config_file_without_force() {
             Jail::expect_with(|jail| {
-                jail.create_file(WINDOWS_CONFIG_FILE_NAME, "old")?;
+                jail.clear_env();
+                let home = point_home_at_jail(jail);
+                let user_dir = user_config_dir(&home);
+                fs::create_dir_all(&user_dir).map_err(to_figment_error)?;
+                fs::write(user_dir.join(WINDOWS_CONFIG_FILE_NAME), "old")
+                    .map_err(to_figment_error)?;
 
                 let err = write_example_configs_in_place(false).unwrap_err();
 
                 assert_eq!(err.kind(), ErrorKind::AlreadyExists);
+                assert!(err.to_string().contains(".rdog"));
                 Ok(())
             });
         }
@@ -1523,25 +1731,49 @@ shell = "/bin/bash"
         #[test]
         fn should_overwrite_existing_platform_config_files_when_force_enabled() {
             Jail::expect_with(|jail| {
-                jail.create_file(WINDOWS_CONFIG_FILE_NAME, "old")?;
-                jail.create_file(MACOS_CONFIG_FILE_NAME, "old")?;
-                jail.create_file(LINUX_CONFIG_FILE_NAME, "old")?;
+                jail.clear_env();
+                let home = point_home_at_jail(jail);
+                let user_dir = user_config_dir(&home);
+                fs::create_dir_all(&user_dir).map_err(to_figment_error)?;
+                for name in [
+                    WINDOWS_CONFIG_FILE_NAME,
+                    MACOS_CONFIG_FILE_NAME,
+                    LINUX_CONFIG_FILE_NAME,
+                ] {
+                    fs::write(user_dir.join(name), "old").map_err(to_figment_error)?;
+                }
 
                 let paths = write_example_configs_in_place(true).map_err(to_figment_error)?;
 
                 assert_eq!(paths.len(), 3);
                 assert_eq!(
-                    fs::read_to_string(WINDOWS_CONFIG_FILE_NAME).map_err(to_figment_error)?,
+                    fs::read_to_string(user_dir.join(WINDOWS_CONFIG_FILE_NAME))
+                        .map_err(to_figment_error)?,
                     WINDOWS_EXAMPLE_CONFIG_TEMPLATE
                 );
                 assert_eq!(
-                    fs::read_to_string(MACOS_CONFIG_FILE_NAME).map_err(to_figment_error)?,
+                    fs::read_to_string(user_dir.join(MACOS_CONFIG_FILE_NAME))
+                        .map_err(to_figment_error)?,
                     MACOS_EXAMPLE_CONFIG_TEMPLATE
                 );
                 assert_eq!(
-                    fs::read_to_string(LINUX_CONFIG_FILE_NAME).map_err(to_figment_error)?,
+                    fs::read_to_string(user_dir.join(LINUX_CONFIG_FILE_NAME))
+                        .map_err(to_figment_error)?,
                     LINUX_EXAMPLE_CONFIG_TEMPLATE
                 );
+                Ok(())
+            });
+        }
+
+        #[test]
+        fn should_fail_when_home_is_unset() {
+            Jail::expect_with(|jail| {
+                jail.clear_env();
+
+                let err = write_example_configs_in_place(false).unwrap_err();
+
+                assert_eq!(err.kind(), ErrorKind::NotFound);
+                assert!(err.to_string().contains("用户配置目录"));
                 Ok(())
             });
         }

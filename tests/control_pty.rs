@@ -110,6 +110,8 @@ fn wait_with_output_timeout(mut child: Child, timeout: Duration, context: &str) 
 fn spawn_control_daemon(port: u16) -> Child {
     Command::new(rdog_binary_path())
         .arg("daemon")
+        .env("RDOG_ZENOH__ENABLED", "false")
+        .env("RDOG_OBSERVATION__DURABLE_ENABLED", "false")
         .env("RDOG_DAEMON__RETRY_SECONDS", "1")
         .env("RDOG_OUTBOUND__ENABLED", "false")
         .env("RDOG_INBOUND__ENABLED", "true")
@@ -127,6 +129,8 @@ fn spawn_control_daemon(port: u16) -> Child {
 fn spawn_control_daemon_with_output(port: u16) -> Child {
     Command::new(rdog_binary_path())
         .arg("daemon")
+        .env("RDOG_ZENOH__ENABLED", "false")
+        .env("RDOG_OBSERVATION__DURABLE_ENABLED", "false")
         .env("RDOG_DAEMON__RETRY_SECONDS", "1")
         .env("RDOG_OUTBOUND__ENABLED", "false")
         .env("RDOG_INBOUND__ENABLED", "true")

@@ -522,11 +522,9 @@ fn run(opts: input::Opts) -> Result<(), String> {
             daemon_name,
             entry_point,
         } => {
-            let explicit_config_path = config.is_some();
             let daemon_config = config::load_daemon_config_unvalidated(config.as_deref())
                 .map_err(|err| err.to_string())?;
-            let transport =
-                resolve_daemon_transport(transport, explicit_config_path, &daemon_config);
+            let transport = resolve_daemon_transport(transport, &daemon_config);
 
             match transport {
                 Transport::Tcp => {
@@ -615,11 +613,13 @@ fn run(opts: input::Opts) -> Result<(), String> {
 
 fn resolve_daemon_transport(
     requested_transport: Option<Transport>,
-    explicit_config_path: bool,
     config: &config::DaemonConfig,
 ) -> Transport {
+    // 显式 `--transport` 最高优先;否则跟随合并后配置的 zenoh.enabled。
+    // 用户级配置目录 (`~/.rdog`) 引入后,无 `--config` 时也可能加载到 zenoh profile,
+    // 因此 transport 推断必须只看最终配置,不再要求 `--config` 显式传入。
     requested_transport.unwrap_or_else(|| {
-        if explicit_config_path && config.zenoh.enabled {
+        if config.zenoh.enabled {
             Transport::Zenoh
         } else {
             Transport::Tcp
@@ -700,7 +700,7 @@ mod tests {
         };
 
         assert_eq!(
-            resolve_daemon_transport(None, true, &config),
+            resolve_daemon_transport(None, &config),
             Transport::Zenoh
         );
     }
@@ -716,13 +716,24 @@ mod tests {
         };
 
         assert_eq!(
-            resolve_daemon_transport(Some(Transport::Tcp), true, &config),
+            resolve_daemon_transport(Some(Transport::Tcp), &config),
             Transport::Tcp
         );
     }
 
     #[test]
-    fn resolve_daemon_transport_should_keep_default_daemon_on_tcp_without_explicit_config() {
+    fn resolve_daemon_transport_should_keep_tcp_when_zenoh_is_disabled_in_config() {
+        let config = DaemonConfig::default();
+
+        assert_eq!(
+            resolve_daemon_transport(None, &config),
+            Transport::Tcp
+        );
+    }
+
+    #[test]
+    fn resolve_daemon_transport_should_infer_zenoh_without_explicit_config_path() {
+        // 用户级配置目录场景: 无 `--config`,但合并后配置 zenoh.enabled=true。
         let config = DaemonConfig {
             zenoh: ZenohConfig {
                 enabled: true,
@@ -732,8 +743,8 @@ mod tests {
         };
 
         assert_eq!(
-            resolve_daemon_transport(None, false, &config),
-            Transport::Tcp
+            resolve_daemon_transport(None, &config),
+            Transport::Zenoh
         );
     }
 }

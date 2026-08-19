@@ -173,6 +173,8 @@ fn daemon_control_lane_should_execute_script_via_rdog_control() {
     let binary = rdog_binary_path();
     let mut daemon = Command::new(&binary)
         .arg("daemon")
+        .env("RDOG_ZENOH__ENABLED", "false")
+        .env("RDOG_OBSERVATION__DURABLE_ENABLED", "false")
         .env("RDOG_OUTBOUND__ENABLED", "false")
         .env("RDOG_INBOUND__ENABLED", "true")
         .env("RDOG_INBOUND__HOST", "127.0.0.1")
@@ -235,6 +237,8 @@ fn daemon_control_lane_should_roundtrip_request_id_in_response() {
     let binary = rdog_binary_path();
     let mut daemon = Command::new(&binary)
         .arg("daemon")
+        .env("RDOG_ZENOH__ENABLED", "false")
+        .env("RDOG_OBSERVATION__DURABLE_ENABLED", "false")
         .env("RDOG_OUTBOUND__ENABLED", "false")
         .env("RDOG_INBOUND__ENABLED", "true")
         .env("RDOG_INBOUND__HOST", "127.0.0.1")
@@ -297,6 +301,8 @@ fn daemon_control_lane_should_accept_key_object_payload_with_request_id() {
     let binary = rdog_binary_path();
     let mut daemon = Command::new(&binary)
         .arg("daemon")
+        .env("RDOG_ZENOH__ENABLED", "false")
+        .env("RDOG_OBSERVATION__DURABLE_ENABLED", "false")
         .env("RDOG_OUTBOUND__ENABLED", "false")
         .env("RDOG_INBOUND__ENABLED", "true")
         .env("RDOG_INBOUND__HOST", "127.0.0.1")
@@ -361,6 +367,8 @@ fn daemon_control_lane_should_execute_screenshot_and_save_file_via_rdog_control(
     let workdir = temp_workdir("screenshot-smoke");
     let mut daemon = Command::new(&binary)
         .arg("daemon")
+        .env("RDOG_ZENOH__ENABLED", "false")
+        .env("RDOG_OBSERVATION__DURABLE_ENABLED", "false")
         .env("RDOG_OUTBOUND__ENABLED", "false")
         .env("RDOG_INBOUND__ENABLED", "true")
         .env("RDOG_INBOUND__HOST", "127.0.0.1")
@@ -476,6 +484,8 @@ fn daemon_control_lane_should_report_invalid_key_name_to_client() {
     let binary = rdog_binary_path();
     let mut daemon = Command::new(&binary)
         .arg("daemon")
+        .env("RDOG_ZENOH__ENABLED", "false")
+        .env("RDOG_OBSERVATION__DURABLE_ENABLED", "false")
         .env("RDOG_OUTBOUND__ENABLED", "false")
         .env("RDOG_INBOUND__ENABLED", "true")
         .env("RDOG_INBOUND__HOST", "127.0.0.1")
@@ -548,6 +558,8 @@ fn daemon_outbound_control_lane_should_execute_remote_script() {
 
     let mut daemon = Command::new(&binary)
         .arg("daemon")
+        .env("RDOG_ZENOH__ENABLED", "false")
+        .env("RDOG_OBSERVATION__DURABLE_ENABLED", "false")
         .env("RDOG_OUTBOUND__ENABLED", "true")
         .env("RDOG_OUTBOUND__HOST", "127.0.0.1")
         .env("RDOG_OUTBOUND__PORT", port.to_string())
@@ -861,6 +873,8 @@ fn control_one_shot_should_send_ping_and_exit_for_tcp_lane() {
     let binary = rdog_binary_path();
     let mut daemon = Command::new(&binary)
         .arg("daemon")
+        .env("RDOG_ZENOH__ENABLED", "false")
+        .env("RDOG_OBSERVATION__DURABLE_ENABLED", "false")
         .env("RDOG_OUTBOUND__ENABLED", "false")
         .env("RDOG_INBOUND__ENABLED", "true")
         .env("RDOG_INBOUND__HOST", "127.0.0.1")
@@ -912,6 +926,8 @@ fn control_one_shot_should_send_ping_with_request_id() {
     let binary = rdog_binary_path();
     let mut daemon = Command::new(&binary)
         .arg("daemon")
+        .env("RDOG_ZENOH__ENABLED", "false")
+        .env("RDOG_OBSERVATION__DURABLE_ENABLED", "false")
         .env("RDOG_OUTBOUND__ENABLED", "false")
         .env("RDOG_INBOUND__ENABLED", "true")
         .env("RDOG_INBOUND__HOST", "127.0.0.1")
@@ -996,6 +1012,8 @@ fn control_one_shot_should_accept_two_at_lines_and_run_in_order_for_tcp_lane() {
     let binary = rdog_binary_path();
     let mut daemon = Command::new(&binary)
         .arg("daemon")
+        .env("RDOG_ZENOH__ENABLED", "false")
+        .env("RDOG_OBSERVATION__DURABLE_ENABLED", "false")
         .env("RDOG_OUTBOUND__ENABLED", "false")
         .env("RDOG_INBOUND__ENABLED", "true")
         .env("RDOG_INBOUND__HOST", "127.0.0.1")
@@ -1059,6 +1077,8 @@ fn control_multi_one_shot_should_run_lines_in_order_for_tcp_lane() {
     let binary = rdog_binary_path();
     let mut daemon = Command::new(&binary)
         .arg("daemon")
+        .env("RDOG_ZENOH__ENABLED", "false")
+        .env("RDOG_OBSERVATION__DURABLE_ENABLED", "false")
         .env("RDOG_OUTBOUND__ENABLED", "false")
         .env("RDOG_INBOUND__ENABLED", "true")
         .env("RDOG_INBOUND__HOST", "127.0.0.1")
@@ -1127,6 +1147,8 @@ fn control_multi_one_shot_should_run_with_one_line_for_tcp_lane() {
     let binary = rdog_binary_path();
     let mut daemon = Command::new(&binary)
         .arg("daemon")
+        .env("RDOG_ZENOH__ENABLED", "false")
+        .env("RDOG_OBSERVATION__DURABLE_ENABLED", "false")
         .env("RDOG_OUTBOUND__ENABLED", "false")
         .env("RDOG_INBOUND__ENABLED", "true")
         .env("RDOG_INBOUND__HOST", "127.0.0.1")

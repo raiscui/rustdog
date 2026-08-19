@@ -185,6 +185,8 @@ fn start_daemon(binary: &Path) -> (DaemonGuard, u16) {
     fs::create_dir_all(&workdir).expect("应该能创建 daemon 临时目录");
     let child = Command::new(binary)
         .arg("daemon")
+        .env("RDOG_ZENOH__ENABLED", "false")
+        .env("RDOG_OBSERVATION__DURABLE_ENABLED", "false")
         .env("RDOG_OUTBOUND__ENABLED", "false")
         .env("RDOG_INBOUND__ENABLED", "true")
         .env("RDOG_INBOUND__HOST", "127.0.0.1")

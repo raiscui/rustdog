@@ -451,6 +451,8 @@ fn start_direct_daemon(binary: &Path, workdir: &Path, port: u16) -> ChildGuard {
     ChildGuard::new(
         Command::new(binary)
             .arg("daemon")
+            .env("RDOG_ZENOH__ENABLED", "false")
+            .env("RDOG_OBSERVATION__DURABLE_ENABLED", "false")
             .env("RDOG_OUTBOUND__ENABLED", "false")
             .env("RDOG_INBOUND__ENABLED", "true")
             .env("RDOG_INBOUND__HOST", "127.0.0.1")

@@ -127,6 +127,8 @@ fn daemon_inbound_should_keep_idle_session_alive_until_client_sends_data() {
     let binary = rdog_binary_path();
     let mut daemon = Command::new(binary)
         .arg("daemon")
+        .env("RDOG_ZENOH__ENABLED", "false")
+        .env("RDOG_OBSERVATION__DURABLE_ENABLED", "false")
         .env("RDOG_OUTBOUND__ENABLED", "false")
         .env("RDOG_INBOUND__ENABLED", "true")
         .env("RDOG_INBOUND__HOST", "127.0.0.1")

@@ -153,6 +153,8 @@ fn control_mode_should_bridge_agent_protocol_to_daemon_inbound() {
     let binary = rdog_binary_path();
     let mut daemon = Command::new(&binary)
         .arg("daemon")
+        .env("RDOG_ZENOH__ENABLED", "false")
+        .env("RDOG_OBSERVATION__DURABLE_ENABLED", "false")
         .env("RDOG_DAEMON__RETRY_SECONDS", "1")
         .env("RDOG_OUTBOUND__ENABLED", "false")
         .env("RDOG_INBOUND__ENABLED", "true")

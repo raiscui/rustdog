@@ -54,6 +54,11 @@ Issues 和 Wayfinder maps 使用 GitHub Issues。详见 `docs/agents/issue-track
   - 用途: 固定 daemon-owned PID lane、capture-start token、dispatch 前后双递增和 stale response 的已验证原因
   - 何时阅读: 修改 `src/control_resource_lane.rs`、PID-backed observation producer、`@computer-act` ref mutation 或 resource epoch 语义前
 
+- `docs/solutions/logic-errors/durable-observation-root-growth.md`
+  - 主题: durable observation 根目录增长、延迟物化、日期轮转和测试隔离
+  - 用途: 固定默认 store 的生命周期、活动 owner 保护、未知目录 fail-closed 和 quarantine-first 治理证据
+  - 何时阅读: 修改 `src/control_observation/durable.rs`、默认 observation 路径、retention 清理或 daemon 集成测试隔离前
+
 - `docs/solutions/tooling-decisions/upstream-pi-macos-ops-cli-contract.md`
   - 主题: upstream Pi v0.84.1 macOS ops 的 CLI 工具 allowlist、skill preload、agent 隔离和 models.json 边界
   - 用途: 固定 `--tools bash,read`、绝对 `--append-system-prompt`、`PI_CODING_AGENT_DIR` 与旧 Rust Pi profile 字段的迁移口径
@@ -162,6 +167,11 @@ Issues 和 Wayfinder maps 使用 GitHub Issues。详见 `docs/agents/issue-track
   - 主题: rdog control macOS / Linux 本机 fast path(Zenoh `transport_unixpipe`)规划
   - 用途: 固定"同机 daemon + control 自动走 Zenoh unixpipe FIFO,失败透明 fallback 到 UDP/TCP"的契约,以及 FIFO base 路径推导、local-default registry、daemon/client 行为边界、错误处理、验收标准;包含 2026-06-21 加的 `self` / 空 target 入口设计和 2026-06-25 加的 local-default 默认 daemon 规则
   - 何时阅读: 修改 `src/zenoh_runtime.rs`、`src/zenoh_runtime/` 子模块、`src/zenoh_control.rs`、`src/config.rs` 或 `src/main.rs` 的 unixpipe 相关逻辑、`Cargo.toml` 的 `transport_unixpipe` feature、`rdog_macos.toml` / `rdog_linux.toml` 模板,或排查"同机 ping 慢" / "FIFO 创建失败" / "远端 fallback 是否生效" / "`rdog control self` 找不到 daemon"前
+
+- `specs/rdog-user-config-dir-plan.md`
+  - 主题: rdog 用户级默认配置目录 (`~/.rdog/`) 与配置查找分层规划
+  - 用途: 固定配置查找顺序 (内置默认 → `~/.rdog/<platform>.toml` → cwd 平台文件 → `RDOG_`/`RCAT_` env)、`rdog config init` 默认落用户目录、与 local-default registry 的配合、12 项验收矩阵
+  - 何时阅读: 修改 `src/config.rs` 的配置加载/生成 (`build_figment` / `write_example_configs`)、`rdog config init` 行为、`~/.rdog/` 目录语义,或排查"daemon 配置与 cwd 绑定" / "本机默认 daemon 身份漂移"前
 
 - `specs/zenoh-control-plane-plan.md`
   - 主题: `rustdog` 的 canonical Zenoh router/serial control-plane 规划

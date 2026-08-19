@@ -168,6 +168,8 @@ fn control_cli_should_drive_websocket_daemon_end_to_end() {
 
     let mut daemon = Command::new(&binary)
         .arg("daemon")
+        .env("RDOG_ZENOH__ENABLED", "false")
+        .env("RDOG_OBSERVATION__DURABLE_ENABLED", "false")
         .env("RDOG_DAEMON__RETRY_SECONDS", "1")
         .env("RDOG_OUTBOUND__ENABLED", "false")
         .env("RDOG_INBOUND__ENABLED", "true")
@@ -314,6 +316,8 @@ fn control_cli_should_run_websocket_pty_command_end_to_end() {
 
     let mut daemon = Command::new(&binary)
         .arg("daemon")
+        .env("RDOG_ZENOH__ENABLED", "false")
+        .env("RDOG_OBSERVATION__DURABLE_ENABLED", "false")
         .env("RDOG_DAEMON__RETRY_SECONDS", "1")
         .env("RDOG_OUTBOUND__ENABLED", "false")
         .env("RDOG_INBOUND__ENABLED", "true")
@@ -390,6 +394,8 @@ fn control_cli_should_execute_screenshot_and_save_file_over_websocket() {
 
     let mut daemon = Command::new(&binary)
         .arg("daemon")
+        .env("RDOG_ZENOH__ENABLED", "false")
+        .env("RDOG_OBSERVATION__DURABLE_ENABLED", "false")
         .env("RDOG_DAEMON__RETRY_SECONDS", "1")
         .env("RDOG_OUTBOUND__ENABLED", "false")
         .env("RDOG_INBOUND__ENABLED", "true")

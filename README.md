@@ -91,11 +91,16 @@ rdog connect -s cmd.exe the.0.0.ip 55600
 rdog config init
 ```
 
-This creates platform-specific templates in the current directory:
+This creates platform-specific templates in the user config directory
+`~/.rdog/` (the user-level default used by `rdog daemon` when no `--config`
+is given and no platform file exists in the current directory):
 
-- `rdog_win.toml`
-- `rdog_macos.toml`
-- `rdog_linux.toml`
+- `~/.rdog/rdog_win.toml`
+- `~/.rdog/rdog_macos.toml`
+- `~/.rdog/rdog_linux.toml`
+
+Pass `--config <path>` to write templates to a specific path instead of the
+user directory.
 
 Overwrite existing templates when needed:
 
@@ -103,7 +108,12 @@ Overwrite existing templates when needed:
 rdog config init --force
 ```
 
-Start the daemon with the platform default config:
+Config lookup order for `rdog daemon` (later sources override earlier ones):
+built-in defaults → `~/.rdog/<platform>.toml` (user-level) → platform file in
+the current directory (project-level) → `RDOG_` / `RCAT_` environment
+variables. An explicit `--config <path>` reads only that file.
+
+Start the daemon with the user-level default config:
 
 ```bash
 rdog daemon
@@ -112,7 +122,7 @@ rdog daemon
 Or use an explicit config path:
 
 ```bash
-rdog daemon --config ./rdog_macos.toml
+rdog daemon --config ~/.rdog/rdog_macos.toml
 ```
 
 ### TCP control lane

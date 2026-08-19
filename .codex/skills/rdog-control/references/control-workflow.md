@@ -102,6 +102,10 @@ error: 本机没有可用的active managed local-default registry;检测到未�
 让 `rdog control @ping` / `rdog control @screenshot` 默认选择当前配置中的 daemon。
 Windows 默认 `enabled = false`(zenoh unixpipe 在 Windows 语义不同)。
 
+配置查找分层(daemon 启动时,后覆盖前):内置默认 → `~/.rdog/<platform>.toml`(用户级默认)
+→ cwd 平台文件(项目级覆盖)→ `RDOG_` / `RCAT_` 环境变量。`--config <path>` 显式指定时
+只读该文件。`rdog config init` 默认把模板写入 `~/.rdog/`。
+
 ```toml
 [zenoh.unixpipe]
 enabled = true
@@ -119,6 +123,7 @@ Current daemon entry points:
 
 ```bash
 rdog daemon --transport zenoh --name mac.lab --namespace lab
+rdog daemon --config ~/.rdog/rdog_macos.toml
 rdog daemon --config ./rdog_macos.toml
 rdog daemon --config ./rdog_linux.toml
 rdog daemon --config ./rdog_win.toml

@@ -115,6 +115,8 @@ pub fn start_daemon(binary: &Path, workdir: &Path, port: u16) -> DaemonGuard {
     DaemonGuard {
         child: Command::new(binary)
             .arg("daemon")
+            .env("RDOG_ZENOH__ENABLED", "false")
+            .env("RDOG_OBSERVATION__DURABLE_ENABLED", "false")
             .env("RDOG_OUTBOUND__ENABLED", "false")
             .env("RDOG_INBOUND__ENABLED", "true")
             .env("RDOG_INBOUND__HOST", "127.0.0.1")
