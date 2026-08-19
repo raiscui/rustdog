@@ -203,7 +203,8 @@ sequenceDiagram
 - TTL / eviction 状态
 
 采用 daemon-owned state dir,而不是 CLI scratch file.
-当前 P1 实现使用 JSON / JSONL 文件,并由 daemon 启动时初始化:
+当前 P1 实现使用 JSON / JSONL 文件。daemon 启动时只加载已有 store 或创建内存空
+index;全新 store 在第一次 `record_observation` 时才物化:
 
 - `meta.json`: `rdog.observation.state.v1`,记录 daemon identity、privacy 和 retention。
 - `index.json`: `rdog.observation.index.v1`,保存可快速查询的 observation / selector 索引。
@@ -213,11 +214,16 @@ sequenceDiagram
 
 默认路径由平台决定:
 
-- macOS: `~/Library/Application Support/rdog/observations/<daemon_name>/`
-- Windows: `%LOCALAPPDATA%/rdog/observations/<daemon_name>/`
-- Linux: `${XDG_STATE_HOME:-~/.local/state}/rdog/observations/<daemon_name>/`
+- macOS: `~/Library/Application Support/rdog/observations/YYYY-MM-DD/<daemon_name>/`
+- Windows: `%LOCALAPPDATA%/rdog/observations/YYYY-MM-DD/<daemon_name>/`
+- Linux: `${XDG_STATE_HOME:-~/.local/state}/rdog/observations/YYYY-MM-DD/<daemon_name>/`
 
-如果配置了 `[observation].state_dir`,则以配置值为准。
+日期表示 store 的最近活跃日期。跨日写入会原子移动同一 daemon store,不会把 selector
+history 切成互不相干的每日分片。daemon 默认每 3600 秒检查一次,删除 7 天以前且没有
+活动 owner 的日期 store。
+
+如果配置了 `[observation].state_dir`,则该值是精确 store 目录,不增加日期层,也不参加
+默认 root 的日期清理。
 
 关键是语义先定死:
 

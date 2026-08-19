@@ -182,7 +182,10 @@ fn write_temp_zenoh_daemon_config(daemon_name: &str, listen_port: u16) -> PathBu
     ));
 
     let contents = format!(
-        r#"[zenoh]
+        r#"[observation]
+durable_enabled = false
+
+[zenoh]
 enabled = true
 mode = "router"
 namespace = "lab"

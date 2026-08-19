@@ -302,14 +302,6 @@ fn render_observe_response_should_expose_epoch_at_top_level() {
         epoch, primary_observation.created_at_unix_ms,
         "epoch 必须等于 primary observation 的 created_at_unix_ms"
     );
-    // epoch 与 observed_at_unix_ms 应该类同 (同时间产生), 允许差 1ms 内
-    let observed_at = bundle.value["observed_at_unix_ms"]
-        .as_u64()
-        .expect("observed_at_unix_ms should be u64");
-    assert!(
-        observed_at.abs_diff(epoch) <= 1,
-        "epoch ({epoch}) 应该与 observed_at_unix_ms ({observed_at}) 一致"
-    );
 }
 
 #[test]

@@ -5,15 +5,23 @@ use crate::control_observation::selector::{
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, HashSet},
-    env, fs,
+    env,
+    fs::{self, File, OpenOptions, TryLockError},
     io::{self, BufRead, BufWriter, Write},
     path::{Path, PathBuf},
+    sync::{Arc, Condvar, Mutex},
+    thread::{self, JoinHandle},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 pub const DURABLE_STATE_SCHEMA: &str = "rdog.observation.state.v1";
 pub const DURABLE_OBSERVATION_SCHEMA: &str = "rdog.observation.record.v1";
 pub const DURABLE_REF_CACHE_SCHEMA: &str = "rdog.ref-cache.v1";
 pub const DURABLE_INDEX_SCHEMA: &str = "rdog.observation.index.v1";
+
+const DAY_MS: u64 = 24 * 60 * 60 * 1_000;
+const MAINTENANCE_LOCK_NAME: &str = ".maintenance.lock";
+const OWNER_DIR_NAME: &str = ".owners";
 
 /// Wayfinder Destination B: 默认 5 分钟,与 `ttl_ms` 数量级一致。
 pub const DEFAULT_SELECTOR_VISIBILITY_MS: u64 = 5 * 60_000;
@@ -184,6 +192,7 @@ impl DurableSelectorLastSeen {
 #[derive(Debug)]
 pub struct JsonlDurableObservationStore {
     state_dir: PathBuf,
+    layout: DurableStoreLayout,
     identity: DurableObservationIdentity,
     privacy: DurableObservationPrivacy,
     retention_observations: usize,
@@ -191,6 +200,34 @@ pub struct JsonlDurableObservationStore {
     selector_visibility_ms: u64,
     write_ref_cache: bool,
     index: DurableStateIndex,
+}
+
+#[derive(Debug)]
+enum DurableStoreLayout {
+    Exact,
+    Dated {
+        root_dir: PathBuf,
+        daemon_dir_name: String,
+        owner_lock: Option<File>,
+    },
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ObservationCleanupReport {
+    pub scanned_date_dirs: usize,
+    pub removed_date_dirs: usize,
+    pub removed_stores: usize,
+    pub skipped_active_stores: usize,
+    pub skipped_unknown_stores: usize,
+}
+
+/// 默认 observation root 的定时清理任务。
+///
+/// `Condvar` 让 Drop 可以立即唤醒线程,daemon 退出时不会等待完整检查间隔。
+#[derive(Debug)]
+pub struct ObservationMaintenance {
+    stop: Arc<(Mutex<bool>, Condvar)>,
+    join: Option<JoinHandle<()>>,
 }
 
 impl JsonlDurableObservationStore {
@@ -225,10 +262,78 @@ impl JsonlDurableObservationStore {
         selector_visibility_ms: u64,
         now_ms: u64,
     ) -> io::Result<Self> {
-        fs::create_dir_all(state_dir.join("tmp"))?;
+        Self::open_with_layout(
+            state_dir,
+            DurableStoreLayout::Exact,
+            identity,
+            privacy,
+            retention_observations,
+            retention_bytes,
+            write_ref_cache,
+            selector_visibility_ms,
+            now_ms,
+        )
+    }
+
+    pub fn open_dated(
+        root_dir: PathBuf,
+        identity: DurableObservationIdentity,
+        privacy: DurableObservationPrivacy,
+        retention_observations: usize,
+        retention_bytes: u64,
+        write_ref_cache: bool,
+        now_ms: u64,
+    ) -> io::Result<Self> {
+        let daemon_dir_name = sanitize_path_component(&identity.daemon_name);
+        let _root_lock = root_dir
+            .is_dir()
+            .then(|| acquire_root_maintenance_lock(&root_dir))
+            .transpose()?;
+        let existing = discover_existing_dated_store(&root_dir, &daemon_dir_name)?;
+        let mut owner_lock = None;
+        let state_dir = if let Some(path) = existing {
+            owner_lock = Some(acquire_owner_lock(&root_dir, &daemon_dir_name)?);
+            path
+        } else {
+            root_dir
+                .join(date_component_from_unix_ms(now_ms))
+                .join(&daemon_dir_name)
+        };
+
+        Self::open_with_layout(
+            state_dir,
+            DurableStoreLayout::Dated {
+                root_dir,
+                daemon_dir_name,
+                owner_lock,
+            },
+            identity,
+            privacy,
+            retention_observations,
+            retention_bytes,
+            write_ref_cache,
+            DEFAULT_SELECTOR_VISIBILITY_MS,
+            now_ms,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn open_with_layout(
+        state_dir: PathBuf,
+        layout: DurableStoreLayout,
+        identity: DurableObservationIdentity,
+        privacy: DurableObservationPrivacy,
+        retention_observations: usize,
+        retention_bytes: u64,
+        write_ref_cache: bool,
+        selector_visibility_ms: u64,
+        now_ms: u64,
+    ) -> io::Result<Self> {
+        let materialized = looks_like_observation_store(&state_dir);
         let index = load_or_replay_index(&state_dir, now_ms)?;
         let mut store = Self {
             state_dir,
+            layout,
             identity,
             privacy,
             retention_observations,
@@ -238,9 +343,11 @@ impl JsonlDurableObservationStore {
             index,
         };
         store.prune_index();
-        store.write_meta(now_ms)?;
-        store.write_index(now_ms)?;
-        store.enforce_byte_retention(now_ms)?;
+        if materialized {
+            store.write_meta(now_ms)?;
+            store.write_index(now_ms)?;
+            store.enforce_byte_retention(now_ms)?;
+        }
         Ok(store)
     }
 
@@ -250,6 +357,7 @@ impl JsonlDurableObservationStore {
         refs: &[ObservationRefEntry],
         selectors: &[DurableSelectorRecord],
     ) -> io::Result<()> {
+        self.prepare_for_record(header.created_at_unix_ms)?;
         let observation_record = DurableObservationRecord::from_header(header);
         append_jsonl(self.observations_path(), &observation_record)?;
         append_jsonl_batch(self.selectors_path(), selectors.iter())?;
@@ -302,6 +410,62 @@ impl JsonlDurableObservationStore {
         self.prune_index();
         self.write_index(header.created_at_unix_ms)?;
         self.enforce_byte_retention(header.created_at_unix_ms)
+    }
+
+    fn prepare_for_record(&mut self, now_ms: u64) -> io::Result<()> {
+        let _root_lock = match &self.layout {
+            DurableStoreLayout::Exact => None,
+            DurableStoreLayout::Dated { root_dir, .. } => {
+                Some(acquire_root_maintenance_lock(root_dir)?)
+            }
+        };
+        let target = match &mut self.layout {
+            DurableStoreLayout::Exact => self.state_dir.clone(),
+            DurableStoreLayout::Dated {
+                root_dir,
+                daemon_dir_name,
+                owner_lock,
+            } => {
+                if owner_lock.is_none() {
+                    *owner_lock = Some(acquire_owner_lock(root_dir, daemon_dir_name)?);
+                }
+                root_dir
+                    .join(date_component_from_unix_ms(now_ms))
+                    .join(daemon_dir_name)
+            }
+        };
+
+        if self.state_dir != target && self.state_dir.exists() {
+            let target_parent = target
+                .parent()
+                .ok_or_else(|| io::Error::other("dated observation path 缺少 parent"))?;
+            fs::create_dir_all(target_parent)?;
+            if target.exists() {
+                return Err(io::Error::new(
+                    io::ErrorKind::AlreadyExists,
+                    format!("dated observation 目标目录已存在: {}", target.display()),
+                ));
+            }
+            let previous_parent = self.state_dir.parent().map(Path::to_path_buf);
+            if let Err(err) = fs::rename(&self.state_dir, &target) {
+                let _ = fs::remove_dir(target_parent);
+                return Err(err);
+            }
+            if let Some(previous_parent) = previous_parent {
+                if matches!(&self.layout, DurableStoreLayout::Dated { root_dir, .. } if previous_parent != *root_dir)
+                {
+                    let _ = fs::remove_dir(previous_parent);
+                }
+            }
+        }
+
+        self.state_dir = target;
+        if !looks_like_observation_store(&self.state_dir) {
+            fs::create_dir_all(self.state_dir.join("tmp"))?;
+            self.write_meta(now_ms)?;
+            self.write_index(now_ms)?;
+        }
+        Ok(())
     }
 
     pub fn selector_hint_for_ref(
@@ -566,22 +730,152 @@ impl JsonlDurableObservationStore {
     }
 }
 
-pub fn resolve_observation_state_dir(configured: Option<&Path>, daemon_name: &str) -> PathBuf {
-    if let Some(path) = configured {
-        return path.to_path_buf();
+impl ObservationMaintenance {
+    pub fn start(root_dir: PathBuf, interval: Duration, retention_days: u64) -> Self {
+        let stop = Arc::new((Mutex::new(false), Condvar::new()));
+        let worker_stop = Arc::clone(&stop);
+        let join = thread::spawn(move || loop {
+            let now_ms = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64;
+            match cleanup_expired_default_observation_dirs(&root_dir, now_ms, retention_days) {
+                Ok(report)
+                    if report.removed_stores > 0
+                        || report.skipped_active_stores > 0
+                        || report.skipped_unknown_stores > 0 =>
+                {
+                    log::info!(
+                        "observation cleanup complete: root={}, removed_stores={}, removed_date_dirs={}, skipped_active_stores={}, skipped_unknown_stores={}",
+                        root_dir.display(),
+                        report.removed_stores,
+                        report.removed_date_dirs,
+                        report.skipped_active_stores,
+                        report.skipped_unknown_stores
+                    );
+                }
+                Ok(_) => {}
+                Err(err) => log::warn!(
+                    "observation cleanup failed: root={}, error={err}",
+                    root_dir.display()
+                ),
+            }
+
+            let (lock, wake) = &*worker_stop;
+            let Ok(stopped) = lock.lock() else {
+                return;
+            };
+            if *stopped {
+                return;
+            }
+            let Ok((stopped, _)) = wake.wait_timeout(stopped, interval) else {
+                return;
+            };
+            if *stopped {
+                return;
+            }
+        });
+
+        Self {
+            stop,
+            join: Some(join),
+        }
     }
-    platform_default_observation_state_dir(daemon_name)
 }
 
-fn platform_default_observation_state_dir(daemon_name: &str) -> PathBuf {
-    let daemon_name = sanitize_path_component(daemon_name);
+impl Drop for ObservationMaintenance {
+    fn drop(&mut self) {
+        let (lock, wake) = &*self.stop;
+        if let Ok(mut stopped) = lock.lock() {
+            *stopped = true;
+            wake.notify_one();
+        }
+        if let Some(join) = self.join.take() {
+            let _ = join.join();
+        }
+    }
+}
+
+pub fn cleanup_expired_default_observation_dirs(
+    root_dir: &Path,
+    now_ms: u64,
+    retention_days: u64,
+) -> io::Result<ObservationCleanupReport> {
+    if retention_days == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "observation retention_days 必须大于 0",
+        ));
+    }
+    if !root_dir.is_dir() {
+        return Ok(ObservationCleanupReport::default());
+    }
+
+    // 所有 dated store 物化、跨日移动和 owner lock 获取都先经过这把根锁。
+    // 因此清理后删除 owner lock path 不会和新 daemon 打开同一路径产生 inode 分裂。
+    let _root_lock = acquire_root_maintenance_lock(root_dir)?;
+    let cutoff_day = (now_ms / DAY_MS).saturating_sub(retention_days);
+    let mut report = ObservationCleanupReport::default();
+    for date_entry in fs::read_dir(root_dir)? {
+        let date_entry = date_entry?;
+        if !date_entry.file_type()?.is_dir() {
+            continue;
+        }
+        let date_name = date_entry.file_name();
+        let Some(date_day) = date_name
+            .to_str()
+            .and_then(parse_date_component_to_unix_day)
+        else {
+            continue;
+        };
+        if date_day >= cutoff_day {
+            continue;
+        }
+
+        report.scanned_date_dirs += 1;
+        let date_dir = date_entry.path();
+        for store_entry in fs::read_dir(&date_dir)? {
+            let store_entry = store_entry?;
+            if !store_entry.file_type()?.is_dir() {
+                continue;
+            }
+            if !looks_like_observation_store(&store_entry.path()) {
+                report.skipped_unknown_stores += 1;
+                continue;
+            }
+            let Some(daemon_dir_name) = store_entry.file_name().to_str().map(str::to_owned) else {
+                continue;
+            };
+            let Some(cleanup_lock) = try_acquire_cleanup_lock(root_dir, &daemon_dir_name)? else {
+                report.skipped_active_stores += 1;
+                continue;
+            };
+
+            fs::remove_dir_all(store_entry.path())?;
+            drop(cleanup_lock);
+            match fs::remove_file(owner_lock_path(root_dir, &daemon_dir_name)) {
+                Ok(()) => {}
+                Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+                Err(err) => return Err(err),
+            }
+            report.removed_stores += 1;
+        }
+
+        if fs::read_dir(&date_dir)?.next().is_none() {
+            fs::remove_dir(&date_dir)?;
+            report.removed_date_dirs += 1;
+        }
+    }
+    Ok(report)
+}
+
+pub fn default_observation_root() -> PathBuf {
     if cfg!(windows) {
         env::var_os("LOCALAPPDATA")
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from("."))
             .join("rdog")
             .join("observations")
-            .join(daemon_name)
     } else if cfg!(target_os = "macos") {
         env::var_os("HOME")
             .map(PathBuf::from)
@@ -590,7 +884,6 @@ fn platform_default_observation_state_dir(daemon_name: &str) -> PathBuf {
             .join("Application Support")
             .join("rdog")
             .join("observations")
-            .join(daemon_name)
     } else {
         env::var_os("XDG_STATE_HOME")
             .map(PathBuf::from)
@@ -598,8 +891,169 @@ fn platform_default_observation_state_dir(daemon_name: &str) -> PathBuf {
             .unwrap_or_else(|| PathBuf::from("."))
             .join("rdog")
             .join("observations")
-            .join(daemon_name)
     }
+}
+
+fn discover_existing_dated_store(
+    root_dir: &Path,
+    daemon_dir_name: &str,
+) -> io::Result<Option<PathBuf>> {
+    if !root_dir.is_dir() {
+        return Ok(None);
+    }
+
+    let mut candidates = Vec::new();
+    let legacy = root_dir.join(daemon_dir_name);
+    if legacy.is_dir() && looks_like_observation_store(&legacy) {
+        candidates.push(legacy);
+    }
+    for entry in fs::read_dir(root_dir)? {
+        let entry = entry?;
+        if !entry.file_type()?.is_dir()
+            || entry
+                .file_name()
+                .to_str()
+                .and_then(parse_date_component_to_unix_day)
+                .is_none()
+        {
+            continue;
+        }
+        let candidate = entry.path().join(daemon_dir_name);
+        if candidate.is_dir() && looks_like_observation_store(&candidate) {
+            candidates.push(candidate);
+        }
+    }
+
+    match candidates.len() {
+        0 => Ok(None),
+        1 => Ok(candidates.pop()),
+        _ => Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "同一 daemon 存在多个 durable observation store: daemon={daemon_dir_name}, candidates={candidates:?}"
+            ),
+        )),
+    }
+}
+
+fn looks_like_observation_store(path: &Path) -> bool {
+    fs::read(path.join("meta.json"))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<DurableObservationMeta>(&bytes).ok())
+        .is_some_and(|meta| meta.schema == DURABLE_STATE_SCHEMA)
+}
+
+fn acquire_root_maintenance_lock(root_dir: &Path) -> io::Result<File> {
+    fs::create_dir_all(root_dir)?;
+    let file = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(root_dir.join(MAINTENANCE_LOCK_NAME))?;
+    file.lock()?;
+    Ok(file)
+}
+
+fn owner_lock_path(root_dir: &Path, daemon_dir_name: &str) -> PathBuf {
+    root_dir
+        .join(OWNER_DIR_NAME)
+        .join(format!("{daemon_dir_name}.lock"))
+}
+
+fn acquire_owner_lock(root_dir: &Path, daemon_dir_name: &str) -> io::Result<File> {
+    let owners_dir = root_dir.join(OWNER_DIR_NAME);
+    fs::create_dir_all(&owners_dir)?;
+    let file = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(owner_lock_path(root_dir, daemon_dir_name))?;
+    match file.try_lock() {
+        Ok(()) => Ok(file),
+        Err(TryLockError::WouldBlock) => Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            format!("durable observation store 已被活动 daemon 持有: {daemon_dir_name}"),
+        )),
+        Err(TryLockError::Error(err)) => Err(err),
+    }
+}
+
+fn try_acquire_cleanup_lock(root_dir: &Path, daemon_dir_name: &str) -> io::Result<Option<File>> {
+    let owners_dir = root_dir.join(OWNER_DIR_NAME);
+    fs::create_dir_all(&owners_dir)?;
+    let file = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(owner_lock_path(root_dir, daemon_dir_name))?;
+    match file.try_lock() {
+        Ok(()) => Ok(Some(file)),
+        Err(TryLockError::WouldBlock) => Ok(None),
+        Err(TryLockError::Error(err)) => Err(err),
+    }
+}
+
+fn date_component_from_unix_ms(unix_ms: u64) -> String {
+    let (year, month, day) = civil_from_unix_day(unix_ms / DAY_MS);
+    format!("{year:04}-{month:02}-{day:02}")
+}
+
+fn parse_date_component_to_unix_day(value: &str) -> Option<u64> {
+    let bytes = value.as_bytes();
+    if bytes.len() != 10 || bytes[4] != b'-' || bytes[7] != b'-' {
+        return None;
+    }
+    let year = value[0..4].parse::<i64>().ok()?;
+    let month = value[5..7].parse::<u32>().ok()?;
+    let day = value[8..10].parse::<u32>().ok()?;
+    let unix_day = unix_day_from_civil(year, month, day)?;
+    (unix_day >= 0).then_some(unix_day as u64)
+}
+
+fn unix_day_from_civil(year: i64, month: u32, day: u32) -> Option<i64> {
+    if !(1..=12).contains(&month) {
+        return None;
+    }
+    let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+    let days_in_month = match month {
+        2 if leap => 29,
+        2 => 28,
+        4 | 6 | 9 | 11 => 30,
+        _ => 31,
+    };
+    if day == 0 || day > days_in_month {
+        return None;
+    }
+
+    let adjusted_year = year - i64::from(month <= 2);
+    let era = if adjusted_year >= 0 {
+        adjusted_year
+    } else {
+        adjusted_year - 399
+    } / 400;
+    let year_of_era = adjusted_year - era * 400;
+    let adjusted_month = i64::from(month) + if month > 2 { -3 } else { 9 };
+    let day_of_year = (153 * adjusted_month + 2) / 5 + i64::from(day) - 1;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    Some(era * 146_097 + day_of_era - 719_468)
+}
+
+fn civil_from_unix_day(unix_day: u64) -> (i64, u32, u32) {
+    let shifted = unix_day as i64 + 719_468;
+    let era = shifted / 146_097;
+    let day_of_era = shifted - era * 146_097;
+    let year_of_era =
+        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let mut year = year_of_era + era * 400;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_prime = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * month_prime + 2) / 5 + 1;
+    let month = month_prime + if month_prime < 10 { 3 } else { -9 };
+    year += i64::from(month <= 2);
+    (year, month as u32, day as u32)
 }
 
 fn sanitize_path_component(value: &str) -> String {

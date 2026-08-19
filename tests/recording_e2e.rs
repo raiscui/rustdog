@@ -19,6 +19,22 @@ use std::{
     time::{Duration, Instant},
 };
 
+struct RecordingDaemon {
+    child: Child,
+    _test_lock: fs::File,
+    recording_root: PathBuf,
+}
+
+impl Drop for RecordingDaemon {
+    fn drop(&mut self) {
+        if self.child.try_wait().ok().flatten().is_none() {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
+        let _ = fs::remove_dir_all(&self.recording_root);
+    }
+}
+
 fn next_free_port() -> u16 {
     let listener = TcpListener::bind(("127.0.0.1", 0)).expect("ephemeral listener should bind");
     let port = listener
@@ -50,7 +66,7 @@ fn is_port_listening(port: u16) -> bool {
         &std::net::SocketAddr::from(([127, 0, 0, 1], port)),
         Duration::from_millis(50),
     );
-    matches!(probe, Ok(_))
+    probe.is_ok()
 }
 
 fn wait_until_port_is_busy(child: &mut Child, port: u16, timeout: Duration) -> bool {
@@ -104,22 +120,15 @@ fn read_response_line(stream: &mut TcpStream, timeout: Duration) -> String {
     output
 }
 
-/// Spawn a TCP control daemon wired to a unique recording dir.
-///
-/// Returns the daemon `Child`, the inbound port, and the recording
-/// root (so the test can poke at the journal/bundle dirs).
-fn spawn_recording_daemon() -> (Child, u16, PathBuf) {
-    let port = next_free_port();
-    let binary = rdog_binary_path();
-    let recording_root = std::env::temp_dir().join(format!(
-        "rdog-recording-e2e-{}-{}",
-        std::process::id(),
-        port
-    ));
-    fs::create_dir_all(&recording_root).expect("recording root should create");
-
-    let mut daemon = Command::new(binary)
+fn spawn_recording_child(
+    binary: &std::path::Path,
+    port: u16,
+    recording_root: &std::path::Path,
+) -> Child {
+    match Command::new(binary)
         .arg("daemon")
+        .env("RDOG_ZENOH__ENABLED", "false")
+        .env("RDOG_OBSERVATION__DURABLE_ENABLED", "false")
         .env("RDOG_OUTBOUND__ENABLED", "false")
         .env("RDOG_INBOUND__ENABLED", "true")
         .env("RDOG_INBOUND__HOST", "127.0.0.1")
@@ -131,14 +140,75 @@ fn spawn_recording_daemon() -> (Child, u16, PathBuf) {
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
-        .expect("daemon should start");
+    {
+        Ok(child) => child,
+        Err(error) => {
+            let _ = fs::remove_dir_all(recording_root);
+            panic!("daemon should start: {error}");
+        }
+    }
+}
+
+/// Spawn a TCP control daemon wired to a unique recording dir.
+///
+/// Returns the daemon guard, the inbound port, and the recording root.
+fn spawn_recording_daemon() -> (RecordingDaemon, u16, PathBuf) {
+    // macOS recording 使用 host-global capture 能力,不同测试进程不能并行占用。
+    // 文件锁同时覆盖 cargo test 的线程和 nextest 的独立测试进程。
+    let test_lock = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(std::env::temp_dir().join("rdog-recording-e2e.lock"))
+        .expect("recording E2E lock should open");
+    test_lock.lock().expect("recording E2E lock should acquire");
+
+    let port = next_free_port();
+    let recording_root = std::env::temp_dir().join(format!(
+        "rdog-recording-e2e-{}-{}",
+        std::process::id(),
+        port
+    ));
+    fs::create_dir_all(&recording_root).expect("recording root should create");
+    let child = spawn_recording_child(&rdog_binary_path(), port, &recording_root);
+
+    let mut daemon = RecordingDaemon {
+        child,
+        _test_lock: test_lock,
+        recording_root: recording_root.clone(),
+    };
 
     assert!(
-        wait_until_port_is_busy(&mut daemon, port, Duration::from_secs(3)),
+        wait_until_port_is_busy(&mut daemon.child, port, Duration::from_secs(3)),
         "daemon never started listening on port {port}",
     );
 
     (daemon, port, recording_root)
+}
+
+#[test]
+fn recording_daemon_spawn_failure_should_remove_temporary_root() {
+    let port = next_free_port();
+    let recording_root = std::env::temp_dir().join(format!(
+        "rdog-recording-e2e-spawn-failure-{}-{port}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&recording_root).expect("recording root should create");
+
+    let result = std::panic::catch_unwind(|| {
+        spawn_recording_child(
+            std::path::Path::new("/definitely/missing/rdog"),
+            port,
+            &recording_root,
+        );
+    });
+
+    assert!(result.is_err(), "missing daemon binary should panic");
+    assert!(
+        !recording_root.exists(),
+        "spawn failure should remove temporary recording root"
+    );
 }
 
 fn send_line_and_read_response(stream: &mut TcpStream, line: &str) -> String {
@@ -237,9 +307,10 @@ fn recording_auto_stop_pipeline_commits_bundle_and_marks_auto_duration() {
     // 5. Cleanup.
     client.shutdown(std::net::Shutdown::Both).ok();
     daemon
+        .child
         .kill()
         .expect("daemon should stop after test cleanup");
-    let _ = daemon.wait();
+    let _ = daemon.child.wait();
     let _ = fs::remove_dir_all(&recording_root);
 }
 
@@ -270,9 +341,10 @@ fn recording_duration_too_small_returns_4121_without_starting_session() {
 
     client.shutdown(std::net::Shutdown::Both).ok();
     daemon
+        .child
         .kill()
         .expect("daemon should stop after test cleanup");
-    let _ = daemon.wait();
+    let _ = daemon.child.wait();
     let _ = fs::remove_dir_all(&recording_root);
 }
 
@@ -366,9 +438,10 @@ fn recording_manual_cancel_before_deadline_leaves_no_bundle() {
 
     client.shutdown(std::net::Shutdown::Both).ok();
     daemon
+        .child
         .kill()
         .expect("daemon should stop after test cleanup");
-    let _ = daemon.wait();
+    let _ = daemon.child.wait();
     let _ = fs::remove_dir_all(&recording_root);
 }
 
@@ -471,9 +544,10 @@ fn recording_manual_stop_before_deadline_yields_manual_trigger_and_bundle() {
 
     client.shutdown(std::net::Shutdown::Both).ok();
     daemon
+        .child
         .kill()
         .expect("daemon should stop after test cleanup");
-    let _ = daemon.wait();
+    let _ = daemon.child.wait();
     let _ = fs::remove_dir_all(&recording_root);
 }
 
@@ -557,8 +631,9 @@ fn recording_auto_stop_survives_owner_disconnect_and_reconnect() {
 
     probe_client.shutdown(std::net::Shutdown::Both).ok();
     daemon
+        .child
         .kill()
         .expect("daemon should stop after test cleanup");
-    let _ = daemon.wait();
+    let _ = daemon.child.wait();
     let _ = fs::remove_dir_all(&recording_root);
 }

@@ -4,7 +4,7 @@ use std::{
     collections::{HashMap, VecDeque},
     io,
     sync::{Mutex, OnceLock},
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 #[cfg(test)]
@@ -30,7 +30,7 @@ use crate::control_resource_lane::{
 };
 use durable::{
     DurableObservationIdentity, DurableObservationPrivacy, DurableSelectorHint,
-    DurableSelectorLastSeen, JsonlDurableObservationStore,
+    DurableSelectorLastSeen, JsonlDurableObservationStore, ObservationMaintenance,
 };
 use selector::{
     DurableSelectorDraft, DurableSelectorRecord, PermanentSelector, SelectorKind, SelectorMatchMode,
@@ -43,6 +43,8 @@ const DEFAULT_SELECTOR_HISTORY_LIMIT: usize = 32;
 
 static OBSERVATION_STORE: OnceLock<Mutex<ObservationStore>> = OnceLock::new();
 static DURABLE_OBSERVATION_STORE: OnceLock<Mutex<Option<JsonlDurableObservationStore>>> =
+    OnceLock::new();
+static DURABLE_OBSERVATION_MAINTENANCE: OnceLock<Mutex<Option<ObservationMaintenance>>> =
     OnceLock::new();
 
 /// 一次 UI observation 的轻量头部。
@@ -550,33 +552,64 @@ pub fn initialize_durable_observation_state(
     namespace: Option<&str>,
     daemon_name: &str,
 ) -> io::Result<()> {
-    let state = if config.durable_enabled {
-        let state_dir =
-            durable::resolve_observation_state_dir(config.state_dir.as_deref(), daemon_name);
-        Some(JsonlDurableObservationStore::open(
-            state_dir,
-            DurableObservationIdentity {
-                namespace: namespace.map(str::to_owned),
-                daemon_name: daemon_name.to_owned(),
-            },
-            DurableObservationPrivacy {
-                persist_values: config.persist_values,
-                persist_screenshots: config.persist_screenshots,
-            },
+    clear_durable_observation_runtime()?;
+    if !config.durable_enabled {
+        return Ok(());
+    }
+
+    let now_ms = current_unix_ms();
+    let identity = DurableObservationIdentity {
+        namespace: namespace.map(str::to_owned),
+        daemon_name: daemon_name.to_owned(),
+    };
+    let privacy = DurableObservationPrivacy {
+        persist_values: config.persist_values,
+        persist_screenshots: config.persist_screenshots,
+    };
+    let (state, maintenance) = if let Some(state_dir) = config.state_dir.clone() {
+        (
+            JsonlDurableObservationStore::open(
+                state_dir,
+                identity,
+                privacy,
+                config.retention_observations,
+                config.retention_bytes,
+                config.write_ref_cache,
+                now_ms,
+            )?,
+            None,
+        )
+    } else {
+        let root_dir = durable::default_observation_root();
+        let state = JsonlDurableObservationStore::open_dated(
+            root_dir.clone(),
+            identity,
+            privacy,
             config.retention_observations,
             config.retention_bytes,
             config.write_ref_cache,
-            current_unix_ms(),
-        )?)
-    } else {
-        None
+            now_ms,
+        )?;
+        let maintenance = ObservationMaintenance::start(
+            root_dir,
+            Duration::from_secs(config.cleanup_interval_seconds),
+            config.retention_days,
+        );
+        (state, Some(maintenance))
     };
 
     let store = DURABLE_OBSERVATION_STORE.get_or_init(|| Mutex::new(None));
     let mut guard = store
         .lock()
         .map_err(|_| io::Error::other("durable observation store lock poisoned"))?;
-    *guard = state;
+    *guard = Some(state);
+    drop(guard);
+
+    let worker = DURABLE_OBSERVATION_MAINTENANCE.get_or_init(|| Mutex::new(None));
+    let mut guard = worker
+        .lock()
+        .map_err(|_| io::Error::other("durable observation maintenance lock poisoned"))?;
+    *guard = maintenance;
     Ok(())
 }
 
@@ -596,6 +629,17 @@ pub fn initialize_durable_observation_state_for_tests(
 
 #[cfg(test)]
 pub fn disable_durable_observation_state_for_tests() -> io::Result<()> {
+    clear_durable_observation_runtime()
+}
+
+fn clear_durable_observation_runtime() -> io::Result<()> {
+    let worker = DURABLE_OBSERVATION_MAINTENANCE.get_or_init(|| Mutex::new(None));
+    let mut worker_guard = worker
+        .lock()
+        .map_err(|_| io::Error::other("durable observation maintenance lock poisoned"))?;
+    *worker_guard = None;
+    drop(worker_guard);
+
     let store = DURABLE_OBSERVATION_STORE.get_or_init(|| Mutex::new(None));
     let mut guard = store
         .lock()

@@ -443,6 +443,7 @@ fn start_terminal_daemon(binary: &Path, workdir: &Path, port: u16) -> TerminalDa
         "#!/bin/zsh\n\
          cd {}\n\
          export RDOG_OUTBOUND__ENABLED=false\n\
+         export RDOG_OBSERVATION__DURABLE_ENABLED=false\n\
          export RDOG_INBOUND__ENABLED=true\n\
          export RDOG_INBOUND__HOST=127.0.0.1\n\
          export RDOG_INBOUND__PORT={port}\n\

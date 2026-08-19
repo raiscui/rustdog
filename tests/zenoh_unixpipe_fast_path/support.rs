@@ -87,7 +87,10 @@ fn write_temp_zenoh_router_config_for_namespace(
     };
 
     let contents = format!(
-        r#"[zenoh]
+        r#"[observation]
+durable_enabled = false
+
+[zenoh]
 enabled = true
 mode = "{mode}"
 namespace = "{namespace}"
@@ -236,8 +239,12 @@ pub(super) fn start_zenoh_daemon_with_combined_output(
     unixpipe_enabled: bool,
 ) -> TestDaemon {
     let entrypoint = format!("tcp/127.0.0.1:{listen_port}");
-    let config_path =
-        write_temp_zenoh_router_config(name, &[entrypoint.clone()], "router", unixpipe_enabled);
+    let config_path = write_temp_zenoh_router_config(
+        name,
+        std::slice::from_ref(&entrypoint),
+        "router",
+        unixpipe_enabled,
+    );
     let state_home = create_state_home("unixpipe-daemon");
     spawn_zenoh_daemon(config_path, &state_home, Some(state_home.clone()))
 }
@@ -248,14 +255,14 @@ pub(super) fn start_zenoh_daemon_with_namespace_and_local_default(
     listen_port: u16,
     unixpipe_enabled: bool,
     local_default: bool,
-    xdg_state_home: &PathBuf,
+    xdg_state_home: &Path,
     unixpipe_socket_path: Option<&Path>,
 ) -> TestDaemon {
     let entrypoint = format!("tcp/127.0.0.1:{listen_port}");
     let config_path = write_temp_zenoh_router_config_for_namespace(
         name,
         namespace,
-        &[entrypoint.clone()],
+        std::slice::from_ref(&entrypoint),
         "router",
         unixpipe_enabled,
         local_default,

@@ -58,7 +58,10 @@ fn write_temp_zenoh_router_config(
         .join(", ");
 
     let contents = format!(
-        r#"[zenoh]
+        r#"[observation]
+durable_enabled = false
+
+[zenoh]
 enabled = true
 mode = "{mode}"
 namespace = "lab"
@@ -173,7 +176,8 @@ fn start_zenoh_daemon_with_combined_output(
     listen_port: u16,
 ) -> (Child, PathBuf, String, Arc<Mutex<String>>) {
     let entrypoint = format!("tcp/127.0.0.1:{listen_port}");
-    let config_path = write_temp_zenoh_router_config(name, &[entrypoint.clone()], "router");
+    let config_path =
+        write_temp_zenoh_router_config(name, std::slice::from_ref(&entrypoint), "router");
     let mut child = start_zenoh_daemon_with_config(&config_path.display().to_string());
     let daemon_stdout = child.stdout.take().expect("daemon stdout should exist");
     let daemon_stderr = child.stderr.take().expect("daemon stderr should exist");
@@ -1780,7 +1784,8 @@ fn control_should_execute_screenshot_and_save_file_in_zenoh_profile() {
     let listen_port = next_port();
     let workdir = temp_workdir("screenshot");
     let entrypoint = format!("tcp/127.0.0.1:{listen_port}");
-    let config_path = write_temp_zenoh_router_config(&daemon_name, &[entrypoint.clone()], "router");
+    let config_path =
+        write_temp_zenoh_router_config(&daemon_name, std::slice::from_ref(&entrypoint), "router");
     let mut daemon = Command::new(rdog_binary_path())
         .args(["daemon", "-c", &config_path.display().to_string()])
         .current_dir(&workdir)
@@ -1980,7 +1985,7 @@ fn control_session_should_reresolve_after_daemon_restart() {
     let _ = fs::remove_file(&first_config);
 
     let restart_config =
-        write_temp_zenoh_router_config(&daemon_name, &[entrypoint.clone()], "router");
+        write_temp_zenoh_router_config(&daemon_name, std::slice::from_ref(&entrypoint), "router");
     let mut second = start_zenoh_daemon_with_config(&restart_config.display().to_string());
     let second_stdout = second.stdout.take().expect("daemon stdout should exist");
     let second_stderr = second.stderr.take().expect("daemon stderr should exist");

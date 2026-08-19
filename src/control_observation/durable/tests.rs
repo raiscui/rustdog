@@ -80,6 +80,7 @@ fn selector(observation_id: &str, ref_id: &str) -> DurableSelectorRecord {
 #[test]
 fn jsonl_store_should_write_and_reload_index() {
     let dir = temp_dir("durable-reload");
+    fs::create_dir_all(&dir).unwrap();
     let mut store = JsonlDurableObservationStore::open(
         dir.clone(),
         identity(),
@@ -90,6 +91,10 @@ fn jsonl_store_should_write_and_reload_index() {
         100,
     )
     .unwrap();
+
+    // fresh store 只在内存里持有空 index,daemon 启动不应制造目录和空文件。
+    assert_eq!(fs::read_dir(&dir).unwrap().count(), 0);
+
     let header = header("obs-1", 1);
     store
         .record_observation(
@@ -102,6 +107,10 @@ fn jsonl_store_should_write_and_reload_index() {
             &[selector("obs-1", "@e1")],
         )
         .unwrap();
+
+    assert!(dir.join("meta.json").is_file());
+    assert!(dir.join("index.json").is_file());
+    assert!(dir.join("observations.jsonl").is_file());
 
     let reopened = JsonlDurableObservationStore::open(
         dir.clone(),
@@ -118,6 +127,137 @@ fn jsonl_store_should_write_and_reload_index() {
     assert_eq!(reopened.index().selectors.len(), 1);
     assert!(reopened.selector_hint_for_ref("obs-1", "@e1").is_some());
     let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn dated_store_should_move_to_new_date_without_losing_history() {
+    const DAY_MS: u64 = 24 * 60 * 60 * 1_000;
+
+    let root = temp_dir("durable-dated-move");
+    let first_day = 1_700_000_000_000;
+    let second_day = first_day + DAY_MS;
+    let daemon_dir = sanitize_path_component(&identity().daemon_name);
+    let first_path = root
+        .join(date_component_from_unix_ms(first_day))
+        .join(&daemon_dir);
+    let second_path = root
+        .join(date_component_from_unix_ms(second_day))
+        .join(&daemon_dir);
+    let mut store = JsonlDurableObservationStore::open_dated(
+        root.clone(),
+        identity(),
+        privacy(),
+        16,
+        10_000_000,
+        true,
+        first_day,
+    )
+    .unwrap();
+
+    assert!(!root.exists());
+
+    let mut first = header("obs-day-1", 1);
+    first.created_at_unix_ms = first_day;
+    store
+        .record_observation(&first, &[], &[selector("obs-day-1", "@e1")])
+        .unwrap();
+    assert!(first_path.is_dir());
+
+    let mut second = header("obs-day-2", 1);
+    second.created_at_unix_ms = second_day;
+    store
+        .record_observation(&second, &[], &[selector("obs-day-2", "@e2")])
+        .unwrap();
+
+    assert!(!first_path.exists());
+    assert!(second_path.is_dir());
+    assert_eq!(store.index().observations.len(), 2);
+    drop(store);
+
+    let reopened = JsonlDurableObservationStore::open_dated(
+        root.clone(),
+        identity(),
+        privacy(),
+        16,
+        10_000_000,
+        true,
+        second_day,
+    )
+    .unwrap();
+    assert_eq!(reopened.index().observations.len(), 2);
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn cleanup_should_remove_only_expired_inactive_dated_stores() {
+    const DAY_MS: u64 = 24 * 60 * 60 * 1_000;
+
+    let root = temp_dir("durable-dated-cleanup");
+    let now_ms = 20 * DAY_MS;
+    let expired_ms = now_ms - 8 * DAY_MS;
+    let boundary_ms = now_ms - 7 * DAY_MS;
+    let expired_date = date_component_from_unix_ms(expired_ms);
+    let boundary_date = date_component_from_unix_ms(boundary_ms);
+
+    let make_store = |daemon_name: &str, created_at_unix_ms: u64| {
+        let identity = DurableObservationIdentity {
+            namespace: Some("test".to_owned()),
+            daemon_name: daemon_name.to_owned(),
+        };
+        let mut store = JsonlDurableObservationStore::open_dated(
+            root.clone(),
+            identity,
+            privacy(),
+            16,
+            10_000_000,
+            true,
+            created_at_unix_ms,
+        )
+        .unwrap();
+        let mut observation = header(&format!("obs-{daemon_name}"), 0);
+        observation.created_at_unix_ms = created_at_unix_ms;
+        store.record_observation(&observation, &[], &[]).unwrap();
+        store
+    };
+
+    drop(make_store("expired-inactive", expired_ms));
+    let active_store = make_store("expired-active", expired_ms);
+    drop(make_store("retention-boundary", boundary_ms));
+    let unknown_dir = root.join(&expired_date).join("not-an-observation-store");
+    fs::create_dir_all(unknown_dir.join("tmp")).unwrap();
+    fs::write(unknown_dir.join("meta.json"), r#"{"schema":"unknown"}"#).unwrap();
+    fs::write(unknown_dir.join("keep.txt"), "unknown data").unwrap();
+
+    let first = cleanup_expired_default_observation_dirs(&root, now_ms, 7).unwrap();
+
+    assert_eq!(first.removed_stores, 1);
+    assert_eq!(first.skipped_active_stores, 1);
+    assert_eq!(first.skipped_unknown_stores, 1);
+    assert!(!root.join(&expired_date).join("expired-inactive").exists());
+    assert!(root.join(&expired_date).join("expired-active").exists());
+    assert_eq!(
+        fs::read_to_string(unknown_dir.join("keep.txt")).unwrap(),
+        "unknown data"
+    );
+    assert!(root
+        .join(&boundary_date)
+        .join("retention-boundary")
+        .exists());
+
+    drop(active_store);
+    let second = cleanup_expired_default_observation_dirs(&root, now_ms, 7).unwrap();
+    assert_eq!(second.removed_stores, 1);
+    assert_eq!(second.skipped_unknown_stores, 1);
+    assert!(root.join(expired_date).exists());
+    assert!(!owner_lock_path(&root, "expired-inactive").exists());
+    assert!(!owner_lock_path(&root, "expired-active").exists());
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn unix_ms_date_component_should_handle_epoch_and_leap_day() {
+    assert_eq!(date_component_from_unix_ms(0), "1970-01-01");
+    assert_eq!(date_component_from_unix_ms(1_709_164_800_000), "2024-02-29");
 }
 
 #[test]

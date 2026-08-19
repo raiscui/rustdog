@@ -21,11 +21,14 @@ delivery_backend = "ax_press"
 # 这不会让短期 `@eN` ref 跨 daemon 重启继续可用。
 durable_enabled = true
 
-# 省略 state_dir 时使用平台默认路径。
-# 如需固定路径,取消下一行注释并填写目录。
+# 省略 state_dir 时使用 `observations/YYYY-MM-DD/<daemon-name>` 默认布局。
+# 如需固定精确目录,取消下一行注释;显式路径不增加日期层。
 # state_dir = "/Users/you/Library/Application Support/rdog/observations/mac.lab"
 retention_observations = 256
 retention_bytes = 52428800
+# 默认每小时检查一次日期目录,删除 7 天以前且没有活动 owner 的 store。
+cleanup_interval_seconds = 3600
+retention_days = 7
 persist_values = false
 persist_screenshots = false
 write_ref_cache = true
