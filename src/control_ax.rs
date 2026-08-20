@@ -183,6 +183,12 @@ fn resolve_cached_snapshot(
             "缓存 snapshot 与请求 observation identity 不一致",
         ));
     }
+    if entry.snapshot.permission_status != "granted" {
+        return Err(cache_error(
+            "permission_denied",
+            "缓存 observation 的 Accessibility 权限已不可用",
+        ));
+    }
 
     if let Some(resource_key) = resource_key {
         let Some(captured_epoch) = entry.resource_epochs.get(resource_key) else {
@@ -203,6 +209,12 @@ fn resolve_cached_snapshot(
             ));
         }
     } else {
+        if entry.resource_epochs.is_empty() {
+            return Err(cache_error(
+                "cache_unavailable",
+                "observation 没有可证明的 PID resource ownership",
+            ));
+        }
         if observation.created_at_unix_ms != expected_epoch {
             return Err(cache_error(
                 "stale_observation_cache",
@@ -420,6 +432,93 @@ impl AxTarget {
 }
 
 impl AxSnapshot {
+    /// 根据缓存查询请求生成受限只读视图,不修改 cache 中保存的完整 snapshot。
+    ///
+    /// depth 控制元素树展开层级,max_elements 控制返回元素总数,include_values
+    /// 控制敏感且可能很大的 AXValue 字段是否保留。超限通过 truncated 明示。
+    pub fn bounded_for_query(&self, request: &AxTreeRequest) -> Self {
+        self.bounded_for_query_with_target(request, None)
+    }
+
+    /// 为 @ax-get 保留目标节点所在路径,同时应用查询边界。
+    pub fn bounded_for_query_with_target(
+        &self,
+        request: &AxTreeRequest,
+        target_id: Option<&str>,
+    ) -> Self {
+        let mut remaining = request.max_elements as usize;
+        let mut truncated = self.truncated;
+        let windows =
+            self.windows
+                .iter()
+                .cloned()
+                .map(|mut window| {
+                    if let Some(target_id) = target_id {
+                        window.elements.sort_by_key(|element| {
+                            if element.contains_id(target_id) {
+                                0
+                            } else {
+                                1
+                            }
+                        });
+                        for element in &mut window.elements {
+                            prioritize_element_target(element, target_id);
+                        }
+                    }
+                    window
+                })
+                .collect::<Vec<_>>();
+        let mut windows = windows;
+        if let Some(target_id) = target_id {
+            windows.sort_by_key(|window| {
+                if window.id == target_id
+                    || window
+                        .elements
+                        .iter()
+                        .any(|element| element.contains_id(target_id))
+                {
+                    0
+                } else {
+                    1
+                }
+            });
+        }
+        let windows = windows
+            .into_iter()
+            .filter_map(|window| {
+                if remaining == 0 {
+                    truncated = true;
+                    return None;
+                }
+                let mut copy = window;
+                copy.elements = copy
+                    .elements
+                    .iter()
+                    .filter_map(|element| {
+                        let value = bounded_element(
+                            element,
+                            request.depth,
+                            0,
+                            request.include_values,
+                            &mut remaining,
+                            &mut truncated,
+                        )?;
+                        Some(value)
+                    })
+                    .collect();
+                Some(copy)
+            })
+            .collect::<Vec<_>>();
+        let element_count = windows.iter().map(AxWindow::element_count).sum();
+        Self {
+            window_count: windows.len(),
+            element_count,
+            truncated,
+            windows,
+            ..self.clone()
+        }
+    }
+
     pub fn complete(
         platform: impl Into<String>,
         mut windows: Vec<AxWindow>,
@@ -558,6 +657,56 @@ impl AxSnapshot {
                     .any(|element| element.contains_id(target_id))
         })
     }
+}
+
+fn prioritize_element_target(element: &mut AxElement, target_id: &str) {
+    element
+        .children
+        .sort_by_key(|child| if child.contains_id(target_id) { 0 } else { 1 });
+    for child in &mut element.children {
+        prioritize_element_target(child, target_id);
+    }
+}
+
+fn bounded_element(
+    element: &AxElement,
+    max_depth: u8,
+    depth: u8,
+    include_values: bool,
+    remaining: &mut usize,
+    truncated: &mut bool,
+) -> Option<AxElement> {
+    if *remaining == 0 {
+        *truncated = true;
+        return None;
+    }
+    *remaining -= 1;
+    let mut copy = element.clone();
+    if !include_values {
+        copy.value = None;
+    }
+    if depth >= max_depth {
+        if !copy.children.is_empty() {
+            *truncated = true;
+        }
+        copy.children.clear();
+    } else {
+        copy.children = copy
+            .children
+            .iter()
+            .filter_map(|child| {
+                bounded_element(
+                    child,
+                    max_depth,
+                    depth.saturating_add(1),
+                    include_values,
+                    remaining,
+                    truncated,
+                )
+            })
+            .collect();
+    }
+    Some(copy)
 }
 
 impl AxWindow {
@@ -2314,6 +2463,88 @@ mod macos;
 mod tests {
     use super::*;
     use std::cell::Cell;
+
+    fn bounded_query(depth: u8, max_elements: u16, include_values: bool) -> AxTreeRequest {
+        AxTreeRequest {
+            scope: AxTreeScope::Windows,
+            app_menu_app: None,
+            depth,
+            max_elements,
+            include_values,
+            observation_id: None,
+            epoch: None,
+        }
+    }
+
+    #[test]
+    fn bounded_query_should_limit_without_mutating_snapshot() {
+        let child = AxElement {
+            id: "child".to_owned(),
+            ref_id: None,
+            role: "AXStaticText".to_owned(),
+            subrole: None,
+            name: Some("child".to_owned()),
+            value: Some("secret".to_owned()),
+            value_redacted: false,
+            description: None,
+            rect: None,
+            enabled: Some(true),
+            actions: Vec::new(),
+            ax_path: vec![0, 0],
+            children: Vec::new(),
+        };
+        let root = AxElement {
+            id: "root".to_owned(),
+            ref_id: None,
+            role: "AXGroup".to_owned(),
+            subrole: None,
+            name: Some("root".to_owned()),
+            value: Some("root-value".to_owned()),
+            value_redacted: false,
+            description: None,
+            rect: None,
+            enabled: Some(true),
+            actions: Vec::new(),
+            ax_path: vec![0],
+            children: vec![child],
+        };
+        let snapshot = AxSnapshot::complete(
+            "macos",
+            vec![AxWindow {
+                id: "window".to_owned(),
+                ref_id: None,
+                pid: 1,
+                process_name: "Test".to_owned(),
+                title: None,
+                role: "AXWindow".to_owned(),
+                subrole: None,
+                rect: None,
+                focused: None,
+                elements: vec![root],
+            }],
+            false,
+        );
+
+        let bounded = snapshot.bounded_for_query(&bounded_query(0, 1, false));
+        assert_eq!(bounded.element_count, 1);
+        assert!(bounded.truncated);
+        assert!(bounded.windows[0].elements[0].children.is_empty());
+        assert!(bounded.windows[0].elements[0].value.is_none());
+        assert_eq!(snapshot.element_count, 2);
+        assert_eq!(snapshot.windows[0].elements[0].children.len(), 1);
+        assert_eq!(
+            snapshot.windows[0].elements[0].value.as_deref(),
+            Some("root-value")
+        );
+
+        let deep = snapshot.bounded_for_query(&bounded_query(2, 2, true));
+        assert_eq!(deep.element_count, 2);
+        assert_eq!(deep.windows[0].elements[0].children.len(), 1);
+        assert_eq!(
+            deep.windows[0].elements[0].children[0].value.as_deref(),
+            Some("secret")
+        );
+    }
 
     #[test]
     fn ax_snapshot_should_count_nested_elements_and_render_tree_response() {

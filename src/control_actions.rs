@@ -1056,6 +1056,7 @@ fn execute_ax_tree(
     let snapshot = match (&request.observation_id, request.epoch) {
         (Some(observation_id), Some(epoch)) => {
             crate::control_ax::resolve_cached_ax_tree(observation_id, epoch)?
+                .bounded_for_query(request)
         }
         (None, None) => capture_default_ax_snapshot(request)?.with_observation("@ax-tree")?,
         _ => {
@@ -1087,16 +1088,33 @@ fn execute_ax_find(
 
 fn execute_ax_get(request: &crate::control_ax::AxGetRequest) -> io::Result<ActionExecutionResult> {
     let snapshot = match (request.target.observation_id.as_deref(), request.epoch) {
-        (Some(observation_id), Some(epoch)) => crate::control_ax::resolve_cached_ax_get(
-            observation_id,
-            request.target.ref_id.as_deref().ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "缓存 @ax-get 必须使用 observation-local ref",
-                )
-            })?,
-            epoch,
-        )?,
+        (Some(observation_id), Some(epoch)) => {
+            let snapshot = crate::control_ax::resolve_cached_ax_get(
+                observation_id,
+                request.target.ref_id.as_deref().ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "缓存 @ax-get 必须使用 observation-local ref",
+                    )
+                })?,
+                epoch,
+            )?;
+            let target_id =
+                crate::control_ax::resolve_target_id_in_snapshot(&snapshot, &request.target)
+                    .map_err(|_| {
+                        io::Error::new(
+                            io::ErrorKind::InvalidInput,
+                            serde_json::json!({
+                                "ok": false,
+                                "error_code": "target_not_found",
+                                "error_message": "缓存 observation 中不存在请求目标",
+                                "retry": {"strategy": "re_observe_then_retry"}
+                            })
+                            .to_string(),
+                        )
+                    })?;
+            snapshot.bounded_for_query_with_target(&request.tree_request(), Some(&target_id))
+        }
         (None, None) => capture_ax_get_snapshot_with(
             request,
             capture_default_ax_snapshot,

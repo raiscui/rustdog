@@ -74,9 +74,24 @@ fn ax_get_ref_capture_uses_the_observation_target_window() {
 
 #[test]
 fn ax_tree_executor_uses_cached_observation_without_live_capture() {
-    let observed = crate::control_ax::AxSnapshot::complete("test", Vec::new(), false)
-        .with_observation("@ax-tree")
-        .expect("测试 observation 应创建成功");
+    let observed = crate::control_ax::AxSnapshot::complete(
+        "test",
+        vec![crate::control_ax::AxWindow {
+            id: "pid:73061/window:0".to_owned(),
+            ref_id: None,
+            pid: 73061,
+            process_name: "Test".to_owned(),
+            title: None,
+            role: "AXWindow".to_owned(),
+            subrole: None,
+            rect: None,
+            focused: None,
+            elements: Vec::new(),
+        }],
+        false,
+    )
+    .with_observation("@ax-tree")
+    .expect("测试 observation 应创建成功");
     let header = observed
         .observation
         .as_ref()

@@ -704,8 +704,14 @@ pub fn parse_ax_get_payload(input: &str) -> io::Result<AxGetRequest> {
     }
 
     let preset = mode.unwrap_or(DEFAULT_AX_GET_MODE).preset();
+    let target = required_field(target, "@ax-get", "target")?;
+    if epoch.is_some() && (target.observation_id.is_none() || target.ref_id.is_none()) {
+        return Err(invalid_data(
+            "缓存 @ax-get 的 epoch 必须与 target.ref 和 target.observation_id 一起出现",
+        ));
+    }
     Ok(AxGetRequest {
-        target: required_field(target, "@ax-get", "target")?,
+        target,
         depth: depth.unwrap_or(preset.depth),
         max_elements: max_elements.unwrap_or(preset.max_elements),
         include_values: include_values.unwrap_or(preset.include_values),
@@ -1255,5 +1261,7 @@ mod tests {
             parse_ax_get_payload(r#"{target:{ref:"@e1",observation_id:"obs-1"},epoch:7}"#).unwrap();
         assert_eq!(request.epoch, Some(7));
         assert!(parse_ax_get_payload(r#"{target:{id:"pid:1/window:0"},epoch:-1}"#).is_err());
+        assert!(parse_ax_get_payload(r#"{target:{id:"pid:1/window:0"},epoch:7}"#).is_err());
+        assert!(parse_ax_get_payload(r#"{target:{ref:"@e1"},epoch:7}"#).is_err());
     }
 }
