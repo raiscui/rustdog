@@ -246,7 +246,24 @@ pub fn resolve_cached_ax_get(
     ref_id: &str,
     expected_epoch: u64,
 ) -> io::Result<AxSnapshot> {
-    let entry = resolve_observation_ref(observation_id, ref_id)?;
+    // 缓存查询必须把 observation/ref 生命周期错误收敛到缓存协议的稳定 reason code,
+    // 避免上游依赖 observation store 的内部错误码或中文错误文本做分支判断。
+    let entry = resolve_observation_ref(observation_id, ref_id).map_err(|error| {
+        let code = serde_json::from_str::<serde_json::Value>(&error.to_string())
+            .ok()
+            .and_then(|value| {
+                value
+                    .get("error_code")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned)
+            });
+        match code {
+            Some(code) if code == "STALE_REF" => {
+                cache_error("target_not_found", "缓存 observation 中不存在请求目标 ref")
+            }
+            _ => cache_error("stale_observation_cache", "缓存 observation 已过期或不存在"),
+        }
+    })?;
     let Some(resource_key) =
         crate::control_resource_lane::resource_key_from_backend_id(&entry.backend_id)
     else {
@@ -2870,7 +2887,13 @@ mod tests {
             .unwrap();
         let observation_id = snapshot.observation.unwrap().observation_id;
         let missing_ref = resolve_cached_ax_get(&observation_id, "@e404", 0).unwrap_err();
-        assert!(!missing_ref.to_string().is_empty());
+        assert!(missing_ref.to_string().contains("target_not_found"));
+    }
+
+    #[test]
+    fn cached_ax_get_should_normalize_expired_observation_reason_code() {
+        let expired = resolve_cached_ax_get("obs-does-not-exist", "@e404", 0).unwrap_err();
+        assert!(expired.to_string().contains("stale_observation_cache"));
     }
 
     #[test]

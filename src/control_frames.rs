@@ -1181,6 +1181,27 @@ mod tests {
     }
 
     #[test]
+    fn response_budget_preserves_exact_byte_and_line_boundaries() {
+        let exact_bytes = "界".repeat(4);
+        assert_eq!(
+            bound_response_line_with_limits(&exact_bytes, exact_bytes.len(), 1),
+            exact_bytes
+        );
+        let over_bytes = format!("{exact_bytes}x");
+        let bounded = bound_response_line_with_limits(&over_bytes, exact_bytes.len(), 1);
+        assert!(bounded.contains("output_budget_exceeded"));
+
+        let exact_lines = "a\nb";
+        assert_eq!(
+            bound_response_line_with_limits(exact_lines, 128, 2),
+            exact_lines
+        );
+        let over_lines = "a\nb\nc";
+        let bounded = bound_response_line_with_limits(over_lines, 128, 2);
+        assert!(bounded.contains("output_budget_exceeded"));
+    }
+
+    #[test]
     fn response_budget_returns_utf8_safe_structured_preview() {
         let original = format!(
             "@response {{\"id\":7,\"value\":\"{}\"}}",

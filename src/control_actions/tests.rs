@@ -108,6 +108,64 @@ fn ax_tree_executor_uses_cached_observation_without_live_capture() {
 }
 
 #[test]
+fn cached_ax_get_executor_returns_stable_target_not_found_code() {
+    let observed = crate::control_ax::AxSnapshot::complete(
+        "test",
+        vec![crate::control_ax::AxWindow {
+            id: "pid:73062/window:0".to_owned(),
+            ref_id: None,
+            pid: 73062,
+            process_name: "Test".to_owned(),
+            title: None,
+            role: "AXWindow".to_owned(),
+            subrole: None,
+            rect: None,
+            focused: None,
+            elements: Vec::new(),
+        }],
+        false,
+    )
+    .with_observation("@ax-tree")
+    .expect("测试 observation 应创建成功");
+    let header = observed
+        .observation
+        .as_ref()
+        .expect("应有 observation header");
+    let request = crate::control_ax::AxGetRequest {
+        target: crate::control_ax::AxTarget {
+            ref_id: Some("@e-missing".to_owned()),
+            observation_id: Some(header.observation_id.clone()),
+            ..crate::control_ax::AxTarget::default()
+        },
+        depth: 1,
+        max_elements: 20,
+        include_values: true,
+        epoch: Some(header.created_at_unix_ms),
+    };
+
+    let error = super::execute_ax_get(&request).expect_err("缺失 ref 必须 fail closed");
+    assert!(error.to_string().contains("target_not_found"));
+}
+
+#[test]
+fn cached_ax_get_executor_returns_stale_code_for_expired_observation() {
+    let request = crate::control_ax::AxGetRequest {
+        target: crate::control_ax::AxTarget {
+            ref_id: Some("@e-missing".to_owned()),
+            observation_id: Some("obs-expired".to_owned()),
+            ..crate::control_ax::AxTarget::default()
+        },
+        depth: 1,
+        max_elements: 20,
+        include_values: true,
+        epoch: Some(0),
+    };
+
+    let error = super::execute_ax_get(&request).expect_err("过期 observation 必须 fail closed");
+    assert!(error.to_string().contains("stale_observation_cache"));
+}
+
+#[test]
 fn direct_ax_focus_ref_mutation_makes_old_computer_act_stale() {
     let observation = record_observation(
         "ax",
