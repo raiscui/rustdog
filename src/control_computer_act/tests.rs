@@ -402,14 +402,17 @@ fn unknown_action_returns_error() {
 }
 
 use super::{
-    check_observation_epoch_fast_reject, dispatch_with_resource_epoch, execute_computer_act,
+    append_post_dispatch_evidence, check_observation_epoch_fast_reject,
+    dispatch_with_resource_epoch, execute_computer_act, PostDispatchStatus,
 };
 use crate::control_ax::{AxElement, AxSnapshot, AxWindow};
 use crate::control_observation::{
     record_observation, record_observation_with_selectors_from_capture, resolve_observation_header,
     resolve_observation_resource_epoch, ObservationRefEntry, ObservationRoot,
 };
-use crate::control_protocol::ComputerActRequest;
+use crate::control_protocol::{
+    ComputerActPostcondition, ComputerActPostconditionKind, ComputerActRequest,
+};
 use crate::control_resource_lane::{capture_resource_epochs, with_resource_write};
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
@@ -776,15 +779,83 @@ fn successor_target_uses_the_new_snapshot_ref_for_the_same_backend() {
     .with_observation("@computer-act")
     .expect("successor observation should be recorded");
 
-    let target = super::build_successor_target(&successor, "pid:910007/window:0/path:0")
+    let target = super::verify::build_successor_target(&successor, "pid:910007/window:0/path:0")
         .expect("successor should expose the exact target ref");
 
     assert_eq!(target["ref"], "@e4");
     assert_eq!(
         target["observation_id"],
-        successor.observation.unwrap().observation_id
+        successor
+            .observation
+            .as_ref()
+            .expect("successor observation 应存在")
+            .observation_id
     );
-    assert!(target["epoch"].is_u64());
+    let resource_epoch = resolve_observation_resource_epoch(
+        target["observation_id"]
+            .as_str()
+            .expect("successor observation id 应为字符串"),
+        target["ref"]
+            .as_str()
+            .expect("successor target ref 应为字符串"),
+    )
+    .expect("successor resource epoch 应可解析")
+    .expect("PID-backed successor 必须携带 resource epoch");
+    assert_eq!(target["epoch"], resource_epoch.epoch);
+}
+
+#[test]
+fn post_dispatch_response_marks_missing_successor_unknown_without_fabrication() {
+    let pre = AxSnapshot::complete("test", Vec::new(), false)
+        .with_observation("@computer-act")
+        .expect("pre observation 应创建成功");
+    let changes = crate::ax_diff::changes_first::decide_snapshot_changes(Some(&pre), None);
+    let request = ComputerActRequest {
+        schema: "rdog.computer-act.v1".to_string(),
+        action: "click".to_string(),
+        args: json!({}),
+        verify: None,
+        postcondition: Some(ComputerActPostcondition {
+            kind: ComputerActPostconditionKind::Exists,
+            query: crate::control_ax::AxFindQuery {
+                role: Some("AXButton".to_string()),
+                ..Default::default()
+            },
+        }),
+        observation_id: None,
+        timeout_ms: None,
+        trace: None,
+        epoch: None,
+    };
+    let mut payload = json!({"ok": true});
+
+    append_post_dispatch_evidence(
+        &mut payload,
+        &request,
+        None,
+        None,
+        Some(&changes),
+        PostDispatchStatus {
+            dispatch_ok: true,
+            successor_required: true,
+            verify_policy: super::VerifyPolicy::None,
+            verify_ran: false,
+            verification_passed: false,
+        },
+    );
+
+    assert_eq!(payload["changes"]["status"], "unavailable");
+    assert_eq!(
+        payload["changes"]["base_observation_id"],
+        pre.observation
+            .as_ref()
+            .expect("pre observation 应存在")
+            .observation_id
+    );
+    assert_eq!(payload["postcondition"]["status"], "unavailable");
+    assert_eq!(payload["outcome"], "unknown");
+    assert!(payload.get("successor_observation").is_none());
+    assert!(payload.get("successor_target").is_none());
 }
 
 #[test]

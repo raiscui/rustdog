@@ -49,10 +49,10 @@ pub(crate) use implicit_observe::{
 #[path = "verify.rs"]
 mod verify;
 pub(crate) use verify::{
-    build_successor_target, capture_pre_snapshot, capture_successor_snapshot,
+    append_successor_evidence, capture_pre_snapshot, capture_successor_snapshot,
     evaluate_postcondition, parse_verify_policy, render_postcondition,
     render_unavailable_postcondition, render_verification, run_always_verify,
-    run_best_effort_verify, VerifyPolicy,
+    run_best_effort_verify_with_changes, VerifyPolicy,
 };
 
 // ticket 17 density metrics (ADR-0006 §Consequences)
@@ -665,6 +665,66 @@ fn dispatch_with_resource_epoch(
     }
 }
 
+struct PostDispatchStatus {
+    dispatch_ok: bool,
+    successor_required: bool,
+    verify_policy: VerifyPolicy,
+    verify_ran: bool,
+    verification_passed: bool,
+}
+
+fn append_post_dispatch_evidence(
+    payload: &mut Value,
+    request: &ComputerActRequest,
+    successor_snapshot: Option<&crate::control_ax::AxSnapshot>,
+    target_backend_id: Option<&str>,
+    changes_decision: Option<&crate::ax_diff::changes_first::SnapshotChangesDecision>,
+    status: PostDispatchStatus,
+) {
+    append_successor_evidence(
+        payload,
+        successor_snapshot,
+        target_backend_id,
+        changes_decision,
+    );
+
+    let postcondition_report = request.postcondition.as_ref().and_then(|condition| {
+        successor_snapshot.map(|snapshot| evaluate_postcondition(snapshot, condition))
+    });
+    if let Some(report) = postcondition_report.as_ref() {
+        payload["postcondition"] = render_postcondition(report);
+    } else if let Some(condition) = request.postcondition.as_ref() {
+        payload["postcondition"] = render_unavailable_postcondition(condition);
+    }
+
+    let verify_requested = !matches!(status.verify_policy, VerifyPolicy::None);
+    let outcome = compute_outcome(&OutcomeInputs {
+        dispatch_ok: status.dispatch_ok,
+        successor_available: status
+            .successor_required
+            .then_some(successor_snapshot.is_some()),
+        postcondition: match (
+            request.postcondition.as_ref(),
+            postcondition_report.as_ref(),
+        ) {
+            (None, _) => EvidenceStatus::NotRequested,
+            (Some(_), None) => EvidenceStatus::Unavailable,
+            (Some(_), Some(report)) if report.status == "verified" => EvidenceStatus::Passed,
+            (Some(_), Some(_)) => EvidenceStatus::Failed,
+        },
+        verification: if !verify_requested {
+            EvidenceStatus::NotRequested
+        } else if !status.verify_ran {
+            EvidenceStatus::Unavailable
+        } else if status.verification_passed {
+            EvidenceStatus::Passed
+        } else {
+            EvidenceStatus::Failed
+        },
+    });
+    payload["outcome"] = render_outcome(outcome);
+}
+
 /// `execute_computer_act` 是 `@computer-act` 的 executor。
 ///
 /// 流程 (skeleton 范围):
@@ -767,10 +827,13 @@ pub(crate) fn execute_computer_act(
     // 以保留 STALE_REF / OBSERVATION_EXPIRED 等既有精确错误语义。
     let resource_epoch = resolve_request_resource_epoch(request).ok().flatten();
     let target_backend_id = resolve_request_target_backend_id(request);
-    let pre_snapshot = if matches!(verify_policy, VerifyPolicy::None) {
-        None
-    } else {
+    let successor_required = resource_epoch.is_some() || request.postcondition.is_some();
+    let successor_evidence_requested =
+        successor_required || !matches!(verify_policy, VerifyPolicy::None);
+    let pre_snapshot = if successor_evidence_requested {
         capture_pre_snapshot(target_backend_id.as_deref()).ok()
+    } else {
+        None
     };
 
     // ticket 16: timeout watcher (spawn background thread, 命中后 signal cancel_token)。
@@ -819,13 +882,19 @@ pub(crate) fn execute_computer_act(
     }
 
     let dispatch_ok = underlying_result.exit_code == 0;
-    let successor_required = resource_epoch.is_some() || request.postcondition.is_some();
-    let successor_snapshot =
-        if dispatch_ok && (successor_required || !matches!(verify_policy, VerifyPolicy::None)) {
-            capture_successor_snapshot(target_backend_id.as_deref()).ok()
-        } else {
-            None
-        };
+    let successor_snapshot = if dispatch_ok && successor_evidence_requested {
+        capture_successor_snapshot(target_backend_id.as_deref()).ok()
+    } else {
+        None
+    };
+    let changes_start = Instant::now();
+    let changes_decision = (dispatch_ok && successor_evidence_requested).then(|| {
+        crate::ax_diff::changes_first::decide_snapshot_changes(
+            pre_snapshot.as_ref(),
+            successor_snapshot.as_ref(),
+        )
+    });
+    let changes_ms = changes_start.elapsed().as_millis() as u64;
 
     // ticket 13/14: pre snapshot 与唯一 successor snapshot 跨越 dispatch。
     // - BestEffort: AX diff only (轻量)
@@ -835,14 +904,26 @@ pub(crate) fn execute_computer_act(
         VerifyPolicy::BestEffort => pre_snapshot
             .as_ref()
             .zip(successor_snapshot.as_ref())
-            .map(|(pre, successor)| run_best_effort_verify(pre, successor, dispatch_ms)),
+            .zip(changes_decision.as_ref())
+            .map(|((pre, successor), changes)| {
+                run_best_effort_verify_with_changes(
+                    pre,
+                    successor,
+                    dispatch_ms,
+                    changes,
+                    changes_ms,
+                )
+            }),
         _ => None,
     };
     let always_summary = match verify_policy {
         VerifyPolicy::Always => pre_snapshot
             .as_ref()
             .zip(successor_snapshot.as_ref())
-            .map(|(pre, successor)| run_always_verify(pre, successor, dispatch_ms)),
+            .zip(changes_decision.as_ref())
+            .map(|((pre, successor), changes)| {
+                run_always_verify(pre, successor, dispatch_ms, changes, changes_ms)
+            }),
         _ => None,
     };
     let verify_ms = match verify_policy {
@@ -920,31 +1001,6 @@ pub(crate) fn execute_computer_act(
         "density": render_density(&density_metrics),
         "trace_summary": trace_summary_json,
     });
-    if let Some(header) = successor_snapshot
-        .as_ref()
-        .and_then(|snapshot| snapshot.observation.as_ref())
-    {
-        payload["successor_observation"] = serde_json::to_value(header).unwrap_or(Value::Null);
-    }
-    if let Some(successor_target) = successor_snapshot
-        .as_ref()
-        .zip(target_backend_id.as_deref())
-        .and_then(|(snapshot, backend_id)| build_successor_target(snapshot, backend_id))
-    {
-        payload["successor_target"] = successor_target;
-    }
-
-    let postcondition_report = request.postcondition.as_ref().and_then(|condition| {
-        successor_snapshot
-            .as_ref()
-            .map(|snapshot| evaluate_postcondition(snapshot, condition))
-    });
-    if let Some(report) = postcondition_report.as_ref() {
-        payload["postcondition"] = render_postcondition(report);
-    } else if let Some(condition) = request.postcondition.as_ref() {
-        payload["postcondition"] = render_unavailable_postcondition(condition);
-    }
-
     // ticket 12/13/14: verify=none 时不写 verification 字段;best_effort 写 ax_diff 摘要;
     // always 走 AlwaysVerifySummary 路径 (full observe + ax_diff)。
     if let Some(v) = render_verification(
@@ -958,31 +1014,21 @@ pub(crate) fn execute_computer_act(
     // feature/computer-act-outcome-3state: outcome 三态替换 Phase F-2 verify_failed
     // envelope rewrite. dispatch 成功 + verify_failed 现在是 ok:true + outcome:"didnt",
     // 不再改 ok:false + error_code:verify_failed. 三态详见 `outcome.rs` 的决策表.
-    let verify_requested = !matches!(verify_policy, VerifyPolicy::None);
     let verify_ran = verify_summary.is_some() || always_summary.is_some();
-    let outcome = compute_outcome(&OutcomeInputs {
-        dispatch_ok: ok,
-        successor_available: successor_required.then_some(successor_snapshot.is_some()),
-        postcondition: match (
-            request.postcondition.as_ref(),
-            postcondition_report.as_ref(),
-        ) {
-            (None, _) => EvidenceStatus::NotRequested,
-            (Some(_), None) => EvidenceStatus::Unavailable,
-            (Some(_), Some(report)) if report.status == "verified" => EvidenceStatus::Passed,
-            (Some(_), Some(_)) => EvidenceStatus::Failed,
+    append_post_dispatch_evidence(
+        &mut payload,
+        request,
+        successor_snapshot.as_ref(),
+        target_backend_id.as_deref(),
+        changes_decision.as_ref(),
+        PostDispatchStatus {
+            dispatch_ok: ok,
+            successor_required,
+            verify_policy,
+            verify_ran,
+            verification_passed,
         },
-        verification: if !verify_requested {
-            EvidenceStatus::NotRequested
-        } else if !verify_ran {
-            EvidenceStatus::Unavailable
-        } else if verification_passed {
-            EvidenceStatus::Passed
-        } else {
-            EvidenceStatus::Failed
-        },
-    });
-    payload["outcome"] = render_outcome(outcome);
+    );
 
     // ticket 18: trace_summary 总是带 (即使 verify=none 也占 4 段);trace_savefile
     // 仅在 request.trace == Some("savefile") 时存在

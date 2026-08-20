@@ -19,12 +19,17 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::time::Instant;
 
+#[cfg(test)]
+use crate::ax_diff::changes_first::decide_snapshot_changes;
+use crate::ax_diff::changes_first::SnapshotChangesDecision;
 use crate::ax_diff::diff::compute_diff;
 use crate::control_ax::{
     ax_window_id_from_backend_id, capture_current_ax_window_snapshot, capture_default_ax_snapshot,
     query::matches_query, AxFindQuery, AxSnapshot, AxTreeRequest,
 };
-use crate::control_observation::{build_observe_bundle, ObserveRequest};
+use crate::control_observation::{
+    build_observe_bundle, resolve_observation_resource_epoch, ObserveRequest,
+};
 use crate::control_protocol::{ComputerActPostcondition, ComputerActPostconditionKind};
 
 /// ADR-0004 V3: 三档 verify policy。
@@ -141,8 +146,17 @@ fn capture_target_snapshot_with(
     }
 }
 
+fn capture_pre_snapshot_with(
+    target_backend_id: Option<&str>,
+    capture_global: impl FnOnce(&AxTreeRequest) -> io::Result<AxSnapshot>,
+    capture_window: impl FnOnce(&str, &AxTreeRequest) -> io::Result<AxSnapshot>,
+) -> io::Result<AxSnapshot> {
+    capture_target_snapshot_with(target_backend_id, capture_global, capture_window)?
+        .with_observation("@computer-act")
+}
+
 pub(crate) fn capture_pre_snapshot(target_backend_id: Option<&str>) -> io::Result<AxSnapshot> {
-    capture_target_snapshot_with(
+    capture_pre_snapshot_with(
         target_backend_id,
         capture_default_ax_snapshot,
         capture_current_ax_window_snapshot,
@@ -201,17 +215,49 @@ pub(crate) fn build_successor_target(snapshot: &AxSnapshot, backend_id: &str) ->
         }
     })?;
 
+    let epoch = resolve_observation_resource_epoch(&header.observation_id, ref_id)
+        .ok()
+        .flatten()?
+        .epoch;
     Some(serde_json::json!({
         "ref": ref_id,
         "observation_id": header.observation_id,
-        "epoch": header.created_at_unix_ms,
+        "epoch": epoch,
     }))
+}
+
+/// 把唯一 successor capture 的可复用证据写入 response。
+///
+/// `changes` 是只读摘要。后续 mutation 仍必须消费 `successor_target`,
+/// capture 缺失时只返回 unavailable,不会伪造 observation 或 target。
+pub(crate) fn append_successor_evidence(
+    payload: &mut Value,
+    successor_snapshot: Option<&AxSnapshot>,
+    target_backend_id: Option<&str>,
+    decision: Option<&SnapshotChangesDecision>,
+) {
+    let Some(decision) = decision else {
+        return;
+    };
+    payload["changes"] = serde_json::to_value(&decision.changes).unwrap_or(Value::Null);
+    let Some(successor) = successor_snapshot else {
+        return;
+    };
+    if let Some(header) = successor.observation.as_ref() {
+        payload["successor_observation"] = serde_json::to_value(header).unwrap_or(Value::Null);
+    }
+    if let Some(successor_target) =
+        target_backend_id.and_then(|backend_id| build_successor_target(successor, backend_id))
+    {
+        payload["successor_target"] = successor_target;
+    }
 }
 
 #[cfg(test)]
 mod successor_capture_tests {
     use super::*;
     use crate::control_ax::{AxElement, AxWindow};
+    use crate::control_observation::{ObservationHeader, ObservationRoot};
     use std::cell::Cell;
 
     fn target_snapshot() -> AxSnapshot {
@@ -247,6 +293,26 @@ mod successor_capture_tests {
         )
     }
 
+    fn target_snapshot_with_observation(observation_id: &str) -> AxSnapshot {
+        let mut snapshot = target_snapshot();
+        snapshot.observation = Some(ObservationHeader {
+            observation_id: observation_id.to_string(),
+            session_id: None,
+            created_at_unix_ms: 1,
+            ttl_ms: 5_000,
+            scope: "ax".to_string(),
+            source_command: "@computer-act".to_string(),
+            root: ObservationRoot {
+                schema: "rdog.ax.v1".to_string(),
+                platform: "test".to_string(),
+                coordinate_space: "os-logical".to_string(),
+            },
+            ref_count: 2,
+            selector_count: 0,
+        });
+        snapshot
+    }
+
     #[test]
     fn successor_capture_uses_target_window_when_global_snapshot_would_be_truncated() {
         let global_called = Cell::new(false);
@@ -275,6 +341,98 @@ mod successor_capture_tests {
 
         assert!(build_successor_target(&snapshot, "pid:73060/window:0/path:9").is_none());
     }
+
+    #[test]
+    fn successor_response_keeps_changes_target_and_epoch_on_the_same_observation() {
+        let pre = target_snapshot()
+            .with_observation("@computer-act")
+            .expect("pre observation 应创建成功");
+        let successor = target_snapshot()
+            .with_observation("@computer-act")
+            .expect("successor observation 应创建成功");
+        let mut payload = serde_json::json!({});
+
+        append_successor_evidence(
+            &mut payload,
+            Some(&successor),
+            Some("pid:73060/window:0/path:0.0"),
+            Some(&decide_snapshot_changes(Some(&pre), Some(&successor))),
+        );
+
+        assert_eq!(payload["changes"]["status"], "changes");
+        assert_eq!(
+            payload["changes"]["base_observation_id"],
+            pre.observation
+                .as_ref()
+                .expect("pre observation 应存在")
+                .observation_id
+        );
+        assert_eq!(
+            payload["changes"]["successor_observation_id"],
+            payload["successor_observation"]["observation_id"]
+        );
+        assert_eq!(
+            payload["successor_target"]["observation_id"],
+            payload["successor_observation"]["observation_id"]
+        );
+        let resource_epoch = resolve_observation_resource_epoch(
+            payload["successor_target"]["observation_id"]
+                .as_str()
+                .expect("successor observation id 应为字符串"),
+            payload["successor_target"]["ref"]
+                .as_str()
+                .expect("successor ref 应为字符串"),
+        )
+        .expect("resource epoch 应可解析")
+        .expect("PID-backed target 必须有 resource epoch");
+        assert_eq!(payload["successor_target"]["epoch"], resource_epoch.epoch);
+    }
+
+    #[test]
+    fn missing_after_capture_returns_unavailable_without_fabricating_successor() {
+        // after 缺失时无需把 fixture 写进全局 observation store。
+        // 这里仅验证 response 不会伪造 successor。
+        let pre = target_snapshot();
+        let mut payload = serde_json::json!({});
+
+        append_successor_evidence(
+            &mut payload,
+            None,
+            Some("pid:73060/window:0/path:0.0"),
+            Some(&decide_snapshot_changes(Some(&pre), None)),
+        );
+
+        assert_eq!(payload["changes"]["status"], "unavailable");
+        assert_eq!(
+            payload["changes"]["fallback_reason"],
+            "successor_capture_unavailable"
+        );
+        assert!(payload.get("successor_observation").is_none());
+        assert!(payload.get("successor_target").is_none());
+    }
+
+    #[test]
+    fn missing_base_capture_keeps_real_successor_but_marks_changes_unavailable() {
+        let successor = target_snapshot_with_observation("successor");
+        let mut payload = serde_json::json!({});
+
+        append_successor_evidence(
+            &mut payload,
+            Some(&successor),
+            None,
+            Some(&decide_snapshot_changes(None, Some(&successor))),
+        );
+
+        assert_eq!(payload["changes"]["status"], "unavailable");
+        assert_eq!(
+            payload["changes"]["fallback_reason"],
+            "base_capture_unavailable"
+        );
+        assert_eq!(
+            payload["changes"]["successor_observation_id"],
+            payload["successor_observation"]["observation_id"]
+        );
+    }
 }
 
 pub(crate) fn run_best_effort_verify(
@@ -300,6 +458,31 @@ pub(crate) fn run_best_effort_verify(
         verify_ms,
         dispatch_ms,
         full_report,
+    }
+}
+
+pub(crate) fn run_best_effort_verify_with_changes(
+    pre: &AxSnapshot,
+    successor: &AxSnapshot,
+    dispatch_ms: u64,
+    changes: &SnapshotChangesDecision,
+    changes_ms: u64,
+) -> AxDiffSummary {
+    let Some(report) = changes.diff.as_ref() else {
+        let mut summary = run_best_effort_verify(pre, successor, dispatch_ms);
+        summary.verify_ms += changes_ms;
+        return summary;
+    };
+    AxDiffSummary {
+        windows_added: report.windows_added,
+        windows_removed: report.windows_removed,
+        windows_modified: report.windows_modified,
+        elements_added: report.elements_added,
+        elements_removed: report.elements_removed,
+        elements_modified: report.elements_modified,
+        verify_ms: changes_ms,
+        dispatch_ms,
+        full_report: serde_json::to_value(report).unwrap_or(Value::Null),
     }
 }
 
@@ -416,10 +599,13 @@ pub(crate) fn run_always_verify(
     pre: &AxSnapshot,
     successor: &AxSnapshot,
     dispatch_ms: u64,
+    changes: &SnapshotChangesDecision,
+    changes_ms: u64,
 ) -> AlwaysVerifySummary {
     use std::time::Instant;
     let verify_start = Instant::now();
-    let mut ax_diff = run_best_effort_verify(pre, successor, dispatch_ms);
+    let mut ax_diff =
+        run_best_effort_verify_with_changes(pre, successor, dispatch_ms, changes, changes_ms);
 
     // successor 已提供唯一 post-action AX。这里仅补 screenshot/windows。
     let mut observe_request = ObserveRequest::default();
@@ -427,7 +613,7 @@ pub(crate) fn run_always_verify(
     let observe_bundle = match build_observe_bundle(None, &observe_request) {
         Ok(b) => b,
         Err(_) => {
-            ax_diff.verify_ms = verify_start.elapsed().as_millis() as u64;
+            ax_diff.verify_ms = changes_ms + verify_start.elapsed().as_millis() as u64;
             return AlwaysVerifySummary {
                 observation_block: Value::Null,
                 screenshot_id: None,
@@ -478,7 +664,7 @@ pub(crate) fn run_always_verify(
         .unwrap_or(0);
     let screenshot_truncated = screenshot_bytes > ALWAYS_VERIFY_SCREENSHOT_LIMIT_BYTES;
 
-    let total_verify_ms = verify_start.elapsed().as_millis() as u64;
+    let total_verify_ms = changes_ms + verify_start.elapsed().as_millis() as u64;
     ax_diff.verify_ms = total_verify_ms;
     ax_diff.dispatch_ms = dispatch_ms;
 

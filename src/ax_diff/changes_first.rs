@@ -3,7 +3,7 @@
 //
 // 目标: 只有在 before/after 使用同一组稳定 identity 时才返回精简 changes。
 // identity 不可信时返回 full,避免把“整棵树被替换”误报成少量局部变化。
-// 这个模块暂时只做纯函数和 fixture 回归,不改变现有 @computer-act wire。
+// `@computer-act` 复用这里的纯决策,不维护第二套 diff 或 identity gate。
 // =====================================================================
 
 use crate::ax_diff::{diff::compute_diff, normalize::normalize_snapshot};
@@ -41,6 +41,8 @@ pub(crate) enum ChangesFirstReason {
     ResourceIdentityChanged,
     MissingIdentityMetadata,
     RootIdentityChanged,
+    BaseCaptureUnavailable,
+    SuccessorCaptureUnavailable,
 }
 
 #[derive(Debug, Serialize)]
@@ -78,6 +80,12 @@ pub(crate) struct ChangesFirstDecision {
     pub(crate) compared_elements: usize,
     pub(crate) diff: Option<crate::ax_diff::types::DiffReport>,
     pub(crate) changes: ChangesSummary,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct SnapshotChangesDecision {
+    pub(crate) changes: ChangesSummary,
+    pub(crate) diff: Option<crate::ax_diff::types::DiffReport>,
 }
 
 pub(crate) fn decide_changes_first(
@@ -253,6 +261,61 @@ pub(crate) fn decide_changes_first(
         compared_elements,
         diff: Some(diff),
         changes,
+    }
+}
+
+/// 把现有 pre/successor snapshot 转为 `@computer-act` 可内联的可信 changes 摘要。
+///
+/// capture 缺失和 identity 不可信是两类不同事实。前者返回 unavailable,
+/// 后者继续由 `decide_changes_first` 返回 full 和精确 fallback reason。
+pub(crate) fn decide_snapshot_changes(
+    before: Option<&crate::control_ax::AxSnapshot>,
+    after: Option<&crate::control_ax::AxSnapshot>,
+) -> SnapshotChangesDecision {
+    let Some(before) = before else {
+        return SnapshotChangesDecision {
+            changes: unavailable_changes(ChangesFirstReason::BaseCaptureUnavailable, None, after),
+            diff: None,
+        };
+    };
+    let Some(after) = after else {
+        return SnapshotChangesDecision {
+            changes: unavailable_changes(
+                ChangesFirstReason::SuccessorCaptureUnavailable,
+                Some(before),
+                None,
+            ),
+            diff: None,
+        };
+    };
+    let before = serde_json::to_value(before).unwrap_or(Value::Null);
+    let after = serde_json::to_value(after).unwrap_or(Value::Null);
+    let decision = decide_changes_first(&before, &after, 64);
+    SnapshotChangesDecision {
+        changes: decision.changes,
+        diff: decision.diff,
+    }
+}
+
+fn unavailable_changes(
+    reason: ChangesFirstReason,
+    before: Option<&crate::control_ax::AxSnapshot>,
+    after: Option<&crate::control_ax::AxSnapshot>,
+) -> ChangesSummary {
+    ChangesSummary {
+        status: ChangesStatus::Unavailable,
+        base_observation_id: before
+            .and_then(|snapshot| snapshot.observation.as_ref())
+            .map(|header| header.observation_id.clone()),
+        successor_observation_id: after
+            .and_then(|snapshot| snapshot.observation.as_ref())
+            .map(|header| header.observation_id.clone()),
+        identity_version: AX_IDENTITY_VERSION,
+        pairing_ratio: 0.0,
+        added: Vec::new(),
+        updated: Vec::new(),
+        removed: Vec::new(),
+        fallback_reason: Some(reason),
     }
 }
 

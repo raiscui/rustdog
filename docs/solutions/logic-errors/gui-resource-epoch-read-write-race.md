@@ -1,7 +1,7 @@
 ---
 title: "GUI resource epoch 必须覆盖 capture 与 mutation 的完整交错"
 date: 2026-08-13
-last_updated: 2026-08-13
+last_updated: 2026-08-20
 module: control
 component: observation-resource-lane
 problem_type: logic_error
@@ -17,6 +17,7 @@ verified_by:
   - "same observation and PID probe: both mutations reached dispatch before the fix"
   - "cargo nextest run -j 2 --bin rdog: 812 passed, 1 skipped"
   - "successor observation epoch regression: old epoch + 2, old ref stale, successor ref writable"
+  - "computer-act successor target uses the recorded ref resource epoch instead of observation created_at_unix_ms"
 root_cause: "observation epoch only identified capture creation time; mutation neither consumed a per-PID version nor invalidated captures started while dispatch was in flight"
 resolution_type: "daemon-owned per-PID lane with capture-start epoch snapshots and pre/post-dispatch epoch increments"
 ---
@@ -62,6 +63,8 @@ resolution_type: "daemon-owned per-PID lane with capture-start epoch snapshots a
 6. wire observation epoch 保持创建时间语义;坐标动作没有可靠 PID 时不猜资源归属。
 7. mutation 完成后 successor capture 必须发生在 PID lane 的 post-increment 之后,
    这样返回的 observation 才能直接作为下一条 mutation 的基线。
+8. `successor_target.epoch` 必须从 `observation_id + ref` 解析对应 PID resource epoch,
+   不能复用 observation 的 `created_at_unix_ms`。
 
 ## Why This Works
 
@@ -83,6 +86,8 @@ resolution_type: "daemon-owned per-PID lane with capture-start epoch snapshots a
   - 812 passed,1 skipped。
 - `cargo test -j 2 --bin rdog control_computer_act::tests::successor_observation_can_drive_next_same_pid_mutation -- --exact --nocapture`
   - 1 passed,证明 successor 取得完成态 epoch,旧 ref stale,successor ref 可继续同 PID mutation。
+- `cargo test -j 2 --bin rdog control_computer_act::tests::successor_target_uses_the_new_snapshot_ref_for_the_same_backend -- --exact`
+  - 1 passed,证明 successor target 的 epoch 等于 observation store 中该 ref 的 resource epoch。
 
 ## Prevention
 
