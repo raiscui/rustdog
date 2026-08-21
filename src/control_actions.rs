@@ -1,13 +1,14 @@
 use crate::{
-    ax_action::perform_action,
+    ax_action::{
+        focus as ax_focus, perform_action, scroll as ax_scroll, set_value as ax_set_value,
+    },
     ax_input::{send_key_with_config, type_text_with_config},
     cancellation::CancellationToken,
     control_ax::{
         ax_window_id_from_backend_id, build_ax_find_response_json, build_ax_get_response_json,
         capture_ax_find_snapshot, capture_current_ax_window_snapshot, capture_default_ax_snapshot,
-        perform_default_ax_focus, perform_default_ax_press, perform_default_ax_press_sequence,
-        perform_default_ax_press_with_postcondition, perform_default_ax_scroll,
-        perform_default_ax_set_value, window_activation_verified, AxFocusReport,
+        perform_default_ax_press, perform_default_ax_press_sequence,
+        perform_default_ax_press_with_postcondition, window_activation_verified, AxFocusReport,
     },
     // Phase F-1: 三个 error_envelope wrapper helper (Cancelled / PlatformUnsupported /
     // PermissionDenied), 让手写 JSON payload 跟其它 error_code 走同一 envelope 形状。
@@ -1195,7 +1196,7 @@ fn execute_ax_action(
 fn execute_ax_set_value(
     request: &crate::control_ax::AxSetValueRequest,
 ) -> io::Result<ActionExecutionResult> {
-    let report = perform_default_ax_set_value(request)?;
+    let report = ax_set_value(request)?;
     Ok(ActionExecutionResult {
         exit_code: 0,
         stdout: Vec::new(),
@@ -1207,11 +1208,7 @@ fn execute_ax_set_value(
 fn execute_ax_focus(
     request: &crate::control_ax::AxFocusRequest,
 ) -> io::Result<ActionExecutionResult> {
-    execute_ax_focus_with(
-        request,
-        execute_default_window_activate,
-        perform_default_ax_focus,
-    )
+    execute_ax_focus_with(request, execute_default_window_activate, ax_focus)
 }
 
 fn execute_ax_focus_with(
@@ -1294,7 +1291,7 @@ fn target_window_id_from_ax_target(
 fn execute_ax_scroll(
     request: &crate::control_ax::AxScrollRequest,
 ) -> io::Result<ActionExecutionResult> {
-    let report = perform_default_ax_scroll(request)?;
+    let report = ax_scroll(request)?;
     Ok(ActionExecutionResult {
         exit_code: 0,
         stdout: Vec::new(),

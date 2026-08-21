@@ -120,7 +120,7 @@ pub enum AxActionName {
 }
 
 // ---- was lines 153-158 ----
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
 pub struct AxSetValueRequest {
     pub target: AxTarget,
     pub value: String,
@@ -128,7 +128,7 @@ pub struct AxSetValueRequest {
 }
 
 // ---- was lines 160-165 ----
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
 pub struct AxFocusRequest {
     pub target: Option<AxTarget>,
     pub window_id: Option<String>,
@@ -136,7 +136,7 @@ pub struct AxFocusRequest {
 }
 
 // ---- was lines 167-172 ----
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
 pub struct AxScrollRequest {
     pub target: AxTarget,
     pub direction: AxScrollDirection,
@@ -144,7 +144,7 @@ pub struct AxScrollRequest {
 }
 
 // ---- was lines 174-180 ----
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
 pub enum AxScrollDirection {
     Up,
     Down,
@@ -153,7 +153,7 @@ pub enum AxScrollDirection {
 }
 
 // ---- was lines 193-197 ----
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
 pub enum AxValueSetMode {
     Replace,
     Append,

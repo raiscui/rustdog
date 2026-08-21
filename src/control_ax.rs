@@ -1439,18 +1439,6 @@ fn perform_ax_press_sequence_with(
     }
 }
 
-pub fn perform_default_ax_set_value(request: &AxSetValueRequest) -> io::Result<AxSetValueReport> {
-    SystemAxBackend.set_value(request)
-}
-
-pub fn perform_default_ax_focus(request: &AxFocusRequest) -> io::Result<AxFocusReport> {
-    SystemAxBackend.focus(request)
-}
-
-pub fn perform_default_ax_scroll(request: &AxScrollRequest) -> io::Result<AxScrollReport> {
-    SystemAxBackend.scroll(request)
-}
-
 pub fn parse_ax_tree_payload(input: &str) -> io::Result<AxTreeRequest> {
     let inner = object_inner(input, "@ax-tree")?;
     if inner.is_empty() {

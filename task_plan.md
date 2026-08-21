@@ -471,3 +471,30 @@ Commit: feat(ax_input): implement Ticket #02 - migrate control_actions to ax_inp
 
 ### 当前状态
 **阶段 2 进度：press + 6 通用 action 已迁移，剩 4 个专用 action**
+
+## [2026-08-21 17:15:00] [Session ID: current] Ticket #05 完成 - 三个专用 action 迁移
+
+### 完成内容
+- [x] 用 dynamic_route! 宏收敛 5 对 dynamic wrapper（10 个手写函数 -> 5 行宏调用）
+- [x] protocol.rs 新增 parse_set_value / parse_focus / parse_scroll
+- [x] execute.rs 新增 set_value / focus / scroll（直连 backend）
+- [x] 5 个类型补 serde 派生
+- [x] routing 表补到 10 条
+- [x] control_actions.rs 三处调用迁移
+- [x] 删除三个零引用旧函数
+- [x] 新增 3 个 routing 表覆盖测试（含条目数断言防止测试腐烂）
+
+### 验证
+- ax_action 定向测试：18 passed
+- cargo check --tests：0 warning 0 error
+- 全量 nextest：981 passed, 21 skipped
+
+### 剩余待迁移（1 个）
+- [ ] perform_default_ax_press_sequence（grilling Q3 决策：保持独立，不进 routing 表）
+
+### 未完成的独立工作
+- [ ] routing 表接入生产路径（RPC 边界）。当前 execute_ax_action 只被测试调用。
+      这是 grilling Q7 定的"RPC 边界用字符串 API"，尚未落地。
+
+### 当前状态
+**阶段 2 进度：10 个 action 已进 routing 表，剩 press_sequence 一个特殊件**

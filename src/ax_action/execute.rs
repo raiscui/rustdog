@@ -6,8 +6,9 @@
 use std::io;
 
 use crate::control_ax::types::{
-    AxActionReport, AxActionRequest, AxPerformedActionReport, AxPressPostconditionReport,
-    AxPressRequest,
+    AxActionReport, AxActionRequest, AxFocusReport, AxFocusRequest, AxPerformedActionReport,
+    AxPressPostconditionReport, AxPressRequest, AxScrollReport, AxScrollRequest, AxSetValueReport,
+    AxSetValueRequest,
 };
 use crate::control_ax::{
     perform_default_ax_press as legacy_press,
@@ -85,6 +86,35 @@ pub fn perform_action(request: &AxActionRequest) -> io::Result<AxPerformedAction
     use crate::control_ax::{AxBackend, SystemAxBackend};
 
     SystemAxBackend.perform_action(request)
+}
+
+/// 设置 AX 元素的值 (Ticket #05)。
+///
+/// 支持 Replace / Append 两种写入模式, 由 request.mode 决定。
+#[allow(dead_code)] // routing 表启用后使用
+pub fn set_value(request: &AxSetValueRequest) -> io::Result<AxSetValueReport> {
+    use crate::control_ax::{AxBackend, SystemAxBackend};
+
+    SystemAxBackend.set_value(request)
+}
+
+/// 聚焦 AX 元素或窗口 (Ticket #05)。
+///
+/// 注意: 这里只做 AX 层聚焦。窗口激活 (activate) 由调用方
+/// 在 control_actions 中先行处理, 不属于本函数职责。
+#[allow(dead_code)] // routing 表启用后使用
+pub fn focus(request: &AxFocusRequest) -> io::Result<AxFocusReport> {
+    use crate::control_ax::{AxBackend, SystemAxBackend};
+
+    SystemAxBackend.focus(request)
+}
+
+/// 滚动 AX 元素 (Ticket #05)。
+#[allow(dead_code)] // routing 表启用后使用
+pub fn scroll(request: &AxScrollRequest) -> io::Result<AxScrollReport> {
+    use crate::control_ax::{AxBackend, SystemAxBackend};
+
+    SystemAxBackend.scroll(request)
 }
 
 #[cfg(test)]

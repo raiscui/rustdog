@@ -355,3 +355,61 @@ compact 格式那个失败提醒我：写测试前要确认被测函数真实支
 - 剩余 4 个待迁移：set_value / focus / scroll / press_sequence
 - press_sequence 按 grilling 决策保持独立，不进 routing 表
 - routing 表还没有生产调用方，等 web_rpc 或 control_computer_act 接入
+
+## [2026-08-21 17:10:00] [Session ID: current] Ticket #05: 迁移三个专用 AX action
+
+### 任务内容
+把 set_value / focus / scroll 从 control_ax 迁到 ax_action，routing 表补齐到 10 条。
+
+### 完成过程
+
+#### 1. 用宏收敛 dynamic wrapper 样板
+迁移前每个 action 需要手写一对 `parse_*_dynamic` / `execute_*_dynamic`，逐字相同，只有类型名不同。
+Ticket #04 结束时已经有 2 对 = 4 个函数，再加 3 个 action 会变成 5 对 = 10 个函数。
+
+改成 `dynamic_route!` 宏声明，每个 action 一行：
+```rust
+dynamic_route!(parse_focus_dynamic, execute_focus_dynamic,
+               AxFocusRequest, protocol::parse_focus, execute::focus);
+```
+5 个 action 从 10 个手写函数收敛成 5 行宏调用。
+
+#### 2. protocol / execute 层
+- `parse_set_value` / `parse_focus` / `parse_scroll`：字符串走 line-control 对象字面量，JSON Value 走 serde
+- `set_value` / `focus` / `scroll`：直连 `SystemAxBackend`
+
+`focus` 的文档里写清了一件容易搞错的事：它只做 AX 层聚焦，窗口激活（activate）由 `control_actions` 在外层先行处理，不属于这个函数的职责。
+
+#### 3. 类型
+5 个类型补 serde 派生：`AxSetValueRequest` / `AxFocusRequest` / `AxScrollRequest` / `AxValueSetMode` / `AxScrollDirection`。
+
+#### 4. 调用方迁移
+`control_actions.rs` 三处，其中 `focus` 是作为函数指针传给 `execute_ax_focus_with` 的，用 `focus as ax_focus` 重命名导入避免与局部参数名冲突。
+
+三个旧函数迁完零引用，直接删除。
+
+#### 5. routing 表覆盖测试
+新加三个测试：
+- `test_routing_table_covers_all_migrated_actions`：10 个 action 全在表里，且条目数与清单一致（数量断言会在新增 action 忘记同步测试时失败）
+- `test_routing_table_has_no_duplicate_names`：重复名字会让后一条永远命中不到
+- `test_specialized_actions_reject_invalid_payload`：三个新 action 的无效 payload 在 parser 层就被拒绝
+
+### 验证
+- ax_action 定向测试：18 passed
+- `cargo check --tests`：0 warning 0 error
+- 全量 nextest：981 passed, 21 skipped
+
+### 总结感悟
+
+#### 样板代码到第三次就该收敛
+第 1 对 wrapper 是必要的，第 2 对还能忍，第 3 对开始就是抄写。宏在这里不是炫技，是因为这些函数除了类型名之外**逐字相同**——这正是宏该做的事。如果它们有任何实质差异，就不该用宏。
+
+#### 数量断言让覆盖测试不会腐烂
+`assert_eq!(ACTION_ROUTES.len(), expected.len())` 这一行让"新增 action 但忘记加测试"变成编译后立刻失败，而不是悄悄漏掉覆盖。只检查"每个期望的都在表里"是不够的——那样加了新 action 也不会有人提醒你。
+
+#### 三个旧函数又是直接删除
+和 Ticket #04 一样：调用方都在 repo 内，迁完就删。到目前为止 control_ax 里被移走的 4 个 action 函数都没留 deprecated 壳。
+
+### 后续
+- 剩 1 个：`perform_default_ax_press_sequence`（按 grilling Q3 决策保持独立，不进 routing 表）
+- routing 表 10 条已就位，但仍无生产调用方；接入 RPC 边界是独立的一步

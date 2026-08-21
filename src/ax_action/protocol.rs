@@ -6,7 +6,10 @@ use serde_json::Value;
 use std::io;
 
 use crate::control_ax::parse_ax_press_payload;
-use crate::control_ax::types::{AxActionRequest, AxPressPostcondition, AxPressRequest, AxTarget};
+use crate::control_ax::types::{
+    AxActionRequest, AxFocusRequest, AxPressPostcondition, AxPressRequest, AxScrollRequest,
+    AxSetValueRequest, AxTarget,
+};
 
 /// 解析 press action 的 payload。
 ///
@@ -143,6 +146,53 @@ pub fn parse_action(payload: &Value) -> io::Result<AxActionRequest> {
             io::Error::new(
                 io::ErrorKind::InvalidInput,
                 format!("无效的 action payload: {}", e),
+            )
+        })
+    }
+}
+
+/// 解析 set-value payload (Ticket #05)。
+///
+/// 字符串走 line-control 对象字面量, JSON Value 走 serde。
+#[allow(dead_code)] // routing 表启用后使用
+pub fn parse_set_value(payload: &Value) -> io::Result<AxSetValueRequest> {
+    if let Some(s) = payload.as_str() {
+        crate::control_ax::parse_ax_set_value_payload(s)
+    } else {
+        serde_json::from_value(payload.clone()).map_err(|e| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("无效的 set-value payload: {e}"),
+            )
+        })
+    }
+}
+
+/// 解析 focus payload (Ticket #05)。
+#[allow(dead_code)] // routing 表启用后使用
+pub fn parse_focus(payload: &Value) -> io::Result<AxFocusRequest> {
+    if let Some(s) = payload.as_str() {
+        crate::control_ax::parse_ax_focus_payload(s)
+    } else {
+        serde_json::from_value(payload.clone()).map_err(|e| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("无效的 focus payload: {e}"),
+            )
+        })
+    }
+}
+
+/// 解析 scroll payload (Ticket #05)。
+#[allow(dead_code)] // routing 表启用后使用
+pub fn parse_scroll(payload: &Value) -> io::Result<AxScrollRequest> {
+    if let Some(s) = payload.as_str() {
+        crate::control_ax::parse_ax_scroll_payload(s)
+    } else {
+        serde_json::from_value(payload.clone()).map_err(|e| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("无效的 scroll payload: {e}"),
             )
         })
     }
