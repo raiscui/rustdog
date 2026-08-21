@@ -13,7 +13,7 @@ use crate::input::{Command, ConfigCommand, RecordCommandShared, RecordSubcommand
 use crate::listener::{listen, Mode, Opts};
 
 mod ax_diff;
-mod control_recording;
+mod ax_input;
 mod cancellation;
 mod config;
 mod control_actions;
@@ -32,6 +32,7 @@ mod control_invocation;
 mod control_mouse;
 mod control_observation;
 mod control_protocol;
+mod control_recording;
 mod control_resource_lane;
 mod control_session;
 mod control_transport;
@@ -183,11 +184,18 @@ fn run(opts: input::Opts) -> Result<(), String> {
             host,
         } => {
             let record_subcommand = match subcommand {
-                RecordSubcommand::Start { profile, duration } => RecordCommand::Start { profile, duration_ms: duration },
+                RecordSubcommand::Start { profile, duration } => RecordCommand::Start {
+                    profile,
+                    duration_ms: duration,
+                },
                 RecordSubcommand::Status => RecordCommand::Status,
-                RecordSubcommand::Mark { label, redaction_active } => {
-                    RecordCommand::Mark { label, redaction_active }
-                }
+                RecordSubcommand::Mark {
+                    label,
+                    redaction_active,
+                } => RecordCommand::Mark {
+                    label,
+                    redaction_active,
+                },
                 RecordSubcommand::Stop => RecordCommand::Stop,
                 RecordSubcommand::Cancel => RecordCommand::Cancel,
             };
@@ -199,7 +207,11 @@ fn run(opts: input::Opts) -> Result<(), String> {
                 entry_point,
                 host,
             };
-            record_cli::run(record_subcommand, &shared, &record_cli::default_artifacts_dir())?;
+            record_cli::run(
+                record_subcommand,
+                &shared,
+                &record_cli::default_artifacts_dir(),
+            )?;
         }
         Command::Listen {
             interactive,
@@ -699,10 +711,7 @@ mod tests {
             ..DaemonConfig::default()
         };
 
-        assert_eq!(
-            resolve_daemon_transport(None, &config),
-            Transport::Zenoh
-        );
+        assert_eq!(resolve_daemon_transport(None, &config), Transport::Zenoh);
     }
 
     #[test]
@@ -725,10 +734,7 @@ mod tests {
     fn resolve_daemon_transport_should_keep_tcp_when_zenoh_is_disabled_in_config() {
         let config = DaemonConfig::default();
 
-        assert_eq!(
-            resolve_daemon_transport(None, &config),
-            Transport::Tcp
-        );
+        assert_eq!(resolve_daemon_transport(None, &config), Transport::Tcp);
     }
 
     #[test]
@@ -742,9 +748,6 @@ mod tests {
             ..DaemonConfig::default()
         };
 
-        assert_eq!(
-            resolve_daemon_transport(None, &config),
-            Transport::Zenoh
-        );
+        assert_eq!(resolve_daemon_transport(None, &config), Transport::Zenoh);
     }
 }
