@@ -6,19 +6,16 @@
 
 #![cfg_attr(test, allow(dead_code))]
 
-use std::{
-    fs,
-    path::PathBuf,
-};
+use std::{fs, path::PathBuf};
 
 use serde_json::Value;
 
 use super::{
-    CaptureEvent,
     journal::{
         GapDeclaration, JournalError, JournalKind, JournalWriter, LaneTransition, Mark,
         PlatformInfo, SessionTerminalState, WallClockAnchor, JOURNAL_SCHEMA,
     },
+    CaptureEvent,
 };
 
 fn temp_path(label: &str) -> PathBuf {
@@ -238,7 +235,9 @@ fn writes_after_close_return_state_error() {
         x: 0,
         y: 0,
     };
-    let err = writer.write_capture_event(2, &event).expect_err("must fail after close");
+    let err = writer
+        .write_capture_event(2, &event)
+        .expect_err("must fail after close");
     assert!(matches!(err, JournalError::State(_)));
 }
 
@@ -262,7 +261,10 @@ fn fsync_interval_triggers_at_threshold() {
     // All entries share the same schema and recording_id.
     for line in &lines {
         assert_eq!(line["schema"], JOURNAL_SCHEMA);
-        assert!(line["recording_id"].as_str().unwrap().starts_with("rec-fsync_interval"));
+        assert!(line["recording_id"]
+            .as_str()
+            .unwrap()
+            .starts_with("rec-fsync_interval"));
     }
 }
 

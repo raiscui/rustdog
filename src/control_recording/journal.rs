@@ -266,7 +266,12 @@ impl JournalWriter {
     ) -> Result<u64, JournalError> {
         let payload = physical_payload(event);
         let capture_seq = self.capture_seq;
-        let envelope = self.envelope(JournalKind::Physical, monotonic_ns, Some(capture_seq), payload)?;
+        let envelope = self.envelope(
+            JournalKind::Physical,
+            monotonic_ns,
+            Some(capture_seq),
+            payload,
+        )?;
         self.append_line(envelope)?;
         self.capture_seq += 1;
         Ok(capture_seq)
@@ -382,7 +387,10 @@ impl JournalWriter {
         }
         let mut env = serde_json::Map::new();
         env.insert("schema".into(), Value::String(JOURNAL_SCHEMA.into()));
-        env.insert("recording_id".into(), Value::String(self.recording_id.clone()));
+        env.insert(
+            "recording_id".into(),
+            Value::String(self.recording_id.clone()),
+        );
         env.insert("journal_seq".into(), json!(self.journal_seq));
         env.insert("kind".into(), Value::String(kind.as_str().into()));
         env.insert("monotonic_ns".into(), json!(monotonic_ns));
@@ -394,7 +402,10 @@ impl JournalWriter {
     }
 
     fn append_line(&mut self, envelope: Value) -> Result<(), JournalError> {
-        let writer = self.writer.as_mut().ok_or(JournalError::State("journal not open"))?;
+        let writer = self
+            .writer
+            .as_mut()
+            .ok_or(JournalError::State("journal not open"))?;
         let line = canonical_json_line(&envelope)?;
         writer.write_all(line.as_bytes())?;
         self.journal_seq += 1;
@@ -426,11 +437,17 @@ impl Drop for JournalWriter {
 /// Serialize a JSON value to a single canonical JSONL line: trailing newline.
 fn canonical_json_line(value: &Value) -> io::Result<String> {
     let mut buf = serde_json::to_vec(value).map_err(|err| {
-        io::Error::new(io::ErrorKind::InvalidData, format!("serialize journal line: {err}"))
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("serialize journal line: {err}"),
+        )
     })?;
     buf.push(b'\n');
     String::from_utf8(buf).map_err(|err| {
-        io::Error::new(io::ErrorKind::InvalidData, format!("non-utf8 journal line: {err}"))
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("non-utf8 journal line: {err}"),
+        )
     })
 }
 
@@ -444,36 +461,69 @@ fn file_fsync(file: &File) -> io::Result<()> {
 /// Convert a `CaptureEvent` into its physical JSONL payload.
 fn physical_payload(event: &CaptureEvent) -> Value {
     match event {
-        CaptureEvent::Key { monotonic_ms: _, keycode, down, text } => json!({
+        CaptureEvent::Key {
+            monotonic_ms: _,
+            keycode,
+            down,
+            text,
+        } => json!({
             "type": if *down { "key_down" } else { "key_up" },
             "keycode": keycode,
             "text": text,
         }),
-        CaptureEvent::MouseButton { monotonic_ms: _, x, y, button, down } => json!({
+        CaptureEvent::MouseButton {
+            monotonic_ms: _,
+            x,
+            y,
+            button,
+            down,
+        } => json!({
             "type": if *down { "mouse_down" } else { "mouse_up" },
             "x": x,
             "y": y,
             "button": button,
         }),
-        CaptureEvent::MouseMove { monotonic_ms: _, x, y } => json!({
+        CaptureEvent::MouseMove {
+            monotonic_ms: _,
+            x,
+            y,
+        } => json!({
             "type": "mouse_move",
             "x": x,
             "y": y,
         }),
-        CaptureEvent::Scroll { monotonic_ms: _, delta_x, delta_y } => json!({
+        CaptureEvent::Scroll {
+            monotonic_ms: _,
+            delta_x,
+            delta_y,
+        } => json!({
             "type": "scroll",
             "delta_x": delta_x,
             "delta_y": delta_y,
         }),
-        CaptureEvent::AxSnapshot { monotonic_ms: _, focused } => json!({
+        CaptureEvent::AxSnapshot {
+            monotonic_ms: _,
+            focused,
+        } => json!({
             "type": "ax_snapshot",
             "focused": focused,
         }),
-        CaptureEvent::WorkspaceFocus { monotonic_ms: _, bundle_id } => json!({
+        CaptureEvent::WorkspaceFocus {
+            monotonic_ms: _,
+            bundle_id,
+        } => json!({
             "type": "workspace_focus",
             "bundle_id": bundle_id,
         }),
-        CaptureEvent::WindowGeometry { monotonic_ms: _, bundle_id, title, x, y, width, height } => json!({
+        CaptureEvent::WindowGeometry {
+            monotonic_ms: _,
+            bundle_id,
+            title,
+            x,
+            y,
+            width,
+            height,
+        } => json!({
             "type": "window_geometry",
             "bundle_id": bundle_id,
             "title": title,
@@ -482,7 +532,11 @@ fn physical_payload(event: &CaptureEvent) -> Value {
             "width": width,
             "height": height,
         }),
-        CaptureEvent::LaneStatus { monotonic_ms: _, lane, status } => json!({
+        CaptureEvent::LaneStatus {
+            monotonic_ms: _,
+            lane,
+            status,
+        } => json!({
             "type": "lane_status_inline",
             "lane": lane,
             "status": status,

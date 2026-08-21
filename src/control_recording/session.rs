@@ -23,8 +23,11 @@ use std::{
 use serde::{Deserialize, Serialize};
 
 use super::{
-    journal::{JournalError, JournalWriter, LaneTransition, Mark, PlatformInfo, SessionTerminalState, WallClockAnchor, JOURNAL_SCHEMA},
-    CaptureEvent, RecorderCapture, RecorderError, ShutdownSignal, platform_capture,
+    journal::{
+        JournalError, JournalWriter, LaneTransition, Mark, PlatformInfo, SessionTerminalState,
+        WallClockAnchor, JOURNAL_SCHEMA,
+    },
+    platform_capture, CaptureEvent, RecorderCapture, RecorderError, ShutdownSignal,
 };
 
 /// Recording profile (`semantic` / `physical`).
@@ -194,7 +197,10 @@ pub enum LifecycleError {
     /// No active session when one was expected.
     NoActiveSession,
     /// The transition is not allowed from the current phase.
-    InvalidTransition { from: SessionPhase, to: &'static str },
+    InvalidTransition {
+        from: SessionPhase,
+        to: &'static str,
+    },
     /// Recorder capture backend reported a failure.
     Capture(RecorderError),
     /// Journal writer failure.
@@ -306,7 +312,10 @@ impl Session {
         for lane in profile.required_lanes() {
             lanes.insert(
                 (*lane).to_string(),
-                LaneRecord { state: LaneState::Available, generation: 0 },
+                LaneRecord {
+                    state: LaneState::Available,
+                    generation: 0,
+                },
             );
         }
 
@@ -439,7 +448,10 @@ impl Session {
             .ok_or(LifecycleError::NoActiveSession)?;
         journal.write_mark(
             monotonic_ns,
-            Mark { label, redaction_active },
+            Mark {
+                label,
+                redaction_active,
+            },
         )?;
         self.mark_count += 1;
         Ok(())
@@ -474,10 +486,10 @@ impl Session {
                 to: "update_lane",
             });
         }
-        let rec = self
-            .lanes
-            .entry(name.to_string())
-            .or_insert(LaneRecord { state: LaneState::Available, generation: 0 });
+        let rec = self.lanes.entry(name.to_string()).or_insert(LaneRecord {
+            state: LaneState::Available,
+            generation: 0,
+        });
         rec.generation += 1;
         rec.state = new_state;
 
@@ -498,9 +510,7 @@ impl Session {
         )?;
 
         // Required lane failure → fail closed.
-        if self.profile.required_lanes().contains(&name)
-            && new_state != LaneState::Available
-        {
+        if self.profile.required_lanes().contains(&name) && new_state != LaneState::Available {
             self.fail(FailureDetail {
                 reason: FailureReason::RequiredLaneFailure,
                 detail: format!("lane {name} -> {}", lane_state_str(new_state)),
@@ -675,7 +685,11 @@ impl Session {
         }
     }
 
-    fn require_phase(&self, expected: SessionPhase, op: &'static str) -> Result<(), LifecycleError> {
+    fn require_phase(
+        &self,
+        expected: SessionPhase,
+        op: &'static str,
+    ) -> Result<(), LifecycleError> {
         if self.state != expected {
             return Err(LifecycleError::InvalidTransition {
                 from: self.state,
@@ -872,8 +886,8 @@ pub enum CrashClassification {
 /// `control_recording::session` without a second import path.
 #[allow(unused)]
 mod journal {
-    pub use super::super::journal::*;
     pub use super::super::journal::now_unix_ms;
+    pub use super::super::journal::*;
 }
 
 /// Public schema id re-export so the protocol layer can reference the

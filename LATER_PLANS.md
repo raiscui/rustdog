@@ -842,9 +842,74 @@ zenoh router down / unixpipe broken / zenoh timeout 等场景.
 - 影响: 纯日志噪音, 不影响 discovery/control (真实接口 192.168.50.165 正常)。
 - 处理选项 (需要时): 调整 Zenoh multicast 接口配置 (`multicast.interface` 白名单) 或引入 per-module 日志过滤; 当前不值得做。
 
-## [2026-08-09 22:55:00] [Session ID: omx-1786268168901-f711dm] 观察: screenshot sck_timeout 测试全量并行时 flaky
+## [2026-08-15 16:10:00] [Session ID: omx-1786607662650-pvvuyy] 待办: successor 产品级效率认证
 
-- 现象: `screenshot::tests::capture_fallback_should_trace_sck_timeout_and_xcap_transition` 全量 `cargo test --bin rdog` 时偶发 FAILED (断言 `screenshot_capture_timeout` 事件缺失), 单独运行该测试必过。
-- 2026-08-09 验证: git stash 全部改动后全量仍失败, 与 warning 清理无关; 属既有 flaky (全局 trace 事件捕获与并行测试的竞争)。
-- 触发条件: 全量并行测试, 负载/时序敏感。
-- 处理选项 (需要时): 给该测试加 serial 执行 (进程级锁) 或放宽事件断言时序; 当前不影响功能, 待其频繁干扰时再处理。
+### 当前事实
+- 固定两条 TextEdit case 和 DeepSeek 的 3 x 2 policy matrix 已认证 consume-successor 减少 request 与 post-action evidence。
+
+### 未完成边界
+- 该结果不是 `workflows/macos-ops-interaction-efficiency.md` 定义的完整 6 x 8 产品 baseline,不能替代全模型认证或更新既有产品级 baseline。
+
+### 触发条件
+- 下一次共享 `@computer-act`、canonical skill、runner 分类或 macOS ops case 发生语义变化,且需要声明产品级交互效率收益时,运行完整 6 x 8 matrix 并以新的 immutable ledger 评审。
+
+## [2026-08-16 19:30:00] [Session ID: omx-1786607662650-pvvuyy] 更新: successor 产品级效率认证边界
+
+### 当前事实
+
+- 五个远程模型已经在固定两个 TextEdit policy case 上完成 3 x 2 paired certification。该范围的 successor no-worse request 和 post-action evidence 收益已有跨模型证据。
+
+### 仍未完成边界
+
+- 这不替代完整六模型八 case 产品 baseline。标准八 case prompt 也不含 successor policy treatment。
+
+### 触发条件
+
+- 需要把 successor policy 外推到完整 macOS ops 产品矩阵时，才以冻结输入重新运行完整门禁。
+
+## [2026-08-19 13:20:00] [Session ID: 本会话] 观察: control_tty 箭头键测试在串行全量中稳定失败
+
+### 现象
+- `tests/control_tty.rs::control_cli_should_treat_arrow_keys_as_local_cursor_motion_in_tty` 在 `cargo test -j 2 -- --test-threads=1` 中稳定 FAILED。
+- 断言 `@ping` vs 实际 `@png\u{1b}[D...` (箭头键转义序列泄漏到远端控制行)。
+
+### 已排除
+- 与 2026-08-19 用户配置目录改动无关: `git stash push src/config.rs` 后同样失败。
+- 测试自 2026-08-03 `d062ea0` ([key] delivery_backend) 后未改动。
+
+### 触发条件
+- 疑似 TTY 时序/输入缓冲竞态,单跑和当前环境多跑均失败;与本会话改动无关。
+- 修复入口: `tests/control_tty.rs:129` 附近,箭头键本地编辑的输入时序。
+
+### 暂不处置
+- 不阻塞本次 config 改动合入;记录为既有 flake,后续单独排查 TTY 输入缓冲。
+
+## [2026-08-19 15:23:42] [Session ID: omx-1787115582924-n1rbi7] 待办: production observation root size/count 配额
+
+### 当前边界
+- 日期保留、活动 owner 保护、延迟物化和测试隔离已完成。
+- 当前没有真实生产 daemon-name churn 造成大量有效 store 的动态证据,因此不预设 size/count 淘汰顺序。
+
+### 触发条件
+- 监测到生产 daemon identity 持续变化,且 7 天 age retention 仍无法约束磁盘或目录数量时再实施。
+- 实施前必须量化 active/inactive store 分布,并保留现有 owner lock 和未知目录 fail-closed 保护。
+
+## [2026-08-19 15:37:17] [Session ID: omx-1787115582924-n1rbi7] 待办: 历史 recording E2E 临时目录治理
+
+### 当前事实
+- `$TMPDIR` 现有 60 个历史 `rdog-recording-e2e-*` 目录,来源早于本轮 panic cleanup guard。
+- guard 修复后的 recording E2E 前后计数均为 60,已停止新增。
+
+### 后续治理
+- 另行执行 dry-run,按目录年龄、进程归属和 bundle/journal 内容分类。
+- 只对可证明无活动 owner 的历史测试目录执行 quarantine-first 清理,不在 observations 任务中直接删除。
+## [2026-08-20 16:48:00] [Session ID: omx-1787115582924-n1rbi7] 待办: observation singleton 单测并行隔离
+
+### 当前事实
+- `cargo test -j 2 --bin rdog` 会让同一进程内的 observation 测试共享 64-entry singleton store。
+- 长时间 direct-ref mutation 测试执行期间,其他并行测试可驱逐它仍要使用的 observation;exact 单跑通过,full cargo test 在 resize/web-act 位置复现失败。
+- 项目标准 cargo-nextest 通过每测试进程隔离规避该问题,所以不阻塞 #54。
+
+### 建议
+- 后续专门整理 observation test seam,让需要 production global store 的测试使用可替换 store 或统一串行测试组。
+- 不要通过提高 `DEFAULT_MAX_OBSERVATIONS` 掩盖共享状态,容量语义仍应由显式 retention 测试验证。

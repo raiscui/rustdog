@@ -212,9 +212,7 @@ impl ControlActionExecutor for FakeExecutor {
             ControlCommand::SelectorRefind(request) => {
                 format!("SELECTOR_REFIND:{}\n", request.selector_id).into_bytes()
             }
-            ControlCommand::Record(_) => {
-                b"RECORD_CONTROL\n".to_vec()
-            }
+            ControlCommand::Record(_) => b"RECORD_CONTROL\n".to_vec(),
         };
 
         Ok(ActionExecutionResult {

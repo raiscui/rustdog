@@ -26,9 +26,7 @@ use std::{
     thread::JoinHandle,
 };
 
-use super::{
-    BoundedQueue, RecorderCapture, RecorderError, ShutdownSignal,
-};
+use super::{BoundedQueue, RecorderCapture, RecorderError, ShutdownSignal};
 
 /// macOS capture backend.
 pub struct MacOsCapture {
@@ -108,7 +106,9 @@ impl RecorderCapture for MacOsCapture {
         }
         self.shutdown.trigger();
         if let Some(handle) = self.worker.take() {
-            handle.join().map_err(|err| RecorderError::Backend(format!("join: {err:?}")))?;
+            handle
+                .join()
+                .map_err(|err| RecorderError::Backend(format!("join: {err:?}")))?;
         }
         self.started = false;
         Ok(())

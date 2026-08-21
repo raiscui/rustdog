@@ -5,9 +5,9 @@ use crate::{
         capture_ax_find_snapshot, capture_current_ax_window_snapshot, capture_default_ax_snapshot,
         perform_default_ax_action, perform_default_ax_focus, perform_default_ax_press,
         perform_default_ax_press_sequence, perform_default_ax_press_with_postcondition,
-        perform_default_ax_scroll, perform_default_ax_set_value, perform_default_key_delivery,
-        perform_default_type_text, window_activation_verified, AxFocusReport,
+        perform_default_ax_scroll, perform_default_ax_set_value, window_activation_verified, AxFocusReport,
     },
+    ax_input::{type_text_with_config, send_key_with_config},
     // Phase F-1: 三个 error_envelope wrapper helper (Cancelled / PlatformUnsupported /
     // PermissionDenied), 让手写 JSON payload 跟其它 error_code 走同一 envelope 形状。
     control_computer_act::error_envelope::{
@@ -633,7 +633,7 @@ pub(crate) fn execute_key(
     key_input_event_sink: Option<&dyn KeyInputEventSink>,
     delivery_backend: Option<crate::config::KeyDeliveryBackend>,
 ) -> io::Result<ActionExecutionResult> {
-    if let Some(report) = perform_default_key_delivery(request)? {
+    if let Some(report) = send_key_with_config(request.clone())? {
         if let Some(key_input_event_sink) = key_input_event_sink {
             key_input_event_sink.publish_key_event(request)?;
         }
@@ -1305,7 +1305,7 @@ fn execute_ax_scroll(
 pub(crate) fn execute_type_text(
     request: &crate::control_ax::TypeTextRequest,
 ) -> io::Result<ActionExecutionResult> {
-    let report = perform_default_type_text(request)?;
+    let report = type_text_with_config(request.clone())?;
     Ok(ActionExecutionResult {
         exit_code: 0,
         stdout: Vec::new(),

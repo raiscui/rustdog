@@ -66,6 +66,17 @@ _Avoid_: Any query after an action, recovery read
 它用于下一次 mutation 的重新定位,不能被当作上一次动作成功的 evidence。
 _Avoid_: Post-action evidence, verification proof
 
+**Observation Capture**:
+为 Recording Session 或 Replay 捕获 AX tree 的轻量级适配器,封装了"为 observation 生成 snapshot + selectors"的语义。
+它调用 ax_query 底层能力,但返回 observation 需要的完整格式。
+_Avoid_: Direct ax_query call from observation layer, snapshot-only capture
+
+**AX Snapshot Cache**:
+缓存已捕获的 AX tree snapshot 和对应的资源 epoch 快照,用于避免重复 observation 注册。
+它由 ObservationStore 持有,是加速层而非真相源;资源 epoch 的单一真相源仍然是 ResourceCoordinator。
+支持多种 TTL policy (ImplicitObserve 5s, Progressive 300s) 满足不同场景需求。
+_Avoid_: Epoch truth source, global singleton cache
+
 **Successor Observation**:
 资源 lane 完成 mutation 并提交稳定 write epoch 后,针对原目标窗口生成的新 observation。
 它携带下一次 mutation 可消费的 successor target,其 ref 仍然是 observation-local。

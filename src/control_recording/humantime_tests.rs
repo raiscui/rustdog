@@ -1,8 +1,6 @@
 //! humantime parser unit tests (TDD red-then-green).
 
-use super::humantime::{
-    parse_humantime, validate_duration_ms, DurationLimitError, HumantimeError,
-};
+use super::humantime::{parse_humantime, validate_duration_ms, DurationLimitError, HumantimeError};
 
 #[test]
 fn parses_seconds_integer() {
@@ -36,8 +34,14 @@ fn accepts_optional_whitespace_between_number_and_unit() {
 fn invalid_format_rejected() {
     assert_eq!(parse_humantime(""), Err(HumantimeError::Empty));
     assert_eq!(parse_humantime("30"), Err(HumantimeError::MissingUnit));
-    assert_eq!(parse_humantime("30x"), Err(HumantimeError::UnknownUnit("x".to_owned())));
-    assert_eq!(parse_humantime("abc"), Err(HumantimeError::InvalidNumber("abc".to_owned())));
+    assert_eq!(
+        parse_humantime("30x"),
+        Err(HumantimeError::UnknownUnit("x".to_owned()))
+    );
+    assert_eq!(
+        parse_humantime("abc"),
+        Err(HumantimeError::InvalidNumber("abc".to_owned()))
+    );
 }
 
 #[test]
@@ -64,5 +68,8 @@ fn validate_rejects_too_small() {
 
 #[test]
 fn validate_rejects_too_large() {
-    assert_eq!(validate_duration_ms(3_600_001), Err(DurationLimitError::TooLarge));
+    assert_eq!(
+        validate_duration_ms(3_600_001),
+        Err(DurationLimitError::TooLarge)
+    );
 }

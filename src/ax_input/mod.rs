@@ -8,8 +8,8 @@
 
 #![allow(dead_code)]  // 允许未使用，直到 Ticket #02 迁移调用方
 
-use crate::control_ax::input::{perform_default_key_delivery, perform_default_type_text};
 use crate::control_ax::types::{AxTarget, TypeTextMode, TypeTextReport};
+use crate::control_ax::AxBackend;  // 新增：直接使用 AxBackend
 use crate::control_protocol::{KeyDelivery, KeyMode, KeyRequest, KeyResponseMode};
 use std::io;
 
@@ -37,7 +37,7 @@ pub fn type_text(target: AxTarget, text: &str) -> io::Result<TypeTextReport> {
         mode: TypeTextMode::Auto,
         allow_clipboard: true,
     };
-    perform_default_type_text(&request)
+    type_text_with_config(request)
 }
 
 /// 高级 API: 使用完整配置输入文本（20% 场景）
@@ -47,7 +47,8 @@ pub fn type_text(target: AxTarget, text: &str) -> io::Result<TypeTextReport> {
 /// - 需要指定特殊模式
 /// - 需要自定义 target 配置
 pub fn type_text_with_config(request: TypeTextRequest) -> io::Result<TypeTextReport> {
-    perform_default_type_text(&request)
+    // 直接调用底层实现，避免循环依赖
+    crate::control_ax::SystemAxBackend.type_text(&request)
 }
 
 /// 简单 API: 发送按键（80% 场景）
@@ -77,7 +78,7 @@ pub fn send_key(key: &str) -> io::Result<Option<KeyDeliveryReport>> {
         window_id: None,
         response_mode: KeyResponseMode::Structured,
     };
-    perform_default_key_delivery(&request)
+    send_key_with_config(request)
 }
 
 /// 高级 API: 使用完整配置发送按键（20% 场景）
@@ -88,7 +89,13 @@ pub fn send_key(key: &str) -> io::Result<Option<KeyDeliveryReport>> {
 /// - 需要自定义 hold_ms
 /// - 需要 Press-only 或 Release-only 模式
 pub fn send_key_with_config(request: KeyRequest) -> io::Result<Option<KeyDeliveryReport>> {
-    perform_default_key_delivery(&request)
+    // 直接调用底层实现，避免循环依赖
+    match request.delivery {
+        KeyDelivery::Global => Ok(None),
+        KeyDelivery::PidTargeted | KeyDelivery::WindowTargeted => {
+            crate::control_ax::platform_key_delivery(&request).map(Some)
+        }
+    }
 }
 
 #[cfg(test)]

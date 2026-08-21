@@ -1,0 +1,317 @@
+# ADR-0008: Split control_ax into ax_query, ax_action, ax_input modules
+
+## Status
+
+Accepted (2026-08-20)
+
+## Context
+
+control_ax.rs is a 122KB file with 53+ public functions, exhibiting shallow module characteristics where interface complexity nearly equals implementation complexity. The architecture review identified it as the top priority friction point:
+
+- **17+ parse functions**: parse_ax_tree_payload, parse_ax_press_payload, etc.
+- **10+ perform functions**: perform_default_ax_press, perform_default_ax_action, etc.
+- **5+ capture functions**: capture_ax_find_snapshot, capture_current_ax_subtree, etc.
+- **3+ resolve functions**: resolve_cached_ax_tree, resolve_current_ax_target_rect, etc.
+
+Callers need to understand all 53 functions to use the module correctly. The module also has a circular dependency with control_observation (bidirectional calls).
+
+### Deletion Test Result
+
+If we delete control_ax, complexity would not concentrate but scatter to callers — they would need to know "which parse corresponds to which perform", "when to use cached vs current", increasing cognitive load.
+
+### Module Size Breakdown
+
+- `control_ax.rs`: 3611 lines (main file)
+- `macos.rs`: 67KB (platform implementation)
+- `query.rs`: 45.6KB (query logic)
+- `tree.rs`: 15.1KB (tree capture)
+- `types.rs`: 14.1KB (type definitions)
+- `input.rs`: 2.8KB (input handling)
+
+Total: 4298 lines
+
+## Decision
+
+Split control_ax into three focused modules with deep interfaces:
+
+### 1. ax_query/ — AX tree capture & query (~47KB)
+
+**Responsibility**: Capture AX trees, execute queries, provide snapshots.
+
+**Public Interface** (deep, ~5 functions):
+```rust
+pub fn capture_window_snapshot(window_id: &str) -> io::Result<AxSnapshot>;
+pub fn capture_tree(query: &AxQuery) -> io::Result<AxSnapshot>;
+pub fn find_element(snapshot: &AxSnapshot, selector: &Selector) -> Option<AxElement>;
+pub fn query_cached(observation_id: &str) -> Option<&AxSnapshot>;
+```
+
+**Internal Structure**:
+- `mod.rs`: Public interface + re-exports
+- `capture.rs`: Tree capture logic (from tree.rs)
+- `query.rs`: Query execution (45.6KB, unchanged)
+- `types.rs`: Query-specific types
+
+**Key Design**: Stateless module. Does not own cache; cache logic moves to control_observation.
+
+### 2. ax_action/ — AX action execution (~70KB)
+
+**Responsibility**: Parse action payloads, execute actions via platform APIs, manage routing.
+
+**Public Interface** (deep, unified entry):
+```rust
+pub fn execute_ax_action(action: &str, payload: Value) -> io::Result<ActionResult>;
+```
+
+**Internal Structure**:
+- `mod.rs`: Unified entry + data-driven routing table
+- `protocol.rs`: 7 parse_* functions (protocol layer)
+- `execute.rs`: 7 perform_* functions (execution layer)
+- `platform/macos.rs`: 67KB macOS implementation (unchanged)
+- `types.rs`: Action-specific types
+
+**Routing Table** (data-driven, solves Friction #4):
+```rust
+struct ActionRoute {
+    name: &'static str,
+    parser: fn(Value) -> io::Result<AnyActionRequest>,
+    executor: fn(AnyActionRequest) -> io::Result<ActionResult>,
+}
+
+const ROUTES: &[ActionRoute] = &[
+    ActionRoute { name: "press", parser: parse_press, executor: execute_press },
+    // ... 13 actions visible at a glance
+];
+```
+
+**TODO**: When multi-platform support is needed, extract `platform/` into a separate ax_platform module. Currently only macOS is implemented (YAGNI).
+
+### 3. ax_input/ — Text & keyboard input (~3KB)
+
+**Responsibility**: High-level text input and key delivery.
+
+**Public Interface** (layered, 80/20 split):
+```rust
+// Simple API (80% use cases)
+pub fn type_text(content: &str, mode: TypeMode) -> io::Result<TypeReport>;
+pub fn send_key(key: Key, modifiers: &[Modifier]) -> io::Result<KeyReport>;
+
+// Advanced API (20% use cases)
+pub fn type_text_with_config(request: TypeTextRequest) -> io::Result<TypeReport>;
+pub fn send_key_with_config(request: KeyRequest) -> io::Result<KeyReport>;
+```
+
+**Internal Structure**:
+- `mod.rs`: High-level interface (hides Request types)
+- `input.rs`: 2.8KB implementation (unchanged)
+- `types.rs`: Input-specific types
+
+**Key Design**: Simple API hides `TypeTextRequest` complexity (delivery, target_window, verification) with sensible defaults. Advanced API exposes full control for special cases.
+
+### 4. Breaking the Circular Dependency
+
+**Problem**: control_ax calls control_observation (4 functions), control_observation calls control_ax (capture functions).
+
+**Solution**: Introduce `ObservationCapture` adapter in control_observation.
+
+```rust
+// In control_observation
+pub struct ObservationCapture {
+    // Internal: wraps ax_query calls
+}
+
+impl ObservationCapture {
+    pub fn capture_for_observation(
+        &self, 
+        window_id: &str
+    ) -> io::Result<(AxSnapshot, Selectors)> {
+        let snapshot = ax_query::capture_window_snapshot(window_id)?;
+        let selectors = self.build_selectors(&snapshot);
+        Ok((snapshot, selectors))
+    }
+}
+```
+
+**Rationale**:
+- ObservationCapture is a **long-term seam**, not temporary adapter
+- It encapsulates "capture for observation" semantics (returns snapshot + selectors)
+- Maintains synchronous call path (required by ADR-0005 for implicit_observe)
+- Added to CONTEXT.md as a domain concept
+
+### 5. AxObservationCache Migration
+
+**Current**: Defined in control_ax.rs (internal static singleton)
+
+**New Location**: control_observation (owned by ObservationStore)
+
+```rust
+// In control_observation
+pub struct ObservationStore {
+    observations: HashMap<String, StoredObservation>,
+    ax_snapshot_cache: AxSnapshotCache,  // New
+}
+
+pub struct AxSnapshotCache {
+    entries: HashMap<String, AxSnapshotCacheEntry>,
+    order: VecDeque<String>,
+}
+
+pub struct AxSnapshotCacheEntry {
+    snapshot: AxSnapshot,
+    epochs: HashMap<String, u64>,  // Immutable snapshot, not truth source
+    policy: CachePolicy,            // New
+}
+
+pub enum CachePolicy {
+    ImplicitObserve { ttl_ms: 5000 },    // ADR-0005 requirement
+    Progressive { ttl_ms: 300000 },
+}
+```
+
+**Rationale**:
+- Solves Friction #2 (three truth sources for epoch)
+- ObservationStore remains the single truth source for resource epochs
+- AxSnapshotCache is an "acceleration layer" that validates against ObservationStore
+- Solves Friction #3 (dual cache) by supporting multiple TTL policies per entry
+
+**Caller-specified Policy**:
+```rust
+observation_store.cache_ax_snapshot(
+    observation_id,
+    snapshot,
+    CachePolicy::ImplicitObserve,  // Caller decides
+);
+```
+
+## Implementation Plan
+
+### Phase 1: ax_input (Smallest, Template for Process)
+
+1. Create `ax_input/` directory structure
+2. Implement high-level interface in `mod.rs`
+3. Move `input.rs` (2.8KB unchanged)
+4. Add unit tests for high-level interface
+5. Migrate control_actions.rs input calls
+6. Mark old control_ax input functions as `#[deprecated]`
+7. Delete deprecated functions after migration
+
+### Phase 2: ax_action (Largest, Core Logic)
+
+1. Create `ax_action/` directory structure
+2. Implement data-driven routing table in `mod.rs`
+3. Move parse_* to `protocol.rs`
+4. Move perform_* to `execute.rs`
+5. Move `platform/macos.rs` (67KB unchanged)
+6. Add unit tests for parse functions (easy wins)
+7. Add integration tests for routing table
+8. Migrate control_actions.rs action calls
+9. Delete deprecated functions
+
+### Phase 3: ax_query + Cache Migration (Most Complex)
+
+1. Create `ax_query/` directory structure
+2. Move capture logic from `tree.rs` to `capture.rs`
+3. Keep `query.rs` (45.6KB unchanged)
+4. Introduce `ObservationCapture` adapter in control_observation
+5. Define `AxSnapshotCache` with multi-policy support
+6. Add unit tests for cache validation logic (Priority #1 from Q13)
+7. Move AxObservationCache to control_observation
+8. Migrate all capture calls to use `ObservationCapture`
+9. Delete deprecated functions
+
+### Phase 4: Internal Caller Migration (Incremental)
+
+**Scope**: Only internal callers (control_actions.rs, control_computer_act/, control_flow/)
+
+**Timeline**: Immediately after each phase completes
+
+**External API**: control_protocol commands (@computer-act, @ax-tree) unchanged
+
+**Facade Lifetime**:
+- Marked `#[deprecated]` immediately
+- Removed after all internal callers migrated
+- Only preserved for potential internal test tools (minimal scope)
+
+## Testing Strategy
+
+### Priority Order (Q13-C: Critical Path First)
+
+1. **Cache validation logic** (AxObservationCache → ObservationStore migration)
+   - Tests epoch validation
+   - Tests TTL policy enforcement
+   - Validates ObservationCapture adapter design
+
+2. **Parse logic** (Easy wins, pure functions)
+   - Tests all 7 parse_* functions
+   - JSON → struct conversion
+
+3. **Perform logic** (Last, requires platform mock)
+   - Integration tests with macOS AX API mocks
+
+### Test-Driven Split
+
+- Write tests for new interfaces **before** moving code
+- Ensure tests pass on both old and new paths during transition
+- Remove old tests only after migration complete
+
+## Consequences
+
+### Positive
+
+- **Interface Depth**: 53 functions → ~15 high-level functions across 3 modules
+- **Locality**: Understanding AX query only requires reading ax_query/, not entire control_ax
+- **Leverage**: Each module provides 5-10 high-level functions hiding internal complexity
+- **Testability**: Can test ax_query independently (mock ObservationStore via adapter)
+- **Maintainability**: Adding new action = update ROUTES table, not write new function
+- **Solves Frictions #2, #3, #4**: Epoch truth source, dual cache, routing table
+
+### Negative
+
+- **Migration Cost**: 3 major调用方需要迁移 (control_actions, control_computer_act, control_flow)
+- **Learning Curve**: Developers need to learn new module boundaries
+- **Import Verbosity**: Callers import from 3 modules instead of 1 (mitigated by clear module names)
+
+### Mitigations
+
+- **Incremental Migration**: One module at a time, each independently reviewable
+- **Clear Documentation**: Update CONTEXT.md with new module definitions
+- **Facade Layer**: Temporary `#[deprecated]` re-exports for gradual migration
+- **Test Coverage**: Comprehensive tests ensure no regressions
+
+## Alternatives Considered
+
+### A. Single unified command: execute_ax_command(AxCommand)
+
+**Rejected**: Too aggressive. Requires all 53 functions to become enum variants. High migration cost without proportional benefit.
+
+### B. Extract only platform code (ax_platform)
+
+**Rejected**: Solves platform abstraction but not interface complexity. 53 functions would remain in control_ax.
+
+### C. Keep control_ax, add facade modules
+
+**Rejected**: Facade without moving implementation = fake modularity. Does not reduce actual complexity.
+
+### D. Four modules: ax_query, ax_action, ax_input, ax_platform
+
+**Deferred**: ax_platform extraction deferred until multi-platform support is actually needed (YAGNI). macos.rs remains in ax_action with TODO comment.
+
+## ADR Compatibility Check
+
+### ADR-0005 (Lifecycle)
+
+✅ **Compatible**: ObservationCapture maintains synchronous call path for implicit_observe. The 5-second TTL reuse contract is preserved via CachePolicy::ImplicitObserve.
+
+### ADR-0006 (Integration & Observability)
+
+✅ **Compatible**: @flow embedding of @computer-act continues to work. Internal @flow dispatch will call new paths directly, bypassing facade to ensure density/trace_summary/verification fields are present.
+
+### Other ADRs
+
+✅ **No conflicts** with ADR-0001 through ADR-0004.
+
+## References
+
+- Architecture Review Report: `/var/folders/.../architecture-review-20260820.html`
+- Exploration Data: Agent af29a0a9335f08314 (68053 tokens, 26 tool uses)
+- Grilling Session: This ADR documents all 21 design questions answered in 3 rounds
