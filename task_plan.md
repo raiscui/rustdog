@@ -498,3 +498,45 @@ Commit: feat(ax_input): implement Ticket #02 - migrate control_actions to ax_inp
 
 ### 当前状态
 **阶段 2 进度：10 个 action 已进 routing 表，剩 press_sequence 一个特殊件**
+
+## [2026-08-21 18:05:00] [Session ID: current] Ticket #06 完成 - 阶段 2 收尾
+
+### 完成内容
+- [x] press_sequence 迁到 ax_action，resolve_app 改为注入参数
+- [x] 两个 helper（materialize / perform_press_sequence_with）保持私有
+- [x] 搬迁 1 个原子性回归测试 + 补 3 个边界测试（ok / 混用 app / 空 targets）
+- [x] 删除 control_ax 里 4 个旧函数（perform_default + 3 个 helper）
+- [x] 删除已搬走的旧测试
+- [x] control_actions.rs 迁移调用点
+
+### 遇到错误（详见 ERRORFIX.md）
+- 跨行正则插 deprecated 属性，匹配到了 AxObservationCacheEntry：改用行匹配
+- `rindex("}")` 定位 test mod 结尾失败，测试插进了函数体：改为文件末尾新建 mod
+
+### 验证
+- press_sequence 测试：7 passed
+- cargo check --tests：0 warning 0 error
+- 全量 nextest：984 passed, 21 skipped
+
+### 阶段 2 完成状态
+
+**已迁移并删除旧实现（5 个）**
+- perform_default_ax_action
+- perform_default_ax_set_value
+- perform_default_ax_focus
+- perform_default_ax_scroll
+- perform_default_ax_press_sequence
+
+**仍在 control_ax（2 个，属 Ticket #11 清理范围）**
+- perform_default_ax_press：被 ax_action::press 作为 legacy 实现复用
+- perform_default_ax_press_with_postcondition：同上
+
+这两个不是"待迁移入口"，是 press 的底层实现。
+
+### 未完成的独立工作
+- [ ] routing 表接入生产路径（RPC 边界）。execute_ax_action 目前只被测试调用。
+      grilling Q7 定的"RPC 边界用字符串 API"尚未落地。
+- [ ] Ticket #11：把 press 的 legacy 实现也搬进 ax_action，清空 control_ax 的 action 层
+
+### 当前状态
+**阶段 2 完成。10 个 action 在 routing 表 + press_sequence 独立函数，全部有测试覆盖。**

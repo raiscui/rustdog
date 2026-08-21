@@ -375,7 +375,7 @@ impl ClipboardRestoreStatus {
 }
 
 impl AxTarget {
-    fn validate(&self) -> io::Result<()> {
+    pub fn validate(&self) -> io::Result<()> {
         let has_ref = self.ref_id.is_some();
         let has_observation_id = self.observation_id.is_some();
         let has_semantic = self.window_id.is_some()
@@ -781,7 +781,7 @@ impl AxPressPostconditionReport {
 }
 
 impl AxPressSequenceStepReport {
-    fn success(index: usize, description: String, report: AxActionReport) -> Self {
+    pub fn success(index: usize, description: String, report: AxActionReport) -> Self {
         Self {
             index,
             description,
@@ -792,7 +792,7 @@ impl AxPressSequenceStepReport {
         }
     }
 
-    fn failed(index: usize, description: String, error: String) -> Self {
+    pub fn failed(index: usize, description: String, error: String) -> Self {
         Self {
             index,
             description,
@@ -1318,125 +1318,6 @@ fn normalize_ax_verification_value(value: &str) -> String {
         .collect::<String>()
         .trim()
         .to_owned()
-}
-
-pub fn perform_default_ax_press_sequence(
-    request: &AxPressSequenceRequest,
-) -> AxPressSequenceReport {
-    let request = match materialize_press_sequence_request(request) {
-        Ok(request) => request,
-        Err(error) => {
-            let steps = request.targets.first().map_or_else(Vec::new, |target| {
-                vec![AxPressSequenceStepReport::failed(
-                    0,
-                    target.description.clone().unwrap_or_default(),
-                    error.to_string(),
-                )]
-            });
-            return AxPressSequenceReport {
-                kind: "ax-press-sequence",
-                action: "press-sequence",
-                performed: false,
-                status: "failed",
-                step_count: request.targets.len(),
-                steps,
-                failed_index: Some(0),
-                error: Some(error.to_string()),
-            };
-        }
-    };
-    perform_ax_press_sequence_with(&request, perform_default_ax_press)
-}
-
-/// sequence 只允许一套窗口归属.若使用 app selector,在第一个 side effect 前
-/// 解析一次并把所有步骤固化为同一个 window_id,避免执行中途漂移到另一窗口.
-fn materialize_press_sequence_request(
-    request: &AxPressSequenceRequest,
-) -> io::Result<AxPressSequenceRequest> {
-    materialize_press_sequence_request_with(request, resolve_unique_app_window_id)
-}
-
-fn materialize_press_sequence_request_with(
-    request: &AxPressSequenceRequest,
-    resolve_app: impl FnOnce(&str) -> io::Result<String>,
-) -> io::Result<AxPressSequenceRequest> {
-    let first = request
-        .targets
-        .first()
-        .ok_or_else(|| invalid_data("@ax-press-sequence 至少需要一个 target"))?;
-    let Some(app) = first.app.as_deref() else {
-        for target in &request.targets {
-            target.validate()?;
-        }
-        return Ok(request.clone());
-    };
-
-    let window_id = resolve_app(app)?;
-    let mut targets = Vec::with_capacity(request.targets.len());
-    for target in &request.targets {
-        if target.app.as_deref() != Some(app) {
-            return Err(invalid_data(
-                "@ax-press-sequence 的所有 target 必须使用同一个 app selector",
-            ));
-        }
-        let mut target = target.clone();
-        target.app = None;
-        target.window_id = Some(window_id.clone());
-        target.validate()?;
-        targets.push(target);
-    }
-    Ok(AxPressSequenceRequest { targets })
-}
-
-fn perform_ax_press_sequence_with(
-    request: &AxPressSequenceRequest,
-    mut perform: impl FnMut(&AxPressRequest) -> io::Result<AxActionReport>,
-) -> AxPressSequenceReport {
-    let mut steps = Vec::with_capacity(request.targets.len());
-    for (index, target) in request.targets.iter().enumerate() {
-        let description = target.description.clone().unwrap_or_default();
-        match perform(&AxPressRequest {
-            target: target.clone(),
-            postcondition: None,
-        }) {
-            Ok(report) => {
-                steps.push(AxPressSequenceStepReport::success(
-                    index,
-                    description,
-                    report,
-                ));
-            }
-            Err(error) => {
-                let error = error.to_string();
-                steps.push(AxPressSequenceStepReport::failed(
-                    index,
-                    description,
-                    error.clone(),
-                ));
-                return AxPressSequenceReport {
-                    kind: "ax-press-sequence",
-                    action: "press-sequence",
-                    performed: false,
-                    status: "failed",
-                    step_count: request.targets.len(),
-                    steps,
-                    failed_index: Some(index),
-                    error: Some(error),
-                };
-            }
-        }
-    }
-
-    AxPressSequenceReport {
-        kind: "ax-press-sequence",
-        action: "press-sequence",
-        performed: true,
-        status: "ok",
-        step_count: request.targets.len(),
-        steps,
-        failed_index: None,
-        error: None,
-    }
 }
 
 pub fn parse_ax_tree_payload(input: &str) -> io::Result<AxTreeRequest> {
@@ -3178,49 +3059,6 @@ mod tests {
         assert_eq!(captured_request_depth.get(), AX_POSTCONDITION_DEPTH);
         assert!(captured_request_depth.get() >= 6);
         assert_eq!(values, vec!["0".to_owned()]);
-    }
-
-    #[test]
-    fn press_sequence_should_resolve_app_once_and_preserve_partial_failure() {
-        let request = parse_ax_press_sequence_payload("app:Calculator,1,加,2").unwrap();
-        let resolve_calls = Cell::new(0usize);
-        let request = materialize_press_sequence_request_with(&request, |app| {
-            resolve_calls.set(resolve_calls.get() + 1);
-            assert_eq!(app, "Calculator");
-            Ok("pid:123/window:0".to_owned())
-        })
-        .unwrap();
-
-        assert_eq!(resolve_calls.get(), 1);
-        assert!(request.targets.iter().all(|target| {
-            target.app.is_none() && target.window_id.as_deref() == Some("pid:123/window:0")
-        }));
-
-        let mut call_index = 0usize;
-        let report = perform_ax_press_sequence_with(&request, |_| {
-            let index = call_index;
-            call_index += 1;
-            if index == 1 {
-                return Err(io::Error::new(io::ErrorKind::InvalidInput, "目标歧义"));
-            }
-            Ok(AxActionReport::press(
-                "test",
-                Some(format!("pid:123/window:0/path:{index}")),
-                None,
-            ))
-        });
-
-        assert!(!report.performed);
-        assert_eq!(report.status, "failed");
-        assert_eq!(report.step_count, 3);
-        assert_eq!(report.steps.len(), 2);
-        assert!(report.steps[0].performed);
-        assert!(!report.steps[1].performed);
-        assert_eq!(report.steps[1].description, "加");
-        assert_eq!(report.steps[1].error.as_deref(), Some("目标歧义"));
-        assert_eq!(report.failed_index, Some(1));
-        assert_eq!(report.error.as_deref(), Some("目标歧义"));
-        assert_eq!(call_index, 2);
     }
 
     #[test]

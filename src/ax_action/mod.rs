@@ -17,7 +17,7 @@ use std::io;
 
 // Re-export 强类型 API
 // pub use execute::{press, press_with_postcondition}; // 暂未使用
-pub use execute::{focus, perform_action, scroll, set_value};
+pub use execute::{focus, perform_action, press_sequence, scroll, set_value};
 
 /// Action routing 表的单个 entry。
 #[allow(dead_code)] // Ticket #03 启用后使用

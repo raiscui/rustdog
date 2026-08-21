@@ -413,3 +413,90 @@ dynamic_route!(parse_focus_dynamic, execute_focus_dynamic,
 ### 后续
 - 剩 1 个：`perform_default_ax_press_sequence`（按 grilling Q3 决策保持独立，不进 routing 表）
 - routing 表 10 条已就位，但仍无生产调用方；接入 RPC 边界是独立的一步
+
+## [2026-08-21 18:00:00] [Session ID: current] Ticket #06: 迁移 press_sequence，阶段 2 收尾
+
+### 任务内容
+把 `perform_default_ax_press_sequence` 及其两个 helper 从 control_ax 迁到 ax_action，完成阶段 2。
+
+### 完成过程
+
+#### 1. resolve_app 从内部依赖改为注入参数
+旧实现里 `materialize_press_sequence_request` 硬编码调用 `resolve_unique_app_window_id`，
+真正可测的 `_with` 版本藏在私有层，外部只能测到硬编码那一层。
+
+新签名把 resolve_app 提到公开入口：
+```rust
+pub fn press_sequence(
+    request: &AxPressSequenceRequest,
+    resolve_app: impl FnOnce(&str) -> io::Result<String>,
+) -> AxPressSequenceReport
+```
+
+这样 `control_actions.rs` 传真实解析器，测试传 stub，不再需要一对 `f` / `f_with` 函数。
+两个 helper（materialize / perform_press_sequence_with）保持私有，只服务模块内和测试。
+
+#### 2. 搬迁 + 补充测试
+从 control_ax 搬来 1 个原子性回归测试（app 只解析一次 + 中途失败保留已完成步骤），
+另补 3 个之前没有的边界：
+- 全部成功时 status 为 ok、failed_index 为空
+- 混用不同 app selector 被拒绝（防止执行中途漂移窗口）
+- 空 target 列表在 materialize 阶段失败，不产出步骤报告
+
+press_sequence 从"1 个测试"变成"4 个测试"，覆盖成功/部分失败/参数非法三类路径。
+
+#### 3. 删除旧实现
+`perform_default_ax_press_sequence` + `materialize_press_sequence_request` +
+`materialize_press_sequence_request_with` + `perform_ax_press_sequence_with` 四个函数全删。
+调用方只有 control_actions 一处，迁完零引用，没留 deprecated 壳。
+
+`parse_ax_press_sequence_payload` 留在 control_ax（它是 protocol 层，不属于本次迁移范围）。
+
+### 遇到的错误
+
+**错误 1：deprecated 属性插错位置**
+用 Python 正则插入 `#[deprecated]` 时，脚本匹配到了文件前部的 `AxObservationCacheEntry`
+而不是目标函数，导致 11 个不相关的 deprecated 警告（"AxObservationCacheEntry: use
+ax_action::press_sequence instead" 这种明显错乱的提示）。
+
+原因是我用 `re.search` 配 `(///.*?\n)*` 这种贪婪度不明确的模式去定位函数，
+而没有先验证匹配到的是哪一处。修正方式是改用逐行扫描精确匹配 `pub fn` 那一行。
+
+教训：**在源码里插入属性，用行匹配而不是跨行正则**。跨行正则在长文件里很容易匹配到
+上游某个结构体的文档注释块。
+
+**错误 2：把测试插进了函数体**
+用 `s.rindex("}\n")` 定位"最后一个大括号"来追加测试，但那个位置是
+`perform_press_sequence_with` 的函数结尾，不是 `mod tests` 的结尾，
+结果测试被插进了函数体内部，报 "expected one of `.`, `;`, `?`" 。
+
+修正方式是先把误插块切出来，把函数体正确收尾，再包进一个独立的
+`mod press_sequence_tests`。
+
+教训：**`rindex("}")` 不等于"文件末尾的 mod 结尾"**。追加测试要么在文件末尾新建 mod，
+要么精确定位目标 mod 的边界，不能靠"最后一个括号"。
+
+### 验证
+- press_sequence 相关测试：7 passed（含 control_ax 的 parser 测试）
+- `cargo check --tests`：0 warning 0 error
+- 全量 nextest：984 passed, 21 skipped
+
+### 总结感悟
+
+#### 注入参数比 `_with` 后缀更干净
+旧代码用 `f` / `f_with` 一对函数来兼顾"生产调用简单"和"测试可注入"。
+把依赖提到公开签名后，一个函数同时满足两者，调用方多传一个参数的代价远小于维护两个函数。
+
+这个模式在 control_ax 里还有别的地方在用（`perform_ax_press_with_postcondition_with`
+接了三个注入参数），迁移那部分时可以顺手统一。
+
+#### 阶段 2 完成情况
+control_ax 里的 7 个 action 执行函数，5 个已迁走并删除，剩 2 个：
+- `perform_default_ax_press`：被 ax_action::press 内部复用（作为 legacy 实现）
+- `perform_default_ax_press_with_postcondition`：同上
+
+这两个是 press 的底层实现，不是"待迁移的调用入口"，属于 Ticket #11 清理范围。
+
+### 后续
+- routing 表 10 条 + press_sequence 独立函数都已就位，但 `execute_ax_action` 仍无生产调用方
+- 接入 RPC 边界是独立一步，会动到请求分发路径

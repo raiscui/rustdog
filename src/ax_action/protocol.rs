@@ -7,8 +7,8 @@ use std::io;
 
 use crate::control_ax::parse_ax_press_payload;
 use crate::control_ax::types::{
-    AxActionRequest, AxFocusRequest, AxPressPostcondition, AxPressRequest, AxScrollRequest,
-    AxSetValueRequest, AxTarget,
+    AxActionRequest, AxFocusRequest, AxPressPostcondition, AxPressRequest, AxPressSequenceRequest,
+    AxScrollRequest, AxSetValueRequest, AxTarget,
 };
 
 /// 解析 press action 的 payload。
@@ -253,5 +253,26 @@ mod action_tests {
             let result = parse_action(&payload);
             assert!(result.is_ok(), "应该能解析 action: {}", action_name);
         }
+    }
+}
+
+/// 解析 press_sequence action 的 payload。
+///
+/// 目前只支持 line-control 对象字面量格式（多 target 对象数组）。
+/// JSON Value 格式暂未实现（Ticket #06 需要时再加）。
+///
+/// # 向后兼容
+/// 保持与原有 `@ax-press-sequence` 完全兼容。
+#[allow(dead_code)] // 供未来 routing 表接入 RPC 边界时使用
+pub fn parse_press_sequence(payload: &Value) -> io::Result<AxPressSequenceRequest> {
+    if let Some(s) = payload.as_str() {
+        // Line-control 对象字面量: "target:[{...},{...}]"
+        crate::control_ax::parse_ax_press_sequence_payload(s)
+    } else {
+        // JSON Value 格式暂未实现
+        Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "press_sequence JSON Value 格式暂未实现，请使用 line-control 对象字面量",
+        ))
     }
 }

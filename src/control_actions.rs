@@ -1,14 +1,15 @@
 use crate::{
     ax_action::{
-        focus as ax_focus, perform_action, scroll as ax_scroll, set_value as ax_set_value,
+        focus as ax_focus, perform_action, press_sequence, scroll as ax_scroll,
+        set_value as ax_set_value,
     },
     ax_input::{send_key_with_config, type_text_with_config},
     cancellation::CancellationToken,
     control_ax::{
         ax_window_id_from_backend_id, build_ax_find_response_json, build_ax_get_response_json,
         capture_ax_find_snapshot, capture_current_ax_window_snapshot, capture_default_ax_snapshot,
-        perform_default_ax_press, perform_default_ax_press_sequence,
-        perform_default_ax_press_with_postcondition, window_activation_verified, AxFocusReport,
+        perform_default_ax_press, perform_default_ax_press_with_postcondition,
+        window_activation_verified, AxFocusReport,
     },
     // Phase F-1: 三个 error_envelope wrapper helper (Cancelled / PlatformUnsupported /
     // PermissionDenied), 让手写 JSON payload 跟其它 error_code 走同一 envelope 形状。
@@ -32,7 +33,7 @@ use crate::{
     control_web::{build_default_web_act_response_json, build_default_web_find_response_json},
     control_window::{
         execute_default_window_activate, execute_default_window_close, execute_default_window_find,
-        execute_default_window_resize,
+        execute_default_window_resize, resolve_unique_app_window_id,
     },
 };
 use enigo::{Direction, Enigo, Key, Keyboard, Settings};
@@ -1172,7 +1173,9 @@ fn execute_ax_press(
 fn execute_ax_press_sequence(
     request: &crate::control_ax::AxPressSequenceRequest,
 ) -> io::Result<ActionExecutionResult> {
-    let report = perform_default_ax_press_sequence(request);
+    // resolve_app 由调用方注入: 这既是 app selector 的解析入口,
+    // 也是 press_sequence 的可测试 seam (单测传入 stub 即可)。
+    let report = press_sequence(request, resolve_unique_app_window_id);
     Ok(ActionExecutionResult {
         exit_code: 0,
         stdout: Vec::new(),

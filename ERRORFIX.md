@@ -134,3 +134,67 @@
 ### 测试环境发现
 - `cargo test -j 2 --bin rdog` 的同进程并行测试会共享 64-entry observation singleton,使长时间 direct-ref 测试的 observation 被驱逐。exact 单跑通过,nextest 进程隔离全量通过。
 - 该既有隔离问题已记录到 `LATER_PLANS.md`,没有通过扩大 production capacity 掩盖。
+
+## [2026-08-21 18:00:00] [Session ID: current] 源码脚本化编辑的两个定位错误
+
+### 错误 1：跨行正则插入属性，匹配到了错误的目标
+
+**现象**
+给 `perform_default_ax_press_sequence` 加 `#[deprecated]` 后，编译输出 11 个
+内容错乱的警告：`use of deprecated struct control_ax::AxObservationCacheEntry:
+use ax_action::press_sequence instead`。
+
+**原因**
+脚本用了这个模式定位函数：
+```python
+pattern = r'(///.*?\n)*pub fn perform_default_ax_press_sequence\('
+match = re.search(pattern, s, re.DOTALL)
+s = s[:match.start()] + deprecated + s[match.start():]
+```
+`(///.*?\n)*` 配 `re.DOTALL` 时，`.` 能跨行匹配，导致 `match.start()` 回退到了
+文件前部 `AxObservationCacheEntry` 的文档注释开头，而不是目标函数上方。
+属性被插到了那个结构体上。
+
+**修复**
+改用逐行扫描精确匹配：
+```python
+for i, line in enumerate(lines):
+    if 'pub fn perform_default_ax_press_sequence(' in line:
+        lines.insert(i, deprecated)
+        break
+```
+
+**规律**
+在源码里插入属性/注解，用**行匹配**而不是跨行正则。跨行正则在长文件里
+很容易把"目标上方的文档注释"匹配成"上游某个结构体的文档注释"。
+`re.DOTALL` + `*` 量词的组合尤其危险。
+
+### 错误 2：`rindex("}")` 不等于目标 mod 的结尾
+
+**现象**
+往 execute.rs 追加测试后编译报
+`error: expected one of '.', ';', '?', '}', or an operator, found doc comment`。
+
+**原因**
+脚本用 `s.rindex("}\n")` 找"最后一个大括号"作为插入点，假设它是 `mod tests` 的结尾。
+但当时文件末尾是 `perform_press_sequence_with` 这个函数（它在 tests mod 之后定义），
+所以测试被插进了函数体内部。
+
+**修复**
+把误插块切出来，函数体正确收尾，测试包进新的 `mod press_sequence_tests`：
+```python
+mi = s.index(marker)
+test_block = s[mi:]
+s = s[:mi].rstrip() + "\n}\n"          # 函数收尾
+s += "\n#[cfg(test)]\nmod press_sequence_tests {\n    use super::*;\n\n" + test_block
+```
+
+**规律**
+追加测试时，**在文件末尾新建一个 `#[cfg(test)] mod`**，而不是试图插进已有 mod。
+Rust 允许一个文件有多个 test mod，新建 mod 是零风险操作；
+定位已有 mod 的闭合括号则需要括号配对分析，脚本里做不可靠。
+
+### 共同教训
+两个错误都是"用文本位置猜代码结构"。脚本化编辑源码时，
+能用行级唯一标识（`pub fn xxx(` 这一行）就不要用跨行模式；
+能追加到文件末尾就不要往中间插。改完立刻编译，不要连续做多个位置猜测。
