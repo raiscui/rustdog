@@ -139,3 +139,219 @@
 - [ ] 将 specs/control-ax-split-implementation-plan.md 添加到 task_plan.md
 - [ ] 开始 Phase 1 实施（创建 ax_input/ 目录）
 - [ ] 或者：等待用户反馈，调整方案细节
+
+## [2026-08-21 13:30:00] [Session ID: current] Ticket #02: 迁移 control_actions 到 ax_input API
+
+### 任务内容
+将 control_actions.rs 中的输入操作迁移到新的 ax_input 高级 API，并标记旧函数为 deprecated。
+
+### 完成过程
+
+#### 1. 迁移 control_actions.rs
+- 修改 `execute_type_text()`: 
+  - 从 `perform_default_type_text()` 迁移到 `ax_input::type_text_with_config()`
+  - 保持功能完全一致
+- 修改 `execute_key()`:
+  - 从 `perform_default_key_delivery()` 迁移到 `ax_input::send_key_with_config()`
+  - 保持功能完全一致
+
+#### 2. 标记旧函数 deprecated
+- 在 `control_ax/input.rs` 中标记：
+  - `perform_default_type_text` → `#[deprecated(since = "0.9.0")]`
+  - `perform_default_key_delivery` → `#[deprecated(since = "0.9.0")]`
+- Deprecated message 指向新 API
+
+#### 3. 实现 Facade 模式
+- Deprecated 函数完整代理到新 API：
+  - `perform_default_type_text()` → `ax_input::type_text_with_config()`
+  - `perform_default_key_delivery()` → `ax_input::send_key_with_config()`
+- 确保向后兼容
+
+#### 4. 修复循环依赖
+- `ax_input` 模块直接调用底层实现：
+  - `type_text_with_config()` → `SystemAxBackend.type_text()`
+  - `send_key_with_config()` → `platform_key_delivery()`
+- 避免 ax_input → control_ax/input → ax_input 的循环
+
+#### 5. 测试验证
+- 运行 ax_input 专项测试：16 passed, 0 failed
+- 运行全量测试：883 passed, 2 failed (预先存在)
+- 验证 deprecated warnings 正常显示
+
+### 总结感悟
+
+#### 架构设计
+1. **Facade 模式的价值**：旧函数完整代理到新 API，既保持兼容又引导迁移
+2. **循环依赖处理**：通过直接调用底层实现打破循环，清晰的依赖层次
+3. **渐进式迁移**：标记 deprecated 而非直接删除，给调用方迁移时间
+
+#### 测试策略
+1. **专项测试先行**：先验证核心模块测试通过
+2. **全量测试覆盖**：确保无回归
+3. **Deprecated 验证**：确认警告机制正常工作
+
+#### 实施经验
+1. **阅读代码是关键**：先理解调用关系再动手，避免破坏功能
+2. **测试驱动迁移**：每个修改后立即测试，快速发现问题
+3. **编译器是最好的向导**：利用编译错误找到所有需要修改的位置
+
+### 后续建议
+1. **继续迁移 Ticket #03**：处理 web_rpc 和 integration tests 中的调用
+2. **监控 deprecated 使用**：定期检查是否还有代码使用旧 API
+3. **准备 Ticket #11**：在所有迁移完成后进行最终清理和文档更新
+
+
+## [2026-08-21 16:00:00] [Session ID: current] Ticket #03: 完成 ax_action 模块拆分
+
+### 任务内容
+将 control_ax.rs 中的 press action 相关逻辑拆分到新的 ax_action 模块。
+
+### 完成过程
+
+#### 1. 创建模块结构
+- 创建 `src/ax_action/` 目录
+- 创建三个核心文件：
+  - `mod.rs`: 模块导出和路由表框架
+  - `protocol.rs`: press action 的 payload 解析
+  - `execute.rs`: press action 的执行逻辑
+
+#### 2. 协议层实现 (protocol.rs)
+- 实现 `parse_press()` 函数：
+  - 支持 JSON 格式：`{"target": {"id": "..."}, "postcondition": {...}}`
+  - 支持 Compact 格式：`app:APP,description:删除`
+  - 复用 `control_ax::parse_ax_press_payload()` 的解析逻辑
+- 清晰的职责边界：只做数据转换，不含业务逻辑校验
+
+#### 3. 执行层实现 (execute.rs)
+- 实现两个公开函数：
+  - `press()`: 统一入口，根据是否有 postcondition 路由到不同逻辑
+  - `press_with_postcondition()`: 完整 postcondition 验证流程
+- 内部实现：
+  - 复用 `control_ax::legacy_press_with_postcondition()` 的核心逻辑
+  - 类型转换：`AxPressPostconditionReport` → `AxActionReport`
+- 错误处理：postcondition 验证失败时返回明确错误
+
+#### 4. 路由层框架 (mod.rs)
+- 定义 `ActionRoute` 结构：action 名称 → parser/executor 的映射
+- 定义 `ACTION_ROUTES` 常量表：数据化 routing（当前只有 "press"）
+- 实现 `execute_ax_action()` 统一入口：
+  - 根据 action 名称查找 route
+  - 调用对应的 parser/executor
+  - 标准化返回类型
+- 标记 `#[allow(dead_code)]`：Ticket #03 启用后使用
+
+#### 5. 类型系统完善
+- 在 `control_ax/types.rs` 中为 `AxTarget` 添加：
+  - `#[derive(Serialize, Deserialize)]`
+  - `#[serde(rename_all = "camelCase")]`
+- 修复 `ref_id` 字段的 serde 映射：
+  - 添加 `#[serde(rename = "ref")]` 注解
+  - 确保 JSON 中的 `"ref"` 字段正确映射到 Rust 的 `ref_id`
+
+#### 6. 测试验证
+- 在 `execute.rs` 中添加单元测试：
+  - `test_press_basic()`: 基础 press 功能
+  - `test_press_with_postcondition_success()`: postcondition 成功验证
+  - `test_press_with_postcondition_fail()`: postcondition 验证失败
+- 运行专项测试：3 passed
+- 运行全量测试：892 passed, 2 failed (预先存在)
+- 编译验证：无警告（deprecated 函数已标记 `#[allow(dead_code)]`）
+
+#### 7. 向后兼容处理
+- 保留 `control_ax::legacy_press_with_postcondition()` 用于复用
+- 标记 `#[allow(dead_code)]`：等 Ticket #03 启用后自然使用
+
+### 总结感悟
+
+#### 架构设计
+1. **分层清晰**：protocol (解析) → execute (逻辑) → mod (路由)，职责边界明确
+2. **数据化 routing**：`ACTION_ROUTES` 常量表，新增 action 只需修改数据
+3. **类型安全的桥接**：通过 AxActionReport 统一返回类型，消除类型膨胀
+4. **复用而非重写**：复用 `legacy_press_with_postcondition()` 核心逻辑，避免重复
+
+#### 实施经验
+1. **serde 注解是关键**：`ref_id` 映射问题提醒我们 serde 注解必须完整
+2. **测试先行**：单元测试覆盖关键路径，快速发现类型映射问题
+3. **增量验证**：每个文件创建后立即编译，快速定位问题
+4. **允许 dead_code**：新模块未启用前标记 `#[allow(dead_code)]`，避免无意义警告
+
+#### 值得复用的规律
+- **Facade 模式**：旧代码通过 deprecated 函数代理到新 API，平滑迁移
+- **数据化配置**：routing 表、parser/executor 映射都数据化，易于扩展
+- **类型转换策略**：定义统一返回类型，在边界处做类型转换
+- **测试策略**：关键路径优先（postcondition 验证），边界情况其次
+
+### 后续建议
+1. **继续 Ticket #04-#10**：将其他 12 个 action 逐个迁移到 ax_action
+2. **启用 routing 表**：在 web_rpc 或 control_computer_act 中调用 `execute_ax_action()`
+3. **监控 deprecated 使用**：确保所有调用方已迁移
+4. **最终清理 (Ticket #11)**：删除 deprecated 函数和 legacy 实现
+
+---
+
+**下一步行动**：
+- [ ] 开始 Ticket #04：迁移 click action
+- [ ] 或者：继续其他优先级更高的任务
+
+
+## [2026-08-21 16:40:00] [Session ID: current] Ticket #04: 迁移通用 AX action 到 ax_action
+
+### 任务内容
+把 `perform_default_ax_action` 从 control_ax 迁到 ax_action，并接入 routing 表。
+
+### 完成过程
+
+#### 1. protocol 层
+- 新增 `parse_action()`，两种输入：
+  - JSON Value 对象 -> serde 反序列化
+  - 字符串 -> 复用 `control_ax::parse_ax_action_payload`（line-control 对象字面量）
+
+#### 2. execute 层
+- 新增 `perform_action()`，直接调 `SystemAxBackend.perform_action`
+- 不再经过 control_ax 的 facade，依赖层次是 ax_action -> control_ax backend
+
+#### 3. routing 表
+- `ACTION_ROUTES` 从 1 条扩到 7 条：press + 6 个通用 action
+- 6 个通用 action 共用同一对 `parse_action_dynamic` / `execute_action_dynamic`
+- 新增 action 只需加一行数据，不写新函数
+
+#### 4. 类型系统
+- `AxActionRequest`、`AxActionName` 补 `Serialize` / `Deserialize`
+- routing 表内部走 Value 传递，这两个派生是必需的
+
+#### 5. 调用方迁移
+- `control_actions.rs::execute_ax_action` -> `ax_action::perform_action`
+- `control_web/act.rs::build_default_web_act_response_json` -> `ax_action::perform_action`
+- 两个调用方迁完后 `perform_default_ax_action` 零引用，直接删除，没留 deprecated 壳
+
+### 遇到的问题与修正
+
+**问题：compact 格式测试失败**
+- 现象：`test_parse_action_compact_format` 报 "@ax-action payload 必须是对象"
+- 原因：我先假设 `@ax-action` 像 `@ax-press` 一样支持 `app:X,description:Y` 裸 compact，但读 `parse_ax_action_payload` 源码后确认它只接受对象字面量
+- 修正：改测试而不是改生产代码，拆成两个测试：
+  - `test_parse_action_object_literal_string`：对象字面量字符串能解析
+  - `test_parse_action_rejects_bare_compact`：裸 compact 被拒绝（这是既有契约）
+
+这里的教训是：**先读被复用函数的实现，再写测试**。假设契约相同就会写出反映错误期望的测试。
+
+### 验证结果
+- ax_action 定向测试：15 passed
+- `cargo check --tests`：0 warning 0 error
+- 全量 nextest：978 passed, 21 skipped（之前 2 个 flaky 失败在进程隔离下也通过了）
+
+### 总结感悟
+
+#### 数据化 routing 的实际收益
+6 个通用 action 只加了 6 行数据，共用一对 wrapper 函数。如果按老写法要写 6 个 `route_*` 函数。这是摩擦点 #4 想解决的问题，现在有了实证。
+
+#### deprecated 不是默认选项
+`perform_default_ax_action` 只有 2 个调用方，都在同一个 repo 里。迁完就能删，没必要留 deprecated 壳。deprecated 是给"调用方不在我手上"的情况用的，内部函数直接删更干净。
+
+#### 测试反映的是契约，不是愿望
+compact 格式那个失败提醒我：写测试前要确认被测函数真实支持什么。测试失败时先问"是代码错了还是我的期望错了"，不要条件反射改代码。
+
+### 后续
+- 剩余 4 个待迁移：set_value / focus / scroll / press_sequence
+- press_sequence 按 grilling 决策保持独立，不进 routing 表
+- routing 表还没有生产调用方，等 web_rpc 或 control_computer_act 接入

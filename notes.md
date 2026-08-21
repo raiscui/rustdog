@@ -376,3 +376,276 @@ const ROUTES: &[ActionRoute] = &[
 - 评测 runner unit tests 通过,但真实 runner 在校验配置时失败: /Users/cuiluming/Library/pnpm/pi 不存在。
 - .envrc 经 direnv exec . 可提供 DashScope key,所以凭据不是已验证 blocker;缺失的是 upstream Pi binary。
 - 历史 successor policy 2-case x 5-model artifact 仅作背景,不能宣称本轮 current-binary canary。
+
+## [2026-08-21 13:55:00] [Session ID: current] 阶段 2 探索: ax_action 模块分析
+
+### 当前结构分析
+
+#### control_ax.rs 文件信息
+- **总行数**: 3634 行
+- **大小**: 122KB（从架构报告）
+- **核心 action 函数**: 5 个 perform + 6 个 parse
+
+#### 核心 Action 函数
+
+**Perform 函数** (执行层):
+1. `perform_default_ax_press` (line 1093)
+2. `perform_default_ax_press_with_postcondition` (line 1133)
+3. `perform_default_ax_press_sequence` (line 1324)
+4. `perform_default_ax_action` (line 1443)
+5. `perform_default_ax_set_value` (line 1447)
+6. `perform_default_ax_focus` (line 1451)
+7. `perform_default_ax_scroll` (line 1455)
+
+**Parse 函数** (协议层):
+1. `parse_ax_press_payload` (line 1641)
+2. `parse_ax_press_sequence_payload` (line 1738)
+3. `parse_ax_action_payload` (line 1793)
+4. `parse_ax_set_value_payload` (line 1833)
+5. `parse_ax_focus_payload` (line 1881)
+6. `parse_ax_scroll_payload` (line 1938)
+
+#### 调用方分析
+
+**主要调用方** (2 个文件):
+1. `src/control_actions.rs` - 10+ 处调用
+2. `src/control_web/act.rs` - 1 处调用
+
+#### 现有子模块
+
+```
+src/control_ax/
+├── input.rs      3.1K  (已迁移到 ax_input)
+├── macos.rs      67KB  (平台实现，需要移动)
+├── query.rs      45.6KB (AX tree query，阶段 3)
+├── tree.rs       15.1KB (AX tree 结构)
+└── types.rs      14.1KB (类型定义)
+```
+
+### 拆分策略
+
+#### 目标结构
+
+```
+src/ax_action/
+├── mod.rs           # 统一入口 + 数据化 routing 表
+├── protocol.rs      # Parse 层 (6 个 parse 函数)
+├── execute.rs       # Execution 层 (7 个 perform 函数)
+├── types.rs         # Re-export from control_ax::types
+├── platform/
+│   └── macos.rs     # 移动自 control_ax/macos.rs
+└── tests.rs         # 单元测试
+```
+
+#### 关键设计决策
+
+**1. Routing 表数据化** (解决摩擦点 #4)
+```rust
+struct ActionRoute {
+    name: &'static str,
+    parser: fn(Value) -> io::Result<ActionRequest>,
+    executor: fn(ActionRequest) -> io::Result<ActionResult>,
+    timeout_ms: u64,
+}
+
+const ROUTES: &[ActionRoute] = &[
+    ActionRoute { name: "press", parser: parse_press, executor: perform_press, timeout_ms: 5000 },
+    ActionRoute { name: "action", parser: parse_action, executor: perform_action, timeout_ms: 5000 },
+    // ... 一眼可见所有 action
+];
+```
+
+**2. 统一入口函数**
+```rust
+pub fn execute_ax_action(action: &str, payload: Value) -> io::Result<ActionResult>
+```
+
+**3. Deprecated Facade**
+```rust
+#[deprecated(since = "0.9.0", note = "use ax_action::execute_ax_action")]
+pub fn perform_default_ax_press(req: &AxPressRequest) -> io::Result<AxActionReport> {
+    ax_action::execute_ax_action("press", serde_json::to_value(req)?)
+}
+```
+
+### 下一步行动
+
+- [ ] 步骤 2.1: 创建 `src/ax_action/` 目录结构
+- [ ] 步骤 2.2: 实现 `mod.rs` (routing 表 + 统一入口)
+- [ ] 步骤 2.3: 实现 `protocol.rs` (移动 6 个 parse 函数)
+- [ ] 步骤 2.4: 实现 `execute.rs` (移动 7 个 perform 函数)
+- [ ] 步骤 2.5: 考虑是否移动 `macos.rs` (67KB，可能延后到阶段 3)
+
+
+### 第一轮决策（已确认）
+
+**Q1 - 双 API 策略**: ✅
+- 动态入口: `execute_ax_action(action: &str, payload: Value)` (RPC 用)
+- 强类型函数: `execute_press(req: &AxPressRequest)` 等 (内部调用)
+- Routing 表服务动态路径，内部调用强类型函数
+
+**Q2 - postcondition 合并**: ✅
+- `press_with_postcondition` 合并到 `press` action
+- `AxPressRequest` 添加 `Option<Postcondition>` 字段
+- Routing 表只需一个 `"press"` entry
+
+**Q3 - press_sequence 独立**: ✅
+- 暴露为独立 action `"press_sequence"`
+- 保持原子性（全部成功或全部回滚）
+
+**Q4 - macos.rs 暂不动**: ✅
+- 保持在 `control_ax/macos.rs` 作为共享平台层
+- 等阶段 3 (query 拆分) 后再统一评估
+
+**Q5 - types 不 re-export**: ✅
+- 不在 `ax_action` 创建 `types.rs`
+- 所有类型保持在 `control_ax::types`
+- 新模块直接 `use control_ax::types::*`
+
+**Q6 - Facade 完整代理**: ✅
+- Deprecated facade 必须完整代理旧签名
+- 负责参数转换（如果新旧 API 参数结构不同）
+
+**Q7 - 分阶段迁移**: ✅
+- 立即迁移 `control_actions.rs` 到强类型 API
+- 保留 `control_web/act.rs` 用 facade（RPC 边界）
+
+
+### 第二轮决策（已确认）
+
+**Q8 - Postcondition 字段向后兼容**: ✅
+- 修改 `AxPressRequest`，添加 `#[serde(default, skip_serializing_if = "Option::is_none")]`
+- 旧 JSON payload 仍能解析（字段缺失 = None）
+- 新 payload 可包含 postcondition
+
+**Q9 - 特定错误类型**: ✅
+- 返回 `ActionNotFound(String)` 错误
+- 映射到 `io::ErrorKind::NotFound`
+- RPC 层根据 ErrorKind 决定 HTTP 状态码
+
+**Q10 - Routing 表统一签名**: ✅
+- 统一签名: `fn(&Value) -> io::Result<Value>`
+- Routing 表是 `const` 纯数据结构
+- 内部: 反序列化 → 强类型函数 → 序列化
+
+**Q11 - 简化命名**: ✅
+- 新模块: `press()`, `action()`, `set_value()`, `focus()`, `scroll()`, `press_sequence()`
+- 旧函数: `perform_default_*` 作为 deprecated facade
+
+**Q12 - 分层边界**: ✅
+- `protocol.rs`: 纯反序列化（JSON → struct），serde 自动校验必填字段
+- `execute.rs`: 业务逻辑校验 + 执行，自包含
+
+**Q13 - 分层测试**: ✅
+- (1) Routing 表测试（action 名 → handler）
+- (2) 强类型函数单元测试（mock 平台）
+- 旧测试暂不迁移，先覆盖新 API
+
+**Q14 - 增量迁移**: ✅
+- 先迁移 `press`，验证通过后批量迁移其他
+- Import: `use ax_action::{press, action, ...}` (显式导入)
+
+
+### 第三轮决策（已确认）
+
+**Q15 - 增量实施**: ✅
+- 先完成 `press` action 端到端（parse + execute + routing + API + test）
+- 验证通过后批量添加其他 6 个 action
+- 最快发现设计问题
+
+**Q16 - 循环依赖处理**: ✅
+- Facade 调用 `ax_action::execute_ax_action` 字符串 API
+- 避免导入所有强类型函数
+- 模块级 `pub use` 是安全的
+
+**Q17 - 兼容性测试**: ✅
+- 添加 `test_parse_ax_press_backward_compatible()`
+- 用旧格式 JSON（无 `postcondition`）测试
+- 验证能解析且字段为 `None`
+
+**Q18 - Timeout 作为元数据**: ✅
+- `timeout_ms` 暂时只作为元数据
+- 不自动应用超时（保持 sync）
+- 调用方自己决定是否超时
+
+**Q19 - 测试策略**: ✅
+- 单元测试：只测 protocol 层（parse 逻辑）
+- Execute 层依赖集成测试（真实 AX 环境）
+- 必要时用 `#[cfg(test)]` fake 实现
+
+**Q20 - 三层验收**: ✅
+1. 单元测试：新模块测试全部通过
+2. 集成测试：`cargo test` 全量测试（883 个）
+3. 冒烟测试：手动验证 press/type/scroll
+
+**Q21 - Deprecated 删除时间线**: ✅
+- 阶段 2 完成后迁移 `control_actions.rs`
+- 阶段 3 完成后迁移 `control_web/act.rs`
+- 0.10.0 或 0.11.0 删除所有 deprecated 函数
+
+
+## 设计共识完成 ✅
+
+经过 3 轮 21 个问题的 grilling，我们达成了完整的设计树：
+
+### 核心架构决策
+
+**模块结构**:
+```
+src/ax_action/
+├── mod.rs          # Routing 表 + 统一入口 execute_ax_action()
+├── protocol.rs     # 6 个 parse 函数（纯反序列化）
+├── execute.rs      # 6 个强类型函数: press(), action(), set_value()...
+└── tests.rs        # 单元测试（protocol + routing）
+```
+
+**双 API 设计**:
+- 动态 API: `execute_ax_action(action: &str, payload: Value)` (RPC 用)
+- 强类型 API: `press(req: &AxPressRequest)` 等（内部调用）
+- Routing 表: `const` 数据结构，统一签名 `fn(&Value) -> io::Result<Value>`
+
+**关键合并**:
+- `press_with_postcondition` 合并到 `press`
+- `AxPressRequest` 添加 `postcondition: Option<Postcondition>` 字段
+- `press_sequence` 保持独立（原子性）
+
+**依赖关系**:
+- `ax_action` → `control_ax::types` (类型定义)
+- `ax_action` → `control_ax::macos` (平台实现)
+- `control_ax.rs` → `ax_action` (deprecated facade)
+- 不创建 `ax_action/types.rs`，避免路径混乱
+
+**迁移路径**:
+1. 增量实施：先完成 `press` action 端到端
+2. 立即迁移 `control_actions.rs` 到强类型 API
+3. 保留 `control_web/act.rs` 用 facade
+4. 阶段 3 后删除 deprecated 函数
+
+**测试策略**:
+- 单元测试：protocol 层 + routing 表
+- 集成测试：全量 `cargo test`
+- 兼容性测试：旧 JSON 格式仍能解析
+- 冒烟测试：手动验证核心 action
+
+### Alternatives Considered
+
+#### Why not 立即移动 macos.rs？
+- 67KB 平台代码可能被 query 和 action 共同依赖
+- 等阶段 3 拆分 query 后再统一评估
+- 避免过早抽象
+
+#### Why not 引入 PlatformAx trait？
+- 增加复杂度，但单元测试收益不大
+- Execute 层依赖集成测试更真实
+- 必要时用 `#[cfg(test)]` fake 实现
+
+#### Why not 自动应用 timeout？
+- 需要 async runtime，增加复杂度
+- 调用方已有自己的超时机制
+- 暂作为元数据，未来可扩展
+
+#### Why not 批量实施所有 action？
+- 风险高，难以定位问题
+- 增量式可最快验证设计
+- 先完成 `press` 建立模板
+

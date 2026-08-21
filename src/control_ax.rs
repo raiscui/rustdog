@@ -32,7 +32,6 @@ pub use self::tree::{
     resolve_target_id_in_snapshot,
 };
 pub mod input;
-pub use self::input::{perform_default_key_delivery, perform_default_type_text};
 use self::input::{remap_type_text_ax_value_error, remap_type_text_targeted_keyboard_error};
 pub(crate) use self::tree::ax_window_id_from_backend_id;
 use self::tree::{
@@ -1438,10 +1437,6 @@ fn perform_ax_press_sequence_with(
         failed_index: None,
         error: None,
     }
-}
-
-pub fn perform_default_ax_action(request: &AxActionRequest) -> io::Result<AxPerformedActionReport> {
-    SystemAxBackend.perform_action(request)
 }
 
 pub fn perform_default_ax_set_value(request: &AxSetValueRequest) -> io::Result<AxSetValueReport> {

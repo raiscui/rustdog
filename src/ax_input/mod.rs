@@ -6,10 +6,10 @@
 //!
 //! 注意：这些 API 在 Ticket #02 之前尚未被调用，因此会有 dead_code 警告。
 
-#![allow(dead_code)]  // 允许未使用，直到 Ticket #02 迁移调用方
+#![allow(dead_code)] // 允许未使用，直到 Ticket #02 迁移调用方
 
 use crate::control_ax::types::{AxTarget, TypeTextMode, TypeTextReport};
-use crate::control_ax::AxBackend;  // 新增：直接使用 AxBackend
+use crate::control_ax::AxBackend; // 新增：直接使用 AxBackend
 use crate::control_protocol::{KeyDelivery, KeyMode, KeyRequest, KeyResponseMode};
 use std::io;
 
@@ -279,7 +279,7 @@ mod tests {
     fn advanced_send_key_should_allow_custom_hold_ms() {
         let request = KeyRequest {
             key: "Space".to_string(),
-            hold_ms: 1000,  // 自定义 hold 时间
+            hold_ms: 1000, // 自定义 hold 时间
             mode: KeyMode::PressRelease,
             delivery: KeyDelivery::PidTargeted,
             pid: None,

@@ -1,13 +1,14 @@
 use crate::{
+    ax_action::perform_action,
+    ax_input::{send_key_with_config, type_text_with_config},
     cancellation::CancellationToken,
     control_ax::{
         ax_window_id_from_backend_id, build_ax_find_response_json, build_ax_get_response_json,
         capture_ax_find_snapshot, capture_current_ax_window_snapshot, capture_default_ax_snapshot,
-        perform_default_ax_action, perform_default_ax_focus, perform_default_ax_press,
-        perform_default_ax_press_sequence, perform_default_ax_press_with_postcondition,
-        perform_default_ax_scroll, perform_default_ax_set_value, window_activation_verified, AxFocusReport,
+        perform_default_ax_focus, perform_default_ax_press, perform_default_ax_press_sequence,
+        perform_default_ax_press_with_postcondition, perform_default_ax_scroll,
+        perform_default_ax_set_value, window_activation_verified, AxFocusReport,
     },
-    ax_input::{type_text_with_config, send_key_with_config},
     // Phase F-1: 三个 error_envelope wrapper helper (Cancelled / PlatformUnsupported /
     // PermissionDenied), 让手写 JSON payload 跟其它 error_code 走同一 envelope 形状。
     control_computer_act::error_envelope::{
@@ -1182,7 +1183,7 @@ fn execute_ax_press_sequence(
 fn execute_ax_action(
     request: &crate::control_ax::AxActionRequest,
 ) -> io::Result<ActionExecutionResult> {
-    let report = perform_default_ax_action(request)?;
+    let report = perform_action(request)?;
     Ok(ActionExecutionResult {
         exit_code: 0,
         stdout: Vec::new(),

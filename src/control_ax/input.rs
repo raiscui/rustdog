@@ -11,14 +11,14 @@
 //! **注意**: 这个模块的公开函数已迁移到 ax_input 模块。
 //! 这些函数将在 Ticket #11 中删除。
 
-use crate::control_protocol::{KeyDelivery, KeyRequest};
+use crate::control_protocol::KeyRequest;
 use std::io;
 
 use super::types::*;
-use super::{platform_key_delivery, AxBackend};
 
 // ---- perform_default_key_delivery (was lines 1076-1083) ----
 #[deprecated(since = "0.9.0", note = "use ax_input::send_key_with_config instead")]
+#[allow(dead_code)] // Ticket #11 删除时一并移除
 pub fn perform_default_key_delivery(request: &KeyRequest) -> io::Result<Option<KeyDeliveryReport>> {
     // Facade: 完整代理到新 API
     crate::ax_input::send_key_with_config(request.clone())
@@ -26,6 +26,7 @@ pub fn perform_default_key_delivery(request: &KeyRequest) -> io::Result<Option<K
 
 // ---- perform_default_type_text (was lines 1093-1095) ----
 #[deprecated(since = "0.9.0", note = "use ax_input::type_text_with_config instead")]
+#[allow(dead_code)] // Ticket #11 删除时一并移除
 pub fn perform_default_type_text(request: &TypeTextRequest) -> io::Result<TypeTextReport> {
     // Facade: 完整代理到新 API
     crate::ax_input::type_text_with_config(request.clone())
