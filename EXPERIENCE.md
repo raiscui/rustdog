@@ -484,3 +484,27 @@
 - 原候选缺少的 `--append-system-prompt` 真实 payload 证据已由 mock provider contract 补齐,不再作为 `EXPERIENCE.md` inbox 候选保留。
 - 详见 [`docs/solutions/tooling-decisions/upstream-pi-macos-ops-cli-contract.md`](docs/solutions/tooling-decisions/upstream-pi-macos-ops-cli-contract.md)。
 - Pi JSONL v3 的 route、多轮和 `turnIndex` 兼容规则见 [`docs/solutions/conventions/pi-jsonl-v3-semantic-aggregation.md`](docs/solutions/conventions/pi-jsonl-v3-semantic-aggregation.md)。
+
+## [2026-08-22 12:47:20] [Session ID: zcode-sess_fa3b551c] 积压核验处置 (2026-08-22 全量复盘)
+
+### 已 Capture (新增指针)
+- [2026-07-14] 坐标 AX hit-test owner 门禁 + WeChat no-AX 政策 ->
+  `docs/solutions/best-practices/gui-target-owner-evidence-gate.md`。
+  重要漂移: 该政策原真相源 (SKILL.md 章节) 已于 2026-07-28 被 92a3d06 skill 瘦身
+  整体移除 (无意图记录), 旧条目中 "真相源在 SKILL.md" 的指向失效, 以 solution 为准。
+- [2026-04-13] Windows Zenoh Hello locator 顺序 ->
+  `docs/solutions/best-practices/zenoh-hello-locator-priority.md`
+  (代码 `zenoh_runtime/session.rs` 已实现 manual scout + 排序 + 显式 open, 带单测)。
+- [2026-06-20] log 输出路径 e2e 隐性契约 ->
+  `docs/solutions/conventions/daemon-log-sentinel-e2e-contract.md`。
+
+### 核验后保留为索引 (代码/spec/skill 即载体, 不另建文档)
+- line-control 协议、Zenoh peer/peer、entry-point fallback、PTY 生命周期、unixpipe
+  FIFO、self/空 target: specs 各计划文档承接。
+- [2026-07-18] 唯一共享锁: `src/zenoh_runtime/test_support.rs::env_test_guard` 即载体。
+- [2026-04-05] Windows UIPI: `control_capabilities.rs` code 77 语义 +
+  `to_io_error_should_upgrade_uipi_failures_to_permission_denied` 测试即载体。
+- [2026-05-11] 更名权限主体: `macos-tcc-stable-codesign-identity.md` 邻接承接。
+- [2026-08-04] parser 兼容机制: 本文件继续作为 canonical 索引 (AGENTS.md 已如此声明)。
+- 其余历史条目 (Codex/OMX 提交规范、更名迁移、skill 瘦身纪律等): 一次性/历史性,
+  保留原文备查。

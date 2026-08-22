@@ -63,11 +63,21 @@ The `retry.strategy` value on the error response envelope:
 - `reconnect_then_retry` — re-establish the daemon session first.
 - `manual_only` — the action cannot be safely retried; surface to user.
 
+**`outcome`**:
+Three-state field on every `@computer-act` response describing the
+postcondition result: `worked` / `didnt` / `unknown`. `ok` only reports
+dispatch success; a dispatch-ok action whose verify failed is
+`ok: true, outcome: "didnt"` with the reason in the `verification`
+section (`status`: `verified` / `preexisting` / `failed`). Decision table
+in `src/control_computer_act/outcome.rs`.
+
 **`verify_failed`**:
-An `error_code` returned when the dispatch succeeded but the
-post-action verify showed no expected GUI change. Treated structurally
-distinct from dispatch-layer errors so the agent loop can apply
-`re_observe_then_retry` specifically.
+Historical wire `error_code` from the Phase F-2 design (`ok: false` when
+post-action verify showed no expected GUI change). Superseded by the
+`outcome` three-state field: dispatch-ok verify failures are now
+`ok: true, outcome: "didnt"` and the `VerifyFailed` enum variant is kept
+only as an internal retry-strategy reference, not as a response
+`error_code`.
 
 ## Observability
 

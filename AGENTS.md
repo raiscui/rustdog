@@ -17,7 +17,7 @@ Issues 和 Wayfinder maps 使用 GitHub Issues。详见 `docs/agents/issue-track
 
 ### Domain docs
 
-使用 single-context 布局。领域术语见根级 `CONTEXT.md`,消费规则见 `docs/agents/domain.md`。
+使用 single-context 布局。canonical glossary 是根级 `CONTEXT.md` (录制回放与 GUI mutation 域); `@computer-act` surface 的 CUA/verify/observability 术语在 `docs/glossary.md` (ADR 配套, 与 CONTEXT.md 分工不重叠)。消费规则见 `docs/agents/domain.md`。
 
 ## 何时优先阅读
 
@@ -69,13 +69,38 @@ Issues 和 Wayfinder maps 使用 GitHub Issues。详见 `docs/agents/issue-track
   - 用途: 固定 `message_end`、`turn_end`、session/assistant route 和缺失 `turnIndex` 的 fail-closed 语义
   - 何时阅读: 修改 `vendor/pi_events.py`、`multiTurnVerified`、provider route 判定、对话轮数统计或 Pi artifact 回放前
 
+- `docs/solutions/architecture-patterns/ax-observation-cached-progressive-queries.md`
+  - 主题: `@ax-tree` / `@ax-get` 复用 observation 缓存的六条架构不变量
+  - 用途: 固定写入路径独占、epoch 真相源分层 (resource lane 为准)、tree/get 失效粒度、双重 epoch 比较、fail-closed 稳定 reason code 和受限只读视图
+  - 何时阅读: 修改 `src/control_ax.rs` 的 `AxObservationCache` / `resolve_cached_*` / `bounded_for_query`, 或为其他读路径 (window/web/screenshot manifest) 设计 capture 复用缓存前
+
+- `docs/solutions/best-practices/gui-target-owner-evidence-gate.md`
+  - 主题: GUI 坐标 hit-test 的 foreign-tree 归属风险与 owner 证据门禁; WeChat 临时 no-AX 政策的本体载体
+  - 用途: 固定 "请求目标与实际 hit owner 是两份状态" 的五类证据 checklist、find/get/stale 链不能替代归属验证、WeChat 允许路径与重新启用条件
+  - 何时阅读: 重新引入坐标 hit-test / AX root discovery、处理重叠窗口目标归属、对 WeChat 内容定位, 或做 skill 瘦身评审前
+
+- `docs/solutions/best-practices/zenoh-hello-locator-priority.md`
+  - 主题: Zenoh autodiscovery 必须排序 Hello locator 后显式连接
+  - 用途: 固定 manual scout -> locator 排序 (loopback > LAN > link-local) -> 显式 open 的多网卡连接模式, 延长 timeout 不是修复
+  - 何时阅读: 修改 `src/zenoh_runtime/session.rs` 的 scout/open 路径、排查 "看见了 router 却连不上" 的多网卡现场前
+
+- `docs/solutions/conventions/daemon-log-sentinel-e2e-contract.md`
+  - 主题: daemon log 输出行是 e2e 测试的隐性启动 sentinel
+  - 用途: 固定改 logger 路径/文案/level 前先 grep `wait_until_output_contains` 双侧, 以及 `start_zenoh_daemon_with_combined_output` 合流 helper 模板
+  - 何时阅读: 修改 `init_logger`/fern 配置、daemon "ready" 日志, 或新写等待 daemon 就绪的 e2e 前
+
+- `docs/glossary.md`
+  - 主题: `@computer-act` surface 术语表 (CUA、verify policy、outcome 三态、retry strategy、density metrics、GuiTransaction)
+  - 用途: ADR-0001 到 0006 的配套 glossary; `verify_failed` 已标注被 outcome 三态取代的历史语义
+  - 何时阅读: 修改 `@computer-act` 请求/响应 schema、error_code、retry strategy 或 density metrics 字段前, 以及实现 ADR 时
+
 - `EXPERIENCE.md`
   - 主题: 本项目已经验证过的协议、运行时与GUI安全经验边界,以及 rdog parser 兼容 LLM 多样化写法的机制与踩坑
   - 用途: 待整理经验收件箱, 同时保留已承接协议/运行时经验的索引性描述; 满足成熟度门禁的经验分流到 `docs/solutions/`; 帮助后续改协议时避免把 `@exit`、显式协议请求和裸 shell 行再次混淆;沉淀跨平台修复、Zenoh、log路径、AX hit-test窗口归属、app-menu capture selector 与 screenshot backend gate 等隐性契约教训;改 parser 时先读 compact 前缀路由/空格参数/引号剥离/响应自包含机制,避免破坏 LLM 兼容
   - 何时阅读: 做协议演进、回顾历史判断口径、沉淀经验时;改daemon日志/e2e polling、坐标AX root discovery、backend locator、app-menu、screenshot backend、GUI目标归属门禁、或任何 compact/对象语法解析前
 
 - `.codex/skills/rdog-control/SKILL.md`
-  - 主题: rdog-control skill,覆盖 Zenoh target-name、line-control、PTY、daemon-side `@flow`、AX/window/web/鼠标、硬件桥接、WeChat no-AX override,以及 `rdog ax-diff` 结构化 AX JSON diff
+  - 主题: rdog-control skill,覆盖 Zenoh target-name、line-control、PTY、daemon-side `@flow`、AX/window/web/鼠标、硬件桥接,以及 `rdog ax-diff` 结构化 AX JSON diff (含 WeChat Temporary No-AX 安全政策, 2026-08-22 恢复于 v2.28; 原理与门禁见 `docs/solutions/best-practices/gui-target-owner-evidence-gate.md`)
   - 用途: agent-agnostic 且 token-lean 的执行入口,同时服务 Codex / Claude / GPT / openai-compatible / MCP / 人类。让 `rdog control` 高频路径、硬边界和验证规则与协议文档一起版本化
   - 何时阅读: 改 rdog control 相关协议、示例、README、PTY、GUI 控制、`@flow`、ax-diff子命令、WeChat内容定位策略,或调整agent适用范围/skill文案组织前
 
