@@ -5,15 +5,15 @@
 
 use std::io;
 
-use crate::control_ax::types::{
-    AxActionReport, AxActionName, AxActionRequest, AxElement, AxFocusReport, AxFocusRequest,
-    AxPerformedActionReport, AxPressPostcondition, AxPressPostconditionReport,
-    AxPressPostconditionStepReport, AxPressRequest, AxPressSequenceReport,
-    AxPressSequenceRequest, AxPressSequenceStepReport, AxSnapshot, AxScrollReport,
-    AxScrollRequest, AxSetValueReport, AxSetValueRequest, AxTreeRequest,
-    AX_POSTCONDITION_DEPTH, AX_POSTCONDITION_MAX_ELEMENTS,
-};
 use crate::control_ax::tree::{ax_snapshot_status_error, materialize_app_window_target_with};
+use crate::control_ax::types::{
+    AxActionName, AxActionReport, AxActionRequest, AxElement, AxFocusReport, AxFocusRequest,
+    AxPerformedActionReport, AxPressPostcondition, AxPressPostconditionReport,
+    AxPressPostconditionStepReport, AxPressRequest, AxPressSequenceReport, AxPressSequenceRequest,
+    AxPressSequenceStepReport, AxScrollReport, AxScrollRequest, AxSetValueReport,
+    AxSetValueRequest, AxSnapshot, AxTreeRequest, AX_POSTCONDITION_DEPTH,
+    AX_POSTCONDITION_MAX_ELEMENTS,
+};
 use crate::control_ax::{capture_current_ax_window_snapshot, invalid_data, invalid_input};
 use crate::control_window::resolve_unique_app_window_id;
 

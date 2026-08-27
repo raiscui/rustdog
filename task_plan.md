@@ -591,9 +591,11 @@ Commit: feat(ax_input): implement Ticket #02 - migrate control_actions to ax_inp
 ### 本轮计划
 - [x] A. Ticket #11 验证门禁: cargo check --tests (无 -Awarnings) 0 warning + 定向测试 45/45 + 全量 nextest 969/970 (唯一失败为 LATER_PLANS 2026-08-19 登记的既有 TTY flake)
 - [x] B. 提交 Ticket #11 (单独 commit, 便于回溯)
-- [ ] C. routing 表终局: 删除动态层 (ACTION_ROUTES / execute_ax_action 字符串 API / dynamic_route! 宏 /
+- [x] C. routing 表终局: 删除动态层 (ACTION_ROUTES / execute_ax_action 字符串 API / dynamic_route! 宏 /
       protocol.rs 全部 parse 函数及其测试), mod.rs 收敛为纯 re-export + 模块文档
-- [ ] D. C 的验证 + 单独 commit
+- [x] D. C 的验证 + 单独 commit (cargo check --tests 0 warning; 定向 88/88;
+      全量 nextest 955/956, 唯一失败仍为既有 TTY flake; 测试数 970→956,
+      正好等于删除的 14 个动态层测试; 顺手 cargo fmt 修复 execute.rs import 排序)
 - [ ] E. rustfmt + 全量 nextest 终验
 - [ ] F. code-review skill 审查
 - [ ] G. WORKLOG / task_plan 收尾 + LATER_PLANS / EPIPHANY_LOG 回顾
