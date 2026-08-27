@@ -613,6 +613,50 @@ fn can_fallback_type_text_delivery(error: &io::Error) -> bool {
     )
 }
 
+// ---- type_text 路径的错误命名 remap (自 control_ax/input.rs 迁入, 唯一消费者在本文件) ----
+
+/// 把 AXValue 路径的底层错误包装成 type-text 协议命名的错误,
+/// 保留原有 ErrorKind, 只改写用户可见的 message。
+fn remap_type_text_ax_value_error(err: io::Error) -> io::Error {
+    let message = err.to_string();
+    match err.kind() {
+        io::ErrorKind::Unsupported => io::Error::new(
+            io::ErrorKind::Unsupported,
+            "type-text 当前只支持 macOS AXValue 路径",
+        ),
+        io::ErrorKind::InvalidInput => io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("type-text AXValue 路径失败: {message}"),
+        ),
+        io::ErrorKind::PermissionDenied => io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!("type-text AXValue 路径失败: {message}"),
+        ),
+        _ => io::Error::other(format!("type-text AXValue 路径失败: {message}")),
+    }
+}
+
+/// 把 targeted keyboard 路径的底层错误包装成 type-text 协议命名的错误,
+/// 保留原有 ErrorKind, 只改写用户可见的 message。
+fn remap_type_text_targeted_keyboard_error(err: io::Error) -> io::Error {
+    let message = err.to_string();
+    match err.kind() {
+        io::ErrorKind::Unsupported => io::Error::new(
+            io::ErrorKind::Unsupported,
+            "type-text 当前只支持 macOS targeted keyboard 路径",
+        ),
+        io::ErrorKind::InvalidInput => io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("type-text targeted keyboard 路径失败: {message}"),
+        ),
+        io::ErrorKind::PermissionDenied => io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!("type-text targeted keyboard 路径失败: {message}"),
+        ),
+        _ => io::Error::other(format!("type-text targeted keyboard 路径失败: {message}")),
+    }
+}
+
 fn type_text_via_ax_value(request: &TypeTextRequest) -> io::Result<TypeTextReport> {
     let set_request = AxSetValueRequest {
         target: request.target.clone(),
@@ -2025,5 +2069,31 @@ mod tests {
         assert!(snapshot_optional_ax_error(AX_ERROR_INVALID_UI_ELEMENT));
         assert!(!snapshot_optional_ax_error(AX_ERROR_API_DISABLED));
         assert!(!snapshot_optional_ax_error(AX_SUCCESS));
+    }
+
+    /// remap 必须保留 ErrorKind 并改写成 type-text 协议命名 (自 control_ax 测试迁入)。
+    #[test]
+    fn remap_type_text_ax_value_error_should_use_type_text_protocol_name() {
+        let unsupported = remap_type_text_ax_value_error(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "AX set value 当前只支持 macOS",
+        ));
+        assert_eq!(unsupported.kind(), io::ErrorKind::Unsupported);
+        assert!(
+            unsupported
+                .to_string()
+                .contains("type-text 当前只支持 macOS AXValue 路径"),
+            "unexpected error: {unsupported}"
+        );
+
+        let invalid = remap_type_text_ax_value_error(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "目标 AX 元素不支持 AXValue",
+        ));
+        assert_eq!(invalid.kind(), io::ErrorKind::InvalidInput);
+        assert!(
+            invalid.to_string().contains("type-text AXValue 路径失败"),
+            "unexpected error: {invalid}"
+        );
     }
 }

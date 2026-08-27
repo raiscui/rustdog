@@ -15,9 +15,12 @@ mod protocol;
 use serde_json::Value;
 use std::io;
 
-// Re-export 强类型 API
-// pub use execute::{press, press_with_postcondition}; // 暂未使用
-pub use execute::{focus, perform_action, press_sequence, scroll, set_value};
+// Re-export 强类型 API (press 系列自 Ticket #11 起为生产路径)
+pub use execute::{
+    focus, perform_action, press, press_sequence, press_with_postcondition, scroll, set_value,
+};
+// 清除类 continue hint 文案: @ax-press 走 press(), @key 走 control_actions 直接引用。
+pub(crate) use execute::CLEAR_ACTION_HINT;
 
 /// Action routing 表的单个 entry。
 #[allow(dead_code)] // Ticket #03 启用后使用

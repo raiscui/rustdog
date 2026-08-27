@@ -1,14 +1,13 @@
 use crate::{
     ax_action::{
-        focus as ax_focus, perform_action, press_sequence, scroll as ax_scroll,
-        set_value as ax_set_value,
+        focus as ax_focus, perform_action, press as ax_press, press_sequence,
+        press_with_postcondition, scroll as ax_scroll, set_value as ax_set_value,
     },
     ax_input::{send_key_with_config, type_text_with_config},
     cancellation::CancellationToken,
     control_ax::{
         ax_window_id_from_backend_id, build_ax_find_response_json, build_ax_get_response_json,
         capture_ax_find_snapshot, capture_current_ax_window_snapshot, capture_default_ax_snapshot,
-        perform_default_ax_press, perform_default_ax_press_with_postcondition,
         window_activation_verified, AxFocusReport,
     },
     // Phase F-1: 三个 error_envelope wrapper helper (Cancelled / PlatformUnsupported /
@@ -742,7 +741,7 @@ fn try_ax_press_single_char(
         },
         postcondition: None,
     };
-    let report = crate::control_ax::perform_default_ax_press(&press_request)?;
+    let report = ax_press(&press_request)?;
     if !report.performed {
         return Ok(None);
     }
@@ -838,7 +837,7 @@ fn structured_global_key_success_response(request: &KeyRequest) -> io::Result<Op
             None,
             None,
         );
-        report.hint = Some(crate::control_ax::CLEAR_ACTION_HINT.to_string());
+        report.hint = Some(crate::ax_action::CLEAR_ACTION_HINT.to_string());
         return report.to_value_json().map(Some);
     }
 
@@ -1159,8 +1158,8 @@ fn execute_ax_press(
     request: &crate::control_ax::AxPressRequest,
 ) -> io::Result<ActionExecutionResult> {
     let response_value_json = match request.postcondition {
-        Some(_) => perform_default_ax_press_with_postcondition(request)?.to_value_json()?,
-        None => perform_default_ax_press(request)?.to_value_json()?,
+        Some(_) => press_with_postcondition(request)?.to_value_json()?,
+        None => ax_press(request)?.to_value_json()?,
     };
     Ok(ActionExecutionResult {
         exit_code: 0,

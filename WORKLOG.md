@@ -500,3 +500,26 @@ control_ax 里的 7 个 action 执行函数，5 个已迁走并删除，剩 2 �
 ### 后续
 - routing 表 10 条 + press_sequence 独立函数都已就位，但 `execute_ax_action` 仍无生产调用方
 - 接入 RPC 边界是独立一步，会动到请求分发路径
+
+## [2026-08-27 10:45:00] [Session ID: current] 任务名称: Ticket #11 - press legacy 搬迁 + control_ax action 层清空
+
+### 任务内容
+- press 实现层 (perform_default_ax_press / _with_postcondition + 8 个私有 helper + CLEAR_ACTION_HINT)
+  从 control_ax.rs 整体迁入 ax_action/execute.rs, 重写为真实实现, 删除 legacy import
+- ax_action::press / press_with_postcondition 成为生产路径, control_actions 3 个调用点迁移
+- 删除 control_ax/input.rs (deprecated facade 零调用) 与 ax_input/input.rs (重复实现),
+  remap_type_text_* 错误命名函数收编为 control_ax/macos.rs 私有 (唯一消费者就地私有化)
+- ax_input 收敛为单一 with_config API, 删除零调用的简单包装层 (type_text / send_key) 及其
+  "result.is_ok() || result.is_err()" 恒真断言测试, 换成函数签名编译时验证
+- 迁入 5 个 press 实现层测试 (clear hint / guarded 重试 / fail-closed / bidi 归一化 / 深层观察)
+
+### 完成过程
+- 上一会话完成 11.1-11.5 的代码实施; 本轮确认存量状态后执行验证门禁并收尾提交
+- 验证: cargo check --tests 0 warning 0 error; 定向测试 45/45; 全量 nextest 969 passed,
+  1 failed (tests/control_tty.rs 箭头键测试, LATER_PLANS.md 2026-08-19 已登记的既有 TTY
+  时序 flake, 失败模式与当时记录逐字一致, 与本次改动无关), 21 skipped
+
+### 总结感悟
+- remap 类纯错误命名函数: 消费者唯一时就地私有化优于搬到公共模块, 消除跨模块跳转
+- ax_input 简单 API 的教训: 为"80% 场景易用"预建的包装层, 迁移完成后零调用即删,
+  恒真断言测试纯属噪音。设计 API 入口时先等真实调用方出现

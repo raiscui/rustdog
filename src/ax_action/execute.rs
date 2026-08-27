@@ -6,15 +6,16 @@
 use std::io;
 
 use crate::control_ax::types::{
-    AxActionReport, AxActionRequest, AxFocusReport, AxFocusRequest, AxPerformedActionReport,
-    AxPressPostconditionReport, AxPressRequest, AxPressSequenceReport, AxPressSequenceRequest,
-    AxPressSequenceStepReport, AxScrollReport, AxScrollRequest, AxSetValueReport,
-    AxSetValueRequest,
+    AxActionReport, AxActionName, AxActionRequest, AxElement, AxFocusReport, AxFocusRequest,
+    AxPerformedActionReport, AxPressPostcondition, AxPressPostconditionReport,
+    AxPressPostconditionStepReport, AxPressRequest, AxPressSequenceReport,
+    AxPressSequenceRequest, AxPressSequenceStepReport, AxSnapshot, AxScrollReport,
+    AxScrollRequest, AxSetValueReport, AxSetValueRequest, AxTreeRequest,
+    AX_POSTCONDITION_DEPTH, AX_POSTCONDITION_MAX_ELEMENTS,
 };
-use crate::control_ax::{
-    perform_default_ax_press as legacy_press,
-    perform_default_ax_press_with_postcondition as legacy_press_with_postcondition,
-};
+use crate::control_ax::tree::{ax_snapshot_status_error, materialize_app_window_target_with};
+use crate::control_ax::{capture_current_ax_window_snapshot, invalid_data, invalid_input};
+use crate::control_window::resolve_unique_app_window_id;
 
 /// 执行 AX press action。
 ///
@@ -28,7 +29,6 @@ use crate::control_ax::{
 /// # 逻辑
 /// - 如果 request 包含 postcondition，调用 press_with_postcondition 逻辑
 /// - 否则调用普通 press 逻辑
-#[allow(dead_code)] // Ticket #03 启用后使用
 pub fn press(request: &AxPressRequest) -> io::Result<AxActionReport> {
     if let Some(ref postcondition) = request.postcondition {
         // 调用 postcondition 版本，提取出 base report
@@ -43,7 +43,7 @@ pub fn press(request: &AxPressRequest) -> io::Result<AxActionReport> {
                     postcondition.role,
                     postcondition.expected_value,
                     postcondition_report.attempt_count,
-                    postcondition.max_attempts
+                    postcondition_report.max_attempts
                 ),
             ));
         }
@@ -60,20 +60,253 @@ pub fn press(request: &AxPressRequest) -> io::Result<AxActionReport> {
             status: postcondition_report.status,
         })
     } else {
-        // 普通 press（复用现有实现）
-        legacy_press(request)
+        // 普通 press
+        press_plain(request)
     }
 }
 
 /// 执行带 postcondition 验证的 press action。
 ///
 /// 内部使用，由 `press()` 调用。也可被需要完整 postcondition report 的调用方直接使用。
-#[allow(dead_code)] // Ticket #03 启用后使用
 pub fn press_with_postcondition(
     request: &AxPressRequest,
 ) -> io::Result<AxPressPostconditionReport> {
-    // 复用现有实现
-    legacy_press_with_postcondition(request)
+    perform_ax_press_with_postcondition_with(
+        request,
+        resolve_unique_app_window_id,
+        press_plain,
+        |window_id, role| {
+            observe_current_ax_values_with(window_id, role, capture_current_ax_window_snapshot)
+        },
+    )
+}
+
+/// 无 postcondition 的 press 底层实现 (自 control_ax 迁入)。
+///
+/// 直接调用平台 backend 执行 AXPress, 并为清除类按钮附加通用 continue hint。
+fn press_plain(request: &AxPressRequest) -> io::Result<AxActionReport> {
+    use crate::control_ax::{AxBackend, SystemAxBackend};
+
+    let report = SystemAxBackend.perform_action(&AxActionRequest {
+        target: request.target.clone(),
+        action: AxActionName::Press,
+    })?;
+    let mut report = AxActionReport::press(
+        report.backend,
+        report.target_id,
+        request.target.description.clone(),
+    );
+    // 2026-08-04 (清除类 hint): 清除类按钮被按下后, 给 agent 一句通用引导,
+    // 防止"清除子目标完成 -> 流程断裂" (模型清除后迷失, 不继续剩余输入)。
+    // 文案不含任何任务知识, 任何"清除后要继续"的场景都成立。
+    report.hint = clear_action_hint(request.target.description.as_deref());
+    Ok(report)
+}
+
+/// 清除类操作的 continue hint (纯函数, 便于单测)。
+fn clear_action_hint(description: Option<&str>) -> Option<String> {
+    description
+        .filter(|desc| is_clear_action_description(desc))
+        .map(|_| CLEAR_ACTION_HINT.to_string())
+}
+
+/// 清除类操作完成后的通用 continue 引导 (共享给 @ax-press 与 @key)。
+pub(crate) const CLEAR_ACTION_HINT: &str =
+    "clear completed; the task is not finished until the remaining input steps and the final confirm action are done";
+
+/// 判断按钮描述是否为"清除类"操作 (删除 / 全部清除 / Clear / AC 等)。
+///
+/// 清除类操作通常是任务的中间步骤 (清掉旧状态), 完成清除后 agent 容易
+/// 把子目标当成任务终点。这里只做通用语义匹配, 不含任何具体任务知识。
+fn is_clear_action_description(description: &str) -> bool {
+    let normalized = description.trim().to_ascii_lowercase();
+    matches!(
+        normalized.as_str(),
+        "删除" | "全部清除" | "清除" | "清空" | "clear" | "all clear" | "ac" | "delete" | "del"
+    )
+}
+
+/// guarded press 的核心逻辑 (自 control_ax 迁入, 依赖全部注入, 可测试)。
+fn perform_ax_press_with_postcondition_with(
+    request: &AxPressRequest,
+    resolve_app: impl FnOnce(&str) -> io::Result<String>,
+    mut perform: impl FnMut(&AxPressRequest) -> io::Result<AxActionReport>,
+    mut observe: impl FnMut(&str, &str) -> io::Result<Vec<String>>,
+) -> io::Result<AxPressPostconditionReport> {
+    let postcondition = request
+        .postcondition
+        .as_ref()
+        .ok_or_else(|| invalid_data("AX guarded press 缺少 postcondition"))?;
+    let target = materialize_app_window_target_with(&request.target, resolve_app)?;
+    let window_id = target
+        .window_id
+        .as_deref()
+        .ok_or_else(|| invalid_data("AX guarded press 必须使用 app:APP 或 pid:PID/window:INDEX"))?;
+    let expected_value = normalize_ax_verification_value(&postcondition.expected_value);
+    let mut steps = Vec::with_capacity(postcondition.max_attempts);
+
+    for index in 0..postcondition.max_attempts {
+        let action = match perform(&AxPressRequest {
+            target: target.clone(),
+            postcondition: None,
+        }) {
+            Ok(action) => action,
+            Err(error) => {
+                let error = error.to_string();
+                steps.push(AxPressPostconditionStepReport {
+                    index,
+                    performed: false,
+                    verified: false,
+                    target_id: None,
+                    observed_values: Vec::new(),
+                    error: Some(error.clone()),
+                });
+                return Ok(build_ax_press_postcondition_report(
+                    postcondition,
+                    steps,
+                    false,
+                    Some(error),
+                ));
+            }
+        };
+
+        let observed_values = match observe(window_id, &postcondition.role) {
+            Ok(values) => values,
+            Err(error) => {
+                let error = error.to_string();
+                steps.push(AxPressPostconditionStepReport {
+                    index,
+                    performed: action.performed,
+                    verified: false,
+                    target_id: action.target_id,
+                    observed_values: Vec::new(),
+                    error: Some(error.clone()),
+                });
+                return Ok(build_ax_press_postcondition_report(
+                    postcondition,
+                    steps,
+                    false,
+                    Some(error),
+                ));
+            }
+        };
+        let verified = observed_values
+            .iter()
+            .any(|value| normalize_ax_verification_value(value) == expected_value);
+        steps.push(AxPressPostconditionStepReport {
+            index,
+            performed: action.performed,
+            verified,
+            target_id: action.target_id,
+            observed_values,
+            error: None,
+        });
+        if verified {
+            return Ok(build_ax_press_postcondition_report(
+                postcondition,
+                steps,
+                true,
+                None,
+            ));
+        }
+    }
+
+    let error = format!(
+        "AX postcondition 未在{}次动作内满足: role={}, expected_value={}",
+        postcondition.max_attempts, postcondition.role, postcondition.expected_value
+    );
+    Ok(build_ax_press_postcondition_report(
+        postcondition,
+        steps,
+        false,
+        Some(error),
+    ))
+}
+
+/// 组装 guarded press 的最终报告。
+fn build_ax_press_postcondition_report(
+    postcondition: &AxPressPostcondition,
+    steps: Vec<AxPressPostconditionStepReport>,
+    verified: bool,
+    error: Option<String>,
+) -> AxPressPostconditionReport {
+    AxPressPostconditionReport {
+        kind: "ax-press",
+        action: "press-until",
+        performed: steps.iter().any(|step| step.performed),
+        verified,
+        status: if verified { "ok" } else { "failed" },
+        role: postcondition.role.clone(),
+        expected_value: postcondition.expected_value.clone(),
+        attempt_count: steps.len(),
+        max_attempts: postcondition.max_attempts,
+        steps,
+        error,
+    }
+}
+
+/// 对目标窗口做一次通用 fresh 观察, 收集指定 role 的全部 value。
+fn observe_current_ax_values_with(
+    window_id: &str,
+    role: &str,
+    capture: impl FnOnce(&str, &AxTreeRequest) -> io::Result<AxSnapshot>,
+) -> io::Result<Vec<String>> {
+    // 通用 fresh 观察必须能深入 Calculator 等多层 AX 树拿到 AXStaticText 的 value。
+    // 默认 AxTreeRequest 只到 depth=4,实测不足以覆盖 Calculator 结果节点。
+    // 这里使用与 compact ax-find 一致的深度与上限,与 parser 侧契约对齐。
+    let request = AxTreeRequest {
+        depth: AX_POSTCONDITION_DEPTH,
+        max_elements: AX_POSTCONDITION_MAX_ELEMENTS,
+        include_values: true,
+        ..AxTreeRequest::default()
+    };
+    let snapshot = capture(window_id, &request)?;
+    if snapshot.capture_status != "complete" {
+        return Err(ax_snapshot_status_error(&snapshot));
+    }
+    if snapshot.truncated {
+        return Err(invalid_input(
+            "AX guarded press fresh snapshot 被截断,无法证明postcondition",
+        ));
+    }
+
+    let mut values = Vec::new();
+    for window in &snapshot.windows {
+        collect_ax_values_by_role(&window.elements, role, &mut values);
+    }
+    values.sort();
+    values.dedup();
+    Ok(values)
+}
+
+/// 递归收集指定 role 的元素 value (跳过被脱敏的元素)。
+fn collect_ax_values_by_role(elements: &[AxElement], role: &str, values: &mut Vec<String>) {
+    for element in elements {
+        if element.role == role && !element.value_redacted {
+            if let Some(value) = element.value.as_deref() {
+                values.push(normalize_ax_verification_value(value));
+            }
+        }
+        collect_ax_values_by_role(&element.children, role, values);
+    }
+}
+
+/// 剥离 bidi 控制字符后 trim, 用于 postcondition 期望值与观察值的可比对。
+fn normalize_ax_verification_value(value: &str) -> String {
+    value
+        .chars()
+        .filter(|character| {
+            !matches!(
+                character,
+                '\u{200e}'
+                    | '\u{200f}'
+                    | '\u{202a}'..='\u{202e}'
+                    | '\u{2066}'..='\u{2069}'
+            )
+        })
+        .collect::<String>()
+        .trim()
+        .to_owned()
 }
 
 /// 执行通用 AX action (Ticket #04)。
@@ -82,7 +315,6 @@ pub fn press_with_postcondition(
 ///
 /// 这是 `control_ax::perform_default_ax_action` 的新家:
 /// 直接调用平台 backend, 不再经过 control_ax 的 deprecated facade。
-#[allow(dead_code)] // routing 表启用后使用
 pub fn perform_action(request: &AxActionRequest) -> io::Result<AxPerformedActionReport> {
     use crate::control_ax::{AxBackend, SystemAxBackend};
 
@@ -92,7 +324,6 @@ pub fn perform_action(request: &AxActionRequest) -> io::Result<AxPerformedAction
 /// 设置 AX 元素的值 (Ticket #05)。
 ///
 /// 支持 Replace / Append 两种写入模式, 由 request.mode 决定。
-#[allow(dead_code)] // routing 表启用后使用
 pub fn set_value(request: &AxSetValueRequest) -> io::Result<AxSetValueReport> {
     use crate::control_ax::{AxBackend, SystemAxBackend};
 
@@ -103,7 +334,6 @@ pub fn set_value(request: &AxSetValueRequest) -> io::Result<AxSetValueReport> {
 ///
 /// 注意: 这里只做 AX 层聚焦。窗口激活 (activate) 由调用方
 /// 在 control_actions 中先行处理, 不属于本函数职责。
-#[allow(dead_code)] // routing 表启用后使用
 pub fn focus(request: &AxFocusRequest) -> io::Result<AxFocusReport> {
     use crate::control_ax::{AxBackend, SystemAxBackend};
 
@@ -111,7 +341,6 @@ pub fn focus(request: &AxFocusRequest) -> io::Result<AxFocusReport> {
 }
 
 /// 滚动 AX 元素 (Ticket #05)。
-#[allow(dead_code)] // routing 表启用后使用
 pub fn scroll(request: &AxScrollRequest) -> io::Result<AxScrollReport> {
     use crate::control_ax::{AxBackend, SystemAxBackend};
 
@@ -197,8 +426,6 @@ fn materialize_press_sequence_request(
     request: &AxPressSequenceRequest,
     resolve_app: impl FnOnce(&str) -> io::Result<String>,
 ) -> io::Result<AxPressSequenceRequest> {
-    use crate::control_ax::invalid_data;
-
     let first = request
         .targets
         .first()
@@ -392,5 +619,194 @@ mod press_sequence_tests {
         assert_eq!(report.status, "failed");
         assert_eq!(report.step_count, 0);
         assert!(report.steps.is_empty(), "没有 target 时不产出步骤报告");
+    }
+}
+
+/// 自 control_ax 迁入的 press 实现层测试。
+///
+/// 覆盖: 清除类 hint / guarded press 重试与 fail-closed / bidi 值比对 / 深层 fresh 观察。
+#[cfg(test)]
+mod press_tests {
+    use super::*;
+    use crate::control_ax::parse_ax_press_payload;
+    use crate::control_ax::types::AxWindow;
+    use std::cell::Cell;
+
+    #[test]
+    fn clear_action_press_should_include_continue_hint() {
+        // 清除类按钮被按下后, 响应带通用 hint, 防止"清除后流程断裂"。
+        let hint = clear_action_hint(Some("删除")).expect("clear must hint");
+        assert!(
+            hint.contains("not finished") && hint.contains("final confirm"),
+            "hint must guide continue: {hint}"
+        );
+
+        // 非清除按钮不加 hint。
+        assert!(clear_action_hint(Some("1")).is_none());
+        assert!(clear_action_hint(Some("加")).is_none());
+        assert!(clear_action_hint(None).is_none());
+
+        // 英文清除语义同样命中。
+        for desc in ["clear", "all clear", "AC", "delete", "全部清除", "清空"] {
+            assert!(
+                clear_action_hint(Some(desc)).is_some(),
+                "{desc} must be treated as clear action"
+            );
+        }
+    }
+
+    #[test]
+    fn guarded_ax_press_should_stop_when_fresh_postcondition_matches() {
+        let request = parse_ax_press_payload("app:Demo,重置,AXStaticText,ready,3").unwrap();
+        let resolve_calls = Cell::new(0usize);
+        let press_calls = Cell::new(0usize);
+        let observe_calls = Cell::new(0usize);
+
+        let report = perform_ax_press_with_postcondition_with(
+            &request,
+            |app| {
+                resolve_calls.set(resolve_calls.get() + 1);
+                assert_eq!(app, "Demo");
+                Ok("pid:321/window:0".to_owned())
+            },
+            |_| {
+                press_calls.set(press_calls.get() + 1);
+                Ok(AxActionReport::press(
+                    "test",
+                    Some(format!("pid:321/window:0/path:{}", press_calls.get())),
+                    None,
+                ))
+            },
+            |window_id, role| {
+                observe_calls.set(observe_calls.get() + 1);
+                assert_eq!(window_id, "pid:321/window:0");
+                assert_eq!(role, "AXStaticText");
+                Ok(if observe_calls.get() == 1 {
+                    vec!["pending".to_owned()]
+                } else {
+                    vec!["ready".to_owned()]
+                })
+            },
+        )
+        .unwrap();
+
+        assert_eq!(resolve_calls.get(), 1);
+        assert_eq!(press_calls.get(), 2);
+        assert_eq!(observe_calls.get(), 2);
+        assert!(report.performed);
+        assert!(report.verified);
+        assert_eq!(report.status, "ok");
+        assert_eq!(report.attempt_count, 2);
+        assert_eq!(report.steps.len(), 2);
+        assert!(report.steps.iter().all(|step| step.performed));
+        assert!(!report.steps[0].verified);
+        assert!(report.steps[1].verified);
+    }
+
+    #[test]
+    fn guarded_ax_press_should_fail_closed_at_attempt_limit() {
+        let request = parse_ax_press_payload("pid:321/window:0,重置,AXStaticText,ready,3").unwrap();
+        let press_calls = Cell::new(0usize);
+
+        let report = perform_ax_press_with_postcondition_with(
+            &request,
+            |_| panic!("window_id target不应解析app"),
+            |_| {
+                press_calls.set(press_calls.get() + 1);
+                Ok(AxActionReport::press(
+                    "test",
+                    Some("pid:321/window:0/path:1".to_owned()),
+                    None,
+                ))
+            },
+            |_, _| Ok(vec!["pending".to_owned()]),
+        )
+        .unwrap();
+
+        assert_eq!(press_calls.get(), 3);
+        assert!(report.performed);
+        assert!(!report.verified);
+        assert_eq!(report.status, "failed");
+        assert_eq!(report.attempt_count, 3);
+        assert_eq!(report.steps.len(), 3);
+        assert!(report
+            .error
+            .as_deref()
+            .is_some_and(|error| { error.contains("未在3次动作内满足") }));
+    }
+
+    #[test]
+    fn ax_postcondition_comparison_should_remove_bidi_controls() {
+        assert_eq!(normalize_ax_verification_value("\u{200e}0\u{200f}"), "0");
+        assert_eq!(
+            normalize_ax_verification_value("\u{2066}ready\u{2069}"),
+            "ready"
+        );
+    }
+
+    #[test]
+    fn observe_current_ax_values_should_reach_deeply_nested_static_text() {
+        // Calculator 等应用的 AXStaticText result value 常位于 depth >= 5。
+        // 这里手工构造一个 depth=6 的 snapshot,验证通用 fresh 观察能取到。
+        fn leaf(role: &str, value: &str) -> AxElement {
+            AxElement {
+                id: format!("id-{role}"),
+                ref_id: None,
+                role: role.to_owned(),
+                subrole: None,
+                name: None,
+                value: Some(value.to_owned()),
+                value_redacted: false,
+                description: None,
+                rect: None,
+                enabled: Some(true),
+                actions: Vec::new(),
+                ax_path: Vec::new(),
+                children: Vec::new(),
+            }
+        }
+
+        let mut nested = leaf("AXStaticText", "0");
+        for index in 1..=6 {
+            nested = AxElement {
+                id: format!("id-group-{index}"),
+                ref_id: None,
+                role: "AXGroup".to_owned(),
+                subrole: None,
+                name: None,
+                value: None,
+                value_redacted: false,
+                description: None,
+                rect: None,
+                enabled: Some(true),
+                actions: Vec::new(),
+                ax_path: Vec::new(),
+                children: vec![nested],
+            };
+        }
+        let window = AxWindow {
+            id: "pid:7/window:0".to_owned(),
+            ref_id: None,
+            pid: 7,
+            process_name: "Calculator".to_owned(),
+            title: Some("Calculator".to_owned()),
+            role: "AXWindow".to_owned(),
+            subrole: None,
+            rect: None,
+            focused: Some(true),
+            elements: vec![nested],
+        };
+        let snapshot = AxSnapshot::complete("test", vec![window], false);
+
+        let captured_request_depth = Cell::new(0u8);
+        let values = observe_current_ax_values_with("pid:7/window:0", "AXStaticText", |_, req| {
+            captured_request_depth.set(req.depth);
+            Ok(snapshot.clone())
+        })
+        .unwrap();
+
+        assert_eq!(captured_request_depth.get(), AX_POSTCONDITION_DEPTH);
+        assert!(captured_request_depth.get() >= 6);
+        assert_eq!(values, vec!["0".to_owned()]);
     }
 }

@@ -540,3 +540,82 @@ Commit: feat(ax_input): implement Ticket #02 - migrate control_actions to ax_inp
 
 ### 当前状态
 **阶段 2 完成。10 个 action 在 routing 表 + press_sequence 独立函数，全部有测试覆盖。**
+
+## [2026-08-23 19:51:01] [Session ID: current] Ticket #11 启动 - press legacy 搬迁 + control_ax action 层清空
+
+### 背景
+- 阶段 2 (ax_action) 已完成 10 个 action + press_sequence, 但 press 的底层实现
+  (perform_default_ax_press / _with_postcondition) 仍留在 control_ax.rs,
+  ax_action::execute::press 通过 legacy import 复用
+- Q7 决策要求 control_actions.rs 用强类型 API, 当前 3 个调用点仍走 control_ax 旧函数
+- control_ax/input.rs 的 2 个 deprecated facade 已零调用 (注释明确 "Ticket #11 删除时一并移除")
+- 发现冗余: remap_type_text_* 在 control_ax/input.rs 与 ax_input/input.rs 双份重复实现,
+  macos.rs 仍用旧份
+
+### 阶段 (本次会话)
+- [x] 11.1 搬迁 press 实现层: control_ax.rs 的 2 个 pub fn + 8 个私有 helper/const + 5 个测试 → ax_action/execute.rs
+- [x] 11.2 重写 execute::press / press_with_postcondition 为真实实现, 删除 legacy import, 移除过期 #[allow(dead_code)]
+- [x] 11.3 mod.rs 导出 press / press_with_postcondition
+- [x] 11.4 迁移 control_actions.rs 3 个调用点 (745, 1162, 1163) 到 ax_action 强类型 API
+- [x] 11.5 删除 control_ax/input.rs 整个模块 (实施时优化: remap 就地私有化进 macos.rs 而非搬去 ax_input; ax_input/input.rs 重复副本一并删除)
+- [x] 11.6 cargo check --tests 0 warning 0 error + ax_action 定向测试 + 全量 nextest
+- [x] 11.7 提交 + WORKLOG
+
+### 关键决策
+- press() 保持现有双分支语义 (Q2: postcondition 合并到 press entry): None → 真实 plain 实现;
+  Some → press_with_postcondition + simplified report + unverified 时 Err。
+  生产路径 execute_ax_press 保持显式分支 (Some → press_with_postcondition 拿完整 steps report),
+  wire 响应形状零变化
+- CLEAR_ACTION_HINT 收窄为 execute.rs 私有 const (全仓库唯一消费者是 press hint)
+- remap_type_text_* 单一真相源收到 ax_input (macos.rs 改指向), control_ax/input.rs 整体删除
+
+### 曾考虑的替代方案
+- press() 拒绝 postcondition (fail-fast): 与 Q2 "routing 表只需一个 press entry" 冲突, 不采用
+- 保留 control_ax/input.rs 仅存 remap: 双份实现违反单一真相源, 不采用
+
+## [2026-08-26 18:24:18] [Session ID: current] 支线索引: A2A 协议架构咨询 (后缀 __a2a_research)
+
+- 启用原因: 用户咨询 A2A 协议与 rustdog 跨主机 agent 通讯架构方向, 与 ax-split 主线无关, 支线轻量记录
+- 支线主题: A2A v1.0 调研, rustdog Zenoh 控制面对比, 分层结论(学语义不换传输)
+- 支线文件: task_plan__a2a_research.md, notes__a2a_research.md
+
+## [2026-08-27 10:30:00] [Session ID: current] $implement all: Ticket #11 收尾 + routing 表终局
+
+### 存量状态确认 (上会话遗留的未提交改动)
+- 11.1-11.5 已实际完成: press 实现层已迁入 ax_action/execute.rs (真实实现, 非 legacy import),
+  mod.rs 已导出, control_actions 3 调用点已迁移, control_ax/input.rs 与 ax_input/input.rs
+  双份重复实现均已删除, remap 收编为 macos.rs 私有 (比原计划"搬去 ax_input"更进一步且更优:
+  remap 的唯一消费者就是 macos.rs, 就地私有化消除了跨模块跳转)
+- cargo check --tests 通过 (RUSTFLAGS=-Awarnings 下 exit 0)
+
+### 本轮计划
+- [x] A. Ticket #11 验证门禁: cargo check --tests (无 -Awarnings) 0 warning + 定向测试 45/45 + 全量 nextest 969/970 (唯一失败为 LATER_PLANS 2026-08-19 登记的既有 TTY flake)
+- [x] B. 提交 Ticket #11 (单独 commit, 便于回溯)
+- [ ] C. routing 表终局: 删除动态层 (ACTION_ROUTES / execute_ax_action 字符串 API / dynamic_route! 宏 /
+      protocol.rs 全部 parse 函数及其测试), mod.rs 收敛为纯 re-export + 模块文档
+- [ ] D. C 的验证 + 单独 commit
+- [ ] E. rustfmt + 全量 nextest 终验
+- [ ] F. code-review skill 审查
+- [ ] G. WORKLOG / task_plan 收尾 + LATER_PLANS / EPIPHANY_LOG 回顾
+
+### 关键决策: routing 表删除而非接入 (决策记录)
+- 现象: execute_ax_action 字符串 API + ACTION_ROUTES + protocol.rs parse 函数,
+  经 Tickets #03-#11 全部迁移后, 生产调用方为零 (仅测试调用)。
+  全仓库所有边界 (compact 行协议 / ui_script kind 映射 / web RPC control_web/act.rs)
+  都选择了强类型路径: 协议层 parse_control_line 直接产出 typed ControlCommand。
+- 主判断: "接入生产路径"没有诚实路径。ControlCommand::AxAction 到达时已是强类型,
+  为用 routing 表需要人为 Value 往返序列化, 零能力收益, 纯开销。
+- 已验证证据 (静态): rg 全仓库 execute_ax_action/ACTION_ROUTES/dynamic_route 零外部调用方;
+  protocol.rs parse_* 仅被 mod.rs dynamic wrapper 与自身测试引用。
+- 备选方案 1 (不选): 接入 ControlCommand::AxAction 分发臂 -- 人为制造消费者,
+  增加 2 次序列化 + 1 次反序列化 + 字符串匹配 + 更差错误信息, 换来零收益。
+- 备选方案 2 (不选): 保留现状等未来 RPC 边界 -- 双向控制面规划 (specs/bidirectional-*)
+  复用的是 typed ControlCommand 形态; 未来真出现 Value-payload 边界时,
+  20 行 serde 适配即可重建, git 历史可整体找回。保留 550+ 行死代码违背
+  "避免预设未来的抽象" 与 "删除过时路径" 纪律。
+- 备选方案 3 (不选): 只删 routing 表保留 protocol.rs -- parse 函数唯一消费者就是
+  dynamic wrapper, 表删则 protocol.rs 全部函数零引用, 一并删除才是完整清理。
+- 最终选择: 删除动态层, 单独 commit, 可整体 revert。
+- 与 grilling Q7/Q10/Q16 的关系: 该共识的前提 ("RPC 边界用 facade"/"facade 调字符串 API")
+  已被后续迁移事实推翻 (facade 全删, web RPC 直用强类型)。Q15 的增量验证哲学
+  ("先做 press 最快发现设计问题") 的验证结论正是: 动态层无消费者。
