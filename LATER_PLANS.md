@@ -913,3 +913,25 @@ zenoh router down / unixpipe broken / zenoh timeout 等场景.
 ### 建议
 - 后续专门整理 observation test seam,让需要 production global store 的测试使用可替换 store 或统一串行测试组。
 - 不要通过提高 `DEFAULT_MAX_OBSERVATIONS` 掩盖共享状态,容量语义仍应由显式 retention 测试验证。
+
+## [2026-08-26 18:24:18] [Session ID: current] A2A 语义借鉴方向(咨询结论, 未实施)
+
+- 若推进跨主机 agent 协作: 优先完成双向控制面 Phase 3(ControlFrame::Request +
+  daemon 主动发起), 再设计通用 task registry(状态机+进度帧+artifact), 认证层先行
+- 语义设计参考 A2A v1.0 的 AgentCard/Task/Artifact 模型; 不照搬 HTTP 传输
+- 对外互操作(让外部 A2A agent 委派任务给 rdog 主机)可后置为可选 gateway
+- 细节见 task_plan__a2a_research.md / notes__a2a_research.md
+
+## [2026-08-27 11:20:00] [Session ID: current] ax-split review 延后项 (绑定阶段 3 ax_query, 未实施)
+
+双轴 review 判断项中, 以下 4 项与未实施的 ADR-0008 阶段 3 (ax_query) 绑定,
+等阶段 3 启动时一并处理, 不在本次主线展开:
+
+- `execute_ax_press` (control_actions.rs) 与 `ax_action::press` 对 postcondition
+  各做一次分支, 语义有差异 (完整 report vs Err), 收敛为单入口时要保 wire 形状
+- `AxPressPostconditionReport` 的 status/kind/action 裸字符串应转枚举 (涉及 wire
+  serde, 需逐字锁定序列化输出)
+- `observe_current_ax_values_with` / `collect_ax_values_by_role` 深走 control_ax
+  types/tree, 按 ADR 阶段 3 应归属 ax_query
+- `ax_input` 的 with_config 一行转投 SystemAxBackend (Middle Man), 阶段 3 迁
+  backend 后消除

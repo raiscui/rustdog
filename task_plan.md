@@ -596,9 +596,11 @@ Commit: feat(ax_input): implement Ticket #02 - migrate control_actions to ax_inp
 - [x] D. C 的验证 + 单独 commit (cargo check --tests 0 warning; 定向 88/88;
       全量 nextest 955/956, 唯一失败仍为既有 TTY flake; 测试数 970→956,
       正好等于删除的 14 个动态层测试; 顺手 cargo fmt 修复 execute.rs import 排序)
-- [ ] E. rustfmt + 全量 nextest 终验
-- [ ] F. code-review skill 审查
-- [ ] G. WORKLOG / task_plan 收尾 + LATER_PLANS / EPIPHANY_LOG 回顾
+- [x] E. rustfmt + 全量 nextest 终验 (fmt clean; 955/956, 唯一失败为既有 control_tty flake)
+- [x] F. code-review skill 审查 (双轴并行: Standards 无硬性违规 7 个判断项, Spec 确认
+      wire 形状逐字保留 + 删除边界干净; 判断项中 macos.rs remap 双函数重复已当场收敛为
+      remap_type_text_path_error(err, path_label), 其余 4 项绑定阶段 3 记入 LATER_PLANS)
+- [x] G. WORKLOG / task_plan 收尾 + LATER_PLANS / EPIPHANY_LOG 回顾
 
 ### 关键决策: routing 表删除而非接入 (决策记录)
 - 现象: execute_ax_action 字符串 API + ACTION_ROUTES + protocol.rs parse 函数,
@@ -621,3 +623,10 @@ Commit: feat(ax_input): implement Ticket #02 - migrate control_actions to ax_inp
 - 与 grilling Q7/Q10/Q16 的关系: 该共识的前提 ("RPC 边界用 facade"/"facade 调字符串 API")
   已被后续迁移事实推翻 (facade 全删, web RPC 直用强类型)。Q15 的增量验证哲学
   ("先做 press 最快发现设计问题") 的验证结论正是: 动态层无消费者。
+
+### 最终状态 (2026-08-27)
+**全部完成** - 提交链: 89b8343 (Ticket #11) / 2e8239e (动态层删除) / 78a60ab (文档同步) /
+remap 收敛 commit。control-ax-split 主线的 ax_input + ax_action 两阶段全部落地,
+阶段 3 (ax_query) 未实施, 延后事项见 LATER_PLANS.md。
+EPIPHANY_LOG 判断: routing 层教训已完整记录于 ADR-0008 Amendment (长期载体, 已索引),
+无需重复进 EPIPHANY_LOG (该文件 999 行, 避免无谓触发续档)。

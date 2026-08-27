@@ -523,3 +523,26 @@ control_ax 里的 7 个 action 执行函数，5 个已迁走并删除，剩 2 �
 - remap 类纯错误命名函数: 消费者唯一时就地私有化优于搬到公共模块, 消除跨模块跳转
 - ax_input 简单 API 的教训: 为"80% 场景易用"预建的包装层, 迁移完成后零调用即删,
   恒真断言测试纯属噪音。设计 API 入口时先等真实调用方出现
+
+## [2026-08-27 11:20:00] [Session ID: current] 任务名称: $implement all - routing 表终局 + 双轴 review
+
+### 任务内容
+- 终局处理 "routing 表接入生产路径" 遗留项: 全仓库证据确认动态层零生产消费者后,
+  删除 ACTION_ROUTES / execute_ax_action 字符串 API / dynamic_route! 宏 / protocol.rs
+  (共 559 行, 14 个测试), mod.rs 收敛为纯 re-export (2e8239e)
+- ADR-0008 加 Amendment, 两个 ax-split spec 头部加 as-built 执行状态 (78a60ab)
+- 双轴 code-review (并行子代理): Standards 无硬性违规, 7 个判断项; Spec 确认
+  @ax-press wire 响应形状逐字保留、删除边界干净
+- 当场修复 review 判断项: macos.rs 两个逐字重复的 remap 函数收敛为
+  remap_type_text_path_error(err, path_label), 输出契约由测试逐字锁定
+
+### 完成过程
+- 判定 "接入" 无诚实路径的依据: ControlCommand 到分发点已是强类型, 接入需人为
+  Value 往返; compact 行协议 / ui_script / web RPC 三个边界全部选择强类型
+- 测试数 970 → 956, 差值正好等于删除的动态层测试数, 无误伤
+
+### 总结感悟
+- 为设想中 RPC 边界预建的抽象, 经过 10 次真实迁移都没等到消费者 -- 这本身就是
+  最强的反证。删除比人为接入更忠实于 "implement all" 的意图
+- 遗留规划文档的正确处理是 "as-built 增补 + 保留历史", 不是重写; ADR 用 Amendment
+  机制承接设计演进, 决策链路可追溯
