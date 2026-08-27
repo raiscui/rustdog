@@ -2,7 +2,25 @@
 
 ## Status
 
-Accepted (2026-08-20)
+Accepted (2026-08-20); amended 2026-08-27 (见下方 Amendment)
+
+## Amendment (2026-08-27): 动态 routing 层按 as-built 移除
+
+阶段 1 (ax_input) 与阶段 2 (ax_action) 已通过 Tickets #01-#11 完整落地后, 本 ADR 中
+"ax_action 统一入口 `execute_ax_action(action, payload)` + 数据化 routing 表" 的设计
+被实施事实推翻并移除 (commit 2e8239e):
+
+- 全仓库所有边界 (compact 行协议 / ui_script / web RPC) 在迁移中均选择强类型路径,
+  `ControlCommand` 到达分发点时已是 typed request, 动态层零生产消费者。
+- 接入它需要人为 Value 往返序列化, 无能力收益; 保留则为死代码。
+- as-built 的 ax_action 入口是 7 个强类型函数: `press` / `press_with_postcondition` /
+  `press_sequence` / `perform_action` / `set_value` / `focus` / `scroll`;
+  protocol 层职责由 control_protocol 的 compact 行解析承担, ax_action/protocol.rs 已删除。
+- ax_input 同理收敛为单一 `type_text_with_config` / `send_key_with_config` 完整配置 API,
+  80/20 简单包装层 (零调用) 一并删除。
+
+阶段 3 (ax_query + cache migration) 尚未实施, 该部分设计仍为规划状态。
+完整决策记录与备选方案见 task_plan.md 2026-08-27 条目。
 
 ## Context
 

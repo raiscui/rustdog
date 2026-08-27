@@ -3,6 +3,12 @@
 > Companion to ADR-0008. This document is the **what**; ADR-0008 is the **why**. 
 > Read this for build scope; read the ADR for design rationale.
 
+> **As-built 增补 (2026-08-27)**: 本 spec 中围绕 `execute_ax_action` 统一字符串入口、
+> 数据化 routing 表与 `ax_action/protocol.rs` parse 层的设计已按实施结论移除
+> (零生产消费者, 详见 ADR-0008 Amendment 与 task_plan.md 2026-08-27 决策记录)。
+> as-built 的 ax_action 只有 7 个强类型函数; 阶段 3 (ax_query) 尚未实施。
+> 下文保留原始规划内容作为决策历史, 不代表当前架构。
+
 ## Problem Statement
 
 control_ax.rs 是一个 122KB 的文件，包含 53+ 个公开函数，表现出典型的"浅模块"特征——接口复杂度几乎等于实现复杂度。调用方需要理解所有 53 个函数才能正确使用该模块。此外，该模块还存在以下问题：

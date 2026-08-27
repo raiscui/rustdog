@@ -4,6 +4,12 @@
 **ADR 参考**: docs/adr/0008-control-ax-module-split.md  
 **架构审查**: /var/folders/.../architecture-review-20260820.html
 
+> **执行状态 (2026-08-27)**: 阶段 1 (ax_input) 与阶段 2 (ax_action, Tickets #01-#11)
+> 已完成, 提交链 068024b..2e8239e。计划中的动态 routing 表 / execute_ax_action
+> 字符串入口 / protocol.rs parse 层在落地后确认零生产消费者, 已于 2026-08-27 移除
+> (见 ADR-0008 Amendment)。阶段 3 (ax_query) 未实施。
+> 下文为原始执行计划, 保留作决策历史。
+
 ---
 
 ## 执行摘要
