@@ -26,16 +26,16 @@ use crate::control_observation::record_observation_with_selectors;
 
 pub mod tree;
 pub mod types;
-pub use self::tree::{
-    capture_ax_find_snapshot, capture_current_ax_subtree, capture_current_ax_window_snapshot,
-    capture_default_ax_snapshot, current_ax_platform, resolve_current_ax_target_rect,
-    resolve_target_id_in_snapshot,
-};
 pub(crate) use self::tree::ax_window_id_from_backend_id;
 use self::tree::{
     app_selector_for_window, capture_semantic_target_snapshot, collect_element_refs,
     direct_ax_target_id, materialize_app_window_target, reserve_existing_ref_index,
     window_selector_draft, window_selector_for_ax_window,
+};
+pub use self::tree::{
+    capture_ax_find_snapshot, capture_current_ax_subtree, capture_current_ax_window_snapshot,
+    capture_default_ax_snapshot, current_ax_platform, resolve_current_ax_target_rect,
+    resolve_target_id_in_snapshot,
 };
 // 这些 tree helper 仅在测试代码里使用, 单独用 cfg(test) 导入,
 // 避免非测试编译出现 unused import。
