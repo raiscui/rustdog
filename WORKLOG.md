@@ -901,3 +901,18 @@ control_actions::execute_ax_action
 ### 总结感悟
 - replace 型脚本改代码必须 assert anchor, 否则静默失败很难发现
 - 通配 sub + 注册集合是 zenoh 广播语义下做单点归属的轻量模式
+
+## [2026-08-29 00:30:00] [Session ID: current] 任务名称: Phase 3 五票连打 (#72-#76)
+
+### 任务内容
+- agent messaging 全链: envelope/mailbox/agent runtime/卡片/收口 e2e
+- PR #78 五个实现提交, 全量 1022/1022
+
+### 完成过程
+- 排障三连: @response 前缀剥离 -> from/to 混淆 -> reply sub 时序契约
+- 一次测试文件误删事故 (git checkout 丢未提交测试) 重写恢复
+
+### 总结感悟
+- zenoh pub 的'无订阅者即丢'是隐式契约, 测试必须先 sub 后触发
+- 防丢与防重的语义权衡要靠真实场景驱动 (#76 的 pre-start 场景推翻了
+  #73 的注册过滤设计 — 简化正确)

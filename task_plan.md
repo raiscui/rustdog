@@ -1281,3 +1281,30 @@ mailbox) 是下一票。**
 
 **#72/#73 完成 (PR #78 stacked 2 commits each)。#74 (rdog agent CLI +
 loop) 已认领, 是下一票 (决策回调 trait + daemon lifecycle 托管 + alive token)。**
+
+## [2026-08-29 00:30:00] [Session ID: current] Phase 3 全部五票完成 (#72-#76)
+
+### 提交链 (feature/agent-messaging-phase3)
+
+- 04b803b #72 keyexpr + rdog.agentmsg.v1 envelope (8 单测)
+- 9d4591f #73 mailbox + 通配 sub + @agent-register/inbox/ack (e2e)
+- d3cc99a #74 rdog agent CLI + loop (决策回调/EchoDecision/alive, e2e 往返)
+- c3322fc #75 卡片托管 (card pub + @agent-card, e2e v1/v2)
+- 5f92250 #76 收口 e2e (pre-start 恢复 + id 去重) + mailbox 防丢语义修正
+
+### 修复的实现 bug (记录于票 comments)
+
+- 补拉响应漏剥 @response 前缀 (serde 静默失败空转)
+- 回复 publisher 误用 envelope.from (发回自己)
+- card key 提取 split 首段空串索引错位
+- 测试时序契约: 委派方 reply sub 必须先于 agent 启动 (pub 无订阅者即丢)
+
+### 语义修正
+
+- mailbox: '未注册不缓存' -> '收到即缓存' (防丢优先, #76 场景驱动)
+- 'queryable 补拉/卡片拉取' 统一实现为 control 命令 (@agent-inbox/@agent-card)
+
+### 状态
+
+**Phase 3 完成 (PR #78 ready, 全量 1022/1022)。Phase 4 (A2A 语义层)
+按 spec 需 Phase 3 语义稳定后 to-spec; 认证层仍是前置必做项。**
