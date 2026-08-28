@@ -1324,3 +1324,14 @@ loop) 已认领, 是下一票 (决策回调 trait + daemon lifecycle 托管 + al
 
 **Phase 1-3 全部入 main。认证层 spec #79 就绪 (票未拆)。
 Phase 4 (A2A 语义层) 等真实使用反馈。**
+
+## [2026-08-29 09:50:00] [Session ID: current] 认证层拆票 (#81-#83) + docs PR #80
+
+### 票链
+- #81 凭证层 (auth.toml 生成/env 覆盖/[auth] 段) ← frontier
+- #82 usrpwd 接线 (daemon/client/agent 全 transport)
+- #83 e2e 凭证注入 + 反向认证用例
+- Phase B (TLS) 独立 spec 后置
+
+### 状态
+**docs PR #80 (spec 镜像) + 三票就绪, #81 是 frontier。**
