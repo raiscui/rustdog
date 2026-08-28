@@ -6,10 +6,7 @@
 
 #![cfg_attr(test, allow(dead_code))]
 
-use std::{
-    fs,
-    path::PathBuf,
-};
+use std::{fs, path::PathBuf};
 
 use serde_json::Value;
 
@@ -104,15 +101,14 @@ fn manager_rejects_second_start_when_already_active() {
         1,
     )
     .expect("first start");
-    let err = mgr
-        .start(
-            "rec-2".into(),
-            Profile::Semantic,
-            ConnectionId(1),
-            path2,
-            platform(),
-            2,
-        );
+    let err = mgr.start(
+        "rec-2".into(),
+        Profile::Semantic,
+        ConnectionId(1),
+        path2,
+        platform(),
+        2,
+    );
     match err {
         Err(super::session::LifecycleError::AlreadyActive { recording_id }) => {
             assert_eq!(recording_id, "rec-1");
@@ -162,9 +158,7 @@ fn mark_writes_journal_entry_with_immediate_fsync() {
             1,
         )
         .expect("start");
-    session
-        .mark("step-1".into(), false)
-        .expect("mark writes");
+    session.mark("step-1".into(), false).expect("mark writes");
     assert_eq!(session.mark_count(), 1);
     drop(mgr);
     let lines = read_jsonl(&path);
@@ -256,7 +250,11 @@ fn optional_lane_unavailable_does_not_fail_session() {
         )
         .expect("start");
     session
-        .update_lane("screen_recording", LaneState::Unavailable, "no_evidence".into())
+        .update_lane(
+            "screen_recording",
+            LaneState::Unavailable,
+            "no_evidence".into(),
+        )
         .expect("update_lane optional");
     assert_eq!(session.phase(), SessionPhase::Recording);
     let rec = session.lane("screen_recording").expect("lane recorded");
@@ -307,7 +305,10 @@ fn complete_writes_terminal_entry_and_moves_to_completed() {
     assert!(mgr.last_session().is_some());
     let lines = read_jsonl(&path);
     assert_eq!(lines.last().expect("non-empty")["kind"], "session_terminal");
-    assert_eq!(lines.last().expect("non-empty")["payload"]["type"], "completed");
+    assert_eq!(
+        lines.last().expect("non-empty")["payload"]["type"],
+        "completed"
+    );
 }
 
 #[test]
@@ -333,7 +334,10 @@ fn cancel_writes_terminal_entry_and_keeps_orphan_journal() {
     let lines = read_jsonl(&path);
     assert!(path.exists(), "orphan journal must remain on disk");
     assert_eq!(lines.last().expect("non-empty")["kind"], "session_terminal");
-    assert_eq!(lines.last().expect("non-empty")["payload"]["type"], "cancelled");
+    assert_eq!(
+        lines.last().expect("non-empty")["payload"]["type"],
+        "cancelled"
+    );
 }
 
 #[test]
@@ -361,7 +365,10 @@ fn fail_writes_terminal_and_records_failure_detail() {
     assert!(summary.failure.is_some());
     let lines = read_jsonl(&path);
     assert_eq!(lines.last().expect("non-empty")["kind"], "session_terminal");
-    assert_eq!(lines.last().expect("non-empty")["payload"]["type"], "failed");
+    assert_eq!(
+        lines.last().expect("non-empty")["payload"]["type"],
+        "failed"
+    );
 }
 
 #[test]
@@ -381,7 +388,10 @@ fn operations_after_terminal_return_invalid_transition() {
         .expect("start");
     mgr.cancel_current().expect("cancel");
     // After cancel, the manager slot is empty.
-    assert!(mgr.current().is_none(), "manager should be empty after cancel");
+    assert!(
+        mgr.current().is_none(),
+        "manager should be empty after cancel"
+    );
 }
 
 #[test]

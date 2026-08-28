@@ -10,18 +10,22 @@ use super::*;
 #[test]
 fn stub_capture_lifecycle_records_wall_clock_anchor() {
     let mut capture = platform_capture();
-    assert!(!capture.is_healthy(), "capture should not be healthy before start");
+    assert!(
+        !capture.is_healthy(),
+        "capture should not be healthy before start"
+    );
     assert_eq!(capture.wall_clock_anchor_ms(), 0);
 
     capture.start().expect("start");
-    assert!(capture.is_healthy(), "capture should be healthy after start");
+    assert!(
+        capture.is_healthy(),
+        "capture should be healthy after start"
+    );
     let anchor = capture.wall_clock_anchor_ms();
     assert!(anchor > 0, "anchor must be set after start");
 
     let mut drained = 0;
-    let _ = capture
-        .queue()
-        .drain_all(|_event| drained += 1);
+    let _ = capture.queue().drain_all(|_event| drained += 1);
     assert_eq!(drained, 0, "stub queue has no events");
 
     capture.stop().expect("stop");

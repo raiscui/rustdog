@@ -68,6 +68,23 @@ impl AxWindowIdentity {
     }
 }
 
+/// 按 find 请求的 window identity 选择全局或定向捕获。
+///
+/// window identity (显式 id / app 名 / observation ref) 在本层解析成 window_id,
+/// 交给 ax_query 的 scoped 分发; App menu 恒走全局捕获, 且短路在 identity
+/// 解析之前 (无效 window 不会让 app-menu 捕获失败)。
+pub fn capture_ax_find_snapshot(request: &AxFindRequest) -> io::Result<AxSnapshot> {
+    if matches!(request.tree.scope, AxTreeScope::AppMenu) {
+        return crate::ax_query::capture_default_ax_snapshot(&request.tree);
+    }
+    let window_id = request
+        .window
+        .as_ref()
+        .map(AxWindowIdentity::resolve_window_id)
+        .transpose()?;
+    crate::ax_query::capture_scoped_snapshot(&request.tree, window_id.as_deref())
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct AxFindQuery {
     pub process: Option<String>,

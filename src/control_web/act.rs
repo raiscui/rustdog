@@ -1,8 +1,9 @@
 use super::*;
-use crate::control_ax::{
+use crate::ax_query::{
     capture_current_ax_subtree, capture_current_ax_window_snapshot, capture_default_ax_snapshot,
-    perform_default_ax_action, AxActionName, AxActionRequest, AxCapturedSubtree,
-    AxPerformedActionReport, AxTarget,
+};
+use crate::control_ax::{
+    AxActionName, AxActionRequest, AxCapturedSubtree, AxPerformedActionReport, AxTarget,
 };
 
 const WEB_ACT_SCHEMA: &str = "rdog.web-act.v1";
@@ -217,7 +218,7 @@ pub fn build_default_web_act_response_json(request: &WebActRequest) -> io::Resul
         request,
         capture_default_ax_snapshot,
         capture_current_ax_window_snapshot,
-        perform_default_ax_action,
+        crate::ax_action::perform_action,
         |target_id, tree_request| capture_current_ax_subtree(target_id, tree_request).map(Some),
     )
 }

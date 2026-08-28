@@ -10,7 +10,7 @@ use crate::{
         KeyDelivery, KeyMode, KeyRequest,
     },
     control_resource_lane::{capture_resource_epochs, resource_key_from_backend_id},
-    control_window::{resolve_unique_app_window_id, WindowActionReport, WindowActionVerifyReport},
+    control_window::{WindowActionReport, WindowActionVerifyReport},
 };
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -26,25 +26,11 @@ use crate::control_observation::record_observation_with_selectors;
 
 pub mod tree;
 pub mod types;
-pub use self::tree::{
-    capture_ax_find_snapshot, capture_current_ax_subtree, capture_current_ax_window_snapshot,
-    capture_default_ax_snapshot, current_ax_platform, resolve_current_ax_target_rect,
-    resolve_target_id_in_snapshot,
-};
-pub mod input;
-pub use self::input::{perform_default_key_delivery, perform_default_type_text};
-use self::input::{remap_type_text_ax_value_error, remap_type_text_targeted_keyboard_error};
-pub(crate) use self::tree::ax_window_id_from_backend_id;
 use self::tree::{
-    app_selector_for_window, ax_snapshot_status_error, capture_semantic_target_snapshot,
-    collect_element_refs, direct_ax_target_id, materialize_app_window_target,
-    materialize_app_window_target_with, reserve_existing_ref_index, window_selector_draft,
-    window_selector_for_ax_window,
+    app_selector_for_window, collect_element_refs, direct_ax_target_id, reserve_existing_ref_index,
+    window_selector_draft, window_selector_for_ax_window,
 };
-// 这些 tree helper 仅在测试代码里使用, 单独用 cfg(test) 导入,
-// 避免非测试编译出现 unused import。
-#[cfg(test)]
-use self::tree::{capture_ax_find_snapshot_with, capture_semantic_target_snapshot_with};
+pub use self::tree::{resolve_current_ax_target_rect, resolve_target_id_in_snapshot};
 pub use self::types::*;
 
 /// observation 产生的完整 AX snapshot 缓存。
@@ -376,7 +362,7 @@ impl ClipboardRestoreStatus {
 }
 
 impl AxTarget {
-    fn validate(&self) -> io::Result<()> {
+    pub fn validate(&self) -> io::Result<()> {
         let has_ref = self.ref_id.is_some();
         let has_observation_id = self.observation_id.is_some();
         let has_semantic = self.window_id.is_some()
@@ -782,7 +768,7 @@ impl AxPressPostconditionReport {
 }
 
 impl AxPressSequenceStepReport {
-    fn success(index: usize, description: String, report: AxActionReport) -> Self {
+    pub fn success(index: usize, description: String, report: AxActionReport) -> Self {
         Self {
             index,
             description,
@@ -793,7 +779,7 @@ impl AxPressSequenceStepReport {
         }
     }
 
-    fn failed(index: usize, description: String, error: String) -> Self {
+    pub fn failed(index: usize, description: String, error: String) -> Self {
         Self {
             index,
             description,
@@ -1048,8 +1034,8 @@ impl AxScrollReport {
 pub mod query;
 
 pub use query::{
-    build_ax_find_response_json, build_ax_get_response_json, parse_ax_find_payload,
-    parse_ax_get_payload, AxFindQuery, AxFindRequest, AxGetRequest,
+    build_ax_find_response_json, build_ax_get_response_json, capture_ax_find_snapshot,
+    parse_ax_find_payload, parse_ax_get_payload, AxFindQuery, AxFindRequest, AxGetRequest,
 };
 
 pub trait AxBackend {
@@ -1058,7 +1044,6 @@ pub trait AxBackend {
     fn set_value(&self, request: &AxSetValueRequest) -> io::Result<AxSetValueReport>;
     fn focus(&self, request: &AxFocusRequest) -> io::Result<AxFocusReport>;
     fn scroll(&self, request: &AxScrollRequest) -> io::Result<AxScrollReport>;
-    fn type_text(&self, request: &TypeTextRequest) -> io::Result<TypeTextReport>;
 }
 
 impl AxBackend for SystemAxBackend {
@@ -1084,376 +1069,6 @@ impl AxBackend for SystemAxBackend {
     fn scroll(&self, request: &AxScrollRequest) -> io::Result<AxScrollReport> {
         platform_scroll(request)
     }
-
-    fn type_text(&self, request: &TypeTextRequest) -> io::Result<TypeTextReport> {
-        platform_type_text(request)
-    }
-}
-
-pub fn perform_default_ax_press(request: &AxPressRequest) -> io::Result<AxActionReport> {
-    let report = SystemAxBackend.perform_action(&AxActionRequest {
-        target: request.target.clone(),
-        action: AxActionName::Press,
-    })?;
-    let mut report = AxActionReport::press(
-        report.backend,
-        report.target_id,
-        request.target.description.clone(),
-    );
-    // 2026-08-04 (清除类 hint): 清除类按钮被按下后, 给 agent 一句通用引导,
-    // 防止"清除子目标完成 -> 流程断裂" (模型清除后迷失, 不继续剩余输入)。
-    // 文案不含任何任务知识, 任何"清除后要继续"的场景都成立。
-    report.hint = clear_action_hint(request.target.description.as_deref());
-    Ok(report)
-}
-
-/// 清除类操作的 continue hint (纯函数, 便于单测)。
-fn clear_action_hint(description: Option<&str>) -> Option<String> {
-    description
-        .filter(|desc| is_clear_action_description(desc))
-        .map(|_| CLEAR_ACTION_HINT.to_string())
-}
-
-/// 清除类操作完成后的通用 continue 引导 (共享给 @ax-press 与 @key)。
-pub(crate) const CLEAR_ACTION_HINT: &str =
-    "clear completed; the task is not finished until the remaining input steps and the final confirm action are done";
-
-/// 判断按钮描述是否为"清除类"操作 (删除 / 全部清除 / Clear / AC 等)。
-///
-/// 清除类操作通常是任务的中间步骤 (清掉旧状态), 完成清除后 agent 容易
-/// 把子目标当成任务终点。这里只做通用语义匹配, 不含任何具体任务知识。
-fn is_clear_action_description(description: &str) -> bool {
-    let normalized = description.trim().to_ascii_lowercase();
-    matches!(
-        normalized.as_str(),
-        "删除" | "全部清除" | "清除" | "清空" | "clear" | "all clear" | "ac" | "delete" | "del"
-    )
-}
-
-pub fn perform_default_ax_press_with_postcondition(
-    request: &AxPressRequest,
-) -> io::Result<AxPressPostconditionReport> {
-    perform_ax_press_with_postcondition_with(
-        request,
-        resolve_unique_app_window_id,
-        perform_default_ax_press,
-        |window_id, role| {
-            observe_current_ax_values_with(window_id, role, capture_current_ax_window_snapshot)
-        },
-    )
-}
-
-fn perform_ax_press_with_postcondition_with(
-    request: &AxPressRequest,
-    resolve_app: impl FnOnce(&str) -> io::Result<String>,
-    mut perform: impl FnMut(&AxPressRequest) -> io::Result<AxActionReport>,
-    mut observe: impl FnMut(&str, &str) -> io::Result<Vec<String>>,
-) -> io::Result<AxPressPostconditionReport> {
-    let postcondition = request
-        .postcondition
-        .as_ref()
-        .ok_or_else(|| invalid_data("AX guarded press 缺少 postcondition"))?;
-    let target = materialize_app_window_target_with(&request.target, resolve_app)?;
-    let window_id = target
-        .window_id
-        .as_deref()
-        .ok_or_else(|| invalid_data("AX guarded press 必须使用 app:APP 或 pid:PID/window:INDEX"))?;
-    let expected_value = normalize_ax_verification_value(&postcondition.expected_value);
-    let mut steps = Vec::with_capacity(postcondition.max_attempts);
-
-    for index in 0..postcondition.max_attempts {
-        let action = match perform(&AxPressRequest {
-            target: target.clone(),
-            postcondition: None,
-        }) {
-            Ok(action) => action,
-            Err(error) => {
-                let error = error.to_string();
-                steps.push(AxPressPostconditionStepReport {
-                    index,
-                    performed: false,
-                    verified: false,
-                    target_id: None,
-                    observed_values: Vec::new(),
-                    error: Some(error.clone()),
-                });
-                return Ok(build_ax_press_postcondition_report(
-                    postcondition,
-                    steps,
-                    false,
-                    Some(error),
-                ));
-            }
-        };
-
-        let observed_values = match observe(window_id, &postcondition.role) {
-            Ok(values) => values,
-            Err(error) => {
-                let error = error.to_string();
-                steps.push(AxPressPostconditionStepReport {
-                    index,
-                    performed: action.performed,
-                    verified: false,
-                    target_id: action.target_id,
-                    observed_values: Vec::new(),
-                    error: Some(error.clone()),
-                });
-                return Ok(build_ax_press_postcondition_report(
-                    postcondition,
-                    steps,
-                    false,
-                    Some(error),
-                ));
-            }
-        };
-        let verified = observed_values
-            .iter()
-            .any(|value| normalize_ax_verification_value(value) == expected_value);
-        steps.push(AxPressPostconditionStepReport {
-            index,
-            performed: action.performed,
-            verified,
-            target_id: action.target_id,
-            observed_values,
-            error: None,
-        });
-        if verified {
-            return Ok(build_ax_press_postcondition_report(
-                postcondition,
-                steps,
-                true,
-                None,
-            ));
-        }
-    }
-
-    let error = format!(
-        "AX postcondition 未在{}次动作内满足: role={}, expected_value={}",
-        postcondition.max_attempts, postcondition.role, postcondition.expected_value
-    );
-    Ok(build_ax_press_postcondition_report(
-        postcondition,
-        steps,
-        false,
-        Some(error),
-    ))
-}
-
-fn build_ax_press_postcondition_report(
-    postcondition: &AxPressPostcondition,
-    steps: Vec<AxPressPostconditionStepReport>,
-    verified: bool,
-    error: Option<String>,
-) -> AxPressPostconditionReport {
-    AxPressPostconditionReport {
-        kind: "ax-press",
-        action: "press-until",
-        performed: steps.iter().any(|step| step.performed),
-        verified,
-        status: if verified { "ok" } else { "failed" },
-        role: postcondition.role.clone(),
-        expected_value: postcondition.expected_value.clone(),
-        attempt_count: steps.len(),
-        max_attempts: postcondition.max_attempts,
-        steps,
-        error,
-    }
-}
-
-fn observe_current_ax_values_with(
-    window_id: &str,
-    role: &str,
-    capture: impl FnOnce(&str, &AxTreeRequest) -> io::Result<AxSnapshot>,
-) -> io::Result<Vec<String>> {
-    // 通用 fresh 观察必须能深入 Calculator 等多层 AX 树拿到 AXStaticText 的 value。
-    // 默认 AxTreeRequest 只到 depth=4,实测不足以覆盖 Calculator 结果节点。
-    // 这里使用与 compact ax-find 一致的深度与上限,与 parser 侧契约对齐。
-    let request = AxTreeRequest {
-        depth: AX_POSTCONDITION_DEPTH,
-        max_elements: AX_POSTCONDITION_MAX_ELEMENTS,
-        include_values: true,
-        ..AxTreeRequest::default()
-    };
-    let snapshot = capture(window_id, &request)?;
-    if snapshot.capture_status != "complete" {
-        return Err(ax_snapshot_status_error(&snapshot));
-    }
-    if snapshot.truncated {
-        return Err(invalid_input(
-            "AX guarded press fresh snapshot 被截断,无法证明postcondition",
-        ));
-    }
-
-    let mut values = Vec::new();
-    for window in &snapshot.windows {
-        collect_ax_values_by_role(&window.elements, role, &mut values);
-    }
-    values.sort();
-    values.dedup();
-    Ok(values)
-}
-
-fn collect_ax_values_by_role(elements: &[AxElement], role: &str, values: &mut Vec<String>) {
-    for element in elements {
-        if element.role == role && !element.value_redacted {
-            if let Some(value) = element.value.as_deref() {
-                values.push(normalize_ax_verification_value(value));
-            }
-        }
-        collect_ax_values_by_role(&element.children, role, values);
-    }
-}
-
-fn normalize_ax_verification_value(value: &str) -> String {
-    value
-        .chars()
-        .filter(|character| {
-            !matches!(
-                character,
-                '\u{200e}'
-                    | '\u{200f}'
-                    | '\u{202a}'..='\u{202e}'
-                    | '\u{2066}'..='\u{2069}'
-            )
-        })
-        .collect::<String>()
-        .trim()
-        .to_owned()
-}
-
-pub fn perform_default_ax_press_sequence(
-    request: &AxPressSequenceRequest,
-) -> AxPressSequenceReport {
-    let request = match materialize_press_sequence_request(request) {
-        Ok(request) => request,
-        Err(error) => {
-            let steps = request.targets.first().map_or_else(Vec::new, |target| {
-                vec![AxPressSequenceStepReport::failed(
-                    0,
-                    target.description.clone().unwrap_or_default(),
-                    error.to_string(),
-                )]
-            });
-            return AxPressSequenceReport {
-                kind: "ax-press-sequence",
-                action: "press-sequence",
-                performed: false,
-                status: "failed",
-                step_count: request.targets.len(),
-                steps,
-                failed_index: Some(0),
-                error: Some(error.to_string()),
-            };
-        }
-    };
-    perform_ax_press_sequence_with(&request, perform_default_ax_press)
-}
-
-/// sequence 只允许一套窗口归属.若使用 app selector,在第一个 side effect 前
-/// 解析一次并把所有步骤固化为同一个 window_id,避免执行中途漂移到另一窗口.
-fn materialize_press_sequence_request(
-    request: &AxPressSequenceRequest,
-) -> io::Result<AxPressSequenceRequest> {
-    materialize_press_sequence_request_with(request, resolve_unique_app_window_id)
-}
-
-fn materialize_press_sequence_request_with(
-    request: &AxPressSequenceRequest,
-    resolve_app: impl FnOnce(&str) -> io::Result<String>,
-) -> io::Result<AxPressSequenceRequest> {
-    let first = request
-        .targets
-        .first()
-        .ok_or_else(|| invalid_data("@ax-press-sequence 至少需要一个 target"))?;
-    let Some(app) = first.app.as_deref() else {
-        for target in &request.targets {
-            target.validate()?;
-        }
-        return Ok(request.clone());
-    };
-
-    let window_id = resolve_app(app)?;
-    let mut targets = Vec::with_capacity(request.targets.len());
-    for target in &request.targets {
-        if target.app.as_deref() != Some(app) {
-            return Err(invalid_data(
-                "@ax-press-sequence 的所有 target 必须使用同一个 app selector",
-            ));
-        }
-        let mut target = target.clone();
-        target.app = None;
-        target.window_id = Some(window_id.clone());
-        target.validate()?;
-        targets.push(target);
-    }
-    Ok(AxPressSequenceRequest { targets })
-}
-
-fn perform_ax_press_sequence_with(
-    request: &AxPressSequenceRequest,
-    mut perform: impl FnMut(&AxPressRequest) -> io::Result<AxActionReport>,
-) -> AxPressSequenceReport {
-    let mut steps = Vec::with_capacity(request.targets.len());
-    for (index, target) in request.targets.iter().enumerate() {
-        let description = target.description.clone().unwrap_or_default();
-        match perform(&AxPressRequest {
-            target: target.clone(),
-            postcondition: None,
-        }) {
-            Ok(report) => {
-                steps.push(AxPressSequenceStepReport::success(
-                    index,
-                    description,
-                    report,
-                ));
-            }
-            Err(error) => {
-                let error = error.to_string();
-                steps.push(AxPressSequenceStepReport::failed(
-                    index,
-                    description,
-                    error.clone(),
-                ));
-                return AxPressSequenceReport {
-                    kind: "ax-press-sequence",
-                    action: "press-sequence",
-                    performed: false,
-                    status: "failed",
-                    step_count: request.targets.len(),
-                    steps,
-                    failed_index: Some(index),
-                    error: Some(error),
-                };
-            }
-        }
-    }
-
-    AxPressSequenceReport {
-        kind: "ax-press-sequence",
-        action: "press-sequence",
-        performed: true,
-        status: "ok",
-        step_count: request.targets.len(),
-        steps,
-        failed_index: None,
-        error: None,
-    }
-}
-
-pub fn perform_default_ax_action(request: &AxActionRequest) -> io::Result<AxPerformedActionReport> {
-    SystemAxBackend.perform_action(request)
-}
-
-pub fn perform_default_ax_set_value(request: &AxSetValueRequest) -> io::Result<AxSetValueReport> {
-    SystemAxBackend.set_value(request)
-}
-
-pub fn perform_default_ax_focus(request: &AxFocusRequest) -> io::Result<AxFocusReport> {
-    SystemAxBackend.focus(request)
-}
-
-pub fn perform_default_ax_scroll(request: &AxScrollRequest) -> io::Result<AxScrollReport> {
-    SystemAxBackend.scroll(request)
 }
 
 pub fn parse_ax_tree_payload(input: &str) -> io::Result<AxTreeRequest> {
@@ -2455,22 +2070,72 @@ pub(crate) fn platform_scroll(_request: &AxScrollRequest) -> io::Result<AxScroll
     ))
 }
 
+// type-text 的投递策略 (模式分发 + Auto 回退链) 在 ax_input; 这里只把
+// 三条平台投递路径与信任检查桥接给策略层。
+//
+// 非 macOS 注意: 三条路径 stub 都返回 Unsupported (可回退), 因此 Auto 模式
+// 会逐层回退后以 keyboard/clipboard 的 stub 消息终止 (旧实现按 mode 直查,
+// Auto 直接报 AXValue 路径)。当前产品仅 macOS, 该标签漂移不构成实际边界。
+
 #[cfg(target_os = "macos")]
-pub(crate) fn platform_type_text(request: &TypeTextRequest) -> io::Result<TypeTextReport> {
-    macos::type_text(request)
+pub(crate) fn platform_ensure_ax_trusted() -> io::Result<()> {
+    macos::ensure_trusted()
 }
 
 #[cfg(not(target_os = "macos"))]
-pub(crate) fn platform_type_text(request: &TypeTextRequest) -> io::Result<TypeTextReport> {
-    let detail = match request.mode {
-        TypeTextMode::Auto | TypeTextMode::AxValue => "macOS AXValue 路径",
-        TypeTextMode::TargetedKeyboard => "macOS targeted keyboard 路径",
-        TypeTextMode::Clipboard => "macOS clipboard 路径",
-    };
-    Err(io::Error::new(
+pub(crate) fn platform_ensure_ax_trusted() -> io::Result<()> {
+    Ok(())
+}
+
+/// 非 macOS 平台的统一 stub: 三条路径同构, 只有路径名不同。
+#[cfg(not(target_os = "macos"))]
+fn unsupported_type_text_path(path_label: &str) -> io::Error {
+    io::Error::new(
         io::ErrorKind::Unsupported,
-        format!("type-text 当前只支持 {detail}"),
-    ))
+        format!("type-text 当前只支持 macOS {path_label} 路径"),
+    )
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn platform_type_text_via_ax_value(
+    request: &TypeTextRequest,
+) -> io::Result<TypeTextReport> {
+    macos::type_text_via_ax_value(request)
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn platform_type_text_via_targeted_keyboard(
+    request: &TypeTextRequest,
+) -> io::Result<TypeTextReport> {
+    macos::type_text_via_targeted_keyboard(request)
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn platform_type_text_via_clipboard(
+    request: &TypeTextRequest,
+) -> io::Result<TypeTextReport> {
+    macos::type_text_via_clipboard(request)
+}
+
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn platform_type_text_via_ax_value(
+    _request: &TypeTextRequest,
+) -> io::Result<TypeTextReport> {
+    Err(unsupported_type_text_path("AXValue"))
+}
+
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn platform_type_text_via_targeted_keyboard(
+    _request: &TypeTextRequest,
+) -> io::Result<TypeTextReport> {
+    Err(unsupported_type_text_path("targeted keyboard"))
+}
+
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn platform_type_text_via_clipboard(
+    _request: &TypeTextRequest,
+) -> io::Result<TypeTextReport> {
+    Err(unsupported_type_text_path("clipboard"))
 }
 
 #[cfg(target_os = "macos")]
@@ -2479,7 +2144,6 @@ mod macos;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::cell::Cell;
 
     fn bounded_query(depth: u8, max_elements: u16, include_values: bool) -> AxTreeRequest {
         AxTreeRequest {
@@ -3020,227 +2684,6 @@ mod tests {
     }
 
     #[test]
-    fn clear_action_press_should_include_continue_hint() {
-        // 清除类按钮被按下后, 响应带通用 hint, 防止"清除后流程断裂"。
-        let hint = clear_action_hint(Some("删除")).expect("clear must hint");
-        assert!(
-            hint.contains("not finished") && hint.contains("final confirm"),
-            "hint must guide continue: {hint}"
-        );
-
-        // 非清除按钮不加 hint。
-        assert!(clear_action_hint(Some("1")).is_none());
-        assert!(clear_action_hint(Some("加")).is_none());
-        assert!(clear_action_hint(None).is_none());
-
-        // 英文清除语义同样命中。
-        for desc in ["clear", "all clear", "AC", "delete", "全部清除", "清空"] {
-            assert!(
-                clear_action_hint(Some(desc)).is_some(),
-                "{desc} must be treated as clear action"
-            );
-        }
-    }
-
-    #[test]
-    fn guarded_ax_press_should_stop_when_fresh_postcondition_matches() {
-        let request = parse_ax_press_payload("app:Demo,重置,AXStaticText,ready,3").unwrap();
-        let resolve_calls = Cell::new(0usize);
-        let press_calls = Cell::new(0usize);
-        let observe_calls = Cell::new(0usize);
-
-        let report = perform_ax_press_with_postcondition_with(
-            &request,
-            |app| {
-                resolve_calls.set(resolve_calls.get() + 1);
-                assert_eq!(app, "Demo");
-                Ok("pid:321/window:0".to_owned())
-            },
-            |_| {
-                press_calls.set(press_calls.get() + 1);
-                Ok(AxActionReport::press(
-                    "test",
-                    Some(format!("pid:321/window:0/path:{}", press_calls.get())),
-                    None,
-                ))
-            },
-            |window_id, role| {
-                observe_calls.set(observe_calls.get() + 1);
-                assert_eq!(window_id, "pid:321/window:0");
-                assert_eq!(role, "AXStaticText");
-                Ok(if observe_calls.get() == 1 {
-                    vec!["pending".to_owned()]
-                } else {
-                    vec!["ready".to_owned()]
-                })
-            },
-        )
-        .unwrap();
-
-        assert_eq!(resolve_calls.get(), 1);
-        assert_eq!(press_calls.get(), 2);
-        assert_eq!(observe_calls.get(), 2);
-        assert!(report.performed);
-        assert!(report.verified);
-        assert_eq!(report.status, "ok");
-        assert_eq!(report.attempt_count, 2);
-        assert_eq!(report.steps.len(), 2);
-        assert!(report.steps.iter().all(|step| step.performed));
-        assert!(!report.steps[0].verified);
-        assert!(report.steps[1].verified);
-    }
-
-    #[test]
-    fn guarded_ax_press_should_fail_closed_at_attempt_limit() {
-        let request = parse_ax_press_payload("pid:321/window:0,重置,AXStaticText,ready,3").unwrap();
-        let press_calls = Cell::new(0usize);
-
-        let report = perform_ax_press_with_postcondition_with(
-            &request,
-            |_| panic!("window_id target不应解析app"),
-            |_| {
-                press_calls.set(press_calls.get() + 1);
-                Ok(AxActionReport::press(
-                    "test",
-                    Some("pid:321/window:0/path:1".to_owned()),
-                    None,
-                ))
-            },
-            |_, _| Ok(vec!["pending".to_owned()]),
-        )
-        .unwrap();
-
-        assert_eq!(press_calls.get(), 3);
-        assert!(report.performed);
-        assert!(!report.verified);
-        assert_eq!(report.status, "failed");
-        assert_eq!(report.attempt_count, 3);
-        assert_eq!(report.steps.len(), 3);
-        assert!(report
-            .error
-            .as_deref()
-            .is_some_and(|error| { error.contains("未在3次动作内满足") }));
-    }
-
-    #[test]
-    fn ax_postcondition_comparison_should_remove_bidi_controls() {
-        assert_eq!(normalize_ax_verification_value("\u{200e}0\u{200f}"), "0");
-        assert_eq!(
-            normalize_ax_verification_value("\u{2066}ready\u{2069}"),
-            "ready"
-        );
-    }
-
-    #[test]
-    fn observe_current_ax_values_should_reach_deeply_nested_static_text() {
-        // Calculator 等应用的 AXStaticText result value 常位于 depth >= 5。
-        // 这里手工构造一个 depth=6 的 snapshot,验证通用 fresh 观察能取到。
-        fn leaf(role: &str, value: &str) -> AxElement {
-            AxElement {
-                id: format!("id-{role}"),
-                ref_id: None,
-                role: role.to_owned(),
-                subrole: None,
-                name: None,
-                value: Some(value.to_owned()),
-                value_redacted: false,
-                description: None,
-                rect: None,
-                enabled: Some(true),
-                actions: Vec::new(),
-                ax_path: Vec::new(),
-                children: Vec::new(),
-            }
-        }
-
-        let mut nested = leaf("AXStaticText", "0");
-        for index in 1..=6 {
-            nested = AxElement {
-                id: format!("id-group-{index}"),
-                ref_id: None,
-                role: "AXGroup".to_owned(),
-                subrole: None,
-                name: None,
-                value: None,
-                value_redacted: false,
-                description: None,
-                rect: None,
-                enabled: Some(true),
-                actions: Vec::new(),
-                ax_path: Vec::new(),
-                children: vec![nested],
-            };
-        }
-        let window = AxWindow {
-            id: "pid:7/window:0".to_owned(),
-            ref_id: None,
-            pid: 7,
-            process_name: "Calculator".to_owned(),
-            title: Some("Calculator".to_owned()),
-            role: "AXWindow".to_owned(),
-            subrole: None,
-            rect: None,
-            focused: Some(true),
-            elements: vec![nested],
-        };
-        let snapshot = AxSnapshot::complete("test", vec![window], false);
-
-        let captured_request_depth = Cell::new(0u8);
-        let values = observe_current_ax_values_with("pid:7/window:0", "AXStaticText", |_, req| {
-            captured_request_depth.set(req.depth);
-            Ok(snapshot.clone())
-        })
-        .unwrap();
-
-        assert_eq!(captured_request_depth.get(), AX_POSTCONDITION_DEPTH);
-        assert!(captured_request_depth.get() >= 6);
-        assert_eq!(values, vec!["0".to_owned()]);
-    }
-
-    #[test]
-    fn press_sequence_should_resolve_app_once_and_preserve_partial_failure() {
-        let request = parse_ax_press_sequence_payload("app:Calculator,1,加,2").unwrap();
-        let resolve_calls = Cell::new(0usize);
-        let request = materialize_press_sequence_request_with(&request, |app| {
-            resolve_calls.set(resolve_calls.get() + 1);
-            assert_eq!(app, "Calculator");
-            Ok("pid:123/window:0".to_owned())
-        })
-        .unwrap();
-
-        assert_eq!(resolve_calls.get(), 1);
-        assert!(request.targets.iter().all(|target| {
-            target.app.is_none() && target.window_id.as_deref() == Some("pid:123/window:0")
-        }));
-
-        let mut call_index = 0usize;
-        let report = perform_ax_press_sequence_with(&request, |_| {
-            let index = call_index;
-            call_index += 1;
-            if index == 1 {
-                return Err(io::Error::new(io::ErrorKind::InvalidInput, "目标歧义"));
-            }
-            Ok(AxActionReport::press(
-                "test",
-                Some(format!("pid:123/window:0/path:{index}")),
-                None,
-            ))
-        });
-
-        assert!(!report.performed);
-        assert_eq!(report.status, "failed");
-        assert_eq!(report.step_count, 3);
-        assert_eq!(report.steps.len(), 2);
-        assert!(report.steps[0].performed);
-        assert!(!report.steps[1].performed);
-        assert_eq!(report.steps[1].description, "加");
-        assert_eq!(report.steps[1].error.as_deref(), Some("目标歧义"));
-        assert_eq!(report.failed_index, Some(1));
-        assert_eq!(report.error.as_deref(), Some("目标歧义"));
-        assert_eq!(call_index, 2);
-    }
-
-    #[test]
     fn ax_target_window_ownership_should_fail_closed() {
         let direct_id_with_window = parse_ax_press_payload(
             r#"{target:{id:"pid:123/window:0/path:0",window_id:"pid:123/window:0"}}"#,
@@ -3476,159 +2919,5 @@ mod tests {
         .is_err());
     }
 
-    #[test]
-    fn remap_type_text_ax_value_error_should_use_type_text_protocol_name() {
-        let unsupported = remap_type_text_ax_value_error(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "AX set value 当前只支持 macOS",
-        ));
-        assert_eq!(unsupported.kind(), io::ErrorKind::Unsupported);
-        assert!(
-            unsupported
-                .to_string()
-                .contains("type-text 当前只支持 macOS AXValue 路径"),
-            "unexpected error: {unsupported}"
-        );
-
-        let invalid = remap_type_text_ax_value_error(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "目标 AX 元素不支持 AXValue",
-        ));
-        assert_eq!(invalid.kind(), io::ErrorKind::InvalidInput);
-        assert!(
-            invalid.to_string().contains("type-text AXValue 路径失败"),
-            "unexpected error: {invalid}"
-        );
-    }
-
-    #[test]
-    fn ax_find_window_identity_should_route_only_to_targeted_capture() {
-        let global_calls = Cell::new(0);
-        let targeted_calls = Cell::new(0);
-        let request =
-            parse_ax_find_payload(r#"{window:{window_id:"pid:7/window:1"},role:"AXButton"}"#)
-                .unwrap();
-
-        let snapshot = capture_ax_find_snapshot_with(
-            &request,
-            |_| {
-                global_calls.set(global_calls.get() + 1);
-                Ok(AxSnapshot::complete("global", Vec::new(), false))
-            },
-            |window_id, _| {
-                targeted_calls.set(targeted_calls.get() + 1);
-                assert_eq!(window_id, "pid:7/window:1");
-                Ok(AxSnapshot::complete("targeted", Vec::new(), false))
-            },
-        )
-        .unwrap();
-
-        assert_eq!(snapshot.platform, "targeted");
-        assert_eq!(global_calls.get(), 0);
-        assert_eq!(targeted_calls.get(), 1);
-    }
-
-    #[test]
-    fn ax_find_app_menu_should_pass_app_selector_to_capture_backend() {
-        let request =
-            parse_ax_find_payload(r#"{root:"app-menu",app:"Finder",role:"AXMenuBarItem"}"#)
-                .expect("app menu request should parse");
-
-        let snapshot = capture_ax_find_snapshot_with(
-            &request,
-            |tree| {
-                assert_eq!(tree.scope, AxTreeScope::AppMenu);
-                assert_eq!(tree.app_menu_app.as_deref(), Some("Finder"));
-                Ok(AxSnapshot::complete("targeted-app-menu", Vec::new(), false))
-            },
-            |_, _| panic!("app menu must not be captured as a window subtree"),
-        )
-        .expect("app menu capture should succeed");
-
-        assert_eq!(snapshot.platform, "targeted-app-menu");
-    }
-
-    #[test]
-    fn semantic_target_window_id_should_route_only_to_targeted_capture() {
-        let global_calls = Cell::new(0);
-        let targeted_calls = Cell::new(0);
-        let target = AxTarget {
-            window_id: Some("pid:7/window:1".to_owned()),
-            role: Some("AXButton".to_owned()),
-            description: Some("1".to_owned()),
-            ..AxTarget::default()
-        };
-
-        let snapshot = capture_semantic_target_snapshot_with(
-            &target,
-            &AxTreeRequest::default(),
-            |_| {
-                global_calls.set(global_calls.get() + 1);
-                Ok(AxSnapshot::complete("global", Vec::new(), false))
-            },
-            |window_id, _| {
-                targeted_calls.set(targeted_calls.get() + 1);
-                assert_eq!(window_id, "pid:7/window:1");
-                Ok(AxSnapshot::complete("targeted", Vec::new(), false))
-            },
-        )
-        .unwrap();
-
-        assert_eq!(snapshot.platform, "targeted");
-        assert_eq!(global_calls.get(), 0);
-        assert_eq!(targeted_calls.get(), 1);
-    }
-
-    #[test]
-    fn semantic_target_without_window_id_should_keep_global_capture() {
-        let global_calls = Cell::new(0);
-        let targeted_calls = Cell::new(0);
-        let target = AxTarget {
-            role: Some("AXButton".to_owned()),
-            description: Some("1".to_owned()),
-            ..AxTarget::default()
-        };
-
-        let snapshot = capture_semantic_target_snapshot_with(
-            &target,
-            &AxTreeRequest::default(),
-            |_| {
-                global_calls.set(global_calls.get() + 1);
-                Ok(AxSnapshot::complete("global", Vec::new(), false))
-            },
-            |_, _| {
-                targeted_calls.set(targeted_calls.get() + 1);
-                Ok(AxSnapshot::complete("targeted", Vec::new(), false))
-            },
-        )
-        .unwrap();
-
-        assert_eq!(snapshot.platform, "global");
-        assert_eq!(global_calls.get(), 1);
-        assert_eq!(targeted_calls.get(), 0);
-    }
-
-    #[test]
-    fn ax_find_without_window_identity_should_keep_global_capture() {
-        let global_calls = Cell::new(0);
-        let targeted_calls = Cell::new(0);
-        let request = parse_ax_find_payload(r#"{role:"AXButton"}"#).unwrap();
-
-        let snapshot = capture_ax_find_snapshot_with(
-            &request,
-            |_| {
-                global_calls.set(global_calls.get() + 1);
-                Ok(AxSnapshot::complete("global", Vec::new(), false))
-            },
-            |_, _| {
-                targeted_calls.set(targeted_calls.get() + 1);
-                Ok(AxSnapshot::complete("targeted", Vec::new(), false))
-            },
-        )
-        .unwrap();
-
-        assert_eq!(snapshot.platform, "global");
-        assert_eq!(global_calls.get(), 1);
-        assert_eq!(targeted_calls.get(), 0);
-    }
+    // capture 分发路由测试已随实现迁往 ax_query::capture 的 capture_routing_tests。
 }

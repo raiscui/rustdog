@@ -23,10 +23,7 @@ use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
-use crate::control_core::{
-    render_protocol_error_response,
-    render_structured_success_response,
-};
+use crate::control_core::{render_protocol_error_response, render_structured_success_response};
 use crate::control_frames::{ControlExecutionOutcome, ControlFrame, SaveFileFrame};
 
 use super::{
@@ -97,9 +94,15 @@ pub const RECORD_CONTROL_SCHEMA: &str = "rdog.record-control.v1";
 /// line-control 一侧的 recording 请求。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RecordRequest {
-    Start { profile: Profile, duration_ms: Option<u64> },
+    Start {
+        profile: Profile,
+        duration_ms: Option<u64>,
+    },
     Status,
-    Mark { label: Option<String>, redaction_active: bool },
+    Mark {
+        label: Option<String>,
+        redaction_active: bool,
+    },
     Stop,
     Cancel,
 }
@@ -161,10 +164,18 @@ impl RecordingHandler {
             .or_else(|| self.lifecycle.last_session())
     }
 
-    pub fn lifecycle(&self) -> &LifecycleManager { &self.lifecycle }
-    pub fn lifecycle_mut(&mut self) -> &mut LifecycleManager { &mut self.lifecycle }
-    pub fn delivery_mut(&mut self) -> &mut DeliveryManager { &mut self.delivery }
-    pub fn completed(&self) -> &HashMap<String, Bundle> { &self.completed }
+    pub fn lifecycle(&self) -> &LifecycleManager {
+        &self.lifecycle
+    }
+    pub fn lifecycle_mut(&mut self) -> &mut LifecycleManager {
+        &mut self.lifecycle
+    }
+    pub fn delivery_mut(&mut self) -> &mut DeliveryManager {
+        &mut self.delivery
+    }
+    pub fn completed(&self) -> &HashMap<String, Bundle> {
+        &self.completed
+    }
 
     /// 把 line-control 命令转换成 `ControlExecutionOutcome`。
     /// 必要时产出 `@savefile` + 终结 `@response`。
@@ -178,29 +189,43 @@ impl RecordingHandler {
         // by whichever request comes in next. Per issue #23.
         self.check_auto_stop();
         match request {
-            RecordRequest::Start { profile, duration_ms } => self.start(request_id, connection, profile, duration_ms),
+            RecordRequest::Start {
+                profile,
+                duration_ms,
+            } => self.start(request_id, connection, profile, duration_ms),
             RecordRequest::Status => self.status(request_id),
-            RecordRequest::Mark { label, redaction_active } => {
-                self.mark(request_id, connection, label, redaction_active)
-            }
+            RecordRequest::Mark {
+                label,
+                redaction_active,
+            } => self.mark(request_id, connection, label, redaction_active),
             RecordRequest::Stop => self.stop(request_id, connection),
             RecordRequest::Cancel => self.cancel(request_id, connection),
         }
     }
 
-    fn start(&mut self, request_id: Option<u64>, connection: ConnectionId, profile: Profile, duration_ms: Option<u64>) -> ControlExecutionOutcome {
+    fn start(
+        &mut self,
+        request_id: Option<u64>,
+        connection: ConnectionId,
+        profile: Profile,
+        duration_ms: Option<u64>,
+    ) -> ControlExecutionOutcome {
         // A new session invalidates the previous summary view.
         self.last_session_override = None;
         // If a previous timer is still around (shouldn't happen but be
         // defensive), cancel + join before starting fresh.
         self.cancel_auto_stop_timer();
         if let Some(active) = self.lifecycle.current() {
-            return protocol_error(request_id, 4101, json!({
-                "schema": RECORD_CONTROL_SCHEMA,
-                "kind": "record-start",
-                "error_code": "RECORDING_ALREADY_ACTIVE",
-                "recording_id": active.recording_id(),
-            }));
+            return protocol_error(
+                request_id,
+                4101,
+                json!({
+                    "schema": RECORD_CONTROL_SCHEMA,
+                    "kind": "record-start",
+                    "error_code": "RECORDING_ALREADY_ACTIVE",
+                    "recording_id": active.recording_id(),
+                }),
+            );
         }
         // Validate duration_ms before allocating the session record so
         // we fail fast on bad input. 0 is treated as "no duration" per
@@ -212,7 +237,9 @@ impl RecordingHandler {
         }
         let recording_id = generate_recording_id();
         let started_at = now_unix_ms();
-        let journal_path = self.journal_dir.join(format!("{recording_id}.journal.jsonl"));
+        let journal_path = self
+            .journal_dir
+            .join(format!("{recording_id}.journal.jsonl"));
         if let Err(err) = std::fs::create_dir_all(&self.journal_dir) {
             return io_error_outcome(request_id, &err);
         }
@@ -220,7 +247,14 @@ impl RecordingHandler {
             os: std::env::consts::OS.to_owned(),
             capture_backend: "auto".to_owned(),
         };
-        if let Err(err) = self.lifecycle.start(recording_id.clone(), profile, connection, journal_path, platform, started_at) {
+        if let Err(err) = self.lifecycle.start(
+            recording_id.clone(),
+            profile,
+            connection,
+            journal_path,
+            platform,
+            started_at,
+        ) {
             return lifecycle_outcome(request_id, &err);
         }
         // Spawn the auto-stop timer AFTER the session is registered so a
@@ -246,7 +280,12 @@ impl RecordingHandler {
     /// Spawn the auto-stop timer thread. The thread polls the shared
     /// flag every 100 ms and, on timeout, performs the auto-stop path
     /// (same as manual `stop` minus the framework response).
-    fn spawn_auto_stop_timer(&mut self, owner: ConnectionId, recording_id: String, duration_ms: u64) {
+    fn spawn_auto_stop_timer(
+        &mut self,
+        owner: ConnectionId,
+        recording_id: String,
+        duration_ms: u64,
+    ) {
         let flag = Arc::new(AtomicU8::new(AUTO_STOP_PENDING));
         let flag_clone = Arc::clone(&flag);
         let join = thread::spawn(move || {
@@ -313,50 +352,91 @@ impl RecordingHandler {
         success(request_id, &body)
     }
 
-    fn stop(&mut self, request_id: Option<u64>, connection: ConnectionId) -> ControlExecutionOutcome {
+    fn stop(
+        &mut self,
+        request_id: Option<u64>,
+        connection: ConnectionId,
+    ) -> ControlExecutionOutcome {
         // Cancel the auto-stop timer first so the worker thread does not
         // race with the manual stop path. Per issue #23.
         self.cancel_auto_stop_timer();
         if let Err(err) = self.delivery.check_record_stop(connection) {
             if let DeliveryError::Rejected(reason) = err {
                 if matches!(reason, DeliveryFailureReason::RateLimited) {
-                    return protocol_error(request_id, 4200, json!({
-                        "schema": RECORD_CONTROL_SCHEMA,
-                        "kind": "record-stop",
-                        "error_code": "DELIVERY_RATE_LIMITED",
-                    }));
+                    return protocol_error(
+                        request_id,
+                        4200,
+                        json!({
+                            "schema": RECORD_CONTROL_SCHEMA,
+                            "kind": "record-stop",
+                            "error_code": "DELIVERY_RATE_LIMITED",
+                        }),
+                    );
                 }
             }
         }
         let journal_path = match self.lifecycle.current_mut() {
             Some(s) if s.owner() == connection => s.begin_finalize(),
-            Some(_) => return protocol_error(request_id, 4102, json!({"error_code": "RECORD_NOT_OWNER"})),
-            None => return protocol_error(request_id, 4103, json!({"error_code": "RECORD_NO_ACTIVE_SESSION"})),
+            Some(_) => {
+                return protocol_error(request_id, 4102, json!({"error_code": "RECORD_NOT_OWNER"}))
+            }
+            None => {
+                return protocol_error(
+                    request_id,
+                    4103,
+                    json!({"error_code": "RECORD_NO_ACTIVE_SESSION"}),
+                )
+            }
         };
         let journal_path = match journal_path {
             Ok(p) => p,
             Err(err) => {
                 if let Some(session) = self.lifecycle.current_mut() {
-                    let _ = session.fail(FailureDetail { reason: FailureReason::FinalizeError, detail: err.to_string() });
+                    let _ = session.fail(FailureDetail {
+                        reason: FailureReason::FinalizeError,
+                        detail: err.to_string(),
+                    });
                 }
                 return lifecycle_outcome(request_id, &err);
             }
         };
-        let recording_id = self.lifecycle.current().map(|s| s.recording_id().to_owned()).unwrap_or_default();
-        let started_at = self.lifecycle.current().map(|s| s.started_at_unix_ms()).unwrap_or(0);
+        let recording_id = self
+            .lifecycle
+            .current()
+            .map(|s| s.recording_id().to_owned())
+            .unwrap_or_default();
+        let started_at = self
+            .lifecycle
+            .current()
+            .map(|s| s.started_at_unix_ms())
+            .unwrap_or(0);
         let flow = placeholder_flow();
-        let bundle = match write_bundle(&self.bundle_dir, &recording_id, started_at, &journal_path, &flow, 0) {
+        let bundle = match write_bundle(
+            &self.bundle_dir,
+            &recording_id,
+            started_at,
+            &journal_path,
+            &flow,
+            0,
+        ) {
             Ok(b) => b,
             Err(err) => {
                 if let Some(session) = self.lifecycle.current_mut() {
-                    let _ = session.fail(FailureDetail { reason: FailureReason::FinalizeError, detail: err.to_string() });
+                    let _ = session.fail(FailureDetail {
+                        reason: FailureReason::FinalizeError,
+                        detail: err.to_string(),
+                    });
                 }
-                return protocol_error(request_id, 4107, json!({
-                    "schema": RECORD_CONTROL_SCHEMA,
-                    "kind": "record-stop",
-                    "error_code": "BUNDLE_COMMIT_FAILED",
-                    "detail": err.to_string(),
-                }));
+                return protocol_error(
+                    request_id,
+                    4107,
+                    json!({
+                        "schema": RECORD_CONTROL_SCHEMA,
+                        "kind": "record-stop",
+                        "error_code": "BUNDLE_COMMIT_FAILED",
+                        "detail": err.to_string(),
+                    }),
+                );
             }
         };
         let summary = match self.lifecycle.complete_current() {
@@ -377,50 +457,90 @@ impl RecordingHandler {
             "trigger": summary.stop_trigger.as_ref().map(|t| t.as_str()),
         });
         let frame = savefile_for_bundle(&bundle, request_id);
-        let response = render_structured_success_response(request_id, &serde_json::to_string(&body).unwrap_or_else(|_| "{}".to_owned()));
-        ControlExecutionOutcome { outbound_frames: vec![ControlFrame::SaveFile(frame), ControlFrame::ResponseLine(response)] }
+        let response = render_structured_success_response(
+            request_id,
+            &serde_json::to_string(&body).unwrap_or_else(|_| "{}".to_owned()),
+        );
+        ControlExecutionOutcome {
+            outbound_frames: vec![
+                ControlFrame::SaveFile(frame),
+                ControlFrame::ResponseLine(response),
+            ],
+        }
     }
 
-    fn mark(&mut self, request_id: Option<u64>, connection: ConnectionId, label: Option<String>, redaction_active: bool) -> ControlExecutionOutcome {
+    fn mark(
+        &mut self,
+        request_id: Option<u64>,
+        connection: ConnectionId,
+        label: Option<String>,
+        redaction_active: bool,
+    ) -> ControlExecutionOutcome {
         let session = match self.lifecycle.current_mut() {
             Some(s) if s.owner() == connection => s,
-            Some(_) => return protocol_error(request_id, 4102, json!({"error_code": "RECORD_NOT_OWNER"})),
-            None => return protocol_error(request_id, 4103, json!({"error_code": "RECORD_NO_ACTIVE_SESSION"})),
+            Some(_) => {
+                return protocol_error(request_id, 4102, json!({"error_code": "RECORD_NOT_OWNER"}))
+            }
+            None => {
+                return protocol_error(
+                    request_id,
+                    4103,
+                    json!({"error_code": "RECORD_NO_ACTIVE_SESSION"}),
+                )
+            }
         };
         let label_value = label.unwrap_or_else(|| "mark".to_owned());
         if let Err(err) = session.mark(label_value.clone(), redaction_active) {
             return lifecycle_outcome(request_id, &err);
         }
-        success(request_id, &json!({
-            "schema": RECORD_CONTROL_SCHEMA,
-            "kind": "record-mark",
-            "recording_id": session.recording_id(),
-            "label": label_value,
-            "redaction_active": redaction_active,
-            "mark_count": session.mark_count(),
-        }))
+        success(
+            request_id,
+            &json!({
+                "schema": RECORD_CONTROL_SCHEMA,
+                "kind": "record-mark",
+                "recording_id": session.recording_id(),
+                "label": label_value,
+                "redaction_active": redaction_active,
+                "mark_count": session.mark_count(),
+            }),
+        )
     }
 
-    fn cancel(&mut self, request_id: Option<u64>, connection: ConnectionId) -> ControlExecutionOutcome {
+    fn cancel(
+        &mut self,
+        request_id: Option<u64>,
+        connection: ConnectionId,
+    ) -> ControlExecutionOutcome {
         // Cancel the auto-stop timer first so the worker thread does not
         // race with the manual cancel path. Per issue #23.
         self.cancel_auto_stop_timer();
         let recording_id = match self.lifecycle.current() {
             Some(s) if s.owner() == connection => s.recording_id().to_owned(),
-            Some(_) => return protocol_error(request_id, 4102, json!({"error_code": "RECORD_NOT_OWNER"})),
-            None => return protocol_error(request_id, 4103, json!({"error_code": "RECORD_NO_ACTIVE_SESSION"})),
+            Some(_) => {
+                return protocol_error(request_id, 4102, json!({"error_code": "RECORD_NOT_OWNER"}))
+            }
+            None => {
+                return protocol_error(
+                    request_id,
+                    4103,
+                    json!({"error_code": "RECORD_NO_ACTIVE_SESSION"}),
+                )
+            }
         };
         match self.lifecycle.cancel_current() {
             Ok(summary) => {
                 let summary = summary.with_trigger(StopTrigger::Manual);
                 self.last_session_override = Some(summary.clone());
-                success(request_id, &json!({
-                    "schema": RECORD_CONTROL_SCHEMA,
-                    "kind": "record-cancel",
-                    "recording_id": recording_id,
-                    "phase": "cancelled",
-                    "stop_trigger": summary.stop_trigger.as_ref().map(|t| t.as_str()),
-                }))
+                success(
+                    request_id,
+                    &json!({
+                        "schema": RECORD_CONTROL_SCHEMA,
+                        "kind": "record-cancel",
+                        "recording_id": recording_id,
+                        "phase": "cancelled",
+                        "stop_trigger": summary.stop_trigger.as_ref().map(|t| t.as_str()),
+                    }),
+                )
             }
             Err(err) => lifecycle_outcome(request_id, &err),
         }
@@ -489,7 +609,8 @@ impl RecordingHandler {
             .map(|s| s.started_at_unix_ms())
             .unwrap_or(0);
         let flow = placeholder_flow();
-        let bundle = match write_bundle(&self.bundle_dir, &rid, started_at, &journal_path, &flow, 0) {
+        let bundle = match write_bundle(&self.bundle_dir, &rid, started_at, &journal_path, &flow, 0)
+        {
             Ok(b) => b,
             Err(_) => {
                 if let Some(session) = self.lifecycle.current_mut() {
@@ -522,7 +643,12 @@ impl Drop for RecordingHandler {
     }
 }
 
-fn profile_name(profile: Profile) -> &'static str { match profile { Profile::Semantic => "semantic", Profile::Physical => "physical" } }
+fn profile_name(profile: Profile) -> &'static str {
+    match profile {
+        Profile::Semantic => "semantic",
+        Profile::Physical => "physical",
+    }
+}
 fn phase_name(phase: SessionPhase) -> &'static str {
     match phase {
         SessionPhase::Recording => "recording",
@@ -539,7 +665,9 @@ fn generate_recording_id() -> String {
     hasher.update(nanos.to_be_bytes());
     let digest = hasher.finalize();
     let mut out = String::with_capacity(20);
-    for byte in &digest[..10] { let _ = std::fmt::write(&mut out, format_args!("{byte:02x}")); }
+    for byte in &digest[..10] {
+        let _ = std::fmt::write(&mut out, format_args!("{byte:02x}"));
+    }
     format!("rec-{out}")
 }
 
@@ -556,7 +684,12 @@ fn savefile_for_bundle(bundle: &Bundle, request_id: Option<u64>) -> SaveFileFram
     let bytes = std::fs::read(&bundle.path).unwrap_or_default();
     SaveFileFrame {
         request_id,
-        filename: bundle.path.file_name().and_then(|n| n.to_str()).unwrap_or("bundle.rdogrec.tar").to_owned(),
+        filename: bundle
+            .path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("bundle.rdogrec.tar")
+            .to_owned(),
         mime: "application/vnd.rdog.recording-bundle".to_owned(),
         encoding: "base64".to_owned(),
         data: BASE64_STANDARD.encode(bytes),
@@ -568,20 +701,28 @@ fn savefile_for_bundle(bundle: &Bundle, request_id: Option<u64>) -> SaveFileFram
 
 fn success(request_id: Option<u64>, value: &Value) -> ControlExecutionOutcome {
     let body = serde_json::to_string(value).unwrap_or_else(|_| "{}".to_owned());
-    ControlExecutionOutcome::from_response_line(render_structured_success_response(request_id, &body))
+    ControlExecutionOutcome::from_response_line(render_structured_success_response(
+        request_id, &body,
+    ))
 }
 
 fn protocol_error(request_id: Option<u64>, code: i32, value: Value) -> ControlExecutionOutcome {
     let body = serde_json::to_string(&value).unwrap_or_else(|_| "{}".to_owned());
-    ControlExecutionOutcome::from_response_line(render_protocol_error_response(request_id, code, &body))
+    ControlExecutionOutcome::from_response_line(render_protocol_error_response(
+        request_id, code, &body,
+    ))
 }
 
 fn lifecycle_outcome(request_id: Option<u64>, err: &LifecycleError) -> ControlExecutionOutcome {
-    protocol_error(request_id, 4106, json!({
-        "schema": RECORD_CONTROL_SCHEMA,
-        "error_code": "RECORD_LIFECYCLE_ERROR",
-        "detail": err.to_string(),
-    }))
+    protocol_error(
+        request_id,
+        4106,
+        json!({
+            "schema": RECORD_CONTROL_SCHEMA,
+            "error_code": "RECORD_LIFECYCLE_ERROR",
+            "detail": err.to_string(),
+        }),
+    )
 }
 
 fn io_error_outcome(request_id: Option<u64>, err: &std::io::Error) -> ControlExecutionOutcome {
@@ -589,8 +730,11 @@ fn io_error_outcome(request_id: Option<u64>, err: &std::io::Error) -> ControlExe
         "schema": RECORD_CONTROL_SCHEMA,
         "error_code": "RECORD_IO_ERROR",
         "detail": err.to_string(),
-    })).unwrap_or_else(|_| "{}".to_owned());
-    ControlExecutionOutcome::from_response_line(render_protocol_error_response(request_id, 4110, &body))
+    }))
+    .unwrap_or_else(|_| "{}".to_owned());
+    ControlExecutionOutcome::from_response_line(render_protocol_error_response(
+        request_id, 4110, &body,
+    ))
 }
 
 /// Validate that `duration_ms` is within the accepted range. Returning
@@ -602,22 +746,30 @@ fn validate_duration(d: u64, request_id: Option<u64>) -> Option<ControlExecution
     const MIN_MS: u64 = 100;
     const MAX_MS: u64 = 3_600_000;
     if d < MIN_MS {
-        return Some(protocol_error(request_id, 4121, json!({
-            "schema": RECORD_CONTROL_SCHEMA,
-            "kind": "record-start",
-            "error_code": "DURATION_TOO_SMALL",
-            "min_ms": MIN_MS,
-            "got_ms": d,
-        })));
+        return Some(protocol_error(
+            request_id,
+            4121,
+            json!({
+                "schema": RECORD_CONTROL_SCHEMA,
+                "kind": "record-start",
+                "error_code": "DURATION_TOO_SMALL",
+                "min_ms": MIN_MS,
+                "got_ms": d,
+            }),
+        ));
     }
     if d > MAX_MS {
-        return Some(protocol_error(request_id, 4120, json!({
-            "schema": RECORD_CONTROL_SCHEMA,
-            "kind": "record-start",
-            "error_code": "DURATION_TOO_LARGE",
-            "max_ms": MAX_MS,
-            "got_ms": d,
-        })));
+        return Some(protocol_error(
+            request_id,
+            4120,
+            json!({
+                "schema": RECORD_CONTROL_SCHEMA,
+                "kind": "record-start",
+                "error_code": "DURATION_TOO_LARGE",
+                "max_ms": MAX_MS,
+                "got_ms": d,
+            }),
+        ));
     }
     None
 }
@@ -652,14 +804,17 @@ fn auto_stop_worker(flag: Arc<AtomicU8>, duration_ms: u64) {
 }
 
 fn not_implemented(request_id: Option<u64>, kind: &str) -> ControlExecutionOutcome {
-    protocol_error(request_id, 4109, json!({
-        "schema": RECORD_CONTROL_SCHEMA,
-        "kind": kind,
-        "error_code": "NOT_IMPLEMENTED",
-        "detail": "this record control variant is intentionally deferred",
-    }))
+    protocol_error(
+        request_id,
+        4109,
+        json!({
+            "schema": RECORD_CONTROL_SCHEMA,
+            "kind": kind,
+            "error_code": "NOT_IMPLEMENTED",
+            "detail": "this record control variant is intentionally deferred",
+        }),
+    )
 }
-
 
 use std::sync::{Mutex, OnceLock};
 
@@ -667,7 +822,9 @@ static RECORDING_HANDLER: OnceLock<Mutex<RecordingHandler>> = OnceLock::new();
 
 /// 全局注册一个 `RecordingHandler`。只能调用一次,daemon 启动时调用。
 pub fn install_recording_handler(handler: RecordingHandler) -> Result<(), RecordingHandler> {
-    RECORDING_HANDLER.set(Mutex::new(handler)).map_err(|h| h.into_inner().expect("just inserted"))
+    RECORDING_HANDLER
+        .set(Mutex::new(handler))
+        .map_err(|h| h.into_inner().expect("just inserted"))
 }
 
 /// 访问已安装的 handler。`None` 表示 daemon 还没初始化 recording 栈。

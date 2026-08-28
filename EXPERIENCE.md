@@ -485,6 +485,36 @@
 - 详见 [`docs/solutions/tooling-decisions/upstream-pi-macos-ops-cli-contract.md`](docs/solutions/tooling-decisions/upstream-pi-macos-ops-cli-contract.md)。
 - Pi JSONL v3 的 route、多轮和 `turnIndex` 兼容规则见 [`docs/solutions/conventions/pi-jsonl-v3-semantic-aggregation.md`](docs/solutions/conventions/pi-jsonl-v3-semantic-aggregation.md)。
 
+## [2026-08-18 21:00:00] [Session ID: 本会话] 全局 tracing subscriber 在并行测试中必须串行化
+
+- `tracing::subscriber::with_default` 切换的是进程全局 subscriber,不是测试局部状态。
+- 多个 trace 测试并行执行时会互相覆盖全局 subscriber,导致 trace 事件串到错误的 buffer,断言读到别的测试的输出。
+- 修复: 在测试模块顶层声明唯一 `static Mutex<()>` (如 `src/screenshot/tests.rs` 的 `TIMEOUT_TRACE_TEST_LOCK`),在 `capture_trace` helper 和直接使用 `with_default` 的测试入口各取一次锁,覆盖所有 `capture_with_timeout` 调用点;锁只影响 macOS 测试,不涉及产品代码。
+- 验证: `cargo test screenshot::tests::` → 30 passed, 0 failed, 1 ignored (live smoke 需 Screen Recording 权限)。
+- 与 `[2026-07-18 17:00:00]`「模块拆分会改变测试调度」条目同属"测试并行隔离"主题: 前者是进程级环境变量 (TMPDIR/HOME),本次是全局 tracing subscriber;两者都要求唯一共享锁,且锁必须放在共同祖先/模块顶层而非各测试各自创建。
+
+## [2026-08-19 14:30:00] [Session ID: 本会话] 新增用户级配置目录后,集成测试 spawn daemon 必须显式隔离环境
+
+- 场景: rdog 新增 `~/.rdog/<platform>.toml` 用户级配置目录后,daemon 配置查找分层变为 内置默认 → 用户目录 → cwd → env。
+- 集成测试 spawn `rdog daemon` 子进程会继承测试进程的真实 `HOME` 和 cwd;若测试不传 `--config`,daemon 会读到真实 `~/.rdog`(含 zenoh profile / local_default),导致:
+  - 期望 TCP daemon 的测试被 zenoh 配置污染 (transport 推断变化、行为漂移);
+  - 随机 daemon name 的测试可能在真实 registry/guard 留下残留。
+- 修复: 测试 spawn daemon 时显式 `.env("RDOG_ZENOH__ENABLED", "false")` (env 最高优先级,强制 TCP) 或 `--transport tcp`;zenoh 测试用 `-c <临时配置>` + 隔离 `XDG_STATE_HOME`。
+- 验证: 10 个集成测试文件 23 处 spawn 点加 env 隔离后,`cargo test -j 2 -- --test-threads=1` → 882 passed。
+- 证据缺口: 未验证 Windows / Linux 平台;`zenoh_router_client.rs` 未隔离 `XDG_STATE_HOME`,随机 daemon name 的 guard 仍会累积在真实 state (既有测试卫生问题,见 LATER_PLANS observations 治理条目)。
+- 与 `[2026-07-18 17:00:00]`「模块拆分会改变测试调度」同属"测试环境隔离"主题: 配置分层、环境变量、进程级状态都会让测试读到真实用户数据。
+
+## [2026-08-19 23:30:00] [Session ID: 本会话] 并发共享工作树的 commit 必须按主题拆分,不夹带他人账本
+
+- 场景: 多个会话在同一仓库工作树并行,各自修改不同模块 + 共享六文件 (`WORKLOG.md` / `task_plan.md` / `EXPERIENCE.md` 等)。
+- 错误做法: 用 `git add -A && git commit` 把所有未提交改动一次性入库;会把他人未审阅的代码、SPEC、账本条目混进一个 commit,无法干净 review 与 revert。
+- 正确做法:
+  - 提交前 `git status --short` 分类: 自己的主题改动 vs 他人主题改动 vs 共享账本。
+  - 仅 `git add` 自己主题的精确文件列表,共享账本与他人改动留给对应会话。
+  - commit message 担任"知识载体"角色: 包含设计契约摘要、测试矩阵、验证结论与端到端结果,而非把账本与代码混合。
+  - 脚本误伤的"半截改动" (如统一 `RDOG_ZENOH__ENABLED=false` 注入其他会话在改的文件) 不应带进本会话 commit,留给对应会话的完整 commit。
+- 验证: 2026-08-19 commit `155ec1f` 提交 14 个本会话纯主题文件,`git status` 确认其余改动 (observations 治理、共享账本、未跟踪 handoff) 仍属对应会话。
+- 与既有边界: `EXPERIENCE.md` 2026-07-18 测试隔离条目是"测试内部"的环境纪律,本条是"跨会话外部"的 commit 边界纪律。
 ## [2026-08-22 12:47:20] [Session ID: zcode-sess_fa3b551c] 积压核验处置 (2026-08-22 全量复盘)
 
 ### 已 Capture (新增指针)

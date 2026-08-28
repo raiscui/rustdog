@@ -10,7 +10,6 @@
 //! 录制功能按 specs 规划逐步接入主流程, 接入前允许 dead code, 避免
 //! 每次编译的 never-used 噪音掩盖真正的问题。
 #![allow(dead_code)]
-
 #![allow(missing_docs)]
 
 use std::{
@@ -35,7 +34,9 @@ pub enum RecorderError {
 impl fmt::Display for RecorderError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            RecorderError::Unavailable => f.write_str("recorder capture unavailable on this platform"),
+            RecorderError::Unavailable => {
+                f.write_str("recorder capture unavailable on this platform")
+            }
             RecorderError::PermissionMissing(name) => {
                 write!(f, "recorder permission missing: {name}")
             }
@@ -187,7 +188,9 @@ pub struct ShutdownSignal {
 impl ShutdownSignal {
     /// New signal in `false` state.
     pub fn new() -> Self {
-        Self { flag: AtomicBool::new(false) }
+        Self {
+            flag: AtomicBool::new(false),
+        }
     }
     /// Returns the shared `Arc<Self>` so the worker and owner can both clone.
     pub fn shared() -> Arc<Self> {
@@ -274,11 +277,11 @@ pub fn filter_self_event(user_data: u64, event: CaptureEvent) -> Option<CaptureE
 
 pub mod bundle;
 pub mod cli;
-pub mod humantime;
 pub mod control_handler;
-pub mod protocol;
 pub mod delivery;
+pub mod humantime;
 pub mod journal;
+pub mod protocol;
 pub mod session;
 
 #[cfg(target_os = "macos")]

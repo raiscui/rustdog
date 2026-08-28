@@ -822,3 +822,83 @@ zenoh router down / unixpipe broken / zenoh timeout 等场景.
 - 现象: 2026-08-09 复现 admin transport event 时, UDP-only daemon 持续输出 `ERROR zenoh::net::runtime::orchestrator: Unable to send Hello(...): Can't assign requested address (os error 49)`, 目标是 192.168.107.0 / 198.18.0.1 等 VPN/虚拟接口地址 (Zenoh 对所有网卡广播 scout Hello)。
 - 影响: 纯日志噪音, 不影响 discovery/control (真实接口 192.168.50.165 正常)。
 - 处理选项 (需要时): 调整 Zenoh multicast 接口配置 (`multicast.interface` 白名单) 或引入 per-module 日志过滤; 当前不值得做。
+
+## [2026-08-15 16:10:00] [Session ID: omx-1786607662650-pvvuyy] 待办: successor 产品级效率认证
+
+### 当前事实
+- 固定两条 TextEdit case 和 DeepSeek 的 3 x 2 policy matrix 已认证 consume-successor 减少 request 与 post-action evidence。
+
+### 未完成边界
+- 该结果不是 `workflows/macos-ops-interaction-efficiency.md` 定义的完整 6 x 8 产品 baseline,不能替代全模型认证或更新既有产品级 baseline。
+
+### 触发条件
+- 下一次共享 `@computer-act`、canonical skill、runner 分类或 macOS ops case 发生语义变化,且需要声明产品级交互效率收益时,运行完整 6 x 8 matrix 并以新的 immutable ledger 评审。
+
+## [2026-08-16 19:30:00] [Session ID: omx-1786607662650-pvvuyy] 更新: successor 产品级效率认证边界
+
+### 当前事实
+
+- 五个远程模型已经在固定两个 TextEdit policy case 上完成 3 x 2 paired certification。该范围的 successor no-worse request 和 post-action evidence 收益已有跨模型证据。
+
+### 仍未完成边界
+
+- 这不替代完整六模型八 case 产品 baseline。标准八 case prompt 也不含 successor policy treatment。
+
+### 触发条件
+
+- 需要把 successor policy 外推到完整 macOS ops 产品矩阵时，才以冻结输入重新运行完整门禁。
+
+
+## [2026-08-19 15:23:42] [Session ID: omx-1787115582924-n1rbi7] 待办: production observation root size/count 配额
+
+### 当前边界
+- 日期保留、活动 owner 保护、延迟物化和测试隔离已完成。
+- 当前没有真实生产 daemon-name churn 造成大量有效 store 的动态证据,因此不预设 size/count 淘汰顺序。
+
+### 触发条件
+- 监测到生产 daemon identity 持续变化,且 7 天 age retention 仍无法约束磁盘或目录数量时再实施。
+- 实施前必须量化 active/inactive store 分布,并保留现有 owner lock 和未知目录 fail-closed 保护。
+
+## [2026-08-19 15:37:17] [Session ID: omx-1787115582924-n1rbi7] 待办: 历史 recording E2E 临时目录治理
+
+### 当前事实
+- `$TMPDIR` 现有 60 个历史 `rdog-recording-e2e-*` 目录,来源早于本轮 panic cleanup guard。
+- guard 修复后的 recording E2E 前后计数均为 60,已停止新增。
+
+### 后续治理
+- 另行执行 dry-run,按目录年龄、进程归属和 bundle/journal 内容分类。
+- 只对可证明无活动 owner 的历史测试目录执行 quarantine-first 清理,不在 observations 任务中直接删除。
+## [2026-08-20 16:48:00] [Session ID: omx-1787115582924-n1rbi7] 待办: observation singleton 单测并行隔离
+
+### 当前事实
+- `cargo test -j 2 --bin rdog` 会让同一进程内的 observation 测试共享 64-entry singleton store。
+- 长时间 direct-ref mutation 测试执行期间,其他并行测试可驱逐它仍要使用的 observation;exact 单跑通过,full cargo test 在 resize/web-act 位置复现失败。
+- 项目标准 cargo-nextest 通过每测试进程隔离规避该问题,所以不阻塞 #54。
+
+### 建议
+- 后续专门整理 observation test seam,让需要 production global store 的测试使用可替换 store 或统一串行测试组。
+- 不要通过提高 `DEFAULT_MAX_OBSERVATIONS` 掩盖共享状态,容量语义仍应由显式 retention 测试验证。
+
+## [2026-08-26 18:24:18] [Session ID: current] A2A 语义借鉴方向(咨询结论, 未实施)
+
+- 若推进跨主机 agent 协作: 优先完成双向控制面 Phase 3(ControlFrame::Request +
+  daemon 主动发起), 再设计通用 task registry(状态机+进度帧+artifact), 认证层先行
+- 语义设计参考 A2A v1.0 的 AgentCard/Task/Artifact 模型; 不照搬 HTTP 传输
+- 对外互操作(让外部 A2A agent 委派任务给 rdog 主机)可后置为可选 gateway
+- 细节见 task_plan__a2a_research.md / notes__a2a_research.md
+
+## [2026-08-27 11:20:00] [Session ID: current] ax-split review 延后项
+
+双轴 review 判断项的处理记录 (2026-08-28 收尾):
+
+- (已完成 R1) postcondition 双分支收敛: press(target: &AxTarget) 类型级消除,
+  guarded core / press_sequence 注入参数同步收窄, wire 形状不变
+- (已完成 R3) ax_input Middle Man: type-text 投递策略 (模式分发 + Auto 回退链 +
+  错误命名) 自 macos.rs 迁入 ax_input/execute.rs, 平台路径注入, AxBackend 删除
+  type_text 方法
+- (保留, 认识已修正) report status/kind/action 转枚举: 实际字段是 &'static str
+  且 10 个同族 report 一致, 单结构体转枚举会制造孤例; 若做应是全族统一的
+  wire-schema sweep (serde rename 逐字锁定序列化输出), 作为独立事项排期
+- (已完成并移除) observe_current_ax_values_with / collect_ax_values_by_role
+  纯遍历部分已作为 collect_ax_role_values 收进 ax_query
+

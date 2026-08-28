@@ -788,7 +788,7 @@ fn resolve_ax_selector_candidates(
     include_explanations: bool,
 ) -> io::Result<Vec<serde_json::Value>> {
     let request = ax_find_request_from_selector(selector, limit);
-    let snapshot = crate::control_ax::capture_default_ax_snapshot(&request.tree)?;
+    let snapshot = crate::ax_query::capture_default_ax_snapshot(&request.tree)?;
     let response_json = crate::control_ax::build_ax_find_response_json(&snapshot, &request)?;
     let response: serde_json::Value =
         serde_json::from_str(&response_json).map_err(|err| io::Error::other(err.to_string()))?;

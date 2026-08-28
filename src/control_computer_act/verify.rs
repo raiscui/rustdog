@@ -23,10 +23,10 @@ use std::time::Instant;
 use crate::ax_diff::changes_first::decide_snapshot_changes;
 use crate::ax_diff::changes_first::SnapshotChangesDecision;
 use crate::ax_diff::diff::compute_diff;
-use crate::control_ax::{
+use crate::ax_query::{
     ax_window_id_from_backend_id, capture_current_ax_window_snapshot, capture_default_ax_snapshot,
-    query::matches_query, AxFindQuery, AxSnapshot, AxTreeRequest,
 };
+use crate::control_ax::{query::matches_query, AxFindQuery, AxSnapshot, AxTreeRequest};
 use crate::control_observation::{
     build_observe_bundle, resolve_observation_resource_epoch, ObserveRequest,
 };

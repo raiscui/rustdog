@@ -81,14 +81,14 @@ pub enum AxTreeScope {
 }
 
 // ---- was lines 102-106 ----
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
 pub struct AxPressRequest {
     pub target: AxTarget,
     pub postcondition: Option<AxPressPostcondition>,
 }
 
 // ---- was lines 108-113 ----
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
 pub struct AxPressPostcondition {
     pub role: String,
     pub expected_value: String,
@@ -102,14 +102,14 @@ pub struct AxPressSequenceRequest {
 }
 
 // ---- was lines 120-124 ----
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
 pub struct AxActionRequest {
     pub target: AxTarget,
     pub action: AxActionName,
 }
 
 // ---- was lines 126-134 ----
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
 pub enum AxActionName {
     Press,
     Open,
@@ -120,7 +120,7 @@ pub enum AxActionName {
 }
 
 // ---- was lines 153-158 ----
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
 pub struct AxSetValueRequest {
     pub target: AxTarget,
     pub value: String,
@@ -128,7 +128,7 @@ pub struct AxSetValueRequest {
 }
 
 // ---- was lines 160-165 ----
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
 pub struct AxFocusRequest {
     pub target: Option<AxTarget>,
     pub window_id: Option<String>,
@@ -136,7 +136,7 @@ pub struct AxFocusRequest {
 }
 
 // ---- was lines 167-172 ----
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
 pub struct AxScrollRequest {
     pub target: AxTarget,
     pub direction: AxScrollDirection,
@@ -144,7 +144,7 @@ pub struct AxScrollRequest {
 }
 
 // ---- was lines 174-180 ----
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
 pub enum AxScrollDirection {
     Up,
     Down,
@@ -153,7 +153,7 @@ pub enum AxScrollDirection {
 }
 
 // ---- was lines 193-197 ----
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
 pub enum AxValueSetMode {
     Replace,
     Append,
@@ -185,18 +185,29 @@ pub struct ClipboardRestoreStatus {
 }
 
 // ---- was lines 257-270 ----
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, serde::Deserialize)]
 pub struct AxTarget {
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", rename = "ref")]
     pub ref_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub observation_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub window_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub app: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub process: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub window_title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub role: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub subrole: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
 }
 

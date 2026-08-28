@@ -1,5 +1,6 @@
 use super::*;
 use crate::{
+    ax_query::{capture_semantic_target_snapshot, materialize_app_window_target},
     control_protocol::{KeyResponseMode, DEFAULT_KEY_HOLD_MS},
     control_window::resolve_unique_app_pid,
 };
@@ -578,48 +579,18 @@ pub(super) fn scroll(request: &AxScrollRequest) -> io::Result<AxScrollReport> {
     ))
 }
 
-pub(super) fn type_text(request: &TypeTextRequest) -> io::Result<TypeTextReport> {
-    ensure_trusted()?;
+// type-text 的投递策略 (模式分发 + Auto 回退链 + 错误命名) 已迁往
+// ax_input/execute.rs; 本文件只保留三条平台投递路径与信任检查。
 
-    match request.mode {
-        TypeTextMode::AxValue => type_text_via_ax_value(request),
-        TypeTextMode::TargetedKeyboard => type_text_via_targeted_keyboard(request),
-        TypeTextMode::Clipboard => type_text_via_clipboard(request),
-        TypeTextMode::Auto => match type_text_via_ax_value(request) {
-            Ok(report) => Ok(report),
-            Err(ax_err) if can_fallback_type_text_delivery(&ax_err) => {
-                match type_text_via_targeted_keyboard(request) {
-                    Ok(report) => Ok(report),
-                    Err(keyboard_err)
-                        if request.allow_clipboard
-                            && can_fallback_type_text_delivery(&keyboard_err) =>
-                    {
-                        type_text_via_clipboard(request)
-                    }
-                    Err(keyboard_err) => Err(remap_type_text_targeted_keyboard_error(keyboard_err)),
-                }
-            }
-            Err(ax_err) => Err(remap_type_text_ax_value_error(ax_err)),
-        },
-    }
-}
-
-/// 仅把“不支持此投递方式”作为 auto 的下一层尝试条件。
-/// 权限、IO 等失败必须原样返回,不能绕过用户或系统的安全边界。
-fn can_fallback_type_text_delivery(error: &io::Error) -> bool {
-    matches!(
-        error.kind(),
-        io::ErrorKind::InvalidInput | io::ErrorKind::Unsupported
-    )
-}
-
-fn type_text_via_ax_value(request: &TypeTextRequest) -> io::Result<TypeTextReport> {
+/// 把文本写入目标元素的 AXValue (经 set_value 的 Replace 模式)。
+pub(super) fn type_text_via_ax_value(request: &TypeTextRequest) -> io::Result<TypeTextReport> {
     let set_request = AxSetValueRequest {
         target: request.target.clone(),
         value: request.text.clone(),
         mode: AxValueSetMode::Replace,
     };
-    let report = set_value(&set_request).map_err(remap_type_text_ax_value_error)?;
+    // 错误命名 (remap) 由 ax_input 策略层统一施加, 平台路径返回原始错误。
+    let report = set_value(&set_request)?;
     Ok(TypeTextReport::ax_value_success(
         report.backend,
         report.target_id,
@@ -627,7 +598,9 @@ fn type_text_via_ax_value(request: &TypeTextRequest) -> io::Result<TypeTextRepor
     ))
 }
 
-fn type_text_via_targeted_keyboard(request: &TypeTextRequest) -> io::Result<TypeTextReport> {
+pub(super) fn type_text_via_targeted_keyboard(
+    request: &TypeTextRequest,
+) -> io::Result<TypeTextReport> {
     let target_id = resolve_live_target_id(&request.target)?;
     prepare_text_target(&target_id)?;
     let parsed = parse_target_id(&target_id)?;
@@ -638,7 +611,7 @@ fn type_text_via_targeted_keyboard(request: &TypeTextRequest) -> io::Result<Type
     ))
 }
 
-fn type_text_via_clipboard(request: &TypeTextRequest) -> io::Result<TypeTextReport> {
+pub(super) fn type_text_via_clipboard(request: &TypeTextRequest) -> io::Result<TypeTextReport> {
     if !request.allow_clipboard {
         return Err(invalid_input(
             "type-text clipboard 路径需要显式 `allow_clipboard:true`",
@@ -1602,7 +1575,7 @@ fn parse_target_id(target_id: &str) -> io::Result<ParsedTargetId> {
     Ok(ParsedTargetId { pid, root, path })
 }
 
-fn ensure_trusted() -> io::Result<()> {
+pub(super) fn ensure_trusted() -> io::Result<()> {
     if unsafe { AXIsProcessTrusted() } != 0 {
         return Ok(());
     }
@@ -1963,26 +1936,6 @@ mod tests {
             "unexpected error: {message}"
         );
     }
-
-    #[test]
-    fn type_text_auto_should_only_fallback_after_recoverable_delivery_errors() {
-        assert!(can_fallback_type_text_delivery(&io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "AXValue 不可写"
-        )));
-        assert!(can_fallback_type_text_delivery(&io::Error::new(
-            io::ErrorKind::Unsupported,
-            "AXValue 不支持"
-        )));
-        assert!(!can_fallback_type_text_delivery(&io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            "Accessibility 未授权"
-        )));
-        assert!(!can_fallback_type_text_delivery(&io::Error::other(
-            "CGEvent 传输失败"
-        )));
-    }
-
     #[test]
     fn build_final_ax_value_should_reject_append_when_current_value_is_unreadable() {
         assert_eq!(

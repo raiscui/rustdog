@@ -6,41 +6,52 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::{
-    control_invocation::{
-        resolve_control_invocation, send_control_lines_for_invocation,
-    },
-};
+use crate::control_invocation::{resolve_control_invocation, send_control_lines_for_invocation};
 
 /// CLI 5 个子命令的 high-level 视图, 由 input.rs 直接 derive。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RecordCommand {
-    Start { profile: String, duration_ms: Option<u64> },
+    Start {
+        profile: String,
+        duration_ms: Option<u64>,
+    },
     Status,
-    Mark { label: Option<String>, redaction_active: bool },
+    Mark {
+        label: Option<String>,
+        redaction_active: bool,
+    },
     Stop,
     Cancel,
 }
 
 pub type RecordCommandShared = crate::input::RecordCommandShared;
 
-
 /// 把 subcommand 翻译成对应 line-control 文本行 (无末尾 `\n`)。
 pub fn render_line(subcommand: &RecordCommand) -> Result<String, String> {
     let line = match subcommand {
-        RecordCommand::Start { profile, duration_ms } => {
+        RecordCommand::Start {
+            profile,
+            duration_ms,
+        } => {
             let profile_str = match profile.as_str() {
                 "semantic" | "physical" => profile.as_str(),
-                other => return Err(format!("`rdog record start` profile 必须是 semantic 或 physical,收到 {other}")),
+                other => {
+                    return Err(format!(
+                        "`rdog record start` profile 必须是 semantic 或 physical,收到 {other}"
+                    ))
+                }
             };
             let duration_field = match duration_ms {
                 Some(ms) => format!(",\"duration_ms\":{ms}"),
                 None => String::new(),
             };
             format!("@record-start:{{\"profile\":\"{profile_str}\"{duration_field}}}")
-        },
+        }
         RecordCommand::Status => "@record-status".to_owned(),
-        RecordCommand::Mark { label, redaction_active } => {
+        RecordCommand::Mark {
+            label,
+            redaction_active,
+        } => {
             let label_field = match label {
                 Some(value) => format!(",\"label\":\"{}\"", escape_json_string(value)),
                 None => String::new(),

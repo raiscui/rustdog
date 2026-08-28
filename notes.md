@@ -1,493 +1,691 @@
-## [2026-08-05 22:58:24] [Session ID: omx-1785926019233-oohizd] 笔记: native screenshot capture tracing 诊断
-
-### 现象
-
-- macOS `capture_with_timeout` 会在 native SCK 或 xcap 调用长期不返回时,以 `TimedOut` 结束控制面等待,并用单 worker gate 避免无限创建线程。
-- 现有路径没有结构化事件。daemon 日志无法区分 SCK 超时、正常 fallback、fallback 失败或 Screen Recording 权限拒绝。
-
-### 静态证据
-
-- `capture_primary_display_image` 与 `capture_all_display_images` 都先执行 Screen Recording preflight,再走 SCK,最后按非权限错误进入 xcap。
-- `capture_with_timeout` 是唯一的 native deadline 与 in-flight gate 边界。它知道 backend、timeout 和 timeout 原因,但不知道请求是 primary 还是 all-display。
-- `classify_capture_error` 已保证任一 backend 的 `PermissionDenied` 会覆盖为最终权限错误。权限不应继续 fallback。
-- `Cargo.toml` 只有 `log` / `fern`,没有能输出 structured fields 的 tracing subscriber。
-
-### 当前设计
-
-- 新增 `tracing` 与 `tracing-subscriber`,让新增事件沿用 `RDOG_LOG_LEVEL` 和已有 stderr/hidden-file 目标,不迁移既有 `log` 调用。
-- 共享 SCK -> xcap policy 负责 `fallback` 与终态事件。timeout helper 负责 timeout 原因,因为只有它能识别 worker deadline 和 in-flight gate。
-- 权限拒绝是终态类别,用 `screenshot_capture_permission_denied` 代替泛化 `screenshot_capture_failed`,避免同一请求重复记录两个终态错误。
-
-### 反证与边界
-
-- 备选方案是在 `map_capture_error` 直接记录。该函数没有 capture kind 或 fallback 上下文,会把同一次失败拆成无关联的重复日志,因此不采用。
-- 备选方案是只继续用 `log::warn!` 拼接文本。这无法按字段筛选 SCK timeout、fallback 与权限,不满足此次可观测性目标。
-
-### 外部 API 证据
-
-- `cargo info tracing@0.1.44`: 当前 crate 提供 application-level tracing。
-- `cargo info tracing-subscriber@0.3.23`: `fmt` subscriber 可输出 events。源码 `fmt::writer::BoxMakeWriter` 支持运行时选择 stderr 或 file writer。
-
-## [2026-08-06 15:06:56] [Session ID: omx-1785926019233-oohizd] 笔记: 全模型 macOS ops 与兼容性归因
-
-### 动态证据
-
-- 新 DeepSeek artifact: `/tmp/pi-rdog-macos-ops-deepseek-20260806-145902/suite-result.json`。`runCount:8`、`successCount:8`,8 个 case 均为 attempt 1 success。
-- 该 suite 记录的 canonical skill 是仓库内 `.codex/skills/rdog-control/SKILL.md`,SHA-256 为 `129aa820edbedaed787d7dd9397c9b69ffeaf74140edbc19c3031207dc97f5d2`。
-- 其余四个有效 suite 也均为 8/8。MiniMax-M3 与 MiniMax-M2.7-highspeed 的 `safari-new-tab-navigate` 为 attempt 2 success,其余 case 均首次成功。
-
-### 可恢复错误审计
-
-- 五个 suite 共记录多类非致命 `code:64`。所有 case 最终都有 real rdog call、fresh AX/window/URL verification 与 expected result,因此没有失败样本可归因为 rdog 兼容缺口。
-- `@window-find:Calendar`、`@window-find:Terminal`、`@window-find:TextEdit` 合计出现 3 次。静态代码显示 `parse_compact_fields` 已把无前缀 token 放入 positional,而 `parse_window_find_payload` 只消费 `app:` 与 `pid:` named field,随后报多余字段。
-- 最强备选解释是 canonical skill 已足以让模型快速改用对象请求。新 DeepSeek JSONL 支持该解释: `@window-find:Calendar` 报错后改用 `@window-find:{app:"Calendar"}` 并成功。
-
-### 决策
-
-- 不在本轮为上述自愈错误扩展 parser,避免改变 canonical skill hash 后重跑五模型完整矩阵。
-- `@window-find:APP` 作为低风险候选记录到 `LATER_PLANS.md`;若后续目标是降低每 case 的 recoverable protocol error,应在 parser 消费唯一 positional app 后添加回归测试,再完整重跑五模型矩阵。
-
-## [2026-08-07 00:19:24] [Session ID: omx-1786061963768-e7in9l] 笔记: macOS ops 交互步数优化工作流
-
-### 已确认的工作流目标
-
-- 主指标是每个 macOS ops 用例中的 agent 决策点与 rdog control 交互次数。
-- 真实 rdog 调用和新鲜 AX/window/URL 验证仍是成功成立的前提,不能为了减少步数而删除证据链。
-- 全部 8-case suite 的总运行时间不是当前主指标,只可作为后续观察项。
-- 第一版同时覆盖现有 8 个用例的基线优化,以及 runner 对未来用例的低交互路径约束。
-- 统计所有 agent 发出的 `rdog control` 请求,并将每个请求分类为必要证据或可消除开销;每个成功仍必须保留动作后的新鲜验证。
-- 禁止在 canonical skill 或 runner 中为特定 app、特定操作写固定序列。优化必须改善 rdog 的通用兼容性和控制难度,不能以局部 case 的技巧替代通用能力。
-- 遇到高交互轨迹时,先用真实控制记录确认通用摩擦点;优先复用或改进 rdog 共享 parser、协议或高密度 primitive。只有协议已足以表达意图时,才缩短 canonical skill 的通用决策路径。runner 只能测量和门禁,不能补偿协议缺口。
-- 开发阶段允许用定向样本诊断,但每次优化的最终认证必须重跑全部 5 个活动模型 × 8 个 case。全矩阵必须保持成功和新鲜证据,总 `rdog control` 请求数下降,并单列可恢复协议错误。
-- 矩阵总请求数下降时,个别 case 默认不得增加请求。唯一例外是新增请求被证明为不可替代的通用验证证据,并在比较报告中逐项说明。
-- 优化证据的单一事实来源是自动从每个 case 的原始 JSONL 与 suite result 生成的机器可读 interaction ledger。ledger 按模型、case、attempt 和请求记录命令、分类、证据路径与协议错误;Markdown 只能从 ledger 生成摘要。
-- 仅在共享 rdog control parser、协议、通用 primitive、canonical skill，或 macOS ops case 本身变更时触发完整 5 × 8 live matrix。普通无关改动不运行。
-- 自动完成基线采集、轨迹分类和通用改动候选分析。任何会改变 rdog 协议行为或 canonical skill 控制策略的补丁之前,必须向用户提供一次决策 brief;确认后再自动实现和完整矩阵认证。
-
-## [2026-08-07 00:19:24] [Session ID: omx-1786061963768-e7in9l] 笔记: interaction ledger 可用证据
-
-### 静态证据
-
-- 外部 runner 的每次尝试已保存 `pi-events.jsonl`、`pi-summary.json` 和 `run-result.json`。`pi-summary.json` 包含 agent 的 `toolCalls`、`toolResults`、`rdogCommands`、`rdogResponses` 与 `rdogResponseErrors`。
-- runner 自己的 setup、before/after verification 也通过 `run_rdog()` 发送控制请求,但它们不属于 agent 发起的请求,必须从 ledger 主指标排除。
-- 现有 summary 只收集含 `rdog control` 的 bash command 文本;为统计真正请求次数,ledger 实现必须从原始 tool call 确认每条 shell 命令中实际执行的 rdog invocation,而不能把 bash call 数直接当作请求数。
-
-### 尚待决定
-
-- 请求角色应仅按通用协议语义和相邻结果分类,未知项保持未知;禁止根据 app 名称、case id 或用户任务文本推断可消除性。
-- ledger 仅根据通用协议 verb、错误响应以及请求前后顺序标记 `query`、`action`、`post_action_evidence`、`recovery` 或 `unknown`。`unknown` 不是冗余的同义词,不得自动删除或降权。
-- 已认证 baseline ledger 必须不可变,并记录 rustdog commit、canonical skill SHA-256、runner/config/case 文件 hash、模型标识与运行时间。候选使用相同输入重跑完整矩阵,只有通过认证的候选才能成为新的 baseline。
-- 补丁前的唯一 brief 必须包含候选共享摩擦点、静态代码位置、跨模型/case 的触发轨迹数、按角色分组的请求差额、协议错误差额、预计影响面、原始 ledger 链接和批准/拒绝/暂缓决定。
-- 共享摩擦点必须同时具有共享 rdog/skill 层的静态代码证据,并在至少两个独立 `(模型, case)` 样本中重现同一通用意图或失败模式。单次样本只进入 ledger,不进入补丁候选。
-- canonical skill 已规定每个 bash 调用以 `rdog control` 开始。ledger 应将违反该通用调用契约的样本判为不可计量,并使认证 fail-closed,而不是用 shell/app 特例猜测请求数量。
-- 新增或语义变化的 macOS ops case 先独立建立 baseline,不得为全局请求数下降记功。未变化的 case 必须继续逐项对比旧 baseline。
-- immutable baseline 存入 `../pi-rdog-calculator-eval/results/macos-ops-interaction/<baseline-id>/`,包含 ledger、comparison manifest、摘要和每个 case 的原始 JSONL/source artifact 副本,并随外部评测仓库提交。
-
-## [2026-08-07 09:40:21] [Session ID: omx-1786061963768-e7in9l] 笔记: interaction ledger 动态验证修正
-
-### 现象
-
-- 完整 5 模型 x 8 case artifact 中出现普通 shell、`sleep ...; rdog control ...` 和一个工具调用前失败的 retry。
-- 5 个 suite 共计 40 个成功 case、41 个 attempt、260 个 agent 决策、252 个 rdog 请求和 8 个 supporting shell。
-
-### 上一假设不成立
-
-- 上一条“每个 bash 调用必须以 `rdog control` 开头,否则不可计量”的假设不成立。
-- 动态证据是归档 ledger 中 qwen3.7 的 1 个零成本失败 attempt,以及 8 个 supporting shell;若沿用旧规则会丢失真实成本或错误拒绝合法通用 shell 组合。
-
-### 当前结论
-
-- 所有 Pi bash tool call 是 `agentDecisionCount`;每个 bash 中唯一可识别的 `rdog control` invocation 是 `requestCount`。
-- 无 control 的 bash 是 `supporting_shell`;多个 control invocation 或不可解析 shell 仍失败关闭。
-- 规则只依赖 shell token、通用 verb、错误响应和调用顺序,未读取 app、case、prompt 或预期结果。
-
-## [2026-08-07 10:00:19] [Session ID: omx-1786061963768-e7in9l] 笔记: baseline 候选的静态安全筛选
-
-### 动态证据
-
-- `@cmd` 裸 payload 的同类 `code:64` 在 5 个 `(model, case)` 样本出现 6 次;`@window-find:APP` 在 2 个样本出现 2 次。
-- `@key.target` 在 4 个样本出现 4 次,`@ax-press.action` 在 2 个样本出现 3 次。
-
-### 静态证据与结论
-
-- `src/control_protocol.rs` 的 `cmd` 分支直接调用 `parse_quoted_payload`,但 `@cmd` 本身仍路由到既有 `ControlCommand::Script` shell lane。候选只处理 raw 单行文本,不引入新执行器。
-- `src/control_window.rs::parse_window_find_payload` 的 compact 分支只消费 named `app` / `pid`,然后 `ensure_empty`。唯一 positional atom 可无歧义映射为 app;查询仍是只读。
-- `src/control_protocol/parsers/key.rs` 将 targeted delivery 固定为显式 `delivery + pid/window_id`;不能把 heterogeneous `target` 猜成全局或定向输入。
-- `src/control_ax.rs::parse_ax_press_payload` 固定构造 AXPress,而 `parse_ax_action_payload` 对其它 allowlist action 做独立验证。不能无提示改变 command 语义。
-
-## [2026-08-07 10:10:51] [Session ID: omx-1786061963768-e7in9l] 笔记: parser 兼容实施的 raw payload 边界
-
-### 静态证据
-- `src/control_protocol.rs` 先以 `trim_end_matches(['\r', '\n'])` 保留正常输入行语义,但随后曾对拆出的 payload 执行全局 `trim()`。
-- `parse_cmd_payload()` 已拒绝 `\r` / `\n`,但没有原始输入就无法区分前导换行与正常空白。
-
-### 动态证据
-- 新增前导换行断言后,`rtk cargo nextest run --package rustdog --bin rdog -E 'test(parse_should_accept_raw_single_line_cmd_and_reject_ambiguous_payloads)' --no-capture` 在未修复时失败。
-- 将 `raw_payload` 只传给 `@cmd` 后,该测试通过。`@window-find:APP` 正向测试和 named/positional/multi-atom 拒绝测试也通过。
-
-### 结论
-- 已验证结论: 上游 payload trim 曾覆盖 raw `@cmd` 的单行校验,现已在共享分派入口修复。
-- 正常文本行末尾的 `\n` 仍在 `parse_control_line()` 入口剥离,这符合“按行解析”约定;命令 payload 内或前导的物理换行继续拒绝。
-- 改动不触及 shell executor、targeted key delivery、AX action 语义或特定 App 操作序列。
-
-### 全量验证
-- `cargo fmt -- --check`、`git diff --check` 通过。
-- `cargo nextest run --package rustdog --bin rdog`: 685 passed, 1 skipped。
-- `cargo build --package rustdog --bin rdog`: 0 errors, 17 warnings。warning 对应既有 cfg/dead-code 边界,不纳入本次共享 parser 修复。
-
-## [2026-08-07 10:46:53] [Session ID: omx-1786061963768-e7in9l] 笔记: interaction ledger 的 heredoc 计量缺口
-
-### 现象
-- candidate archive 在 MiniMax Safari retry 中停止,错误是 `shlex` 的 `No closing quotation`。
-
-### 验证
-- 原始 Pi bash tool call 使用 `<<'EOF'` heredoc 写入 handoff 文本;body 包含普通 apostrophe 和 `rdog control` 字样。
-- `bash -n` 对同一命令返回 0,Pi 的 tool result 不是 error。
-
-### 结论
-- 这是 ledger shell parser 的语法覆盖缺口。应泛化地跳过有明确 delimiter 的 heredoc body,而不是按 App、case 或固定 handoff 文本处理。
-- 计量器必须继续拒绝无法识别的复杂 heredoc,防止 body 内的文本伪造 control invocation。
-
-## [2026-08-07 10:53:54] [Session ID: omx-1786061963768-e7in9l] 笔记: Pi 与 runner 的 rdog 二进制 provenance
-
-### 现象
-
-- candidate artifact 中,本应被当前 parser 接受的 raw `@cmd` 与 positional `@window-find` 仍返回旧版 `code:64`。
-
-### 静态证据
-
-- `runner/run_macos_ops_eval.py::build_pi_env()` 只设置 `PI_CODING_AGENT_DIR` 与 `PI_TEST_MODE`,没有固定 `rdog` 可执行文件或 PATH 优先级。
-
-### 动态证据
-
-- 无 GUI 副作用的 Pi probe 实际执行 `command -v rdog && rdog --version && shasum -a 256 "$(command -v rdog)"`。
-- tool result 返回 `/Users/cuiluming/.cargo/bin/rdog` 与 SHA-256 `57eae7f8660c16c1abf2584f8072d8c083ab77219e1434e94cf774cbbf04c9ac`。
-- current `/Users/cuiluming/local_doc/l_dev/my/rust/rustdog/target/debug/rdog` 的 SHA-256 为 `db5cb9fde3afd4e6d7c54c1375af1578e450994e457ae72eb6c174fe9d0f39c7`。
-
-### 结论
-
-- 已验证: candidate 的 Pi bash tool 调用旧安装版。相同版本字符串 `rustdog 3.0.0` 不能证明二进制来源。
-- 修复应在 runner config / Pi child environment 上形成单一真相源,然后把解析到的真实路径和 SHA 写入每次 run artifact。不得修改 `~/.cargo/bin/rdog`,不得按模型、App 或 case 分支。
-
-## [2026-08-07 10:57:30] [Session ID: omx-1786061963768-e7in9l] 笔记: 修复后的 Pi binary probe
-
-### 验证命令
-
-- 通过 `run_macos_ops_eval.py::build_pi_env()` 启动与正式 runner 相同参数的 Pi,仅执行 `command -v rdog && rdog --version && shasum -a 256 "$(command -v rdog)"`。
-
-### 关键输出
-
-- `command -v rdog` 返回 `/Users/cuiluming/local_doc/l_dev/my/rust/rustdog/target/debug/rdog`。
-- shell 计算出的 SHA-256 是 `db5cb9fde3afd4e6d7c54c1375af1578e450994e457ae72eb6c174fe9d0f39c7`,与 config 指向的 current binary 一致。
-
-### 结论
-
-- 已验证: PATH 前置在 Pi bash runtime 中生效。上一轮 candidate 的二进制来源问题已被修复,但 interaction 改善仍须以新的完整 matrix 为准。
-
-## [2026-08-07 11:22:58] [Session ID: omx-1786061963768-e7in9l] 笔记: ledger 归档的二进制 provenance 门禁
-
-### 静态证据
-
-- `run_macos_ops_eval.py` 已把 config `rdogBinary` 的绝对路径和 SHA-256 写入每个 `run-plan.json`。
-- 原 `macos_ops_interaction.py` 只读取该字段,不验证其与 archive 时的 config 相同,所以旧 binary artifact 理论上仍能进入新 candidate。
-
-### 验证
-
-- 归档器现在从 config 重新计算 `rdogBinary` identity,并在构建每个 run ledger 前比较 source `run-plan.rdog` 的 path/SHA-256。
-- 纯文件回归覆盖正常归档、缺少 provenance 和 hash mismatch。`python3 -m unittest test_macos_ops_interaction.py` 为 10 passed;`python3 -m unittest test_run_macos_ops_eval.py` 为 27 passed;`ruff check runner` 通过。
-
-### 结论
-
-- provenance 是评测输入的一部分,不是只读展示字段。缺失或不一致时归档必须失败关闭,否则 requestCount 不能证明属于当前 rdog build。
-
-## [2026-08-07 16:39:13] [Session ID: omx-1786061963768-e7in9l] 笔记: parser compatibility 独立重复采样
-
-### 验证命令与关键输出
-
-- 两次独立 `runner/eval-macos-ops.sh all` 均完成 5 x 8 live matrix。归档器对每份 source `run-plan.json` 检查 current binary path 和 SHA-256。
-- repeat A: 40/40 成功,272 agent decisions,252 rdog requests,40 attempts,31 recovery,30 response errors。
-- repeat B: 40/40 成功,354 agent decisions,340 rdog requests,44 attempts,67 recovery,71 response errors。
-- current reference 与 A/B 的 rdog SHA-256、canonical skill SHA-256 和所有输入内容 hash 一致。manifest 中 skill 的绝对/相对 path 表示不同,对应 SHA-256 相同,不构成内容差异。
-
-### 结论
-
-- current reference 的 `243` requests 低于历史 baseline 的 `252`,但 A 回到 `252`,B 升至 `340`。三个 current-binary 样本的中位数为 `252`,没有严格低于历史 baseline。
-- repeat B 的高成本主要由 MiniMax-M3 (`101` requests) 和 MiniMax-M2.7-highspeed (`106` requests) 贡献。当前只有动态成本分布,没有足够证据把它归为 parser regression 或授权新的 parser/skill 兼容分支。
-- 已验证结论是: shared parser compatibility 的单轮收益不能表述为稳定交互效率改善。保留实现和原始 artifacts,不升级新的效率 baseline。
-
-## [2026-08-08 01:02:49] [Session ID: omx-1786061963768-e7in9l] 笔记: 稳定共享摩擦候选筛选
-
-### 动态证据
-
-- `@key` 对象 `target` 未知字段: 11 次,7 个独立 `(model, case)` 样本,3 轮;8 次紧接 recovery。
-- `@key` 对象 `keys` / `shortcut` 未知字段: 9 次,5 个独立样本,至少 2 轮;4 次紧接 recovery。
-- `@ax-press` 顶层 `action` 未知字段: 9 次,4 个独立样本,3 轮;9 次紧接 recovery。
-- 三类合计 29 个 response errors,21 次紧接 recovery。21 是暴露的可避免 recovery 上限,不是已验证收益。
-- App selector 多窗口歧义: 10 次,6 个独立样本,每次都进入 recovery;这是现有 fail-closed 唯一窗口不变量的正常保护。
-- AX/window locator stale: 11 次,6 个独立样本,每次都进入 fresh re-query 或 recovery;不能静默重绑。
-
-### 静态证据
-
-- `src/control_protocol/parsers/key.rs:41-175` 明确定义 `@key` 对象字段,没有 `target`、`keys`、`shortcut`;targeted delivery 需要显式 `delivery` 与 `pid` 或 `window_id`。
-- `src/control_ax.rs:1231-1325` 的 `@ax-press` parser 固定构造 AXPress;其它 action 由独立 `@ax-action` parser 处理。
-- `src/control_window.rs:718-760` 要求 app selector 的 fresh 查询返回唯一且可交互窗口;`src/control_window/macos.rs:1681-1690` 对过期 window index 明确 fail closed。
-- `.codex/skills/rdog-control/references/protocol.md:35-56` 有基础 `@key` 示例,但第 633 行引用 canonical `SKILL.md` 中不存在的 `Local Key Chords` 章节。
-
-### 判断
-
-- 建议批准的第一步是通用契约澄清: 在 canonical skill 中补齐 `@key` 对象字段、targeted delivery 约束,并明确 `@ax-press` 只表达 AXPress、其它 action 使用 `@ax-action`;同时修正 protocol reference 的断链。该方向不接受歧义字段,不改变 target、权限或 action 语义,也不写 App/case 操作序列。
-- 不建议批准 `target`、`keys`、`shortcut` 或通用 `action` parser alias。它们可能改变投递范围、把数组当 chord/sequence 猜测,或把 AXConfirm/AXShowDefaultUI 错路由为 press。
-- 暂缓自动修复 app 多窗口歧义和 stale locator。后续只能基于显式 durable selector/ref + `auto_refind` policy 设计,不能根据 app/case 文本猜目标。
-
-## [2026-08-08 01:48:00] [Session ID: omx-1786061963768-e7in9l] 笔记: key contract candidate 动态认证
-
-### 现象
-
-- 首次执行 matrix 在 setup 的 `prepare-open` 失败,`rdog control @ping` 显示没有 active managed local-default registry。
-- 使用仓库当前 binary 和 `rdog_macos.toml` 启动 daemon 后,同一 `@ping` 返回 `pong`,完整 matrix 随后可运行。
-
-### 验证
-
-- 5 个活动模型各完成 8/8,合计 40/40,全部为 attempt 1。
-- ledger 为 213 decisions、209 requests、20 response errors;current reference 为 258、243、25。
-- candidate 原始命令中 `@key target`、`@key keys`、`@key shortcut`、`@ax-press action` 的命中数均为 0。
-- 对输入兼容 current reference 做逐 `(provider, model, case)` 聚合后,有 9 个 case 请求数增加。
-
-### 结论
-
-- 已验证: 本轮样本消除了 decision brief 关注的两类语法漂移,并保持全部正确性证据。
-- 未验证: 单轮总请求下降不能证明稳定收益,因为逐 case 门禁已失败。
-- 按 workflow 拒绝 baseline promotion,保留 artifacts 供后续跨轮观察。该结论不授权新增 parser alias 或模型/App 特例。
-
-## [2026-08-08 23:50:00] [Session ID: omx-1786201921174-cvveb1] 笔记: outcome 三态 macOS live smoke + preexisting 中间档真实出现
-
-### 现象 (live evidence)
-
-第一次跑 `smoke_computer_act_verify.sh` test 3 (`verify:"best_effort" + wait 0ms`):
-
-真实 wire response (简化):
-```json
-{
-  "ok": true,
-  "outcome": "worked",
-  "verification": {
-    "method": "ax_diff",
-    "ax_diff": {
-      "changed": 0,
-      "elements_added": 1,
-      "elements_removed": 1,
-      "elements_modified": 0,
-      ...
-    },
-    "status": "preexisting",
-    "report": {
-      "elements": {
-        "pid:538/window:0/path:3.0.0": {"kind": "Added", "role": "AXGroup"},
-        "pid:86138/window:3/path:11.8.0.0": {"kind": "Removed", "role": "AXStaticText", "value": "速度"}
-      },
-      ...
-    }
-  }
+# 架构摩擦点探索笔记
+
+## [2026-08-20 12:30:00] 初步探索发现
+
+### 代码库规模
+- 137 个 Rust 源文件
+- 最大文件: control_ax.rs (122K), control_window.rs (76K), control_flow.rs (64K)
+- control_computer_act 模块总计约 5000 行代码
+
+### 热点模块初步观察
+
+#### 1. control_ax.rs (122K) - AX 查询与操作
+**表面职责**:
+- AX tree capture/query
+- AX action execution (press/scroll/focus/set_value)
+- 缓存 AX snapshot (observation-scoped)
+
+**观察到的边界**:
+- 既有 tree capture (`capture_ax_find_snapshot`, `capture_current_ax_window_snapshot`)
+- 又有 action execution (`perform_default_ax_press`, `perform_default_ax_action`)
+- 还有 cache 管理 (`AxObservationCache`, `ax_observation_cache()`)
+- 还有 parser (`parse_ax_tree_payload`, `parse_ax_press_payload`)
+
+**初步问题**:
+这是一个"胖模块"还是"深模块"? 需要看 interface complexity vs implementation complexity。
+
+#### 2. control_observation.rs (53K) - Observation 生命周期
+**表面职责**:
+- 内存 ObservationStore (TTL-based, LRU eviction)
+- Durable observation store (JSONL 落盘)
+- Ref registry (observation-local ref ↔ backend id)
+- Resource epoch snapshot (capture-start 版本)
+
+**观察到的边界**:
+- ObservationStore (内存) + JsonlDurableObservationStore (磁盘) 是两套真相源
+- resource epoch 的 **capture-start snapshot** 存在 ObservationStore
+- 但 resource epoch 的 **全局可变版本** 在 control_resource_lane.rs
+
+**初步问题**:
+- ObservationStore 保存 `resource_epochs: HashMap<String, ResourceEpochSnapshot>` (line 99)
+- control_resource_lane.rs 保存 `epochs: Mutex<HashMap<String, u64>>` (全局版本)
+- 为什么 epoch 真相源分散在两个模块?
+
+#### 3. control_resource_lane.rs (短文件) - Resource 串行化
+**表面职责**:
+- 同 PID 资源的 mutation 串行执行
+- dispatch 前/后双递增 write epoch (奇数=进行中, 偶数=完成)
+- stale epoch 拒绝
+
+**观察到的设计**:
+```rust
+struct ResourceCoordinator {
+    lanes: Mutex<HashMap<String, Arc<Mutex<()>>>>,  // per-resource lock
+    epochs: Mutex<HashMap<String, u64>>,            // 全局版本
 }
 ```
 
-### 综合发现
+**初步问题**:
+- `epochs` 是单一真相源，但为什么 ObservationStore 也要保存 `resource_epochs`?
+- ObservationStore 的 epoch 是 **capture-start 时的快照**，用于后续 stale 校验
+- 这个设计看起来合理，但跨模块的 epoch 语义需要理解成本
 
-#### outcome 三态 decision table 真实有效
+#### 4. control_computer_act/mod.rs (44K) - Meta-command dispatcher
+**表面职责**:
+- 13 个 Mano-CUA action 路由到底层 primitive
+- implicit_observe (ticket 11)
+- verify 三档 (ticket 12-14)
+- error envelope E2 (ticket 15)
+- timeout/density/trace (ticket 16-18)
 
-| dispatch_ok | verify_requested | verify_ran | verify_passed | outcome | 真实出现? |
-|-------------|------------------|------------|---------------|---------|-----------|
-| true | false | - | - | worked | test 1 / test 2 (默认 verify=None) |
-| true | true | true | true | worked | test 4 (verify=always, changed=12) / test 3 第一次跑 (status=preexisting) |
-| true | true | true | false | didnt | test 3 第二次跑 (verify_passed=false) |
-| true | true | false | - | unknown | (未出现, 需要 verify timeout) |
-| false | - | - | - | unknown | test 5 (verify:"bogus" → invalid_verify error envelope, outcome 不写入) |
+**观察到的结构**:
+```
+mod.rs (44K)
+  ├─ implicit_observe.rs (26K)
+  ├─ verify.rs (32K)
+  ├─ error_envelope.rs (19K)
+  ├─ timeout.rs (8K)
+  ├─ density.rs (7K)
+  ├─ trace.rs (11K)
+  └─ outcome.rs (8K)
+```
 
-#### verification.status 三档真实出现
+**初步问题**:
+- mod.rs 仍然 44K，即使拆出了 7 个子模块
+- 这是"真的复杂"还是"还可以进一步拆分"?
 
-- "failed": test 3 第二次跑 (verify_passed=false, ax_diff 全 0)
-- "preexisting": test 3 第一次跑 (changed=0 + morphed=2, OS 背景变化)
-- "verified": (未直接出现, 需要 action 真生效的 case; wait 0ms 不会改 GUI, 但 verify=always 触发了 method="full" 路径不走 status)
+#### 5. ax_diff/ 模块 - AX snapshot diff
+**表面职责**:
+- 规范化 AX snapshot (移除 observation/ref/ax_path 噪音)
+- 结构化 diff (window + element 两阶段配对)
+- changes_first.rs - trusted changes decision (Phase Pi 借鉴)
 
-#### smoke 期望错误 (设计 bug)
+**观察到的设计**:
+- `compute_diff()` 在 diff.rs
+- `trusted_changes_decision()` 在 changes_first.rs
+- 两者都依赖 normalize.rs 的规范化
 
-`smoke_computer_act_verify.sh` test 3 期望 `outcome:"didnt"`, 但真实 macOS 上 wait 0ms 期间 OS 背景会让 AX diff 出现 1 add + 1 remove → verify_passed=true → outcome:"worked" + status:"preexisting".
+**初步问题**:
+- changes_first 是 "diff 的变体" 还是 "diff 的消费者"?
+- 如果是变体，为什么不是 diff.rs 的一个函数?
+- 如果是消费者，为什么在同一个模块?
 
-Phase F-2 时代假设 "wait 0ms + verify best_effort = GUI 完全不变 = outcome:didnt", 实际 wait 0ms 不保证 AX tree 不变 (其他进程增减 element).
+### 下一步探索方向
+1. **deletion test**: 如果删除 AxObservationCache，复杂度去哪了?
+2. **测试覆盖**: control_ax.rs 的 action execution 是否容易测试?
+3. **模块边界**: observation epoch 分散在 ObservationStore 和 ResourceCoordinator，是必然还是泄漏?
 
-修法: smoke 改成枚举匹配 (outcome 三态之一 + verification.status 三档之一), 锁 wire contract 不锁特定值. 特定值 regression 由 outcome.rs 7 个单测抓.
+## [2026-08-20 12:45:00] 深入分析：识别到的摩擦点
 
-#### daemon TCC 权限 OK
+### 摩擦点 1: control_ax.rs - 浅模块警告
+**位置**: `src/control_ax.rs` (122K, 53 个公开函数)
 
-daemon 日志 (`/var/folders/.../computer-act-verify-smoke-XXXX*/computer-act-verify-smoke-daemon.log`) 无 TCC warning. verify_ms=955-1023ms 不是 0, AX diff 真出来 (pid:538 加 element, pid:86138 减 element). Accessibility TCC 权限已授权.
+**摩擦类型**: 浅模块 - interface 复杂度接近 implementation 复杂度
 
-### 结论
+**具体问题**:
+1. **过多的公开 parse 函数** (17+):
+   - `parse_ax_tree_payload()`
+   - `parse_ax_press_payload()`
+   - `parse_ax_press_sequence_payload()`
+   - `parse_ax_action_payload()`
+   - `parse_ax_set_value_payload()`
+   - `parse_ax_focus_payload()`
+   - `parse_ax_scroll_payload()`
+   - `parse_type_text_payload()`
+   - ...
 
-- outcome 三态 decision table 5 行全部实证, 包括 "preexisting" 这一之前设计时顾虑会不会真实出现的中间档. 现在确认 "preexisting" 是真实有效的 wire 档位, 让 client 能区分 "动作真生效" vs "AX 拓扑变了但 field 没变".
-- smoke 期望锁 wire contract 不锁特定值是更鲁棒的设计哲学.
-- macOS TCC 权限 (accessibility) 已授权, AX capture 真实跑.
+2. **过多的公开 perform 函数** (10+):
+   - `perform_default_ax_press()`
+   - `perform_default_ax_press_with_postcondition()`
+   - `perform_default_ax_press_sequence()`
+   - `perform_default_ax_action()`
+   - `perform_default_ax_set_value()`
+   - `perform_default_ax_focus()`
+   - `perform_default_ax_scroll()`
+   - `perform_default_key_delivery()`
+   - `perform_default_type_text()`
+   - ...
 
-## [2026-08-09 00:30:00] [Session ID: omx-1786201921174-cvveb1] 笔记: outcome 三态 + verification.status 全部档位实证
+3. **过多的公开 capture 函数** (5+):
+   - `capture_ax_find_snapshot()`
+   - `capture_current_ax_subtree()`
+   - `capture_current_ax_window_snapshot()`
+   - `capture_default_ax_snapshot()`
+   - `capture_semantic_target_snapshot()`
 
-### 现象
+4. **过多的公开 resolve 函数** (3+):
+   - `resolve_cached_ax_tree()`
+   - `resolve_cached_ax_get()`
+   - `resolve_current_ax_target_rect()`
 
-跑 dead_code cleanup 时跑 smoke, 真实 macOS live evidence:
+**影响**:
+- 调用方需要知道 "哪个 parse 对应哪个 perform"
+- 调用方需要知道 "什么时候用 capture_default 还是 capture_current_window"
+- 调用方需要知道 "什么时候用 cached 还是直接 capture"
+- 53 个公开函数意味着理解成本高，测试矩阵大
 
-- outcome 三态 decision table 5 行 → 实证 4 行 (剩 `unknown` 需要 verify timeout 触发):
-  | dispatch_ok | verify_req | verify_run | verify_pass | outcome | 实证 |
-  |-------------|------------|------------|-------------|---------|------|
-  | true | false | - | - | worked | test 1/2 (默认 verify=None) |
-  | true | true | true | true | worked | test 3 (OS 真实变化) / test 4 (verify=always, changed=12) |
-  | true | true | true | false | didnt | test 3 (verify_passed=false) |
-  | true | true | false | - | unknown | (未实测, 需 verify timeout) |
-  | false | - | - | - | unknown | test 5 (verify:"bogus" → invalid_verify error envelope) |
+**深化机会**:
+将 control_ax 拆分为 3 个独立模块：
+1. **ax_query** - 只负责 AX tree capture/query/cache (10 functions)
+2. **ax_action** - 只负责 AX action execution (10 functions)  
+3. **ax_input** - 只负责 keyboard/type input (5 functions)
 
-- verification.status 三档 → 全部实证:
-  | status | 决策 | 实证 |
-  |--------|------|------|
-  | verified | modified > 0 | test 3 (Zap spinner 字符 + button rect 变化, changed=5) |
-  | preexisting | modified == 0 + morphed > 0 | test 3 (changed=0 + morphed=2, AX 拓扑变但 field 没变) |
-  | failed | all zero | test 3 (verify_passed=false, ax_diff 全 0) |
+或者更激进：提供统一入口
+```rust
+pub fn execute_ax_command(command: AxCommand) -> io::Result<AxResult>
+```
+内部根据 `AxCommand` 枚举分发，而不是暴露 53 个独立函数。
 
-### 综合发现
+### 摩擦点 2: Observation Epoch 的双重真相源
+**位置**: 
+- `src/control_observation.rs::ObservationStore` (line 99)
+- `src/control_resource_lane.rs::ResourceCoordinator` (line 45)
 
-- outcome 三态 + status 三档**所有档位**都在真实 macOS live 出现过, decision table 设计正确 (包括之前顾虑的 "preexisting" 中间档).
-- smoke run-to-run outcome 不稳定 (OS 状态决定 outcome 值), 这正是把 smoke 期望改成枚举匹配的根本原因: 锁 wire contract 不锁特定值, 鲁棒 + 不丢失 verification evidence.
+**摩擦类型**: 紧耦合泄漏 - 职责边界不清晰
 
-## [2026-08-09 01:48] TextEdit MAIN_DOC + @window-resize 600x400 — 工具预算 80% 触发 graceful handoff
+**具体问题**:
+观察到两套 epoch 存储：
 
-### 状态 (one-line)
+**ResourceCoordinator** (全局可变版本):
+```rust
+struct ResourceCoordinator {
+    epochs: Mutex<HashMap<String, u64>>,  // 单一真相源
+}
+```
 
-TextEdit pid:6586/window:0 focused+contains MAIN_DOC; @window-resize + fresh verify 待续.
+**ObservationStore** (capture-start 快照):
+```rust
+struct StoredObservation {
+    resource_epochs: HashMap<String, ResourceEpochSnapshot>,  // 快照副本
+}
+```
 
-### 不完整 handoff envelope
+还有第三个缓存层：
+**AxObservationCache** (line 54 in control_ax.rs):
+```rust
+struct AxObservationCacheEntry {
+    resource_epochs: HashMap<String, u64>,  // 又一个快照副本
+    snapshot: AxSnapshot,
+}
+```
 
-**任务**:
-打开 TextEdit, 在主窗口输入 'MAIN_DOC', `@window-resize` 把窗口缩到 600x400, 验证 window 状态 (rect + title 仍 OK), 窗口内文本仍是 'MAIN_DOC'.
+**为什么这是摩擦**:
+1. 开发者需要理解 3 个地方的 epoch 语义差异：
+   - ResourceCoordinator: 全局当前版本
+   - ObservationStore: observation 创建时的版本
+   - AxObservationCache: AX snapshot 创建时的版本
 
-**verify method**: window_state_and_ax_read
-**expected**: TextEdit AXWindow rect={width:600,height:400}, AXTextArea 含 'MAIN_DOC'
+2. 注释说 "observation store 才是资源 epoch 的单一真相源" (control_ax.rs line 75)
+   但实际 ResourceCoordinator 才是真正的全局版本
 
-### 已完成 (fresh proof 都在 rdog control 真实 stdout 里)
-
-1. `rdog control @ping` → `@response "pong"` ✅ (unixpipe fast path)
-2. `rdog control @ping @capabilities#1` → 11/11 capability available, status=complete ✅
-3. `rdog control '@window-find:TextEdit'` → 6 个未命名窗口, @e1 = `pid:6586/window:0` title="未命名6" rect={x:1828,y:96,width:586,height:476}, frontmost=true, interactable=true ✅
-4. `rdog control '@window-activate:{window_id:"pid:6586/window:0"}'` → status=ok, verify={focused:true,frontmost:true}, elapsed_ms=43 ✅
-5. `rdog control '@ax-find:{window:{window_id:"pid:6586/window:0"},role:"AXTextArea",limit:5}'` → 1 match, id=`pid:6586/window:0/path:0.0`, **value="MAIN_DOC"** ✅
-
-### 已观察到的事实边界
-
-- TextEdit 当前 6 个未命名窗口都是 frontmost=true, 需用 window_id 唯一定位
-- @e1 (`pid:6586/window:0`, "未命名6") 是当前选定的主窗口, 已 activate + focused
-- AXTextArea.value 已经是 "MAIN_DOC" — 这是 fresh `@ax-find` 读到的真实 GUI 状态, 不是 self-report
-- AXTextArea rect = {x:1828,y:184,width:586,height:388} (相对窗口内容区)
-- 窗口当前 rect = 586x476, 任务目标 600x400
-
-### 剩余工作 (next-agent 必须做)
-
-1. **查 `@window-resize` 协议语法**:
-   - 入口: `references/protocol.md` 搜 `window-resize` 或 `WindowSize`
-   - 预期字段: `{window_id, size:{width,height}}` 或 `{target, size}`
-   - 在执行 resize 前**必须**先看到 syntax example, 不能猜
-
-2. **执行 `@window-resize`**:
-   ```bash
-   rdog control '@window-resize:{window_id:"pid:6586/window:0",size:{width:600,height:400}}'
-   # 或实际 syntax, 见协议
+3. 跨模块调用链：
    ```
-   必须 `@response` 含 `status:ok` 且 verify 通过 (resize 真正生效)
+   capture_resource_epochs()  // control_resource_lane
+     → record_observation()   // control_observation
+       → insert(snapshot)     // control_ax AxObservationCache
+   ```
 
-3. **Fresh verify 三件套** (按 verify method 顺序):
-   - `rdog control '@window-find:TextEdit'` → 重新拿 window_id (refs 可能已变, 不要复用)
-   - 用新 window_id 跑 `@ax-find` AXWindow, 读 rect 必须 = {width:600, height:400}, title 仍是 "未命名6"
-   - 用新 window_id 跑 `@ax-find` AXTextArea, value 必须 = "MAIN_DOC"
-   - 三件全 OK 才算 verify pass
+**影响**:
+- 理解 observation 生命周期需要跨 3 个模块
+- 新开发者容易混淆 "当前 epoch" vs "capture-start epoch"
+- 测试需要同步 3 个地方的 epoch 状态
 
-4. **报告**:
-   - 三件 verify 结果贴原始 stdout (含 `@response` 完整 JSON)
-   - 明确标"verify pass"或"verify fail", 不能模糊
+**深化机会**:
+将 epoch 管理集中到 ResourceCoordinator，其他地方只保存 `EpochSnapshot { resource_key, epoch, captured_at }` 不可变快照。
 
-### Next-agent starting position
+或者：将 ObservationStore 的 `resource_epochs` 字段改为 `EpochCapture` 类型（opaque），不暴露内部 HashMap，强制通过 ResourceCoordinator API 查询。
 
-- cwd: `/Users/cuiluming/local_doc/l_dev/my/rust/rustdog`
-- 当前 iteration 已用 6/8, handoff 是因为预算触发, 不是任务完成
-- **不要重复已完成的工作** (ping / window-find / window-activate / ax-find 都已 fresh, 直接用)
-- 也不要"为了完成" 跳过 verify — verify 是任务的硬性部分
-- 如果 `@window-resize` 报 resize 后文本丢失, **不要**自己 clear+retype, **停下来**报告这是 regression
-- 完整事实已留在本 notes 段, 下个 agent 读这一段就能继续
+### 摩擦点 3: 两套 Observation Cache (implicit vs explicit)
+**位置**:
+- `src/control_computer_act/implicit_observe.rs::ComputerActObservationCache`
+- `src/control_ax.rs::AxObservationCache`
 
-### 不要做的事
+**摩擦类型**: 缺少 locality - 相似功能分散
 
-- ❌ 不要把"输入 MAIN_DOC"再做一次 (已 fresh verified 在 AXTextArea.value)
-- ❌ 不要 pipe `@response` 到 jq/grep/tail (跟 profile 规则冲突)
-- ❌ 不要用 `app:TextEdit` 跑 resize (必须用 window_id, 6 窗口要唯一定位)
-- ❌ 不要复用旧的 @e1 ref 跨 daemon restart (refs 是 short-lived)
+**具体问题**:
 
-## [2026-08-11 14:38:00] [Session ID: omx-1786429420551-ysl4w1] 上游 Pi 包结构确认
+**ComputerActObservationCache** (implicit_observe.rs):
+- TTL: 5 秒
+- 用途: `@computer-act` 的 implicit observe
+- 存储: `observation_id → (ref_id, created_at_ms)`
+- 容量: 64 条
 
-### 来源
-- `/Users/cuiluming/Library/pnpm/pi`
-- `/Users/cuiluming/Library/pnpm/global/5/node_modules/@earendil-works/pi-coding-agent/package.json`
-- `pnpm view @earendil-works/pi-coding-agent@0.84.1 repository homepage version dist.tarball --json`
+**AxObservationCache** (control_ax.rs):
+- TTL: 无明确 TTL (依赖 ObservationStore 的 300s?)
+- 用途: `@ax-tree` / `@ax-get` 的缓存查询
+- 存储: `observation_id → (snapshot, resource_epochs, content_hash)`
+- 容量: 64 条
 
-### 事实
-- `/Users/cuiluming/Library/pnpm/pi` 是 pnpm 生成的 POSIX 启动脚本,执行全局安装包的 `dist/cli.js`。
-- 当前全局包版本是 `0.84.1`。
-- 上游源码仓库是 `https://github.com/earendil-works/pi`,包目录是 `packages/coding-agent`。
-- 包要求 Node `>=22.19.0`;当前环境 Node `v24.18.0`。
-- 旧 `~/.pi/agent/models.json` 中的 `toolUseProfiles` / `extensions` 不能直接视为上游支持的配置契约,应先做源码级能力盘点。
+**为什么这是摩擦**:
+1. 两套缓存都用 `observation_id` 作为 key
+2. 两套缓存都有 64 条容量上限
+3. 两套缓存都有 FIFO eviction
+4. 但 TTL 不同（5s vs 300s）
+5. 用途重叠：都是为了避免重复 capture
 
-### 当前建议
-- clone 上游仓库到独立工作树,固定 commit/tag 后在 `packages/coding-agent` 开发。
-- 先迁移 macOS ops 所需最小路径,用请求体 diff 和单 case canary 验证新旧 Pi 链路一致,再决定是否跑完整矩阵。
+**影响**:
+- 开发者需要知道 "什么时候用哪个 cache"
+- `@computer-act` 用 implicit cache，`@ax-tree` 用 explicit cache
+- 如果 implicit observe 生成的 observation_id 也想 cache AX snapshot，需要同时写两个 cache
 
-## [2026-08-11 15:31:00] [Session ID: omx-1786429420551-ysl4w1] upstream Pi 迁移与现有 macOS ops runner 的差异
+**深化机会**:
+统一为一个 `ObservationCache`，支持多种 TTL policy：
+```rust
+enum CachePolicy {
+    ComputerAct { ttl_ms: 5000 },
+    Progressive { ttl_ms: 300000 },
+}
 
-### 静态证据
-- `runner/run_macos_ops_eval.py::load_config()` 把 `toolUseProfiles`、模型 `toolUseProfile` 和 `generation.temperature` 作为硬校验条件。
-- `build_pi_command()` 当前只传 `--no-extensions`,没有 upstream 迁移后必须显式固定的 `--no-skills --skill <canonical> --tools bash,read`。
-- 已认证 `macos-ops-20260807-live-5x8` baseline 中 DeepSeek 8 case 均为 success。
-- `workflows/macos-ops-interaction-efficiency.md` 的 6 x 8 全成功要求,触发范围是 rdog 协议、canonical skill 或 case 变化;本轮只迁移 Pi 和 runner,不修改这些共享控制面。
-
-### 推导的迁移验收边界
-- upstream Pi 迁移必须新增独立 config schema,以隔离 `PI_CODING_AGENT_DIR`、原生 `providers`、`samplingParams` 和 CLI 资源 allowlist 为单一真相源。
-- local mock provider 用于证明真实 request 的 tools/skill 注入;strong-model case 用于证明 rdog actions 的端到端行为。
-- 5 x 8 remote matrix 是最终迁移回归;LFM2.5 只运行旧有成功的 fixed case 作为非阻塞能力观测,不替代接入验收。
-
-## [2026-08-11 15:45:00] [Session ID: omx-1786429420551-ysl4w1] 确认: upstream Pi 预选 tools 与完整 skill preload 操作契约
-
-### 目标
-- 保留旧 `toolUseProfiles` 的两个行为: 启动前固定工具 allowlist,以及将 canonical `rdog-control` 的完整 `SKILL.md` 放入 system prompt。
-- 不保留旧 fork 的 `toolUseProfiles` / `toolUseProfile` 字段和 profile 绑定机制。
-
-### runner 配置单一真相源
-
-```json
-{
-  "agent": {
-    "tools": ["bash", "read"],
-    "appendSystemPromptFiles": [
-      "/Users/cuiluming/local_doc/l_dev/my/rust/rustdog/.codex/skills/rdog-control/SKILL.md"
-    ]
-  }
+struct ObservationCache {
+    entries: HashMap<String, CacheEntry>,
+    policies: HashMap<String, CachePolicy>,
 }
 ```
 
-### 固定 Pi 命令片段
+或者：让 ComputerActObservationCache 只管理 observation_id 的生命周期，AX snapshot 统一走 AxObservationCache。
 
-```bash
-/Users/cuiluming/Library/pnpm/pi \
-  --no-extensions \
-  --no-skills \
-  --no-context-files \
-  --tools bash,read \
-  --append-system-prompt /Users/cuiluming/local_doc/l_dev/my/rust/rustdog/.codex/skills/rdog-control/SKILL.md \
-  --mode json --print
+### 摩擦点 4: control_computer_act/mod.rs - 膨胀的 dispatcher
+**位置**: `src/control_computer_act/mod.rs` (44K)
+
+**摩擦类型**: 浅模块 + 难以测试
+
+**具体问题**:
+尽管已经拆出 7 个子模块，mod.rs 仍有 44K 代码：
+- `implicit_observe.rs` (26K)
+- `verify.rs` (32K)  
+- `error_envelope.rs` (19K)
+- 其他子模块 (34K)
+- 但 `mod.rs` 本身仍有 44K
+
+mod.rs 包含：
+1. 13 个 `route_*` 函数 (click/hover/type/hotkey/scroll/drag/wait...)
+2. `parse_start_box`, `parse_ref_target`, `parse_text` 等解析逻辑
+3. `execute_computer_act` 主入口
+4. `apply_implicit_observe_to_args` 协调逻辑
+5. timeout/density/trace/verification 的组装逻辑
+
+**为什么这是摩擦**:
+1. **routing 表散落在多个 `route_*` 函数中**，没有集中的数据结构
+2. **测试困难**: 要测 `route_click` 需要构造完整的 `serde_json::Value` args
+3. **职责混杂**: routing + parsing + execution + verification 都在一个文件
+
+**影响**:
+- 新增 action 需要理解整个 44K 文件的结构
+- routing 逻辑分散，无法一眼看出 "支持哪 13 个 action"
+- 单元测试只有 `tests.rs` (29K)，主要测 error envelope，routing 依赖集成测试
+
+**深化机会**:
+1. 将 routing 表数据化：
+```rust
+struct ActionRoute {
+    action: &'static str,
+    parser: fn(&Value) -> Result<ControlCommand, RouteError>,
+    timeout_ms: u64,
+}
+
+const ROUTES: &[ActionRoute] = &[
+    ActionRoute { action: "click", parser: parse_click, timeout_ms: 5000 },
+    ActionRoute { action: "type", parser: parse_type, timeout_ms: 10000 },
+    // ...
+];
 ```
 
-### 边界与验证
-- `--skill` 只把 skill 名称、描述和路径放进 `<available_skills>`;它不能代替完整 preload。
-- upstream `resource-loader.js::resolvePromptInput()` 对存在的 `--append-system-prompt` 路径执行 `readFileSync`,因此完整 `SKILL.md` 内容会进入 system prompt。
-- 实现后的 mock provider 必须捕获 tools 恰为 `bash`、`read`,并在 system message 中匹配 canonical `SKILL.md` 的固定片段。
-- 这只保证 prompt/config 链路;LFM2.5 的任务成功率仍以独立能力观测记录,不能混入配置正确性结论。
+2. 将 execution 逻辑移到 `execute.rs`，mod.rs 只保留 routing 表
+
+### 总结：四类摩擦的共同模式
+
+**共同特征**:
+1. **接口爆炸**: control_ax 53 函数，control_computer_act 44K routing
+2. **状态分散**: epoch 在 3 个地方，cache 在 2 个地方
+3. **测试困难**: 需要构造复杂 JSON/跨多个模块才能测试单个功能
+4. **理解成本高**: 新开发者需要跨 3-4 个模块才能理解一个完整流程
+
+**不是摩擦的地方**:
+- `control_resource_lane.rs` 设计清晰：单一职责，接口简洁
+- `ax_diff/` 模块职责明确：只做 diff，不混入 observation 管理
+- ADR 文档完善，领域术语清晰（CONTEXT.md）
+
+**推荐深化方向**:
+1. **优先级 1**: 拆分 control_ax.rs 为 3 个模块（query/action/input）
+2. **优先级 2**: 统一 observation cache 策略，消除 implicit vs explicit 双轨
+3. **优先级 3**: 将 control_computer_act routing 表数据化
+4. **优先级 4**: 明确 epoch 职责边界，减少跨模块理解成本
+## [2026-08-20 16:24:00] [Session ID: omx-1787115582924-n1rbi7] 笔记: #54 successor changes 接入证据
+
+### 现象
+- `execute_computer_act` 已有唯一 pre/successor snapshot 路径,successor 同时服务 postcondition、verification 和 successor response。
+- pre snapshot 只在 `verify != none` 时采集,且没有 observation header。
+- `build_successor_target` 当前把 `ObservationHeader.created_at_unix_ms` 写入 `epoch`。
+
+### 已验证结论
+- #53 的 identity gate 要求 before/after 都包含 `rdog.ax.v1` schema、observation id、完整 capture 和 granted permission。现有 pre snapshot 直接进入 gate 会被判为 `missing_identity_metadata`。
+- 下一次 mutation 的并发保护读取 `resolve_observation_resource_epoch(observation_id, ref_id)`,因此 successor target 必须返回该值,不能返回 observation 创建时间。
+- 统一 output budget 已在 `ControlExecutionOutcome::from_response_line` 的 `control_frames::bound_response_line` 路径执行。本轮扩展 structured payload 即可,无需新增预算实现。
+
+### 最小实现
+- 让现有 pre capture 同样调用 `with_observation`,不增加第二次 capture。
+- 在 `changes_first` 复用现有 `ChangesSummary`,只补 unavailable constructor 和明确 fallback reason。
+- 提取一个很小的 successor response 装配 seam,让 executor 与 contract test 共用,不引入 trait、factory 或新依赖。
+
+## [2026-08-20 18:05:00] [Session ID: omx-1787115582924-n1rbi7] 笔记: #55 对抗式验证覆盖
+
+### 静态与动态覆盖
+
+- resource lane: capture-during-dispatch stale、failed dispatch invalidation、same-PID single writer、different-PID parallel 已有动态测试。
+- cached AX: cache hit 不走 live capture、wrong epoch、unknown observation、missing ref、expired observation 已在 executor/helper 层覆盖。
+- changes-first: stable 100%、exact 75%、74% fallback、duplicate id、root replacement、window/resource drift、permission、unsupported、truncation、unknown identity 已有 fixture。
+- output: exact/over byte boundary、exact/over line boundary、multibyte UTF-8 structured preview、oversized response/error path 已覆盖。
+
+### 本轮修复
+
+- resolve_cached_ax_get 以前直接透传 observation store 的 STALE_REF / OBSERVATION_EXPIRED,上层无法依赖统一 reason code。
+- 现在 STALE_REF -> target_not_found,其余 observation 生命周期错误 -> stale_observation_cache;生产查询入口保持单一归一化路径。
+
+### Canary blocker
+
+- 评测 runner unit tests 通过,但真实 runner 在校验配置时失败: /Users/cuiluming/Library/pnpm/pi 不存在。
+- .envrc 经 direnv exec . 可提供 DashScope key,所以凭据不是已验证 blocker;缺失的是 upstream Pi binary。
+- 历史 successor policy 2-case x 5-model artifact 仅作背景,不能宣称本轮 current-binary canary。
+
+## [2026-08-21 13:55:00] [Session ID: current] 阶段 2 探索: ax_action 模块分析
+
+### 当前结构分析
+
+#### control_ax.rs 文件信息
+- **总行数**: 3634 行
+- **大小**: 122KB（从架构报告）
+- **核心 action 函数**: 5 个 perform + 6 个 parse
+
+#### 核心 Action 函数
+
+**Perform 函数** (执行层):
+1. `perform_default_ax_press` (line 1093)
+2. `perform_default_ax_press_with_postcondition` (line 1133)
+3. `perform_default_ax_press_sequence` (line 1324)
+4. `perform_default_ax_action` (line 1443)
+5. `perform_default_ax_set_value` (line 1447)
+6. `perform_default_ax_focus` (line 1451)
+7. `perform_default_ax_scroll` (line 1455)
+
+**Parse 函数** (协议层):
+1. `parse_ax_press_payload` (line 1641)
+2. `parse_ax_press_sequence_payload` (line 1738)
+3. `parse_ax_action_payload` (line 1793)
+4. `parse_ax_set_value_payload` (line 1833)
+5. `parse_ax_focus_payload` (line 1881)
+6. `parse_ax_scroll_payload` (line 1938)
+
+#### 调用方分析
+
+**主要调用方** (2 个文件):
+1. `src/control_actions.rs` - 10+ 处调用
+2. `src/control_web/act.rs` - 1 处调用
+
+#### 现有子模块
+
+```
+src/control_ax/
+├── input.rs      3.1K  (已迁移到 ax_input)
+├── macos.rs      67KB  (平台实现，需要移动)
+├── query.rs      45.6KB (AX tree query，阶段 3)
+├── tree.rs       15.1KB (AX tree 结构)
+└── types.rs      14.1KB (类型定义)
+```
+
+### 拆分策略
+
+#### 目标结构
+
+```
+src/ax_action/
+├── mod.rs           # 统一入口 + 数据化 routing 表
+├── protocol.rs      # Parse 层 (6 个 parse 函数)
+├── execute.rs       # Execution 层 (7 个 perform 函数)
+├── types.rs         # Re-export from control_ax::types
+├── platform/
+│   └── macos.rs     # 移动自 control_ax/macos.rs
+└── tests.rs         # 单元测试
+```
+
+#### 关键设计决策
+
+**1. Routing 表数据化** (解决摩擦点 #4)
+```rust
+struct ActionRoute {
+    name: &'static str,
+    parser: fn(Value) -> io::Result<ActionRequest>,
+    executor: fn(ActionRequest) -> io::Result<ActionResult>,
+    timeout_ms: u64,
+}
+
+const ROUTES: &[ActionRoute] = &[
+    ActionRoute { name: "press", parser: parse_press, executor: perform_press, timeout_ms: 5000 },
+    ActionRoute { name: "action", parser: parse_action, executor: perform_action, timeout_ms: 5000 },
+    // ... 一眼可见所有 action
+];
+```
+
+**2. 统一入口函数**
+```rust
+pub fn execute_ax_action(action: &str, payload: Value) -> io::Result<ActionResult>
+```
+
+**3. Deprecated Facade**
+```rust
+#[deprecated(since = "0.9.0", note = "use ax_action::execute_ax_action")]
+pub fn perform_default_ax_press(req: &AxPressRequest) -> io::Result<AxActionReport> {
+    ax_action::execute_ax_action("press", serde_json::to_value(req)?)
+}
+```
+
+### 下一步行动
+
+- [ ] 步骤 2.1: 创建 `src/ax_action/` 目录结构
+- [ ] 步骤 2.2: 实现 `mod.rs` (routing 表 + 统一入口)
+- [ ] 步骤 2.3: 实现 `protocol.rs` (移动 6 个 parse 函数)
+- [ ] 步骤 2.4: 实现 `execute.rs` (移动 7 个 perform 函数)
+- [ ] 步骤 2.5: 考虑是否移动 `macos.rs` (67KB，可能延后到阶段 3)
+
+
+### 第一轮决策（已确认）
+
+**Q1 - 双 API 策略**: ✅
+- 动态入口: `execute_ax_action(action: &str, payload: Value)` (RPC 用)
+- 强类型函数: `execute_press(req: &AxPressRequest)` 等 (内部调用)
+- Routing 表服务动态路径，内部调用强类型函数
+
+**Q2 - postcondition 合并**: ✅
+- `press_with_postcondition` 合并到 `press` action
+- `AxPressRequest` 添加 `Option<Postcondition>` 字段
+- Routing 表只需一个 `"press"` entry
+
+**Q3 - press_sequence 独立**: ✅
+- 暴露为独立 action `"press_sequence"`
+- 保持原子性（全部成功或全部回滚）
+
+**Q4 - macos.rs 暂不动**: ✅
+- 保持在 `control_ax/macos.rs` 作为共享平台层
+- 等阶段 3 (query 拆分) 后再统一评估
+
+**Q5 - types 不 re-export**: ✅
+- 不在 `ax_action` 创建 `types.rs`
+- 所有类型保持在 `control_ax::types`
+- 新模块直接 `use control_ax::types::*`
+
+**Q6 - Facade 完整代理**: ✅
+- Deprecated facade 必须完整代理旧签名
+- 负责参数转换（如果新旧 API 参数结构不同）
+
+**Q7 - 分阶段迁移**: ✅
+- 立即迁移 `control_actions.rs` 到强类型 API
+- 保留 `control_web/act.rs` 用 facade（RPC 边界）
+
+
+### 第二轮决策（已确认）
+
+**Q8 - Postcondition 字段向后兼容**: ✅
+- 修改 `AxPressRequest`，添加 `#[serde(default, skip_serializing_if = "Option::is_none")]`
+- 旧 JSON payload 仍能解析（字段缺失 = None）
+- 新 payload 可包含 postcondition
+
+**Q9 - 特定错误类型**: ✅
+- 返回 `ActionNotFound(String)` 错误
+- 映射到 `io::ErrorKind::NotFound`
+- RPC 层根据 ErrorKind 决定 HTTP 状态码
+
+**Q10 - Routing 表统一签名**: ✅
+- 统一签名: `fn(&Value) -> io::Result<Value>`
+- Routing 表是 `const` 纯数据结构
+- 内部: 反序列化 → 强类型函数 → 序列化
+
+**Q11 - 简化命名**: ✅
+- 新模块: `press()`, `action()`, `set_value()`, `focus()`, `scroll()`, `press_sequence()`
+- 旧函数: `perform_default_*` 作为 deprecated facade
+
+**Q12 - 分层边界**: ✅
+- `protocol.rs`: 纯反序列化（JSON → struct），serde 自动校验必填字段
+- `execute.rs`: 业务逻辑校验 + 执行，自包含
+
+**Q13 - 分层测试**: ✅
+- (1) Routing 表测试（action 名 → handler）
+- (2) 强类型函数单元测试（mock 平台）
+- 旧测试暂不迁移，先覆盖新 API
+
+**Q14 - 增量迁移**: ✅
+- 先迁移 `press`，验证通过后批量迁移其他
+- Import: `use ax_action::{press, action, ...}` (显式导入)
+
+
+### 第三轮决策（已确认）
+
+**Q15 - 增量实施**: ✅
+- 先完成 `press` action 端到端（parse + execute + routing + API + test）
+- 验证通过后批量添加其他 6 个 action
+- 最快发现设计问题
+
+**Q16 - 循环依赖处理**: ✅
+- Facade 调用 `ax_action::execute_ax_action` 字符串 API
+- 避免导入所有强类型函数
+- 模块级 `pub use` 是安全的
+
+**Q17 - 兼容性测试**: ✅
+- 添加 `test_parse_ax_press_backward_compatible()`
+- 用旧格式 JSON（无 `postcondition`）测试
+- 验证能解析且字段为 `None`
+
+**Q18 - Timeout 作为元数据**: ✅
+- `timeout_ms` 暂时只作为元数据
+- 不自动应用超时（保持 sync）
+- 调用方自己决定是否超时
+
+**Q19 - 测试策略**: ✅
+- 单元测试：只测 protocol 层（parse 逻辑）
+- Execute 层依赖集成测试（真实 AX 环境）
+- 必要时用 `#[cfg(test)]` fake 实现
+
+**Q20 - 三层验收**: ✅
+1. 单元测试：新模块测试全部通过
+2. 集成测试：`cargo test` 全量测试（883 个）
+3. 冒烟测试：手动验证 press/type/scroll
+
+**Q21 - Deprecated 删除时间线**: ✅
+- 阶段 2 完成后迁移 `control_actions.rs`
+- 阶段 3 完成后迁移 `control_web/act.rs`
+- 0.10.0 或 0.11.0 删除所有 deprecated 函数
+
+
+## 设计共识完成 ✅
+
+经过 3 轮 21 个问题的 grilling，我们达成了完整的设计树：
+
+### 核心架构决策
+
+**模块结构**:
+```
+src/ax_action/
+├── mod.rs          # Routing 表 + 统一入口 execute_ax_action()
+├── protocol.rs     # 6 个 parse 函数（纯反序列化）
+├── execute.rs      # 6 个强类型函数: press(), action(), set_value()...
+└── tests.rs        # 单元测试（protocol + routing）
+```
+
+**双 API 设计**:
+- 动态 API: `execute_ax_action(action: &str, payload: Value)` (RPC 用)
+- 强类型 API: `press(req: &AxPressRequest)` 等（内部调用）
+- Routing 表: `const` 数据结构，统一签名 `fn(&Value) -> io::Result<Value>`
+
+**关键合并**:
+- `press_with_postcondition` 合并到 `press`
+- `AxPressRequest` 添加 `postcondition: Option<Postcondition>` 字段
+- `press_sequence` 保持独立（原子性）
+
+**依赖关系**:
+- `ax_action` → `control_ax::types` (类型定义)
+- `ax_action` → `control_ax::macos` (平台实现)
+- `control_ax.rs` → `ax_action` (deprecated facade)
+- 不创建 `ax_action/types.rs`，避免路径混乱
+
+**迁移路径**:
+1. 增量实施：先完成 `press` action 端到端
+2. 立即迁移 `control_actions.rs` 到强类型 API
+3. 保留 `control_web/act.rs` 用 facade
+4. 阶段 3 后删除 deprecated 函数
+
+**测试策略**:
+- 单元测试：protocol 层 + routing 表
+- 集成测试：全量 `cargo test`
+- 兼容性测试：旧 JSON 格式仍能解析
+- 冒烟测试：手动验证核心 action
+
+### Alternatives Considered
+
+#### Why not 立即移动 macos.rs？
+- 67KB 平台代码可能被 query 和 action 共同依赖
+- 等阶段 3 拆分 query 后再统一评估
+- 避免过早抽象
+
+#### Why not 引入 PlatformAx trait？
+- 增加复杂度，但单元测试收益不大
+- Execute 层依赖集成测试更真实
+- 必要时用 `#[cfg(test)]` fake 实现
+
+#### Why not 自动应用 timeout？
+- 需要 async runtime，增加复杂度
+- 调用方已有自己的超时机制
+- 暂作为元数据，未来可扩展
+
+#### Why not 批量实施所有 action？
+- 风险高，难以定位问题
+- 增量式可最快验证设计
+- 先完成 `press` 建立模板
+
+
+## [2026-08-28 09:30:00] [Session ID: current] 笔记: 阶段 3 (ax_query) 现状研究
+
+### 来源: 代码勘察 (control_ax.rs / tree.rs / query.rs / control_observation / scratch tickets 07-11)
+
+### 关键发现 (ADR 设想 vs #51/#54/#55 之后的现实)
+
+1. **ticket 08 (AxSnapshotCache 迁移) 大部分已被现实超越**:
+   - epoch 单一真相源已落地: 真源在 observation store / control_resource_lane,
+     AX_OBSERVATION_CACHE 只存 capture 时快照 + 读取时向 resource lane 校验
+     (control_ax.rs:46-232, #54/#55 加固过, 有对抗性测试 7/7 + 4/4)
+   - 现缓存无 TTL policy, 纯 epoch 校验; ADR 设想的 CachePolicy
+     (ImplicitObserve 5s / Progressive 300s) 对应的是另一个独立缓存
+     COMPUTER_ACT_OBSERVATION_CACHE (control_computer_act/implicit_observe.rs)
+   - 迁移/重构缓存的剩余收益只是物理位置, 风险却是动 #55 刚验证过的路径
+2. **query.rs 不是纯查询引擎**: 1267 行里是 @ax-find/@ax-get 的完整 verb 实现
+   (compact/对象协议解析 + observation ref 解析 + display scope + screenshot 摘要)。
+   原样搬入 ax_query 会让"无状态模块"目标当场破产
+3. **tree.rs 是混合体**: ~200 行纯 capture/匹配 helper (零 observation 依赖)
+   + selector draft 构造 (只被 control_ax.rs 的 AxSnapshot::with_observation 用)
+   + target 解析 (direct_ax_target_id / resolve_target_id_in_snapshot 依赖 observation ref)
+4. **循环依赖现状**: control_ax→control_observation (selector/header/ref/注册) 与
+   observation→control_ax (capture 入口 + AX 类型) 双向仍在;
+   ax_action→control_ax 单向 (阶段 2 成果)
+5. **capture 函数的消费面极广**: capture_default_ax_snapshot 有 8 个模块消费
+   (observation/screenshot/actions/web/computer_act), 全部从 122KB 的 control_ax 导入
+
+### 调用方映射 (tree.rs 函数 -> 外部消费者)
+- capture_default_ax_snapshot: control_observation(.rs+producer), screenshot, control_actions, control_web capture+act, computer_act/verify
+- capture_current_ax_window_snapshot: ax_action, control_actions, control_web capture+act, computer_act/verify
+- capture_ax_find_snapshot / capture_current_ax_subtree: control_actions / control_web
+- current_ax_platform: screenshot, observation/producer
+- materialize_app_window_target(+_with) / ax_snapshot_status_error: ax_action/execute
+- resolve_current_ax_target_rect: query.rs, screenshot, control_mouse/target
+- selector drafts (collect_element_refs 等): 仅 control_ax.rs 的 with_observation
+
+### 综合结论
+ADR 阶段 3 的真目标 (无状态查询核心 + 单向依赖 + 甩掉 verb 大杂烩) 仍成立,
+但实现切分必须按现实重划: ax_query 只收零 observation 依赖的纯 capture/匹配核心,
+query.rs (verb) 与 selector 富化留在 control_ax 侧。缓存不动。

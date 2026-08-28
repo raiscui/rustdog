@@ -1,12 +1,17 @@
 use crate::{
+    ax_action::{
+        focus as ax_focus, perform_action, press as ax_press, press_sequence,
+        press_with_postcondition, scroll as ax_scroll, set_value as ax_set_value,
+    },
+    ax_input::{send_key_with_config, type_text_with_config},
+    ax_query::{
+        ax_window_id_from_backend_id, capture_current_ax_window_snapshot,
+        capture_default_ax_snapshot,
+    },
     cancellation::CancellationToken,
     control_ax::{
-        ax_window_id_from_backend_id, build_ax_find_response_json, build_ax_get_response_json,
-        capture_ax_find_snapshot, capture_current_ax_window_snapshot, capture_default_ax_snapshot,
-        perform_default_ax_action, perform_default_ax_focus, perform_default_ax_press,
-        perform_default_ax_press_sequence, perform_default_ax_press_with_postcondition,
-        perform_default_ax_scroll, perform_default_ax_set_value, perform_default_key_delivery,
-        perform_default_type_text, window_activation_verified, AxFocusReport,
+        build_ax_find_response_json, build_ax_get_response_json, capture_ax_find_snapshot,
+        window_activation_verified, AxFocusReport,
     },
     // Phase F-1: 三个 error_envelope wrapper helper (Cancelled / PlatformUnsupported /
     // PermissionDenied), 让手写 JSON payload 跟其它 error_code 走同一 envelope 形状。
@@ -30,7 +35,7 @@ use crate::{
     control_web::{build_default_web_act_response_json, build_default_web_find_response_json},
     control_window::{
         execute_default_window_activate, execute_default_window_close, execute_default_window_find,
-        execute_default_window_resize,
+        execute_default_window_resize, resolve_unique_app_window_id,
     },
 };
 use enigo::{Direction, Enigo, Key, Keyboard, Settings};
@@ -633,7 +638,7 @@ pub(crate) fn execute_key(
     key_input_event_sink: Option<&dyn KeyInputEventSink>,
     delivery_backend: Option<crate::config::KeyDeliveryBackend>,
 ) -> io::Result<ActionExecutionResult> {
-    if let Some(report) = perform_default_key_delivery(request)? {
+    if let Some(report) = send_key_with_config(request.clone())? {
         if let Some(key_input_event_sink) = key_input_event_sink {
             key_input_event_sink.publish_key_event(request)?;
         }
@@ -732,14 +737,11 @@ fn try_ax_press_single_char(
     };
 
     // 找到匹配按钮, 用 AX press 按下。
-    let press_request = crate::control_ax::AxPressRequest {
-        target: crate::control_ax::AxTarget {
-            id: Some(element_id),
-            ..crate::control_ax::AxTarget::default()
-        },
-        postcondition: None,
+    let target = crate::control_ax::AxTarget {
+        id: Some(element_id),
+        ..crate::control_ax::AxTarget::default()
     };
-    let report = crate::control_ax::perform_default_ax_press(&press_request)?;
+    let report = ax_press(&target)?;
     if !report.performed {
         return Ok(None);
     }
@@ -835,7 +837,7 @@ fn structured_global_key_success_response(request: &KeyRequest) -> io::Result<Op
             None,
             None,
         );
-        report.hint = Some(crate::control_ax::CLEAR_ACTION_HINT.to_string());
+        report.hint = Some(crate::ax_action::CLEAR_ACTION_HINT.to_string());
         return report.to_value_json().map(Some);
     }
 
@@ -1156,8 +1158,8 @@ fn execute_ax_press(
     request: &crate::control_ax::AxPressRequest,
 ) -> io::Result<ActionExecutionResult> {
     let response_value_json = match request.postcondition {
-        Some(_) => perform_default_ax_press_with_postcondition(request)?.to_value_json()?,
-        None => perform_default_ax_press(request)?.to_value_json()?,
+        Some(_) => press_with_postcondition(request)?.to_value_json()?,
+        None => ax_press(&request.target)?.to_value_json()?,
     };
     Ok(ActionExecutionResult {
         exit_code: 0,
@@ -1170,7 +1172,9 @@ fn execute_ax_press(
 fn execute_ax_press_sequence(
     request: &crate::control_ax::AxPressSequenceRequest,
 ) -> io::Result<ActionExecutionResult> {
-    let report = perform_default_ax_press_sequence(request);
+    // resolve_app 由调用方注入: 这既是 app selector 的解析入口,
+    // 也是 press_sequence 的可测试 seam (单测传入 stub 即可)。
+    let report = press_sequence(request, resolve_unique_app_window_id);
     Ok(ActionExecutionResult {
         exit_code: 0,
         stdout: Vec::new(),
@@ -1182,7 +1186,7 @@ fn execute_ax_press_sequence(
 fn execute_ax_action(
     request: &crate::control_ax::AxActionRequest,
 ) -> io::Result<ActionExecutionResult> {
-    let report = perform_default_ax_action(request)?;
+    let report = perform_action(request)?;
     Ok(ActionExecutionResult {
         exit_code: 0,
         stdout: Vec::new(),
@@ -1194,7 +1198,7 @@ fn execute_ax_action(
 fn execute_ax_set_value(
     request: &crate::control_ax::AxSetValueRequest,
 ) -> io::Result<ActionExecutionResult> {
-    let report = perform_default_ax_set_value(request)?;
+    let report = ax_set_value(request)?;
     Ok(ActionExecutionResult {
         exit_code: 0,
         stdout: Vec::new(),
@@ -1206,11 +1210,7 @@ fn execute_ax_set_value(
 fn execute_ax_focus(
     request: &crate::control_ax::AxFocusRequest,
 ) -> io::Result<ActionExecutionResult> {
-    execute_ax_focus_with(
-        request,
-        execute_default_window_activate,
-        perform_default_ax_focus,
-    )
+    execute_ax_focus_with(request, execute_default_window_activate, ax_focus)
 }
 
 fn execute_ax_focus_with(
@@ -1293,7 +1293,7 @@ fn target_window_id_from_ax_target(
 fn execute_ax_scroll(
     request: &crate::control_ax::AxScrollRequest,
 ) -> io::Result<ActionExecutionResult> {
-    let report = perform_default_ax_scroll(request)?;
+    let report = ax_scroll(request)?;
     Ok(ActionExecutionResult {
         exit_code: 0,
         stdout: Vec::new(),
@@ -1305,7 +1305,7 @@ fn execute_ax_scroll(
 pub(crate) fn execute_type_text(
     request: &crate::control_ax::TypeTextRequest,
 ) -> io::Result<ActionExecutionResult> {
-    let report = perform_default_type_text(request)?;
+    let report = type_text_with_config(request.clone())?;
     Ok(ActionExecutionResult {
         exit_code: 0,
         stdout: Vec::new(),

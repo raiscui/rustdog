@@ -101,16 +101,24 @@ fn scale_number(number: &str, unit_ms: u64) -> Result<u64, HumantimeError> {
         let frac_val: u64 = if frac_truncated.is_empty() {
             0
         } else {
-            frac_truncated.parse().map_err(|_| HumantimeError::Overflow)?
+            frac_truncated
+                .parse()
+                .map_err(|_| HumantimeError::Overflow)?
         };
-        let whole_ms = whole_val.checked_mul(unit_ms).ok_or(HumantimeError::Overflow)?;
+        let whole_ms = whole_val
+            .checked_mul(unit_ms)
+            .ok_or(HumantimeError::Overflow)?;
         // frac_ms = frac_val * unit_ms / 10^frac_len
-        let divisor: u64 = 10_u64.checked_pow(frac_len_u64).ok_or(HumantimeError::Overflow)?;
+        let divisor: u64 = 10_u64
+            .checked_pow(frac_len_u64)
+            .ok_or(HumantimeError::Overflow)?;
         let frac_ms = frac_val
             .checked_mul(unit_ms)
             .and_then(|v| v.checked_div(divisor))
             .ok_or(HumantimeError::Overflow)?;
-        whole_ms.checked_add(frac_ms).ok_or(HumantimeError::Overflow)
+        whole_ms
+            .checked_add(frac_ms)
+            .ok_or(HumantimeError::Overflow)
     } else {
         scale_integer(number, unit_ms)
     }

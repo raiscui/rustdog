@@ -1,9 +1,7 @@
 use crate::{
     config::{DaemonConfig, EndpointMode, InboundConfig, OutboundConfig},
     control_observation::initialize_durable_observation_state,
-    control_recording::control_handler::{
-        install_recording_handler, RecordingHandler,
-    },
+    control_recording::control_handler::{install_recording_handler, RecordingHandler},
     control_transport::ControlTransportKind,
     shell::{self, ShellMode},
 };
