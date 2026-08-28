@@ -14,7 +14,7 @@
 //!   超过 MAX_RUNNING_TASKS 拒绝新 spawn (资源保护, fail-fast)
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     io::{self, Read},
     process::{Child, Stdio},
     sync::{
@@ -26,6 +26,7 @@ use std::{
 };
 
 use crate::control_actions::build_shell_command;
+use crate::control_frames::{ControlFrame, TaskCompletedFrame, TaskFailedFrame, TaskStartedFrame};
 
 /// 输出 ring buffer 硬上限 (1MB): 超出部分丢头部, 保留最新尾部。
 const MAX_OUTPUT_BYTES: usize = 1024 * 1024;
@@ -35,6 +36,8 @@ pub const DEFAULT_OUTPUT_TAIL_LINES: usize = 80;
 const MAX_RUNNING_TASKS: usize = 64;
 /// 终态任务保留条数: 超过后按 finished_at 回收最老条目。
 const MAX_FINISHED_TASKS: usize = 64;
+/// 每任务待 drain 帧上限: legacy 路径 (未绑定 lane) 的帧滞留到条目回收, 防 pending 无界。
+const MAX_PENDING_FRAMES_PER_TASK: usize = 8;
 /// waiter 线程收割轮询间隔。
 const WAIT_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
@@ -117,6 +120,12 @@ struct TaskEntry {
     output: Arc<Mutex<TaskOutputBuffer>>,
     /// waiter 与 cancel 共享的 child 句柄; `None` 表示已被收割方 take 走。
     child: Arc<Mutex<Option<Child>>>,
+    /// spawn 请求来路的 session lane (spec §6.4): None = legacy/query 路径,
+    /// 帧 static 滞留 pending 无人 drain (上限防泄漏), 语义即"静默不推"。
+    session_lane: Option<String>,
+    /// 待 session bridge drain 的进度帧。无条件入队 (bind 前产生的 started
+    /// 帧等 bind 后一并 drain, 无丢失); drain 只取走绑定本 session 的任务。
+    pending_frames: VecDeque<ControlFrame>,
 }
 
 /// `@task-status` / `@task-cancel` 的查询快照。
@@ -198,6 +207,13 @@ pub fn spawn_task(shell: &str, command: &str, cwd: Option<&str>) -> io::Result<S
     let output = Arc::new(Mutex::new(TaskOutputBuffer::default()));
     let child_handle = Arc::new(Mutex::new(Some(child)));
 
+    let started_frame = ControlFrame::TaskStarted(TaskStartedFrame {
+        task_id: task_id.clone(),
+        seq,
+        command: command.to_owned(),
+    });
+    let mut pending_frames = VecDeque::new();
+    pending_frames.push_back(started_frame);
     registry.insert(
         task_id.clone(),
         TaskEntry {
@@ -208,6 +224,8 @@ pub fn spawn_task(shell: &str, command: &str, cwd: Option<&str>) -> io::Result<S
             finished_at_ms: None,
             output: Arc::clone(&output),
             child: Arc::clone(&child_handle),
+            session_lane: None,
+            pending_frames,
         },
     );
 
@@ -312,6 +330,31 @@ fn finalize_task(task_id: &str, exit_code: i32, decide: impl FnOnce(&mut TaskEnt
     decide(entry);
     entry.exit_code = Some(exit_code);
     entry.finished_at_ms = Some(now_ms());
+    // 终态帧入 pending (spec §6.3/6.4): canceled 复用 @task-failed + canceled:true
+    let terminal_frame = match entry.state {
+        TaskState::Completed => ControlFrame::TaskCompleted(TaskCompletedFrame {
+            task_id: task_id.to_owned(),
+            seq: entry.seq,
+            exit_code,
+        }),
+        TaskState::Failed => ControlFrame::TaskFailed(TaskFailedFrame {
+            task_id: task_id.to_owned(),
+            seq: entry.seq,
+            exit_code,
+            canceled: false,
+        }),
+        TaskState::Canceled => ControlFrame::TaskFailed(TaskFailedFrame {
+            task_id: task_id.to_owned(),
+            seq: entry.seq,
+            exit_code,
+            canceled: true,
+        }),
+        TaskState::Running => unreachable!("finalize 只处理终态"),
+    };
+    entry.pending_frames.push_back(terminal_frame);
+    if entry.pending_frames.len() > MAX_PENDING_FRAMES_PER_TASK {
+        entry.pending_frames.pop_front();
+    }
     reap_finished_tasks(&mut registry);
 }
 
@@ -444,6 +487,64 @@ fn wait_terminal_briefly(task_id: &str) -> Option<TaskSnapshot> {
         thread::sleep(WAIT_POLL_INTERVAL);
     }
     None
+}
+
+/// session bridge 在 spawn 响应返回后绑定 lane (spec §6.4: 推送 lane 跟随来路)。
+///
+/// bind 前 pending 里已有 started 帧, bind 后首轮 drain 一并取走, 无丢失窗口。
+pub fn bind_task_lane(task_id: &str, session_id: &str) {
+    let mut registry = registry().lock().expect("task registry lock should work");
+    if let Some(entry) = registry.get_mut(task_id) {
+        entry.session_lane = Some(session_id.to_owned());
+    }
+}
+
+/// 从 spawn 的 `@response` 行提取 task id 并绑定 lane。
+///
+/// 由 daemon_bridge 在 dispatch spawn 响应后调用; 非 spawn 响应 (缺 task 字段)
+/// 是常态, 静默返回 false。响应形状与 control_core 的 task_snapshot_json 同源:
+/// 带 request id 时在 value 信封内, 无 id 时裸对象。
+pub fn bind_task_lane_from_spawn_response(response_line: &str, session_id: &str) -> bool {
+    let Some(json_text) = response_line.trim().strip_prefix("@response ") else {
+        return false;
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(json_text) else {
+        return false;
+    };
+    let task_id = value["task"]
+        .as_str()
+        .or_else(|| value["value"]["task"].as_str());
+    let Some(task_id) = task_id else {
+        return false;
+    };
+    bind_task_lane(task_id, session_id);
+    true
+}
+
+/// 取走绑定到指定 session 的全部待发进度帧 (按任务 seq 顺序)。
+///
+/// drain 即移除: 帧的消费是 at-most-once, 丢帧检测靠 seq (spec §6.2)。
+pub fn drain_session_frames(session_id: &str) -> Vec<ControlFrame> {
+    let mut registry = registry().lock().expect("task registry lock should work");
+    let mut frames = Vec::new();
+    for entry in registry.values_mut() {
+        if entry.session_lane.as_deref() == Some(session_id) && !entry.pending_frames.is_empty() {
+            frames.extend(entry.pending_frames.drain(..));
+        }
+    }
+    frames
+}
+
+/// 指定 session 是否还有绑定且 running 的任务 (或有待 drain 帧)。
+///
+/// daemon bridge 用它决定轮询节奏: 有活跃绑定 -> 25ms 快轮询 (对齐 PTY active),
+/// 否则维持 60s idle, 不给空闲 session 增加 CPU。
+pub fn session_has_live_tasks(session_id: &str) -> bool {
+    let registry = registry().lock().expect("task registry lock should work");
+    registry.values().any(|entry| {
+        entry.session_lane.as_deref() == Some(session_id)
+            && (entry.state == TaskState::Running || !entry.pending_frames.is_empty())
+    })
 }
 
 fn task_not_found(task_id: &str) -> io::Error {
@@ -680,6 +781,80 @@ mod tests {
         // 输出报告也携带同一 seq (真相源一致)
         let report_seq = task_output(&first, 10).unwrap().seq;
         assert_eq!(report_seq, first_seq);
+    }
+
+    #[test]
+    fn session_lane_frames_should_drain_only_for_bound_session() {
+        let task_id = spawn_quick("true");
+        // bind 前其他 session drain 不到
+        assert!(drain_session_frames("sess-other").is_empty());
+        // 未绑定 lane 的主 session 也 drain 不到 (帧在 pending 滞留)
+        assert!(drain_session_frames("sess-main").is_empty());
+
+        bind_task_lane(&task_id, "sess-main");
+        // bind 后 started 帧可被 drain
+        let frames = drain_session_frames("sess-main");
+        assert_eq!(frames.len(), 1, "应 drain 出 started 帧");
+        assert!(matches!(frames[0], ControlFrame::TaskStarted(_)));
+
+        // 终态帧: 等任务完成后 drain
+        wait_terminal(&task_id);
+        let frames = drain_session_frames("sess-main");
+        assert_eq!(frames.len(), 1, "应 drain 出终态帧");
+        assert!(matches!(frames[0], ControlFrame::TaskCompleted(_)));
+
+        // drain 即移除: 第二次为空
+        assert!(drain_session_frames("sess-main").is_empty());
+    }
+
+    #[test]
+    fn canceled_task_terminal_frame_should_reuse_task_failed_with_flag() {
+        let task_id = spawn_quick("sleep 30");
+        bind_task_lane(&task_id, "sess-main");
+        let _ = drain_session_frames("sess-main"); // 取走 started
+        cancel_task(&task_id).unwrap();
+        let frames = drain_session_frames("sess-main");
+        match frames.first() {
+            Some(ControlFrame::TaskFailed(frame)) => {
+                assert!(
+                    frame.canceled,
+                    "取消终态应复用 @task-failed + canceled:true"
+                );
+            }
+            other => panic!("预期 TaskFailed 帧, 实际 {other:?}"),
+        }
+    }
+
+    #[test]
+    fn legacy_unbound_task_frames_should_not_leak_beyond_cap() {
+        let task_id = spawn_quick("echo x");
+        let registry = registry().lock().unwrap();
+        let entry = &registry[&task_id];
+        assert!(entry.pending_frames.len() <= MAX_PENDING_FRAMES_PER_TASK);
+        assert!(entry.session_lane.is_none());
+    }
+
+    #[test]
+    fn bind_task_lane_from_spawn_response_should_parse_both_envelope_shapes() {
+        let task_id = spawn_quick("true");
+        // 有 request id 的 value 信封形状
+        let with_id = format!(
+            "@response {{\"id\":101,\"value\":{{\"task\":\"{task_id}\",\"state\":\"running\"}}}}"
+        );
+        assert!(bind_task_lane_from_spawn_response(&with_id, "sess-a"));
+        // registry guard 必须在下一个 spawn 前释放:
+        // 同线程 Mutex 不可重入, guard 跨 spawn 存活会自死锁
+        {
+            let registry = registry().lock().unwrap();
+            assert_eq!(registry[&task_id].session_lane.as_deref(), Some("sess-a"));
+        }
+
+        // 无信封裸对象形状
+        let task2 = spawn_quick("true");
+        let bare = format!("@response {{\"task\":\"{task2}\",\"state\":\"running\"}}");
+        assert!(bind_task_lane_from_spawn_response(&bare, "sess-b"));
+        // 非 spawn 响应静默 false
+        assert!(!bind_task_lane_from_spawn_response("@response 0", "sess-b"));
     }
 
     #[test]
