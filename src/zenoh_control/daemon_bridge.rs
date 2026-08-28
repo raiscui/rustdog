@@ -106,9 +106,15 @@ pub(super) fn open_daemon_session_bridge(
                 session_idle_timeout
             };
 
-            // drain 绑定本 session 的 task 进度帧并转发到 to-control (at-most-once)
+            // drain 绑定本 session 的 task 进度帧并转发到 to-control (at-most-once)。
+            // INFO 级日志是 e2e 的 daemon 侧证据: client 在 one-shot 模式下可能
+            // 先于终态帧退出 (行间隙毫秒级竞态), 帧发布本身以日志为准。
             for frame in crate::task_control::drain_session_frames(session_id.as_str()) {
                 let wire_message = frame.to_wire_message();
+                log::info!(
+                    "task frame pushed to session channel: bridge_session_id={}, frame={wire_message}",
+                    session_id
+                );
                 let _ = publish_zenoh_text(&publisher, &wire_message);
             }
 
@@ -353,9 +359,12 @@ pub(super) fn open_daemon_session_bridge(
                         );
                     }
                 }
-                Ok(None) if active_pty_session.is_some() => continue,
+                // 有活跃 PTY 或活跃 task 绑定时, recv_timeout 被压到 25ms,
+                // 超时 (Ok(None)/Err) 是节奏超时不是 session 关闭, 必须 continue;
+                // 否则 task 运行期间首个 25ms 超时就会误关 bridge, 终态帧永远发不出
+                Ok(None) if active_pty_session.is_some() || has_live_task => continue,
                 Ok(None) => break,
-                Err(_) if active_pty_session.is_some() => continue,
+                Err(_) if active_pty_session.is_some() || has_live_task => continue,
                 Err(_) => break,
             }
         }

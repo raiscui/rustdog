@@ -296,6 +296,8 @@ impl ControlFrame {
     /// 当前只识别:
     /// - `@response ...`
     /// - `@savefile {...}`
+    /// - `@pty-*` 帧族
+    /// - `@task-*` 进度帧族 (Task/Spawn Phase 2)
     pub fn parse_inbound_result_message(message: &str) -> io::Result<Self> {
         let trimmed = message.trim_end_matches(['\r', '\n']);
 
@@ -335,6 +337,30 @@ impl ControlFrame {
 
         if let Some(payload) = trimmed.strip_prefix("@pty-attached ") {
             return Ok(Self::PtyAttached(PtyAttachedFrame::parse_object_payload(
+                payload,
+            )?));
+        }
+
+        if let Some(payload) = trimmed.strip_prefix("@task-started ") {
+            return Ok(Self::TaskStarted(TaskStartedFrame::parse_object_payload(
+                payload,
+            )?));
+        }
+
+        if let Some(payload) = trimmed.strip_prefix("@task-progress ") {
+            return Ok(Self::TaskProgress(TaskProgressFrame::parse_object_payload(
+                payload,
+            )?));
+        }
+
+        if let Some(payload) = trimmed.strip_prefix("@task-completed ") {
+            return Ok(Self::TaskCompleted(
+                TaskCompletedFrame::parse_object_payload(payload)?,
+            ));
+        }
+
+        if let Some(payload) = trimmed.strip_prefix("@task-failed ") {
+            return Ok(Self::TaskFailed(TaskFailedFrame::parse_object_payload(
                 payload,
             )?));
         }
@@ -427,6 +453,119 @@ impl TaskFailedFrame {
             self.exit_code,
             self.canceled,
         )
+    }
+}
+
+impl TaskStartedFrame {
+    pub fn parse_object_payload(payload: &str) -> io::Result<Self> {
+        let mut task_id = None::<String>;
+        let mut seq = None::<u64>;
+        let mut command = None::<String>;
+        for (name, raw_value) in parse_object_fields(payload)? {
+            match name.as_str() {
+                "task" => task_id = Some(parse_json_string(raw_value)?),
+                "seq" => {
+                    seq = Some(
+                        raw_value
+                            .parse::<u64>()
+                            .map_err(|_| invalid_frame_field("@task-started", "seq", raw_value))?,
+                    )
+                }
+                "command" => command = Some(parse_json_string(raw_value)?),
+                _ => return Err(invalid_frame_field("@task-started", &name, raw_value)),
+            }
+        }
+        Ok(Self {
+            task_id: require_string_field("@task-started", "task", task_id)?,
+            seq: seq.unwrap_or(0),
+            command: require_string_field("@task-started", "command", command)?,
+        })
+    }
+}
+
+impl TaskProgressFrame {
+    pub fn parse_object_payload(payload: &str) -> io::Result<Self> {
+        let mut task_id = None::<String>;
+        let mut seq = None::<u64>;
+        let mut step = None::<String>;
+        let mut detail = None::<String>;
+        for (name, raw_value) in parse_object_fields(payload)? {
+            match name.as_str() {
+                "task" => task_id = Some(parse_json_string(raw_value)?),
+                "seq" => {
+                    seq = Some(
+                        raw_value
+                            .parse::<u64>()
+                            .map_err(|_| invalid_frame_field("@task-progress", "seq", raw_value))?,
+                    )
+                }
+                "step" => step = Some(parse_json_string(raw_value)?),
+                "detail" => detail = Some(parse_json_string(raw_value)?),
+                _ => return Err(invalid_frame_field("@task-progress", &name, raw_value)),
+            }
+        }
+        Ok(Self {
+            task_id: require_string_field("@task-progress", "task", task_id)?,
+            seq: seq.unwrap_or(0),
+            step: require_string_field("@task-progress", "step", step)?,
+            detail,
+        })
+    }
+}
+
+impl TaskCompletedFrame {
+    pub fn parse_object_payload(payload: &str) -> io::Result<Self> {
+        let mut task_id = None::<String>;
+        let mut seq = None::<u64>;
+        let mut exit_code = None::<i32>;
+        for (name, raw_value) in parse_object_fields(payload)? {
+            match name.as_str() {
+                "task" => task_id = Some(parse_json_string(raw_value)?),
+                "seq" => {
+                    seq =
+                        Some(raw_value.parse::<u64>().map_err(|_| {
+                            invalid_frame_field("@task-completed", "seq", raw_value)
+                        })?)
+                }
+                "exit_code" => exit_code = Some(parse_i32(raw_value, "exit_code")?),
+                _ => return Err(invalid_frame_field("@task-completed", &name, raw_value)),
+            }
+        }
+        Ok(Self {
+            task_id: require_string_field("@task-completed", "task", task_id)?,
+            seq: seq.unwrap_or(0),
+            exit_code: exit_code.unwrap_or(-1),
+        })
+    }
+}
+
+impl TaskFailedFrame {
+    pub fn parse_object_payload(payload: &str) -> io::Result<Self> {
+        let mut task_id = None::<String>;
+        let mut seq = None::<u64>;
+        let mut exit_code = None::<i32>;
+        let mut canceled = false;
+        for (name, raw_value) in parse_object_fields(payload)? {
+            match name.as_str() {
+                "task" => task_id = Some(parse_json_string(raw_value)?),
+                "seq" => {
+                    seq = Some(
+                        raw_value
+                            .parse::<u64>()
+                            .map_err(|_| invalid_frame_field("@task-failed", "seq", raw_value))?,
+                    )
+                }
+                "exit_code" => exit_code = Some(parse_i32(raw_value, "exit_code")?),
+                "canceled" => canceled = raw_value.trim() == "true",
+                _ => return Err(invalid_frame_field("@task-failed", &name, raw_value)),
+            }
+        }
+        Ok(Self {
+            task_id: require_string_field("@task-failed", "task", task_id)?,
+            seq: seq.unwrap_or(0),
+            exit_code: exit_code.unwrap_or(-1),
+            canceled,
+        })
     }
 }
 
@@ -1110,6 +1249,14 @@ fn parse_u32(input: &str, field_name: &str) -> io::Result<u32> {
             format!("@savefile 的 {field_name} 必须是无符号整数: {input}"),
         )
     })
+}
+
+/// 帧对象 payload 的未知/非法字段统一错误 (task 帧族与 pty 同风格)。
+fn invalid_frame_field(kind: &str, field_name: &str, raw_value: &str) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::InvalidData,
+        format!("{kind} 帧包含未知或非法字段 {field_name}: {raw_value}"),
+    )
 }
 
 fn parse_i32(input: &str, field_name: &str) -> io::Result<i32> {

@@ -2303,3 +2303,150 @@ fn control_multi_one_shot_should_run_three_lines_with_3_responses_in_zenoh_profi
         "3 responses should appear in input order; stdout:\n{stdout}"
     );
 }
+
+// ============================================================================
+// Task/Spawn Phase 2 (spec §6.4): session channel 进度帧 e2e
+//
+// one-shot client 收到 spawn 的 @response 即返回, 进度帧由后续命令行的
+// frames 前缀带回 (client session bridge 把非 response 帧 push 进下一条
+// 命令的返回)。帧自带 task id, stdout 断言无需预知 id。
+// ============================================================================
+
+/// 从输出提取第一个 task id (`"task":"t-xxxx"` 形状)。
+fn extract_task_id_from_output(stdout: &str) -> String {
+    let marker = "\"task\":\"";
+    let start = stdout
+        .find(marker)
+        .expect("output should contain task field")
+        + marker.len();
+    let rest = &stdout[start..];
+    let end = rest.find('"').expect("task id should be quoted");
+    rest[..end].to_owned()
+}
+
+#[test]
+fn task_spawn_progress_frames_should_reach_control_client() {
+    let daemon_name = unique_name("task-frames");
+    let listen_port = next_port();
+    let (mut daemon, config_path, entrypoint, buffer) =
+        start_zenoh_daemon_with_combined_output(&daemon_name, listen_port);
+    wait_until_output_contains(
+        &mut daemon,
+        &buffer,
+        "zenoh router daemon ready",
+        Duration::from_secs(8),
+    )
+    .expect("daemon should report ready");
+
+    // 行1 spawn 毫秒级任务; 行2/行3 的往返窗口带回 started + completed 帧,
+    // 同时验证帧推送不打断同 session 后续命令 (@ping 正常 pong)
+    let (status, stdout, stderr) = run_control_multi_one_shot(
+        &[
+            "--transport",
+            "zenoh",
+            "--target-name",
+            &daemon_name,
+            "--entry-point",
+            &entrypoint,
+        ],
+        // 帧到达的时序契约: started 在 spawn 后首个 25ms drain 周期发出,
+        // completed 在 waiter 50ms 收割后入 pending。client 三行在本机 zenoh
+        // 下 ~50ms 就跑完并发 session close, 会早于 echo 任务的收割点 —
+        // 所以中间插一行 daemon 侧 @wait 400ms: bridge 处理完 wait 返回后、
+        // 行3 请求前必然经过 drain 轮, completed 帧此时随行3 的 frames 回带。
+        &[
+            "@spawn:echo TASK_E2E_DONE",
+            "@ping#401",
+            "@wait#402:{duration_ms:400}",
+            "@ping#403",
+        ],
+        Duration::from_secs(20),
+    );
+
+    stop_child(&mut daemon);
+    let _ = fs::remove_file(&config_path);
+
+    assert!(
+        status.success(),
+        "multi one-shot should succeed\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+
+    // client 侧断言: started 帧到达 (覆盖 client 白名单/exchange/打印全链路,
+    // completed 走同一链路)。one-shot 多行行间隙毫秒级, client 可能先于终态帧
+    // 退出, completed 的到达以 daemon 侧日志为准 (下方 buffer 断言)。
+    assert!(
+        stdout.contains("@task-started {\"task\":\"t-"),
+        "started frame should reach client stdout\nstdout:\n{stdout}"
+    );
+    // 帧推送没有阻塞同 session 的后续命令
+    assert!(
+        stdout.contains("pong"),
+        "@ping should still answer while frames stream\nstdout:\n{stdout}"
+    );
+
+    // daemon 侧断言: started 与 completed 两帧都被推到 session channel。
+    // buffer 是 daemon stdout/stderr 合流 (String), bridge drain 有 INFO 日志。
+    let daemon_log = buffer
+        .lock()
+        .expect("collector buffer lock should work")
+        .clone();
+    for needle in ["frame=@task-started", "frame=@task-completed"] {
+        assert!(
+            daemon_log.contains(needle),
+            "daemon log should contain {needle}\ndaemon_log:\n{daemon_log}"
+        );
+    }
+}
+
+#[test]
+fn task_spawn_cancel_should_work_across_client_processes() {
+    let daemon_name = unique_name("task-cancel");
+    let listen_port = next_port();
+    let (mut daemon, config_path, entrypoint, buffer) =
+        start_zenoh_daemon_with_combined_output(&daemon_name, listen_port);
+    wait_until_output_contains(
+        &mut daemon,
+        &buffer,
+        "zenoh router daemon ready",
+        Duration::from_secs(8),
+    )
+    .expect("daemon should report ready");
+
+    let args: &[&str] = &[
+        "--transport",
+        "zenoh",
+        "--target-name",
+        &daemon_name,
+        "--entry-point",
+        &entrypoint,
+    ];
+
+    // 进程1: spawn 长任务并提取 task id (registry 是 daemon 进程级, 跨 client 存活)
+    let (status, stdout, stderr) =
+        run_control_multi_one_shot(args, &["@spawn:sleep 30"], Duration::from_secs(20));
+    assert!(
+        status.success() && stdout.contains("\"state\":\"running\""),
+        "spawn should answer running\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    let task_id = extract_task_id_from_output(&stdout);
+    assert!(task_id.starts_with("t-"));
+
+    // 进程2: 另一个 session 发起 cancel — registry 唯一真相源, 跨 session 生效。
+    // (canceled 帧推给进程1 的 lane, 进程1 已退出故帧滞留; 帧本身在单测
+    //  canceled_task_terminal_frame_should_reuse_task_failed_with_flag 验收)
+    let cancel_line = format!("@task-cancel:{task_id}");
+    let (status, stdout, stderr) =
+        run_control_multi_one_shot(args, &[&cancel_line], Duration::from_secs(20));
+
+    stop_child(&mut daemon);
+    let _ = fs::remove_file(&config_path);
+
+    assert!(
+        status.success(),
+        "cancel one-shot should succeed\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        stdout.contains("\"state\":\"canceled\""),
+        "cancel response should report canceled\nstdout:\n{stdout}"
+    );
+}
