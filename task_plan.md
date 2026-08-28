@@ -1009,3 +1009,26 @@ feature/control-ax-split 分支: ax_input + ax_action + ax_query 三模块落地
 ### 状态
 
 **Phase 1 完成。Phase 2 (Task registry 状态机 + 进度帧) 待启动。**
+
+## [2026-08-28 14:00:00] [Session ID: current] Phase 1 发 PR + Phase 2 spec 细化 + 拆票
+
+### 完成内容
+
+- [x] Phase 1 draft PR #63 (feature/task-spawn-phase1, 4 commits 含 spec 细化)
+- [x] spec §6 细化 (ab4aceb): 已落地基线标记 / seq / 四帧 wire 格式 /
+  推送语义(默认推, @spawn 无 progress 帧, lane 跟随来路) / @flow async 预留
+- [x] Phase 2 拆票: #64 seq -> #65 帧族 -> #66 推送接线 -> #67 e2e 验收
+      (native dependencies 链已建)
+- [x] PR 说明中标注 control_actions.rs 与 fix/ci-linux-xcap-deps 29d49e5 同源收敛
+
+### 关键设计决策 (spec §6.3/6.4)
+
+- canceled 复用 @task-failed + canceled:true 字段, 不设独立帧
+- @spawn 后台任务不发 @task-progress (无语义事件); progress 只属于
+  @flow async 和未来伴生 agent
+- 推送 lane 跟随 spawn 来路, legacy queryable 静默不推
+- 帧是状态事件不是输出流, stdout 永远走 @task-output 拉
+
+### 状态
+
+**Phase 1 完成待 review (PR #63); Phase 2 票就绪 (#64 是 frontier)。**
