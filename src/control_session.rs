@@ -220,6 +220,48 @@ impl ControlPeerSession {
                 request_id: extract_response_request_id(line),
                 payload_summary: format!("response_len={}", line.len()),
             },
+            ControlFrame::TaskStarted(frame) => ControlPeerFrameLogRecord {
+                frame_kind: "@task-started",
+                session_id: None,
+                target_name: None,
+                request_id: None,
+                payload_summary: format!(
+                    "task={},seq={},command_len={}",
+                    frame.task_id,
+                    frame.seq,
+                    frame.command.len()
+                ),
+            },
+            ControlFrame::TaskProgress(frame) => ControlPeerFrameLogRecord {
+                frame_kind: "@task-progress",
+                session_id: None,
+                target_name: None,
+                request_id: None,
+                payload_summary: format!(
+                    "task={},seq={},step={},detail={:?}",
+                    frame.task_id, frame.seq, frame.step, frame.detail
+                ),
+            },
+            ControlFrame::TaskCompleted(frame) => ControlPeerFrameLogRecord {
+                frame_kind: "@task-completed",
+                session_id: None,
+                target_name: None,
+                request_id: None,
+                payload_summary: format!(
+                    "task={},seq={},exit_code={}",
+                    frame.task_id, frame.seq, frame.exit_code
+                ),
+            },
+            ControlFrame::TaskFailed(frame) => ControlPeerFrameLogRecord {
+                frame_kind: "@task-failed",
+                session_id: None,
+                target_name: None,
+                request_id: None,
+                payload_summary: format!(
+                    "task={},seq={},exit_code={},canceled={}",
+                    frame.task_id, frame.seq, frame.exit_code, frame.canceled
+                ),
+            },
             ControlFrame::SaveFile(frame) => ControlPeerFrameLogRecord {
                 frame_kind: "@savefile",
                 session_id: None,
@@ -322,6 +364,23 @@ where
             writeln!(output, "saved file: {}", saved_path.display())?;
             output.flush()
         }
+        // task 进度帧对普通 control client 是可见事件: 直接显示 wire 文本一行
+        ControlFrame::TaskStarted(frame) => {
+            writeln!(output, "{}", frame.to_wire_message())?;
+            output.flush()
+        }
+        ControlFrame::TaskProgress(frame) => {
+            writeln!(output, "{}", frame.to_wire_message())?;
+            output.flush()
+        }
+        ControlFrame::TaskCompleted(frame) => {
+            writeln!(output, "{}", frame.to_wire_message())?;
+            output.flush()
+        }
+        ControlFrame::TaskFailed(frame) => {
+            writeln!(output, "{}", frame.to_wire_message())?;
+            output.flush()
+        }
         ControlFrame::PtyReady(_)
         | ControlFrame::PtyOutput(_)
         | ControlFrame::PtyExit(_)
@@ -377,7 +436,11 @@ fn collect_request_ids(frames: &[ControlFrame]) -> Vec<u64> {
             | ControlFrame::PtyExit(_)
             | ControlFrame::PtyClosed(_)
             | ControlFrame::PtyDetached(_)
-            | ControlFrame::PtyAttached(_) => None,
+            | ControlFrame::PtyAttached(_)
+            | ControlFrame::TaskStarted(_)
+            | ControlFrame::TaskProgress(_)
+            | ControlFrame::TaskCompleted(_)
+            | ControlFrame::TaskFailed(_) => None,
         };
 
         if let Some(request_id) = request_id {

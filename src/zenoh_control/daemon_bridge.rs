@@ -97,11 +97,26 @@ pub(super) fn open_daemon_session_bridge(
                 }
             }
 
-            let recv_timeout = if active_pty_session.is_some() {
+            // Task/Spawn Phase 2 (spec §6.4): 绑定本 session 且仍有 running 任务
+            // (或帧待 drain) 时加快到 25ms, 对齐 PTY active 节奏; 否则维持 idle。
+            let has_live_task = crate::task_control::session_has_live_tasks(session_id.as_str());
+            let recv_timeout = if active_pty_session.is_some() || has_live_task {
                 session_active_poll
             } else {
                 session_idle_timeout
             };
+
+            // drain 绑定本 session 的 task 进度帧并转发到 to-control (at-most-once)。
+            // INFO 级日志是 e2e 的 daemon 侧证据: client 在 one-shot 模式下可能
+            // 先于终态帧退出 (行间隙毫秒级竞态), 帧发布本身以日志为准。
+            for frame in crate::task_control::drain_session_frames(session_id.as_str()) {
+                let wire_message = frame.to_wire_message();
+                log::info!(
+                    "task frame pushed to session channel: bridge_session_id={}, frame={wire_message}",
+                    session_id
+                );
+                let _ = publish_zenoh_text(&publisher, &wire_message);
+            }
 
             match subscriber.recv_timeout(recv_timeout) {
                 Ok(Some(sample)) => {
@@ -323,6 +338,19 @@ pub(super) fn open_daemon_session_bridge(
                         .and_then(|mut publisher| {
                             session_core.dispatch_outcome_ref(&outcome, &mut *publisher)
                         });
+                    // Task/Spawn Phase 2 (spec §6.4): spawn 请求的推送 lane 跟随来路。
+                    // 用请求行前缀识别 (比逐条解析响应更省), bind 后下一轮 drain
+                    // 会把 started 帧一并带给本 session。
+                    if line.trim_start().starts_with("@spawn") {
+                        for frame in &outcome.outbound_frames {
+                            if let ControlFrame::ResponseLine(response) = frame {
+                                crate::task_control::bind_task_lane_from_spawn_response(
+                                    response,
+                                    session_id.as_str(),
+                                );
+                            }
+                        }
+                    }
                     if let Err(err) = dispatch_result {
                         log::warn!(
                             "Zenoh session bridge failed to dispatch outcome: bridge_session_id={}, error={}",
@@ -331,9 +359,12 @@ pub(super) fn open_daemon_session_bridge(
                         );
                     }
                 }
-                Ok(None) if active_pty_session.is_some() => continue,
+                // 有活跃 PTY 或活跃 task 绑定时, recv_timeout 被压到 25ms,
+                // 超时 (Ok(None)/Err) 是节奏超时不是 session 关闭, 必须 continue;
+                // 否则 task 运行期间首个 25ms 超时就会误关 bridge, 终态帧永远发不出
+                Ok(None) if active_pty_session.is_some() || has_live_task => continue,
                 Ok(None) => break,
-                Err(_) if active_pty_session.is_some() => continue,
+                Err(_) if active_pty_session.is_some() || has_live_task => continue,
                 Err(_) => break,
             }
         }
@@ -366,6 +397,10 @@ fn describe_pty_bridge_frame(frame: &ControlFrame) -> (&'static str, usize) {
         ControlFrame::PtyAttached(_) => ("pty-attached", 0),
         ControlFrame::ResponseLine(line) => ("response-line", line.len()),
         ControlFrame::SaveFile(frame) => ("savefile", frame.data.len()),
+        ControlFrame::TaskStarted(_) => ("task-started", 0),
+        ControlFrame::TaskProgress(frame) => ("task-progress", frame.step.len()),
+        ControlFrame::TaskCompleted(_) => ("task-completed", 0),
+        ControlFrame::TaskFailed(_) => ("task-failed", 0),
     }
 }
 

@@ -29,6 +29,12 @@ pub enum ControlFrame {
     PtyClosed(PtyClosedFrame),
     PtyDetached(PtyDetachedFrame),
     PtyAttached(PtyAttachedFrame),
+    /// Task/Spawn Phase 2 进度帧族 (specs/rdog-task-spawn-control-plan.md §6.3)。
+    /// 状态事件不是输出流; @spawn 任务不发 progress (无语义事件)。
+    TaskStarted(TaskStartedFrame),
+    TaskProgress(TaskProgressFrame),
+    TaskCompleted(TaskCompletedFrame),
+    TaskFailed(TaskFailedFrame),
 }
 
 /// `@savefile` frame 的最小稳定载荷。
@@ -45,6 +51,40 @@ pub struct SaveFileFrame {
     pub quality: Option<u8>,
     pub width: Option<u32>,
     pub height: Option<u32>,
+}
+
+/// `@task-started`: 任务进入 running。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskStartedFrame {
+    pub task_id: String,
+    pub seq: u64,
+    pub command: String,
+}
+
+/// `@task-progress`: 任务源主动汇报的步骤事件 (仅 @flow async / 伴生 agent)。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskProgressFrame {
+    pub task_id: String,
+    pub seq: u64,
+    pub step: String,
+    pub detail: Option<String>,
+}
+
+/// `@task-completed`: 自然成功终态 (exit_code == 0)。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskCompletedFrame {
+    pub task_id: String,
+    pub seq: u64,
+    pub exit_code: i32,
+}
+
+/// `@task-failed`: 非自然终态 (非零退出码); 取消复用本帧 + canceled:true。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskFailedFrame {
+    pub task_id: String,
+    pub seq: u64,
+    pub exit_code: i32,
+    pub canceled: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -244,6 +284,10 @@ impl ControlFrame {
             Self::PtyClosed(frame) => frame.to_wire_message(),
             Self::PtyDetached(frame) => frame.to_wire_message(),
             Self::PtyAttached(frame) => frame.to_wire_message(),
+            Self::TaskStarted(frame) => frame.to_wire_message(),
+            Self::TaskProgress(frame) => frame.to_wire_message(),
+            Self::TaskCompleted(frame) => frame.to_wire_message(),
+            Self::TaskFailed(frame) => frame.to_wire_message(),
         }
     }
 
@@ -252,6 +296,8 @@ impl ControlFrame {
     /// 当前只识别:
     /// - `@response ...`
     /// - `@savefile {...}`
+    /// - `@pty-*` 帧族
+    /// - `@task-*` 进度帧族 (Task/Spawn Phase 2)
     pub fn parse_inbound_result_message(message: &str) -> io::Result<Self> {
         let trimmed = message.trim_end_matches(['\r', '\n']);
 
@@ -295,6 +341,30 @@ impl ControlFrame {
             )?));
         }
 
+        if let Some(payload) = trimmed.strip_prefix("@task-started ") {
+            return Ok(Self::TaskStarted(TaskStartedFrame::parse_object_payload(
+                payload,
+            )?));
+        }
+
+        if let Some(payload) = trimmed.strip_prefix("@task-progress ") {
+            return Ok(Self::TaskProgress(TaskProgressFrame::parse_object_payload(
+                payload,
+            )?));
+        }
+
+        if let Some(payload) = trimmed.strip_prefix("@task-completed ") {
+            return Ok(Self::TaskCompleted(
+                TaskCompletedFrame::parse_object_payload(payload)?,
+            ));
+        }
+
+        if let Some(payload) = trimmed.strip_prefix("@task-failed ") {
+            return Ok(Self::TaskFailed(TaskFailedFrame::parse_object_payload(
+                payload,
+            )?));
+        }
+
         if trimmed.starts_with("@response ") {
             return Ok(Self::ResponseLine(trimmed.to_owned()));
         }
@@ -329,6 +399,173 @@ impl ControlFrame {
         }
 
         Ok(frames)
+    }
+}
+
+impl TaskStartedFrame {
+    pub fn to_wire_message(&self) -> String {
+        format!(
+            "@task-started {{\"task\":\"{}\",\"seq\":{},\"command\":\"{}\"}}",
+            escape_json_string(&self.task_id),
+            self.seq,
+            escape_json_string(&self.command),
+        )
+    }
+}
+
+impl TaskProgressFrame {
+    pub fn to_wire_message(&self) -> String {
+        match &self.detail {
+            Some(detail) => format!(
+                "@task-progress {{\"task\":\"{}\",\"seq\":{},\"step\":\"{}\",\"detail\":\"{}\"}}",
+                escape_json_string(&self.task_id),
+                self.seq,
+                escape_json_string(&self.step),
+                escape_json_string(detail),
+            ),
+            None => format!(
+                "@task-progress {{\"task\":\"{}\",\"seq\":{},\"step\":\"{}\"}}",
+                escape_json_string(&self.task_id),
+                self.seq,
+                escape_json_string(&self.step),
+            ),
+        }
+    }
+}
+
+impl TaskCompletedFrame {
+    pub fn to_wire_message(&self) -> String {
+        format!(
+            "@task-completed {{\"task\":\"{}\",\"seq\":{},\"exit_code\":{}}}",
+            escape_json_string(&self.task_id),
+            self.seq,
+            self.exit_code,
+        )
+    }
+}
+
+impl TaskFailedFrame {
+    pub fn to_wire_message(&self) -> String {
+        format!(
+            "@task-failed {{\"task\":\"{}\",\"seq\":{},\"exit_code\":{},\"canceled\":{}}}",
+            escape_json_string(&self.task_id),
+            self.seq,
+            self.exit_code,
+            self.canceled,
+        )
+    }
+}
+
+impl TaskStartedFrame {
+    pub fn parse_object_payload(payload: &str) -> io::Result<Self> {
+        let mut task_id = None::<String>;
+        let mut seq = None::<u64>;
+        let mut command = None::<String>;
+        for (name, raw_value) in parse_object_fields(payload)? {
+            match name.as_str() {
+                "task" => task_id = Some(parse_json_string(raw_value)?),
+                "seq" => {
+                    seq = Some(
+                        raw_value
+                            .parse::<u64>()
+                            .map_err(|_| invalid_frame_field("@task-started", "seq", raw_value))?,
+                    )
+                }
+                "command" => command = Some(parse_json_string(raw_value)?),
+                _ => return Err(invalid_frame_field("@task-started", &name, raw_value)),
+            }
+        }
+        Ok(Self {
+            task_id: require_string_field("@task-started", "task", task_id)?,
+            seq: seq.unwrap_or(0),
+            command: require_string_field("@task-started", "command", command)?,
+        })
+    }
+}
+
+impl TaskProgressFrame {
+    pub fn parse_object_payload(payload: &str) -> io::Result<Self> {
+        let mut task_id = None::<String>;
+        let mut seq = None::<u64>;
+        let mut step = None::<String>;
+        let mut detail = None::<String>;
+        for (name, raw_value) in parse_object_fields(payload)? {
+            match name.as_str() {
+                "task" => task_id = Some(parse_json_string(raw_value)?),
+                "seq" => {
+                    seq = Some(
+                        raw_value
+                            .parse::<u64>()
+                            .map_err(|_| invalid_frame_field("@task-progress", "seq", raw_value))?,
+                    )
+                }
+                "step" => step = Some(parse_json_string(raw_value)?),
+                "detail" => detail = Some(parse_json_string(raw_value)?),
+                _ => return Err(invalid_frame_field("@task-progress", &name, raw_value)),
+            }
+        }
+        Ok(Self {
+            task_id: require_string_field("@task-progress", "task", task_id)?,
+            seq: seq.unwrap_or(0),
+            step: require_string_field("@task-progress", "step", step)?,
+            detail,
+        })
+    }
+}
+
+impl TaskCompletedFrame {
+    pub fn parse_object_payload(payload: &str) -> io::Result<Self> {
+        let mut task_id = None::<String>;
+        let mut seq = None::<u64>;
+        let mut exit_code = None::<i32>;
+        for (name, raw_value) in parse_object_fields(payload)? {
+            match name.as_str() {
+                "task" => task_id = Some(parse_json_string(raw_value)?),
+                "seq" => {
+                    seq =
+                        Some(raw_value.parse::<u64>().map_err(|_| {
+                            invalid_frame_field("@task-completed", "seq", raw_value)
+                        })?)
+                }
+                "exit_code" => exit_code = Some(parse_i32(raw_value, "exit_code")?),
+                _ => return Err(invalid_frame_field("@task-completed", &name, raw_value)),
+            }
+        }
+        Ok(Self {
+            task_id: require_string_field("@task-completed", "task", task_id)?,
+            seq: seq.unwrap_or(0),
+            exit_code: exit_code.unwrap_or(-1),
+        })
+    }
+}
+
+impl TaskFailedFrame {
+    pub fn parse_object_payload(payload: &str) -> io::Result<Self> {
+        let mut task_id = None::<String>;
+        let mut seq = None::<u64>;
+        let mut exit_code = None::<i32>;
+        let mut canceled = false;
+        for (name, raw_value) in parse_object_fields(payload)? {
+            match name.as_str() {
+                "task" => task_id = Some(parse_json_string(raw_value)?),
+                "seq" => {
+                    seq = Some(
+                        raw_value
+                            .parse::<u64>()
+                            .map_err(|_| invalid_frame_field("@task-failed", "seq", raw_value))?,
+                    )
+                }
+                "exit_code" => exit_code = Some(parse_i32(raw_value, "exit_code")?),
+                "canceled" => canceled = raw_value.trim() == "true",
+                _ => return Err(invalid_frame_field("@task-failed", &name, raw_value)),
+            }
+        }
+        Ok(Self {
+            task_id: require_string_field("@task-failed", "task", task_id)?,
+            seq: seq.unwrap_or(0),
+            exit_code: exit_code.unwrap_or(-1),
+            canceled,
+        })
     }
 }
 
@@ -1014,6 +1251,14 @@ fn parse_u32(input: &str, field_name: &str) -> io::Result<u32> {
     })
 }
 
+/// 帧对象 payload 的未知/非法字段统一错误 (task 帧族与 pty 同风格)。
+fn invalid_frame_field(kind: &str, field_name: &str, raw_value: &str) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::InvalidData,
+        format!("{kind} 帧包含未知或非法字段 {field_name}: {raw_value}"),
+    )
+}
+
 fn parse_i32(input: &str, field_name: &str) -> io::Result<i32> {
     input.parse::<i32>().map_err(|_| {
         io::Error::new(
@@ -1373,5 +1618,74 @@ mod tests {
         assert_eq!(fs::read(&saved).expect("renamed file should exist"), b"NEW");
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Task/Spawn Phase 2 四帧 wire 格式逐字段验收 (spec §6.3)。
+    #[test]
+    fn task_frames_wire_format_should_match_spec() {
+        let started = ControlFrame::TaskStarted(TaskStartedFrame {
+            task_id: "t-a1b2c3d4".to_owned(),
+            seq: 7,
+            command: "cargo build --release".to_owned(),
+        });
+        assert_eq!(
+            started.to_wire_message(),
+            "@task-started {\"task\":\"t-a1b2c3d4\",\"seq\":7,\"command\":\"cargo build --release\"}"
+        );
+
+        let progress_no_detail = ControlFrame::TaskProgress(TaskProgressFrame {
+            task_id: "t-a1b2c3d4".to_owned(),
+            seq: 9,
+            step: "build".to_owned(),
+            detail: None,
+        });
+        assert_eq!(
+            progress_no_detail.to_wire_message(),
+            "@task-progress {\"task\":\"t-a1b2c3d4\",\"seq\":9,\"step\":\"build\"}"
+        );
+
+        let progress_with_detail = ControlFrame::TaskProgress(TaskProgressFrame {
+            task_id: "t-a1b2c3d4".to_owned(),
+            seq: 9,
+            step: "build".to_owned(),
+            detail: Some("42/120 crates".to_owned()),
+        });
+        assert_eq!(
+            progress_with_detail.to_wire_message(),
+            "@task-progress {\"task\":\"t-a1b2c3d4\",\"seq\":9,\"step\":\"build\",\"detail\":\"42/120 crates\"}"
+        );
+
+        let completed = ControlFrame::TaskCompleted(TaskCompletedFrame {
+            task_id: "t-a1b2c3d4".to_owned(),
+            seq: 10,
+            exit_code: 0,
+        });
+        assert_eq!(
+            completed.to_wire_message(),
+            "@task-completed {\"task\":\"t-a1b2c3d4\",\"seq\":10,\"exit_code\":0}"
+        );
+
+        // canceled 终态复用 @task-failed + canceled:true (spec §6.3, 不设独立帧)
+        let canceled = ControlFrame::TaskFailed(TaskFailedFrame {
+            task_id: "t-a1b2c3d4".to_owned(),
+            seq: 10,
+            exit_code: -1,
+            canceled: true,
+        });
+        assert_eq!(
+            canceled.to_wire_message(),
+            "@task-failed {\"task\":\"t-a1b2c3d4\",\"seq\":10,\"exit_code\":-1,\"canceled\":true}"
+        );
+
+        let failed = ControlFrame::TaskFailed(TaskFailedFrame {
+            task_id: "t-a1b2c3d4".to_owned(),
+            seq: 10,
+            exit_code: 2,
+            canceled: false,
+        });
+        assert_eq!(
+            failed.to_wire_message(),
+            "@task-failed {\"task\":\"t-a1b2c3d4\",\"seq\":10,\"exit_code\":2,\"canceled\":false}"
+        );
     }
 }

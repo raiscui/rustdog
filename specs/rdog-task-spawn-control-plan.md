@@ -221,7 +221,9 @@ keyexpr 草案(`rdog/<ns>/task/<id>/status` topic + queryable 兜底)已在
 A2A 调研支线记录,内部语义稳定后再正式化。**旁观 topic 必须默认关闭、
 opt-in 开启,且只发摘要不发原始输出**(认证层落地前的 fail-closed 暴露面控制)。
 
-## 7. Phase 3: 伴生 agent 托管(`rdog agent`)
+## 7. Phase 3: 伴生 agent 托管(`rdog agent`)— 已正式化为独立 spec
+
+详细设计见 `specs/rdog-agent-messaging-plan.md` (issue #71), 本节保留为阶段索引。
 
 - **形态**: `rdog agent` 子命令 = 托管 daemon lifecycle + agent loop 注册为 Task +
   消息通道接线。headless loop,不绑定 LLM provider(与评测 runner 的 provider

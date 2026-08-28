@@ -48,3 +48,56 @@
   .codex/skills/rdog-control/SKILL.md v2.28, 位于 Native App Lane 末尾;
   Safety 节加指针; 附来源注标明这是安全边界, 禁止后续 token 优化 pass 移除。
 - 上一条目中 "未决: 是否把政策恢复进 SKILL.md" 已解决, LATER_PLANS 决策项已清除。
+
+## [2026-08-28 16:45:00] [Session ID: current] 主题: macos flake 双族未修前, 每个 PR 都需人工判定放行
+
+### 发现来源
+- 本轮处理 PR #62/#63/#68: 三个 PR 的 macos job 全部挂已知 flake 族放行
+
+### 核心问题
+- ubuntu 修复后 (PR #62), macos 成为唯一常态红源; screenshot 锁毒化族
+  接近每轮必挂, 流程上每个 PR 合并都要重跑+比对+人工放行一次
+
+### 为什么重要
+- flake 判定依赖与 main 同轮比对, 成本随 PR 频率线性增长; 新会话若不读
+  记忆/LATER_PLANS 可能把 screenshot 4 件套误判为回归, 浪费排查时间
+
+### 未来风险
+- 若有人"顺手"重试到 screenshot 恰好全过的轮次, 可能误以为已自愈;
+  锁毒化根源 (10ms 计时窗口 + TIMEOUT_TRACE_TEST_LOCK) 不修不会消失
+
+### 当前结论
+- 修复方向已定且成本低 (计时窗口自适应 + 锁毒化恢复), 记录于 LATER_PLANS
+
+### 后续讨论入口
+- src/screenshot/tests.rs:54-120 + LATER_PLANS.md screenshot 条目
+
+## [2026-08-28 17:40:00] [Session ID: current] 主题: main 的 macos recording CI 已从抽签 flake 恶化为稳定红
+
+### 发现来源
+- PR #69 rebase 到 main 后 CI: macos 挂 recording_manual_cancel_before_deadline (两次重跑同测再挂);
+  main 最近 3 个 run 全红 (66685ce 起), 同族甚至更多测试挂 (manual_stop 也挂)
+
+### 核心问题
+- 该族不再是计时抽签: 重跑不翻 = 环境决定性稳定红
+- 指纹: 本地 992/992 全绿 (含此测试) + CI 稳定红
+- panic 点: tests/recording_e2e.rs:395 parse_response_value().unwrap() on None
+  = @record-start 的响应在 CI 5s 窗口内没带回 @response 标记
+- main 已合入两笔 recording flake 修复 (435be72 daemon 就绪探活 / c3267df owner 重连轮询),
+  未覆盖 cancel 族的这个路径
+
+### 为什么重要
+- 红的 main 会污染所有后续 PR 的 macos 信号, "与 main 同轮比对"口径会越来越难执行
+- recording 是 recorder/replay 主线的验收地基, CI 上跑不了会侵蚀信任
+
+### 未来风险
+- 后续 PR 全部带红 merge, 真回归被淹没
+- CI runner 与本地环境差异 (TCC 权限) 无诊断日志, 排查盲飞
+
+### 当前结论
+- 已确认: 与 task-spawn Phase 1/2 改动无关 (零接触 + ubuntu 全绿 + 本地全绿)
+- 未确认: CI 上 @record-start 的真实响应形状 (需加诊断日志)
+
+### 后续讨论入口
+- 入口: tests/recording_e2e.rs read_response_line 加超时时的原始行日志,
+  在 CI 复现一轮看 @record-start 到底回了什么 (error envelope? 超时空?)

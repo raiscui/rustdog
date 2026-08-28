@@ -813,3 +813,55 @@ control_actions::execute_ax_action
   之前的全部条目", 而不是只列代表性条目
 - 三例同模式的第三次出现 (singleton) 是模式成熟的信号, 单例时判"代码即载体"
   的条目, 在多例印证后值得升级为正式 solution
+
+## [2026-08-28 16:10:00] [Session ID: current] 任务名称: 处理 PR #62/#63 (CI 修复落地 + Phase 1 推进)
+
+### 任务内容
+
+- 接手两个 open PR 的处置: PR #62 (CI 修复, UNSTABLE) 与 PR #63 (Phase 1, DRAFT)
+- PR #62: 修正标题/body (原纯 docs 标题未反映 CI 修复内容), 修正 PR #63 body
+  中已失效的 29d49e5 hash 引用 (被并行会话 amend 为 10d495e)
+- PR #62 ubuntu unit tests 4 个失败的根因定位与修复 (e1f61dc):
+  - 3 个 open_app envelope 测试缺 #[cfg(target_os = "macos")] 门控
+    (非 macOS 分支绕过 mock), 补门控 + 新增非 macOS 镜像测试
+  - shell_lane timeout duration 2001ms: GNU coreutils kill("-TERM","-<pid>")
+    参数歧义 (docker strace 实证解析为 kill(-2, TERM) ESRCH), 孤儿持管道;
+    terminate_process_tree 改 libc::kill(2) 直发进程组信号
+- PR #62 合并 (ubuntu 首绿; macos 4 个 screenshot 失败与 main 同轮同款存量)
+- PR #63: 合并 main 解冲突 (control_actions.rs 一行注释差异取 main 版,
+  WORKLOG 双会话记录按时间序保留), 本地 task 19/19 验证后推送
+- PR #63 macos flake 判定: 跨 main/#62/#63 多轮比对矩阵 + recording e2e
+  本地 6 轮 30/30 复现, 确认全部为存量抽签 flake, Phase 1 无回归
+
+### 完成过程
+
+- 与并行会话在同一分支上协作: 发现对方已先行修复混入问题 (29d49e5→10d495e)
+  和 gbm/drm 依赖, 避免了重复劳动; 我的增量是 unit tests 层的根因修复
+- 全程 git worktree 隔离操作 PR 分支, 未触碰主工作区 (phase2 检出) 和 .mimosa
+- 根因验证遵守 现象→假设→验证→结论: docker 容器 python 复刻 + strace 决定性证据
+
+### 总结感悟
+
+- CI 每修一层暴露下一层存量: Build→链接→unit tests, 修复链要逐层实证不跳步
+- GNU/BSD 工具链的同名命令参数解析可能有静默歧义, 跨平台代码避免经外部命令
+  做关键路径; strace 是这类问题的最终裁判
+- 多会话同分支协作时, 动手前先 fetch + ls-remote 确认远端头, 别按记忆里的
+  hash 干活
+
+## [2026-08-28 15:30:00] [Session ID: current] 任务名称: Task/Spawn Phase 2 四票实施
+
+### 任务内容
+- feature/task-spawn-phase2: seq/帧族/推送接线/client 链路/e2e, 四票全关
+- stacked PR #69 (base = PR #63 分支)
+
+### 完成过程
+- 按依赖链 #64→65→66→67 顺序实施, 每票实现+测试+commit+comment+close
+- 排障链: nextest 空挂 (tail 管道缓冲+真死锁) → 单线程串行定位测试自死锁 →
+  e2e 三轮失败逐层剥: 白名单拒绝 → invocation 报错 → completed 竞态 →
+  bridge 生命周期误判 → wait 行稳定窗口
+- 手动 daemon+client 复现两次, status 探针隔离出"收割正常/推送丢失"
+
+### 总结感悟
+- e2e 失败输出 (错误消息) 每轮都精确定位了下一层问题, 没有一轮白费
+- one-shot 多行 client 的帧时序是真实契约, 注释进测试而非依赖巧合
+- 后台任务帧推送的验收必须双侧 (client 可见性 + daemon 发布证据)

@@ -1032,3 +1032,205 @@ feature/control-ax-split 分支: ax_input + ax_action + ax_query 三模块落地
 ### 状态
 
 **Phase 1 完成待 review (PR #63); Phase 2 票就绪 (#64 是 frontier)。**
+
+## [2026-08-28 15:00:00] [Session ID: current] 处理 PR: 修 PR #62 混入编译失败 + 推进 PR #63
+
+### 背景
+
+- PR #62 (fix/ci-linux-xcap-deps → main): CI 修复 + docs PR, 但 29d49e5 混入了
+  Phase 1 的 ControlCommand::Spawn 四分支 match arm, 而 main 无这些 enum 变体,
+  双平台编译 E0599 失败
+- PR #63 (feature/task-spawn-phase1 → main, DRAFT): Phase 1 完整实现,
+  已包含同一段 control_actions.rs 改动 (c0e3863)
+- main 近 3 轮 CI 全红 (wayland-sys 存量), PR #62 的 ci.yml 依赖安装正是修这个
+
+### 阶段
+
+- [ ] 阶段1: git worktree 隔离操作 fix/ci-linux-xcap-deps, 撤掉混入的
+  Spawn 四分支 (保留 platform_unsupported_envelope_json import 修复), 推送
+- [ ] 阶段2: 修正 PR #62 标题 (实际内容是 CI 修复, 不是纯 docs), 更新说明
+- [ ] 阶段3: 盯 PR #62 CI 至绿, 然后合并
+- [ ] 阶段4: PR #63 等 base 更新后 CI 重跑, 判定绿后转正/合并
+
+### 决策记录
+
+- 选 "PR #62 撤混入代码": 考虑过 (A) 撤掉混入分支 (B) 把 PR #62 base 改成
+  feature/task-spawn-phase1 (C) 先合 PR #63 再合 #62。
+  (B) 让 CI 修复 PR 依赖未合的功能分支, 合并顺序锁死且 review 噪音大;
+  (C) PR #63 的 ubuntu CI 继续存量红, 无法真正验证 Phase 1 在 linux 的编译,
+  且 984 绿的记忆只覆盖 macOS 本地。选 (A), 两个 PR 各自独立可编译,
+  顺序 #62 先 (修 CI) → #63 后 (受益于 ubuntu CI 可用)。
+
+## [2026-08-28 20:00:00] [Session ID: current] ubuntu CI 修复实施进展 (C1-C5)
+
+### 已验证结论
+- C1 根因: wayland-sys 0.31.11 build.rs:10 无条件 pkg-config wayland-client 并 unwrap;
+  xcap -> libwayshot-xcap -> wayland-backend(client_system/server_system) 无 dlopen
+- C2 依赖链与历史: xcap 0.9.4 自仓库基线就在; CI 全部 25 次可溯运行全失败,
+  ubuntu job 从未通过 (推翻 "8 月 9 日断裂" 的最初判断); workflow 从未装系统依赖
+- C3 本地复现: cargo check --target x86_64-unknown-linux-gnu 同一 build.rs:10 panic
+- C4 分层突破中 (PR #62, fix/ci-linux-xcap-deps):
+  1. apt 依赖 (上游 xcap README 清单) -> wayland 过 ✓
+  2. E0425 platform_unsupported_envelope_json 缺 import (linux 首编译暴露) -> cfg 门控 import ✓
+  3. 链接层 -lgbm -> 补 libgbm-dev/libdrm-dev ✓ (Build 通过)
+  4. Unit tests 平台差异 (当前): 3 个 @open-app envelope 测试期望 macOS 分支 ->
+     待 cfg 门控; shell_lane timeout 2001ms vs 界 1000ms -> 待 linux 容器动态复现
+- macOS run 已首次全绿一轮 (33143082932)
+
+### 并行会话干扰记录
+- 并行 task-spawn 会话曾误把 WIP 提交/推到本修复分支, 又自行 reset 清理;
+- 我的 29d49e5 曾误夹带其工作区 14 行 WIP (git add 整文件所致), 已在隔离
+  worktree 重建干净提交 10d495e 并 force-push 替换
+- 教训: 共享工作目录下提交前必须 git diff --stat 核对暂存内容只含自己的改动
+
+### 待办
+- [ ] C4.4: open_app 三测试 cfg 门控 (mocks + helper 一并)
+- [ ] C4.5: shell_lane 超时根因 (docker linux 容器复现中) + 修复
+- [ ] C5: ubuntu job 绿后合并 PR #62
+
+## [2026-08-28 15:50:00] [Session ID: current] PR #62 ubuntu unit tests 修复推送
+
+### 完成内容
+
+- [x] 根因链完整实证 (notes.md 详录):
+  - 3 个 open_app 测试: 非 macOS 分支绕过 mock, 断言必挂 → 缺 cfg 门控
+  - shell_lane timeout: GNU coreutils kill("-TERM","-<pid>") 解析成 kill(-2,TERM)
+    ESRCH (docker strace 实证), 孤儿持管道写端, duration 2001ms
+- [x] 修复 e1f61dc 推送 fix/ci-linux-xcap-deps:
+  - process.rs terminate_process_tree 改 libc::kill(2) 直发进程组信号
+  - Cargo.toml unix 段加 libc (依赖树已有, 零成本)
+  - 3 个 open_app 测试加 #[cfg(target_os = "macos")]
+  - 新增非 macOS platform_unsupported envelope 镜像测试
+- [x] macOS 侧验证: cargo check 过 + shell_lane/open_app 9/9 绿
+- [x] PR #63 macos flake 判定完成: 与 main 同轮比对全为存量, recording e2e
+  本地 6 轮 30/30 绿
+
+### 待验证
+
+- PR #62 e1f61dc 轮 CI: ubuntu Build+unit tests 首次全绿?
+- macos 抽签 flake (auto_stop/metadata_publish 等) 重跑表现
+
+## [2026-08-28 16:30:00] [Session ID: current] 处理 PR 任务收尾
+
+### 最终状态
+
+- [x] PR #62 (CI 修复): 修复 ubuntu unit tests 4 失败后合并 (05:39Z)
+      - ubuntu job 半月来首次全绿 (Build + unit tests)
+- [x] PR #63 (Phase 1 @spawn 四原语): merge main 收敛后双平台判定, 转正合并 (05:59Z)
+      - ubuntu 875 passed 全绿 (含 23 个新测试), macos 903 passed 仅存量 flake
+- [x] PR #68 (docs): kill 参数歧义 solution capture, 已创建待 CI
+- [x] ERRORFIX / WORKLOG / LATER_PLANS / notes 全部落盘
+- [x] solution 沉淀 (Compound Gate 七项过) + AGENTS.md 索引
+
+### 遗留 (LATER_PLANS 已记)
+
+- macos CI screenshot 4 测试锁毒化连锁 flake (计时窗口 + 锁毒化)
+- process_lease metadata_publish_failure 跨平台 flake 待观察
+
+## [2026-08-28 15:30:00] [Session ID: current] Phase 2 完成 (#64-#67 全关, PR #69)
+
+### 提交链 (feature/task-spawn-phase2, 基于 phase1)
+
+- 0caabb8 #64 registry 全局单调 seq
+- 0600f14 #65 ControlFrame 四帧族 + wire 格式
+- 9397b79 #66 session channel 推送接线 (lane/pending/drain/bridge 节奏)
+- 0f28f65 #67 client 链路打通 + e2e x2 + bridge 生命周期修复
+
+### 实现中发现并修复的问题
+
+- 测试自死锁: registry guard 跨 spawn 存活 (同线程 Mutex 不可重入)
+- bridge 生命周期误判: has_live_task 25ms 超时被 Ok(None)=>break 当 session 关闭
+- client 入站白名单不含 task 帧; invocation 对 task 帧报"意外帧"
+- 帧到达时序契约: client one-shot 行间隙毫秒级可能先于终态帧退出,
+  e2e 采用 client 全链 (started) + daemon 推送日志 (completed) 双侧断言
+
+### 状态
+
+**Phase 1 (PR #63) + Phase 2 (PR #69, stacked) 完成。
+Phase 3 (伴生 agent) 需先完整 to-spec (A2A 支线 channel 设计收拢)。**
+
+## [2026-08-28 21:30:00] [Session ID: current] CI 修复战役收官 -- 双平台历史首次全绿
+
+### 最终结果
+- run 33151443006: ubuntu ✓ + macOS ✓ -- 仓库 CI 历史 (25+ 可溯运行) 上首次全绿
+- PR #62 (e1f61dc, 并行会话抢合并) + PR #70 (435be72, 测试稳定性 5 连发) 均已合并
+- main 历史性转绿
+
+### 完整根因清单 (每层独立实证)
+1. ubuntu Build 断: wayland-sys 0.31.11 build.rs 无条件 pkg-config + workflow 从未装
+   系统依赖 (上游 xcap README 清单 + libgbm/libdrm 链接层)
+2. linux 编译错: cfg 分支从未在开发机编译 (缺 import)
+3. flow 超时失效: procps kill -TERM -pgid 负 pid 被吞成选项 (kill -0 -PGID 容器实证),
+   改 libc::kill(2) 直发; macOS BSD kill 无此歧义 -- 跨平台坑
+4. websocket EPIPE: write_to 三连 write_all vs 服务线程只读 2 字节帧头就关 socket
+5. macOS flake 家族 (全部轮询化/裕量化): recording handler x3, e2e 探测 x1 + 首轮就绪
+   竞态 (@ping 探活门), timeout_watcher, screenshot 计时 x4 (10ms/50ms 是测试自造的
+   饥饿敏感点) + gate 释放轮询
+
+### 方法论沉淀
+- 层层剥洋葱: 修一层 CI 暴露下一层 (deps -> 编译 -> 链接 -> 单测 -> e2e), 每层独立验证
+- 本地 linux 容器 (OrbStack + rust:1-bookworm + 同款 apt 清单) 是 CI 问题的可调试复现场,
+  探针 + /proc 观测 + 隔离 shell 实验三件套定位了 kill 二进制方言问题
+- "固定 sleep 等线程置位" 在负载 CI 上是结构性错误, 统一改带期限轮询 (幂等观测点)
+- 端口监听 != 控制面就绪: spawn 测试加 @ping 探活门
+
+### 协作记录
+- 并行 task-spawn 会话全程在同一仓库工作: 曾误提交到本修复分支 (自行清理),
+  同步修复了同一批问题 (e1f61dc 与我的 c2060e9 功能等价, 采纳其版),
+  并抢先合并了 PR #62; 剩余 4 提交由我以 PR #70 补齐合并
+- 我的 29d49e5 曾误夹带其工作区 WIP (git add 整文件), 重建干净提交修复;
+  教训: 共享工作目录提交前必须核对暂存 diff 只含自己的改动
+
+## [2026-08-28 16:20:00] [Session ID: current] Phase 3 to-spec 完成 (issue #71)
+
+### 完成内容
+
+- [x] to-spec: 五轮 A2A 调研 + Phase 1/2 实施经验综合成 Phase 3 正式 spec
+- [x] 发布 issue #71 (enhancement + ready-for-agent), 14 条 user story
+- [x] specs/rdog-agent-messaging-plan.md 镜像落盘, AGENTS.md 索引登记
+- [x] task-spawn spec §7 指向新 spec (阶段索引化)
+
+### spec 核心决策 (收拢支线散落设计)
+
+- keyexpr: rdog/<ns>/agent/<name>/{inbox,card,alive}, 对齐 daemon 身份层级
+- mailbox: daemon 侧 per-agent 有界缓存(256), ack 清除, 不持久化
+- rdog.agentmsg.v1 envelope: {id, from, to, kind, payload, sent_at}
+- rdog agent CLI: --name + 复用/带起 daemon; 决策回调 trait 是唯一智能注入点
+- 测试 seam: 复用 e2e 子进程模式(不新建), loop 决策回调 mock 为第二 seam
+- 分工红线: daemon 确定性(存储/路由/托管), agent 智能(消化/规划/卡片内容)
+
+### 状态
+
+**Phase 3 spec 就绪待实施。Phase 1(PR #63)/Phase 2(PR #69)待 review merge。**
+
+## [2026-08-28 16:50:00] [Session ID: current] Phase 3 拆票完成 (#72-#76)
+
+### 票链
+
+- #72 keyexpr builders + rdog.agentmsg.v1 envelope (frontier)
+- #73 daemon 侧 mailbox (inbox 接收/有界缓存/补拉/ack/id 去重)
+- #74 rdog agent CLI + loop (决策回调 trait, daemon 托管)
+- #75 能力卡片托管 (card keyexpr, agent 生成 daemon 分发)
+- #76 e2e 验收 (投递/处理/回复/补拉/ack/重启恢复全链)
+
+依赖链: 72 -> 73 -> 74 -> 75/76 (76 双依赖 74+75), native dependencies 已建
+
+### 状态
+
+**Phase 3 票就绪, #72 是 frontier。实施前置 = PR #63/#69 review merge
+(或用户指示 stacked 继续)。认证层仍是独立并行项待排期。**
+
+## [2026-08-28 17:45:00] [Session ID: current] 路径 1 执行: PR 整备与 CI 判定
+
+### 完成内容
+
+- [x] 发现 PR #63 已由用户 merge (05:59), main 还并入了 PR #70 (fix/ci + flake 修复)
+- [x] PR #69 base 切到 main + rebase (仅 WORKLOG append 冲突, 保留两边) + force push
+- [x] PR #69 CI: ubuntu 绿; macos 挂 recording_manual_cancel (重跑不翻)
+- [x] 判定: 与 Phase 2 零接触, main 本身 3 连红同族 — main 存量问题非 PR 回归
+- [x] 记忆更新 (rustdog-ci-red-state: recording 族从抽签恶化稳定红) + EPIPHANY 记录
+
+### 状态
+
+**PR #69 ready 待 merge (CI 红为 main 存量, 证据链完整)。
+merge 前建议先修 main 的 recording 稳定红 (诊断日志入口已记录在 EPIPHANY)。**

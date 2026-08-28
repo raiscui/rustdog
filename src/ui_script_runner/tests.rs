@@ -262,6 +262,7 @@ fn ui_script_trace_should_write_control_step_record() {
         line: "@ping".to_string(),
     };
     let exchange = ControlLineExchange {
+        task_events: Vec::new(),
         line: "@ping".to_string(),
         frames: vec![ControlFrame::ResponseLine(
             r#"@response "pong""#.to_string(),
@@ -287,6 +288,7 @@ fn ui_script_trace_should_include_timing_and_target_resolution() {
     };
     let response = r#"@response {"value":{"status":"ok","target_resolution":{"source":"coordinate_fallback","coordinate_space":"os-logical"}}}"#;
     let exchange = ControlLineExchange {
+        task_events: Vec::new(),
         line: pending.line.clone(),
         frames: vec![ControlFrame::ResponseLine(response.to_string())],
         response_line: Some(response.to_string()),
@@ -397,6 +399,7 @@ fn ui_script_control_step_should_fail_on_error_response() {
         line: "@window-resize#1:{}".to_string(),
     };
     let exchange = ControlLineExchange {
+        task_events: Vec::new(),
         line: pending.line.clone(),
         frames: vec![ControlFrame::ResponseLine(
             r#"@response {"code":64,"error":"permission denied"}"#.to_string(),

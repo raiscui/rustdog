@@ -79,6 +79,10 @@ pub(crate) struct ControlLineExchange {
     pub(crate) frames: Vec<control_frames::ControlFrame>,
     pub(crate) response_line: Option<String>,
     pub(crate) artifacts: Vec<ControlArtifactRecord>,
+    /// 本行途中到达的 task 进度帧 wire 文本 (旁路通知, 非本行响应产物)。
+    /// Task/Spawn Phase 2: spawn 后续行会带回 daemon 推送的任务帧,
+    /// 多行 one-shot / UI script 把它们作为通知行打印, 不计入响应。
+    pub(crate) task_events: Vec<String>,
 }
 
 pub(crate) fn resolve_control_invocation(
@@ -471,6 +475,8 @@ fn collect_control_exchange_from_frames(
     frames: Vec<control_frames::ControlFrame>,
     artifacts_dir: &Path,
 ) -> std::io::Result<ControlLineExchange> {
+    let mut task_events = Vec::new();
+
     let mut response_line = None::<String>;
     let mut artifacts = Vec::new();
 
@@ -500,6 +506,24 @@ fn collect_control_exchange_from_frames(
                     "UI script line-control response 收到了意外 PTY frame",
                 ));
             }
+            // Task/Spawn Phase 2: task 进度帧是"旁边的通知", 不是本 line 的
+            // 响应产物 — 记录 wire 文本进 task_events, 由打印层输出。
+            control_frames::ControlFrame::TaskStarted(frame) => {
+                task_events.push(frame.to_wire_message());
+                continue;
+            }
+            control_frames::ControlFrame::TaskProgress(frame) => {
+                task_events.push(frame.to_wire_message());
+                continue;
+            }
+            control_frames::ControlFrame::TaskCompleted(frame) => {
+                task_events.push(frame.to_wire_message());
+                continue;
+            }
+            control_frames::ControlFrame::TaskFailed(frame) => {
+                task_events.push(frame.to_wire_message());
+                continue;
+            }
         }
     }
 
@@ -512,6 +536,7 @@ fn collect_control_exchange_from_frames(
 
     Ok(ControlLineExchange {
         line: line.to_owned(),
+        task_events,
         frames,
         response_line,
         artifacts,
@@ -519,6 +544,10 @@ fn collect_control_exchange_from_frames(
 }
 
 fn print_control_line_exchange(exchange: &ControlLineExchange) -> std::io::Result<()> {
+    // task 进度通知先于本行 response 打印 (时序上它们也先于 response 到达)
+    for event in &exchange.task_events {
+        println!("{event}");
+    }
     for artifact in &exchange.artifacts {
         println!("saved file: {}", artifact.path.display());
     }
