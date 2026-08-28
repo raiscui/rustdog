@@ -86,6 +86,15 @@ impl ControlActionExecutor for FakeExecutor {
             ControlCommand::TaskCancel(request) => {
                 format!("TASK_CANCEL:{}\n", request.task_id).into_bytes()
             }
+            ControlCommand::AgentRegister(request) => {
+                format!("AGENT_REGISTER:{}\n", request.agent_name).into_bytes()
+            }
+            ControlCommand::AgentInbox(request) => {
+                format!("AGENT_INBOX:{}\n", request.agent_name).into_bytes()
+            }
+            ControlCommand::AgentAck(request) => {
+                format!("AGENT_ACK:{}:{}\n", request.agent_name, request.message_id).into_bytes()
+            }
             ControlCommand::MouseMove(request) => format!(
                 "MOUSE_MOVE:{}:{}\n",
                 request.x.unwrap_or(0),

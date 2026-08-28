@@ -8,11 +8,11 @@ pub(crate) use self::parsers::{
 };
 
 use self::parsers::{
-    parse_cancel_payload, parse_cmd_payload, parse_computer_act_payload, parse_control_header,
-    parse_key_payload, parse_open_app_payload, parse_pty_attach_payload, parse_pty_close_payload,
-    parse_pty_detach_payload, parse_pty_payload, parse_screenshot_payload, parse_spawn_payload,
-    parse_task_id_payload, parse_task_output_payload, parse_wait_payload,
-    require_non_empty_payload,
+    parse_agent_ack_payload, parse_agent_name_payload, parse_cancel_payload, parse_cmd_payload,
+    parse_computer_act_payload, parse_control_header, parse_key_payload, parse_open_app_payload,
+    parse_pty_attach_payload, parse_pty_close_payload, parse_pty_detach_payload, parse_pty_payload,
+    parse_screenshot_payload, parse_spawn_payload, parse_task_id_payload,
+    parse_task_output_payload, parse_wait_payload, require_non_empty_payload,
 };
 
 use crate::control_ax::{
@@ -114,6 +114,10 @@ pub enum ControlCommand {
     TaskStatus(TaskIdRequest),
     TaskOutput(TaskOutputRequest),
     TaskCancel(TaskIdRequest),
+    /// agent messaging Phase 3 (issue #71/#73): mailbox 的注册/补拉/ack。
+    AgentRegister(AgentNameRequest),
+    AgentInbox(AgentNameRequest),
+    AgentAck(AgentAckRequest),
     /// ticket 08 + 21: composite 复合命令 (e.g., hotkey_click = key down + click + key up)
     /// mod.rs dispatch_underlying 顺序执行每个 sub-command, 任一失败回滚已执行的 (modifier release)。
     Composite(Vec<ControlCommand>),
@@ -150,6 +154,19 @@ pub struct SpawnRequest {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TaskIdRequest {
     pub task_id: String,
+}
+
+/// `@agent-register` / `@agent-inbox` 的结构化请求: 单个 agent name。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentNameRequest {
+    pub agent_name: String,
+}
+
+/// `@agent-ack` 的结构化请求: agent name + 被确认的消息 id。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentAckRequest {
+    pub agent_name: String,
+    pub message_id: String,
 }
 
 /// `@task-output` 的结构化请求: task id + 尾部行数 (默认 80)。
@@ -587,6 +604,13 @@ pub fn parse_control_line(line: &str) -> io::Result<ControlParseResult> {
         "task-status" => ControlCommand::TaskStatus(parse_task_id_payload("task-status", payload)?),
         "task-output" => ControlCommand::TaskOutput(parse_task_output_payload(payload)?),
         "task-cancel" => ControlCommand::TaskCancel(parse_task_id_payload("task-cancel", payload)?),
+        "agent-register" => {
+            ControlCommand::AgentRegister(parse_agent_name_payload("agent-register", payload)?)
+        }
+        "agent-inbox" => {
+            ControlCommand::AgentInbox(parse_agent_name_payload("agent-inbox", payload)?)
+        }
+        "agent-ack" => ControlCommand::AgentAck(parse_agent_ack_payload(payload)?),
         "pty-close" => ControlCommand::PtyClose(parse_pty_close_payload(payload)?),
         "pty-detach" => ControlCommand::PtyDetach(parse_pty_detach_payload(payload)?),
         "pty-attach" => ControlCommand::PtyAttach(parse_pty_attach_payload(payload)?),

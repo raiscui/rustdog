@@ -7,7 +7,11 @@
 //! - from/to 是 agent name, 复用 daemon_name 校验规则 (DNS 风格 label)
 //! - id 由发送方生成 (uuid v4), 消费方用它做去重与关联回复
 
-use std::io;
+use std::{
+    collections::{HashMap, HashSet, VecDeque},
+    io,
+    sync::{Mutex, OnceLock},
+};
 
 use crate::zenoh_identity::validate_daemon_name;
 
@@ -202,6 +206,75 @@ fn now_ms() -> u64 {
 mod tests {
     use super::*;
 
+    // ===== mailbox store (issue #73) =====
+
+    fn deliver_to(agent: &str, id: &str) -> bool {
+        let message = AgentMessage {
+            id: id.to_owned(),
+            from: "sender.lab".to_owned(),
+            to: agent.to_owned(),
+            kind: AgentMessageKind::Task,
+            payload: "p".to_owned(),
+            sent_at_ms: 1,
+        };
+        mailbox_deliver(&message)
+    }
+
+    #[test]
+    fn mailbox_should_require_registration_before_caching() {
+        // 测试隔离: 用未注册过的 agent name
+        let agent = format!("mb-unreg-{}.lab", std::process::id());
+        assert!(!deliver_to(&agent, "u1"), "未注册 agent 不缓存");
+        mailbox_register_agent(&agent);
+        assert!(deliver_to(&agent, "u2"));
+        mailbox_unregister_agent(&agent);
+    }
+
+    #[test]
+    fn mailbox_should_deduplicate_by_message_id() {
+        let agent = format!("mb-dedup-{}.lab", std::process::id());
+        mailbox_register_agent(&agent);
+        assert!(deliver_to(&agent, "dup-1"));
+        assert!(!deliver_to(&agent, "dup-1"), "重复 id 丢弃");
+        assert!(deliver_to(&agent, "dup-2"));
+        let snapshot = mailbox_pending(&agent);
+        assert_eq!(snapshot.pending.len(), 2);
+        assert_eq!(snapshot.duplicate, 1);
+        mailbox_unregister_agent(&agent);
+    }
+
+    #[test]
+    fn mailbox_ack_should_remove_only_target_message() {
+        let agent = format!("mb-ack-{}.lab", std::process::id());
+        mailbox_register_agent(&agent);
+        deliver_to(&agent, "ack-1");
+        deliver_to(&agent, "ack-2");
+        assert!(mailbox_ack(&agent, "ack-1"));
+        let snapshot = mailbox_pending(&agent);
+        assert_eq!(snapshot.pending.len(), 1);
+        assert_eq!(snapshot.pending[0].message.id, "ack-2");
+        // 重复 ack 幂等返回 false
+        assert!(!mailbox_ack(&agent, "ack-1"));
+        // ack 后同 id 重投仍被去重窗口拦截
+        assert!(!deliver_to(&agent, "ack-1"));
+        mailbox_unregister_agent(&agent);
+    }
+
+    #[test]
+    fn mailbox_should_drop_oldest_beyond_capacity() {
+        let agent = format!("mb-cap-{}.lab", std::process::id());
+        mailbox_register_agent(&agent);
+        for index in 0..(MAILBOX_CAPACITY_PER_AGENT + 10) {
+            deliver_to(&agent, &format!("cap-{index}"));
+        }
+        let snapshot = mailbox_pending(&agent);
+        assert_eq!(snapshot.pending.len(), MAILBOX_CAPACITY_PER_AGENT);
+        assert_eq!(snapshot.dropped, 10);
+        // 丢的是最老: 首条应是 cap-10
+        assert_eq!(snapshot.pending[0].message.id, "cap-10");
+        mailbox_unregister_agent(&agent);
+    }
+
     #[test]
     fn round_trip_should_preserve_all_fields() {
         let message = AgentMessage::new(
@@ -267,5 +340,145 @@ mod tests {
         let partial = r#"{"v":1,"id":"u","from":"a.lab","to":"b.lab","kind":"task","sent_at":1}"#;
         let err = AgentMessage::parse_wire_message(partial).unwrap_err();
         assert!(err.to_string().contains("缺少 payload"), "{err}");
+    }
+}
+
+// ===========================================================================
+// mailbox store (issue #73, spec §Implementation Decisions)
+//
+// daemon 侧 per-agent 有界缓存: 纯逻辑层, 不含 zenoh 依赖 (sub 接线在
+// zenoh_control 域, 保持协议域与传输域分层)。全局单例模式对齐 task registry。
+//
+// 语义边界 (spec 固定):
+// - 上限 256 条/agent, 超限丢最老并计数 (dropped)
+// - id 去重窗口: 已见 id 的重复投递直接丢弃 (计数 duplicate)
+// - ack 清除; 不持久化, daemon 重启归零
+// - 注册幂等; 未注册 agent 的消息不入缓存 (接线层负责过滤)
+// ===========================================================================
+
+/// 每个agent 的 pending 消息上限 (spec: 量级 256)。
+pub const MAILBOX_CAPACITY_PER_AGENT: usize = 256;
+
+/// mailbox 里的一条待消费消息 (envelope + 到达时间)。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingAgentMessage {
+    pub message: AgentMessage,
+    pub received_at_ms: u64,
+}
+
+/// 单个 agent 的 mailbox 状态。
+#[derive(Debug, Default)]
+struct AgentMailbox {
+    pending: VecDeque<PendingAgentMessage>,
+    /// 已见消息 id 的去重窗口 (含已 ack 的; 上限与 pending 同步有界)。
+    seen_ids: HashSet<String>,
+    /// 容量溢出丢弃计数 (可观测性)。
+    dropped: u64,
+    /// 重复投递丢弃计数。
+    duplicate: u64,
+}
+
+/// mailbox 全局注册表: agent name -> mailbox (namespace 由接线层持有,
+/// 同一 daemon 内单一 namespace, 与 daemon 配置一致)。
+struct MailboxRegistry {
+    agents: HashMap<String, AgentMailbox>,
+}
+
+static MAILBOX: OnceLock<Mutex<MailboxRegistry>> = OnceLock::new();
+
+fn mailbox() -> &'static Mutex<MailboxRegistry> {
+    MAILBOX.get_or_init(|| {
+        Mutex::new(MailboxRegistry {
+            agents: HashMap::new(),
+        })
+    })
+}
+
+fn now_ms_u64() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// 注册一个本机 agent (幂等)。注册后接线层才会把该 agent 的 inbox 消息写入。
+pub fn mailbox_register_agent(agent_name: &str) {
+    let mut registry = mailbox().lock().expect("mailbox lock should work");
+    registry.agents.entry(agent_name.to_owned()).or_default();
+}
+
+/// 注销 agent (agent 下线不调用也安全: mailbox 有界; 注销用于显式清理)。
+pub fn mailbox_unregister_agent(agent_name: &str) {
+    let mut registry = mailbox().lock().expect("mailbox lock should work");
+    registry.agents.remove(agent_name);
+}
+
+/// 一条 inbox 消息入缓存 (接线层在 sub 回调里调用)。
+///
+/// 返回是否入队: 未注册 agent / 重复 id 返回 false (调用方只做日志)。
+pub fn mailbox_deliver(message: &AgentMessage) -> bool {
+    let mut registry = mailbox().lock().expect("mailbox lock should work");
+    let Some(agent) = registry.agents.get_mut(&message.to) else {
+        return false;
+    };
+    if !agent.seen_ids.insert(message.id.clone()) {
+        agent.duplicate += 1;
+        return false;
+    }
+    agent.pending.push_back(PendingAgentMessage {
+        message: message.clone(),
+        received_at_ms: now_ms_u64(),
+    });
+    if agent.pending.len() > MAILBOX_CAPACITY_PER_AGENT {
+        agent.pending.pop_front();
+        agent.dropped += 1;
+    }
+    true
+}
+
+/// 拉取 agent 的未 ack 消息快照 (补拉语义: 不移除, ack 才移除)。
+pub fn mailbox_pending(agent_name: &str) -> MailboxSnapshot {
+    let registry = mailbox().lock().expect("mailbox lock should work");
+    match registry.agents.get(agent_name) {
+        Some(agent) => MailboxSnapshot {
+            registered: true,
+            pending: agent.pending.iter().cloned().collect(),
+            dropped: agent.dropped,
+            duplicate: agent.duplicate,
+        },
+        None => MailboxSnapshot::unregistered(),
+    }
+}
+
+/// ack 一条消息: 从 pending 移除 (seen_ids 保留 — 去重窗口继续生效)。
+///
+/// 返回 false = agent 未注册或消息不在 pending (已 ack / 从未入队)。
+pub fn mailbox_ack(agent_name: &str, message_id: &str) -> bool {
+    let mut registry = mailbox().lock().expect("mailbox lock should work");
+    let Some(agent) = registry.agents.get_mut(agent_name) else {
+        return false;
+    };
+    let before = agent.pending.len();
+    agent.pending.retain(|entry| entry.message.id != message_id);
+    agent.pending.len() != before
+}
+
+/// mailbox 查询快照。
+#[derive(Debug, Clone)]
+pub struct MailboxSnapshot {
+    pub registered: bool,
+    pub pending: Vec<PendingAgentMessage>,
+    pub dropped: u64,
+    pub duplicate: u64,
+}
+
+impl MailboxSnapshot {
+    fn unregistered() -> Self {
+        Self {
+            registered: false,
+            pending: Vec::new(),
+            dropped: 0,
+            duplicate: 0,
+        }
     }
 }

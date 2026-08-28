@@ -130,6 +130,56 @@ pub fn execute_explicit_control_request<E: ControlActionExecutor>(
                 ),
             }
         }
+        // agent messaging Phase 3 (issue #73): mailbox 注册/补拉/ack。
+        // 专门分支: 即答命令不进 cancel registry; daemon 侧通配 sub 常驻,
+        // 注册只控制"缓存谁" (spec: 未注册不缓存)。
+        ControlCommand::AgentRegister(agent_request) => {
+            crate::agent_messaging::mailbox_register_agent(&agent_request.agent_name);
+            ControlExecutionOutcome::from_response_line(render_structured_success_response(
+                request.request_id,
+                &format!(
+                    "{{\"agent\":\"{}\",\"registered\":true}}",
+                    agent_request.agent_name
+                ),
+            ))
+        }
+        ControlCommand::AgentInbox(agent_request) => {
+            let snapshot = crate::agent_messaging::mailbox_pending(&agent_request.agent_name);
+            let pending_json = snapshot
+                .pending
+                .iter()
+                .map(|entry| entry.message.to_wire_message())
+                .collect::<Vec<_>>()
+                .join(",");
+            let response = if snapshot.registered {
+                format!(
+                    "{{\"agent\":\"{}\",\"registered\":true,\"pending\":[{pending_json}],\"dropped\":{},\"duplicate\":{}}}",
+                    agent_request.agent_name, snapshot.dropped, snapshot.duplicate
+                )
+            } else {
+                format!(
+                    "{{\"agent\":\"{}\",\"registered\":false}}",
+                    agent_request.agent_name
+                )
+            };
+            ControlExecutionOutcome::from_response_line(render_structured_success_response(
+                request.request_id,
+                &response,
+            ))
+        }
+        ControlCommand::AgentAck(agent_request) => {
+            let acked = crate::agent_messaging::mailbox_ack(
+                &agent_request.agent_name,
+                &agent_request.message_id,
+            );
+            ControlExecutionOutcome::from_response_line(render_structured_success_response(
+                request.request_id,
+                &format!(
+                    "{{\"agent\":\"{}\",\"id\":\"{}\",\"acked\":{acked}}}",
+                    agent_request.agent_name, agent_request.message_id
+                ),
+            ))
+        }
         ControlCommand::Screenshot(screenshot_request) => {
             match execute_screenshot_request(request.request_id, screenshot_request) {
                 Ok(outcome) => outcome,

@@ -1,5 +1,6 @@
 use std::io;
 
+mod agent;
 mod cancel_seq;
 mod computer_act;
 mod key;
@@ -9,6 +10,7 @@ mod screenshot;
 mod task;
 mod wait;
 
+pub(super) use self::agent::{parse_agent_ack_payload, parse_agent_name_payload};
 pub(super) use self::cancel_seq::parse_cancel_payload;
 pub(super) use self::computer_act::parse_computer_act_payload;
 pub(super) use self::key::parse_key_payload;

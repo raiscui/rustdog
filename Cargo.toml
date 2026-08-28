@@ -35,6 +35,10 @@ uuid = { version = "1.18.1", features = ["v4"] }
 xcap = "0.9.4"
 zenoh = { version = "1.8.0", default-features = false, features = ["transport_serial", "transport_tcp", "transport_udp", "transport_unixpipe"] }
 
+[dev-dependencies]
+# agent mailbox e2e: 测试进程直接 zenoh pub 投递 inbox 消息
+zenoh = { version = "1.8.0", default-features = false, features = ["transport_tcp"] }
+
 [target.'cfg(target_os = "macos")'.dependencies]
 sck-rs = { git = "https://github.com/screenpipe/sck-rs" }
 

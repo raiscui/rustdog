@@ -2450,3 +2450,129 @@ fn task_spawn_cancel_should_work_across_client_processes() {
         "cancel response should report canceled\nstdout:\n{stdout}"
     );
 }
+
+// ============================================================================
+// agent messaging Phase 3 (issue #73): mailbox 投递 -> 补拉 -> ack 全链
+//
+// 投递方: 测试进程自己的 zenoh session (dev-dep, peer 连 daemon entry-point)。
+// 这模拟了真实的跨主机委派: 委派方 pub 一条 rdog.agentmsg.v1 envelope 到
+// 目标 agent 的 inbox keyexpr。
+// ============================================================================
+
+#[test]
+fn agent_mailbox_should_accept_delivery_and_support_pull_and_ack() {
+    let daemon_name = unique_name("agent-mb");
+    let listen_port = next_port();
+    let (mut daemon, config_path, entrypoint, buffer) =
+        start_zenoh_daemon_with_combined_output(&daemon_name, listen_port);
+    wait_until_output_contains(
+        &mut daemon,
+        &buffer,
+        "zenoh router daemon ready",
+        Duration::from_secs(8),
+    )
+    .expect("daemon should report ready");
+
+    let agent_name = format!("helper-{}.lab", std::process::id());
+    let args: &[&str] = &[
+        "--transport",
+        "zenoh",
+        "--target-name",
+        &daemon_name,
+        "--entry-point",
+        &entrypoint,
+        "--namespace",
+        "lab",
+    ];
+
+    // 1. 注册 agent (mailbox 开始缓存它)
+    let (status, stdout, stderr) = run_control_multi_one_shot(
+        args,
+        &[&format!("@agent-register:{agent_name}")],
+        Duration::from_secs(20),
+    );
+    assert!(
+        status.success() && stdout.contains("\"registered\":true"),
+        "register should succeed\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+
+    // 2. 测试进程投递一条 task 消息到 inbox keyexpr。
+    // session 显式 connect daemon entry-point: 只有连上 daemon 的 router,
+    // pub 才能路由到 daemon 的通配 inbox sub (不依赖 multicast scout)。
+    let inbox_key = format!("rdog/lab/agent/{agent_name}/inbox");
+    let sent_at_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let message = format!(
+        "{{\"v\":1,\"id\":\"e2e-mailbox-1\",\"from\":\"orchestrator-x.lab\",\"to\":\"{agent_name}\",\"kind\":\"task\",\"payload\":\"打开计算器并算 1+1\",\"sent_at\":{sent_at_ms}}}"
+    );
+    {
+        let mut config = zenoh::Config::default();
+        config
+            .insert_json5("connect/endpoints", &format!("[\"{entrypoint}\"]"))
+            .expect("zenoh config connect endpoints");
+        let zenoh_session = zenoh::open(config)
+            .wait()
+            .expect("test zenoh session should open");
+        let publisher = zenoh_session
+            .declare_publisher(inbox_key.clone())
+            .wait()
+            .expect("declare inbox publisher");
+        publisher
+            .put(message.as_str())
+            .wait()
+            .expect("deliver message");
+        // publisher 声明保持到 put 完成; session drop 前让路由 flush
+        thread::sleep(Duration::from_millis(100));
+    }
+
+    // 3. 补拉: @agent-inbox 应看到这条消息 (异步投递, 带重试窗口)
+    let mut saw_pending = false;
+    for _ in 0..20 {
+        thread::sleep(Duration::from_millis(150));
+        let (status, stdout, stderr) = run_control_multi_one_shot(
+            args,
+            &[&format!("@agent-inbox:{agent_name}")],
+            Duration::from_secs(10),
+        );
+        assert!(status.success(), "inbox query should succeed\n{stderr}");
+        if stdout.contains("\"kind\":\"task\"") && stdout.contains("orchestrator-x.lab") {
+            saw_pending = true;
+            // 4. ack: 从 stdout 提取消息 id
+            let id_marker = "\\\"id\\\":\\\"";
+            if let Some(start) = stdout.find(id_marker) {
+                let rest = &stdout[start + id_marker.len()..];
+                if let Some(end) = rest.find('"') {
+                    let message_id = &rest[..end];
+                    let (status, stdout, stderr) = run_control_multi_one_shot(
+                        args,
+                        &[&format!("@agent-ack:{agent_name}:{message_id}")],
+                        Duration::from_secs(10),
+                    );
+                    assert!(
+                        status.success() && stdout.contains("\"acked\":true"),
+                        "ack should succeed\nstdout:\n{stdout}\nstderr:\n{stderr}"
+                    );
+                    // 5. ack 后 pending 为空
+                    let (status, stdout, _) = run_control_multi_one_shot(
+                        args,
+                        &[&format!("@agent-inbox:{agent_name}")],
+                        Duration::from_secs(10),
+                    );
+                    assert!(status.success());
+                    assert!(
+                        !stdout.contains("\"kind\":\"task\""),
+                        "ack 后 pending 应为空\nstdout:\n{stdout}"
+                    );
+                    break;
+                }
+            }
+            break;
+        }
+    }
+    assert!(saw_pending, "投递的消息应在 mailbox 补拉中可见");
+
+    stop_child(&mut daemon);
+    let _ = fs::remove_file(&config_path);
+}
