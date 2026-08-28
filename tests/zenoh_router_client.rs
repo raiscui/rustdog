@@ -2576,3 +2576,132 @@ fn agent_mailbox_should_accept_delivery_and_support_pull_and_ack() {
     stop_child(&mut daemon);
     let _ = fs::remove_file(&config_path);
 }
+
+// ============================================================================
+// agent runtime e2e (issue #74): rdog agent 子进程起停 + task 消息往返
+// ============================================================================
+
+#[test]
+fn agent_runtime_should_answer_task_message_via_echo_decision() {
+    let daemon_name = unique_name("agent-rt");
+    let listen_port = next_port();
+    let (mut daemon, config_path, entrypoint, buffer) =
+        start_zenoh_daemon_with_combined_output(&daemon_name, listen_port);
+    wait_until_output_contains(
+        &mut daemon,
+        &buffer,
+        "zenoh router daemon ready",
+        Duration::from_secs(8),
+    )
+    .expect("daemon should report ready");
+
+    let agent_name = format!("rt-helper-{}.lab", std::process::id());
+    // 伴生 agent 子进程: EchoDecision (内置), 连 daemon
+    let mut agent = Command::new(rdog_binary_path())
+        .args([
+            "agent",
+            "--name",
+            &agent_name,
+            "--namespace",
+            "lab",
+            "--target-name",
+            &daemon_name,
+            "--entry-point",
+            &entrypoint,
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("rdog agent should start");
+    let agent_out = agent.stdout.take().expect("agent stdout");
+    let agent_err = agent.stderr.take().expect("agent stderr");
+    let agent_log = Arc::new(Mutex::new(String::new()));
+    let _ = spawn_output_collector_to(agent_out, Arc::clone(&agent_log));
+    // stderr (log 输出) 也进诊断 buffer: agent 内部错误不能再静默
+    let _ = spawn_output_collector_to(agent_err, Arc::clone(&agent_log));
+
+    let args: &[&str] = &[
+        "--transport",
+        "zenoh",
+        "--target-name",
+        &daemon_name,
+        "--entry-point",
+        &entrypoint,
+        "--namespace",
+        "lab",
+    ];
+
+    // 就绪等待: agent 完成 mailbox 注册 (registered:true 可查)
+    let mut registered = false;
+    for _ in 0..40 {
+        thread::sleep(Duration::from_millis(250));
+        let (status, stdout, _) = run_control_multi_one_shot(
+            args,
+            &[&format!("@agent-inbox:{agent_name}")],
+            Duration::from_secs(10),
+        );
+        if status.success() && stdout.contains("\"registered\":true") {
+            registered = true;
+            break;
+        }
+    }
+    assert!(registered, "agent 应完成 mailbox 注册");
+
+    // 投递 task, 订阅委派方 inbox 等 echo 回复
+    let sent_at_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let sender = format!("orch-{}.lab", std::process::id());
+    let task_message = format!(
+        "{{\"v\":1,\"id\":\"rt-e2e-1\",\"from\":\"{sender}\",\"to\":\"{agent_name}\",\"kind\":\"task\",\"payload\":\"HELLO_AGENT\",\"sent_at\":{sent_at_ms}}}"
+    );
+    let reply_inbox = format!("rdog/lab/agent/{sender}/inbox");
+    let mut saw_reply = false;
+    {
+        let mut config = zenoh::Config::default();
+        config
+            .insert_json5("connect/endpoints", &format!("[\"{entrypoint}\"]"))
+            .expect("zenoh config");
+        let zenoh_session = zenoh::open(config).wait().expect("test session");
+        let reply_sub = zenoh_session
+            .declare_subscriber(reply_inbox)
+            .wait()
+            .expect("reply sub");
+        let publisher = zenoh_session
+            .declare_publisher(format!("rdog/lab/agent/{agent_name}/inbox"))
+            .wait()
+            .expect("task publisher");
+        thread::sleep(Duration::from_millis(200));
+        publisher
+            .put(task_message.as_str())
+            .wait()
+            .expect("task delivery");
+
+        // 10s 窗口等回复
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while Instant::now() < deadline {
+            if let Ok(Some(sample)) = reply_sub.recv_timeout(Duration::from_millis(300)) {
+                if let Ok(payload) = sample.payload().try_to_string() {
+                    if payload.contains("\"kind\":\"reply\"")
+                        && payload.contains("echo:HELLO_AGENT")
+                    {
+                        saw_reply = true;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    assert!(
+        saw_reply,
+        "agent 应以 echo 回复 task; agent_log:\n{}",
+        agent_log.lock().unwrap()
+    );
+
+    agent.kill().expect("agent should stop");
+    let _ = agent.wait();
+    stop_child(&mut daemon);
+    let _ = fs::remove_file(&config_path);
+}

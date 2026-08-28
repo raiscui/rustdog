@@ -169,6 +169,25 @@ pub enum Command {
 
     /// Start config-driven daemon mode
     #[clap(alias = "d")]
+    /// Run a companion agent that consumes task messages from its inbox
+    Agent {
+        /// Agent name (DNS-style, e.g. `helper-a.lab`); must be unique in the namespace
+        #[clap(long)]
+        name: String,
+
+        /// Namespace (defaults to the suffix of the agent name)
+        #[clap(long)]
+        namespace: Option<String>,
+
+        /// Daemon target name (defaults to the local default daemon)
+        #[clap(long)]
+        target_name: Option<String>,
+
+        /// Explicit Zenoh entry point(s) of the daemon router
+        #[clap(long = "entry-point")]
+        entry_point: Vec<String>,
+    },
+
     Daemon {
         /// Optional daemon config file path
         #[clap(short, long)]

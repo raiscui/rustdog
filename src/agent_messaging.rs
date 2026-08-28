@@ -407,7 +407,8 @@ pub fn mailbox_register_agent(agent_name: &str) {
     registry.agents.entry(agent_name.to_owned()).or_default();
 }
 
-/// 注销 agent (agent 下线不调用也安全: mailbox 有界; 注销用于显式清理)。
+/// 注销 agent (agent 下线不调用也安全: mailbox 有界; 注销用于显式清理/测试隔离)。
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn mailbox_unregister_agent(agent_name: &str) {
     let mut registry = mailbox().lock().expect("mailbox lock should work");
     registry.agents.remove(agent_name);
