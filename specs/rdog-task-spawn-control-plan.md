@@ -81,10 +81,12 @@ flowchart LR
 ### 5.1 协议
 
 ```text
-@spawn:COMMAND...                  # 当前目录 spawn
-@spawn:cwd=CWD:COMMAND...          # 指定工作目录
-@task-status:TASK_ID               # 状态机状态 + 退出码(若终态)
-@task-output:TASK_ID               # 尾部输出(默认行数,可扩展分页参数)
+@spawn:COMMAND...                  # raw shell 文本 spawn (对齐 @cmd raw 先例)
+@spawn "COMMAND"                   # quoted 形式
+@spawn {command:"...",cwd:"..."}   # 对象形式 (cwd 唯一入口)
+@task-status:TASK_ID               # 状态 + 命令 + 退出码(若终态)
+@task-output:TASK_ID               # 尾部输出 (默认 80 行)
+@task-output {task:"...",lines:N}  # 自定义尾部行数
 @task-cancel:TASK_ID               # 请求取消
 ```
 
@@ -129,8 +131,11 @@ sequenceDiagram
 - **daemon 重启**: task registry **不持久化**。重启后 `@task-status` 对旧 task id
   诚实返回 not_found,不假装存在。进程随 daemon 生命周期(进程组归属 daemon,
   daemon 退出时子进程的处理沿用 PTY 现有策略)。
-- **取消**: 泛化 `CancelRegistry`。`@task-cancel` 对 running task 发 CancellationToken,
-  由任务执行侧检查(与现有 `@cancel#seq` 同机制);对已终态 task 返回当前状态(幂等)。
+- **取消**: task registry 内建 kill (实现修订, 2026-08-28): 原计划泛化 `CancelRegistry`,
+  实现时发现它以 u64 request seq 为主键, 而 task 生命周期跨请求、id 为字符串, 不适合复用。
+  实际机制与 PTY close 同款: `@task-cancel` 同步 kill + 收割 (child 共享句柄单收割方协议,
+  waiter 线程 50ms try_wait 轮询), 响应即为 canceled 终态; 对已终态 task 幂等返回现态。
+  `@cancel#seq` 语义不变, 仍只管 in-flight 同步命令。
 - **命令解析**: `@spawn` 走 shell 行还是裸 argv 由实现 ticket 定;
   关键约束是 COMMAND 部分不能被 compact 参数解析误拆(含空格/引号的命令要完整传递)。
 
@@ -226,6 +231,9 @@ Phase 1 只保证 running 与三个终态;`spawn_failed`(启动即失败,如命�
   考虑过 namespace 级 topic 直接广播。否,发起方要求有序不丢的权威流,
   session channel 现有 frame ordering 是现成答案;共享 topic 的安全暴露面
   (stdout 等敏感输出对全网可见)在认证层落地前不可接受。
+- **cwd 走对象形式而不是 `@spawn:cwd=X:COMMAND` 前缀** (实现时修订):
+  考虑过前缀形式。否, cwd 路径含冒号或命令文本含 `cwd=` 时前缀解析歧义;
+  对象形式 `{command,cwd}` 复用既有 object parser 基础设施, 无歧义。
 - **不引入 herdr 代码**:
   考虑过集成 herdr(Apache 2.0, Rust)。否,功能与 PTY 重叠、API 未稳定、
   daemon 高权限进程职责膨胀;只借其异步原语形态(run 提交即返回 + wait/read 分离)

@@ -10,7 +10,8 @@ pub(crate) use self::parsers::{
 use self::parsers::{
     parse_cancel_payload, parse_cmd_payload, parse_computer_act_payload, parse_control_header,
     parse_key_payload, parse_open_app_payload, parse_pty_attach_payload, parse_pty_close_payload,
-    parse_pty_detach_payload, parse_pty_payload, parse_screenshot_payload, parse_wait_payload,
+    parse_pty_detach_payload, parse_pty_payload, parse_screenshot_payload, parse_spawn_payload,
+    parse_task_id_payload, parse_task_output_payload, parse_wait_payload,
     require_non_empty_payload,
 };
 
@@ -108,6 +109,11 @@ pub enum ControlCommand {
     Cancel(CancelRequest),
     ComputerAct(ComputerActRequest),
     Record(RecordRequest),
+    /// Phase 1 后台任务四原语 (specs/rdog-task-spawn-control-plan.md)。
+    Spawn(SpawnRequest),
+    TaskStatus(TaskIdRequest),
+    TaskOutput(TaskOutputRequest),
+    TaskCancel(TaskIdRequest),
     /// ticket 08 + 21: composite 复合命令 (e.g., hotkey_click = key down + click + key up)
     /// mod.rs dispatch_underlying 顺序执行每个 sub-command, 任一失败回滚已执行的 (modifier release)。
     Composite(Vec<ControlCommand>),
@@ -128,6 +134,29 @@ pub const DEFAULT_SCREENSHOT_QUALITY: u8 = 75;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WaitRequest {
     pub duration_ms: u64,
+}
+
+/// `@spawn` 的结构化请求 (specs/rdog-task-spawn-control-plan.md Phase 1)。
+///
+/// `command` 是完整 shell 命令文本 (与 `@cmd` 同语义, 支持管道/引号);
+/// `cwd` 可选, 缺省继承 daemon 工作目录。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SpawnRequest {
+    pub command: String,
+    pub cwd: Option<String>,
+}
+
+/// `@task-status` / `@task-cancel` 的结构化请求: 单个 task id。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskIdRequest {
+    pub task_id: String,
+}
+
+/// `@task-output` 的结构化请求: task id + 尾部行数 (默认 80)。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskOutputRequest {
+    pub task_id: String,
+    pub lines: usize,
 }
 
 /// `@open-app` 的结构化请求。
@@ -552,6 +581,12 @@ pub fn parse_control_line(line: &str) -> io::Result<ControlParseResult> {
             require_non_empty_payload("cmd", payload, ControlCommand::Script)?
         }
         "pty" => ControlCommand::PtyOpen(parse_pty_payload(payload)?),
+        // @spawn 用 raw_payload (与 @cmd 同理): shell 文本必须保留物理行边界,
+        // 不能被上层的 trim 隐藏前导/尾随空白
+        "spawn" => ControlCommand::Spawn(parse_spawn_payload(raw_payload)?),
+        "task-status" => ControlCommand::TaskStatus(parse_task_id_payload("task-status", payload)?),
+        "task-output" => ControlCommand::TaskOutput(parse_task_output_payload(payload)?),
+        "task-cancel" => ControlCommand::TaskCancel(parse_task_id_payload("task-cancel", payload)?),
         "pty-close" => ControlCommand::PtyClose(parse_pty_close_payload(payload)?),
         "pty-detach" => ControlCommand::PtyDetach(parse_pty_detach_payload(payload)?),
         "pty-attach" => ControlCommand::PtyAttach(parse_pty_attach_payload(payload)?),

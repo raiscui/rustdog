@@ -47,6 +47,7 @@ mod listener;
 mod pty_control;
 mod screenshot;
 mod shell;
+mod task_control;
 // UI script runner 复用现有 line-control transport。
 // 这里保持 CLI-side orchestration,不新增 daemon-side UI 协议。
 mod ui_script;

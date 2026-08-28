@@ -38,6 +38,11 @@ use crate::{
         execute_default_window_resize, resolve_unique_app_window_id,
     },
 };
+// platform_unsupported_envelope_json 只被 cfg(not(target_os = "macos")) 分支调用
+// (linux 首次真实编译时暴露过缺失 import, 见 2026-08-28 CI 修复)。
+// 语法修复: use 不能嵌在 use 树成员位置, 移为顶层独立 use。
+#[cfg(not(target_os = "macos"))]
+use crate::control_computer_act::error_envelope::platform_unsupported_envelope_json;
 use enigo::{Direction, Enigo, Key, Keyboard, Settings};
 use std::{
     io,
@@ -274,6 +279,15 @@ impl ControlActionExecutor for SystemControlActionExecutor {
             ControlCommand::Screenshot(_) => Err(io::Error::new(
                 io::ErrorKind::Unsupported,
                 "@screenshot 由 control_core 直接走 screenshot producer,不应进入默认 executor 分支",
+            )),
+            // Phase 1 后台任务四原语: 由 control_core 专门分支直接处理
+            // (specs/rdog-task-spawn-control-plan.md), 不走 executor 兜底
+            ControlCommand::Spawn(_)
+            | ControlCommand::TaskStatus(_)
+            | ControlCommand::TaskOutput(_)
+            | ControlCommand::TaskCancel(_) => Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "@spawn / @task-* 由 control_core 直接走 task registry,不应进入默认 executor 分支",
             )),
             ControlCommand::MouseMove(request) => execute_prepared_mouse_request(
                 prepare_mouse_move_request(request)?,
