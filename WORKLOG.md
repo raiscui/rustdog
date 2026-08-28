@@ -602,3 +602,23 @@ control_ax 里的 7 个 action 执行函数，5 个已迁走并删除，剩 2 �
 ### 验证
 - cargo check / check --tests 双零 warning; 定向 36/36;
   全量 nextest 958/959 (唯一失败为既有 control_tty flake)
+
+## [2026-08-28 15:20:00] [Session ID: current] 任务名称: R5 control_tty 假 flake 根因修复
+
+### 任务内容
+- 按 现象→假设→证伪 的纪律排查被标为 flake 两周的 TTY 箭头键测试失败
+- 三个假设两个被实验证伪 (script PTY 内 is_terminal 为 true; 代码路径零变动),
+  TERM 受控实验锁定根因: 非交互 harness 的 TERM=dumb 触发 rustyline 正确的
+  dumb 终端降级, 方向键序列不做本地编辑
+- 修复: 测试显式固定 TERM=xterm-256color (测试意图就是模拟交互终端,
+  不应继承 harness 环境); 生产代码零改动
+
+### 总结感悟
+- "交互终端绿 + CI/agent 红" 是环境决定性的指纹, 不是 flake 的指纹;
+  第一件事应该是让测试固定它假设的环境, 而不是怀疑时序
+- 失败输出的字节形状直接指向代码分支: ESC 透传 == 非 TTY 整行读取路径,
+  这个比对把排查范围从 "raw mode 竞态" 直接拽回 "rustyline 根本没接管"
+
+### 验证
+- TERM=dumb / 默认环境单测均 PASS; 全量 nextest 959/959, 21 skipped,
+  本分支工作以来首次完整绿灯

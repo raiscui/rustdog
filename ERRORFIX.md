@@ -198,3 +198,38 @@ Rust 允许一个文件有多个 test mod，新建 mod 是零风险操作；
 两个错误都是"用文本位置猜代码结构"。脚本化编辑源码时，
 能用行级唯一标识（`pub fn xxx(` 这一行）就不要用跨行模式；
 能追加到文件末尾就不要往中间插。改完立刻编译，不要连续做多个位置猜测。
+
+## [2026-08-28 15:10:00] [Session ID: current] control_tty 箭头键测试 "假 flake" 根因修复
+
+### 现象
+- tests/control_tty.rs::control_cli_should_treat_arrow_keys_as_local_cursor_motion_in_tty
+  断言失败: 远端收到 "@png\u{1b}[D\u{1b}[Di\u{1b}[C" (期望 "@ping"),
+  方向键 ESC 序列全部原样透传到控制行
+- 2026-08-19 起多轮全量门禁都带此失败, 被标记为 "疑似 TTY 时序竞态的 flake";
+  实际在非交互环境里它是稳定失败, 在用户交互终端里是稳定通过
+
+### 原因 (受控实验确认)
+- 测试经 `script -q /dev/null` 提供 PTY, rdog CLI 的 stdin 在 PTY 内确为终端
+  (实验: pipe 进 script, 内部 `test -t 0` 仍为 true), 行编辑器 rustyline 路径正常启用
+- 真正根因: rustyline 对 TERM=dumb 降级为无 raw mode 的整行读取, 方向键序列
+  不做本地解释 -- 这是正确的生产行为 (dumb 终端确实不支持行编辑)
+- agent shell / CI 等非交互 harness 的 TERM 恰好是 dumb, 而用户终端是
+  xterm-256color 等, 于是同一测试在两种环境里确定性相反, 被误判为 flake
+- 验证: TERM=xterm-256color 跑测试 -> PASS; TERM=dumb 跑测试 -> FAIL;
+  逐字节比对确认失败输出与非 TTY 读取路径 (for_each_buffered_line) 的行为吻合
+
+### 修复
+- 测试侧显式固定环境: Command 增加 .env("TERM", "xterm-256color"),
+  与调用环境解耦。测试的意图就是模拟支持方向键的交互终端,
+  继承 harness 的 dumb TERM 等于自我 sabotages 模拟前提
+- 生产代码零改动 (rustyline 的 dumb 降级是正确行为, 不修)
+
+### 验证
+- TERM=dumb 下单测 PASS, 默认环境单测 PASS
+- 全量 nextest 959/959 passed, 21 skipped -- 本分支工作以来首次完整绿灯
+
+### 教训
+- "在交互终端里是绿的" + "在 agent/CI 里是红的" = 环境决定性失败, 不是 flake;
+  诊断入口是让测试显式固定它假设的环境 (TERM/LANG/TTY), 而不是调时序
+- 失败输出与哪条代码路径的产物逐字节吻合, 是快速锁定分支的证据
+  (本次 ESC 透传 == for_each_buffered_line 的输出形状, 直接排除 raw-mode 竞态)

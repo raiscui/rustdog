@@ -771,4 +771,28 @@ EPIPHANY_LOG 判断: routing 层教训已完整记录于 ADR-0008 Amendment (长
 - 误报驳回: "press_plain 已无其他调用方可合并" -- press_with_postcondition 仍注入
   press_plain 作为 perform 依赖, 一行透传不成立为 Middle Man, 不改
 
-- [ ] R5: control_tty flake 排查
+- [x] R5: control_tty flake 排查 (根因: TERM=dumb 环境决定性, 非 flake; 见下方 R5 条目)
+
+### R5: control_tty "假 flake" 根因修复 (2026-08-28)
+
+- 现象: 箭头键 ESC 序列整行透传到远端 (逐字节 = 非 TTY 读取路径的输出形状)
+- 假设与证伪链:
+  H1 raw-mode 启用竞态 -- 被实验推翻 (script 内 stdin 确为终端;
+  且若只是竞态不会整行 ESC 全透传)
+  H2 (成立) TERM 导致 rustyline 降级 -- 受控实验: TERM=xterm-256color PASS /
+  TERM=dumb FAIL; 根因 = 非交互 harness 的 TERM=dumb 触发 rustyline
+  正确的 dumb 终端降级 (无 raw mode 整行读取)
+  H3 代码回归 -- git log 排除 (control_client_input.rs 与 rustyline 14.0.0
+  自 8 月初零变动)
+- 修复: 测试显式 .env("TERM", "xterm-256color") 与调用环境解耦;
+  生产代码零改动 (dumb 降级是正确行为)
+- 验证: TERM=dumb 与默认环境单测均 PASS; 全量 nextest 959/959 -- 首次完整绿灯
+- 账本: ERRORFIX.md 完整记录; LATER_PLANS 2026-08-19 "疑似时序竞态" 条目
+  已删除 (当时的怀疑方向不成立, 真因是环境决定性而非时序)
+- EPIPHANY_LOG 判断: "环境决定性失败 ≠ flake" 的规律已完整落在 ERRORFIX 与
+  测试注释, 无未决讨论, 不追加 (该文件 999 行, 避免触发续档)
+
+### 本轮最终状态
+**全部完成** - R1/R2/R3/R4/R5 五项收尾, 提交 2619587 + 本修复 commit。
+feature/control-ax-split 分支: ax_input + ax_action + ax_query 三模块落地,
+全部 LATER_PLANS 延后项消化完毕, 测试套件首次 959/959 完整绿灯。

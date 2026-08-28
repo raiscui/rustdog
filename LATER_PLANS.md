@@ -867,22 +867,6 @@ zenoh router down / unixpipe broken / zenoh timeout 等场景.
 
 - 需要把 successor policy 外推到完整 macOS ops 产品矩阵时，才以冻结输入重新运行完整门禁。
 
-## [2026-08-19 13:20:00] [Session ID: 本会话] 观察: control_tty 箭头键测试在串行全量中稳定失败
-
-### 现象
-- `tests/control_tty.rs::control_cli_should_treat_arrow_keys_as_local_cursor_motion_in_tty` 在 `cargo test -j 2 -- --test-threads=1` 中稳定 FAILED。
-- 断言 `@ping` vs 实际 `@png\u{1b}[D...` (箭头键转义序列泄漏到远端控制行)。
-
-### 已排除
-- 与 2026-08-19 用户配置目录改动无关: `git stash push src/config.rs` 后同样失败。
-- 测试自 2026-08-03 `d062ea0` ([key] delivery_backend) 后未改动。
-
-### 触发条件
-- 疑似 TTY 时序/输入缓冲竞态,单跑和当前环境多跑均失败;与本会话改动无关。
-- 修复入口: `tests/control_tty.rs:129` 附近,箭头键本地编辑的输入时序。
-
-### 暂不处置
-- 不阻塞本次 config 改动合入;记录为既有 flake,后续单独排查 TTY 输入缓冲。
 
 ## [2026-08-19 15:23:42] [Session ID: omx-1787115582924-n1rbi7] 待办: production observation root size/count 配额
 

@@ -77,6 +77,11 @@ fn control_cli_should_treat_arrow_keys_as_local_cursor_motion_in_tty() {
             "127.0.0.1",
             &port.to_string(),
         ])
+        // 本测试模拟的是"支持方向键的交互终端"。rustyline 对 dumb TERM 会降级为
+        // 无 raw mode 的整行读取 (方向键序列原样透传) -- 那是正确的生产行为,
+        // 但会让测试在 TERM=dumb 的非交互 harness (agent shell / CI) 里稳定失败。
+        // 显式固定终端类型, 与调用环境解耦 (2026-08-28 根因修复, 详见 ERRORFIX.md)。
+        .env("TERM", "xterm-256color")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
