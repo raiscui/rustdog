@@ -907,3 +907,128 @@ feature/control-ax-split 分支: ax_input + ax_action + ax_query 三模块落地
 - [x] 载体同步 (solution / AGENTS / LATER_PLANS / EPIPHANY)
 - [x] 验证矩阵全过 (逐字 diff / fence / grep / diff-check / 双校验)
 - [x] git 提交 (排除用户进行中的 src/control_actions.rs 与 .mimosa)
+
+## [2026-08-28 18:00:00] [Session ID: current] PR #61 已合并
+
+- PR #61 (control_ax 三模块拆分) 于 f88a498 合并入 main, feature 分支本地/远端已删
+- 合并前 CI 处置: ubuntu wayland-sys 断裂为 main 自 2026-08-09 起的存量红 (与 PR 逐字相同);
+  macos 为计时 flake 抽签 (首轮 screenshot 锁中毒连锁 4 例, 重跑后 screenshot 全过、
+  换 recording 计时测试挂, 与 main 自身行为一致) -- 判定 PR 零新增 CI 失败后合并
+- 合并后 main 全量验证: 959/959 passed, 21 skipped
+- 待办提醒: ubuntu CI 的 wayland-sys/xcap 构建断裂需要单独修复 (存量问题, 非本线引入)
+
+## [2026-08-28 18:10:00] [Session ID: current] 任务: Phase 1 @spawn 四原语实施 (feature/task-spawn-phase1)
+
+### 背景
+
+- PR #61 已合并, ax-split 主线完成
+- A2A 调研支线产出的 specs/rdog-task-spawn-control-plan.md 已提交 (6cf386a)
+- 本任务实施 Phase 1: @spawn / @task-status / @task-output / @task-cancel
+
+### 阶段
+
+- [ ] S1: 代码调研: 协议命令接入模式 + PTY 进程内核 + CancelRegistry 泛化点
+- [ ] S2: task registry 模块 (spawn/ring buffer/状态机)
+- [ ] S3: 协议层: ControlCommand 四个变体 + parser + 响应形状
+- [ ] S4: 执行接线: daemon 侧分发 + 非阻塞 spawn
+- [ ] S5: 测试: 单测 + 集成测试(同 session 非阻塞验收)
+- [ ] S6: cargo check 0 warning + fmt + 全量 nextest
+- [ ] S7: 提交 + WORKLOG
+
+### 关键约束 (spec 固定)
+
+- task id (t- 前缀) 与 request id 分离
+- 复用 PTY 进程管理内核, 独立入口, @spawn 无 stdin 交互
+- ring buffer 硬上限, 尾部保留, truncated 标记
+- registry 不持久化, daemon 重启后诚实 not_found
+- @task-cancel 走 CancelRegistry 泛化, 终态幂等
+- spawn_failed 直接 error response 不进 registry
+
+### 状态
+
+**S1 进行中: 调研协议命令接入模式**
+
+## [2026-08-28 18:30:00] [Session ID: current] 调研: ubuntu CI wayland-sys 构建断裂修复
+
+### 现象 (已知)
+- ubuntu-latest Build job: wayland-sys v0.31.11 build.rs (10:47) panic, exit 101
+- main 自 2026-08-09 起每次 CI 都红, macOS 构建正常 (仅计时 flake)
+- 本地开发在 macOS, linux 目标从未本地验证过
+
+### 调研阶段
+- [ ] C1: 取 CI 完整 panic 消息 (build.rs:10:47 是什么断言)
+- [ ] C2: 依赖链定位 (谁引入 wayland-sys, feature 组合是什么, Cargo.lock 演进)
+- [ ] C3: 本地最小复现 (rustup target add x86_64-unknown-linux-gnu + cargo check --target)
+- [ ] C4: 修复方案 (候选: 锁版本/升级 xcap/补 feature/CI apt 依赖) + 实施 + 本地验证
+- [ ] C5: 推 main 验证 CI 转绿
+
+## [2026-08-28 20:15:00] [Session ID: zcode-idle-20260828] [记录类型]: 完成 - 闲时 continuous-learning 整理
+
+### 阶段结果
+- [x] 回读六文件 + __a2a_research 支线 + EXPERIENCE + solutions
+- [x] Compound Gate: 2 capture (TERM 假 flake / 并行测试全局状态锁) /
+      3 inbox 保留 (配置隔离 / commit 拆分 / 脚本化编辑, 缺口已注明)
+- [x] Scoped Refresh: 判定无漂移 (ax-split 未移动缓存与 resource_lane 边界)
+- [x] a2a_research 支线归档 + manifest; LATER_PLANS A2A 条目清理
+- [x] AGENTS.md 索引同步 4 条; 双校验 0 flags; WORKLOG/EXPERIENCE 收尾
+
+### 备注
+- 工作区存在并行会话进行中的 task-spawn Phase 1 代码改动 (src/control_protocol
+  系), 本轮知识批次提交将排除这些文件与混合状态的 task_plan.md
+
+## [2026-08-28 13:10:00] [Session ID: current] Phase 1 @spawn 四原语完成 (c0e3863)
+
+### 阶段勾选
+
+- [x] S1: 代码调研 (ControlCommand 大枚举/parser per-verb/PTY 全局 registry 模式/@cmd raw 先例)
+- [x] S2: src/task_control.rs registry (waiter 50ms try_wait + child 共享句柄单收割 + ring buffer 1MB)
+- [x] S3: 协议层 (四变体 + parsers/task.rs, raw/quoted/对象三形式)
+- [x] S4: control_core 专门分支 (不走 executor 兜底, spawn 即答不进 cancel registry)
+- [x] S5: 测试 (14 registry 单测 + 11 parser 单测 + 3 e2e, 共 25 新测试)
+- [x] S6: cargo check 0 warning + fmt + 全量 nextest 984/984
+- [x] S7: 提交 c0e3863 (feature/task-spawn-phase1)
+
+### 实现中决策 (spec 偏差, 已同步回 spec)
+
+- cwd 用对象形式而非 `cwd=` 前缀: 前缀有解析歧义 (路径冒号/命令文本)
+- 取消不走 CancelRegistry: 它以 u64 seq 为主键, task 是字符串 id 跨请求;
+  实际用 registry 内建同步 kill + 收割 (PTY close 同款)
+- TaskEntry 不存无消费字段 (spawned_at 删, Phase 2 加)
+
+### 事故与修复: 错分支提交
+
+- 现象: 提交 5d3c4f3 落在 fix/ci-linux-xcap-deps (并行会话中途切走了分支),
+  且 git add -A 违规收入 .mimosa/ 12 个别人的文件
+- 并行会话的 29d49e5 已把工作区 control_actions.rs (含我的四原语分支 + 我修的
+  非法内嵌 use 语法) 一并提交, 标 fix(linux)
+- 修复: feature 分支重建提交 (从 5d3c4f3 取文件 + 29d49e5 取 control_actions.rs
+  + spec 修订重放); fix 分支 reset 回 29d49e5, .mimosa 留未跟踪, 残留文件清理
+- 教训: 提交前必须 git branch --show-current; 多会话并行时禁用 git add -A,
+  只 add 明确清单
+
+### 状态
+
+**Phase 1 完成。Phase 2 (Task registry 状态机 + 进度帧) 待启动。**
+
+## [2026-08-28 14:00:00] [Session ID: current] Phase 1 发 PR + Phase 2 spec 细化 + 拆票
+
+### 完成内容
+
+- [x] Phase 1 draft PR #63 (feature/task-spawn-phase1, 4 commits 含 spec 细化)
+- [x] spec §6 细化 (ab4aceb): 已落地基线标记 / seq / 四帧 wire 格式 /
+  推送语义(默认推, @spawn 无 progress 帧, lane 跟随来路) / @flow async 预留
+- [x] Phase 2 拆票: #64 seq -> #65 帧族 -> #66 推送接线 -> #67 e2e 验收
+      (native dependencies 链已建)
+- [x] PR 说明中标注 control_actions.rs 与 fix/ci-linux-xcap-deps 29d49e5 同源收敛
+
+### 关键设计决策 (spec §6.3/6.4)
+
+- canceled 复用 @task-failed + canceled:true 字段, 不设独立帧
+- @spawn 后台任务不发 @task-progress (无语义事件); progress 只属于
+  @flow async 和未来伴生 agent
+- 推送 lane 跟随 spawn 来路, legacy queryable 静默不推
+- 帧是状态事件不是输出流, stdout 永远走 @task-output 拉
+
+### 状态
+
+**Phase 1 完成待 review (PR #63); Phase 2 票就绪 (#64 是 frontier)。**

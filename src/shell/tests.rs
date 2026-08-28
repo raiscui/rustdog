@@ -74,6 +74,18 @@ impl ControlActionExecutor for FakeExecutor {
                 request.session_id, request.cols, request.rows
             )
             .into_bytes(),
+            // Phase 1 后台任务四原语: 真实现由 control_core 专门分支处理,
+            // mock executor 只记录命令形状供断言
+            ControlCommand::Spawn(request) => format!("SPAWN:{}\n", request.command).into_bytes(),
+            ControlCommand::TaskStatus(request) => {
+                format!("TASK_STATUS:{}\n", request.task_id).into_bytes()
+            }
+            ControlCommand::TaskOutput(request) => {
+                format!("TASK_OUTPUT:{}:{}\n", request.task_id, request.lines).into_bytes()
+            }
+            ControlCommand::TaskCancel(request) => {
+                format!("TASK_CANCEL:{}\n", request.task_id).into_bytes()
+            }
             ControlCommand::MouseMove(request) => format!(
                 "MOUSE_MOVE:{}:{}\n",
                 request.x.unwrap_or(0),

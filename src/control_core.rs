@@ -70,6 +70,66 @@ pub fn execute_explicit_control_request<E: ControlActionExecutor>(
                 ),
             }
         }
+        // Phase 1 后台任务四原语 (specs/rdog-task-spawn-control-plan.md):
+        // 专门分支而非 executor 兜底 —— @spawn 必须即答 (不进 in-flight cancel
+        // registry), @task-cancel 是 signal-only (同 @cancel 的豁免理由,
+        // 不应把自己的 seq register 进 registry)。
+        ControlCommand::Spawn(spawn_request) => {
+            match crate::task_control::spawn_task(
+                shell,
+                &spawn_request.command,
+                spawn_request.cwd.as_deref(),
+            ) {
+                Ok(task_id) => {
+                    ControlExecutionOutcome::from_response_line(render_structured_success_response(
+                        request.request_id,
+                        &format!("{{\"task\":\"{task_id}\",\"state\":\"running\"}}"),
+                    ))
+                }
+                Err(err) => ControlExecutionOutcome::from_response_line(
+                    render_control_action_error_response(request.request_id, &err),
+                ),
+            }
+        }
+        ControlCommand::TaskStatus(task_request) => {
+            match crate::task_control::task_snapshot(&task_request.task_id) {
+                Ok(snapshot) => {
+                    ControlExecutionOutcome::from_response_line(render_structured_success_response(
+                        request.request_id,
+                        &task_snapshot_json(&snapshot),
+                    ))
+                }
+                Err(err) => ControlExecutionOutcome::from_response_line(
+                    render_control_action_error_response(request.request_id, &err),
+                ),
+            }
+        }
+        ControlCommand::TaskOutput(output_request) => {
+            match crate::task_control::task_output(&output_request.task_id, output_request.lines) {
+                Ok(report) => {
+                    ControlExecutionOutcome::from_response_line(render_structured_success_response(
+                        request.request_id,
+                        &task_output_json(&report),
+                    ))
+                }
+                Err(err) => ControlExecutionOutcome::from_response_line(
+                    render_control_action_error_response(request.request_id, &err),
+                ),
+            }
+        }
+        ControlCommand::TaskCancel(task_request) => {
+            match crate::task_control::cancel_task(&task_request.task_id) {
+                Ok(snapshot) => {
+                    ControlExecutionOutcome::from_response_line(render_structured_success_response(
+                        request.request_id,
+                        &task_snapshot_json(&snapshot),
+                    ))
+                }
+                Err(err) => ControlExecutionOutcome::from_response_line(
+                    render_control_action_error_response(request.request_id, &err),
+                ),
+            }
+        }
         ControlCommand::Screenshot(screenshot_request) => {
             match execute_screenshot_request(request.request_id, screenshot_request) {
                 Ok(outcome) => outcome,
@@ -284,6 +344,40 @@ pub fn render_control_response_payload(
         &format!("{{\"exit_code\":{exit_code},\"stdout\":\"{stdout}\",\"stderr\":\"{stderr}\"}}"),
     );
     render_response_value(&value)
+}
+
+/// `@task-status` / `@task-cancel` 的共享快照 JSON (exit_code 仅终态携带)。
+fn task_snapshot_json(snapshot: &crate::task_control::TaskSnapshot) -> String {
+    let command = escape_json_string(&snapshot.command);
+    match snapshot.exit_code {
+        Some(exit_code) => format!(
+            "{{\"task\":\"{}\",\"command\":\"{}\",\"state\":\"{}\",\"exit_code\":{}}}",
+            snapshot.task_id,
+            command,
+            snapshot.state.as_str(),
+            exit_code
+        ),
+        None => format!(
+            "{{\"task\":\"{}\",\"command\":\"{}\",\"state\":\"{}\"}}",
+            snapshot.task_id,
+            command,
+            snapshot.state.as_str()
+        ),
+    }
+}
+
+/// `@task-output` 的响应 JSON: output 字段走既有 escape_json_string 转义,
+/// total_written + truncated 让消费方诚实感知截断。
+fn task_output_json(report: &crate::task_control::TaskOutputReport) -> String {
+    let escaped_output = escape_json_string(&report.output);
+    format!(
+        "{{\"task\":\"{}\",\"state\":\"{}\",\"output\":\"{}\",\"truncated\":{},\"total_written\":{}}}",
+        report.task_id,
+        report.state.as_str(),
+        escaped_output,
+        report.truncated,
+        report.total_written
+    )
 }
 
 pub fn render_structured_success_response(request_id: Option<u64>, value_json: &str) -> String {

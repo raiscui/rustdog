@@ -81,10 +81,12 @@ flowchart LR
 ### 5.1 协议
 
 ```text
-@spawn:COMMAND...                  # 当前目录 spawn
-@spawn:cwd=CWD:COMMAND...          # 指定工作目录
-@task-status:TASK_ID               # 状态机状态 + 退出码(若终态)
-@task-output:TASK_ID               # 尾部输出(默认行数,可扩展分页参数)
+@spawn:COMMAND...                  # raw shell 文本 spawn (对齐 @cmd raw 先例)
+@spawn "COMMAND"                   # quoted 形式
+@spawn {command:"...",cwd:"..."}   # 对象形式 (cwd 唯一入口)
+@task-status:TASK_ID               # 状态 + 命令 + 退出码(若终态)
+@task-output:TASK_ID               # 尾部输出 (默认 80 行)
+@task-output {task:"...",lines:N}  # 自定义尾部行数
 @task-cancel:TASK_ID               # 请求取消
 ```
 
@@ -129,8 +131,11 @@ sequenceDiagram
 - **daemon 重启**: task registry **不持久化**。重启后 `@task-status` 对旧 task id
   诚实返回 not_found,不假装存在。进程随 daemon 生命周期(进程组归属 daemon,
   daemon 退出时子进程的处理沿用 PTY 现有策略)。
-- **取消**: 泛化 `CancelRegistry`。`@task-cancel` 对 running task 发 CancellationToken,
-  由任务执行侧检查(与现有 `@cancel#seq` 同机制);对已终态 task 返回当前状态(幂等)。
+- **取消**: task registry 内建 kill (实现修订, 2026-08-28): 原计划泛化 `CancelRegistry`,
+  实现时发现它以 u64 request seq 为主键, 而 task 生命周期跨请求、id 为字符串, 不适合复用。
+  实际机制与 PTY close 同款: `@task-cancel` 同步 kill + 收割 (child 共享句柄单收割方协议,
+  waiter 线程 50ms try_wait 轮询), 响应即为 canceled 终态; 对已终态 task 幂等返回现态。
+  `@cancel#seq` 语义不变, 仍只管 in-flight 同步命令。
 - **命令解析**: `@spawn` 走 shell 行还是裸 argv 由实现 ticket 定;
   关键约束是 COMMAND 部分不能被 compact 参数解析误拆(含空格/引号的命令要完整传递)。
 
@@ -152,20 +157,69 @@ Phase 1 只保证 running 与三个终态;`spawn_failed`(启动即失败,如命�
 
 ## 6. Phase 2: Task registry + 进度帧
 
-- **registry 形态**: daemon 内 `task_id -> {state, exit_code, seq, spawned_at, finished_at}`,
-  单调 seq,终态 task 保留最近 N 条后回收(上限防泄漏)。
-- **进度帧**: 新增 `ControlFrame::TaskStarted / TaskProgress / TaskCompleted / TaskFailed`
-  帧族,走现有 session channel(to-control),模式对齐 PTY 帧族。
-  发起方订阅即可获得推送,不再轮询。
-- **@flow 升级路径(可选)**: `@flow` 长脚本可声明 async,执行期间以 TaskProgress 帧
-  汇报 step 进度,终态一条 `@response` 收口。本轮不实现,只在 frame 设计上预留。
-- **与 A2A Task 状态机的映射**(语义对齐,协议自定):
-  `running ≈ working`,`completed/failed ≈ 同名`,`canceled ≈ canceled`;
-  A2A 的 `input-required` 对应未来"任务需要输入"的扩展位,Phase 2 不做。
-- **旁观 channel 与跨主机 Task 委派**: 属 Phase 4(A2A 语义层)范围,
-  keyexpr 草案(`rdog/<ns>/task/<id>/status` topic + queryable 兜底)已在
-  A2A 调研支线记录,内部语义稳定后再正式化。**旁观 topic 必须默认关闭、
-  opt-in 开启,且只发摘要不发原始输出**(认证层落地前的 fail-closed 暴露面控制)。
+### 6.1 已落地基线 (Phase 1 提前完成, 2026-08-28)
+
+Phase 1 实现已覆盖本节原定的一部分 registry 职责, Phase 2 只做增量:
+
+- ✅ `task_id -> {command, state, exit_code, finished_at, output, child}` registry
+- ✅ 终态保留最近 64 条按 finished_at 回收 (`reap_finished_tasks`)
+- ✅ running 上限 64 拒绝新 spawn
+- ❌ `seq` 单调计数 (Phase 2 增量, 见 6.2)
+- ❌ 进度帧族 (Phase 2 增量, 见 6.3/6.4)
+
+### 6.2 registry 增量: 全局单调 seq
+
+daemon 内维护全局 `task_seq`(每次 spawn 递增),写入条目并随帧携带。
+消费方用相邻帧的 seq 检测丢失(帧广播路径上无 request-id 关联, seq 是
+唯一丢帧检测手段)。seq 不持久化,daemon 重启归零(与 registry 不持久化一致)。
+
+### 6.3 进度帧族 wire 格式
+
+对齐 PTY 帧族的 `@帧名 {JSON}` 风格(`control_frames.rs` 的 `to_wire_message`),
+四个帧走 `ControlFrame` 新变体 + session channel(to-control)分发:
+
+```text
+@task-started  {"task":"t-a1b2c3d4","seq":7,"command":"cargo build"}
+@task-progress {"task":"t-a1b2c3d4","seq":9,"step":"build","detail":"42/120 crates"}
+@task-completed {"task":"t-a1b2c3d4","seq":10,"exit_code":0}
+@task-failed    {"task":"t-a1b2c3d4","seq":10,"exit_code":2}
+```
+
+- `canceled` 终态不设独立帧: 复用 `@task-failed` 加 `"canceled":true` 字段
+  (取消是"非自然结束"的一种, 减少帧种类; `@task-status` 查询仍返回 canceled 态)
+- 帧是状态变化事件, 不是输出流: stdout/stderr 永远走 `@task-output` 拉取,
+  帧内不携带任务输出(帧小, 天然在响应预算内)
+
+### 6.4 推送语义
+
+- **默认推送, 不设 opt-in**: 与 PTY 帧族一致(session channel 上 PTY 帧就是默认推)。
+  帧量极小(见下条), 默认推不给消费方增加负担, agent 正是进度帧的主用户。
+- **`@spawn` 任务只发 started + 终态帧, 不发 progress 帧**: 后台 shell 任务中间
+  没有语义事件, 输出流不属于帧的职责(6.3)。`TaskProgress` 只属于有步骤概念的
+  任务源 —— `@flow` async(6.5)和未来伴生 agent。实现时不得为"看起来有进度"
+  而定时推送无信息量的帧。
+- **推送 lane 跟随 spawn 请求的来路**: spawn 从 session channel 进来, 帧推回同一
+  session 的 to-control; 从 legacy queryable 进来(无 session channel)则静默不推,
+  查询靠 `@task-*`。帧丢弃不影响 registry 真相源。
+
+### 6.5 `@flow` async 升级预留 (本轮不实现)
+
+`@flow` 声明 `async:true` 时: 立即返回 task id(flow 进入 task registry),
+step 执行以 `@task-progress {step}` 汇报, 终态发 `@task-completed/failed` 帧
++ 一条最终 `@response`(captures JSON)收口 —— 保持"终态一条 @response 收口"
+的现有惯例。具体 flow 侧编译/执行语义在 flow spec 扩展, 本 spec 只固定
+帧接口不越界。
+
+### 6.6 与 A2A Task 状态机的映射(语义对齐,协议自定)
+
+`running ≈ working`,`completed/failed ≈ 同名`,`canceled ≈ canceled`;
+A2A 的 `input-required` 对应未来"任务需要输入"的扩展位,Phase 2 不做。
+
+### 6.7 旁观 channel 与跨主机 Task 委派(Phase 4 范围, 边界重申)
+
+keyexpr 草案(`rdog/<ns>/task/<id>/status` topic + queryable 兜底)已在
+A2A 调研支线记录,内部语义稳定后再正式化。**旁观 topic 必须默认关闭、
+opt-in 开启,且只发摘要不发原始输出**(认证层落地前的 fail-closed 暴露面控制)。
 
 ## 7. Phase 3: 伴生 agent 托管(`rdog agent`)
 
@@ -226,6 +280,9 @@ Phase 1 只保证 running 与三个终态;`spawn_failed`(启动即失败,如命�
   考虑过 namespace 级 topic 直接广播。否,发起方要求有序不丢的权威流,
   session channel 现有 frame ordering 是现成答案;共享 topic 的安全暴露面
   (stdout 等敏感输出对全网可见)在认证层落地前不可接受。
+- **cwd 走对象形式而不是 `@spawn:cwd=X:COMMAND` 前缀** (实现时修订):
+  考虑过前缀形式。否, cwd 路径含冒号或命令文本含 `cwd=` 时前缀解析歧义;
+  对象形式 `{command,cwd}` 复用既有 object parser 基础设施, 无歧义。
 - **不引入 herdr 代码**:
   考虑过集成 herdr(Apache 2.0, Rust)。否,功能与 PTY 重叠、API 未稳定、
   daemon 高权限进程职责膨胀;只借其异步原语形态(run 提交即返回 + wait/read 分离)

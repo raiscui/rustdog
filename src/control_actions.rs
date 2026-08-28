@@ -279,6 +279,15 @@ impl ControlActionExecutor for SystemControlActionExecutor {
                 io::ErrorKind::Unsupported,
                 "@screenshot 由 control_core 直接走 screenshot producer,不应进入默认 executor 分支",
             )),
+            // Phase 1 后台任务四原语: 由 control_core 专门分支直接处理
+            // (specs/rdog-task-spawn-control-plan.md), 不走 executor 兜底
+            ControlCommand::Spawn(_)
+            | ControlCommand::TaskStatus(_)
+            | ControlCommand::TaskOutput(_)
+            | ControlCommand::TaskCancel(_) => Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "@spawn / @task-* 由 control_core 直接走 task registry,不应进入默认 executor 分支",
+            )),
             ControlCommand::MouseMove(request) => execute_prepared_mouse_request(
                 prepare_mouse_move_request(request)?,
                 build_mouse_move_plan,
