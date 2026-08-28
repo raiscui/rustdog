@@ -48,7 +48,9 @@ jobs:
             libdbus-1-dev \
             libpipewire-0.3-dev \
             libwayland-dev \
-            libegl-dev
+            libegl-dev \
+            libgbm-dev \
+            libdrm-dev
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
