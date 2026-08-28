@@ -813,3 +813,10 @@ feature/control-ax-split 分支: ax_input + ax_action + ax_query 三模块落地
       (implementation-plan 另留档 62c782e fmt 夹带); .scratch tickets 07/08 标
       superseded, 09/11 标 done-as-built, 10 标 done-partially-by-design
 - [x] F4: cargo check --tests 0 warning, fmt clean, 全量 nextest 959/959
+
+## [2026-08-28 17:30:00] [Session ID: current] 分支发 PR
+
+- feature/control-ax-split (16 commits) 已推送并创建 draft PR #61:
+  https://github.com/raiscui/rustdog/pull/61
+- 并行会话的未提交改动 (AGENTS.md task-spawn 索引 / specs/rdog-task-spawn-control-plan.md /
+  a2a 文件 / .mimosa) 属另一条工作线, 按规矩未纳入本 PR
