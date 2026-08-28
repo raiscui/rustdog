@@ -975,3 +975,37 @@ feature/control-ax-split 分支: ax_input + ax_action + ax_query 三模块落地
 ### 备注
 - 工作区存在并行会话进行中的 task-spawn Phase 1 代码改动 (src/control_protocol
   系), 本轮知识批次提交将排除这些文件与混合状态的 task_plan.md
+
+## [2026-08-28 13:10:00] [Session ID: current] Phase 1 @spawn 四原语完成 (c0e3863)
+
+### 阶段勾选
+
+- [x] S1: 代码调研 (ControlCommand 大枚举/parser per-verb/PTY 全局 registry 模式/@cmd raw 先例)
+- [x] S2: src/task_control.rs registry (waiter 50ms try_wait + child 共享句柄单收割 + ring buffer 1MB)
+- [x] S3: 协议层 (四变体 + parsers/task.rs, raw/quoted/对象三形式)
+- [x] S4: control_core 专门分支 (不走 executor 兜底, spawn 即答不进 cancel registry)
+- [x] S5: 测试 (14 registry 单测 + 11 parser 单测 + 3 e2e, 共 25 新测试)
+- [x] S6: cargo check 0 warning + fmt + 全量 nextest 984/984
+- [x] S7: 提交 c0e3863 (feature/task-spawn-phase1)
+
+### 实现中决策 (spec 偏差, 已同步回 spec)
+
+- cwd 用对象形式而非 `cwd=` 前缀: 前缀有解析歧义 (路径冒号/命令文本)
+- 取消不走 CancelRegistry: 它以 u64 seq 为主键, task 是字符串 id 跨请求;
+  实际用 registry 内建同步 kill + 收割 (PTY close 同款)
+- TaskEntry 不存无消费字段 (spawned_at 删, Phase 2 加)
+
+### 事故与修复: 错分支提交
+
+- 现象: 提交 5d3c4f3 落在 fix/ci-linux-xcap-deps (并行会话中途切走了分支),
+  且 git add -A 违规收入 .mimosa/ 12 个别人的文件
+- 并行会话的 29d49e5 已把工作区 control_actions.rs (含我的四原语分支 + 我修的
+  非法内嵌 use 语法) 一并提交, 标 fix(linux)
+- 修复: feature 分支重建提交 (从 5d3c4f3 取文件 + 29d49e5 取 control_actions.rs
+  + spec 修订重放); fix 分支 reset 回 29d49e5, .mimosa 留未跟踪, 残留文件清理
+- 教训: 提交前必须 git branch --show-current; 多会话并行时禁用 git add -A,
+  只 add 明确清单
+
+### 状态
+
+**Phase 1 完成。Phase 2 (Task registry 状态机 + 进度帧) 待启动。**

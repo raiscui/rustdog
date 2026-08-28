@@ -767,3 +767,22 @@ control_actions::execute_ax_action
 ### 总结感悟
 - 恢复用 "从 git 历史逐字复原 + diff 验证" 而非凭记忆重写, 保证安全政策零语义漂移
 - 来源注里显式声明 "safety boundary" 是给未来优化 pass 的护栏, 把这次教训固化进载体本身
+
+## [2026-08-28 13:10:00] [Session ID: current] 任务名称: Task/Spawn Phase 1 @spawn 四原语实施
+
+### 任务内容
+- feature/task-spawn-phase1 分支: 6cf386a (spec) + c0e3863 (实现)
+- 新增 src/task_control.rs (registry/waiter/ring buffer/取消) 与 parsers/task.rs
+- control_core 四专门分支, shell/tests.rs mock 补分支, spec 偏差同步
+
+### 完成过程
+- 调研协议接入模式后按 PTY 全局 registry 模式实现
+- 修复自引入死锁 (cancel 持 registry 锁调 finalize 再锁)
+- 修复并行会话留在工作区的非法嵌套 use (语法修, 意图保留; 后被其 29d49e5 收编)
+- 处理错分支提交事故: feature 重建 + fix 分支摘除 + .mimosa 剔除
+- 验证: 25 新测试绿, 全量 984/984, 0 warning, fmt clean
+
+### 总结感悟
+- 多会话共享工作区时, 提交前必查当前分支, 永不 git add -A
+- e2e 测试暴露 render_structured_success_response 的信封行为 (有 request id 才包
+  value 信封), 协议消费者要兼容两种形状
