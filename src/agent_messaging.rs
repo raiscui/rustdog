@@ -221,6 +221,29 @@ mod tests {
     }
 
     #[test]
+    fn card_cache_should_keep_latest_publish() {
+        let agent = format!("card-a-{}.lab", std::process::id());
+        assert!(card_current(&agent).is_none(), "未发布时为 None");
+        card_publish(&agent, "{\"version\":1}");
+        assert_eq!(card_current(&agent).as_deref(), Some("{\"version\":1}"));
+        card_publish(&agent, "{\"version\":2}");
+        assert_eq!(card_current(&agent).as_deref(), Some("{\"version\":2}"));
+    }
+
+    #[test]
+    fn card_key_extraction_should_parse_agent_name() {
+        assert_eq!(
+            agent_name_from_card_key("rdog/lab/agent/helper-a.lab/card"),
+            Some("helper-a.lab".to_owned())
+        );
+        assert_eq!(agent_name_from_card_key("rdog/lab/agent/a.lab/inbox"), None);
+        assert_eq!(
+            agent_name_from_card_key("rdog/lab/daemon/x.lab/alive"),
+            None
+        );
+    }
+
+    #[test]
     fn mailbox_should_require_registration_before_caching() {
         // 测试隔离: 用未注册过的 agent name
         let agent = format!("mb-unreg-{}.lab", std::process::id());
@@ -462,6 +485,51 @@ pub fn mailbox_ack(agent_name: &str, message_id: &str) -> bool {
     let before = agent.pending.len();
     agent.pending.retain(|entry| entry.message.id != message_id);
     agent.pending.len() != before
+}
+
+// ---------------------------------------------------------------------------
+// card 托管缓存 (issue #75): daemon 通配 sub card keyexpr, 存 per-agent 最新
+// 卡片 (内容 agent 生成, daemon 只托管分发 — 零智能红线)。@agent-card 查询。
+// ---------------------------------------------------------------------------
+
+struct CardRegistry {
+    cards: HashMap<String, String>,
+}
+
+static CARDS: OnceLock<Mutex<CardRegistry>> = OnceLock::new();
+
+fn cards() -> &'static Mutex<CardRegistry> {
+    CARDS.get_or_init(|| {
+        Mutex::new(CardRegistry {
+            cards: HashMap::new(),
+        })
+    })
+}
+
+/// daemon 收到 card pub 时更新缓存 (接线层调用; 任意版本直接覆盖)。
+pub fn card_publish(agent_name: &str, card_json: &str) {
+    let mut registry = cards().lock().expect("card registry lock should work");
+    registry
+        .cards
+        .insert(agent_name.to_owned(), card_json.to_owned());
+}
+
+/// 拉取 agent 当前卡片; None = 从未发布。
+pub fn card_current(agent_name: &str) -> Option<String> {
+    let registry = cards().lock().expect("card registry lock should work");
+    registry.cards.get(agent_name).cloned()
+}
+
+/// 从 card keyexpr 的 sample key 提取 agent name:
+/// rdog/<ns>/agent/<name>/card -> <name>。非该形状返回 None。
+pub fn agent_name_from_card_key(key: &str) -> Option<String> {
+    let rest = key.strip_prefix(crate::zenoh_identity::KEYEXPR_ROOT)?;
+    // strip_prefix 后首段是空串: ["", "<ns>", "agent", "<name>", "card"]
+    let segments: Vec<&str> = rest.split('/').collect();
+    if segments.len() == 5 && segments[2] == "agent" && segments[4] == "card" {
+        return Some(segments[3].to_owned());
+    }
+    None
 }
 
 /// mailbox 查询快照。

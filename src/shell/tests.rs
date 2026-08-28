@@ -95,6 +95,9 @@ impl ControlActionExecutor for FakeExecutor {
             ControlCommand::AgentAck(request) => {
                 format!("AGENT_ACK:{}:{}\n", request.agent_name, request.message_id).into_bytes()
             }
+            ControlCommand::AgentCard(request) => {
+                format!("AGENT_CARD:{}\n", request.agent_name).into_bytes()
+            }
             ControlCommand::MouseMove(request) => format!(
                 "MOUSE_MOVE:{}:{}\n",
                 request.x.unwrap_or(0),

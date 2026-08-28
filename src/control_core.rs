@@ -180,6 +180,22 @@ pub fn execute_explicit_control_request<E: ControlActionExecutor>(
                 ),
             ))
         }
+        ControlCommand::AgentCard(agent_request) => {
+            let response = match crate::agent_messaging::card_current(&agent_request.agent_name) {
+                Some(card) => format!(
+                    "{{\"agent\":\"{}\",\"card\":{card}}}",
+                    agent_request.agent_name
+                ),
+                None => format!(
+                    "{{\"agent\":\"{}\",\"card\":null}}",
+                    agent_request.agent_name
+                ),
+            };
+            ControlExecutionOutcome::from_response_line(render_structured_success_response(
+                request.request_id,
+                &response,
+            ))
+        }
         ControlCommand::Screenshot(screenshot_request) => {
             match execute_screenshot_request(request.request_id, screenshot_request) {
                 Ok(outcome) => outcome,

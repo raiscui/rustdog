@@ -2705,3 +2705,111 @@ fn agent_runtime_should_answer_task_message_via_echo_decision() {
     stop_child(&mut daemon);
     let _ = fs::remove_file(&config_path);
 }
+
+// ============================================================================
+// agent card e2e (issue #75): agent 启动发布卡片 -> @agent-card 查询命中;
+// 外部重新 pub 高版本卡片 -> 查询反映最新 (托管语义, daemon 不解释内容)
+// ============================================================================
+
+#[test]
+fn agent_card_should_be_published_and_queryable_with_version_updates() {
+    let daemon_name = unique_name("agent-card");
+    let listen_port = next_port();
+    let (mut daemon, config_path, entrypoint, buffer) =
+        start_zenoh_daemon_with_combined_output(&daemon_name, listen_port);
+    wait_until_output_contains(
+        &mut daemon,
+        &buffer,
+        "zenoh router daemon ready",
+        Duration::from_secs(8),
+    )
+    .expect("daemon should report ready");
+
+    let agent_name = format!("card-helper-{}.lab", std::process::id());
+    let mut agent = Command::new(rdog_binary_path())
+        .args([
+            "agent",
+            "--name",
+            &agent_name,
+            "--namespace",
+            "lab",
+            "--target-name",
+            &daemon_name,
+            "--entry-point",
+            &entrypoint,
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("rdog agent should start");
+
+    let args: &[&str] = &[
+        "--transport",
+        "zenoh",
+        "--target-name",
+        &daemon_name,
+        "--entry-point",
+        &entrypoint,
+        "--namespace",
+        "lab",
+    ];
+
+    // 就绪等待: 卡片可查且是 echo 决策的 v1
+    let mut saw_card = false;
+    for _ in 0..40 {
+        thread::sleep(Duration::from_millis(250));
+        let (status, stdout, _) = run_control_multi_one_shot(
+            args,
+            &[&format!("@agent-card:{agent_name}")],
+            Duration::from_secs(10),
+        );
+        if status.success()
+            && stdout.contains("\"version\":1")
+            && stdout.contains("\"decision\":\"echo\"")
+        {
+            saw_card = true;
+            break;
+        }
+    }
+    assert!(saw_card, "agent 启动后 @agent-card 应命中 echo v1 卡片");
+
+    // 外部重 pub v2 卡片 (模拟 agent 侧能力更新): daemon 缓存应反映最新
+    {
+        let mut config = zenoh::Config::default();
+        config
+            .insert_json5("connect/endpoints", &format!("[\"{entrypoint}\"]"))
+            .expect("zenoh config");
+        let zenoh_session = zenoh::open(config).wait().expect("test session");
+        let publisher = zenoh_session
+            .declare_publisher(format!("rdog/lab/agent/{agent_name}/card"))
+            .wait()
+            .expect("card publisher");
+        publisher
+            .put(format!(
+                "{{\"agent\":\"{agent_name}\",\"version\":2,\"card\":{{\"decision\":\"echo\",\"capabilities\":[\"task-reply\",\"beta\"]}}}}"
+            ))
+            .wait()
+            .expect("card v2 publish");
+        thread::sleep(Duration::from_millis(300));
+    }
+    let mut saw_v2 = false;
+    for _ in 0..20 {
+        let (status, stdout, _) = run_control_multi_one_shot(
+            args,
+            &[&format!("@agent-card:{agent_name}")],
+            Duration::from_secs(10),
+        );
+        if status.success() && stdout.contains("\"version\":2") {
+            saw_v2 = true;
+            break;
+        }
+        thread::sleep(Duration::from_millis(200));
+    }
+    assert!(saw_v2, "卡片更新后查询应反映 v2");
+
+    agent.kill().expect("agent should stop");
+    let _ = agent.wait();
+    stop_child(&mut daemon);
+    let _ = fs::remove_file(&config_path);
+}

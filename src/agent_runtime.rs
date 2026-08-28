@@ -27,6 +27,12 @@ use crate::zenoh_identity::{build_agent_alive_key, build_agent_inbox_key, build_
 pub trait AgentDecision: Send + Sync {
     /// 处理一条 task 消息, 返回回复 payload 文本。
     fn decide(&self, message: &AgentMessage) -> String;
+
+    /// 本 agent 的能力卡片 JSON (issue #75): 内容由决策侧生成,
+    /// rdog 只托管分发。version 由 run_agent 包装递增。默认空能力卡片。
+    fn card_json(&self) -> String {
+        r#"{"capabilities":[]}"#.to_owned()
+    }
 }
 
 /// 内置 echo 决策: 测试 / 冒烟 / 协议联调用, 不接任何 LLM。
@@ -35,6 +41,11 @@ pub struct EchoDecision;
 impl AgentDecision for EchoDecision {
     fn decide(&self, message: &AgentMessage) -> String {
         format!("echo:{}", message.payload)
+    }
+
+    fn card_json(&self) -> String {
+        // 内置 echo 卡片: 描述能力 + version 起始为 1 (由 run_agent 包装递增)
+        r#"{"decision":"echo","capabilities":["task-reply"],"description":"回显任务 payload 的测试/联调 agent"}"#.to_owned()
     }
 }
 
@@ -122,6 +133,26 @@ pub fn run_agent(session: &zenoh::Session, config: &AgentRuntimeConfig) -> io::R
         .declare_token(&alive_key)
         .wait()
         .map_err(|err| io::Error::other(format!("agent alive token 声明失败: {err}")))?;
+
+    // 1.5 能力卡片发布 (issue #75): daemon 通配 sub 缓存最新版,
+    // @agent-card 查询。version 由 agent 侧递增 (Phase 3: 启动时 v1)。
+    {
+        let card_key =
+            crate::zenoh_identity::build_agent_card_key(&config.namespace, &config.agent_name);
+        let card_body = format!(
+            "{{\"agent\":\"{}\",\"version\":1,\"card\":{}}}",
+            config.agent_name,
+            config.decision.card_json()
+        );
+        let publisher = session
+            .declare_publisher(card_key)
+            .wait()
+            .map_err(|err| io::Error::other(format!("card publisher 声明失败: {err}")))?;
+        publisher
+            .put(card_body.as_str())
+            .wait()
+            .map_err(|err| io::Error::other(format!("card 发布失败: {err}")))?;
+    }
 
     // 2. mailbox 注册 (daemon 侧开始缓存投给本 agent 的消息)
     let register_line = format!("@agent-register:{}", config.agent_name);
@@ -312,6 +343,14 @@ mod tests {
             ..sample_task("x")
         };
         assert!(handle_message("h.lab", &control, &EchoDecision).is_none());
+    }
+
+    #[test]
+    fn echo_decision_card_should_be_valid_json_with_capabilities() {
+        let card = EchoDecision.card_json();
+        let value: serde_json::Value = serde_json::from_str(&card).unwrap();
+        assert_eq!(value["decision"], "echo");
+        assert!(value["capabilities"].is_array());
     }
 
     #[test]

@@ -118,6 +118,7 @@ pub enum ControlCommand {
     AgentRegister(AgentNameRequest),
     AgentInbox(AgentNameRequest),
     AgentAck(AgentAckRequest),
+    AgentCard(AgentNameRequest),
     /// ticket 08 + 21: composite 复合命令 (e.g., hotkey_click = key down + click + key up)
     /// mod.rs dispatch_underlying 顺序执行每个 sub-command, 任一失败回滚已执行的 (modifier release)。
     Composite(Vec<ControlCommand>),
@@ -611,6 +612,7 @@ pub fn parse_control_line(line: &str) -> io::Result<ControlParseResult> {
             ControlCommand::AgentInbox(parse_agent_name_payload("agent-inbox", payload)?)
         }
         "agent-ack" => ControlCommand::AgentAck(parse_agent_ack_payload(payload)?),
+        "agent-card" => ControlCommand::AgentCard(parse_agent_name_payload("agent-card", payload)?),
         "pty-close" => ControlCommand::PtyClose(parse_pty_close_payload(payload)?),
         "pty-detach" => ControlCommand::PtyDetach(parse_pty_detach_payload(payload)?),
         "pty-attach" => ControlCommand::PtyAttach(parse_pty_attach_payload(payload)?),

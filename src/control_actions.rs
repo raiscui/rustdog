@@ -291,9 +291,10 @@ impl ControlActionExecutor for SystemControlActionExecutor {
             // agent messaging Phase 3: mailbox 由 control_core 专门分支处理
             ControlCommand::AgentRegister(_)
             | ControlCommand::AgentInbox(_)
-            | ControlCommand::AgentAck(_) => Err(io::Error::new(
+            | ControlCommand::AgentAck(_)
+            | ControlCommand::AgentCard(_) => Err(io::Error::new(
                 io::ErrorKind::Unsupported,
-                "@agent-* 由 control_core 直接走 mailbox,不应进入默认 executor 分支",
+                "@agent-* 由 control_core 直接走 mailbox/card,不应进入默认 executor 分支",
             )),
             ControlCommand::MouseMove(request) => execute_prepared_mouse_request(
                 prepare_mouse_move_request(request)?,
