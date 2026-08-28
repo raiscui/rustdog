@@ -4,7 +4,9 @@
 
 **Blocked by:** #02 (迁移 control_actions 到 ax_input), #06 (迁移 control_actions 到 ax_action), #10 (打破循环依赖)
 
-**Status:** ready-for-agent
+**Status:** done-as-built (2026-08-28) — deprecated facade 全删, 模块文档/ADR/spec
+同步完成; control_ax.rs 保留为 verb 层 + 共享内核 (未整文件删除, 与本 ticket
+原始设想不同), 见 ADR-0008 Amendment 2 与两份 spec 状态头。
 
 ## Acceptance criteria
 

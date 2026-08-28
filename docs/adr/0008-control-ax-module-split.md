@@ -46,6 +46,16 @@ query.rs 整体搬入 ax_query) 经现状核实后按以下修正实施:
   computer_act/mouse/ax_action) 全部改从 ax_query 导入, control_ax 不再是
   capture 入口的 hub; verb 层与 observation 的双向编排边保留
   (with_observation 注册与缓存校验属于 verb 层职责)。
+- **macos.rs 未搬入 ax_action/platform/** (grilling Q4 决策延续): macos.rs 保持
+  在 control_ax 作为共享平台层; R3 后 type-text 投递策略已上移 ax_input,
+  macos.rs 只剩平台原语, 未来多平台需求出现时再评估独立 ax_platform。
+- **收尾阶段 (2026-08-28 下午) 两处 API as-built 分歧** (完整决策见 task_plan):
+  - R1: `press(target: &AxTarget)` 取代 "postcondition 合并进 press 单入口" 的
+    原设计 -- routing 表删除后双分支失去存在理由, postcondition 在类型层
+    不可表示, guarded press 一律走 press_with_postcondition。
+  - R3: ax_input 升级为真执行模块 -- 原 "80/20 简单 API 分层" 已删除,
+    新增 execute.rs 承载 type-text 投递策略 (模式分发 + Auto 回退链 +
+    错误命名), 平台路径注入; AxBackend trait 移除 type_text 方法。
 
 ## Context
 

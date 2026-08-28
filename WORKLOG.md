@@ -622,3 +622,23 @@ control_ax 里的 7 个 action 执行函数，5 个已迁走并删除，剩 2 �
 ### 验证
 - TERM=dumb / 默认环境单测均 PASS; 全量 nextest 959/959, 21 skipped,
   本分支工作以来首次完整绿灯
+
+## [2026-08-28 17:00:00] [Session ID: current] 任务名称: 分支审查发现修正 (P2x1 + P3x2)
+
+### 任务内容
+- P2: 清除 62c782e 误入库的垃圾文件 -- .tmp/pi-prompts/test.txt 删除并让 .tmp/
+  进 .gitignore; .codegraph/daemon.pid 解除跟踪 (目录级 .gitignore 本就全忽略,
+  历史跟踪覆盖了规则); fmt 夹带事实在修正 commit 与 spec 状态头留档
+- P3: ax_query/mod.rs 纯度文档改为如实表述 (依赖清单补全, 解析职责措辞收窄);
+  ADR Amendment 2 与两份 spec 状态头补全 R1/R3/macos.rs 三处已实施分歧;
+  .scratch tickets 07-11 全部标记真实处置状态
+- 修正全程无行为改动, 纯卫生与文档
+
+### 总结感悟
+- 双 skill 审查的驳回机制运转良好: 两项子代理误报 (存量代码误判为本分支引入)
+  都在核实后驳回, 避免了无意义返工; 发现也全部可验证可执行
+- 被跟踪文件会覆盖后加的 gitignore 规则, "已忽略却还在库里" 的解法永远是
+  git rm --cached, 而不是改规则
+
+### 验证
+- cargo check --tests 0 warning; fmt clean; 全量 nextest 959/959, 21 skipped

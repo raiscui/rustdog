@@ -796,3 +796,20 @@ EPIPHANY_LOG 判断: routing 层教训已完整记录于 ADR-0008 Amendment (长
 **全部完成** - R1/R2/R3/R4/R5 五项收尾, 提交 2619587 + 本修复 commit。
 feature/control-ax-split 分支: ax_input + ax_action + ax_query 三模块落地,
 全部 LATER_PLANS 延后项消化完毕, 测试套件首次 959/959 完整绿灯。
+
+## [2026-08-28 16:30:00] [Session ID: current] 分支审查发现修正
+
+### 目标
+处理双 skill 审查的三项发现 (P2 x1, P3 x2), 全部为卫生/文档级, 无行为改动。
+
+### 阶段
+- [x] F1 (P2): .tmp/pi-prompts/test.txt 整删 + .tmp/ 入 .gitignore;
+      .codegraph/daemon.pid 解除跟踪 (其目录 .gitignore 本就全忽略, 仅历史跟踪覆盖了它);
+      fmt 夹带事实写入本修正 commit 说明与 spec 状态头留档
+- [x] F2 (P3): ax_query/mod.rs 纯度文档修正 -- 依赖清单补全 (control_resource_lane /
+      control_window), "解析在调用方" 收窄为: scoped 捕获吃已解析 window_id,
+      observation ref 解析在 verb 层, app->window_id 物化 (Window API 域) 由本模块提供
+- [x] F3 (P3): ADR Amendment 2 补 macos.rs/R1/R3 三条; 两份 spec 状态头补齐
+      (implementation-plan 另留档 62c782e fmt 夹带); .scratch tickets 07/08 标
+      superseded, 09/11 标 done-as-built, 10 标 done-partially-by-design
+- [x] F4: cargo check --tests 0 warning, fmt clean, 全量 nextest 959/959

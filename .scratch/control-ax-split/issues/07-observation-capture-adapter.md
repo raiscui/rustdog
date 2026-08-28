@@ -4,7 +4,8 @@
 
 **Blocked by:** None (可以立即开始)
 
-**Status:** ready-for-agent
+**Status:** superseded (2026-08-28) — as-built 富化 seam 是 AxSnapshot::with_observation,
+selector draft 构造留在 control_ax/tree.rs; 详见 ADR-0008 Amendment 2。请勿领取。
 
 ## Acceptance criteria
 

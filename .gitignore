@@ -23,3 +23,6 @@ rdog_downloads
 # rdog eval runner
 runner/__pycache__/
 runner/lib/__pycache__/
+
+# 本地临时目录, 不入库 (2026-08-28: 清理 62c782e 误提交)
+.tmp/

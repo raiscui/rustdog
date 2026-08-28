@@ -4,7 +4,9 @@
 
 **Blocked by:** #07 (ObservationCapture adapter 实现)
 
-**Status:** ready-for-agent
+**Status:** done-as-built (2026-08-28) — ax_query 落地为无状态捕获核心;
+query.rs 经核实是 @ax-find/@ax-get verb 实现而非纯查询引擎, 保留在 control_ax。
+与本 ticket 验收项的差异见 ADR-0008 Amendment 2。
 
 ## Acceptance criteria
 

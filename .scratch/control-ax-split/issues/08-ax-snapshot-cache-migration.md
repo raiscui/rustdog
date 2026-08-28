@@ -4,7 +4,9 @@
 
 **Blocked by:** #07 (ObservationCapture adapter 实现)
 
-**Status:** ready-for-agent
+**Status:** superseded (2026-08-28) — epoch 真相源分离已由 #51/#54/#55 落地,
+缓存保持 epoch 校验语义原地不动, 多 TTL policy 场景由 computer-act implicit observe
+缓存独立承担; 详见 ADR-0008 Amendment 2。请勿领取。
 
 ## Acceptance criteria
 

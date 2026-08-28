@@ -4,7 +4,9 @@
 
 **Blocked by:** #08 (AxSnapshotCache 迁移), #09 (ax_query 模块创建)
 
-**Status:** ready-for-agent
+**Status:** done-partially-by-design (2026-08-28) — capture 消费方已全部改走
+ax_query (单向依赖达成); verb 层与 observation 的双向编排边 (with_observation
+注册 / 缓存校验) 为设计保留, 见 ADR-0008 Amendment 2。
 
 ## Acceptance criteria
 

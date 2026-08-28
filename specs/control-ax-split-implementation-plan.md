@@ -4,13 +4,19 @@
 **ADR 参考**: docs/adr/0008-control-ax-module-split.md  
 **架构审查**: /var/folders/.../architecture-review-20260820.html
 
-> **执行状态 (2026-08-28 更新)**: 三个阶段全部落地, 提交链 068024b..89b8343 (阶段 1/2)
-> 与 2026-08-28 的阶段 3 commit。与原计划的三处 as-built 分歧:
+> **执行状态 (2026-08-28 更新)**: 三个阶段全部落地, 提交链 068024b..218a435。
+> 与原计划的三类 as-built 分歧:
 > ① 动态 routing 表 / execute_ax_action 字符串入口 / protocol.rs parse 层确认零生产
 > 消费者后移除 (ADR-0008 Amendment); ② 阶段 3 的 ax_query 只收纳无状态捕获核心,
 > query.rs 保留在 control_ax 作为 @ax-find/@ax-get verb 层, 缓存不迁移
 > (ticket 07/08 superseded, ADR-0008 Amendment 2); ③ ObservationCapture 的 as-built
-> 形态是 AxSnapshot::with_observation 方法。下文为原始执行计划, 保留作决策历史。
+> 形态是 AxSnapshot::with_observation 方法。
+> 收尾阶段另有: press(target: &AxTarget) 取代 postcondition 合并式单入口 (R1);
+> ax_input 的 80/20 简单 API 层删除, 升级为承载投递策略的真执行模块 (R3);
+> macos.rs 按 Q4 决策保留在 control_ax 共享平台层。
+> 另: commit 62c782e 曾夹带一次全仓 cargo fmt 扫荡 (control_recording 纯重排),
+> 当时未在提交信息记录, 在此留档。
+> 下文为原始执行计划, 保留作决策历史。
 
 ---
 

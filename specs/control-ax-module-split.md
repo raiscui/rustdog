@@ -3,12 +3,17 @@
 > Companion to ADR-0008. This document is the **what**; ADR-0008 is the **why**. 
 > Read this for build scope; read the ADR for design rationale.
 
-> **As-built 增补 (2026-08-28 更新)**: 三个阶段已全部落地, 与本 spec 的分歧有
+> **As-built 增补 (2026-08-28 更新)**: 三个阶段已全部落地, 与本 spec 的分歧:
 > ① `execute_ax_action` 统一字符串入口、数据化 routing 表与 `ax_action/protocol.rs`
 > parse 层按实施结论移除 (零生产消费者, ADR-0008 Amendment);
 > ② ax_query 按现实切分只收纳无状态捕获核心, query.rs 保留在 control_ax 作为
 > verb 层, AxSnapshotCache 不迁移 (epoch 真相源分离已由 #51/#54/#55 落地,
-> ADR-0008 Amendment 2)。
+> ADR-0008 Amendment 2);
+> ③ press 入口为 press(target: &AxTarget) + press_with_postcondition 双入口,
+> postcondition 不再合并进单一 press (R1);
+> ④ ax_input 的 80/20 简单 API 分层删除, 升级为承载 type-text 投递策略的
+> 真执行模块 (R3);
+> ⑤ macos.rs 按 Q4 决策保留在 control_ax 共享平台层。
 > 下文保留原始规划内容作为决策历史, 不代表当前架构。
 
 ## Problem Statement
