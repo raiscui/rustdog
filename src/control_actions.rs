@@ -40,7 +40,6 @@ use crate::{
 };
 // platform_unsupported_envelope_json 只被 cfg(not(target_os = "macos")) 分支调用
 // (linux 首次真实编译时暴露过缺失 import, 见 2026-08-28 CI 修复)。
-// 语法修复: use 不能嵌在 use 树成员位置, 移为顶层独立 use。
 #[cfg(not(target_os = "macos"))]
 use crate::control_computer_act::error_envelope::platform_unsupported_envelope_json;
 use enigo::{Direction, Enigo, Key, Keyboard, Settings};

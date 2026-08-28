@@ -31,6 +31,27 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # xcap 截图栈在 linux 上的原生链接依赖 (上游 xcap README 的 Ubuntu 清单):
+      # libwayland-dev / libegl-dev 供 wayland-sys build script 做 pkg-config 探测,
+      # libclang-dev 供 libwayshot bindgen, 其余为 X11/dbus/pipewire 侧构建依赖。
+      # 没有这些包时 wayland-sys v0.31.11 的 build.rs 会在 pkg-config 失败处直接
+      # panic (自仓库基线起 ubuntu job 一直因此全红, 2026-08-28 修复)。
+      - name: Install linux build deps (xcap screen-capture stack)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            pkg-config \
+            libclang-dev \
+            libxcb1-dev \
+            libxrandr-dev \
+            libdbus-1-dev \
+            libpipewire-0.3-dev \
+            libwayland-dev \
+            libegl-dev \
+            libgbm-dev \
+            libdrm-dev
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:

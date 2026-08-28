@@ -131,14 +131,24 @@ fn set_command_process_group(_command: &mut Command) {}
 
 #[cfg(unix)]
 fn terminate_process_tree(child: &mut Child, child_id: u32, signal: TerminationSignal) {
-    let signal_arg = match signal {
-        TerminationSignal::Terminate => "-TERM",
-        TerminationSignal::Kill => "-KILL",
+    // 2026-08-28 CI 实测 (strace): 外部 /usr/bin/kill 在 GNU coreutils 上会把
+    // ["-TERM", "-<pid>"] 解析成 kill(-2, SIGTERM) — 信号发往进程组 2 而非
+    // 目标组, ESRCH 静默失败。孤儿子孙进程因此存活并持有 stdout/stderr 管道
+    // 写端, join_stream_reader 阻塞到其自然退出, shell_lane 超时上限被突破
+    // (ubuntu CI duration_ms=2001)。macOS 的 BSD kill 对同参数无此歧义,
+    // 所以仅 linux 暴露。改用进程内 libc::kill(2) 直发进程组信号, 消灭
+    // 外部命令的参数解析歧义 + PATH 依赖 + spawn 开销三重脆弱点。
+    let signum = match signal {
+        TerminationSignal::Terminate => libc::SIGTERM,
+        TerminationSignal::Kill => libc::SIGKILL,
     };
-    let process_group_arg = format!("-{child_id}");
-    let _ = Command::new("kill")
-        .args([signal_arg, process_group_arg.as_str()])
-        .status();
+    // 负 pid = 进程组信号: 一次性覆盖组长 (shell) 与全部子孙 (如 sleep)
+    let process_group_id = -(child_id as libc::pid_t);
+    // ESRCH (组已消亡) 与其余发送失败都只能尽力而为, 与原实现的吞错语义一致
+    unsafe {
+        libc::kill(process_group_id, signum);
+    }
+    // 兜底: 直杀 child 本体 (SIGKILL 单进程), 确保组长必定终结
     let _ = child.kill();
 }
 

@@ -786,3 +786,30 @@ control_actions::execute_ax_action
 - 多会话共享工作区时, 提交前必查当前分支, 永不 git add -A
 - e2e 测试暴露 render_structured_success_response 的信封行为 (有 request id 才包
   value 信封), 协议消费者要兼容两种形状
+## [2026-08-28 20:10:00] [Session ID: zcode-idle-20260828] 任务名称: 闲时 continuous-learning 整理 (无人值守)
+
+### 任务内容
+- 回读默认六文件 + __a2a_research 支线集 + EXPERIENCE.md + docs/solutions/ 全量
+- Compound Gate 裁决本轮候选: 2 capture / 3 inbox 保留 / 其余确认已承接
+- a2a_research 支线三文件归档 + manifest; LATER_PLANS A2A 条目清理
+- AGENTS.md 索引同步 (2 新 solution + 2 既有遗漏修复)
+
+### 完成过程
+- Capture x2 (双校验均 0 flags, 中途修正 1 处相对路径 flag):
+  - test-failures/tty-term-dumb-environment-deterministic-failure.md
+    ("交互终端绿 + CI 红 = 环境决定性失败" 诊断指纹, 受控实验双向验证)
+  - best-practices/parallel-test-global-state-single-lock.md
+    (env / tracing / singleton 三例同模式的模块顶层唯一锁纪律)
+- Scoped Refresh 判定: 无漂移 -- ax-split (PR #61) 后缓存仍在 control_ax,
+  resource_lane 未动, 既有 solution 不受影响; 评测与测试诊断域不重叠
+- 归档: git mv 三文件至 archive/branch_contexts/a2a_research/,
+  manifest 记录候选去向 (全部由 specs/rdog-task-spawn-control-plan.md 承接)
+- EPIPHANY_LOG 回顾: 2 条均已解决, 无新增重大风险, 不追加
+- 全程未触碰并行会话进行中的 src/ 改动 (task-spawn Phase 1 实施中)
+
+### 总结感悟
+- 8-22 全量复盘处置清单存在盲区: 8-18/8-19 三条测试隔离候选未出现在
+  逐条处置记录中, 本轮靠时间戳比对才补上裁决 -- 处置记录应显式覆盖"复盘时点
+  之前的全部条目", 而不是只列代表性条目
+- 三例同模式的第三次出现 (singleton) 是模式成熟的信号, 单例时判"代码即载体"
+  的条目, 在多例印证后值得升级为正式 solution
