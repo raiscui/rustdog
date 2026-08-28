@@ -515,3 +515,26 @@
   - 脚本误伤的"半截改动" (如统一 `RDOG_ZENOH__ENABLED=false` 注入其他会话在改的文件) 不应带进本会话 commit,留给对应会话的完整 commit。
 - 验证: 2026-08-19 commit `155ec1f` 提交 14 个本会话纯主题文件,`git status` 确认其余改动 (observations 治理、共享账本、未跟踪 handoff) 仍属对应会话。
 - 与既有边界: `EXPERIENCE.md` 2026-07-18 测试隔离条目是"测试内部"的环境纪律,本条是"跨会话外部"的 commit 边界纪律。
+## [2026-08-22 12:47:20] [Session ID: zcode-sess_fa3b551c] 积压核验处置 (2026-08-22 全量复盘)
+
+### 已 Capture (新增指针)
+- [2026-07-14] 坐标 AX hit-test owner 门禁 + WeChat no-AX 政策 ->
+  `docs/solutions/best-practices/gui-target-owner-evidence-gate.md`。
+  重要漂移: 该政策原真相源 (SKILL.md 章节) 已于 2026-07-28 被 92a3d06 skill 瘦身
+  整体移除 (无意图记录), 旧条目中 "真相源在 SKILL.md" 的指向失效, 以 solution 为准。
+- [2026-04-13] Windows Zenoh Hello locator 顺序 ->
+  `docs/solutions/best-practices/zenoh-hello-locator-priority.md`
+  (代码 `zenoh_runtime/session.rs` 已实现 manual scout + 排序 + 显式 open, 带单测)。
+- [2026-06-20] log 输出路径 e2e 隐性契约 ->
+  `docs/solutions/conventions/daemon-log-sentinel-e2e-contract.md`。
+
+### 核验后保留为索引 (代码/spec/skill 即载体, 不另建文档)
+- line-control 协议、Zenoh peer/peer、entry-point fallback、PTY 生命周期、unixpipe
+  FIFO、self/空 target: specs 各计划文档承接。
+- [2026-07-18] 唯一共享锁: `src/zenoh_runtime/test_support.rs::env_test_guard` 即载体。
+- [2026-04-05] Windows UIPI: `control_capabilities.rs` code 77 语义 +
+  `to_io_error_should_upgrade_uipi_failures_to_permission_denied` 测试即载体。
+- [2026-05-11] 更名权限主体: `macos-tcc-stable-codesign-identity.md` 邻接承接。
+- [2026-08-04] parser 兼容机制: 本文件继续作为 canonical 索引 (AGENTS.md 已如此声明)。
+- 其余历史条目 (Codex/OMX 提交规范、更名迁移、skill 瘦身纪律等): 一次性/历史性,
+  保留原文备查。

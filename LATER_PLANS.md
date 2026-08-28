@@ -817,25 +817,6 @@ zenoh router down / unixpipe broken / zenoh timeout 等场景.
 触发条件: 需要 client 端断开测试, 或 daemon 端临时 kill zenoh session,
 可以 mock 但 live trigger 比较难稳定.
 
-## [2026-08-06 15:06:56] [Session ID: omx-1785926019233-oohizd] 候选: Rust binary 既有 warning 清理
-
-### 证据
-- `cargo build --package rustdog --bin rdog` 成功,但报告 17 条 warning。
-- 涉及 `control_actions`、`control_ax`、`control_computer_act`、`control_protocol` 等未在当前 logger diff 中修改的模块,主要是 cfg 后未使用 import、未使用变量和尚未有触发路径的 enum variant/helper。
-
-### 建议
-- 单独按模块做 cfg import 收口与 dead-code 边界整理,每次保持功能不变并跑完整 binary tests。
-- 不与当前 logger 初始化修复混合提交,避免把已验证的启动修复掩盖在无关重构中。
-
-## [2026-08-07 11:25:39] [Session ID: omx-1786061963768-e7in9l] 待办: Zenoh client 关闭时的 admin transport event 日志
-
-- **2026-08-09 已处置 (定位结论, 不改代码)**: zenoh-1.8.0 `src/api/admin.rs:229` 的 transport events listener 回调, 在 session 已关闭时 `resolve_put` 失败即报此错; 属 transport 断开事件与 session close 的时序竞态。
-- 复现尝试 (2026-08-09, 当前 binary): 20x unixpipe 压测 / 5x UDP client / daemon kill / client 正常关闭均未出现; 无动态证据证明当前版本仍会产生, 且原始记录已注明不影响 parser/评测/ledger。
-- 决定: 不修 (zenoh 库内部日志, rdog 统一 LevelFilter 无法按模块过滤; 修日志初始化引入 EnvFilter 属过度设计)。若未来评测日志再出现且造成干扰, 再评估 EnvFilter。
-## [2026-08-09 20:30:00] [Session ID: omx-1786268168901-f711dm] 待办: 清理历史遗留 zenoh guard / unixpipe FIFO
-
-- **2026-08-09 已完成**: 清理 ~/.local/state/rustdog/zenoh-guards/ 死 guard 5478+28 个 + lease 422 个; $TMPDIR 下 476 个 rdog-*.pipe_uplink/downlink FIFO; `rdog control` 无 target 诊断噪音消失。
-- 注意: guard 文件名内容是 PID; FIFO 用 `find -type p` 匹配 (`-f` 对 FIFO 不成立)。
 ## [2026-08-09 22:40:00] [Session ID: omx-1786268168901-f711dm] 观察: UDP 模式 daemon 向虚拟网卡广播 Hello 报错噪音
 
 - 现象: 2026-08-09 复现 admin transport event 时, UDP-only daemon 持续输出 `ERROR zenoh::net::runtime::orchestrator: Unable to send Hello(...): Can't assign requested address (os error 49)`, 目标是 192.168.107.0 / 198.18.0.1 等 VPN/虚拟接口地址 (Zenoh 对所有网卡广播 scout Hello)。
@@ -920,3 +901,4 @@ zenoh router down / unixpipe broken / zenoh timeout 等场景.
   wire-schema sweep (serde rename 逐字锁定序列化输出), 作为独立事项排期
 - (已完成并移除) observe_current_ax_values_with / collect_ax_values_by_role
   纯遍历部分已作为 collect_ax_role_values 收进 ax_query
+

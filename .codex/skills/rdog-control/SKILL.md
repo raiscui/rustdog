@@ -1,6 +1,6 @@
 ---
 name: rdog-control
-version: "2.27-key-contract"
+version: "2.28-wechat-noax-restore"
 description: "Use for rdog control on a local or named machine: health, shell, GUI, browser, window, AX, PTY, flow, verification, and safety."
 ---
 
@@ -190,6 +190,25 @@ invent aliases for them or infer a target from the application name.
 for text and `@ax-press` for AXPress. Use `@ax-action` when the requested AX
 action is something else, such as `AXConfirm` or `AXShowDefaultUI`.
 
+## WeChat Temporary No-AX Policy
+
+When the target app is WeChat (`com.tencent.xinWeChat`) or the user names "WeChat" / "微信", do not use AX to locate or interact with content controls.
+This is a temporary fail-closed policy based on the 2026-07-14 ownership probe.
+
+- Do not call `@ax-find`, `@ax-get`, `@ax-action`, `@ax-set-value`, `@ax-scroll`, or `rdog ax-diff` for WeChat content.
+- Do not reuse AX-derived refs or labels such as `发现`, `直播`, or `发布`; a previous fallback attached a Xiaohongshu/Chrome AX tree to WeChat target metadata.
+- The restriction applies to WeChat content targeting. `@window-find`, `@window-activate`, screenshot capture, guarded mouse actions, `@paste`, and targeted `@key` remain allowed.
+- Use `@window-find` to resolve the current WeChat window, then capture a fresh visual observation with `include_screenshot:true`, `include_windows:true`, and `include_ax:false`.
+- Locate visible controls from screenshot pixels plus the resolved window/display geometry. Use `guard.display`, and confirm the point is still inside the fresh window rect before coordinate actions.
+- If the window is hidden, occluded, or stale, activate it and capture a new screenshot before deriving coordinates. Do not use AX hit-testing to bypass occlusion.
+- Verify every action with a fresh screenshot and window state. If visual ownership or coordinates are ambiguous, stop without clicking or typing.
+
+Do not re-enable WeChat AX targeting until a controlled overlap/z-order regression proves root ownership and a live query reliably finds `文件传输助手` without accepting foreign browser content.
+
+(Restored 2026-08-22 after the 2026-07-28 compaction removed it; durable
+rationale: `docs/solutions/best-practices/gui-target-owner-evidence-gate.md`.
+This is a safety boundary — do not remove it in token-optimization passes.)
+
 ## Browser Lane
 
 浏览器内容动作直接遵守本 skill 的 AX/window/URL 证据合同。评测 cwd 可能不包含
@@ -305,3 +324,6 @@ When none of the above holds, continue the agent loop autonomously.
 🛑 **STOP — destructive operations require user confirmation.** Stop on ambiguous ownership, permission denial, or a failed action. Retry a step at
 most three times with a different locator or lane. Ask before destructive, security,
 permission, reboot, or production actions.
+
+WeChat content targeting always follows the WeChat Temporary No-AX Policy above:
+ambiguous visual ownership means stop, not guess.
