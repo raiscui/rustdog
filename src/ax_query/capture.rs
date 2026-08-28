@@ -1,11 +1,13 @@
 //! AX 捕获核心: 全局/窗口/子树捕获入口与 snapshot 内查找。
 //!
-//! 全部函数自 control_ax/tree.rs 迁入, 语义与签名保持不变。
-//! observation-scoped 的 selector 富化与 ref 解析留在 control_ax 侧
-//! (那是 verb 层职责, 见 tree.rs 现头注释)。
+//! 主体自 control_ax/tree.rs 迁入; 原 find/semantic 两个同形分发器统一为
+//! `capture_scoped_snapshot` (verb 层负责解析 window identity, 这里只消费
+//! 已解析的 window_id)。observation-scoped 的 selector 富化与 ref 解析留在
+//! control_ax 侧 (verb 层职责, 见 tree.rs 头注释)。
 
-use crate::control_ax::query::AxFindRequest;
-use crate::control_ax::types::{AxCapturedSubtree, AxElement, AxSnapshot, AxTarget, AxTreeRequest};
+use crate::control_ax::types::{
+    AxCapturedSubtree, AxElement, AxSnapshot, AxTarget, AxTreeRequest, AxTreeScope,
+};
 use crate::control_ax::AxBackend;
 use crate::control_ax::{
     platform_capture_current_subtree, platform_capture_current_window, SystemAxBackend,
@@ -53,34 +55,38 @@ pub fn ax_window_id_from_backend_id(backend_id: &str) -> Option<&str> {
     (pid.parse::<i32>().is_ok() && window_index.parse::<usize>().is_ok()).then_some(window_id)
 }
 
-/// 按请求的 window identity / scope 选择全局或定向窗口捕获。
-pub fn capture_ax_find_snapshot(request: &AxFindRequest) -> io::Result<AxSnapshot> {
-    capture_ax_find_snapshot_with(
-        request,
+/// 按已解析的 window id 选择全局或定向窗口捕获。
+///
+/// window identity (显式 id / app 名 / observation ref) 的解析是 verb 层职责,
+/// 这里只消费解析结果, 保持本模块不认识 observation 与 verb 请求类型。
+pub fn capture_scoped_snapshot(
+    tree: &AxTreeRequest,
+    window_id: Option<&str>,
+) -> io::Result<AxSnapshot> {
+    capture_scoped_snapshot_with(
+        tree,
+        window_id,
         capture_default_ax_snapshot,
         capture_current_ax_window_snapshot,
     )
 }
 
-/// `capture_ax_find_snapshot` 的可注入变体, 测试用它替换真实捕获。
-pub fn capture_ax_find_snapshot_with(
-    request: &AxFindRequest,
+/// `capture_scoped_snapshot` 的可注入内核, 测试用它替换真实捕获。
+fn capture_scoped_snapshot_with(
+    tree: &AxTreeRequest,
+    window_id: Option<&str>,
     capture_global: impl FnOnce(&AxTreeRequest) -> io::Result<AxSnapshot>,
     capture_window: impl FnOnce(&str, &AxTreeRequest) -> io::Result<AxSnapshot>,
 ) -> io::Result<AxSnapshot> {
     // App 菜单栏挂在 AXApplication 下,不是任意 AXWindow 的子树。
     // 因此必须保留 app-menu root,交给平台后端按应用筛选菜单快照。
-    if matches!(
-        request.tree.scope,
-        crate::control_ax::types::AxTreeScope::AppMenu
-    ) {
-        return capture_global(&request.tree);
+    if matches!(tree.scope, AxTreeScope::AppMenu) {
+        return capture_global(tree);
     }
-    let Some(window) = request.window.as_ref() else {
-        return capture_global(&request.tree);
-    };
-    let window_id = window.resolve_window_id()?;
-    capture_window(&window_id, &request.tree)
+    match window_id {
+        Some(window_id) => capture_window(window_id, tree),
+        None => capture_global(tree),
+    }
 }
 
 /// 定向捕获单个窗口, 并把 capture-start 时刻的 resource epoch 快照嵌入 snapshot。
@@ -99,27 +105,14 @@ pub fn capture_semantic_target_snapshot(
     target: &AxTarget,
     request: &AxTreeRequest,
 ) -> io::Result<AxSnapshot> {
-    capture_semantic_target_snapshot_with(
-        target,
+    // 已解析的 window_id 是本次动作的归属边界.只读取目标窗口,
+    // 避免无关应用的 AX 状态干扰 semantic match.
+    capture_scoped_snapshot_with(
         request,
+        target.window_id.as_deref(),
         capture_default_ax_snapshot,
         capture_current_ax_window_snapshot,
     )
-}
-
-/// `capture_semantic_target_snapshot` 的可注入变体, 测试用它替换真实捕获。
-pub fn capture_semantic_target_snapshot_with(
-    target: &AxTarget,
-    request: &AxTreeRequest,
-    capture_global: impl FnOnce(&AxTreeRequest) -> io::Result<AxSnapshot>,
-    capture_window: impl FnOnce(&str, &AxTreeRequest) -> io::Result<AxSnapshot>,
-) -> io::Result<AxSnapshot> {
-    match target.window_id.as_deref() {
-        // 已解析的 window_id 是本次动作的归属边界.只读取目标窗口,
-        // 避免无关应用的 AX 状态干扰 semantic match.
-        Some(window_id) => capture_window(window_id, request),
-        None => capture_global(request),
-    }
 }
 
 /// 将 Window API 的 app selector 转换为 AX 可直接消费的 canonical window ID.
@@ -181,27 +174,48 @@ pub fn ax_snapshot_status_error(snapshot: &AxSnapshot) -> io::Error {
     io::Error::new(kind, value.to_string())
 }
 
-/// capture 分发路由测试 (自 control_ax tests 迁入, 语义不变)。
+/// 收集 snapshot 内指定 role 的全部元素 value (深度遍历, 跳过被脱敏的元素)。
 ///
-/// 覆盖: window identity / app-menu / semantic target 的全局 vs 定向路由,
-/// 以及"无 window identity 保持全局捕获"的默认行为。
+/// 只做纯遍历: 不排序、不去重、不做任何语义归一化,
+/// 调用方 (如 press postcondition 验证) 按自己的语义加工结果。
+pub fn collect_ax_role_values(snapshot: &AxSnapshot, role: &str) -> Vec<String> {
+    let mut values = Vec::new();
+    for window in &snapshot.windows {
+        collect_role_values_from_elements(&window.elements, role, &mut values);
+    }
+    values
+}
+
+/// `collect_ax_role_values` 的递归内核。
+fn collect_role_values_from_elements(elements: &[AxElement], role: &str, values: &mut Vec<String>) {
+    for element in elements {
+        if element.role == role && !element.value_redacted {
+            if let Some(value) = element.value.as_deref() {
+                values.push(value.to_owned());
+            }
+        }
+        collect_role_values_from_elements(&element.children, role, values);
+    }
+}
+
+/// capture 分发路由测试。
+///
+/// 语义自 control_ax tests 迁入: window id / app-menu 的全局 vs 定向路由。
+/// 原 find/semantic 两套同形断言随分发器统一 (capture_scoped_snapshot) 合并;
+/// window identity 解析 (app 名 / observation ref) 属 verb 层, 其覆盖在 query.rs 侧。
 #[cfg(test)]
 mod capture_routing_tests {
     use super::*;
-    use crate::control_ax::parse_ax_find_payload;
-    use crate::control_ax::types::AxTreeScope;
     use std::cell::Cell;
 
     #[test]
-    fn ax_find_window_identity_should_route_only_to_targeted_capture() {
+    fn scoped_window_id_should_route_only_to_targeted_capture() {
         let global_calls = Cell::new(0);
         let targeted_calls = Cell::new(0);
-        let request =
-            parse_ax_find_payload(r#"{window:{window_id:"pid:7/window:1"},role:"AXButton"}"#)
-                .unwrap();
 
-        let snapshot = capture_ax_find_snapshot_with(
-            &request,
+        let snapshot = capture_scoped_snapshot_with(
+            &AxTreeRequest::default(),
+            Some("pid:7/window:1"),
             |_| {
                 global_calls.set(global_calls.get() + 1);
                 Ok(AxSnapshot::complete("global", Vec::new(), false))
@@ -220,107 +234,67 @@ mod capture_routing_tests {
     }
 
     #[test]
-    fn ax_find_app_menu_should_pass_app_selector_to_capture_backend() {
-        let request =
-            parse_ax_find_payload(r#"{root:"app-menu",app:"Finder",role:"AXMenuBarItem"}"#)
-                .expect("app menu request should parse");
+    fn scoped_without_window_id_should_keep_global_capture() {
+        let global_calls = Cell::new(0);
+        let targeted_calls = Cell::new(0);
 
-        let snapshot = capture_ax_find_snapshot_with(
+        let snapshot = capture_scoped_snapshot_with(
+            &AxTreeRequest::default(),
+            None,
+            |_| {
+                global_calls.set(global_calls.get() + 1);
+                Ok(AxSnapshot::complete("global", Vec::new(), false))
+            },
+            |_, _| {
+                targeted_calls.set(targeted_calls.get() + 1);
+                Ok(AxSnapshot::complete("targeted", Vec::new(), false))
+            },
+        )
+        .unwrap();
+
+        assert_eq!(snapshot.platform, "global");
+        assert_eq!(global_calls.get(), 1);
+        assert_eq!(targeted_calls.get(), 0);
+    }
+
+    /// App 菜单栏挂在 AXApplication 下, 即使带 window_id 也恒走全局捕获,
+    /// 且原始树请求 (scope + app_menu_app) 原样到达平台后端。
+    #[test]
+    fn scoped_app_menu_should_force_global_even_with_window_id() {
+        let request = AxTreeRequest {
+            scope: AxTreeScope::AppMenu,
+            app_menu_app: Some("Finder".to_owned()),
+            ..AxTreeRequest::default()
+        };
+
+        let snapshot = capture_scoped_snapshot_with(
             &request,
+            Some("pid:7/window:1"),
             |tree| {
                 assert_eq!(tree.scope, AxTreeScope::AppMenu);
                 assert_eq!(tree.app_menu_app.as_deref(), Some("Finder"));
-                Ok(AxSnapshot::complete("targeted-app-menu", Vec::new(), false))
+                Ok(AxSnapshot::complete("global-app-menu", Vec::new(), false))
             },
             |_, _| panic!("app menu must not be captured as a window subtree"),
         )
         .expect("app menu capture should succeed");
 
-        assert_eq!(snapshot.platform, "targeted-app-menu");
+        assert_eq!(snapshot.platform, "global-app-menu");
     }
 
+    /// 纯度回归: backend id -> 窗口 id 的提取规则 (menu-bar root 返回 None)。
     #[test]
-    fn semantic_target_window_id_should_route_only_to_targeted_capture() {
-        let global_calls = Cell::new(0);
-        let targeted_calls = Cell::new(0);
-        let target = AxTarget {
-            window_id: Some("pid:7/window:1".to_owned()),
-            role: Some("AXButton".to_owned()),
-            description: Some("1".to_owned()),
-            ..AxTarget::default()
-        };
-
-        let snapshot = capture_semantic_target_snapshot_with(
-            &target,
-            &AxTreeRequest::default(),
-            |_| {
-                global_calls.set(global_calls.get() + 1);
-                Ok(AxSnapshot::complete("global", Vec::new(), false))
-            },
-            |window_id, _| {
-                targeted_calls.set(targeted_calls.get() + 1);
-                assert_eq!(window_id, "pid:7/window:1");
-                Ok(AxSnapshot::complete("targeted", Vec::new(), false))
-            },
-        )
-        .unwrap();
-
-        assert_eq!(snapshot.platform, "targeted");
-        assert_eq!(global_calls.get(), 0);
-        assert_eq!(targeted_calls.get(), 1);
-    }
-
-    #[test]
-    fn semantic_target_without_window_id_should_keep_global_capture() {
-        let global_calls = Cell::new(0);
-        let targeted_calls = Cell::new(0);
-        let target = AxTarget {
-            role: Some("AXButton".to_owned()),
-            description: Some("1".to_owned()),
-            ..AxTarget::default()
-        };
-
-        let snapshot = capture_semantic_target_snapshot_with(
-            &target,
-            &AxTreeRequest::default(),
-            |_| {
-                global_calls.set(global_calls.get() + 1);
-                Ok(AxSnapshot::complete("global", Vec::new(), false))
-            },
-            |_, _| {
-                targeted_calls.set(targeted_calls.get() + 1);
-                Ok(AxSnapshot::complete("targeted", Vec::new(), false))
-            },
-        )
-        .unwrap();
-
-        assert_eq!(snapshot.platform, "global");
-        assert_eq!(global_calls.get(), 1);
-        assert_eq!(targeted_calls.get(), 0);
-    }
-
-    #[test]
-    fn ax_find_without_window_identity_should_keep_global_capture() {
-        let global_calls = Cell::new(0);
-        let targeted_calls = Cell::new(0);
-        let request = parse_ax_find_payload(r#"{role:"AXButton"}"#).unwrap();
-
-        let snapshot = capture_ax_find_snapshot_with(
-            &request,
-            |_| {
-                global_calls.set(global_calls.get() + 1);
-                Ok(AxSnapshot::complete("global", Vec::new(), false))
-            },
-            |_, _| {
-                targeted_calls.set(targeted_calls.get() + 1);
-                Ok(AxSnapshot::complete("targeted", Vec::new(), false))
-            },
-        )
-        .unwrap();
-
-        assert_eq!(snapshot.platform, "global");
-        assert_eq!(global_calls.get(), 1);
-        assert_eq!(targeted_calls.get(), 0);
+    fn ax_window_id_from_backend_id_should_extract_only_canonical_window_ids() {
+        assert_eq!(
+            ax_window_id_from_backend_id("pid:321/window:0"),
+            Some("pid:321/window:0")
+        );
+        assert_eq!(
+            ax_window_id_from_backend_id("pid:321/window:2/path:7"),
+            Some("pid:321/window:2")
+        );
+        assert_eq!(ax_window_id_from_backend_id("app-menu:Finder"), None);
+        assert_eq!(ax_window_id_from_backend_id("pid:not-a-pid/window:0"), None);
     }
 
     /// role value 收集: 深层命中 + 跳过脱敏 + 不做排序去重归一化 (调用方语义)。
@@ -375,47 +349,8 @@ mod capture_routing_tests {
 
         let mut values = collect_ax_role_values(&snapshot, "AXStaticText");
         assert_eq!(values, vec!["0".to_owned()]);
-        // 多窗口去重排序是调用方语义, 这里原样保留重复。
+        // 多次收集原样保留重复, 去重排序是调用方语义。
         values.extend(collect_ax_role_values(&snapshot, "AXStaticText"));
         assert_eq!(values.len(), 2);
-    }
-
-    /// 纯度回归: backend id -> 窗口 id 的提取规则 (menu-bar root 返回 None)。
-    #[test]
-    fn ax_window_id_from_backend_id_should_extract_only_canonical_window_ids() {
-        assert_eq!(
-            ax_window_id_from_backend_id("pid:321/window:0"),
-            Some("pid:321/window:0")
-        );
-        assert_eq!(
-            ax_window_id_from_backend_id("pid:321/window:2/path:7"),
-            Some("pid:321/window:2")
-        );
-        assert_eq!(ax_window_id_from_backend_id("app-menu:Finder"), None);
-        assert_eq!(ax_window_id_from_backend_id("pid:not-a-pid/window:0"), None);
-    }
-}
-
-/// 收集 snapshot 内指定 role 的全部元素 value (深度遍历, 跳过被脱敏的元素)。
-///
-/// 只做纯遍历: 不排序、不去重、不做任何语义归一化,
-/// 调用方 (如 press postcondition 验证) 按自己的语义加工结果。
-pub fn collect_ax_role_values(snapshot: &AxSnapshot, role: &str) -> Vec<String> {
-    let mut values = Vec::new();
-    for window in &snapshot.windows {
-        collect_role_values_from_elements(&window.elements, role, &mut values);
-    }
-    values
-}
-
-/// `collect_ax_role_values` 的递归内核。
-fn collect_role_values_from_elements(elements: &[AxElement], role: &str, values: &mut Vec<String>) {
-    for element in elements {
-        if element.role == role && !element.value_redacted {
-            if let Some(value) = element.value.as_deref() {
-                values.push(value.to_owned());
-            }
-        }
-        collect_role_values_from_elements(&element.children, role, values);
     }
 }

@@ -546,3 +546,33 @@ control_ax 里的 7 个 action 执行函数，5 个已迁走并删除，剩 2 �
   最强的反证。删除比人为接入更忠实于 "implement all" 的意图
 - 遗留规划文档的正确处理是 "as-built 增补 + 保留历史", 不是重写; ADR 用 Amendment
   机制承接设计演进, 决策链路可追溯
+
+## [2026-08-28 11:05:00] [Session ID: current] 任务名称: ADR-0008 阶段 3 - ax_query 无状态捕获核心
+
+### 任务内容
+- 新建 src/ax_query/ (mod.rs + capture.rs ~420 行): tree.rs 中零 observation/protocol
+  依赖的 capture / 查找 / target 物化函数迁入, 模块文档写明纯度契约
+- 全部 capture 消费方 (observation/producer, screenshot, control_actions,
+  control_web, computer_act/verify, ax_action, observation.rs) 改从 ax_query 导入
+- tree.rs 收缩为 target 解析 + selector 富化桥接层; query.rs 保留为 verb 层
+- ax_action 的纯遍历拆为 ax_query::collect_ax_role_values + 验证层归一化
+- 双轴 review 后: find/semantic 同形分发器统一为 capture_scoped_snapshot,
+  find 包装器回归 verb 层 (AppMenu 短路保序), mod.rs 依赖文档如实化
+- 文档: ADR-0008 Amendment 2, 两个 spec 状态头, CONTEXT.md 两条术语 as-built 化
+
+### 完成过程
+- 关键判断: scratch tickets 07/08 (ObservationCapture adapter / cache TTL 迁移)
+  被 #51/#54/#55 的现实超越 -- epoch 真相源分离已落地并对抗性验证, 迁移只剩
+  物理位置收益; query.rs 实为 verb 实现而非纯查询引擎, 不能整搬
+- review 发现 ax_query 吃 verb 层 AxFindRequest 的边界渗漏, 用 "已解析原语"
+  方案修复 (优于搬 types.rs: 避免把 DisplayScope 和 observation ref 解析拖进共享内核)
+
+### 总结感悟
+- 阶段规划要先核对 "设计时假定的现状" 是否被后续演进改变, 本轮 3 张 tickets
+  有 2 张半已被 #51/#54/#55 静默超越
+- 底层模块的入参用 "已解析原语" (window_id) 而非上层请求类型, 是保持依赖
+  单向的最有效手段, 比事后搬类型更干净
+
+### 验证
+- cargo check --tests 0 warning 0 error; 纯度断言 (grep) 通过
+- 定向 21/21; 全量 nextest 955/956 (唯一失败为既有 control_tty flake)

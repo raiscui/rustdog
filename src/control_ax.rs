@@ -1034,8 +1034,8 @@ impl AxScrollReport {
 pub mod query;
 
 pub use query::{
-    build_ax_find_response_json, build_ax_get_response_json, parse_ax_find_payload,
-    parse_ax_get_payload, AxFindQuery, AxFindRequest, AxGetRequest,
+    build_ax_find_response_json, build_ax_get_response_json, capture_ax_find_snapshot,
+    parse_ax_find_payload, parse_ax_get_payload, AxFindQuery, AxFindRequest, AxGetRequest,
 };
 
 pub trait AxBackend {

@@ -658,7 +658,7 @@ EPIPHANY_LOG 判断: routing 层教训已完整记录于 ADR-0008 Amendment (长
 - [ ] P3-4: cargo check 0 warning + ax_query 定向测试 + 全量 nextest
 - [ ] P3-5: 评估 LATER_PLANS 项 3 (ax_action 的 collect_ax_values_by_role 归属 ax_query)
 - [ ] P3-6: 文档同步 (ADR-0008 Amendment 扩展, spec 状态, CONTEXT.md 核对)
-- [ ] P3-7: 双轴 code-review + 提交 + WORKLOG
+- [x] P3-7: 双轴 code-review + 修复 (见下方 review 条目) + 提交 + WORKLOG
 
 ### 验收标准
 - ax_query 零 import control_observation / control_protocol (纯度由 grep 断言)
@@ -687,3 +687,23 @@ EPIPHANY_LOG 判断: routing 层教训已完整记录于 ADR-0008 Amendment (长
 - 5 个 capture 路由测试随实现迁入 ax_query (capture_routing_tests), 补了
   ax_window_id_from_backend_id 提取规则测试; 曾误加"占位"测试, 认识到与
   ax_input 恒真断言同毛病后删除
+
+### 双轴 review 结论与修复 (2026-08-28)
+- 两轴确认硬验收成立: ax_query 纯度 (零 observation/protocol 代码引用) 与
+  capture 消费方迁移均经 reviewer 独立 grep 复核; moved 函数逐行等价;
+  collect 拆分行为等价 (归一化均在排序前施加, 多重集相同)
+- 共同指出的真实问题: mod.rs "依赖方向恒为" 声明过度 + ax_query 消费
+  verb 层 AxFindRequest 是边界渗漏 (移 types.rs 方案被否: AxFindRequest 内嵌
+  DisplayScope 且 AxWindowIdentity::resolve_window_id 有 observation ref 解析,
+  搬 types 会污染共享内核)
+- 已修复: find/semantic 两个同形分发器统一为 capture_scoped_snapshot
+  (只吃已解析 window_id, 顺带消掉 Duplicated Code finding);
+  capture_ax_find_snapshot 回归 verb 层 query.rs (AppMenu 短路保持在
+  identity 解析前, 错误顺序不变); mod.rs 依赖方向文档改为如实描述共享内核;
+  测试 mod 移到文件尾; scoped 路由测试重写 (app-menu 强制全局的断言比原版更强)
+- 接受项 (judgement, 不改): pub vs pub(crate) (binary crate 等价, 与 ax_action
+  风格一致); capture_current_ax_subtree 纯转发 (忠实搬迁存量);
+  screenshot 等双门牌 import (capture 来自 ax_query / resolve 留 control_ax,
+  属拆分固有形态)
+- P3-2 修正: control_mouse 只用 resolve_current_ax_target_rect (本就留 control_ax),
+  无需迁移, 计划条目当时列多了

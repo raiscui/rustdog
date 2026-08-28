@@ -5,13 +5,13 @@ use crate::{
     },
     ax_input::{send_key_with_config, type_text_with_config},
     ax_query::{
-        ax_window_id_from_backend_id, capture_ax_find_snapshot, capture_current_ax_window_snapshot,
+        ax_window_id_from_backend_id, capture_current_ax_window_snapshot,
         capture_default_ax_snapshot,
     },
     cancellation::CancellationToken,
     control_ax::{
-        build_ax_find_response_json, build_ax_get_response_json, window_activation_verified,
-        AxFocusReport,
+        build_ax_find_response_json, build_ax_get_response_json, capture_ax_find_snapshot,
+        window_activation_verified, AxFocusReport,
     },
     // Phase F-1: 三个 error_envelope wrapper helper (Cancelled / PlatformUnsupported /
     // PermissionDenied), 让手写 JSON payload 跟其它 error_code 走同一 envelope 形状。
