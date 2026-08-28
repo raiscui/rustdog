@@ -118,6 +118,11 @@ Issues 和 Wayfinder maps 使用 GitHub Issues。详见 `docs/agents/issue-track
   - 用途: 说明哪些旧支线六文件已完成检索总结并迁入 `archive/branch_contexts/`
   - 何时阅读: 需要追溯旧支线文件为什么被归档、或想快速定位归档后的支线目录时
 
+- `specs/rdog-task-spawn-control-plan.md`
+  - 主题: daemon 任务执行模型从"在线阻塞"演进为"提交即返回 + 可查询后台任务"的四阶段方案
+  - 用途: 固定 `@spawn` / `@task-status` / `@task-output` / `@task-cancel` 四原语、Task registry 确定性状态机、进度帧走 session channel、伴生 agent(`rdog agent`)托管与 A2A 语义层衔接边界
+  - 何时阅读: 实现或评审后台任务/任务生命周期/`@flow` async 升级/伴生 agent 托管,或分析"长命令阻塞同 session"问题前
+
 - `archive/manifests/ARCHIVE_MANIFEST__2026-05-05_zenoh_bare_shell.md`
   - 主题: 2026-05-05 Zenoh 裸 shell 实现前的默认六文件续档与支线归档说明
   - 用途: 说明旧默认 `task_plan.md` / `notes.md` / `WORKLOG.md` 续档位置,以及 `control_zenoh_default` 支线上下文归档位置
