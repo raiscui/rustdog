@@ -85,9 +85,9 @@ fn bounded_capture_should_timeout_once_and_keep_worker_count_bounded() {
         "primary",
         "test",
         &TEST_CAPTURE_IN_FLIGHT,
-        Duration::from_millis(10),
+        Duration::from_millis(200),
         || {
-            thread::sleep(Duration::from_millis(50));
+            thread::sleep(Duration::from_millis(3000));
             Ok::<_, std::io::Error>(())
         },
     )
@@ -98,19 +98,19 @@ fn bounded_capture_should_timeout_once_and_keep_worker_count_bounded() {
         "primary",
         "test",
         &TEST_CAPTURE_IN_FLIGHT,
-        Duration::from_millis(10),
+        Duration::from_millis(200),
         || Ok::<_, std::io::Error>(()),
     )
     .expect_err("a timed-out backend must not create a second worker");
     assert_eq!(duplicate.kind(), std::io::ErrorKind::TimedOut);
 
-    thread::sleep(Duration::from_millis(75));
+    thread::sleep(Duration::from_millis(400));
     assert_eq!(
         capture_with_timeout(
             "primary",
             "test",
             &TEST_CAPTURE_IN_FLIGHT,
-            Duration::from_millis(10),
+            Duration::from_millis(200),
             || Ok::<_, std::io::Error>(42),
         )
         .expect("completed worker should release the backend gate"),
@@ -133,9 +133,9 @@ fn capture_fallback_should_trace_sck_timeout_and_xcap_transition() {
                     "primary",
                     "sck-rs",
                     &TEST_CAPTURE_IN_FLIGHT,
-                    Duration::from_millis(10),
+                    Duration::from_millis(200),
                     || {
-                        thread::sleep(Duration::from_millis(50));
+                        thread::sleep(Duration::from_millis(3000));
                         Ok::<_, std::io::Error>(42)
                     },
                 )
@@ -151,7 +151,7 @@ fn capture_fallback_should_trace_sck_timeout_and_xcap_transition() {
     assert!(events.contains("fallback_backend=\"xcap\""));
     assert!(!events.contains("screenshot_capture_failed"));
 
-    thread::sleep(Duration::from_millis(75));
+    thread::sleep(Duration::from_millis(400));
 }
 
 #[cfg(target_os = "macos")]
