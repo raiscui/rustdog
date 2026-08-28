@@ -1,10 +1,15 @@
-//! ax_input 模块 - 文本与键盘输入的高层接口
+//! ax_input 模块 - 文本与键盘输入的执行层。
 //!
 //! 生产路径只有一套完整配置 API: `type_text_with_config()` / `send_key_with_config()`,
 //! 由调用方 (control_actions) 从 protocol 层解析出完整 Request 后传入。
+//!
+//! - `execute.rs`: type-text 投递策略 (模式分发 + Auto 回退链 + 错误命名),
+//!   平台路径注入, 可在无 macOS 环境下单测
+//! - `send_key_with_config` 直接拥有 delivery 分发 (Global 短路 / 定向投递)
+
+mod execute;
 
 use crate::control_ax::types::TypeTextReport;
-use crate::control_ax::AxBackend; // 新增：直接使用 AxBackend
 use crate::control_protocol::{KeyDelivery, KeyRequest};
 use std::io;
 
@@ -18,8 +23,13 @@ pub use crate::control_ax::types::{KeyDeliveryReport, TypeTextRequest};
 /// - 需要指定特殊模式
 /// - 需要自定义 target 配置
 pub fn type_text_with_config(request: TypeTextRequest) -> io::Result<TypeTextReport> {
-    // 直接调用底层实现，避免循环依赖
-    crate::control_ax::SystemAxBackend.type_text(&request)
+    execute::type_text_with_delivery_paths(
+        &request,
+        crate::control_ax::platform_ensure_ax_trusted,
+        crate::control_ax::platform_type_text_via_ax_value,
+        crate::control_ax::platform_type_text_via_targeted_keyboard,
+        crate::control_ax::platform_type_text_via_clipboard,
+    )
 }
 
 /// 发送按键: 调用方提供完整配置 (delivery / hold / mode)。
@@ -30,8 +40,8 @@ pub fn type_text_with_config(request: TypeTextRequest) -> io::Result<TypeTextRep
 /// - 需要自定义 hold_ms
 /// - 需要 Press-only 或 Release-only 模式
 pub fn send_key_with_config(request: KeyRequest) -> io::Result<Option<KeyDeliveryReport>> {
-    // 直接调用底层实现，避免循环依赖
     match request.delivery {
+        // Global delivery 不做定向投递, 由调用方走全局事件路径。
         KeyDelivery::Global => Ok(None),
         KeyDelivery::PidTargeted | KeyDelivery::WindowTargeted => {
             crate::control_ax::platform_key_delivery(&request).map(Some)

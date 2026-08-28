@@ -707,3 +707,68 @@ EPIPHANY_LOG 判断: routing 层教训已完整记录于 ADR-0008 Amendment (长
   属拆分固有形态)
 - P3-2 修正: control_mouse 只用 resolve_current_ax_target_rect (本就留 control_ax),
   无需迁移, 计划条目当时列多了
+
+## [2026-08-28 13:30:00] [Session ID: current] 阶段 3 收尾: LATER_PLANS 三项延后改造
+
+### 目标
+消化 LATER_PLANS 2026-08-27 登记的 3 项 review 延后改造, 全程锁定 wire 形状不变。
+
+### 阶段
+- [ ] R1: execute_ax_press 与 ax_action::press 的 postcondition 双分支收敛
+- [ ] R2: AxPressPostconditionReport 的 status/kind/action 裸字符串转枚举 (serde 锁 wire)
+- [ ] R3: ax_input Middle Man 处置 (先调查真实结构再决定: 消除 / 保留 / 重定位)
+- [ ] R4: 全量验证 + 双轴 review + 提交 + WORKLOG + LATER_PLANS 清理
+- [ ] R5 (有余力再做): control_tty 箭头键 flake 专项排查 (现象→假设→验证)
+
+### 预判与调查点
+- R1 关键: routing 表已删, press() 双分支的原初理由 (Q2 "routing 表单一 press entry")
+  已消失; 若无调用方传 Some(postcondition) 给 press(), 双分支可整体收敛
+- R2 关键: to_value_json 的实现方式 (手动 json! 还是 derive) 决定锁 wire 的成本
+- R3 关键: input 执行逻辑的真实位置 (macos.rs 的 fallback 链 vs backend impl),
+  决定 ax_input 是 "有意义的边界" 还是 "该消除的转发壳"
+
+### R1-R3 实施记录 (2026-08-28)
+
+- [x] R1: postcondition 双分支收敛 -- 关键证据: rg 全仓库 press() 调用方全部传
+      postcondition: None (try_ax_press_single_char / execute_ax_press None 臂 / 测试)。
+      双分支原初理由 (Q2 "routing 表单一 press entry") 已随动态层删除消失。
+      采用类型级方案: press(target: &AxTarget) 让 postcondition 不可表示,
+      guarded core 与 press_sequence 的注入参数同步收窄为 &AxTarget,
+      press() 的 Some 分支 (simplified report 转换 + unverified 时 Err) 整体删除。
+      wire 形状: execute_ax_press 的 Some→完整 steps report / None→plain report 不变。
+- [x] R2 (决策: 不做孤立转换) -- 深入后发现 reviewer 的 Primitive Obsession 记录
+      把字段记成了 String, 实际是 &'static str 且唯一写入点是集中的 report 构造器;
+      types.rs 里 10 个同族 report 全部用 &'static str, 全仓库无 status 枚举先例。
+      单结构体转枚举会在同族 wire 结构里制造孤例 (比现状更差);
+      全族转换是独立的 wire-schema sweep, 不在本轮伪装完成。认识已精确化并记入
+      LATER_PLANS (从"应转枚举"改为"若做则全族统一 sweep")。
+- [x] R3: ax_input 从转发壳升级为真模块 -- ADR 自己的 Alternatives 写着
+      "facade without moving implementation = fake modularity", ax_input 当时正是假模块。
+      macos.rs 的 type_text 编排 (模式分发 + Auto 回退链 + can_fallback 边界 +
+      remap 错误命名) 迁入新 ax_input/execute.rs, 三条平台路径与信任检查注入
+      (platform_ensure_ax_trusted / platform_type_text_via_*), 可无 macOS 单测。
+      AxBackend trait 删除 type_text 方法 (输入离开 backend trait, 输入是独立模块)。
+      有意 wire 修正 (记录在案): 原 via_ax_value 内部 remap + Auto 链路穷尽再 remap
+      导致非可恢复错误双重前缀, 无测试断言此行为; 现统一单次 remap, kind 与前缀
+      保留, 重复前缀去除。新增 4 个注入式策略测试 (回退接管/权限不回退/剪贴板门禁/
+      命名锁定) + 迁入 can_fallback 与 remap 测试。
+
+### 阶段状态
+- [x] R4 前半: 全量 nextest 958/959 (唯一失败为既有 control_tty flake), 定向 36/36
+- [x] R4 后半: 双轴 review + 修复 + 提交 + WORKLOG + LATER_PLANS 清理
+
+### 双轴 review 结论与修复 (2026-08-28)
+- 两轴核实: R1 wire 形状逐字保持 (Some 臂未动, None 臂与新 press 直通等价);
+  R3 remap 语义声明属实 (显式 AxValue 单次同文, Auto 非可恢复由双前缀改单次,
+  keyboard 耗尽单次不变); 策略测试断言全部有效
+- 抓到的真实问题 (已修复):
+  1. LATER_PLANS 声称"已记入"实际未写 -- 补写, 旧条目改为处理记录
+  2. 测试计数不实 ("新增 4 个"实为 3 新增 + 2 迁移) -- 本条目即勘误
+  3. AxElement 仅测试使用导致非测试编译 unused warning -- 移入测试 mod import
+  4. 非 macOS 三条路径 stub 逐字重复 -- 收敛 unsupported_type_text_path(label);
+     同时记录 Auto 标签漂移 (旧按 mode 直查报 AXValue, 新回退后报 keyboard/clipboard,
+     仅非 macOS 受影响, 产品 macOS-only, stub 注释标注)
+- 误报驳回: "press_plain 已无其他调用方可合并" -- press_with_postcondition 仍注入
+  press_plain 作为 perform 依赖, 一行透传不成立为 Middle Man, 不改
+
+- [ ] R5: control_tty flake 排查

@@ -10,67 +10,29 @@ use crate::ax_query::{
     materialize_app_window_target_with,
 };
 use crate::control_ax::types::{
-    AxActionName, AxActionReport, AxActionRequest, AxElement, AxFocusReport, AxFocusRequest,
+    AxActionName, AxActionReport, AxActionRequest, AxFocusReport, AxFocusRequest,
     AxPerformedActionReport, AxPressPostcondition, AxPressPostconditionReport,
     AxPressPostconditionStepReport, AxPressRequest, AxPressSequenceReport, AxPressSequenceRequest,
     AxPressSequenceStepReport, AxScrollReport, AxScrollRequest, AxSetValueReport,
-    AxSetValueRequest, AxSnapshot, AxTreeRequest, AX_POSTCONDITION_DEPTH,
+    AxSetValueRequest, AxSnapshot, AxTarget, AxTreeRequest, AX_POSTCONDITION_DEPTH,
     AX_POSTCONDITION_MAX_ELEMENTS,
 };
 use crate::control_ax::{invalid_data, invalid_input};
 use crate::control_window::resolve_unique_app_window_id;
 
-/// 执行 AX press action。
+/// 执行 AX press: 直连平台 backend, 并为清除类按钮附加通用 continue hint。
 ///
-/// # 参数
-/// - `request`: 包含 target 和可选的 postcondition
-///
-/// # 返回
-/// - `Ok(report)`: 成功执行（可能包含 postcondition 验证结果）
-/// - `Err(e)`: 执行失败
-///
-/// # 逻辑
-/// - 如果 request 包含 postcondition，调用 press_with_postcondition 逻辑
-/// - 否则调用普通 press 逻辑
-pub fn press(request: &AxPressRequest) -> io::Result<AxActionReport> {
-    if let Some(ref postcondition) = request.postcondition {
-        // 调用 postcondition 版本，提取出 base report
-        let postcondition_report = press_with_postcondition(request)?;
-
-        // 如果 postcondition 未验证成功，返回错误
-        if !postcondition_report.verified {
-            return Err(io::Error::new(
-                io::ErrorKind::Other,
-                format!(
-                    "Postcondition 验证失败: role={}, expected={}, attempts={}/{}",
-                    postcondition.role,
-                    postcondition.expected_value,
-                    postcondition_report.attempt_count,
-                    postcondition_report.max_attempts
-                ),
-            ));
-        }
-
-        // 将 AxPressPostconditionReport 转换为 AxActionReport
-        Ok(AxActionReport {
-            kind: postcondition_report.kind,
-            action: postcondition_report.action.to_string(),
-            backend: "ax".to_string(),
-            target_id: None,
-            description: None,
-            hint: None,
-            performed: postcondition_report.performed,
-            status: postcondition_report.status,
-        })
-    } else {
-        // 普通 press
-        press_plain(request)
-    }
+/// 本入口不消费 postcondition -- 带 postcondition 的 guarded press 需要
+/// 完整重试与验证 steps report, 一律走 [`press_with_postcondition`]。
+/// (历史上 press() 内部对 postcondition 双分支是 routing 表 "单一 press entry"
+/// 设计的产物, routing 表删除后已按 as-built 收敛, 见 task_plan 2026-08-28。)
+pub fn press(target: &AxTarget) -> io::Result<AxActionReport> {
+    press_plain(target)
 }
 
 /// 执行带 postcondition 验证的 press action。
 ///
-/// 内部使用，由 `press()` 调用。也可被需要完整 postcondition report 的调用方直接使用。
+/// guarded press 的完整入口, wire 响应需要 steps report 的调用方直接使用。
 pub fn press_with_postcondition(
     request: &AxPressRequest,
 ) -> io::Result<AxPressPostconditionReport> {
@@ -87,22 +49,19 @@ pub fn press_with_postcondition(
 /// 无 postcondition 的 press 底层实现 (自 control_ax 迁入)。
 ///
 /// 直接调用平台 backend 执行 AXPress, 并为清除类按钮附加通用 continue hint。
-fn press_plain(request: &AxPressRequest) -> io::Result<AxActionReport> {
+fn press_plain(target: &AxTarget) -> io::Result<AxActionReport> {
     use crate::control_ax::{AxBackend, SystemAxBackend};
 
     let report = SystemAxBackend.perform_action(&AxActionRequest {
-        target: request.target.clone(),
+        target: target.clone(),
         action: AxActionName::Press,
     })?;
-    let mut report = AxActionReport::press(
-        report.backend,
-        report.target_id,
-        request.target.description.clone(),
-    );
+    let mut report =
+        AxActionReport::press(report.backend, report.target_id, target.description.clone());
     // 2026-08-04 (清除类 hint): 清除类按钮被按下后, 给 agent 一句通用引导,
     // 防止"清除子目标完成 -> 流程断裂" (模型清除后迷失, 不继续剩余输入)。
     // 文案不含任何任务知识, 任何"清除后要继续"的场景都成立。
-    report.hint = clear_action_hint(request.target.description.as_deref());
+    report.hint = clear_action_hint(target.description.as_deref());
     Ok(report)
 }
 
@@ -133,7 +92,7 @@ fn is_clear_action_description(description: &str) -> bool {
 fn perform_ax_press_with_postcondition_with(
     request: &AxPressRequest,
     resolve_app: impl FnOnce(&str) -> io::Result<String>,
-    mut perform: impl FnMut(&AxPressRequest) -> io::Result<AxActionReport>,
+    mut perform: impl FnMut(&AxTarget) -> io::Result<AxActionReport>,
     mut observe: impl FnMut(&str, &str) -> io::Result<Vec<String>>,
 ) -> io::Result<AxPressPostconditionReport> {
     let postcondition = request
@@ -149,10 +108,7 @@ fn perform_ax_press_with_postcondition_with(
     let mut steps = Vec::with_capacity(postcondition.max_attempts);
 
     for index in 0..postcondition.max_attempts {
-        let action = match perform(&AxPressRequest {
-            target: target.clone(),
-            postcondition: None,
-        }) {
+        let action = match perform(&target) {
             Ok(action) => action,
             Err(error) => {
                 let error = error.to_string();
@@ -348,23 +304,21 @@ mod tests {
     fn test_press_without_postcondition() {
         // 注意：这是单元测试框架，实际执行会失败（因为没有真实 AX 环境）
         // 这里只测试函数签名和错误处理路径
-        let request = AxPressRequest {
-            target: AxTarget {
-                id: Some("test-id".to_owned()),
-                ..AxTarget::default()
-            },
-            postcondition: None,
+        let target = AxTarget {
+            id: Some("test-id".to_owned()),
+            ..AxTarget::default()
         };
 
         // 预期会失败（没有真实环境），但能测试代码路径
-        let result = press(&request);
+        let result = press(&target);
         assert!(result.is_err(), "没有真实 AX 环境应该失败");
     }
 
     #[test]
     fn test_press_api_signature() {
         // 编译时验证：确保函数签名正确
-        let _: fn(&AxPressRequest) -> io::Result<AxActionReport> = press;
+        // press 只吃 target (postcondition 不可表示), guarded 入口吃完整请求。
+        let _: fn(&AxTarget) -> io::Result<AxActionReport> = press;
         let _: fn(&AxPressRequest) -> io::Result<AxPressPostconditionReport> =
             press_with_postcondition;
     }
@@ -451,15 +405,12 @@ fn materialize_press_sequence_request(
 /// 接受一个 perform 函数，遍历 targets 逐个执行。任一步骤失败立即停止。
 fn perform_press_sequence_with(
     request: &AxPressSequenceRequest,
-    mut perform: impl FnMut(&AxPressRequest) -> io::Result<AxActionReport>,
+    mut perform: impl FnMut(&AxTarget) -> io::Result<AxActionReport>,
 ) -> AxPressSequenceReport {
     let mut steps = Vec::with_capacity(request.targets.len());
     for (index, target) in request.targets.iter().enumerate() {
         let description = target.description.clone().unwrap_or_default();
-        match perform(&AxPressRequest {
-            target: target.clone(),
-            postcondition: None,
-        }) {
+        match perform(target) {
             Ok(report) => {
                 steps.push(AxPressSequenceStepReport::success(
                     index,
@@ -621,7 +572,7 @@ mod press_sequence_tests {
 mod press_tests {
     use super::*;
     use crate::control_ax::parse_ax_press_payload;
-    use crate::control_ax::types::AxWindow;
+    use crate::control_ax::types::{AxElement, AxWindow};
     use std::cell::Cell;
 
     #[test]

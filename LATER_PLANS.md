@@ -922,17 +922,17 @@ zenoh router down / unixpipe broken / zenoh timeout 等场景.
 - 对外互操作(让外部 A2A agent 委派任务给 rdog 主机)可后置为可选 gateway
 - 细节见 task_plan__a2a_research.md / notes__a2a_research.md
 
-## [2026-08-27 11:20:00] [Session ID: current] ax-split review 延后项 (绑定阶段 3 ax_query, 未实施)
+## [2026-08-27 11:20:00] [Session ID: current] ax-split review 延后项
 
-双轴 review 判断项中, 以下 4 项与未实施的 ADR-0008 阶段 3 (ax_query) 绑定,
-等阶段 3 启动时一并处理, 不在本次主线展开:
+双轴 review 判断项的处理记录 (2026-08-28 收尾):
 
-- `execute_ax_press` (control_actions.rs) 与 `ax_action::press` 对 postcondition
-  各做一次分支, 语义有差异 (完整 report vs Err), 收敛为单入口时要保 wire 形状
-- `AxPressPostconditionReport` 的 status/kind/action 裸字符串应转枚举 (涉及 wire
-  serde, 需逐字锁定序列化输出)
-- `ax_input` 的 with_config 一行转投 SystemAxBackend (Middle Man), 阶段 3 迁
-  backend 后消除
-
-(2026-08-28 已完成并移除: observe_current_ax_values_with / collect_ax_values_by_role
-的纯遍历部分已作为 collect_ax_role_values 收进 ax_query, 验证语义留在 ax_action)
+- (已完成 R1) postcondition 双分支收敛: press(target: &AxTarget) 类型级消除,
+  guarded core / press_sequence 注入参数同步收窄, wire 形状不变
+- (已完成 R3) ax_input Middle Man: type-text 投递策略 (模式分发 + Auto 回退链 +
+  错误命名) 自 macos.rs 迁入 ax_input/execute.rs, 平台路径注入, AxBackend 删除
+  type_text 方法
+- (保留, 认识已修正) report status/kind/action 转枚举: 实际字段是 &'static str
+  且 10 个同族 report 一致, 单结构体转枚举会制造孤例; 若做应是全族统一的
+  wire-schema sweep (serde rename 逐字锁定序列化输出), 作为独立事项排期
+- (已完成并移除) observe_current_ax_values_with / collect_ax_values_by_role
+  纯遍历部分已作为 collect_ax_role_values 收进 ax_query

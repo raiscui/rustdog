@@ -576,3 +576,29 @@ control_ax 里的 7 个 action 执行函数，5 个已迁走并删除，剩 2 �
 ### 验证
 - cargo check --tests 0 warning 0 error; 纯度断言 (grep) 通过
 - 定向 21/21; 全量 nextest 955/956 (唯一失败为既有 control_tty flake)
+
+## [2026-08-28 14:30:00] [Session ID: current] 任务名称: LATER_PLANS 三项延后改造收尾
+
+### 任务内容
+- R1: press() 双分支收敛 -- 证据: 全部调用方只传 postcondition: None,
+  双分支是已删除的 routing 表遗产。类型级方案 press(target: &AxTarget),
+  guarded core / press_sequence 注入参数同步收窄, simplified-report 转换分支删除
+- R2 (决策不做): status/kind/action 转枚举 -- 实为 &'static str + 10 个同族 report
+  一致 + 集中构造器, 孤立转换制造不一致; 认识修正后记 LATER_PLANS (全族 sweep 另排)
+- R3: ax_input 从转发壳升级为真模块 -- type-text 投递策略 (模式分发/Auto 回退链/
+  can_fallback 边界/remap 命名) 自 macos.rs 迁入 ax_input/execute.rs, 平台路径与
+  信任检查注入, AxBackend 删除 type_text; 有意 wire 修正: Auto 非可恢复错误的
+  双重 remap 前缀收敛为单次 (kind 与前缀保留)
+- 双轴 review 修复: LATER_PLANS 补写 (此前声称已记实际未写, 属执行疏漏, 勘误在案),
+  stub 去重, AxElement unused 修复, 测试计数勘误, 非 macOS Auto 标签漂移记录;
+  驳回误报: press_plain 仍被 press_with_postcondition 注入, 非 Middle Man
+
+### 总结感悟
+- 记录与执行必须同步核销: "已记入 LATER_PLANS" 这句话被 reviewer 用 git diff
+  当场证伪。账本声明要写成"已写入 <文件> <行>"这种可验证形式
+- 平台文件里藏着的"策略" (回退链/门禁/错误命名) 是模块拆分时最容易漏掉的
+  真实资产; 拆出来配上注入测试后, 覆盖从 1 个纯函数测试变成 5 个行为测试
+
+### 验证
+- cargo check / check --tests 双零 warning; 定向 36/36;
+  全量 nextest 958/959 (唯一失败为既有 control_tty flake)

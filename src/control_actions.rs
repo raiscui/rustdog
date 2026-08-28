@@ -737,14 +737,11 @@ fn try_ax_press_single_char(
     };
 
     // 找到匹配按钮, 用 AX press 按下。
-    let press_request = crate::control_ax::AxPressRequest {
-        target: crate::control_ax::AxTarget {
-            id: Some(element_id),
-            ..crate::control_ax::AxTarget::default()
-        },
-        postcondition: None,
+    let target = crate::control_ax::AxTarget {
+        id: Some(element_id),
+        ..crate::control_ax::AxTarget::default()
     };
-    let report = ax_press(&press_request)?;
+    let report = ax_press(&target)?;
     if !report.performed {
         return Ok(None);
     }
@@ -1162,7 +1159,7 @@ fn execute_ax_press(
 ) -> io::Result<ActionExecutionResult> {
     let response_value_json = match request.postcondition {
         Some(_) => press_with_postcondition(request)?.to_value_json()?,
-        None => ax_press(request)?.to_value_json()?,
+        None => ax_press(&request.target)?.to_value_json()?,
     };
     Ok(ActionExecutionResult {
         exit_code: 0,

@@ -1044,7 +1044,6 @@ pub trait AxBackend {
     fn set_value(&self, request: &AxSetValueRequest) -> io::Result<AxSetValueReport>;
     fn focus(&self, request: &AxFocusRequest) -> io::Result<AxFocusReport>;
     fn scroll(&self, request: &AxScrollRequest) -> io::Result<AxScrollReport>;
-    fn type_text(&self, request: &TypeTextRequest) -> io::Result<TypeTextReport>;
 }
 
 impl AxBackend for SystemAxBackend {
@@ -1069,10 +1068,6 @@ impl AxBackend for SystemAxBackend {
 
     fn scroll(&self, request: &AxScrollRequest) -> io::Result<AxScrollReport> {
         platform_scroll(request)
-    }
-
-    fn type_text(&self, request: &TypeTextRequest) -> io::Result<TypeTextReport> {
-        platform_type_text(request)
     }
 }
 
@@ -2075,22 +2070,72 @@ pub(crate) fn platform_scroll(_request: &AxScrollRequest) -> io::Result<AxScroll
     ))
 }
 
+// type-text 的投递策略 (模式分发 + Auto 回退链) 在 ax_input; 这里只把
+// 三条平台投递路径与信任检查桥接给策略层。
+//
+// 非 macOS 注意: 三条路径 stub 都返回 Unsupported (可回退), 因此 Auto 模式
+// 会逐层回退后以 keyboard/clipboard 的 stub 消息终止 (旧实现按 mode 直查,
+// Auto 直接报 AXValue 路径)。当前产品仅 macOS, 该标签漂移不构成实际边界。
+
 #[cfg(target_os = "macos")]
-pub(crate) fn platform_type_text(request: &TypeTextRequest) -> io::Result<TypeTextReport> {
-    macos::type_text(request)
+pub(crate) fn platform_ensure_ax_trusted() -> io::Result<()> {
+    macos::ensure_trusted()
 }
 
 #[cfg(not(target_os = "macos"))]
-pub(crate) fn platform_type_text(request: &TypeTextRequest) -> io::Result<TypeTextReport> {
-    let detail = match request.mode {
-        TypeTextMode::Auto | TypeTextMode::AxValue => "macOS AXValue 路径",
-        TypeTextMode::TargetedKeyboard => "macOS targeted keyboard 路径",
-        TypeTextMode::Clipboard => "macOS clipboard 路径",
-    };
-    Err(io::Error::new(
+pub(crate) fn platform_ensure_ax_trusted() -> io::Result<()> {
+    Ok(())
+}
+
+/// 非 macOS 平台的统一 stub: 三条路径同构, 只有路径名不同。
+#[cfg(not(target_os = "macos"))]
+fn unsupported_type_text_path(path_label: &str) -> io::Error {
+    io::Error::new(
         io::ErrorKind::Unsupported,
-        format!("type-text 当前只支持 {detail}"),
-    ))
+        format!("type-text 当前只支持 macOS {path_label} 路径"),
+    )
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn platform_type_text_via_ax_value(
+    request: &TypeTextRequest,
+) -> io::Result<TypeTextReport> {
+    macos::type_text_via_ax_value(request)
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn platform_type_text_via_targeted_keyboard(
+    request: &TypeTextRequest,
+) -> io::Result<TypeTextReport> {
+    macos::type_text_via_targeted_keyboard(request)
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn platform_type_text_via_clipboard(
+    request: &TypeTextRequest,
+) -> io::Result<TypeTextReport> {
+    macos::type_text_via_clipboard(request)
+}
+
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn platform_type_text_via_ax_value(
+    _request: &TypeTextRequest,
+) -> io::Result<TypeTextReport> {
+    Err(unsupported_type_text_path("AXValue"))
+}
+
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn platform_type_text_via_targeted_keyboard(
+    _request: &TypeTextRequest,
+) -> io::Result<TypeTextReport> {
+    Err(unsupported_type_text_path("targeted keyboard"))
+}
+
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn platform_type_text_via_clipboard(
+    _request: &TypeTextRequest,
+) -> io::Result<TypeTextReport> {
+    Err(unsupported_type_text_path("clipboard"))
 }
 
 #[cfg(target_os = "macos")]
