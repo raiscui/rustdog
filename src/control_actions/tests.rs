@@ -1070,6 +1070,11 @@ impl OpenAppCommand for MockOpenAppSuccess {
     }
 }
 
+// 以下三个测试断言的是 run_open_app_on_macos 分支的行为 (通过 mock 驱动)。
+// 非 macOS 平台上 open_app_payload_for_current_platform 走 platform_unsupported
+// 分支, 完全绕过 mock, 断言必然不成立 — 因此仅 macOS 上编译执行 (2026-08-28
+// ubuntu CI 首次跑到 unit tests 时暴露, linux 侧行为由下方非 macOS 测试覆盖)。
+#[cfg(target_os = "macos")]
 #[test]
 fn execute_open_app_emits_permission_denied_envelope_when_spawn_fails() {
     let request = OpenAppRequest {
@@ -1118,6 +1123,7 @@ fn execute_open_app_emits_permission_denied_envelope_when_spawn_fails() {
     );
 }
 
+#[cfg(target_os = "macos")]
 #[test]
 fn execute_open_app_emits_app_not_found_envelope_when_open_exits_nonzero() {
     let request = OpenAppRequest {
@@ -1167,6 +1173,7 @@ fn execute_open_app_emits_app_not_found_envelope_when_open_exits_nonzero() {
     );
 }
 
+#[cfg(target_os = "macos")]
 #[test]
 fn execute_open_app_emits_ok_envelope_when_open_succeeds() {
     let request = OpenAppRequest {
@@ -1204,6 +1211,50 @@ fn execute_open_app_emits_ok_envelope_when_open_succeeds() {
     assert!(payload.get("error_code").is_none());
     assert!(payload.get("retry").is_none());
     assert!(payload.get("evidence").is_none());
+}
+
+/// 非 macOS 平台: `@open-app` 走 platform_unsupported 分支, 注入的 mock
+/// 必须被完全绕过 (即使 mock 声称成功), 返回带 retry 策略的
+/// platform_unsupported envelope。这是该平台分支唯一的行为契约,
+/// 与上方三个 macOS 行为测试互为镜像 (2026-08-28 ubuntu CI 暴露后补齐)。
+#[cfg(not(target_os = "macos"))]
+#[test]
+fn execute_open_app_emits_platform_unsupported_envelope_ignoring_mock() {
+    let request = OpenAppRequest {
+        app_name: "TextEdit".to_string(),
+        wait_ms: 0,
+    };
+
+    // 注入声称成功的 mock: 非 macOS 分支根本不会调用它
+    let result = execute_open_app(&request, &MockOpenAppSuccess)
+        .expect("executor itself should not error");
+
+    // platform_unsupported 属失败路径, exit_code 非 0
+    assert_ne!(result.exit_code, 0);
+
+    let payload: serde_json::Value = serde_json::from_str(
+        result
+            .response_value_json
+            .as_deref()
+            .expect("payload should be present"),
+    )
+    .expect("payload should be valid JSON");
+
+    assert_eq!(payload.get("ok"), Some(&serde_json::json!(false)));
+    assert_eq!(
+        payload.get("error_code"),
+        Some(&serde_json::json!("platform_unsupported"))
+    );
+
+    // platform_unsupported envelope 必须带 manual_only retry 策略,
+    // 告诉客户端不要自动重试 (与 Phase F-1 契约一致)
+    let retry = payload
+        .get("retry")
+        .expect("platform_unsupported envelope must include retry");
+    assert_eq!(
+        retry.get("strategy"),
+        Some(&serde_json::json!("manual_only"))
+    );
 }
 
 // ============================================================================

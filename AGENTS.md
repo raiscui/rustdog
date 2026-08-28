@@ -89,6 +89,26 @@ Issues 和 Wayfinder maps 使用 GitHub Issues。详见 `docs/agents/issue-track
   - 用途: 固定改 logger 路径/文案/level 前先 grep `wait_until_output_contains` 双侧, 以及 `start_zenoh_daemon_with_combined_output` 合流 helper 模板
   - 何时阅读: 修改 `init_logger`/fern 配置、daemon "ready" 日志, 或新写等待 daemon 就绪的 e2e 前
 
+- `docs/solutions/test-failures/tty-term-dumb-environment-deterministic-failure.md`
+  - 主题: "交互终端绿 + CI/agent 红" 是环境决定性失败的指纹, 不是 flake
+  - 用途: 固定 TERM=dumb 等 harness 环境差异导致的确定性相反失败的诊断入口 (显式固定假设环境, 而非调时序)
+  - 何时阅读: TTY/TERM/环境依赖测试在 agent shell 或 CI 稳定失败而本地交互终端通过, 或要给测试加环境固定前
+
+- `docs/solutions/best-practices/parallel-test-global-state-single-lock.md`
+  - 主题: 同进程并行测试共享全局状态 (env / tracing subscriber / singleton store) 必须用模块顶层唯一共享锁
+  - 用途: 固定三例踩坑收敛的锁纪律 (env_test_guard / TIMEOUT_TRACE_TEST_LOCK / observation singleton 反例边界)
+  - 何时阅读: 新写或修改触碰进程级 env、全局 tracing subscriber 或进程内 singleton 的测试, 或排查 "单跑通过 / 全量并行失败" 的串台断言前
+
+- `docs/solutions/best-practices/eval-carrier-drift-vs-model-regression.md`
+  - 主题: 评测载体差异 (runner/case/prompt/binary) 会被误判成 "模型退步"
+  - 用途: 固定 bisect 同款载体对照方法与载体四要素核查清单
+  - 何时阅读: 评测分数跨轮下降要归因, 或更换 runner/case 集/skill 版本前后对比结论前
+
+- `docs/solutions/best-practices/macos-tcc-stable-codesign-identity.md`
+  - 主题: macOS 本地开发二进制的 TCC 授权身份稳定方案 (固定 identifier + DR 重签)
+  - 用途: 与 `specs/rdog-stable-signing-identity.md` 及 `self-learning.macos-codesign-stable-dr-check` skill 互链的 solution 载体
+  - 何时阅读: 排查 `cargo install` 重编后 TCC 授权失效, 或修改本地安装/发布流程前
+
 - `docs/glossary.md`
   - 主题: `@computer-act` surface 术语表 (CUA、verify policy、outcome 三态、retry strategy、density metrics、GuiTransaction)
   - 用途: ADR-0001 到 0006 的配套 glossary; `verify_failed` 已标注被 outcome 三态取代的历史语义
@@ -117,6 +137,11 @@ Issues 和 Wayfinder maps 使用 GitHub Issues。详见 `docs/agents/issue-track
   - 主题: 2026-04-06 持续学习批次的支线上下文归档说明
   - 用途: 说明哪些旧支线六文件已完成检索总结并迁入 `archive/branch_contexts/`
   - 何时阅读: 需要追溯旧支线文件为什么被归档、或想快速定位归档后的支线目录时
+
+- `specs/rdog-task-spawn-control-plan.md`
+  - 主题: daemon 任务执行模型从"在线阻塞"演进为"提交即返回 + 可查询后台任务"的四阶段方案
+  - 用途: 固定 `@spawn` / `@task-status` / `@task-output` / `@task-cancel` 四原语、Task registry 确定性状态机、进度帧走 session channel、伴生 agent(`rdog agent`)托管与 A2A 语义层衔接边界
+  - 何时阅读: 实现或评审后台任务/任务生命周期/`@flow` async 升级/伴生 agent 托管,或分析"长命令阻塞同 session"问题前
 
 - `archive/manifests/ARCHIVE_MANIFEST__2026-05-05_zenoh_bare_shell.md`
   - 主题: 2026-05-05 Zenoh 裸 shell 实现前的默认六文件续档与支线归档说明

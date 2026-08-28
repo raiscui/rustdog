@@ -42,6 +42,8 @@ sck-rs = { git = "https://github.com/screenpipe/sck-rs" }
 termios = "0.3"
 signal-hook = "0.3.17"
 portable-pty = "0.9.0"
+# control_flow 进程组终止信号直发 (kill(2)); 已是依赖树间接依赖, 直接引用零成本
+libc = "0.2"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_System_Console"] }

@@ -538,3 +538,31 @@
 - [2026-08-04] parser 兼容机制: 本文件继续作为 canonical 索引 (AGENTS.md 已如此声明)。
 - 其余历史条目 (Codex/OMX 提交规范、更名迁移、skill 瘦身纪律等): 一次性/历史性,
   保留原文备查。
+
+## [2026-08-28 20:05:00] [Session ID: zcode-idle-20260828] 积压核验处置 (闲时整理)
+
+### 已 Capture (新增指针)
+- [2026-08-28] control_tty TERM=dumb 假 flake (环境决定性失败 != flake) ->
+  `docs/solutions/test-failures/tty-term-dumb-environment-deterministic-failure.md`。
+  受控实验双向验证 + 全量 959/959, 七项门禁全过。
+- [2026-08-18] 全局 tracing subscriber 并行串行化 + [2026-07-18] env 唯一共享锁
+  + [2026-08-20] observation singleton 反例边界, 三例同模式合并 ->
+  `docs/solutions/best-practices/parallel-test-global-state-single-lock.md`。
+
+### 核验后保留为 inbox (证据缺口注明)
+- [2026-08-19 14:30] 用户级配置目录集成测试环境隔离: Windows/Linux 未验证,
+  `zenoh_router_client.rs` 未隔离 `XDG_STATE_HOME` (自声明缺口, 待补证后升级)。
+- [2026-08-19 23:30] 并发共享工作树 commit 主题拆分: 用户级规则与个人记忆部分
+  承接; 两次实践均为消极证据 ("没搞坏"), 等第三次独立实践后决定是否 Capture。
+- [2026-08-21 18:00] 源码脚本化编辑两个定位错误: 单 session 两例, 更适合
+  用户级 self-learning skill 形态; 等第二次独立复现再升级。
+
+### 归档处置
+- a2a_research 支线三文件 -> `archive/branch_contexts/a2a_research/`,
+  全部知识由 `specs/rdog-task-spawn-control-plan.md` 承接,
+  manifest 见 `archive/manifests/ARCHIVE_MANIFEST__2026-08-28_a2a_research_branch_context.md`。
+- LATER_PLANS [2026-08-26] A2A 咨询结论条目已清理 (spec 承接)。
+
+### AGENTS.md 索引修复 (遗漏, 非新建)
+- eval-carrier-drift-vs-model-regression 与 macos-tcc-stable-codesign-identity
+  两份既有 solution 补齐单独索引条目。
