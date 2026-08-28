@@ -59,6 +59,11 @@ Issues 和 Wayfinder maps 使用 GitHub Issues。详见 `docs/agents/issue-track
   - 用途: 固定默认 store 的生命周期、活动 owner 保护、未知目录 fail-closed 和 quarantine-first 治理证据
   - 何时阅读: 修改 `src/control_observation/durable.rs`、默认 observation 路径、retention 清理或 daemon 集成测试隔离前
 
+- `docs/solutions/logic-errors/gnu-coreutils-kill-neg-pid-argument-ambiguity.md`
+  - 主题: GNU coreutils kill 负 pid 参数歧义 — 外部 kill 命令发进程组信号在 linux 上静默失效 (strace 实证 kill(-2, TERM) ESRCH), 孤儿子孙持管道写端拖满超时
+  - 用途: 固定 `terminate_process_tree` 改用 `libc::kill(2)` 直发进程组信号的决策与验证链, 以及"超时标记对但总时长超标"症状的孤儿管道诊断法
+  - 何时阅读: 向进程组/会话发信号、做 PTY/后台任务/shell lane 超时清理, 或考虑用外部命令 (kill/ps/pgrep) 做进程管理前
+
 - `docs/solutions/tooling-decisions/upstream-pi-macos-ops-cli-contract.md`
   - 主题: upstream Pi v0.84.1 macOS ops 的 CLI 工具 allowlist、skill preload、agent 隔离和 models.json 边界
   - 用途: 固定 `--tools bash,read`、绝对 `--append-system-prompt`、`PI_CODING_AGENT_DIR` 与旧 Rust Pi profile 字段的迁移口径
