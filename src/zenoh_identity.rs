@@ -156,6 +156,40 @@ pub fn build_key_input_key_with_root(root: &str, namespace: &str, daemon_name: &
     format!("{root}/{namespace}/daemon/{daemon_name}/member/{member_id}/keyinput")
 }
 
+// ---------------------------------------------------------------------------
+// agent messaging keyexpr (specs/rdog-agent-messaging-plan.md, Phase 3)
+//
+// agent 身份复用 daemon_name 的校验规则 (DNS 风格 label), 但命名空间层级
+// 独立于 daemon: 一个 daemon 可以托管多个 agent。
+// ---------------------------------------------------------------------------
+
+/// `rdog/<ns>/agent/<name>/inbox` — 消息投递 (pub) 与补拉 (queryable)。
+pub fn build_agent_inbox_key(namespace: &str, agent_name: &str) -> String {
+    build_agent_inbox_key_with_root(KEYEXPR_ROOT, namespace, agent_name)
+}
+
+pub fn build_agent_inbox_key_with_root(root: &str, namespace: &str, agent_name: &str) -> String {
+    format!("{root}/{namespace}/agent/{agent_name}/inbox")
+}
+
+/// `rdog/<ns>/agent/<name>/card` — 能力卡片托管 (pub + queryable)。
+pub fn build_agent_card_key(namespace: &str, agent_name: &str) -> String {
+    build_agent_card_key_with_root(KEYEXPR_ROOT, namespace, agent_name)
+}
+
+pub fn build_agent_card_key_with_root(root: &str, namespace: &str, agent_name: &str) -> String {
+    format!("{root}/{namespace}/agent/{agent_name}/card")
+}
+
+/// `rdog/<ns>/agent/<name>/alive` — agent 在线状态 (liveliness, 对齐 daemon alive)。
+pub fn build_agent_alive_key(namespace: &str, agent_name: &str) -> String {
+    build_agent_alive_key_with_root(KEYEXPR_ROOT, namespace, agent_name)
+}
+
+pub fn build_agent_alive_key_with_root(root: &str, namespace: &str, agent_name: &str) -> String {
+    format!("{root}/{namespace}/agent/{agent_name}/alive")
+}
+
 #[cfg_attr(not(test), allow(dead_code))]
 pub fn build_session_root_key(namespace: &str, session_id: &str) -> String {
     build_session_root_key_with_root(KEYEXPR_ROOT, namespace, session_id)
@@ -236,6 +270,22 @@ mod tests {
         assert_eq!(
             keyexpr,
             "rdog/lab/daemon/mini-a.lab/member/mini-a.lab/keyinput"
+        );
+    }
+
+    #[test]
+    fn agent_keys_should_follow_agent_hierarchy() {
+        assert_eq!(
+            build_agent_inbox_key("lab", "helper-a.lab"),
+            "rdog/lab/agent/helper-a.lab/inbox"
+        );
+        assert_eq!(
+            build_agent_card_key("lab", "helper-a.lab"),
+            "rdog/lab/agent/helper-a.lab/card"
+        );
+        assert_eq!(
+            build_agent_alive_key("lab", "helper-a.lab"),
+            "rdog/lab/agent/helper-a.lab/alive"
         );
     }
 

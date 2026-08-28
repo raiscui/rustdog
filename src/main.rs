@@ -12,6 +12,7 @@ use crate::control_recording::cli::{self as record_cli, RecordCommand};
 use crate::input::{Command, ConfigCommand, RecordCommandShared, RecordSubcommand, Transport};
 use crate::listener::{listen, Mode, Opts};
 
+mod agent_messaging;
 mod ax_action;
 mod ax_diff;
 mod ax_input;
