@@ -1234,3 +1234,77 @@ Phase 3 (伴生 agent) 需先完整 to-spec (A2A 支线 channel 设计收拢)。
 
 **PR #69 ready 待 merge (CI 红为 main 存量, 证据链完整)。
 merge 前建议先修 main 的 recording 稳定红 (诊断日志入口已记录在 EPIPHANY)。**
+## [2026-08-28 21:36:00] [Session ID: current] main recording 稳定红修复完成 (PR #77 全绿)
+
+### 完成内容
+
+- [x] 根因: read_response_line 首次 200ms 安静即返回, 慢 runner 的
+      record-start 响应前安静被误判为完成 (环境决定性, 详见 ERRORFIX)
+- [x] 修复 PR #77 (fix/recording-e2e-slow-response, 基于 main 66685ce):
+      安静 + 已见 @response 才返回
+- [x] 事故处理: 首次提交误入 4 个并行会话工作区文件 (stash pop 自动 staged),
+      追加 commit 撤出, 内容保护回工作区, PR 净 diff 仅 recording 修复 11 行
+- [x] CI 验收: recording 全过 + process_lease 抽签重跑绿 = PR #77 全绿
+- [x] 记忆更新 (recording 族从抽签恶化为稳定红 -> 已修) + ERRORFIX 落盘
+
+### 状态
+
+**PR #77 全绿待 merge。顺序: #77 -> main 转绿 -> merge #69 -> Phase 3 #72 开工。**
+
+## [2026-08-28 22:10:00] [Session ID: current] merge #77/#69 + Phase 3 #72 完成
+
+### 完成内容
+
+- [x] PR #77 (recording 修复) merge -> main 转绿
+- [x] PR #69 rebase 到修复后 main, 双平台 CI 绿, merge -> Phase 2 进 main
+- [x] #72 实施 (feature/agent-messaging-phase3, 04b803b):
+      keyexpr builders + rdog.agentmsg.v1 envelope, 8 单测, draft PR
+- [x] 事故: Write 的模块文件被外部删除一次, bash 直写恢复
+
+### 状态
+
+**Phase 1+2 已入 main。Phase 3 #72 完成 (draft PR), #73 (daemon 侧
+mailbox) 是下一票。**
+
+## [2026-08-28 23:20:00] [Session ID: current] #73 mailbox 完成 (9d4591f)
+
+### 完成内容
+
+- mailbox store (256 有界/去重窗口/ack 清除/注册幂等) + 4 单测
+- 通配 sub agent/*/inbox: 注册集合控制'缓存谁', 跨主机天然单点归属
+- @agent-register / @agent-inbox / @agent-ack 三命令 (对象格式手写循环,
+  serde 不支持项目无引号 key 协议惯例)
+- e2e 投递->补拉->ack->清空全链一次通过; 全量 1010/1010
+- 设计修正 (记录在 issue #73 comment): 'queryable 补拉' 实现为 control 命令
+
+### 状态
+
+**#72/#73 完成 (PR #78 stacked 2 commits each)。#74 (rdog agent CLI +
+loop) 已认领, 是下一票 (决策回调 trait + daemon lifecycle 托管 + alive token)。**
+
+## [2026-08-29 00:30:00] [Session ID: current] Phase 3 全部五票完成 (#72-#76)
+
+### 提交链 (feature/agent-messaging-phase3)
+
+- 04b803b #72 keyexpr + rdog.agentmsg.v1 envelope (8 单测)
+- 9d4591f #73 mailbox + 通配 sub + @agent-register/inbox/ack (e2e)
+- d3cc99a #74 rdog agent CLI + loop (决策回调/EchoDecision/alive, e2e 往返)
+- c3322fc #75 卡片托管 (card pub + @agent-card, e2e v1/v2)
+- 5f92250 #76 收口 e2e (pre-start 恢复 + id 去重) + mailbox 防丢语义修正
+
+### 修复的实现 bug (记录于票 comments)
+
+- 补拉响应漏剥 @response 前缀 (serde 静默失败空转)
+- 回复 publisher 误用 envelope.from (发回自己)
+- card key 提取 split 首段空串索引错位
+- 测试时序契约: 委派方 reply sub 必须先于 agent 启动 (pub 无订阅者即丢)
+
+### 语义修正
+
+- mailbox: '未注册不缓存' -> '收到即缓存' (防丢优先, #76 场景驱动)
+- 'queryable 补拉/卡片拉取' 统一实现为 control 命令 (@agent-inbox/@agent-card)
+
+### 状态
+
+**Phase 3 完成 (PR #78 ready, 全量 1022/1022)。Phase 4 (A2A 语义层)
+按 spec 需 Phase 3 语义稳定后 to-spec; 认证层仍是前置必做项。**

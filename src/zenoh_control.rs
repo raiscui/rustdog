@@ -186,6 +186,68 @@ pub fn run_router_daemon(config: ZenohDaemonRuntimeConfig, shell: &str) -> io::R
         config.request_timeout_ms
     );
 
+    // agent messaging Phase 3 (issue #75): 通配 sub card keyexpr,
+    // daemon 缓存 per-agent 最新卡片 (托管分发, 不解释内容)。
+    {
+        let card_wildcard = format!(
+            "{}/{}/agent/*/card",
+            crate::zenoh_identity::KEYEXPR_ROOT,
+            config.namespace
+        );
+        let card_subscriber = session
+            .declare_subscriber(card_wildcard)
+            .wait()
+            .map_err(|err| io::Error::other(format!("agent card 通配 sub 声明失败: {err}")))?;
+        thread::spawn(move || {
+            while let Ok(sample) = card_subscriber.recv() {
+                let key = sample.key_expr().to_string();
+                let Some(agent_name) = crate::agent_messaging::agent_name_from_card_key(&key)
+                else {
+                    continue;
+                };
+                let Ok(payload) = sample.payload().try_to_string() else {
+                    continue;
+                };
+                crate::agent_messaging::card_publish(&agent_name, &payload);
+            }
+        });
+    }
+
+    // agent messaging Phase 3 (issue #73): 通配 sub namespace 内所有 agent inbox。
+    // mailbox_deliver 按"已注册集合"过滤 — 未注册 agent 的消息不缓存, 跨主机时
+    // 只有托管该 agent 的 daemon 注册过它, 天然单点归属, 无重复缓存问题。
+    {
+        let inbox_wildcard = format!(
+            "{}/{}/agent/*/inbox",
+            crate::zenoh_identity::KEYEXPR_ROOT,
+            config.namespace
+        );
+        let inbox_subscriber = session
+            .declare_subscriber(inbox_wildcard)
+            .wait()
+            .map_err(|err| io::Error::other(format!("agent inbox 通配 sub 声明失败: {err}")))?;
+        thread::spawn(move || {
+            while let Ok(sample) = inbox_subscriber.recv() {
+                let Ok(payload) = sample.payload().try_to_string() else {
+                    continue;
+                };
+                match crate::agent_messaging::AgentMessage::parse_wire_message(&payload) {
+                    Ok(message) => {
+                        if !crate::agent_messaging::mailbox_deliver(&message) {
+                            log::debug!(
+                                "agent inbox message not cached (unregistered or duplicate): to={}",
+                                message.to
+                            );
+                        }
+                    }
+                    Err(err) => {
+                        log::debug!("agent inbox message parse failed: {err}");
+                    }
+                }
+            }
+        });
+    }
+
     let legacy_session = session.clone();
     let legacy_namespace = config.namespace.clone();
     let legacy_shell = shell.to_owned();

@@ -12,6 +12,8 @@ use crate::control_recording::cli::{self as record_cli, RecordCommand};
 use crate::input::{Command, ConfigCommand, RecordCommandShared, RecordSubcommand, Transport};
 use crate::listener::{listen, Mode, Opts};
 
+mod agent_messaging;
+mod agent_runtime;
 mod ax_action;
 mod ax_diff;
 mod ax_input;
@@ -529,6 +531,46 @@ fn run(opts: input::Opts) -> Result<(), String> {
                 trace_dir,
                 positional,
             })?;
+        }
+        Command::Agent {
+            name,
+            namespace,
+            target_name,
+            entry_point,
+        } => {
+            // 伴生 agent (issue #74): 连接现有 daemon, mailbox 注册 + inbox 消费。
+            // daemon 缺失时报错 (内嵌带起是记录在案的实现偏差, 见 agent_runtime 模块注释)
+            let namespace = match namespace {
+                Some(explicit) => explicit,
+                None => crate::zenoh_identity::infer_namespace_from_daemon_name(&name).ok_or_else(
+                    || format!("无法从 agent name `{name}` 推断 namespace, 请显式传 --namespace"),
+                )?,
+            };
+            let daemon_name = match &target_name {
+                Some(explicit) => explicit.clone(),
+                None => zenoh_runtime::find_local_daemon_name(Some(&namespace))
+                    .map_err(|err| err.to_string())?,
+            };
+            let entry_points = if entry_point.is_empty() {
+                zenoh_runtime::resolve_client_connect_endpoints(
+                    &[],
+                    std::time::Duration::from_secs(3),
+                    zenoh_runtime::UnixpipeClientProbe::new(Some(&namespace), Some(&daemon_name)),
+                )
+                .map_err(|err| err.to_string())?
+            } else {
+                entry_point
+            };
+            let session =
+                zenoh_runtime::open_client_session(&entry_points).map_err(|err| err.to_string())?;
+            let config = agent_runtime::resolve_agent_config(
+                &namespace,
+                &name,
+                &daemon_name,
+                std::sync::Arc::new(agent_runtime::EchoDecision),
+            );
+            println!("agent starting: name={name}, namespace={namespace}, daemon={daemon_name}");
+            agent_runtime::run_agent(&session, &config).map_err(|err| err.to_string())?;
         }
         Command::Daemon {
             config,
