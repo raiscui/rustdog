@@ -1234,3 +1234,34 @@ Phase 3 (伴生 agent) 需先完整 to-spec (A2A 支线 channel 设计收拢)。
 
 **PR #69 ready 待 merge (CI 红为 main 存量, 证据链完整)。
 merge 前建议先修 main 的 recording 稳定红 (诊断日志入口已记录在 EPIPHANY)。**
+## [2026-08-28 21:36:00] [Session ID: current] main recording 稳定红修复完成 (PR #77 全绿)
+
+### 完成内容
+
+- [x] 根因: read_response_line 首次 200ms 安静即返回, 慢 runner 的
+      record-start 响应前安静被误判为完成 (环境决定性, 详见 ERRORFIX)
+- [x] 修复 PR #77 (fix/recording-e2e-slow-response, 基于 main 66685ce):
+      安静 + 已见 @response 才返回
+- [x] 事故处理: 首次提交误入 4 个并行会话工作区文件 (stash pop 自动 staged),
+      追加 commit 撤出, 内容保护回工作区, PR 净 diff 仅 recording 修复 11 行
+- [x] CI 验收: recording 全过 + process_lease 抽签重跑绿 = PR #77 全绿
+- [x] 记忆更新 (recording 族从抽签恶化为稳定红 -> 已修) + ERRORFIX 落盘
+
+### 状态
+
+**PR #77 全绿待 merge。顺序: #77 -> main 转绿 -> merge #69 -> Phase 3 #72 开工。**
+
+## [2026-08-28 22:10:00] [Session ID: current] merge #77/#69 + Phase 3 #72 完成
+
+### 完成内容
+
+- [x] PR #77 (recording 修复) merge -> main 转绿
+- [x] PR #69 rebase 到修复后 main, 双平台 CI 绿, merge -> Phase 2 进 main
+- [x] #72 实施 (feature/agent-messaging-phase3, 04b803b):
+      keyexpr builders + rdog.agentmsg.v1 envelope, 8 单测, draft PR
+- [x] 事故: Write 的模块文件被外部删除一次, bash 直写恢复
+
+### 状态
+
+**Phase 1+2 已入 main。Phase 3 #72 完成 (draft PR), #73 (daemon 侧
+mailbox) 是下一票。**
