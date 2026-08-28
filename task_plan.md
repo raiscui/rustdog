@@ -1335,3 +1335,22 @@ Phase 4 (A2A 语义层) 等真实使用反馈。**
 
 ### 状态
 **docs PR #80 (spec 镜像) + 三票就绪, #81 是 frontier。**
+
+## [2026-08-29 11:20:00] [Session ID: current] 认证层 Phase A 完成 (#81-#83)
+
+### 提交链 (feature/auth-phase-a)
+
+- 48349ca #81 凭证层 (auth.toml 生成/env 覆盖/[auth] 段/daemon 挂接)
+- de53773 #82 usrpwd 接线 (dictionary_file/client 惰性凭证/feature 开启)
+- 29cfd5b #83 零配置验收 (local-default self + auth enabled 双断言)
+
+### zenoh 1.8 适配坑 (票内记录)
+
+- 键名是 dictionary_file (旧文档 users_file 已改名)
+- dictionary 是纯文本 user:password (非 JSON) — 以 zenoh-transport 源码为准
+- auth_usrpwd 是 feature-gated, rdog default-features=false 此前未含
+
+### 状态
+
+**认证层 Phase A 完成 (PR 待 review)。Phase B (TLS) 独立 spec 后置。
+Phase 4 (A2A 语义层) 等真实使用反馈。**
