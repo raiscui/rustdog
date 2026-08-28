@@ -1265,3 +1265,19 @@ merge 前建议先修 main 的 recording 稳定红 (诊断日志入口已记录�
 
 **Phase 1+2 已入 main。Phase 3 #72 完成 (draft PR), #73 (daemon 侧
 mailbox) 是下一票。**
+
+## [2026-08-28 23:20:00] [Session ID: current] #73 mailbox 完成 (9d4591f)
+
+### 完成内容
+
+- mailbox store (256 有界/去重窗口/ack 清除/注册幂等) + 4 单测
+- 通配 sub agent/*/inbox: 注册集合控制'缓存谁', 跨主机天然单点归属
+- @agent-register / @agent-inbox / @agent-ack 三命令 (对象格式手写循环,
+  serde 不支持项目无引号 key 协议惯例)
+- e2e 投递->补拉->ack->清空全链一次通过; 全量 1010/1010
+- 设计修正 (记录在 issue #73 comment): 'queryable 补拉' 实现为 control 命令
+
+### 状态
+
+**#72/#73 完成 (PR #78 stacked 2 commits each)。#74 (rdog agent CLI +
+loop) 已认领, 是下一票 (决策回调 trait + daemon lifecycle 托管 + alive token)。**

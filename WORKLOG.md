@@ -865,3 +865,39 @@ control_actions::execute_ax_action
 - e2e 失败输出 (错误消息) 每轮都精确定位了下一层问题, 没有一轮白费
 - one-shot 多行 client 的帧时序是真实契约, 注释进测试而非依赖巧合
 - 后台任务帧推送的验收必须双侧 (client 可见性 + daemon 发布证据)
+
+## [2026-08-28 21:35:00] [Session ID: current] 任务名称: CI 修复战役 -- 双平台历史首次全绿
+
+### 任务内容
+- 从 "研究 ubuntu CI 怎么修" 打穿到 "仓库 CI 历史首次双平台全绿"
+- 6 层根因逐层定位与修复 (详见 task_plan 同日条目), 每层有独立动态证据
+- 交付: PR #62 (部分, 并行会话合并) + PR #70 (测试稳定性 5 连发, 本人合并)
+
+### 总结感悟
+- "端口监听 != 就绪" / "固定 sleep 等置位" / "外部 kill 二进制方言" 三个坑
+  都是跨平台/负载敏感的经典形态, 值得进 docs/solutions
+- 本地容器复现 + 探针观测 > 反复盲推 CI; 一轮 CI 7 分钟, 一个探针 7 秒
+- 与并行会话在同一工作目录协作要极谨慎: 每次提交前 git diff --stat 核对,
+  他们的 WIP 会出现在你的 git add 范围里
+
+### 验证
+- CI run 33151443006: ubuntu ✓ + macOS ✓ (仓库首次)
+- 本地: macOS 全量 nextest 绿; linux 容器全量单测除 OrbStack 网络专属项外绿
+
+## [2026-08-28 23:20:00] [Session ID: current] 任务名称: merge 链 + Phase 3 #72/#73 实施
+
+### 任务内容
+- PR #77 (recording 修复) + PR #69 (Phase 2) 相继 merge, main 转绿
+- #72: agent keyexpr + rdog.agentmsg.v1 envelope (8 单测)
+- #73: daemon 侧 mailbox 全链 (store/通配 sub/三命令/e2e)
+
+### 完成过程
+- mailbox 跨主机单点归属: 通配 sub + 注册集合过滤, 未注册不缓存
+- @agent-ack 对象格式踩坑: serde 严格模式不支持项目无引号 key 协议,
+  改手写字段循环 (与 pty parser 同款)
+- e2e 测试进程 zenoh 直投: dev-dep zenoh + 显式 connect entry-point
+- 分发挂载曾静默失败 (replace 无 assert), 后续挂载全部 assert
+
+### 总结感悟
+- replace 型脚本改代码必须 assert anchor, 否则静默失败很难发现
+- 通配 sub + 注册集合是 zenoh 广播语义下做单点归属的轻量模式
