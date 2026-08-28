@@ -17,7 +17,10 @@ use std::{
     collections::HashMap,
     io::{self, Read},
     process::{Child, Stdio},
-    sync::{Arc, Mutex, OnceLock},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc, Mutex, OnceLock,
+    },
     thread,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -105,6 +108,7 @@ impl TaskOutputBuffer {
 /// registry 内的单个任务条目。
 struct TaskEntry {
     command: String,
+    seq: u64,
     state: TaskState,
     exit_code: Option<i32>,
     /// 终态时间戳: reap_finished_tasks 按 it 排序回收最老条目。
@@ -119,12 +123,21 @@ struct TaskEntry {
 #[derive(Debug)]
 pub struct TaskSnapshot {
     pub task_id: String,
+    pub seq: u64,
     pub command: String,
     pub state: TaskState,
     pub exit_code: Option<i32>,
 }
 
 static TASKS: OnceLock<Mutex<HashMap<String, TaskEntry>>> = OnceLock::new();
+
+/// 全局单调 task seq (spec §6.2): 每次 spawn 递增, 帧与响应携带,
+/// 消费方用它检测帧丢失。daemon 重启归零, 与 registry 不持久化一致。
+static TASK_SEQ: AtomicU64 = AtomicU64::new(0);
+
+fn next_task_seq() -> u64 {
+    TASK_SEQ.fetch_add(1, Ordering::Relaxed) + 1
+}
 
 fn registry() -> &'static Mutex<HashMap<String, TaskEntry>> {
     TASKS.get_or_init(|| Mutex::new(HashMap::new()))
@@ -181,6 +194,7 @@ pub fn spawn_task(shell: &str, command: &str, cwd: Option<&str>) -> io::Result<S
         .map_err(|err| io::Error::new(err.kind(), format!("@spawn 进程启动失败: {err}")))?;
 
     let task_id = new_task_id();
+    let seq = next_task_seq();
     let output = Arc::new(Mutex::new(TaskOutputBuffer::default()));
     let child_handle = Arc::new(Mutex::new(Some(child)));
 
@@ -188,6 +202,7 @@ pub fn spawn_task(shell: &str, command: &str, cwd: Option<&str>) -> io::Result<S
         task_id.clone(),
         TaskEntry {
             command: command.to_owned(),
+            seq,
             state: TaskState::Running,
             exit_code: None,
             finished_at_ms: None,
@@ -329,6 +344,7 @@ pub fn task_snapshot(task_id: &str) -> io::Result<TaskSnapshot> {
         .ok_or_else(|| task_not_found(task_id))?;
     Ok(TaskSnapshot {
         task_id: task_id.to_owned(),
+        seq: entry.seq,
         command: entry.command.clone(),
         state: entry.state,
         exit_code: entry.exit_code,
@@ -351,6 +367,7 @@ pub fn task_output(task_id: &str, tail_lines: usize) -> io::Result<TaskOutputRep
     };
     Ok(TaskOutputReport {
         task_id: task_id.to_owned(),
+        seq: entry.seq,
         state: entry.state,
         output,
         truncated,
@@ -375,6 +392,7 @@ pub fn cancel_task(task_id: &str) -> io::Result<TaskSnapshot> {
         if entry.state.is_terminal() {
             return Ok(TaskSnapshot {
                 task_id: task_id.to_owned(),
+                seq: entry.seq,
                 command: entry.command.clone(),
                 state: entry.state,
                 exit_code: entry.exit_code,
@@ -439,6 +457,7 @@ fn task_not_found(task_id: &str) -> io::Error {
 #[derive(Debug)]
 pub struct TaskOutputReport {
     pub task_id: String,
+    pub seq: u64,
     pub state: TaskState,
     pub output: String,
     pub truncated: bool,
@@ -646,6 +665,21 @@ mod tests {
         let response = execute_line("@task-status:t-0000ffff");
         assert!(response.contains("\"code\""), "{response}");
         assert!(response.contains("task not found"), "{response}");
+    }
+
+    #[test]
+    fn consecutive_spawns_should_have_strictly_increasing_seq() {
+        let first = spawn_quick("true");
+        let second = spawn_quick("true");
+        let third = spawn_quick("true");
+        let first_seq = task_snapshot(&first).unwrap().seq;
+        let second_seq = task_snapshot(&second).unwrap().seq;
+        let third_seq = task_snapshot(&third).unwrap().seq;
+        assert!(first_seq < second_seq, "{first_seq} 应小于 {second_seq}");
+        assert!(second_seq < third_seq, "{second_seq} 应小于 {third_seq}");
+        // 输出报告也携带同一 seq (真相源一致)
+        let report_seq = task_output(&first, 10).unwrap().seq;
+        assert_eq!(report_seq, first_seq);
     }
 
     #[test]

@@ -351,15 +351,17 @@ fn task_snapshot_json(snapshot: &crate::task_control::TaskSnapshot) -> String {
     let command = escape_json_string(&snapshot.command);
     match snapshot.exit_code {
         Some(exit_code) => format!(
-            "{{\"task\":\"{}\",\"command\":\"{}\",\"state\":\"{}\",\"exit_code\":{}}}",
+            "{{\"task\":\"{}\",\"seq\":{},\"command\":\"{}\",\"state\":\"{}\",\"exit_code\":{}}}",
             snapshot.task_id,
+            snapshot.seq,
             command,
             snapshot.state.as_str(),
             exit_code
         ),
         None => format!(
-            "{{\"task\":\"{}\",\"command\":\"{}\",\"state\":\"{}\"}}",
+            "{{\"task\":\"{}\",\"seq\":{},\"command\":\"{}\",\"state\":\"{}\"}}",
             snapshot.task_id,
+            snapshot.seq,
             command,
             snapshot.state.as_str()
         ),
@@ -371,8 +373,9 @@ fn task_snapshot_json(snapshot: &crate::task_control::TaskSnapshot) -> String {
 fn task_output_json(report: &crate::task_control::TaskOutputReport) -> String {
     let escaped_output = escape_json_string(&report.output);
     format!(
-        "{{\"task\":\"{}\",\"state\":\"{}\",\"output\":\"{}\",\"truncated\":{},\"total_written\":{}}}",
+        "{{\"task\":\"{}\",\"seq\":{},\"state\":\"{}\",\"output\":\"{}\",\"truncated\":{},\"total_written\":{}}}",
         report.task_id,
+        report.seq,
         report.state.as_str(),
         escaped_output,
         report.truncated,
