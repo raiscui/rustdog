@@ -1202,3 +1202,20 @@ Phase 3 (伴生 agent) 需先完整 to-spec (A2A 支线 channel 设计收拢)。
 ### 状态
 
 **Phase 3 spec 就绪待实施。Phase 1(PR #63)/Phase 2(PR #69)待 review merge。**
+
+## [2026-08-28 16:50:00] [Session ID: current] Phase 3 拆票完成 (#72-#76)
+
+### 票链
+
+- #72 keyexpr builders + rdog.agentmsg.v1 envelope (frontier)
+- #73 daemon 侧 mailbox (inbox 接收/有界缓存/补拉/ack/id 去重)
+- #74 rdog agent CLI + loop (决策回调 trait, daemon 托管)
+- #75 能力卡片托管 (card keyexpr, agent 生成 daemon 分发)
+- #76 e2e 验收 (投递/处理/回复/补拉/ack/重启恢复全链)
+
+依赖链: 72 -> 73 -> 74 -> 75/76 (76 双依赖 74+75), native dependencies 已建
+
+### 状态
+
+**Phase 3 票就绪, #72 是 frontier。实施前置 = PR #63/#69 review merge
+(或用户指示 stacked 继续)。认证层仍是独立并行项待排期。**
