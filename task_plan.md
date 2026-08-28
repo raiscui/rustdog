@@ -1308,3 +1308,19 @@ loop) 已认领, 是下一票 (决策回调 trait + daemon lifecycle 托管 + al
 
 **Phase 3 完成 (PR #78 ready, 全量 1022/1022)。Phase 4 (A2A 语义层)
 按 spec 需 Phase 3 语义稳定后 to-spec; 认证层仍是前置必做项。**
+
+## [2026-08-29 09:40:00] [Session ID: current] Phase 3 merge + 认证层 to-spec (issue #79)
+
+### 完成内容
+
+- [x] PR #78 merge (140b1c6): Phase 3 五票正式入 main
+- [x] 认证层调研: zenoh usrpwd/pubkey (session 层, 全 transport) vs TLS/mTLS
+      (仅 tcp, 提供加密); usrpwd 只认证不加密 — 分层结论
+- [x] to-spec issue #79: Phase A usrpwd (零配置本机安全: ~/.rdog/auth.toml
+      随机凭证 + 同机同用户共享) + Phase B TLS (机密性); 10 user stories
+- [x] specs/rdog-authentication-plan.md 镜像 + AGENTS.md 索引
+
+### 状态
+
+**Phase 1-3 全部入 main。认证层 spec #79 就绪 (票未拆)。
+Phase 4 (A2A 语义层) 等真实使用反馈。**
