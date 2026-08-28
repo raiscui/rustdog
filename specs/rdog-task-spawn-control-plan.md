@@ -181,7 +181,7 @@ Phase 1 只保证 running 与三个终态;`spawn_failed`(启动即失败,如命�
 
 ## 8. Phase 4: A2A 语义层(索引,不设计)
 
-结论已定(详见 A2A 调研支线 `task_plan__a2a_research.md` / `notes__a2a_research.md`):
+结论已定(详见 A2A 调研支线归档 `archive/branch_contexts/a2a_research/`):
 
 - **学 A2A 的语义模型(AgentCard/Task/Artifact),不照搬其传输绑定(HTTP/JSON-RPC)**。
   执行层保持 Zenoh(多 transport/组播发现/serial 是已验证优势)。
