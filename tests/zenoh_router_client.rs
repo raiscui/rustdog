@@ -2813,3 +2813,218 @@ fn agent_card_should_be_published_and_queryable_with_version_updates() {
     stop_child(&mut daemon);
     let _ = fs::remove_file(&config_path);
 }
+
+// ============================================================================
+// agent messaging Phase 3 收口 e2e (issue #76):
+// 1) 先投递后起 agent (mailbox 补拉恢复, 防丢语义)
+// 2) 重复投递 id 去重
+// ============================================================================
+
+#[test]
+fn agent_message_delivered_before_agent_start_should_be_recovered_via_mailbox() {
+    let daemon_name = unique_name("agent-pre");
+    let listen_port = next_port();
+    let (mut daemon, config_path, entrypoint, buffer) =
+        start_zenoh_daemon_with_combined_output(&daemon_name, listen_port);
+    wait_until_output_contains(
+        &mut daemon,
+        &buffer,
+        "zenoh router daemon ready",
+        Duration::from_secs(8),
+    )
+    .expect("daemon should report ready");
+
+    let agent_name = format!("pre-helper-{}.lab", std::process::id());
+    let sender = format!("pre-orch-{}.lab", std::process::id());
+    let sent_at_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let task_message = format!(
+        "{{\"v\":1,\"id\":\"pre-e2e-1\",\"from\":\"{sender}\",\"to\":\"{agent_name}\",\"kind\":\"task\",\"payload\":\"PRE_START_TASK\",\"sent_at\":{sent_at_ms}}}"
+    );
+
+    // 1. agent 未起时投递 (mailbox 通配缓存, 防丢语义)
+    {
+        let mut config = zenoh::Config::default();
+        config
+            .insert_json5("connect/endpoints", &format!("[\"{entrypoint}\"]"))
+            .expect("zenoh config");
+        let zenoh_session = zenoh::open(config).wait().expect("test session");
+        let publisher = zenoh_session
+            .declare_publisher(format!("rdog/lab/agent/{agent_name}/inbox"))
+            .wait()
+            .expect("pre-start publisher");
+        publisher
+            .put(task_message.as_str())
+            .wait()
+            .expect("pre-start delivery");
+        thread::sleep(Duration::from_millis(300));
+    }
+
+    // 1.5 投递后 mailbox 应立即可见 (缓存发生在 agent 起之前 — 防丢语义断言)
+    {
+        let mut cached = false;
+        for _ in 0..20 {
+            let (status, stdout, _) = run_control_multi_one_shot(
+                &[
+                    "--transport",
+                    "zenoh",
+                    "--target-name",
+                    &daemon_name,
+                    "--entry-point",
+                    &entrypoint,
+                    "--namespace",
+                    "lab",
+                ],
+                &[&format!("@agent-inbox:{agent_name}")],
+                Duration::from_secs(10),
+            );
+            if status.success() && stdout.contains("PRE_START_TASK") {
+                cached = true;
+                break;
+            }
+            thread::sleep(Duration::from_millis(200));
+        }
+        assert!(cached, "投递后 mailbox 应缓存 pre-start 消息");
+    }
+
+    // 2. 先建 reply 订阅 (agent 首次补拉在启动后立即触发, 回复可能早于
+    //    测试侧订阅声明 — pub 无订阅者即丢, 必须先 sub 后起 agent)
+    let reply_session = {
+        let mut config = zenoh::Config::default();
+        config
+            .insert_json5("connect/endpoints", &format!("[\"{entrypoint}\"]"))
+            .expect("zenoh config");
+        zenoh::open(config).wait().expect("test session")
+    };
+    let reply_sub = reply_session
+        .declare_subscriber(format!("rdog/lab/agent/{sender}/inbox"))
+        .wait()
+        .expect("reply sub");
+
+    // 3. 起 agent: 补拉路径应拿到 pre-start 消息并回复
+    let mut agent = Command::new(rdog_binary_path())
+        .args([
+            "agent",
+            "--name",
+            &agent_name,
+            "--namespace",
+            "lab",
+            "--target-name",
+            &daemon_name,
+            "--entry-point",
+            &entrypoint,
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("rdog agent should start");
+    let agent_stderr = agent.stderr.take().expect("agent stderr");
+    let agent_log = Arc::new(Mutex::new(String::new()));
+    let _ = spawn_output_collector_to(agent_stderr, Arc::clone(&agent_log));
+
+    let mut saw_reply = false;
+    {
+        let deadline = Instant::now() + Duration::from_secs(15);
+        while Instant::now() < deadline {
+            if let Ok(Some(sample)) = reply_sub.recv_timeout(Duration::from_millis(300)) {
+                if let Ok(payload) = sample.payload().try_to_string() {
+                    if payload.contains("\"kind\":\"reply\"")
+                        && payload.contains("echo:PRE_START_TASK")
+                    {
+                        saw_reply = true;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    assert!(
+        saw_reply,
+        "agent 起后应经 mailbox 补拉恢复 pre-start 消息并回复; agent_log:\n{}",
+        agent_log.lock().unwrap()
+    );
+
+    agent.kill().expect("agent should stop");
+    let _ = agent.wait();
+    stop_child(&mut daemon);
+    let _ = fs::remove_file(&config_path);
+}
+
+#[test]
+fn agent_mailbox_should_deduplicate_repeated_delivery_by_id() {
+    let daemon_name = unique_name("agent-dedup");
+    let listen_port = next_port();
+    let (mut daemon, config_path, entrypoint, buffer) =
+        start_zenoh_daemon_with_combined_output(&daemon_name, listen_port);
+    wait_until_output_contains(
+        &mut daemon,
+        &buffer,
+        "zenoh router daemon ready",
+        Duration::from_secs(8),
+    )
+    .expect("daemon should report ready");
+
+    let agent_name = format!("dd-helper-{}.lab", std::process::id());
+    let sent_at_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let message = format!(
+        "{{\"v\":1,\"id\":\"dd-e2e-fixed-id\",\"from\":\"dd-orch.lab\",\"to\":\"{agent_name}\",\"kind\":\"task\",\"payload\":\"ONCE\",\"sent_at\":{sent_at_ms}}}"
+    );
+
+    // 同 id 投递两次
+    {
+        let mut config = zenoh::Config::default();
+        config
+            .insert_json5("connect/endpoints", &format!("[\"{entrypoint}\"]"))
+            .expect("zenoh config");
+        let zenoh_session = zenoh::open(config).wait().expect("test session");
+        let publisher = zenoh_session
+            .declare_publisher(format!("rdog/lab/agent/{agent_name}/inbox"))
+            .wait()
+            .expect("publisher");
+        publisher
+            .put(message.as_str())
+            .wait()
+            .expect("first delivery");
+        thread::sleep(Duration::from_millis(150));
+        publisher
+            .put(message.as_str())
+            .wait()
+            .expect("duplicate delivery");
+        thread::sleep(Duration::from_millis(300));
+    }
+
+    let mut saw_single = false;
+    for _ in 0..20 {
+        let (status, stdout, _) = run_control_multi_one_shot(
+            &[
+                "--transport",
+                "zenoh",
+                "--target-name",
+                &daemon_name,
+                "--entry-point",
+                &entrypoint,
+                "--namespace",
+                "lab",
+            ],
+            &[&format!("@agent-inbox:{agent_name}")],
+            Duration::from_secs(10),
+        );
+        if status.success() && stdout.contains("dd-e2e-fixed-id") {
+            let occurrences = stdout.matches("dd-e2e-fixed-id").count();
+            let duplicate_flag = stdout.contains("\"duplicate\":1");
+            saw_single = occurrences == 1 && duplicate_flag;
+            break;
+        }
+        thread::sleep(Duration::from_millis(200));
+    }
+    assert!(saw_single, "重复投递应只留 1 条且 duplicate 计数为 1");
+
+    stop_child(&mut daemon);
+    let _ = fs::remove_file(&config_path);
+}

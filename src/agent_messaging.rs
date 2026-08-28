@@ -244,12 +244,13 @@ mod tests {
     }
 
     #[test]
-    fn mailbox_should_require_registration_before_caching() {
-        // 测试隔离: 用未注册过的 agent name
+    fn mailbox_should_cache_unregistered_agent_for_delivery_safety() {
+        // 语义修正 (#76 防丢优先): 未注册也缓存 — 先投递后起 agent 不丢消息
         let agent = format!("mb-unreg-{}.lab", std::process::id());
-        assert!(!deliver_to(&agent, "u1"), "未注册 agent 不缓存");
-        mailbox_register_agent(&agent);
-        assert!(deliver_to(&agent, "u2"));
+        assert!(deliver_to(&agent, "u1"), "未注册 agent 也应缓存");
+        let snapshot = mailbox_pending(&agent);
+        assert!(snapshot.registered, "自动建 entry");
+        assert_eq!(snapshot.pending.len(), 1);
         mailbox_unregister_agent(&agent);
     }
 
@@ -439,12 +440,13 @@ pub fn mailbox_unregister_agent(agent_name: &str) {
 
 /// 一条 inbox 消息入缓存 (接线层在 sub 回调里调用)。
 ///
-/// 返回是否入队: 未注册 agent / 重复 id 返回 false (调用方只做日志)。
+/// 语义修正 (issue #76, 防丢优先): 收到即缓存 (未注册自动建 entry),
+/// "先投递后起 agent" 的消息不丢。跨主机时每个 daemon 都会缓存一份
+/// (pub 广播语义), agent 只补拉本机 daemon, 其他副本由容量淘汰兜底。
+/// 返回 false 仅当重复 id (调用方只做日志)。
 pub fn mailbox_deliver(message: &AgentMessage) -> bool {
     let mut registry = mailbox().lock().expect("mailbox lock should work");
-    let Some(agent) = registry.agents.get_mut(&message.to) else {
-        return false;
-    };
+    let agent = registry.agents.entry(message.to.clone()).or_default();
     if !agent.seen_ids.insert(message.id.clone()) {
         agent.duplicate += 1;
         return false;
