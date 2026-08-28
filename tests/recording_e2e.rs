@@ -112,7 +112,16 @@ fn read_response_line(stream: &mut TcpStream, timeout: Duration) -> String {
                     std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
                 ) =>
             {
-                return output;
+                // "读直到安静"只对已经见过 @response 的流成立: savefile 多帧
+                // 之后的安静可以收工。慢 runner 上 daemon 处理 @record-start
+                // (semantic profile 启动) 可能超过 200ms, 响应前的安静只是
+                // 中间状态 — 此时返回会让上层拿到空串 unwrap None 稳定炸
+                // (CI 环境决定性, 本地快机器察觉不到)。没见到 @response
+                // 就继续等到 deadline。
+                if output.contains("@response ") {
+                    return output;
+                }
+                continue;
             }
             Err(err) => panic!("read should not fail: {err}"),
         }
