@@ -3,10 +3,12 @@
 > Companion to ADR-0008. This document is the **what**; ADR-0008 is the **why**. 
 > Read this for build scope; read the ADR for design rationale.
 
-> **As-built 增补 (2026-08-27)**: 本 spec 中围绕 `execute_ax_action` 统一字符串入口、
-> 数据化 routing 表与 `ax_action/protocol.rs` parse 层的设计已按实施结论移除
-> (零生产消费者, 详见 ADR-0008 Amendment 与 task_plan.md 2026-08-27 决策记录)。
-> as-built 的 ax_action 只有 7 个强类型函数; 阶段 3 (ax_query) 尚未实施。
+> **As-built 增补 (2026-08-28 更新)**: 三个阶段已全部落地, 与本 spec 的分歧有
+> ① `execute_ax_action` 统一字符串入口、数据化 routing 表与 `ax_action/protocol.rs`
+> parse 层按实施结论移除 (零生产消费者, ADR-0008 Amendment);
+> ② ax_query 按现实切分只收纳无状态捕获核心, query.rs 保留在 control_ax 作为
+> verb 层, AxSnapshotCache 不迁移 (epoch 真相源分离已由 #51/#54/#55 落地,
+> ADR-0008 Amendment 2)。
 > 下文保留原始规划内容作为决策历史, 不代表当前架构。
 
 ## Problem Statement

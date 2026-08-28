@@ -2,10 +2,10 @@ use super::{
     build_web_find_response_json_with_refresh, select_target_window, WebFindRequest,
     WindowSelection,
 };
-use crate::control_ax::{
+use crate::ax_query::{
     capture_current_ax_subtree, capture_current_ax_window_snapshot, capture_default_ax_snapshot,
-    AxCapturedSubtree, AxSnapshot, AxTreeRequest,
 };
+use crate::control_ax::{AxCapturedSubtree, AxSnapshot, AxTreeRequest};
 use crate::control_observation::resolve_observation_ref;
 use std::io;
 

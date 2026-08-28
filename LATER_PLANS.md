@@ -931,7 +931,8 @@ zenoh router down / unixpipe broken / zenoh timeout 等场景.
   各做一次分支, 语义有差异 (完整 report vs Err), 收敛为单入口时要保 wire 形状
 - `AxPressPostconditionReport` 的 status/kind/action 裸字符串应转枚举 (涉及 wire
   serde, 需逐字锁定序列化输出)
-- `observe_current_ax_values_with` / `collect_ax_values_by_role` 深走 control_ax
-  types/tree, 按 ADR 阶段 3 应归属 ax_query
 - `ax_input` 的 with_config 一行转投 SystemAxBackend (Middle Man), 阶段 3 迁
   backend 后消除
+
+(2026-08-28 已完成并移除: observe_current_ax_values_with / collect_ax_values_by_role
+的纯遍历部分已作为 collect_ax_role_values 收进 ax_query, 验证语义留在 ax_action)

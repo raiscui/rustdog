@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted (2026-08-20); amended 2026-08-27 (见下方 Amendment)
+Accepted (2026-08-20); amended 2026-08-27 (动态 routing 层移除) and 2026-08-28 (阶段 3 按现实切分)
 
 ## Amendment (2026-08-27): 动态 routing 层按 as-built 移除
 
@@ -19,12 +19,38 @@ Accepted (2026-08-20); amended 2026-08-27 (见下方 Amendment)
 - ax_input 同理收敛为单一 `type_text_with_config` / `send_key_with_config` 完整配置 API,
   80/20 简单包装层 (零调用) 一并删除。
 
-阶段 3 (ax_query + cache migration) 尚未实施, 该部分设计仍为规划状态。
-完整决策记录与备选方案见 task_plan.md 2026-08-27 条目。
+阶段 3 (ax_query + cache migration) 于 2026-08-28 落地, 同样按 as-built 修正 (见下方
+Amendment 2)。完整决策记录与备选方案见 task_plan.md 对应日期条目。
+
+## Amendment 2 (2026-08-28): 阶段 3 ax_query 按现实切分线落地
+
+原阶段 3 设计 (ObservationCapture adapter struct / AxSnapshotCache 多 TTL policy 迁移 /
+query.rs 整体搬入 ax_query) 经现状核实后按以下修正实施:
+
+- **ax_query 是无状态捕获核心** (~370 行, mod.rs + capture.rs), 收纳 tree.rs 中零
+  observation/protocol 依赖的 capture / 查找 / target 物化函数与 6 个路由测试。
+  纯度契约写入模块文档并可用 grep 断言: 禁止 import control_observation /
+  control_protocol, 无 static 状态。
+- **query.rs 保留在 control_ax**: 它是 @ax-find/@ax-get 的 verb 实现
+  (协议解析 + observation ref 解析 + display scope), 不是纯查询引擎,
+  原样搬入会破坏 ax_query 的无状态目标。纯查询原语 (collect_ax_role_values 等)
+  按需进 ax_query。
+- **缓存不迁移 (ticket 08 superseded)**: epoch 真相源分离已由 #51/#54/#55 落地
+  (真相源在 observation store / control_resource_lane, 缓存仅存捕获时快照并校验),
+  多 TTL policy 场景实际由 computer-act 的 implicit observe 缓存独立承担。
+  迁移只剩物理位置收益, 不值得动刚对抗性验证过的路径。
+- **ObservationCapture adapter (ticket 07) superseded**: as-built 的富化 seam 是
+  `AxSnapshot::with_observation()`, selector draft 构造留在 control_ax/tree.rs,
+  observation 侧入口是 record_observation_with_selectors_from_capture。
+- **循环依赖 (ticket 10) 部分收敛**: capture 消费方 (observation/screenshot/web/
+  computer_act/mouse/ax_action) 全部改从 ax_query 导入, control_ax 不再是
+  capture 入口的 hub; verb 层与 observation 的双向编排边保留
+  (with_observation 注册与缓存校验属于 verb 层职责)。
 
 ## Context
 
 control_ax.rs is a 122KB file with 53+ public functions, exhibiting shallow module characteristics where interface complexity nearly equals implementation complexity. The architecture review identified it as the top priority friction point:
+
 
 - **17+ parse functions**: parse_ax_tree_payload, parse_ax_press_payload, etc.
 - **10+ perform functions**: perform_default_ax_press, perform_default_ax_action, etc.

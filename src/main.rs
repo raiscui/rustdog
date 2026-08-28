@@ -15,6 +15,7 @@ use crate::listener::{listen, Mode, Opts};
 mod ax_action;
 mod ax_diff;
 mod ax_input;
+mod ax_query;
 mod cancellation;
 mod config;
 mod control_actions;

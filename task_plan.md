@@ -630,3 +630,60 @@ remap 收敛 commit。control-ax-split 主线的 ax_input + ax_action 两阶段�
 阶段 3 (ax_query) 未实施, 延后事项见 LATER_PLANS.md。
 EPIPHANY_LOG 判断: routing 层教训已完整记录于 ADR-0008 Amendment (长期载体, 已索引),
 无需重复进 EPIPHANY_LOG (该文件 999 行, 避免无谓触发续档)。
+
+## [2026-08-28 09:40:00] [Session ID: current] 阶段 3 启动: ax_query 无状态捕获核心
+
+### 目标
+按 ADR-0008 阶段 3 的真目标 (无状态查询核心 + 单向依赖), 依据现实重划的切分线实施。
+
+### 方案 (依据 notes.md 2026-08-28 研究结论)
+- 方案 A (采用): ax_query 只收零 observation/protocol 依赖的纯 capture/匹配核心
+  (~300 行), tree.rs 溶解 (纯函数进 ax_query, selector 富化与 target 解析留在
+  control_ax 侧 tree.rs), query.rs 保持为 control_ax 的 verb 层不动, 缓存不动。
+- 方案 B (不选): 按 scratch ticket 09 原样把 query.rs 搬进 ax_query --
+  query.rs 实为 @ax-find/@ax-get verb 实现 (协议解析+observation+display),
+  原样搬入会让"无状态、不认识 observation"目标当场破产。
+- 方案 C (不选): 按 ticket 08 迁移缓存加 TTL policy -- epoch 真相源分离已由
+  #51/#54/#55 落地并对抗性验证, 重构只剩物理位置收益, 风险是动刚验证的路径。
+
+### 阶段
+- [ ] P3-1: 创建 src/ax_query/ (mod.rs + capture.rs), 搬入 tree.rs 纯函数:
+      current_ax_platform, capture_default_ax_snapshot, capture_current_ax_subtree,
+      capture_current_ax_window_snapshot, capture_ax_find_snapshot(+_with),
+      capture_semantic_target_snapshot(+_with), ax_window_id_from_backend_id,
+      find_ax_element_by_id, ax_snapshot_status_error, materialize_app_window_target(+_with)
+- [ ] P3-2: 迁移全部调用方 (observation/producer, screenshot, control_actions,
+      control_web, computer_act/verify, ax_action, control_mouse)
+- [ ] P3-3: tree.rs 收缩为 "target 解析 + selector 富化" (observation 桥接层), 更新头注释
+- [ ] P3-4: cargo check 0 warning + ax_query 定向测试 + 全量 nextest
+- [ ] P3-5: 评估 LATER_PLANS 项 3 (ax_action 的 collect_ax_values_by_role 归属 ax_query)
+- [ ] P3-6: 文档同步 (ADR-0008 Amendment 扩展, spec 状态, CONTEXT.md 核对)
+- [ ] P3-7: 双轴 code-review + 提交 + WORKLOG
+
+### 验收标准
+- ax_query 零 import control_observation / control_protocol (纯度由 grep 断言)
+- 所有 capture 消费方不再从 control_ax 导入 capture 函数
+- 全量 nextest 与基线一致 (955/956, 唯一失败为既有 control_tty flake)
+
+### 阶段 3 进度更新 (2026-08-28)
+- [x] P3-1: ax_query 模块创建 (mod.rs + capture.rs, 纯函数自 tree.rs 迁入)
+- [x] P3-2: 全部 capture 消费方迁移 (observation/producer, screenshot, control_actions,
+      control_web capture+act, computer_act/verify, ax_action, control_observation.rs 全限定调用)
+- [x] P3-3: tree.rs 收缩为 target 解析 + selector 富化桥接层, 头注释重写;
+      control_ax 不再 re-export capture 函数
+- [x] P3-4: cargo check --tests 0 warning; 纯度断言通过 (ax_query 零
+      observation/protocol 代码引用, 无 static 状态); 迁入路由测试 6/6;
+      collect_ax_role_values 测试通过; 全量 nextest 956/957
+      (唯一失败仍为既有 control_tty flake)
+- [x] P3-5: collect_ax_values_by_role 拆分为 ax_query::collect_ax_role_values
+      (纯遍历) + ax_action 侧归一化语义 (bidi/sort/dedup 留在验证层)
+- [x] P3-6: 文档同步 -- ADR-0008 Amendment 2, 两个 spec 状态头, CONTEXT.md
+      两条术语改 as-built (Observation Capture seam = with_observation 方法;
+      AX Snapshot Cache 无 TTL policy, epoch 校验失效), LATER_PLANS 项 3 清除
+- [ ] P3-7: 双轴 code-review + 提交 + WORKLOG
+
+### 实施中修正
+- 抄写 find_ax_element_by_id 时漏了 Some() 包装, 编译器抓回 (对照 git 原版修复)
+- 5 个 capture 路由测试随实现迁入 ax_query (capture_routing_tests), 补了
+  ax_window_id_from_backend_id 提取规则测试; 曾误加"占位"测试, 认识到与
+  ax_input 恒真断言同毛病后删除

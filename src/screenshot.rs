@@ -21,10 +21,8 @@ use std::{
 };
 
 use crate::{
-    control_ax::{
-        capture_default_ax_snapshot, current_ax_platform, resolve_current_ax_target_rect,
-        AxSnapshot, AxTarget, AxTreeRequest,
-    },
+    ax_query::{capture_default_ax_snapshot, current_ax_platform},
+    control_ax::{resolve_current_ax_target_rect, AxSnapshot, AxTarget, AxTreeRequest},
     control_display_scope::{
         resolve_display_scope, resolve_observation_window_ref, DisplayRect, DisplayScope,
         DisplayScopeResolution, DisplaySelector, DisplaySummary, DISPLAY_ID_STABILITY_SESSION,

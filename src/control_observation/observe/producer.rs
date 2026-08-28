@@ -1,9 +1,7 @@
 use super::{request::ObserveRequest, OBSERVE_SCHEMA};
 use crate::{
-    control_ax::{
-        capture_default_ax_snapshot, current_ax_platform, AxElement, AxSnapshot, AxTreeRequest,
-        AxWindow,
-    },
+    ax_query::{capture_default_ax_snapshot, current_ax_platform},
+    control_ax::{AxElement, AxSnapshot, AxTreeRequest, AxWindow},
     control_display_scope::{
         display_intersects_rect, resolve_display_scope, resolve_observation_window_ref,
         DisplayRect, DisplayScope, DisplayScopeResolution, DisplaySelector,

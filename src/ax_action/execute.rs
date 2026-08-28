@@ -5,7 +5,10 @@
 
 use std::io;
 
-use crate::control_ax::tree::{ax_snapshot_status_error, materialize_app_window_target_with};
+use crate::ax_query::{
+    ax_snapshot_status_error, capture_current_ax_window_snapshot, collect_ax_role_values,
+    materialize_app_window_target_with,
+};
 use crate::control_ax::types::{
     AxActionName, AxActionReport, AxActionRequest, AxElement, AxFocusReport, AxFocusRequest,
     AxPerformedActionReport, AxPressPostcondition, AxPressPostconditionReport,
@@ -14,7 +17,7 @@ use crate::control_ax::types::{
     AxSetValueRequest, AxSnapshot, AxTreeRequest, AX_POSTCONDITION_DEPTH,
     AX_POSTCONDITION_MAX_ELEMENTS,
 };
-use crate::control_ax::{capture_current_ax_window_snapshot, invalid_data, invalid_input};
+use crate::control_ax::{invalid_data, invalid_input};
 use crate::control_window::resolve_unique_app_window_id;
 
 /// 执行 AX press action。
@@ -270,25 +273,14 @@ fn observe_current_ax_values_with(
         ));
     }
 
-    let mut values = Vec::new();
-    for window in &snapshot.windows {
-        collect_ax_values_by_role(&window.elements, role, &mut values);
-    }
+    // 遍历由 ax_query 通用原语承担; 这里只叠加验证语义 (bidi 归一化 + 排序去重)。
+    let mut values: Vec<String> = collect_ax_role_values(&snapshot, role)
+        .into_iter()
+        .map(|value| normalize_ax_verification_value(&value))
+        .collect();
     values.sort();
     values.dedup();
     Ok(values)
-}
-
-/// 递归收集指定 role 的元素 value (跳过被脱敏的元素)。
-fn collect_ax_values_by_role(elements: &[AxElement], role: &str, values: &mut Vec<String>) {
-    for element in elements {
-        if element.role == role && !element.value_redacted {
-            if let Some(value) = element.value.as_deref() {
-                values.push(normalize_ax_verification_value(value));
-            }
-        }
-        collect_ax_values_by_role(&element.children, role, values);
-    }
 }
 
 /// 剥离 bidi 控制字符后 trim, 用于 postcondition 期望值与观察值的可比对。

@@ -1,5 +1,6 @@
 use super::*;
 use crate::{
+    ax_query::{capture_semantic_target_snapshot, materialize_app_window_target},
     control_protocol::{KeyResponseMode, DEFAULT_KEY_HOLD_MS},
     control_window::resolve_unique_app_pid,
 };

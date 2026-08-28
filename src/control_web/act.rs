@@ -1,6 +1,8 @@
 use super::*;
-use crate::control_ax::{
+use crate::ax_query::{
     capture_current_ax_subtree, capture_current_ax_window_snapshot, capture_default_ax_snapshot,
+};
+use crate::control_ax::{
     AxActionName, AxActionRequest, AxCapturedSubtree, AxPerformedActionReport, AxTarget,
 };
 

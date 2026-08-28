@@ -649,3 +649,43 @@ src/ax_action/
 - 增量式可最快验证设计
 - 先完成 `press` 建立模板
 
+
+## [2026-08-28 09:30:00] [Session ID: current] 笔记: 阶段 3 (ax_query) 现状研究
+
+### 来源: 代码勘察 (control_ax.rs / tree.rs / query.rs / control_observation / scratch tickets 07-11)
+
+### 关键发现 (ADR 设想 vs #51/#54/#55 之后的现实)
+
+1. **ticket 08 (AxSnapshotCache 迁移) 大部分已被现实超越**:
+   - epoch 单一真相源已落地: 真源在 observation store / control_resource_lane,
+     AX_OBSERVATION_CACHE 只存 capture 时快照 + 读取时向 resource lane 校验
+     (control_ax.rs:46-232, #54/#55 加固过, 有对抗性测试 7/7 + 4/4)
+   - 现缓存无 TTL policy, 纯 epoch 校验; ADR 设想的 CachePolicy
+     (ImplicitObserve 5s / Progressive 300s) 对应的是另一个独立缓存
+     COMPUTER_ACT_OBSERVATION_CACHE (control_computer_act/implicit_observe.rs)
+   - 迁移/重构缓存的剩余收益只是物理位置, 风险却是动 #55 刚验证过的路径
+2. **query.rs 不是纯查询引擎**: 1267 行里是 @ax-find/@ax-get 的完整 verb 实现
+   (compact/对象协议解析 + observation ref 解析 + display scope + screenshot 摘要)。
+   原样搬入 ax_query 会让"无状态模块"目标当场破产
+3. **tree.rs 是混合体**: ~200 行纯 capture/匹配 helper (零 observation 依赖)
+   + selector draft 构造 (只被 control_ax.rs 的 AxSnapshot::with_observation 用)
+   + target 解析 (direct_ax_target_id / resolve_target_id_in_snapshot 依赖 observation ref)
+4. **循环依赖现状**: control_ax→control_observation (selector/header/ref/注册) 与
+   observation→control_ax (capture 入口 + AX 类型) 双向仍在;
+   ax_action→control_ax 单向 (阶段 2 成果)
+5. **capture 函数的消费面极广**: capture_default_ax_snapshot 有 8 个模块消费
+   (observation/screenshot/actions/web/computer_act), 全部从 122KB 的 control_ax 导入
+
+### 调用方映射 (tree.rs 函数 -> 外部消费者)
+- capture_default_ax_snapshot: control_observation(.rs+producer), screenshot, control_actions, control_web capture+act, computer_act/verify
+- capture_current_ax_window_snapshot: ax_action, control_actions, control_web capture+act, computer_act/verify
+- capture_ax_find_snapshot / capture_current_ax_subtree: control_actions / control_web
+- current_ax_platform: screenshot, observation/producer
+- materialize_app_window_target(+_with) / ax_snapshot_status_error: ax_action/execute
+- resolve_current_ax_target_rect: query.rs, screenshot, control_mouse/target
+- selector drafts (collect_element_refs 等): 仅 control_ax.rs 的 with_observation
+
+### 综合结论
+ADR 阶段 3 的真目标 (无状态查询核心 + 单向依赖 + 甩掉 verb 大杂烩) 仍成立,
+但实现切分必须按现实重划: ax_query 只收零 observation 依赖的纯 capture/匹配核心,
+query.rs (verb) 与 selector 富化留在 control_ax 侧。缓存不动。

@@ -26,21 +26,11 @@ use crate::control_observation::record_observation_with_selectors;
 
 pub mod tree;
 pub mod types;
-pub(crate) use self::tree::ax_window_id_from_backend_id;
 use self::tree::{
-    app_selector_for_window, capture_semantic_target_snapshot, collect_element_refs,
-    direct_ax_target_id, materialize_app_window_target, reserve_existing_ref_index,
+    app_selector_for_window, collect_element_refs, direct_ax_target_id, reserve_existing_ref_index,
     window_selector_draft, window_selector_for_ax_window,
 };
-pub use self::tree::{
-    capture_ax_find_snapshot, capture_current_ax_subtree, capture_current_ax_window_snapshot,
-    capture_default_ax_snapshot, current_ax_platform, resolve_current_ax_target_rect,
-    resolve_target_id_in_snapshot,
-};
-// 这些 tree helper 仅在测试代码里使用, 单独用 cfg(test) 导入,
-// 避免非测试编译出现 unused import。
-#[cfg(test)]
-use self::tree::{capture_ax_find_snapshot_with, capture_semantic_target_snapshot_with};
+pub use self::tree::{resolve_current_ax_target_rect, resolve_target_id_in_snapshot};
 pub use self::types::*;
 
 /// observation 产生的完整 AX snapshot 缓存。
@@ -2109,7 +2099,6 @@ mod macos;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::cell::Cell;
 
     fn bounded_query(depth: u8, max_elements: u16, include_values: bool) -> AxTreeRequest {
         AxTreeRequest {
@@ -2885,134 +2874,5 @@ mod tests {
         .is_err());
     }
 
-    #[test]
-    fn ax_find_window_identity_should_route_only_to_targeted_capture() {
-        let global_calls = Cell::new(0);
-        let targeted_calls = Cell::new(0);
-        let request =
-            parse_ax_find_payload(r#"{window:{window_id:"pid:7/window:1"},role:"AXButton"}"#)
-                .unwrap();
-
-        let snapshot = capture_ax_find_snapshot_with(
-            &request,
-            |_| {
-                global_calls.set(global_calls.get() + 1);
-                Ok(AxSnapshot::complete("global", Vec::new(), false))
-            },
-            |window_id, _| {
-                targeted_calls.set(targeted_calls.get() + 1);
-                assert_eq!(window_id, "pid:7/window:1");
-                Ok(AxSnapshot::complete("targeted", Vec::new(), false))
-            },
-        )
-        .unwrap();
-
-        assert_eq!(snapshot.platform, "targeted");
-        assert_eq!(global_calls.get(), 0);
-        assert_eq!(targeted_calls.get(), 1);
-    }
-
-    #[test]
-    fn ax_find_app_menu_should_pass_app_selector_to_capture_backend() {
-        let request =
-            parse_ax_find_payload(r#"{root:"app-menu",app:"Finder",role:"AXMenuBarItem"}"#)
-                .expect("app menu request should parse");
-
-        let snapshot = capture_ax_find_snapshot_with(
-            &request,
-            |tree| {
-                assert_eq!(tree.scope, AxTreeScope::AppMenu);
-                assert_eq!(tree.app_menu_app.as_deref(), Some("Finder"));
-                Ok(AxSnapshot::complete("targeted-app-menu", Vec::new(), false))
-            },
-            |_, _| panic!("app menu must not be captured as a window subtree"),
-        )
-        .expect("app menu capture should succeed");
-
-        assert_eq!(snapshot.platform, "targeted-app-menu");
-    }
-
-    #[test]
-    fn semantic_target_window_id_should_route_only_to_targeted_capture() {
-        let global_calls = Cell::new(0);
-        let targeted_calls = Cell::new(0);
-        let target = AxTarget {
-            window_id: Some("pid:7/window:1".to_owned()),
-            role: Some("AXButton".to_owned()),
-            description: Some("1".to_owned()),
-            ..AxTarget::default()
-        };
-
-        let snapshot = capture_semantic_target_snapshot_with(
-            &target,
-            &AxTreeRequest::default(),
-            |_| {
-                global_calls.set(global_calls.get() + 1);
-                Ok(AxSnapshot::complete("global", Vec::new(), false))
-            },
-            |window_id, _| {
-                targeted_calls.set(targeted_calls.get() + 1);
-                assert_eq!(window_id, "pid:7/window:1");
-                Ok(AxSnapshot::complete("targeted", Vec::new(), false))
-            },
-        )
-        .unwrap();
-
-        assert_eq!(snapshot.platform, "targeted");
-        assert_eq!(global_calls.get(), 0);
-        assert_eq!(targeted_calls.get(), 1);
-    }
-
-    #[test]
-    fn semantic_target_without_window_id_should_keep_global_capture() {
-        let global_calls = Cell::new(0);
-        let targeted_calls = Cell::new(0);
-        let target = AxTarget {
-            role: Some("AXButton".to_owned()),
-            description: Some("1".to_owned()),
-            ..AxTarget::default()
-        };
-
-        let snapshot = capture_semantic_target_snapshot_with(
-            &target,
-            &AxTreeRequest::default(),
-            |_| {
-                global_calls.set(global_calls.get() + 1);
-                Ok(AxSnapshot::complete("global", Vec::new(), false))
-            },
-            |_, _| {
-                targeted_calls.set(targeted_calls.get() + 1);
-                Ok(AxSnapshot::complete("targeted", Vec::new(), false))
-            },
-        )
-        .unwrap();
-
-        assert_eq!(snapshot.platform, "global");
-        assert_eq!(global_calls.get(), 1);
-        assert_eq!(targeted_calls.get(), 0);
-    }
-
-    #[test]
-    fn ax_find_without_window_identity_should_keep_global_capture() {
-        let global_calls = Cell::new(0);
-        let targeted_calls = Cell::new(0);
-        let request = parse_ax_find_payload(r#"{role:"AXButton"}"#).unwrap();
-
-        let snapshot = capture_ax_find_snapshot_with(
-            &request,
-            |_| {
-                global_calls.set(global_calls.get() + 1);
-                Ok(AxSnapshot::complete("global", Vec::new(), false))
-            },
-            |_, _| {
-                targeted_calls.set(targeted_calls.get() + 1);
-                Ok(AxSnapshot::complete("targeted", Vec::new(), false))
-            },
-        )
-        .unwrap();
-
-        assert_eq!(snapshot.platform, "global");
-        assert_eq!(global_calls.get(), 1);
-        assert_eq!(targeted_calls.get(), 0);
-    }
+    // capture 分发路由测试已随实现迁往 ax_query::capture 的 capture_routing_tests。
 }

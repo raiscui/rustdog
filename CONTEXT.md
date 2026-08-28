@@ -67,15 +67,18 @@ _Avoid_: Any query after an action, recovery read
 _Avoid_: Post-action evidence, verification proof
 
 **Observation Capture**:
-为 Recording Session 或 Replay 捕获 AX tree 的轻量级适配器,封装了"为 observation 生成 snapshot + selectors"的语义。
-它调用 ax_query 底层能力,但返回 observation 需要的完整格式。
-_Avoid_: Direct ax_query call from observation layer, snapshot-only capture
+为 observation 注册而做的 AX 富化语义, as-built 形态是 `AxSnapshot::with_observation(source_command)`:
+为 snapshot 分配 ref_id、生成 refs 与 durable selector drafts, 并经 control_observation 落注册。
+底层纯捕获来自无状态模块 ax_query; 富化与注册属于 verb 层职责。
+_Avoid_: Direct ax_query capture without observation registration, raw snapshot as evidence identity
 
 **AX Snapshot Cache**:
-缓存已捕获的 AX tree snapshot 和对应的资源 epoch 快照,用于避免重复 observation 注册。
-它由 ObservationStore 持有,是加速层而非真相源;资源 epoch 的单一真相源仍然是 ResourceCoordinator。
-支持多种 TTL policy (ImplicitObserve 5s, Progressive 300s) 满足不同场景需求。
-_Avoid_: Epoch truth source, global singleton cache
+缓存已捕获的 AX tree snapshot 和捕获时刻的资源 epoch 快照,用于避免重复 observation 注册。
+它是加速层而非真相源: 读取时向 observation store / resource lane 校验当前 epoch,
+epoch 不一致即 cache miss (stale_observation_cache)。
+资源 epoch 的单一真相源是 ObservationStore / control_resource_lane, 缓存内 epoch 只是捕获时快照。
+as-built 无 TTL policy, 失效判定纯靠 epoch 变化 (TTL 型复用由 computer-act 的 implicit observe 缓存另行承担)。
+_Avoid_: Epoch truth source, time-based expiry replacing epoch validation
 
 **Successor Observation**:
 资源 lane 完成 mutation 并提交稳定 write epoch 后,针对原目标窗口生成的新 observation。
