@@ -277,13 +277,9 @@ fn auto_stop_fires_after_duration() {
     let start_value = first_response_value(&start);
     let recording_id = start_value["recording_id"].as_str().unwrap().to_owned();
 
-    // Sleep 250ms so the auto-stop timer fires (200ms). The next
-    // handler call observes the FIRED flag and runs the auto-stop
-    // inline.
-    std::thread::sleep(Duration::from_millis(250));
-
-    let status = handler.handle(Some(2), owner, RecordRequest::Status);
-    let status_value = first_response_value(&status);
+    // 轮询等待 auto-stop (原固定 sleep 250ms 在负载 CI 上间歇性早于置位):
+    // Status 观测到 FIRED flag 时会 inline 执行 auto-stop, 轮询是幂等的。
+    let status_value = poll_until_auto_stopped(&mut handler, Some(2), owner);
     assert_eq!(
         status_value["status"], "idle",
         "session should be auto-stopped"
@@ -397,14 +393,9 @@ fn auto_stop_continues_when_owner_disconnects() {
     let start_value = first_response_value(&start);
     let recording_id = start_value["recording_id"].as_str().unwrap().to_owned();
 
-    // "Owner disconnects" — sleep 250ms (past deadline) without any
-    // handler call from the owner.
-    std::thread::sleep(Duration::from_millis(250));
-
-    // A status call (in practice: from a new admin connection) picks
-    // up the auto-stop and the bundle is committed.
-    let status = handler.handle(Some(31), ConnectionId(99), RecordRequest::Status);
-    let status_value = first_response_value(&status);
+    // "Owner disconnects" — 不由 owner 发起任何调用, 由新连接轮询 Status
+    // 直到 auto-stop 被捡起并提交 bundle (原固定 sleep 改轮询防调度抖动)。
+    let status_value = poll_until_auto_stopped(&mut handler, Some(31), ConnectionId(99));
     assert_eq!(status_value["status"], "idle");
     let last_session = &status_value["last_session"];
     assert_eq!(last_session["phase"], "completed");
@@ -529,6 +520,25 @@ fn status_reports_duration_and_remaining_ms_when_auto_stop_active() {
     assert!(status_value2["remaining_ms"].is_null());
 }
 
+/// 轮询 Status 直到 auto-stop 生效 (status == "idle") 或超时。
+/// timer 线程的 FIRED 置位在负载 CI 上可能晚于任何固定 sleep,
+/// 一次性断言会间歇性失败 (2026-08-28 macOS runner 多轮实证)。
+fn poll_until_auto_stopped(
+    handler: &mut RecordingHandler,
+    request_id: Option<u64>,
+    caller: ConnectionId,
+) -> serde_json::Value {
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let status = handler.handle(request_id, caller, RecordRequest::Status);
+        let value = first_response_value(&status);
+        if value["status"] == "idle" || std::time::Instant::now() > deadline {
+            return value;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
 #[test]
 fn status_remaining_ms_clamped_to_zero_after_deadline() {
     let (journal, bundle) = temp_dirs();
@@ -544,15 +554,7 @@ fn status_remaining_ms_clamped_to_zero_after_deadline() {
         },
     );
 
-    // Sleep past the deadline so the timer fires.
-    std::thread::sleep(Duration::from_millis(180));
-
-    // The next status call observes the FIRED flag and runs the
-    // auto-stop inline. After that, `remaining_ms` is 0 (timer state
-    // is gone) and the session is in `completed` state via
-    // `last_session`.
-    let status = handler.handle(Some(81), owner, RecordRequest::Status);
-    let status_value = first_response_value(&status);
+    let status_value = poll_until_auto_stopped(&mut handler, Some(81), owner);
     assert_eq!(status_value["status"], "idle");
     let remaining_ms = status_value["remaining_ms"].as_u64();
     // After auto-stop completes, the timer is cleared, so remaining_ms

@@ -85,9 +85,9 @@ fn bounded_capture_should_timeout_once_and_keep_worker_count_bounded() {
         "primary",
         "test",
         &TEST_CAPTURE_IN_FLIGHT,
-        Duration::from_millis(10),
+        Duration::from_millis(200),
         || {
-            thread::sleep(Duration::from_millis(50));
+            thread::sleep(Duration::from_millis(3000));
             Ok::<_, std::io::Error>(())
         },
     )
@@ -98,24 +98,39 @@ fn bounded_capture_should_timeout_once_and_keep_worker_count_bounded() {
         "primary",
         "test",
         &TEST_CAPTURE_IN_FLIGHT,
-        Duration::from_millis(10),
+        Duration::from_millis(200),
         || Ok::<_, std::io::Error>(()),
     )
     .expect_err("a timed-out backend must not create a second worker");
     assert_eq!(duplicate.kind(), std::io::ErrorKind::TimedOut);
 
-    thread::sleep(Duration::from_millis(75));
-    assert_eq!(
-        capture_with_timeout(
+    // 第三次捕获轮询等待慢 worker (3s) 退出后拿回 gate: 固定 sleep 需要超过
+    // worker 剩余运行时间, 在 CI 上不可靠; busy 语义下 TimedOut 即"再试"。
+    let release_deadline = std::time::Instant::now() + Duration::from_secs(8);
+    loop {
+        match capture_with_timeout(
             "primary",
             "test",
             &TEST_CAPTURE_IN_FLIGHT,
-            Duration::from_millis(10),
+            Duration::from_millis(200),
             || Ok::<_, std::io::Error>(42),
-        )
-        .expect("completed worker should release the backend gate"),
-        42
-    );
+        ) {
+            Ok(value) => {
+                assert_eq!(
+                    value, 42,
+                    "completed worker should release the backend gate"
+                );
+                break;
+            }
+            Err(error)
+                if error.kind() == std::io::ErrorKind::TimedOut
+                    && std::time::Instant::now() < release_deadline =>
+            {
+                thread::sleep(Duration::from_millis(100));
+            }
+            Err(error) => panic!("gate release poll failed: {error}"),
+        }
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -133,9 +148,9 @@ fn capture_fallback_should_trace_sck_timeout_and_xcap_transition() {
                     "primary",
                     "sck-rs",
                     &TEST_CAPTURE_IN_FLIGHT,
-                    Duration::from_millis(10),
+                    Duration::from_millis(200),
                     || {
-                        thread::sleep(Duration::from_millis(50));
+                        thread::sleep(Duration::from_millis(3000));
                         Ok::<_, std::io::Error>(42)
                     },
                 )
@@ -151,7 +166,7 @@ fn capture_fallback_should_trace_sck_timeout_and_xcap_transition() {
     assert!(events.contains("fallback_backend=\"xcap\""));
     assert!(!events.contains("screenshot_capture_failed"));
 
-    thread::sleep(Duration::from_millis(75));
+    thread::sleep(Duration::from_millis(400));
 }
 
 #[cfg(target_os = "macos")]

@@ -183,8 +183,31 @@ fn spawn_recording_daemon() -> (RecordingDaemon, u16, PathBuf) {
         wait_until_port_is_busy(&mut daemon.child, port, Duration::from_secs(3)),
         "daemon never started listening on port {port}",
     );
+    assert!(
+        wait_until_daemon_answers(port, Duration::from_secs(20)),
+        "daemon never answered a @ping probe on port {port}",
+    );
 
     (daemon, port, recording_root)
+}
+
+/// 端口监听 != 控制面就绪: 负载 CI 上 daemon 首个业务往返可能超过单次
+/// 5s 静默读窗口 (2026-08-28 CI 实证 start 响应 5s 未达, unwrap None)。
+/// 用幂等的 @ping 探活, 应答过一次 @response 才放行测试, 消除所有
+/// 测试的首轮往返竞态。
+fn wait_until_daemon_answers(port: u16, timeout: Duration) -> bool {
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        if let Ok(mut probe) = TcpStream::connect(("127.0.0.1", port)) {
+            let response = send_line_and_read_response(&mut probe, "@ping");
+            drop(probe);
+            if parse_response_value(&response).is_some() {
+                return true;
+            }
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    false
 }
 
 #[test]
@@ -572,17 +595,30 @@ fn recording_auto_stop_survives_owner_disconnect_and_reconnect() {
     );
     drop(start_client);
 
-    // 2. Sleep past the deadline so the auto-stop has fired.
-    thread::sleep(Duration::from_millis(300));
-
-    // 3. Open a fresh connection (a different "owner") and probe
-    //    status. The next handler call observes the FIRED flag and
-    //    runs the auto-stop inline; the bundle is committed even
-    //    though the original connection is gone.
-    let mut probe_client =
-        TcpStream::connect(("127.0.0.1", port)).expect("probe client should connect");
-    let status_resp = send_line_and_read_response(&mut probe_client, r#"@record-status"#);
-    let status_body = parse_response_value(&status_resp).unwrap();
+    // 2+3. 轮询探测 (每轮新连接 = 模拟不同 owner 重连): daemon 侧 auto-stop
+    // 的 FIRED 置位由下一个 handler 调用捡起, 固定 sleep 一次性探测在负载
+    // CI 上会早于置位 (与 handler 层测试同构的竞态, 2026-08-28 CI 实证)。
+    // 轮询到 idle 为止, 上限 10s; 解析失败也重试 (连接/时序抖动)。
+    let probe_deadline = std::time::Instant::now() + Duration::from_secs(10);
+    #[allow(unused_assignments)] // 循环出口由 break 前赋值, 初始值仅为类型锚
+    let mut status_body = String::new();
+    loop {
+        let mut probe_client =
+            TcpStream::connect(("127.0.0.1", port)).expect("probe client should connect");
+        let status_resp = send_line_and_read_response(&mut probe_client, r#"@record-status"#);
+        drop(probe_client);
+        if let Some(body) = parse_response_value(&status_resp) {
+            if body.contains(r#""status":"idle""#) {
+                status_body = body;
+                break;
+            }
+        }
+        assert!(
+            std::time::Instant::now() < probe_deadline,
+            "auto-stop 未在 10s 内被探测到: last response: {status_resp}"
+        );
+        thread::sleep(Duration::from_millis(100));
+    }
     assert!(
         status_body.contains(r#""status":"idle""#),
         "session should be idle after auto-stop: {status_body}",
@@ -595,6 +631,9 @@ fn recording_auto_stop_survives_owner_disconnect_and_reconnect() {
         status_body.contains(r#""stop_trigger":"auto_duration""#),
         "last_session.stop_trigger should be auto_duration: {status_body}",
     );
+    // 清理段需要 probe_client 句柄, 重连一次供 shutdown 收口。
+    let probe_client =
+        TcpStream::connect(("127.0.0.1", port)).expect("probe client should reconnect for cleanup");
 
     // 4. Bundle on disk confirms the auto-stop path actually ran.
     let bundle_dir = recording_root.join("bundle");

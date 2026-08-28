@@ -739,6 +739,9 @@ mod tests {
                 .flush()
                 .expect("server should flush handshake response");
 
+            // 读完整帧再收尾: 客户端 write_to 把 帧头/mask/负载 分三次
+            // write_all 发出, 只读 2 字节帧头就关 socket 会与后续 write 竞态,
+            // linux 调度下稳定 BrokenPipe (macOS 只是通常先落地, 属同一竞态)。
             let mut header = [0_u8; 2];
             stream
                 .read_exact(&mut header)
@@ -748,6 +751,13 @@ mod tests {
                 0,
                 "client -> server websocket frame must carry mask bit"
             );
+            // 短帧 (len <= 125): 低 7 位就是负载长度, "@ping" 必然走短帧。
+            let payload_len = usize::from(header[1] & 0x7F);
+            assert_eq!(payload_len, 5, "frame should carry the @ping payload");
+            let mut mask_and_payload = [0_u8; 4 + 5];
+            stream
+                .read_exact(&mut mask_and_payload)
+                .expect("server should read masking key and payload");
         });
 
         let mut client =

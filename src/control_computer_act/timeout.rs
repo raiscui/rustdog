@@ -203,7 +203,12 @@ mod tests {
         let token = CancellationToken::new();
         let watcher = TimeoutWatcher::start(50, token.clone());
         assert!(!watcher.fired());
-        std::thread::sleep(std::time::Duration::from_millis(80));
+        // 轮询等待置位: 固定 sleep 在负载 CI 上可能早于 watcher 线程调度
+        // (2026-08-28 macOS runner 实证), 一次性断言间歇性失败。
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !watcher.fired() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
         assert!(watcher.fired());
         // stop 回收 thread
         let fired = watcher.stop();

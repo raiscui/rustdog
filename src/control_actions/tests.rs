@@ -1226,8 +1226,8 @@ fn execute_open_app_emits_platform_unsupported_envelope_ignoring_mock() {
     };
 
     // 注入声称成功的 mock: 非 macOS 分支根本不会调用它
-    let result = execute_open_app(&request, &MockOpenAppSuccess)
-        .expect("executor itself should not error");
+    let result =
+        execute_open_app(&request, &MockOpenAppSuccess).expect("executor itself should not error");
 
     // platform_unsupported 属失败路径, exit_code 非 0
     assert_ne!(result.exit_code, 0);
