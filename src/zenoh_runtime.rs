@@ -15,7 +15,8 @@ pub use local_default::find_local_daemon_name;
 #[cfg(unix)]
 pub use local_default::register_local_default_daemon;
 pub use session::{
-    open_client_session, open_router_session, resolve_client_connect_endpoints, UnixpipeClientProbe,
+    open_client_session, open_router_session_with_users_file, resolve_client_connect_endpoints,
+    UnixpipeClientProbe,
 };
 pub use unixpipe::compose_listen_endpoints;
 #[cfg(unix)]

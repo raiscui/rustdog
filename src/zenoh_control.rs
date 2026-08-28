@@ -96,29 +96,35 @@ pub fn run_router_daemon(config: ZenohDaemonRuntimeConfig, shell: &str) -> io::R
     let member_id = crate::zenoh_identity::member_id_from_daemon_name(&config.daemon_name);
     // 先确认当前进程拥有 daemon identity,再执行任何会改写共享运行态的初始化。
     // 同名第二实例会在这里退出,无权删除第一实例正在使用的 FIFO。
-    // 认证凭证生命周期 (issue #81): daemon 启动即加载/生成 (~/.rdog/auth.toml,
-    // 0600)。enabled=false 是过渡开关, 响亮警告。凭证本体由 #82 接入 zenoh usrpwd。
-    {
+    // 认证凭证生命周期 + usrpwd 接线 (issue #81/#82):
+    // daemon 启动即加载/生成凭证 (~/.rdog/auth.toml, 0600), enabled 时派生
+    // users_file 并注入 router session (session 层认证, 覆盖全部 unicast transport)。
+    // enabled=false 是过渡开关, 响亮警告。
+    let auth_users_file: Option<std::path::PathBuf> = {
         let user_config_dir = crate::config::resolve_user_config_dir()
             .ok_or_else(|| io::Error::other("无法定位用户配置目录 (~/.rdog), 认证凭证无处安放"))?;
         match crate::auth_credentials::AuthCredentials::load_or_generate(&user_config_dir) {
             Ok(credentials) => {
                 if config.auth.enabled {
+                    let users_file = credentials.save_zenoh_users_file(&user_config_dir)?;
                     log::info!(
-                        "auth credentials ready: user={} (usrpwd 接线见 issue #82)",
-                        credentials.user
+                        "auth enabled (usrpwd): user={}, users_file={}",
+                        credentials.user,
+                        users_file.display()
                     );
+                    Some(users_file)
                 } else {
                     log::warn!(
                         "auth DISABLED by config — 任何能连到本 daemon 的主体都可下发任意控制, 仅限迁移期使用"
                     );
+                    None
                 }
             }
             Err(err) => {
                 return Err(io::Error::other(format!("认证凭证加载失败: {err}")));
             }
         }
-    }
+    };
 
     let _name_guard = acquire_daemon_name_guard(&config.namespace, &config.daemon_name)?;
     initialize_durable_observation_state(
@@ -163,7 +169,10 @@ pub fn run_router_daemon(config: ZenohDaemonRuntimeConfig, shell: &str) -> io::R
         None
     };
 
-    let session = zenoh_runtime::open_router_session(&config.listen_endpoints)?;
+    let session = zenoh_runtime::open_router_session_with_users_file(
+        &config.listen_endpoints,
+        auth_users_file.as_deref(),
+    )?;
     ensure_unique_daemon_name(
         &session,
         &config.namespace,

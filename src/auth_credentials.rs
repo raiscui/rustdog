@@ -70,9 +70,9 @@ impl AuthCredentials {
     fn generate_random() -> Self {
         use rand::RngCore;
         let mut user_suffix = [0u8; 4];
-        rand::thread_rng().fill_bytes(&mut user_suffix);
+        rand::rng().fill_bytes(&mut user_suffix);
         let mut password_bytes = [0u8; 32];
-        rand::thread_rng().fill_bytes(&mut password_bytes);
+        rand::rng().fill_bytes(&mut password_bytes);
         Self {
             user: format!("rdog-{}", hex(&user_suffix)),
             password: hex(&password_bytes),
@@ -116,14 +116,46 @@ impl AuthCredentials {
         }
     }
 
-    /// 派生 zenoh usrpwd 的 users_file 内容 (JSON: {"user":{"password":"..."}})。
+    /// 保存 zenoh users_file (daemon 侧, ~/.rdog/auth.users.json, 0600)。
+    pub fn save_zenoh_users_file(
+        &self,
+        user_config_dir: &std::path::Path,
+    ) -> io::Result<std::path::PathBuf> {
+        let path = user_config_dir.join("auth.users.json");
+        fs::write(&path, format!("{}:{}\n", self.user, self.password))?;
+        restrict_permissions(&path)?;
+        Ok(path)
+    }
+
+    /// client 侧惰性凭证加载: auth.toml 存在则读; env 成对则覆盖/替代。
     ///
-    /// #82 接线时 daemon 把它写到临时/缓存文件交给 zenoh config。
-    pub fn zenoh_users_file_content(&self) -> String {
-        format!(
-            "{{\"{}\":{{\"password\":\"{}\"}}}}",
-            self.user, self.password
-        )
+    /// 返回 None = 无凭证 (裸连; daemon 开认证时会被拒, 由调用方报错)。
+    pub fn load_client_credentials(user_config_dir: &std::path::Path) -> io::Result<Option<Self>> {
+        let path = user_config_dir.join(AUTH_CREDENTIALS_FILE);
+        let base = if path.exists() {
+            Some(Self::load_from_file(&path)?)
+        } else {
+            None
+        };
+        // env 覆盖语义: 成对 env 优先于一切; 半对 = 错误; 无 env 用文件 (无文件 = None)
+        let user = std::env::var("RDOG_AUTH_USER")
+            .ok()
+            .filter(|v| !v.trim().is_empty());
+        let password = std::env::var("RDOG_AUTH_PASSWORD")
+            .ok()
+            .filter(|v| !v.trim().is_empty());
+        match (user, password) {
+            (Some(user), Some(password)) => Ok(Some(Self { user, password })),
+            (None, None) => Ok(base),
+            (Some(_), None) => Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "RDOG_AUTH_USER 已设置但 RDOG_AUTH_PASSWORD 缺失: env 覆盖必须成对提供",
+            )),
+            (None, Some(_)) => Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "RDOG_AUTH_PASSWORD 已设置但 RDOG_AUTH_USER 缺失: env 覆盖必须成对提供",
+            )),
+        }
     }
 }
 
@@ -224,13 +256,16 @@ mod tests {
     }
 
     #[test]
-    fn zenoh_users_file_content_should_be_json() {
+    fn zenoh_users_file_should_be_colon_separated_text() {
+        // zenoh 1.8 dictionary 格式: user:password 每行一条 (非 JSON)
+        let dir = temp_dir("dict");
         let credentials = AuthCredentials {
             user: "rdog-ab".to_owned(),
             password: "secret".to_owned(),
         };
-        let content = credentials.zenoh_users_file_content();
-        let parsed: serde_json::Value = serde_json::from_str(&content).unwrap();
-        assert_eq!(parsed["rdog-ab"]["password"], "secret");
+        let path = credentials.save_zenoh_users_file(&dir).unwrap();
+        let content = fs::read_to_string(&path).unwrap();
+        assert_eq!(content, "rdog-ab:secret\n");
+        let _ = fs::remove_dir_all(&dir);
     }
 }
