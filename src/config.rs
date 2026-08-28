@@ -40,11 +40,28 @@ const LINUX_EXAMPLE_CONFIG_TEMPLATE: &str = include_str!("../rdog_linux.toml");
 pub struct DaemonConfig {
     pub daemon: DaemonSettings,
     pub key: KeyConfig,
+    pub auth: AuthConfig,
     pub observation: ObservationConfig,
     pub hidden: HiddenResidentConfig,
     pub outbound: OutboundConfig,
     pub inbound: InboundConfig,
     pub zenoh: ZenohConfig,
+}
+
+/// 认证配置 (issue #81, spec: specs/rdog-authentication-plan.md)。
+///
+/// `enabled = false` 是显式过渡开关: 启动时打 WARNING, 只服务于迁移期,
+/// 不是长期形态 (安全默认是开启)。
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct AuthConfig {
+    pub enabled: bool,
+}
+
+impl Default for AuthConfig {
+    fn default() -> Self {
+        Self { enabled: true }
+    }
 }
 
 /// `@key` 命令的送达后端配置。

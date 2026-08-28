@@ -80,6 +80,8 @@ pub struct ZenohDaemonRuntimeConfig {
     pub observation: ObservationConfig,
     /// `@key` 的送达后端 (2026-08-03 wayfinder #37)。
     pub key_delivery_backend: crate::config::KeyDeliveryBackend,
+    /// 认证开关 (issue #81): 凭证生命周期挂接用。
+    pub auth: crate::config::AuthConfig,
     #[cfg(unix)]
     pub unixpipe_startup: Option<ZenohUnixpipeStartupConfig>,
 }
@@ -94,6 +96,30 @@ pub fn run_router_daemon(config: ZenohDaemonRuntimeConfig, shell: &str) -> io::R
     let member_id = crate::zenoh_identity::member_id_from_daemon_name(&config.daemon_name);
     // 先确认当前进程拥有 daemon identity,再执行任何会改写共享运行态的初始化。
     // 同名第二实例会在这里退出,无权删除第一实例正在使用的 FIFO。
+    // 认证凭证生命周期 (issue #81): daemon 启动即加载/生成 (~/.rdog/auth.toml,
+    // 0600)。enabled=false 是过渡开关, 响亮警告。凭证本体由 #82 接入 zenoh usrpwd。
+    {
+        let user_config_dir = crate::config::resolve_user_config_dir()
+            .ok_or_else(|| io::Error::other("无法定位用户配置目录 (~/.rdog), 认证凭证无处安放"))?;
+        match crate::auth_credentials::AuthCredentials::load_or_generate(&user_config_dir) {
+            Ok(credentials) => {
+                if config.auth.enabled {
+                    log::info!(
+                        "auth credentials ready: user={} (usrpwd 接线见 issue #82)",
+                        credentials.user
+                    );
+                } else {
+                    log::warn!(
+                        "auth DISABLED by config — 任何能连到本 daemon 的主体都可下发任意控制, 仅限迁移期使用"
+                    );
+                }
+            }
+            Err(err) => {
+                return Err(io::Error::other(format!("认证凭证加载失败: {err}")));
+            }
+        }
+    }
+
     let _name_guard = acquire_daemon_name_guard(&config.namespace, &config.daemon_name)?;
     initialize_durable_observation_state(
         &config.observation,
