@@ -1148,3 +1148,57 @@ feature/control-ax-split 分支: ax_input + ax_action + ax_query 三模块落地
 
 **Phase 1 (PR #63) + Phase 2 (PR #69, stacked) 完成。
 Phase 3 (伴生 agent) 需先完整 to-spec (A2A 支线 channel 设计收拢)。**
+
+## [2026-08-28 21:30:00] [Session ID: current] CI 修复战役收官 -- 双平台历史首次全绿
+
+### 最终结果
+- run 33151443006: ubuntu ✓ + macOS ✓ -- 仓库 CI 历史 (25+ 可溯运行) 上首次全绿
+- PR #62 (e1f61dc, 并行会话抢合并) + PR #70 (435be72, 测试稳定性 5 连发) 均已合并
+- main 历史性转绿
+
+### 完整根因清单 (每层独立实证)
+1. ubuntu Build 断: wayland-sys 0.31.11 build.rs 无条件 pkg-config + workflow 从未装
+   系统依赖 (上游 xcap README 清单 + libgbm/libdrm 链接层)
+2. linux 编译错: cfg 分支从未在开发机编译 (缺 import)
+3. flow 超时失效: procps kill -TERM -pgid 负 pid 被吞成选项 (kill -0 -PGID 容器实证),
+   改 libc::kill(2) 直发; macOS BSD kill 无此歧义 -- 跨平台坑
+4. websocket EPIPE: write_to 三连 write_all vs 服务线程只读 2 字节帧头就关 socket
+5. macOS flake 家族 (全部轮询化/裕量化): recording handler x3, e2e 探测 x1 + 首轮就绪
+   竞态 (@ping 探活门), timeout_watcher, screenshot 计时 x4 (10ms/50ms 是测试自造的
+   饥饿敏感点) + gate 释放轮询
+
+### 方法论沉淀
+- 层层剥洋葱: 修一层 CI 暴露下一层 (deps -> 编译 -> 链接 -> 单测 -> e2e), 每层独立验证
+- 本地 linux 容器 (OrbStack + rust:1-bookworm + 同款 apt 清单) 是 CI 问题的可调试复现场,
+  探针 + /proc 观测 + 隔离 shell 实验三件套定位了 kill 二进制方言问题
+- "固定 sleep 等线程置位" 在负载 CI 上是结构性错误, 统一改带期限轮询 (幂等观测点)
+- 端口监听 != 控制面就绪: spawn 测试加 @ping 探活门
+
+### 协作记录
+- 并行 task-spawn 会话全程在同一仓库工作: 曾误提交到本修复分支 (自行清理),
+  同步修复了同一批问题 (e1f61dc 与我的 c2060e9 功能等价, 采纳其版),
+  并抢先合并了 PR #62; 剩余 4 提交由我以 PR #70 补齐合并
+- 我的 29d49e5 曾误夹带其工作区 WIP (git add 整文件), 重建干净提交修复;
+  教训: 共享工作目录提交前必须核对暂存 diff 只含自己的改动
+
+## [2026-08-28 16:20:00] [Session ID: current] Phase 3 to-spec 完成 (issue #71)
+
+### 完成内容
+
+- [x] to-spec: 五轮 A2A 调研 + Phase 1/2 实施经验综合成 Phase 3 正式 spec
+- [x] 发布 issue #71 (enhancement + ready-for-agent), 14 条 user story
+- [x] specs/rdog-agent-messaging-plan.md 镜像落盘, AGENTS.md 索引登记
+- [x] task-spawn spec §7 指向新 spec (阶段索引化)
+
+### spec 核心决策 (收拢支线散落设计)
+
+- keyexpr: rdog/<ns>/agent/<name>/{inbox,card,alive}, 对齐 daemon 身份层级
+- mailbox: daemon 侧 per-agent 有界缓存(256), ack 清除, 不持久化
+- rdog.agentmsg.v1 envelope: {id, from, to, kind, payload, sent_at}
+- rdog agent CLI: --name + 复用/带起 daemon; 决策回调 trait 是唯一智能注入点
+- 测试 seam: 复用 e2e 子进程模式(不新建), loop 决策回调 mock 为第二 seam
+- 分工红线: daemon 确定性(存储/路由/托管), agent 智能(消化/规划/卡片内容)
+
+### 状态
+
+**Phase 3 spec 就绪待实施。Phase 1(PR #63)/Phase 2(PR #69)待 review merge。**
