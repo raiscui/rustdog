@@ -894,26 +894,3 @@ zenoh router down / unixpipe broken / zenoh timeout 等场景.
 - (已完成并移除) observe_current_ax_values_with / collect_ax_values_by_role
   纯遍历部分已作为 collect_ax_role_values 收进 ax_query
 
-
-## [2026-08-28 16:00:00] [Session ID: current] macos CI screenshot 4 测试连锁 flake (锁毒化) 待修
-
-- 现象: CI macos 每轮稳定挂 4 个 screenshot::tests (main 同款存量):
-  bounded_capture_should_timeout_once_and_keep_worker_count_bounded +
-  3 个 capture_fallback/permission trace 测试
-- 机制: bounded_capture 的 10ms 计时窗口在慢速 CI runner 上先炸, panic 时
-  持有 TIMEOUT_TRACE_TEST_LOCK 导致锁毒化, 其余 3 个 capture_trace 测试
-  在 lock().expect("...not be poisoned") 处连锁挂; 本地快机不炸
-- 修复方向 (二选一或组合):
-  1. 计时窗口自适应/放大 (10ms/50ms/75ms 在 CI 上太紧)
-  2. 锁毒化恢复 (unwrap_or_else(|e| e.into_inner())) 止住连锁
-- 注意: 属 screenshot capture timeout 域 (2026-08-05 native capture tracing
-  支线的后续), 修前先读该支线归档与 src/screenshot/tests.rs 上下文
-
-## [2026-08-28 16:20:00] [Session ID: current] process_lease metadata_publish_failure 跨平台 flake 待观察
-
-- 现象: `metadata_publish_failure_should_not_leave_self_blocking_legacy_pid`
-  在 macos (PR #62 94be124 轮, PR #63 ab4aceb 轮) 和 ubuntu (PR #63 0496199 轮)
-  都挂过, 重跑即过; 错误 "process lease已被活跃owner持有" (文件锁时序)
-- 与 screenshot 锁毒化族并列的第二个抽签 flake 族; 若再出现 3+ 次考虑
-  与 screenshot 一起修 (读 docs/solutions/best-practices/
-  parallel-test-global-state-single-lock.md 的适用性)
