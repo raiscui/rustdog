@@ -784,6 +784,30 @@ fn summarize_control_frames(frames: &[control_frames::ControlFrame]) -> Vec<serd
                 "kind": "response",
                 "line": line,
             }),
+            control_frames::ControlFrame::TaskStarted(frame) => serde_json::json!({
+                "kind": "task-started",
+                "task": frame.task_id,
+                "seq": frame.seq,
+            }),
+            control_frames::ControlFrame::TaskProgress(frame) => serde_json::json!({
+                "kind": "task-progress",
+                "task": frame.task_id,
+                "seq": frame.seq,
+                "step": frame.step,
+            }),
+            control_frames::ControlFrame::TaskCompleted(frame) => serde_json::json!({
+                "kind": "task-completed",
+                "task": frame.task_id,
+                "seq": frame.seq,
+                "exit_code": frame.exit_code,
+            }),
+            control_frames::ControlFrame::TaskFailed(frame) => serde_json::json!({
+                "kind": "task-failed",
+                "task": frame.task_id,
+                "seq": frame.seq,
+                "exit_code": frame.exit_code,
+                "canceled": frame.canceled,
+            }),
             control_frames::ControlFrame::SaveFile(frame) => serde_json::json!({
                 "kind": "savefile",
                 "filename": frame.filename,

@@ -29,6 +29,12 @@ pub enum ControlFrame {
     PtyClosed(PtyClosedFrame),
     PtyDetached(PtyDetachedFrame),
     PtyAttached(PtyAttachedFrame),
+    /// Task/Spawn Phase 2 进度帧族 (specs/rdog-task-spawn-control-plan.md §6.3)。
+    /// 状态事件不是输出流; @spawn 任务不发 progress (无语义事件)。
+    TaskStarted(TaskStartedFrame),
+    TaskProgress(TaskProgressFrame),
+    TaskCompleted(TaskCompletedFrame),
+    TaskFailed(TaskFailedFrame),
 }
 
 /// `@savefile` frame 的最小稳定载荷。
@@ -45,6 +51,40 @@ pub struct SaveFileFrame {
     pub quality: Option<u8>,
     pub width: Option<u32>,
     pub height: Option<u32>,
+}
+
+/// `@task-started`: 任务进入 running。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskStartedFrame {
+    pub task_id: String,
+    pub seq: u64,
+    pub command: String,
+}
+
+/// `@task-progress`: 任务源主动汇报的步骤事件 (仅 @flow async / 伴生 agent)。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskProgressFrame {
+    pub task_id: String,
+    pub seq: u64,
+    pub step: String,
+    pub detail: Option<String>,
+}
+
+/// `@task-completed`: 自然成功终态 (exit_code == 0)。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskCompletedFrame {
+    pub task_id: String,
+    pub seq: u64,
+    pub exit_code: i32,
+}
+
+/// `@task-failed`: 非自然终态 (非零退出码); 取消复用本帧 + canceled:true。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskFailedFrame {
+    pub task_id: String,
+    pub seq: u64,
+    pub exit_code: i32,
+    pub canceled: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -244,6 +284,10 @@ impl ControlFrame {
             Self::PtyClosed(frame) => frame.to_wire_message(),
             Self::PtyDetached(frame) => frame.to_wire_message(),
             Self::PtyAttached(frame) => frame.to_wire_message(),
+            Self::TaskStarted(frame) => frame.to_wire_message(),
+            Self::TaskProgress(frame) => frame.to_wire_message(),
+            Self::TaskCompleted(frame) => frame.to_wire_message(),
+            Self::TaskFailed(frame) => frame.to_wire_message(),
         }
     }
 
@@ -329,6 +373,60 @@ impl ControlFrame {
         }
 
         Ok(frames)
+    }
+}
+
+impl TaskStartedFrame {
+    pub fn to_wire_message(&self) -> String {
+        format!(
+            "@task-started {{\"task\":\"{}\",\"seq\":{},\"command\":\"{}\"}}",
+            escape_json_string(&self.task_id),
+            self.seq,
+            escape_json_string(&self.command),
+        )
+    }
+}
+
+impl TaskProgressFrame {
+    pub fn to_wire_message(&self) -> String {
+        match &self.detail {
+            Some(detail) => format!(
+                "@task-progress {{\"task\":\"{}\",\"seq\":{},\"step\":\"{}\",\"detail\":\"{}\"}}",
+                escape_json_string(&self.task_id),
+                self.seq,
+                escape_json_string(&self.step),
+                escape_json_string(detail),
+            ),
+            None => format!(
+                "@task-progress {{\"task\":\"{}\",\"seq\":{},\"step\":\"{}\"}}",
+                escape_json_string(&self.task_id),
+                self.seq,
+                escape_json_string(&self.step),
+            ),
+        }
+    }
+}
+
+impl TaskCompletedFrame {
+    pub fn to_wire_message(&self) -> String {
+        format!(
+            "@task-completed {{\"task\":\"{}\",\"seq\":{},\"exit_code\":{}}}",
+            escape_json_string(&self.task_id),
+            self.seq,
+            self.exit_code,
+        )
+    }
+}
+
+impl TaskFailedFrame {
+    pub fn to_wire_message(&self) -> String {
+        format!(
+            "@task-failed {{\"task\":\"{}\",\"seq\":{},\"exit_code\":{},\"canceled\":{}}}",
+            escape_json_string(&self.task_id),
+            self.seq,
+            self.exit_code,
+            self.canceled,
+        )
     }
 }
 
@@ -1373,5 +1471,74 @@ mod tests {
         assert_eq!(fs::read(&saved).expect("renamed file should exist"), b"NEW");
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Task/Spawn Phase 2 四帧 wire 格式逐字段验收 (spec §6.3)。
+    #[test]
+    fn task_frames_wire_format_should_match_spec() {
+        let started = ControlFrame::TaskStarted(TaskStartedFrame {
+            task_id: "t-a1b2c3d4".to_owned(),
+            seq: 7,
+            command: "cargo build --release".to_owned(),
+        });
+        assert_eq!(
+            started.to_wire_message(),
+            "@task-started {\"task\":\"t-a1b2c3d4\",\"seq\":7,\"command\":\"cargo build --release\"}"
+        );
+
+        let progress_no_detail = ControlFrame::TaskProgress(TaskProgressFrame {
+            task_id: "t-a1b2c3d4".to_owned(),
+            seq: 9,
+            step: "build".to_owned(),
+            detail: None,
+        });
+        assert_eq!(
+            progress_no_detail.to_wire_message(),
+            "@task-progress {\"task\":\"t-a1b2c3d4\",\"seq\":9,\"step\":\"build\"}"
+        );
+
+        let progress_with_detail = ControlFrame::TaskProgress(TaskProgressFrame {
+            task_id: "t-a1b2c3d4".to_owned(),
+            seq: 9,
+            step: "build".to_owned(),
+            detail: Some("42/120 crates".to_owned()),
+        });
+        assert_eq!(
+            progress_with_detail.to_wire_message(),
+            "@task-progress {\"task\":\"t-a1b2c3d4\",\"seq\":9,\"step\":\"build\",\"detail\":\"42/120 crates\"}"
+        );
+
+        let completed = ControlFrame::TaskCompleted(TaskCompletedFrame {
+            task_id: "t-a1b2c3d4".to_owned(),
+            seq: 10,
+            exit_code: 0,
+        });
+        assert_eq!(
+            completed.to_wire_message(),
+            "@task-completed {\"task\":\"t-a1b2c3d4\",\"seq\":10,\"exit_code\":0}"
+        );
+
+        // canceled 终态复用 @task-failed + canceled:true (spec §6.3, 不设独立帧)
+        let canceled = ControlFrame::TaskFailed(TaskFailedFrame {
+            task_id: "t-a1b2c3d4".to_owned(),
+            seq: 10,
+            exit_code: -1,
+            canceled: true,
+        });
+        assert_eq!(
+            canceled.to_wire_message(),
+            "@task-failed {\"task\":\"t-a1b2c3d4\",\"seq\":10,\"exit_code\":-1,\"canceled\":true}"
+        );
+
+        let failed = ControlFrame::TaskFailed(TaskFailedFrame {
+            task_id: "t-a1b2c3d4".to_owned(),
+            seq: 10,
+            exit_code: 2,
+            canceled: false,
+        });
+        assert_eq!(
+            failed.to_wire_message(),
+            "@task-failed {\"task\":\"t-a1b2c3d4\",\"seq\":10,\"exit_code\":2,\"canceled\":false}"
+        );
     }
 }

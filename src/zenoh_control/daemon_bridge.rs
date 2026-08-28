@@ -366,6 +366,10 @@ fn describe_pty_bridge_frame(frame: &ControlFrame) -> (&'static str, usize) {
         ControlFrame::PtyAttached(_) => ("pty-attached", 0),
         ControlFrame::ResponseLine(line) => ("response-line", line.len()),
         ControlFrame::SaveFile(frame) => ("savefile", frame.data.len()),
+        ControlFrame::TaskStarted(_) => ("task-started", 0),
+        ControlFrame::TaskProgress(frame) => ("task-progress", frame.step.len()),
+        ControlFrame::TaskCompleted(_) => ("task-completed", 0),
+        ControlFrame::TaskFailed(_) => ("task-failed", 0),
     }
 }
 

@@ -500,6 +500,15 @@ fn collect_control_exchange_from_frames(
                     "UI script line-control response 收到了意外 PTY frame",
                 ));
             }
+            control_frames::ControlFrame::TaskStarted(_)
+            | control_frames::ControlFrame::TaskProgress(_)
+            | control_frames::ControlFrame::TaskCompleted(_)
+            | control_frames::ControlFrame::TaskFailed(_) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "UI script line-control response 收到了意外 task 进度帧",
+                ));
+            }
         }
     }
 

@@ -1289,6 +1289,12 @@ impl FlowRuntimeState {
                 | ControlFrame::PtyAttached(_) => {
                     return Err("ControlLine v1 不支持 PTY outbound frame".to_owned())
                 }
+                ControlFrame::TaskStarted(_)
+                | ControlFrame::TaskProgress(_)
+                | ControlFrame::TaskCompleted(_)
+                | ControlFrame::TaskFailed(_) => {
+                    return Err("ControlLine v1 不支持 task 进度帧".to_owned())
+                }
             }
         }
         Ok(())
