@@ -1219,3 +1219,18 @@ Phase 3 (伴生 agent) 需先完整 to-spec (A2A 支线 channel 设计收拢)。
 
 **Phase 3 票就绪, #72 是 frontier。实施前置 = PR #63/#69 review merge
 (或用户指示 stacked 继续)。认证层仍是独立并行项待排期。**
+
+## [2026-08-28 17:45:00] [Session ID: current] 路径 1 执行: PR 整备与 CI 判定
+
+### 完成内容
+
+- [x] 发现 PR #63 已由用户 merge (05:59), main 还并入了 PR #70 (fix/ci + flake 修复)
+- [x] PR #69 base 切到 main + rebase (仅 WORKLOG append 冲突, 保留两边) + force push
+- [x] PR #69 CI: ubuntu 绿; macos 挂 recording_manual_cancel (重跑不翻)
+- [x] 判定: 与 Phase 2 零接触, main 本身 3 连红同族 — main 存量问题非 PR 回归
+- [x] 记忆更新 (rustdog-ci-red-state: recording 族从抽签恶化稳定红) + EPIPHANY 记录
+
+### 状态
+
+**PR #69 ready 待 merge (CI 红为 main 存量, 证据链完整)。
+merge 前建议先修 main 的 recording 稳定红 (诊断日志入口已记录在 EPIPHANY)。**
