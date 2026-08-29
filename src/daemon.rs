@@ -124,6 +124,7 @@ pub fn run_zenoh_router(
             observation: config.observation,
             key_delivery_backend: config.key.delivery_backend,
             auth: config.auth,
+            tls: config.tls,
             #[cfg(unix)]
             unixpipe_startup,
         },

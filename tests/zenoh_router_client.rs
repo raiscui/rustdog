@@ -3107,3 +3107,145 @@ fn auth_wrong_credentials_should_be_rejected_by_daemon() {
         "错误凭证不应收到 pong\nstdout:\n{stdout}\nstderr:\n{stderr}"
     );
 }
+
+// ============================================================================
+// tls e2e (issue #88/#89, spec: specs/rdog-tls-plan.md):
+// [tls] enabled daemon (tcp->tls + 材料注入) + CA client 连通 + 错 CA 拒绝
+// ============================================================================
+
+fn write_temp_zenoh_tls_config(daemon_name: &str, listen_port: u16) -> std::path::PathBuf {
+    let path = std::env::temp_dir().join(format!(
+        "rdog-zenoh-tls-{}-{}.toml",
+        std::process::id(),
+        listen_port
+    ));
+    std::fs::write(
+        &path,
+        format!(
+            r#"[observation]
+durable_enabled = false
+
+[zenoh]
+enabled = true
+mode = "router"
+namespace = "lab"
+daemon_name = "{daemon_name}"
+listen_endpoints = ["tcp/127.0.0.1:{listen_port}"]
+
+[tls]
+enabled = true
+"#
+        ),
+    )
+    .expect("tls config should write");
+    path
+}
+
+#[test]
+fn tls_enabled_daemon_should_serve_ca_client_and_reject_wrong_ca() {
+    // 前置: 本机 TLS 材料 (幂等; CI 干净环境自动生成)
+    let user_dir = dirs_home_rdkg().expect("home should resolve");
+    assert!(
+        std::process::Command::new(rdog_binary_path())
+            .args(["auth", "tls-init"])
+            .status()
+            .expect("tls-init should run")
+            .success(),
+        "rdog auth tls-init 应成功"
+    );
+
+    let daemon_name = unique_name("tls-e2e");
+    let listen_port = next_port();
+    let config_path = write_temp_zenoh_tls_config(&daemon_name, listen_port);
+    let entrypoint = format!("tls/127.0.0.1:{listen_port}");
+    let _ = user_dir;
+
+    let mut daemon = Command::new(rdog_binary_path())
+        .args(["daemon", "-c", config_path.to_str().unwrap()])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("tls daemon should start");
+    let daemon_out = daemon.stdout.take().expect("daemon stdout");
+    let daemon_err = daemon.stderr.take().expect("daemon stderr");
+    let buffer = Arc::new(Mutex::new(String::new()));
+    let _ = spawn_output_collector_to(daemon_out, Arc::clone(&buffer));
+    let _ = spawn_output_collector_to(daemon_err, Arc::clone(&buffer));
+    wait_until_output_contains(&mut daemon, &buffer, "tls enabled", Duration::from_secs(8))
+        .expect("daemon should report tls enabled");
+    wait_until_output_contains(
+        &mut daemon,
+        &buffer,
+        "zenoh router daemon ready",
+        Duration::from_secs(8),
+    )
+    .expect("daemon should be ready");
+
+    // 场景 1: 正确材料 client (usrpwd + TLS 双层) 连通
+    let (status, stdout, stderr) = run_control_multi_one_shot(
+        &[
+            "--transport",
+            "zenoh",
+            "--target-name",
+            &daemon_name,
+            "--entry-point",
+            &entrypoint,
+            "--namespace",
+            "lab",
+        ],
+        &["@ping#901"],
+        Duration::from_secs(20),
+    );
+    assert!(
+        status.success() && stdout.contains(r#""value":"pong""#),
+        "CA client 应经 tls 连通\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+
+    // 场景 2: 错 CA (HOME 指向独立材料目录) — TLS 握手层拒绝 (BadSignature)
+    let fake_home = std::env::temp_dir().join(format!("rdog-tls-fakehome-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&fake_home);
+    std::fs::create_dir_all(fake_home.join(".rdog")).unwrap();
+    assert!(
+        std::process::Command::new(rdog_binary_path())
+            .env("HOME", &fake_home)
+            .args(["auth", "tls-init"])
+            .status()
+            .expect("fake tls-init should run")
+            .success(),
+        "fake HOME 的独立 CA 应生成"
+    );
+    let wrong = Command::new(rdog_binary_path())
+        .env("HOME", &fake_home)
+        .args([
+            "control",
+            "--transport",
+            "zenoh",
+            "--target-name",
+            &daemon_name,
+            "--entry-point",
+            &entrypoint,
+            "--namespace",
+            "lab",
+            "@ping#902",
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .expect("wrong-CA control should run");
+    let wrong_stdout = String::from_utf8_lossy(&wrong.stdout);
+    assert!(
+        !wrong_stdout.contains("pong"),
+        "错 CA 不应收到 pong\nstdout:\n{wrong_stdout}"
+    );
+
+    stop_child(&mut daemon);
+    let _ = std::fs::remove_file(&config_path);
+    let _ = std::fs::remove_dir_all(&fake_home);
+}
+
+/// 测试辅助: home 目录 (仅用于 tls-init 前置的存在性说明)。
+fn dirs_home_rdkg() -> Option<std::path::PathBuf> {
+    std::env::var("HOME").ok().map(std::path::PathBuf::from)
+}

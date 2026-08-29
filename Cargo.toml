@@ -35,7 +35,7 @@ sha2 = "0.10.9"
 url = "2.5.8"
 uuid = { version = "1.18.1", features = ["v4"] }
 xcap = "0.9.4"
-zenoh = { version = "1.8.0", default-features = false, features = ["transport_serial", "transport_tcp", "transport_udp", "transport_unixpipe", "auth_usrpwd"] }
+zenoh = { version = "1.8.0", default-features = false, features = ["transport_serial", "transport_tcp", "transport_udp", "transport_unixpipe", "auth_usrpwd", "transport_tls"] }
 
 [dev-dependencies]
 # agent mailbox e2e: 测试进程直接 zenoh pub 投递 inbox 消息
