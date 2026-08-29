@@ -148,6 +148,11 @@ Issues 和 Wayfinder maps 使用 GitHub Issues。详见 `docs/agents/issue-track
   - 用途: 固定 `@spawn` / `@task-status` / `@task-output` / `@task-cancel` 四原语、Task registry 确定性状态机、进度帧走 session channel、伴生 agent(`rdog agent`)托管与 A2A 语义层衔接边界
   - 何时阅读: 实现或评审后台任务/任务生命周期/`@flow` async 升级/伴生 agent 托管,或分析"长命令阻塞同 session"问题前
 
+- `specs/rdog-tls-plan.md`
+  - 主题: 认证层 Phase B - TLS 机密性 (tcp transport, 镜像 issue #85)
+  - 用途: 固定证书布局 (~/.rdog/tls/)、rdog auth tls-init 生成策略、endpoint tcp->tls 切换、mTLS 叠加语义
+  - 何时阅读: 实施或评审 TLS 加密、证书分发、mTLS, 或排查 tls/ 连接问题前
+
 - `specs/rdog-authentication-plan.md`
   - 主题: 认证层 (usrpwd session 认证先行 + TLS 机密性后置, 镜像 issue #79)
   - 用途: 固定零配置本机安全的凭证生成策略 (~/.rdog/auth.toml)、env 覆盖、过渡开关、e2e 凭证注入契约

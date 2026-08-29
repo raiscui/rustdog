@@ -1354,3 +1354,18 @@ Phase 4 (A2A 语义层) 等真实使用反馈。**
 
 **认证层 Phase A 完成 (PR 待 review)。Phase B (TLS) 独立 spec 后置。
 Phase 4 (A2A 语义层) 等真实使用反馈。**
+
+## [2026-08-29 12:00:00] [Session ID: current] 认证层 Phase A merge + Phase B to-spec (issue #85)
+
+### 完成内容
+
+- [x] PR #84 merge (c5bb975): 认证层 Phase A 入 main
+- [x] Phase B TLS 调研: zenoh TLS 配置键/mTLS 双套证书/tls endpoint/
+      自建 CA (minica 或 rcgen)/close_link_on_expiration
+- [x] to-spec issue #85: 8 user stories; 叠加不替代 Phase A;
+      rdog auth tls-init (rcgen) 延续零配置哲学
+- [x] specs/rdog-tls-plan.md 镜像 + AGENTS.md 索引
+
+### 状态
+
+**Phase A 入 main。Phase B spec #85 就绪 (票未拆)。**
