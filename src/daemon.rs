@@ -123,6 +123,7 @@ pub fn run_zenoh_router(
             key_input_events: config.zenoh.key_input_events,
             observation: config.observation,
             key_delivery_backend: config.key.delivery_backend,
+            auth: config.auth,
             #[cfg(unix)]
             unixpipe_startup,
         },

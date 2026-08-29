@@ -621,6 +621,62 @@ fn empty_target_should_use_local_default_even_when_extra_fifo_candidate_exists()
 }
 
 #[test]
+/// 认证验收 (issue #83): local-default 零配置场景 — daemon 默认开启 usrpwd
+/// (日志可见 auth enabled), `rdog control self` 无任何凭证参数即通过
+/// (client 与 daemon 同用户共享 ~/.rdog/auth.toml, 自动配对)。
+fn self_target_should_pass_authentication_with_zero_config() {
+    let ns = format!("authz{}", next_port());
+    cleanup_namespace_artifacts(&ns);
+    let state_home = TestStateHome::new("authzero");
+
+    let daemon_name = format!("d{}.{ns}", next_port());
+    let base_path = derive_unixpipe_base_path(&ns, &daemon_name);
+    cleanup_unixpipe_artifacts(&base_path);
+
+    let daemon = start_zenoh_daemon_with_namespace_and_local_default(
+        &daemon_name,
+        &ns,
+        next_port(),
+        true,
+        true,
+        state_home.path(),
+        None,
+    );
+
+    // daemon 必须报告认证开启 (默认 [auth] enabled=true)
+    wait_for_marker(
+        daemon.output(),
+        "auth enabled (usrpwd)",
+        Duration::from_secs(8),
+    )
+    .expect("daemon should report auth enabled");
+    wait_for_marker(
+        daemon.output(),
+        "zenoh router daemon ready",
+        Duration::from_secs(8),
+    )
+    .expect("daemon should be ready");
+
+    let uplink_path = format!("{}_uplink", base_path.display());
+    assert!(
+        wait_for_fifo(std::path::Path::new(&uplink_path), Duration::from_secs(2)),
+        "expected {uplink_path} to be created"
+    );
+
+    let (status, stdout, stderr) =
+        run_control_with_args_and_env(&["self", "--namespace", &ns], Some(state_home.path()));
+
+    drop(daemon);
+    cleanup_unixpipe_artifacts(&base_path);
+
+    assert!(
+        status.success(),
+        "local-default self 在认证开启下应零配置成功,stdout={stdout},stderr={stderr}"
+    );
+    assert!(stdout.contains("pong"), "@ping 应返回 pong,stdout={stdout}");
+}
+
+#[test]
 fn self_target_should_use_local_default_even_when_extra_fifo_candidate_exists() {
     let ns = format!("lds{}", next_port());
     cleanup_namespace_artifacts(&ns);

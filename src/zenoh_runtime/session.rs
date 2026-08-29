@@ -12,12 +12,32 @@ use zenoh::{config::WhatAmI, scouting::Hello, Config, Session, Wait};
 #[cfg(unix)]
 use super::unixpipe::{unixpipe_base_path_alive, unixpipe_locator, unixpipe_socket_path};
 
-pub fn open_router_session(listen_endpoints: &[String]) -> io::Result<Session> {
-    open_session("router", &[], listen_endpoints)
+pub fn open_client_session(connect_endpoints: &[String]) -> io::Result<Session> {
+    // 惰性凭证 (issue #82): auth.toml / 成对 env 有就带。usrpwd 是协商式
+    // 扩展, daemon 未启用验证时忽略 — 客户端无需感知对端开关。
+    let credentials = client_credentials_cached();
+    open_session_auth("client", connect_endpoints, &[], credentials.as_ref(), None)
 }
 
-pub fn open_client_session(connect_endpoints: &[String]) -> io::Result<Session> {
-    open_session("client", connect_endpoints, &[])
+/// 进程级缓存一次的 client 凭证 (None = 无凭证裸连)。
+fn client_credentials_cached() -> Option<crate::auth_credentials::AuthCredentials> {
+    use std::sync::OnceLock;
+    static CREDENTIALS: OnceLock<Option<crate::auth_credentials::AuthCredentials>> =
+        OnceLock::new();
+    CREDENTIALS
+        .get_or_init(|| {
+            let dir = crate::config::resolve_user_config_dir()?;
+            crate::auth_credentials::AuthCredentials::load_client_credentials(&dir).ok()?
+        })
+        .clone()
+}
+
+/// daemon 侧 router session: 注入 usrpwd users_file。
+pub fn open_router_session_with_users_file(
+    listen_endpoints: &[String],
+    users_file: Option<&std::path::Path>,
+) -> io::Result<Session> {
+    open_session_auth("router", &[], listen_endpoints, None, users_file)
 }
 
 pub fn resolve_client_connect_endpoints(
@@ -78,15 +98,44 @@ impl<'a> UnixpipeClientProbe<'a> {
     }
 }
 
-fn open_session(
+/// 带认证的 session 打开 (issue #82)。
+///
+/// client 凭证注入 user/password; daemon 侧注入 users_file (usrpwd)。
+fn open_session_auth(
     mode: &str,
     connect_endpoints: &[String],
     listen_endpoints: &[String],
+    client_credentials: Option<&crate::auth_credentials::AuthCredentials>,
+    users_file: Option<&std::path::Path>,
 ) -> io::Result<Session> {
     let mut config = Config::default();
     config
         .insert_json5("mode", &format!("\"{mode}\""))
         .map_err(to_io_error)?;
+
+    if let Some(credentials) = client_credentials {
+        config
+            .insert_json5(
+                "transport/auth/usrpwd/user",
+                &format!("\"{}\"", credentials.user),
+            )
+            .map_err(to_io_error)?;
+        config
+            .insert_json5(
+                "transport/auth/usrpwd/password",
+                &format!("\"{}\"", credentials.password),
+            )
+            .map_err(to_io_error)?;
+    }
+    if let Some(users_file) = users_file {
+        config
+            .insert_json5(
+                // zenoh 1.8 键名是 dictionary_file (旧文档的 users_file 已改名)
+                "transport/auth/usrpwd/dictionary_file",
+                &format!("\"{}\"", users_file.display()),
+            )
+            .map_err(to_io_error)?;
+    }
 
     if !connect_endpoints.is_empty() {
         let value = json_string_list(connect_endpoints);

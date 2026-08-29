@@ -23,6 +23,51 @@ fn next_port() -> u16 {
         .port()
 }
 
+/// 认证的测试 zenoh session (issue #82): 读 ~/.rdog/auth.toml 注入 usrpwd
+/// 凭证 — daemon 默认开启认证, 裸 session 的 pub 会被拒。
+fn open_authenticated_test_session(entrypoint: &str) -> zenoh::Session {
+    let mut config = zenoh::Config::default();
+    config
+        .insert_json5("connect/endpoints", &format!("[\"{entrypoint}\"]"))
+        .expect("zenoh config connect");
+    if let Some((user, password)) = test_zenoh_credentials() {
+        config
+            .insert_json5("transport/auth/usrpwd/user", &format!("\"{user}\""))
+            .expect("auth user");
+        config
+            .insert_json5("transport/auth/usrpwd/password", &format!("\"{password}\""))
+            .expect("auth password");
+    }
+    zenoh::open(config)
+        .wait()
+        .expect("authenticated test session")
+}
+
+/// 测试进程的凭证: RDOG_AUTH env 成对或 ~/.rdog/auth.toml。
+fn test_zenoh_credentials() -> Option<(String, String)> {
+    if let (Ok(user), Ok(password)) = (
+        std::env::var("RDOG_AUTH_USER"),
+        std::env::var("RDOG_AUTH_PASSWORD"),
+    ) {
+        return Some((user, password));
+    }
+    let path = std::path::PathBuf::from(std::env::var("HOME").ok()?).join(".rdog/auth.toml");
+    let content = std::fs::read_to_string(path).ok()?;
+    let mut user = None;
+    let mut password = None;
+    for line in content.lines() {
+        if let Some((k, v)) = line.trim().split_once('=') {
+            let v = v.trim().trim_matches('"');
+            match k.trim() {
+                "user" => user = Some(v.to_owned()),
+                "password" => password = Some(v.to_owned()),
+                _ => {}
+            }
+        }
+    }
+    Some((user?, password?))
+}
+
 fn rdog_binary_path() -> PathBuf {
     let current_exe = std::env::current_exe().expect("current test binary path should exist");
     let debug_dir = current_exe
@@ -488,6 +533,15 @@ fn open_zenoh_client(entrypoint: &str) -> zenoh::Session {
     config
         .insert_json5("mode", r#""client""#)
         .expect("zenoh client mode should configure");
+    // 认证注入 (issue #82): daemon 默认开启 usrpwd
+    if let Some((user, password)) = test_zenoh_credentials() {
+        config
+            .insert_json5("transport/auth/usrpwd/user", &format!("\"{user}\""))
+            .expect("auth user");
+        config
+            .insert_json5("transport/auth/usrpwd/password", &format!("\"{password}\""))
+            .expect("auth password");
+    }
     config
         .insert_json5("connect/endpoints", &format!(r#"["{entrypoint}"]"#))
         .expect("zenoh client endpoints should configure");
@@ -2508,13 +2562,7 @@ fn agent_mailbox_should_accept_delivery_and_support_pull_and_ack() {
         "{{\"v\":1,\"id\":\"e2e-mailbox-1\",\"from\":\"orchestrator-x.lab\",\"to\":\"{agent_name}\",\"kind\":\"task\",\"payload\":\"打开计算器并算 1+1\",\"sent_at\":{sent_at_ms}}}"
     );
     {
-        let mut config = zenoh::Config::default();
-        config
-            .insert_json5("connect/endpoints", &format!("[\"{entrypoint}\"]"))
-            .expect("zenoh config connect endpoints");
-        let zenoh_session = zenoh::open(config)
-            .wait()
-            .expect("test zenoh session should open");
+        let zenoh_session = open_authenticated_test_session(&entrypoint);
         let publisher = zenoh_session
             .declare_publisher(inbox_key.clone())
             .wait()
@@ -2660,11 +2708,7 @@ fn agent_runtime_should_answer_task_message_via_echo_decision() {
     let reply_inbox = format!("rdog/lab/agent/{sender}/inbox");
     let mut saw_reply = false;
     {
-        let mut config = zenoh::Config::default();
-        config
-            .insert_json5("connect/endpoints", &format!("[\"{entrypoint}\"]"))
-            .expect("zenoh config");
-        let zenoh_session = zenoh::open(config).wait().expect("test session");
+        let zenoh_session = open_authenticated_test_session(&entrypoint);
         let reply_sub = zenoh_session
             .declare_subscriber(reply_inbox)
             .wait()
@@ -2776,11 +2820,7 @@ fn agent_card_should_be_published_and_queryable_with_version_updates() {
 
     // 外部重 pub v2 卡片 (模拟 agent 侧能力更新): daemon 缓存应反映最新
     {
-        let mut config = zenoh::Config::default();
-        config
-            .insert_json5("connect/endpoints", &format!("[\"{entrypoint}\"]"))
-            .expect("zenoh config");
-        let zenoh_session = zenoh::open(config).wait().expect("test session");
+        let zenoh_session = open_authenticated_test_session(&entrypoint);
         let publisher = zenoh_session
             .declare_publisher(format!("rdog/lab/agent/{agent_name}/card"))
             .wait()
@@ -2846,11 +2886,7 @@ fn agent_message_delivered_before_agent_start_should_be_recovered_via_mailbox() 
 
     // 1. agent 未起时投递 (mailbox 通配缓存, 防丢语义)
     {
-        let mut config = zenoh::Config::default();
-        config
-            .insert_json5("connect/endpoints", &format!("[\"{entrypoint}\"]"))
-            .expect("zenoh config");
-        let zenoh_session = zenoh::open(config).wait().expect("test session");
+        let zenoh_session = open_authenticated_test_session(&entrypoint);
         let publisher = zenoh_session
             .declare_publisher(format!("rdog/lab/agent/{agent_name}/inbox"))
             .wait()
@@ -2891,13 +2927,7 @@ fn agent_message_delivered_before_agent_start_should_be_recovered_via_mailbox() 
 
     // 2. 先建 reply 订阅 (agent 首次补拉在启动后立即触发, 回复可能早于
     //    测试侧订阅声明 — pub 无订阅者即丢, 必须先 sub 后起 agent)
-    let reply_session = {
-        let mut config = zenoh::Config::default();
-        config
-            .insert_json5("connect/endpoints", &format!("[\"{entrypoint}\"]"))
-            .expect("zenoh config");
-        zenoh::open(config).wait().expect("test session")
-    };
+    let reply_session = open_authenticated_test_session(&entrypoint);
     let reply_sub = reply_session
         .declare_subscriber(format!("rdog/lab/agent/{sender}/inbox"))
         .wait()
@@ -2978,11 +3008,7 @@ fn agent_mailbox_should_deduplicate_repeated_delivery_by_id() {
 
     // 同 id 投递两次
     {
-        let mut config = zenoh::Config::default();
-        config
-            .insert_json5("connect/endpoints", &format!("[\"{entrypoint}\"]"))
-            .expect("zenoh config");
-        let zenoh_session = zenoh::open(config).wait().expect("test session");
+        let zenoh_session = open_authenticated_test_session(&entrypoint);
         let publisher = zenoh_session
             .declare_publisher(format!("rdog/lab/agent/{agent_name}/inbox"))
             .wait()
@@ -3027,4 +3053,57 @@ fn agent_mailbox_should_deduplicate_repeated_delivery_by_id() {
 
     stop_child(&mut daemon);
     let _ = fs::remove_file(&config_path);
+}
+
+// ============================================================================
+// auth e2e (issue #82): 错误凭证被拒 — daemon 开启 usrpwd 后,
+// 带错密码的 client 连不上 (反向验收)
+// ============================================================================
+
+#[test]
+fn auth_wrong_credentials_should_be_rejected_by_daemon() {
+    let daemon_name = unique_name("auth-reject");
+    let listen_port = next_port();
+    let (mut daemon, config_path, entrypoint, buffer) =
+        start_zenoh_daemon_with_combined_output(&daemon_name, listen_port);
+    wait_until_output_contains(
+        &mut daemon,
+        &buffer,
+        "auth enabled (usrpwd)",
+        Duration::from_secs(8),
+    )
+    .expect("daemon should report auth enabled");
+
+    // 错误凭证 client: 显式 env 覆盖成假值, 连接应失败
+    let child = Command::new(rdog_binary_path())
+        .env("RDOG_AUTH_USER", "rdog-intruder")
+        .env("RDOG_AUTH_PASSWORD", "wrong-password")
+        .args([
+            "control",
+            "--transport",
+            "zenoh",
+            "--target-name",
+            &daemon_name,
+            "--entry-point",
+            &entrypoint,
+            "--namespace",
+            "lab",
+            "@ping",
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("control should start");
+    let output = child.wait_with_output().expect("control should finish");
+
+    stop_child(&mut daemon);
+    let _ = fs::remove_file(&config_path);
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stdout.contains("pong"),
+        "错误凭证不应收到 pong\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
 }
