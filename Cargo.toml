@@ -28,6 +28,8 @@ base64 = "0.22.1"
 image = { version = "0.25", default-features = false, features = ["jpeg"] }
 httparse = "1.10.1"
 rand = "0.9.2"
+# TLS 证书生成 (Phase B tls-init): 自建 CA + 服务器/客户端证书
+rcgen = "0.14.10"
 sha1 = "0.10.6"
 sha2 = "0.10.9"
 url = "2.5.8"
