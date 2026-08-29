@@ -451,6 +451,12 @@ pub fn mailbox_deliver(message: &AgentMessage) -> bool {
         agent.duplicate += 1;
         return false;
     }
+    log::info!(
+        "mailbox delivered: to={}, id={}, kind={}",
+        message.to,
+        message.id,
+        message.kind.as_str()
+    );
     agent.pending.push_back(PendingAgentMessage {
         message: message.clone(),
         received_at_ms: now_ms_u64(),
