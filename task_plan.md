@@ -1428,3 +1428,17 @@ PR checks 区可能为空, 平台事件恢复后 rebase 可补)。**
   rdog agent/卡片) + usrpwd 全 transport 认证 + TLS 机密性
 - specs: task-spawn 四阶段 / agent-messaging / authentication / tls 全部入库
 - 剩余: Phase 4 (A2A 语义层) 等真实使用反馈
+
+## [2026-08-29 16:25:00] [Session ID: current] 测试 HOME 隔离卫生项完成 (PR #92)
+
+### 完成内容
+
+- 19 处 spawn 点 HOME 注入 + 测试凭证三方同源 + mailbox 投递日志
+- 根因排障链完整记录 ERRORFIX (replace 静默失败第二次)
+- 对拍诊断测试保留; agent runtime 时序契约修正
+- 全量 1034/1034, 0 warning
+
+### 状态
+
+**PR #92 待 CI/merge。全部规划工作收束: Phase 1-3 + 认证 A/B +
+测试隔离, 仅剩 Phase 4 等使用反馈。**

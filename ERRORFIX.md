@@ -233,3 +233,89 @@ Rust 允许一个文件有多个 test mod，新建 mod 是零风险操作；
   诊断入口是让测试显式固定它假设的环境 (TERM/LANG/TTY), 而不是调时序
 - 失败输出与哪条代码路径的产物逐字节吻合, 是快速锁定分支的证据
   (本次 ESC 透传 == for_each_buffered_line 的输出形状, 直接排除 raw-mode 竞态)
+
+## [2026-08-28 15:55:00] [Session ID: current] GNU coreutils kill 参数歧义致进程组信号丢失 (ubuntu CI shell_lane 2001ms)
+
+### 现象
+
+- PR #62 (fix/ci-linux-xcap-deps) ubuntu Build 修通后首次跑到 unit tests,
+  `shell_lane_should_mark_timeout_and_continue_to_expect` 挂:
+  `duration_ms: 2001, timed_out: true, exit_code: None` — 超时标记对但整体拖满 2 秒
+
+### 原因 (动态实证链)
+
+1. control_flow/process.rs 的 terminate_process_tree 用外部命令
+   `Command::new("kill").args(["-TERM", "-<child_id>"])` 发进程组信号
+2. docker ubuntu 24.04 + python 复刻 process.rs 完整逻辑:
+   TOTAL duration=2.008s, stdout_join_wait=1.937s, rc=-9
+   → sh(dash) 被 child.kill() 杀, sleep 成孤儿持有 stdout 管道写端,
+   join_stream_reader 阻塞到 sleep 自然退出
+3. strace 决定性证据: `/usr/bin/kill -TERM -2555` 实际执行
+   `kill(-2, SIGTERM) = -1 ESRCH` — GNU coreutils 把参数解析成
+   "信号发往进程组 2", 从未触达目标进程组
+4. macOS 的 BSD kill 对同参数正确解析负 pid, 所以 macOS 从不暴露
+
+### 修复 (PR #62 e1f61dc)
+
+- terminate_process_tree (unix) 改 `libc::kill(-pgid, signum)` 进程内直发,
+  消灭外部命令参数解析歧义 + PATH 依赖 + spawn 开销三重脆弱点
+- Cargo.toml unix 段加 libc = "0.2" (依赖树已有版本 0.2.184, 零成本)
+
+### 验证
+
+- macOS: cargo check 过, shell_lane + open_app 相关 9/9 绿 (nextest)
+- linux: CI e1f61dc 轮 (待出结果, 后续回填)
+
+### 教训
+
+- 外部命令做信号发送是脆弱间接层; 进程组语义直接用 syscall 最正确
+- "带 -- 才可靠": `kill -s TERM -- -<pgid>` 在 GNU 上可用, 但跨 BSD/GNU
+  仍有解析差异风险, 一律优先 libc::kill
+- CI 每前进一步会暴露下一层存量问题 (Build 修好暴露链接, 链接修好暴露
+  unit tests), 修复链要有耐心逐层实证
+
+## [2026-08-28 21:35:00] [Session ID: current] recording_e2e CI 稳定红 (环境决定性) 修复
+
+### 现象
+- main macos CI 3 连红: recording_manual_cancel / recording_manual_stop 稳定挂,
+  PR 重跑不翻; 本地 (含同测试) 992/992 全绿
+
+### 原因 (现象->假设->验证)
+- H1 就绪探活不足 -- 排除 (435be72 已加探活, 且失败点在 record-start 不在连接)
+- H2 (成立) read_response_line "首次 200ms WouldBlock 即返回":
+  注释写"读直到安静", 实现是任意安静窗口直接 return。
+  慢 runner 上 daemon 处理 @record-start (semantic profile 启动) >200ms,
+  client 在响应到达前读到安静 -> 空串 -> parse_response_value.unwrap() None -> panic。
+  快机器 <200ms, 本地永远绿 -- 教科书式环境决定性失败
+
+### 修复 (PR #77, dcff949)
+- 安静返回加前置: output.contains("@response ") 才 return (savefile 多帧后安静照旧收工);
+  否则 continue 等 deadline
+
+### 验证
+- 本地 recording_e2e 6/6 绿 (含两个 CI 挂的)
+- CI macos: recording 全过; 首轮 process_lease 抽签挂 (已知 flake 族), 重跑全绿
+- 教训: "读直到安静"类 helper 必须区分"响应前安静"(继续等)与"响应后安静"(收工)
+
+## [2026-08-29 16:20:00] [Session ID: current] 测试 HOME 隔离的静默替换失败 (第二次同款)
+
+### 现象
+- 隔离改造后 agent e2e 稳定失败 (task pub 不到达), 但部分同模式测试通过
+- daemon 侧无 mailbox delivered 日志 = 投递未达; 手动复现完全正常
+
+### 排障链 (现象->假设->证伪->真因)
+- H1 声明顺序 -> 证伪 (调换无变化)
+- H2 纯 pub session 模式 -> 证伪 (拆分 session 仍失败)
+- H3 agent 进程存在干扰 -> 证伪 (对拍: 无 agent 也失败)
+- H4 sleep 位置 -> 证伪
+- 探测锁定: authenticated session 的 query 都不通 = 连接层
+- 真因: test_zenoh_credentials 仍读真实 HOME — python replace 静默未命中
+  (打印了成功消息但 anchor 不匹配), 测试 session 用真实凭证连隔离 daemon
+
+### 教训 (同类第二次!)
+- replace 型脚本改代码必须 assert anchor — "打印成功"不等于"真的改了"
+- 已写入 ERRORFIX 供 continuous-learning 提炼 self-learning skill 候选
+
+### 附带修正
+- agent runtime e2e: reply_sub 声明后 1s 传播窗口 (zenoh 声明异步传播,
+  无匹配订阅者的 pub 即丢)
