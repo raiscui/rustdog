@@ -1354,3 +1354,10 @@ Phase 4 (A2A 语义层) 等真实使用反馈。**
 
 **认证层 Phase A 完成 (PR 待 review)。Phase B (TLS) 独立 spec 后置。
 Phase 4 (A2A 语义层) 等真实使用反馈。**
+
+## [2026-08-29 13:30:00] [Session ID: current] Phase B #87 tls-init 完成
+
+### 状态
+
+**#87 关闭 (feature/tls-phase-b)。#88 (daemon/client tls 接线) 是 frontier,
+#89 (e2e) 跟进。全量 1032/1032。**
