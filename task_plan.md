@@ -1361,3 +1361,21 @@ Phase 4 (A2A 语义层) 等真实使用反馈。**
 
 **#87 关闭 (feature/tls-phase-b)。#88 (daemon/client tls 接线) 是 frontier,
 #89 (e2e) 跟进。全量 1032/1032。**
+
+## [2026-08-29 14:10:00] [Session ID: current] Phase B 完成 (#87-#89)
+
+### 提交链 (feature/tls-phase-b)
+
+- 06d485a #87 tls-init (rcgen 证书生成, 幂等/0600)
+- b7ea886 #88+#89 接线与 e2e ([tls] 段/endpoint 切换/CA 自动注入/三场景)
+
+### 关键设计
+
+- client 由 endpoint 协议驱动 (tls/ 前缀自动带材料), 无客户端开关
+- [tls] enabled 默认 false (增量不翻转, 与 [auth] 默认 true 的语义差异在 spec 记录)
+- 手动冒烟三场景: 双层连通 pong / 错 CA BadSignature / 幂等前置
+
+### 状态
+
+**认证层 Phase A+B 全部完成 (PR 待 review)。Phase 4 (A2A 语义层)
+是最后一块, 等真实使用反馈。**
