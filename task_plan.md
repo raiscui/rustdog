@@ -1415,3 +1415,16 @@ PR checks 区可能为空, 平台事件恢复后 rebase 可补)。**
 ### 状态
 
 **Phase A 入 main。Phase B spec #85 就绪 (票未拆)。**
+
+## [2026-08-29 15:20:00] [Session ID: current] PR #91 merge - Phase B 入 main
+
+- merge 前解冲突: task_plan append (#86 docs 与本分支, 两边保留)
+- 一次网络 EOF 重试后成功: d48cc32
+- 至此: Phase 1/2/3 + 认证 Phase A/B 全部入 main
+
+### 全链终态
+
+- @spawn 四原语 + Task 进度帧 + 伴生 agent 消息链 (envelope/mailbox/
+  rdog agent/卡片) + usrpwd 全 transport 认证 + TLS 机密性
+- specs: task-spawn 四阶段 / agent-messaging / authentication / tls 全部入库
+- 剩余: Phase 4 (A2A 语义层) 等真实使用反馈
