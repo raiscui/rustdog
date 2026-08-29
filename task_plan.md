@@ -1355,6 +1355,52 @@ Phase 4 (A2A 语义层) 等真实使用反馈。**
 **认证层 Phase A 完成 (PR 待 review)。Phase B (TLS) 独立 spec 后置。
 Phase 4 (A2A 语义层) 等真实使用反馈。**
 
+## [2026-08-29 13:30:00] [Session ID: current] Phase B #87 tls-init 完成
+
+### 状态
+
+**#87 关闭 (feature/tls-phase-b)。#88 (daemon/client tls 接线) 是 frontier,
+#89 (e2e) 跟进。全量 1032/1032。**
+
+## [2026-08-29 14:10:00] [Session ID: current] Phase B 完成 (#87-#89)
+
+### 提交链 (feature/tls-phase-b)
+
+- 06d485a #87 tls-init (rcgen 证书生成, 幂等/0600)
+- b7ea886 #88+#89 接线与 e2e ([tls] 段/endpoint 切换/CA 自动注入/三场景)
+
+### 关键设计
+
+- client 由 endpoint 协议驱动 (tls/ 前缀自动带材料), 无客户端开关
+- [tls] enabled 默认 false (增量不翻转, 与 [auth] 默认 true 的语义差异在 spec 记录)
+- 手动冒烟三场景: 双层连通 pong / 错 CA BadSignature / 幂等前置
+
+### 状态
+
+**认证层 Phase A+B 全部完成 (PR 待 review)。Phase 4 (A2A 语义层)
+是最后一块, 等真实使用反馈。**
+
+## [2026-08-29 15:00:00] [Session ID: current] Phase B PR #91 与 CI 事件异常记录
+
+### 现象 (平台侧, 非代码)
+
+- PR #90 创建于 push 瞬断的不完整分支, 之后 #90/#91 两个 PR 的
+  pull_request 事件都不触发 CI run (分支无任何 run 登记)
+- 对照: workflow_dispatch 正常 (main 与 feature/tls-phase-b 都能手动跑),
+  Actions 平台本身健康
+- 本机到 GitHub 网络多次 TLS timeout/EOF (查询也间歇失败), 事件投递
+  异常疑似与此相关
+
+### 验证证据
+
+- workflow_dispatch run 33239629129 (feature/tls-phase-b):
+  ubuntu-latest success + macos-latest success — Phase B 代码 CI 双绿
+- 本地全量 1033/1033
+
+### 状态
+
+**PR #91 待 merge (CI 证据 = dispatch run 33239629129 双绿;
+PR checks 区可能为空, 平台事件恢复后 rebase 可补)。**
 ## [2026-08-29 12:00:00] [Session ID: current] 认证层 Phase A merge + Phase B to-spec (issue #85)
 
 ### 完成内容

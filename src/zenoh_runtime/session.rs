@@ -16,7 +16,14 @@ pub fn open_client_session(connect_endpoints: &[String]) -> io::Result<Session> 
     // 惰性凭证 (issue #82): auth.toml / 成对 env 有就带。usrpwd 是协商式
     // 扩展, daemon 未启用验证时忽略 — 客户端无需感知对端开关。
     let credentials = client_credentials_cached();
-    open_session_auth("client", connect_endpoints, &[], credentials.as_ref(), None)
+    open_session_auth(
+        "client",
+        connect_endpoints,
+        &[],
+        credentials.as_ref(),
+        None,
+        None,
+    )
 }
 
 /// 进程级缓存一次的 client 凭证 (None = 无凭证裸连)。
@@ -33,11 +40,97 @@ fn client_credentials_cached() -> Option<crate::auth_credentials::AuthCredential
 }
 
 /// daemon 侧 router session: 注入 usrpwd users_file。
-pub fn open_router_session_with_users_file(
+pub fn open_router_session_tls(
     listen_endpoints: &[String],
     users_file: Option<&std::path::Path>,
+    tls_listen: Option<&TlsListenConfig>,
 ) -> io::Result<Session> {
-    open_session_auth("router", &[], listen_endpoints, None, users_file)
+    open_session_auth(
+        "router",
+        &[],
+        listen_endpoints,
+        None,
+        users_file,
+        tls_listen,
+    )
+}
+
+/// daemon 侧 TLS listen 注入 (键路径以 zenoh 1.8 DEFAULT_CONFIG 为准)。
+fn insert_tls_listen_config(config: &mut Config, tls: &TlsListenConfig) -> io::Result<()> {
+    let insert = |config: &mut Config, key: &str, value: &str| -> io::Result<()> {
+        config
+            .insert_json5(key, &format!("\"{value}\""))
+            .map_err(to_io_error)
+    };
+    insert(
+        config,
+        "transport/link/tls/listen_private_key",
+        &tls.listen_private_key.display().to_string(),
+    )?;
+    insert(
+        config,
+        "transport/link/tls/listen_certificate",
+        &tls.listen_certificate.display().to_string(),
+    )?;
+    if let Some(root_ca) = &tls.root_ca_certificate {
+        insert(
+            config,
+            "transport/link/tls/root_ca_certificate",
+            &root_ca.display().to_string(),
+        )?;
+    }
+    if tls.enable_mtls {
+        config
+            .insert_json5("transport/link/tls/enable_mtls", "true")
+            .map_err(to_io_error)?;
+    }
+    // 证书过期即断链, 不静默降级 (spec user story 6)
+    config
+        .insert_json5("transport/link/tls/close_link_on_expiration", "true")
+        .map_err(to_io_error)?;
+    Ok(())
+}
+
+/// client 侧 TLS 材料: ca.pem (验证服务器) + client 套件 (mTLS,
+/// 存在即带 — server 未开 mTLS 时 zenoh 忽略 client 证书, 兼容)。
+fn insert_tls_connect_material(config: &mut Config) -> io::Result<()> {
+    let Some(dir) = crate::config::resolve_user_config_dir() else {
+        return Ok(());
+    };
+    let tls_dir = dir.join(crate::tls_material::TLS_DIR_NAME);
+    let ca = tls_dir.join("ca.pem");
+    if !ca.exists() {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            format!(
+                "connect endpoint 是 tls/ 但缺少 CA 证书: {} (先 rdog auth tls-init)",
+                ca.display()
+            ),
+        ));
+    }
+    config
+        .insert_json5(
+            "transport/link/tls/root_ca_certificate",
+            &format!("\"{}\"", ca.display()),
+        )
+        .map_err(to_io_error)?;
+    let client_cert = tls_dir.join("client/cert.pem");
+    let client_key = tls_dir.join("client/key.pem");
+    if client_cert.exists() && client_key.exists() {
+        config
+            .insert_json5(
+                "transport/link/tls/connect_certificate",
+                &format!("\"{}\"", client_cert.display()),
+            )
+            .map_err(to_io_error)?;
+        config
+            .insert_json5(
+                "transport/link/tls/connect_private_key",
+                &format!("\"{}\"", client_key.display()),
+            )
+            .map_err(to_io_error)?;
+    }
+    Ok(())
 }
 
 pub fn resolve_client_connect_endpoints(
@@ -98,15 +191,26 @@ impl<'a> UnixpipeClientProbe<'a> {
     }
 }
 
-/// 带认证的 session 打开 (issue #82)。
+/// daemon 侧 TLS 材料 (issue #88, spec: specs/rdog-tls-plan.md)。
+pub struct TlsListenConfig {
+    pub listen_private_key: std::path::PathBuf,
+    pub listen_certificate: std::path::PathBuf,
+    /// mTLS 时验证客户端证书的 CA; 单向模式传 None (server 不验客户端)。
+    pub root_ca_certificate: Option<std::path::PathBuf>,
+    pub enable_mtls: bool,
+}
+
+/// 带认证的 session 打开 (issue #82/#88)。
 ///
-/// client 凭证注入 user/password; daemon 侧注入 users_file (usrpwd)。
+/// client 凭证注入 user/password; daemon 侧注入 users_file (usrpwd) 与
+/// TLS listen 材料 (transport/link/tls/*)。
 fn open_session_auth(
     mode: &str,
     connect_endpoints: &[String],
     listen_endpoints: &[String],
     client_credentials: Option<&crate::auth_credentials::AuthCredentials>,
     users_file: Option<&std::path::Path>,
+    tls_listen: Option<&TlsListenConfig>,
 ) -> io::Result<Session> {
     let mut config = Config::default();
     config
@@ -135,6 +239,15 @@ fn open_session_auth(
                 &format!("\"{}\"", users_file.display()),
             )
             .map_err(to_io_error)?;
+    }
+    if let Some(tls) = tls_listen {
+        insert_tls_listen_config(&mut config, tls)?;
+    }
+    // client 侧 TLS: connect endpoints 含 tls/ 前缀时自动注入本地材料
+    // (~/.rdog/tls/ 的 ca.pem + 可选 client 套件)。由 endpoint 协议驱动,
+    // 不需要客户端开关 — tcp/ endpoint 行为完全不变。
+    if connect_endpoints.iter().any(|ep| ep.starts_with("tls/")) {
+        insert_tls_connect_material(&mut config)?;
     }
 
     if !connect_endpoints.is_empty() {

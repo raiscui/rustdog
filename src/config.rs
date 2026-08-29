@@ -41,11 +41,34 @@ pub struct DaemonConfig {
     pub daemon: DaemonSettings,
     pub key: KeyConfig,
     pub auth: AuthConfig,
+    pub tls: TlsConfig,
     pub observation: ObservationConfig,
     pub hidden: HiddenResidentConfig,
     pub outbound: OutboundConfig,
     pub inbound: InboundConfig,
     pub zenoh: ZenohConfig,
+}
+
+/// TLS 机密性配置 (issue #88, spec: specs/rdog-tls-plan.md)。
+///
+/// `enabled = true` 时 listen endpoints 的 tcp/ 切换为 tls/ 并注入
+/// ~/.rdog/tls/ 的证书材料 (rdog auth tls-init 生成)。默认 false:
+/// 加密是增量能力, 不做默认安全翻转 (与 [auth] 的语义差异已在 spec 记录)。
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct TlsConfig {
+    pub enabled: bool,
+    /// mTLS 双向证书认证 (client 也需证书)。
+    pub enable_mtls: bool,
+}
+
+impl Default for TlsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            enable_mtls: false,
+        }
+    }
 }
 
 /// 认证配置 (issue #81, spec: specs/rdog-authentication-plan.md)。

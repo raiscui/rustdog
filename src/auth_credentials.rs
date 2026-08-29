@@ -93,29 +93,6 @@ impl AuthCredentials {
         Ok(())
     }
 
-    /// env 覆盖: `RDOG_AUTH_USER`/`RDOG_AUTH_PASSWORD` 同时提供才整体覆盖
-    /// (半覆盖视为配置错误, 避免用户名来自文件、密码来自 env 的混淆来源)。
-    pub fn apply_env_override(self) -> io::Result<Self> {
-        let user = std::env::var("RDOG_AUTH_USER")
-            .ok()
-            .filter(|v| !v.trim().is_empty());
-        let password = std::env::var("RDOG_AUTH_PASSWORD")
-            .ok()
-            .filter(|v| !v.trim().is_empty());
-        match (user, password) {
-            (Some(user), Some(password)) => Ok(Self { user, password }),
-            (None, None) => Ok(self),
-            (Some(_), None) => Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "RDOG_AUTH_USER 已设置但 RDOG_AUTH_PASSWORD 缺失: env 覆盖必须成对提供",
-            )),
-            (None, Some(_)) => Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "RDOG_AUTH_PASSWORD 已设置但 RDOG_AUTH_USER 缺失: env 覆盖必须成对提供",
-            )),
-        }
-    }
-
     /// 保存 zenoh users_file (daemon 侧, ~/.rdog/auth.users.json, 0600)。
     pub fn save_zenoh_users_file(
         &self,
@@ -244,15 +221,14 @@ mod tests {
     }
 
     #[test]
-    fn env_override_should_require_both_fields() {
-        // 无 env: 原样返回
-        let base = AuthCredentials {
-            user: "u".to_owned(),
-            password: "p".to_owned(),
-        };
-        // 成对覆盖与半覆盖在并行测试下有 env 串台风险, 这里只测纯函数语义:
-        // 直接构造验证 apply 的匹配逻辑分支 (env 测试在 e2e 层做)
-        assert_eq!(base.clone().apply_env_override().unwrap(), base);
+    fn load_client_credentials_should_parse_generated_file() {
+        // env 覆盖语义的纯函数侧验证 (成对/半对在 e2e 层, 避免并行测试串台):
+        // 生成的文件能被 client 加载路径读回
+        let dir = temp_dir("clientload");
+        let generated = AuthCredentials::load_or_generate(&dir).unwrap();
+        let loaded = AuthCredentials::load_client_credentials(&dir).unwrap();
+        assert_eq!(loaded, Some(generated));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

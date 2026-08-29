@@ -82,6 +82,8 @@ pub struct ZenohDaemonRuntimeConfig {
     pub key_delivery_backend: crate::config::KeyDeliveryBackend,
     /// 认证开关 (issue #81): 凭证生命周期挂接用。
     pub auth: crate::config::AuthConfig,
+    /// TLS 机密性开关 (issue #88)。
+    pub tls: crate::config::TlsConfig,
     #[cfg(unix)]
     pub unixpipe_startup: Option<ZenohUnixpipeStartupConfig>,
 }
@@ -169,9 +171,60 @@ pub fn run_router_daemon(config: ZenohDaemonRuntimeConfig, shell: &str) -> io::R
         None
     };
 
-    let session = zenoh_runtime::open_router_session_with_users_file(
-        &config.listen_endpoints,
+    // TLS 机密性 (issue #88, spec: specs/rdog-tls-plan.md): enabled 时 listen
+    // 的 tcp/ 切换 tls/ 并注入 ~/.rdog/tls/ 材料; unixpipe/serial 前缀不动。
+    let (listen_endpoints, tls_listen) = if config.tls.enabled {
+        let user_config_dir = crate::config::resolve_user_config_dir().ok_or_else(|| {
+            io::Error::other("无法定位用户配置目录 (~/.rdog/tls), TLS 材料无处安放")
+        })?;
+        let tls_dir = user_config_dir.join(crate::tls_material::TLS_DIR_NAME);
+        let daemon_cert = tls_dir.join("daemon/cert.pem");
+        let daemon_key = tls_dir.join("daemon/key.pem");
+        if !daemon_cert.exists() || !daemon_key.exists() {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!(
+                    "[tls] enabled 但缺少 daemon 证书材料 ({} / {}), 请先 rdog auth tls-init",
+                    daemon_cert.display(),
+                    daemon_key.display()
+                ),
+            ));
+        }
+        let tls_config = zenoh_runtime::TlsListenConfig {
+            listen_private_key: daemon_key,
+            listen_certificate: daemon_cert,
+            // mTLS: 用同一自建 CA 验客户端 (client 套件同 CA 签发)
+            root_ca_certificate: if config.tls.enable_mtls {
+                Some(tls_dir.join("ca.pem"))
+            } else {
+                None
+            },
+            enable_mtls: config.tls.enable_mtls,
+        };
+        let switched: Vec<String> = config
+            .listen_endpoints
+            .iter()
+            .map(|endpoint| {
+                if let Some(rest) = endpoint.strip_prefix("tcp/") {
+                    format!("tls/{rest}")
+                } else {
+                    endpoint.clone()
+                }
+            })
+            .collect();
+        log::info!(
+            "tls enabled: endpoints tcp->tls switched (mtls={})",
+            config.tls.enable_mtls
+        );
+        (switched, Some(tls_config))
+    } else {
+        (config.listen_endpoints.clone(), None)
+    };
+
+    let session = zenoh_runtime::open_router_session_tls(
+        &listen_endpoints,
         auth_users_file.as_deref(),
+        tls_listen.as_ref(),
     )?;
     ensure_unique_daemon_name(
         &session,

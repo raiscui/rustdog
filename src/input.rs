@@ -19,6 +19,13 @@ pub enum Transport {
     ZenohPeerLegacy,
 }
 
+/// `rdog auth` 子命令。
+#[derive(Debug, Clone, Subcommand)]
+pub enum AuthCommand {
+    /// Generate TLS certificate material under ~/.rdog/tls (idempotent)
+    TlsInit,
+}
+
 #[derive(Subcommand, Debug)]
 pub enum Command {
     /// Start a listener for incoming connections
@@ -169,6 +176,12 @@ pub enum Command {
 
     /// Start config-driven daemon mode
     #[clap(alias = "d")]
+    /// Authentication material management
+    Auth {
+        #[clap(subcommand)]
+        command: AuthCommand,
+    },
+
     /// Run a companion agent that consumes task messages from its inbox
     Agent {
         /// Agent name (DNS-style, e.g. `helper-a.lab`); must be unique in the namespace

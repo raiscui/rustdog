@@ -51,6 +51,7 @@ mod pty_control;
 mod screenshot;
 mod shell;
 mod task_control;
+mod tls_material;
 // UI script runner 复用现有 line-control transport。
 // 这里保持 CLI-side orchestration,不新增 daemon-side UI 协议。
 mod ui_script;
@@ -533,6 +534,29 @@ fn run(opts: input::Opts) -> Result<(), String> {
                 positional,
             })?;
         }
+        Command::Auth { command } => match command {
+            input::AuthCommand::TlsInit => {
+                let user_config_dir = config::resolve_user_config_dir()
+                    .ok_or_else(|| "无法定位用户配置目录 (~/.rdog)".to_string())?;
+                let report =
+                    tls_material::tls_init(&user_config_dir.join(tls_material::TLS_DIR_NAME))
+                        .map_err(|err| err.to_string())?;
+                if report.created.is_empty() {
+                    println!(
+                        "TLS 材料已存在, 跳过 (不覆盖): {}",
+                        report.skipped.join(", ")
+                    );
+                } else {
+                    println!("TLS 材料已生成 (~/.rdog/tls/):");
+                    for item in &report.created {
+                        println!("  {item}");
+                    }
+                    println!(
+                        "客户端分发: 拷贝 ca.pem (服务器验证模式); mTLS 再加 client/{{cert,key}}.pem"
+                    );
+                }
+            }
+        },
         Command::Agent {
             name,
             namespace,
