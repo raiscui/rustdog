@@ -1379,3 +1379,25 @@ Phase 4 (A2A 语义层) 等真实使用反馈。**
 
 **认证层 Phase A+B 全部完成 (PR 待 review)。Phase 4 (A2A 语义层)
 是最后一块, 等真实使用反馈。**
+
+## [2026-08-29 15:00:00] [Session ID: current] Phase B PR #91 与 CI 事件异常记录
+
+### 现象 (平台侧, 非代码)
+
+- PR #90 创建于 push 瞬断的不完整分支, 之后 #90/#91 两个 PR 的
+  pull_request 事件都不触发 CI run (分支无任何 run 登记)
+- 对照: workflow_dispatch 正常 (main 与 feature/tls-phase-b 都能手动跑),
+  Actions 平台本身健康
+- 本机到 GitHub 网络多次 TLS timeout/EOF (查询也间歇失败), 事件投递
+  异常疑似与此相关
+
+### 验证证据
+
+- workflow_dispatch run 33239629129 (feature/tls-phase-b):
+  ubuntu-latest success + macos-latest success — Phase B 代码 CI 双绿
+- 本地全量 1033/1033
+
+### 状态
+
+**PR #91 待 merge (CI 证据 = dispatch run 33239629129 双绿;
+PR checks 区可能为空, 平台事件恢复后 rebase 可补)。**
