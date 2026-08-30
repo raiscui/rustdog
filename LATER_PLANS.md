@@ -879,18 +879,30 @@ zenoh router down / unixpipe broken / zenoh timeout 等场景.
 - 后续专门整理 observation test seam,让需要 production global store 的测试使用可替换 store 或统一串行测试组。
 - 不要通过提高 `DEFAULT_MAX_OBSERVATIONS` 掩盖共享状态,容量语义仍应由显式 retention 测试验证。
 
-## [2026-08-27 11:20:00] [Session ID: current] ax-split review 延后项
+## [2026-08-27 11:20:00] ax-split review 延后项 — 已全部处置, 清理 (2026-08-30)
 
-双轴 review 判断项的处理记录 (2026-08-28 收尾):
+R1/R3 已实施完成 (PR #61 分支), R2 认识修正为"若做则全族统一 sweep"
+(该决策记录在 task_plan 2026-08-28 条目与 ADR-0008 Amendment), 无剩余动作。
 
-- (已完成 R1) postcondition 双分支收敛: press(target: &AxTarget) 类型级消除,
-  guarded core / press_sequence 注入参数同步收窄, wire 形状不变
-- (已完成 R3) ax_input Middle Man: type-text 投递策略 (模式分发 + Auto 回退链 +
-  错误命名) 自 macos.rs 迁入 ax_input/execute.rs, 平台路径注入, AxBackend 删除
-  type_text 方法
-- (保留, 认识已修正) report status/kind/action 转枚举: 实际字段是 &'static str
-  且 10 个同族 report 一致, 单结构体转枚举会制造孤例; 若做应是全族统一的
-  wire-schema sweep (serde rename 逐字锁定序列化输出), 作为独立事项排期
-- (已完成并移除) observe_current_ax_values_with / collect_ax_values_by_role
-  纯遍历部分已作为 collect_ax_role_values 收进 ax_query
+## [2026-08-28 16:00:00] [Session ID: current] macos CI screenshot 4 测试连锁 flake (锁毒化) 待修
 
+- 现象: CI macos 每轮稳定挂 4 个 screenshot::tests (main 同款存量):
+  bounded_capture_should_timeout_once_and_keep_worker_count_bounded +
+  3 个 capture_fallback/permission trace 测试
+- 机制: bounded_capture 的 10ms 计时窗口在慢速 CI runner 上先炸, panic 时
+  持有 TIMEOUT_TRACE_TEST_LOCK 导致锁毒化, 其余 3 个 capture_trace 测试
+  在 lock().expect("...not be poisoned") 处连锁挂; 本地快机不炸
+- 修复方向 (二选一或组合):
+  1. 计时窗口自适应/放大 (10ms/50ms/75ms 在 CI 上太紧)
+  2. 锁毒化恢复 (unwrap_or_else(|e| e.into_inner())) 止住连锁
+- 注意: 属 screenshot capture timeout 域 (2026-08-05 native capture tracing
+  支线的后续), 修前先读该支线归档与 src/screenshot/tests.rs 上下文
+
+## [2026-08-28 16:20:00] [Session ID: current] process_lease metadata_publish_failure 跨平台 flake 待观察
+
+- 现象: `metadata_publish_failure_should_not_leave_self_blocking_legacy_pid`
+  在 macos (PR #62 94be124 轮, PR #63 ab4aceb 轮) 和 ubuntu (PR #63 0496199 轮)
+  都挂过, 重跑即过; 错误 "process lease已被活跃owner持有" (文件锁时序)
+- 与 screenshot 锁毒化族并列的第二个抽签 flake 族; 若再出现 3+ 次考虑
+  与 screenshot 一起修 (读 docs/solutions/best-practices/
+  parallel-test-global-state-single-lock.md 的适用性)

@@ -94,6 +94,31 @@ Issues 和 Wayfinder maps 使用 GitHub Issues。详见 `docs/agents/issue-track
   - 用途: 固定改 logger 路径/文案/level 前先 grep `wait_until_output_contains` 双侧, 以及 `start_zenoh_daemon_with_combined_output` 合流 helper 模板
   - 何时阅读: 修改 `init_logger`/fern 配置、daemon "ready" 日志, 或新写等待 daemon 就绪的 e2e 前
 
+- `docs/solutions/test-failures/silent-replace-anchor-assertion.md`
+  - 主题: 脚本 replace 修改源码必须 assert anchor — 两次静默未命中事故
+  - 用途: 固定 replace 前 assert anchor + 原子写盘 + 行级标识插入的纪律, 与对拍/探测排障法
+  - 何时阅读: 写脚本批量改源码前; "改过但行为不对"的排障起点
+
+- `docs/solutions/conventions/zenoh-pub-sub-declaration-propagation.md`
+  - 主题: zenoh 声明异步传播 — 无匹配订阅者的 pub 即丢
+  - 用途: 固定"先 sub、留传播窗口、再触发对端 pub"的 e2e/集成时序契约与 daemon 侧投递日志纪律
+  - 何时阅读: 写 zenoh pub/sub 集成或 e2e 前; "消息偶发不到达"类问题诊断
+
+- `docs/solutions/conventions/e2e-isolated-home-credentials.md`
+  - 主题: e2e 子进程 HOME 隔离与三方同源凭证 (认证后的 hard gate)
+  - 用途: 固定 test_isolated_home + ensure_test_home_credentials + spawn 点穷举纪律
+  - 何时阅读: 新增 spawn rdog 二进制的 e2e 前; 认证开启后"连接被拒/消息未达"类失败诊断
+
+- `docs/solutions/conventions/env-deterministic-ci-red-vs-local-green.md`
+  - 主题: 读直到安静类 helper 必须区分响应前/后安静 (本地绿 CI 稳定红家族)
+  - 用途: 固定 quiet-window 二分语义与 helper 注释-实现同义要求
+  - 何时阅读: 写多帧响应读取 helper 前; "本地绿 CI 稳定红重跑不翻"的判别
+
+- `docs/solutions/design-patterns/mailbox-delivery-loss-precedence.md`
+  - 主题: mailbox 防丢优先于防重 — 投递语义分级的纪律
+  - 用途: 固定 at-least-once 契约服从与"资源门槛在哪个 user story 反噬"的设计评审问句
+  - 何时阅读: 设计消息缓存/队列语义时; 为资源保护加投递/注册门槛前
+
 - `docs/solutions/test-failures/tty-term-dumb-environment-deterministic-failure.md`
   - 主题: "交互终端绿 + CI/agent 红" 是环境决定性失败的指纹, 不是 flake
   - 用途: 固定 TERM=dumb 等 harness 环境差异导致的确定性相反失败的诊断入口 (显式固定假设环境, 而非调时序)
@@ -407,3 +432,36 @@ Issues 和 Wayfinder maps 使用 GitHub Issues。详见 `docs/agents/issue-track
   - 主题: 稳定的 codesign 身份方案 (GitHub issue #40), 解决 `cargo install` 重编后 macOS TCC 授权失效
   - 用途: 固定"install 后用固定 identifier + 自定义 DR (`designated => identifier \"rdog\"`) 重签, DR 跨构建字节级稳定, TCC 授权保留"的决策, 以及一次性迁移成本与验收方法
   - 何时阅读: 修改本地安装/发布流程、封装 `install-signed` 脚本、排查 daemon 权限反复失效, 或评审 macOS 授权生命周期方案前
+
+
+## [2026-08-30 11:00:00] [Session ID: current] 积压核验处置 (Phase 1-3 + 认证 A/B + 测试隔离全链复盘)
+
+### 已 Capture (新增指针, 双校验全过)
+- [2026-08-21]+[2026-08-29] replace 静默未命中两次 ->
+  `docs/solutions/test-failures/silent-replace-anchor-assertion.md`;
+  同步产出用户级 skill `self-learning.script-replace-must-assert-anchor`
+  (两次独立事故满足升级门槛)。
+- [2026-08-29] zenoh 声明异步传播/无匹配订阅者即丢 ->
+  `docs/solutions/conventions/zenoh-pub-sub-declaration-propagation.md`。
+- [2026-08-29] e2e HOME 隔离与三方同源凭证 ->
+  `docs/solutions/conventions/e2e-isolated-home-credentials.md`
+  (吸收并升级 2026-08-19 14:30 配置隔离条目的认证层续篇)。
+- [2026-08-28] 读直到安静 helper (recording CI 稳定红) ->
+  `docs/solutions/conventions/env-deterministic-ci-red-vs-local-green.md`
+  (与 TERM=dumb 同族, 三例环境决定性家族成形)。
+- [2026-08-29] mailbox 防丢优先于防重 ->
+  `docs/solutions/design-patterns/mailbox-delivery-loss-precedence.md`。
+
+### 核验后保留为 inbox (缺口注明)
+- [2026-08-19 23:30] 并发工作树 commit 主题拆分: 第三次实践已发生
+  (PR #92 前的错分支事故已按纪律修复), 但仍以消极证据为主; 维持 inbox。
+- [2026-08-19 14:30] 配置目录集成测试隔离: 认证层续篇已由
+  e2e-isolated-home-credentials 承接大半, 原条目的 Windows/Linux 缺口仍在,
+  保留待补证。
+
+### 无 Capture 必要 (代码/spec 即载体)
+- task-spawn 四阶段/agent messaging/认证/TLS 的设计契约: 四份 specs + 5 张
+  design ticket 承接, AGENTS.md 已索引。
+- CI 事件异常 (PR #90/#91): 平台瞬时问题, workaround 已验证
+  (workflow_dispatch --ref), task_plan 有完整记录, 不构成长期知识。
+- mailbox 通配 sub 单点归属/材料 fail-fast 等: 代码注释 + ticket 承接。

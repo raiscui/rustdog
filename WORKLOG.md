@@ -916,3 +916,29 @@ control_actions::execute_ax_action
 - zenoh pub 的'无订阅者即丢'是隐式契约, 测试必须先 sub 后触发
 - 防丢与防重的语义权衡要靠真实场景驱动 (#76 的 pre-start 场景推翻了
   #73 的注册过滤设计 — 简化正确)
+
+## [2026-08-30 11:10:00] [Session ID: current] 任务名称: continuous-learning 全链复盘 (main)
+
+### 任务内容
+- 范围: PR #63-#92 全链 (task-spawn 1-3 + 认证 A/B + 测试隔离) 的经验沉淀消费
+- Capture x5 (全部双校验 0 flags):
+  - test-failures/silent-replace-anchor-assertion.md (两次静默未命中合并)
+  - conventions/zenoh-pub-sub-declaration-propagation.md (声明传播竞态)
+  - conventions/e2e-isolated-home-credentials.md (三方同源凭证)
+  - conventions/env-deterministic-ci-red-vs-local-green.md (读直到安静家族)
+  - design-patterns/mailbox-delivery-loss-precedence.md (防丢语义修正)
+- skill x1: self-learning.script-replace-must-assert-anchor (用户级, 两次事故满足门槛)
+- EXPERIENCE 处置记录 + AGENTS.md 5 条索引 + LATER_PLANS ax-split 条目清理
+
+### 完成过程
+- 六文件按本轮时间窗 (08-26~08-30) 分组, 与 08-28 闲时整理的边界清晰
+  (那次消费了 tty-term/parallel-lock/a2a 归档, 本次消费其后新增)
+- 5 个候选全部过七项门禁: 动态证据 (e2e/CI run/对拍) + 静态证据 (代码/票)
+  双全; 无重叠 (与 TERM=dumb 是同族互补非同义, 互相引用)
+- inbox 保留 2 条 (commit 主题拆分等第三次实践 / 配置隔离的平台缺口)
+
+### 总结感悟
+- 本轮 Capture 的 5 条有 4 条来自"测试失败域" — 测试是这套工作流
+  产知识最密集的地方
+- "环境决定性失败"家族三条 solution 互相引用成谱系, 后续遇到
+  本地/CI 差异可直接按谱系排查
