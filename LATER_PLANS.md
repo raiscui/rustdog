@@ -884,19 +884,10 @@ zenoh router down / unixpipe broken / zenoh timeout 等场景.
 R1/R3 已实施完成 (PR #61 分支), R2 认识修正为"若做则全族统一 sweep"
 (该决策记录在 task_plan 2026-08-28 条目与 ADR-0008 Amendment), 无剩余动作。
 
-## [2026-08-28 16:00:00] [Session ID: current] macos CI screenshot 4 测试连锁 flake (锁毒化) 待修
+## [2026-08-28 16:00:00] macos CI screenshot 锁毒化族 — 已修复 (2026-08-30, PR #93)
 
-- 现象: CI macos 每轮稳定挂 4 个 screenshot::tests (main 同款存量):
-  bounded_capture_should_timeout_once_and_keep_worker_count_bounded +
-  3 个 capture_fallback/permission trace 测试
-- 机制: bounded_capture 的 10ms 计时窗口在慢速 CI runner 上先炸, panic 时
-  持有 TIMEOUT_TRACE_TEST_LOCK 导致锁毒化, 其余 3 个 capture_trace 测试
-  在 lock().expect("...not be poisoned") 处连锁挂; 本地快机不炸
-- 修复方向 (二选一或组合):
-  1. 计时窗口自适应/放大 (10ms/50ms/75ms 在 CI 上太紧)
-  2. 锁毒化恢复 (unwrap_or_else(|e| e.into_inner())) 止住连锁
-- 注意: 属 screenshot capture timeout 域 (2026-08-05 native capture tracing
-  支线的后续), 修前先读该支线归档与 src/screenshot/tests.rs 上下文
+锁毒化恢复 (into_inner) + CI 时序窗口 4x 自适应双修复, PR #93 CI 双绿。
+观察后续 CI 数轮确认无复发后可视为根治。
 
 ## [2026-08-28 16:20:00] [Session ID: current] process_lease metadata_publish_failure 跨平台 flake 待观察
 
