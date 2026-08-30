@@ -38,6 +38,13 @@ daemon 提供**纯传输**的 agent 消息通道(per-agent inbox + 卡片托管 
 - **agent name**: 复用 daemon_name 的校验规则(DNS 风格 label, 全小写), namespace 推断同款。
 - **消息 envelope**: `rdog.agentmsg.v1` JSON — {id, from, to, kind, payload, sent_at}; kind 首版: task / reply / ack / control。
 - **mailbox**: daemon 侧 per-agent 有界缓存(入站消息, 上限量级 256 条, 超限丢最老并计数); agent ack 后清除; registry 不持久化与 task registry 同款纪律。
+  - **as-built 修正 (2026-08-29, issue #76)**: "未注册不缓存"已改为"收到即缓存"
+  (未注册自动建 entry) — 防丢优先于防重, 见
+  docs/solutions/design-patterns/mailbox-delivery-loss-precedence.md;
+  "queryable 补拉/卡片拉取"实现为 control 命令 @agent-inbox / @agent-card
+  (与"一切经 control 协议"架构一致)。
+  - **跨主机副本**: 通配缓存下每个 daemon 都会缓存一份, agent 只补拉本机
+  daemon, 其他副本由 256 条容量淘汰兜底。
 - **agent loop 形态**: 收消息 → 决策回调(trait, provider 无关)→ 驱动本机 daemon → 回复/进度。决策回调是唯一智能注入点。
 - **`rdog agent` CLI 契约**: --name(必填), --daemon-config(可选, 缺省复用本地默认 daemon, 没有则带起), agent 退出时消息保留在 mailbox。
 - **安全边界**: inbox 是定向消息非广播(不同于被否决的旁观 topic); 卡片 pub 默认开启但内容是 agent 自己声明的摘要; fail-closed 收紧(认证)归 Phase 4 前置工作, 本 phase 不引入新的明文暴露面超过现有 daemon 控制面。
