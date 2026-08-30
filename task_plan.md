@@ -1442,3 +1442,19 @@ PR checks 区可能为空, 平台事件恢复后 rebase 可补)。**
 
 **PR #92 待 CI/merge。全部规划工作收束: Phase 1-3 + 认证 A/B +
 测试隔离, 仅剩 Phase 4 等使用反馈。**
+
+## [2026-08-30 11:15:00] [Session ID: current] continuous-learning 全链复盘完成 (main, ce4552c)
+
+### 完成内容
+
+- [x] 六文件回读分组 (08-26~08-30 时间窗, 与 08-28 闲时整理边界清晰)
+- [x] Compound Gate: 5 候选全 capture (动态+静态证据双全, 无重叠)
+- [x] Capture x5 双校验 0 flags + 用户级 skill x1
+- [x] AGENTS.md 索引 5 条; EXPERIENCE 处置记录; LATER_PLANS 清理
+- [x] 未归档说明: 本轮六文件 (task_plan 1444 行接近续档线) 仍活跃,
+      六文件续档留待下次超线时执行
+
+### 状态
+
+**知识沉淀完成。仓库状态: Phase 1-3 + 认证 A/B + 测试隔离 + 15 solutions
++ 12 skills 索引, 全部入 main。**
