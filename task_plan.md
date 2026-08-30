@@ -1458,3 +1458,21 @@ PR checks 区可能为空, 平台事件恢复后 rebase 可补)。**
 
 **知识沉淀完成。仓库状态: Phase 1-3 + 认证 A/B + 测试隔离 + 15 solutions
 + 12 skills 索引, 全部入 main。**
+
+## [2026-08-30 12:00:00] [Session ID: current] 盘点后的两项收口完成
+
+### 完成内容
+
+- [x] screenshot 锁毒化族修复 (PR #93, 已 merge): into_inner 毒化免疫
+      + CI=true 4x 时序自适应; LATER_PLANS 条目清理
+- [x] rdog-control skill 同步 (v2.30-task-agent): Background Tasks 段 +
+      Other Lanes 三行 + references/agent-messaging.md 新 reference;
+      发现 .agents/.zcode 两处是 symlink 同一文件, 改一处即两处
+- [x] README 同步: 简介 bullet + 命令表 5 行 + 四份 spec 链接
+- [x] mailbox spec as-built 修正同步 (防丢优先 + control 命令实现)
+
+### 盘点结论 (剩余项)
+
+- process_lease 观察族: 继续观察
+- Phase 4 / @flow async: 等真实使用反馈 (LLM 决策回调需 key, 跨主机需第二台)
+- 历史临时目录治理 / observation singleton 隔离: 低优先级在案
