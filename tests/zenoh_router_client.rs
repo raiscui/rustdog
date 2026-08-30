@@ -51,7 +51,9 @@ fn test_zenoh_credentials() -> Option<(String, String)> {
     ) {
         return Some((user, password));
     }
-    let path = std::path::PathBuf::from(std::env::var("HOME").ok()?).join(".rdog/auth.toml");
+    // 凭证必须来自隔离 HOME (与 daemon 子进程同一份 — 真实 HOME 的凭证
+    // 与隔离 daemon 不匹配会被 usrpwd 全拒)
+    let path = test_isolated_home().join(".rdog/auth.toml");
     let content = std::fs::read_to_string(path).ok()?;
     let mut user = None;
     let mut password = None;
@@ -66,6 +68,37 @@ fn test_zenoh_credentials() -> Option<(String, String)> {
         }
     }
     Some((user?, password?))
+}
+
+/// 测试隔离 HOME (进程级一次): daemon/control 子进程的 HOME 都指向它,
+/// 凭证 (~/.rdog/auth.toml) 与 TLS 材料在测试目录内自持,
+/// 不再触碰真实用户目录。auth_wrong 等 env 覆盖用例优先于文件。
+fn test_isolated_home() -> std::path::PathBuf {
+    use std::sync::OnceLock;
+    static HOME: OnceLock<std::path::PathBuf> = OnceLock::new();
+    HOME.get_or_init(|| {
+        let dir = std::env::temp_dir().join(format!("rdog-e2e-home-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("test home should create");
+        dir
+    })
+    .clone()
+}
+
+/// 隔离 HOME 下预生成认证凭证 (幂等): 需要 usrpwd 的测试先调用。
+fn ensure_test_home_credentials() {
+    // 手写测试凭证 (与 auth_credentials 的自控格式一致), client/daemon 共享;
+    // 不走 daemon 启动路径生成 — 太重。
+    let auth_dir = test_isolated_home().join(".rdog");
+    std::fs::create_dir_all(&auth_dir).expect("auth dir should create");
+    let auth_file = auth_dir.join("auth.toml");
+    if !auth_file.exists() {
+        std::fs::write(
+            &auth_file,
+            "# rdog 测试凭证 (隔离 HOME 自持)\nuser = \"rdog-e2e-test\"\npassword = \"e2e-test-password\"\n",
+        )
+        .expect("test credentials should write");
+    }
 }
 
 fn rdog_binary_path() -> PathBuf {
@@ -198,6 +231,7 @@ fn start_zenoh_daemon_with_config(config_path: &str) -> Child {
     // 合并 stdout+stderr 到一个 buffer,既兼容 stderr 上的 log marker,
     // 也不留 sh 孤儿进程。
     Command::new(rdog_binary_path())
+        .env("HOME", test_isolated_home())
         .args(["daemon", "-c", config_path])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -220,6 +254,7 @@ fn start_zenoh_daemon_with_combined_output(
     name: &str,
     listen_port: u16,
 ) -> (Child, PathBuf, String, Arc<Mutex<String>>) {
+    ensure_test_home_credentials();
     let entrypoint = format!("tcp/127.0.0.1:{listen_port}");
     let config_path =
         write_temp_zenoh_router_config(name, std::slice::from_ref(&entrypoint), "router");
@@ -249,6 +284,7 @@ fn temp_workdir(name: &str) -> PathBuf {
 
 fn run_control(args: &[&str], line: &str) -> (std::process::ExitStatus, String, String) {
     let mut child = Command::new(rdog_binary_path())
+        .env("HOME", test_isolated_home())
         .arg("control")
         .args(args)
         .stdin(Stdio::piped())
@@ -282,6 +318,7 @@ fn run_control_in_dir(
     line: &str,
 ) -> (std::process::ExitStatus, String, String) {
     let mut child = Command::new(rdog_binary_path())
+        .env("HOME", test_isolated_home())
         .arg("control")
         .args(args)
         .current_dir(workdir)
@@ -335,6 +372,7 @@ fn run_control_with_retry_on_missing_target(
 
 fn start_control_session(args: &[&str]) -> Child {
     Command::new(rdog_binary_path())
+        .env("HOME", test_isolated_home())
         .arg("control")
         .args(args)
         .stdin(Stdio::piped())
@@ -682,6 +720,7 @@ fn daemon_should_fail_fast_on_duplicate_name() {
         "router",
     );
     let output = Command::new(rdog_binary_path())
+        .env("HOME", test_isolated_home())
         .args(["daemon", "-c", &second_config.display().to_string()])
         .output()
         .expect("second daemon should run");
@@ -1271,6 +1310,7 @@ fn control_should_run_pty_command_in_zenoh_profile() {
 
     let output = wait_with_output_timeout(
         Command::new(rdog_binary_path())
+            .env("HOME", test_isolated_home())
             .args([
                 "control",
                 "--transport",
@@ -1324,6 +1364,7 @@ fn control_should_accept_pty_string_shorthand_in_zenoh_profile() {
     .expect("daemon should report ready");
 
     let mut child = Command::new(rdog_binary_path())
+        .env("HOME", test_isolated_home())
         .args([
             "control",
             "--transport",
@@ -1472,6 +1513,7 @@ fn control_should_forward_tty_input_after_zenoh_pty_output_goes_idle() {
     .expect("daemon should report ready");
 
     let mut child = Command::new("script")
+        .env("HOME", test_isolated_home())
         .args([
             "-q",
             "/dev/null",
@@ -1563,6 +1605,7 @@ fn control_should_repaint_tui_input_while_zenoh_pty_output_is_busy() {
     .expect("daemon should report ready");
 
     let mut child = Command::new("script")
+        .env("HOME", test_isolated_home())
         .args([
             "-q",
             "/dev/null",
@@ -1841,6 +1884,7 @@ fn control_should_execute_screenshot_and_save_file_in_zenoh_profile() {
     let config_path =
         write_temp_zenoh_router_config(&daemon_name, std::slice::from_ref(&entrypoint), "router");
     let mut daemon = Command::new(rdog_binary_path())
+        .env("HOME", test_isolated_home())
         .args(["daemon", "-c", &config_path.display().to_string()])
         .current_dir(&workdir)
         .stdin(Stdio::null())
@@ -2099,6 +2143,7 @@ fn daemon_should_reject_serial_only_router_profile() {
     );
 
     let output = Command::new(rdog_binary_path())
+        .env("HOME", test_isolated_home())
         .args(["daemon", "-c", &config_path.display().to_string()])
         .output()
         .expect("daemon should run");
@@ -2120,6 +2165,7 @@ fn daemon_should_reject_serial_only_router_profile() {
 fn legacy_zenoh_peer_transport_should_report_migration_error() {
     let daemon_name = unique_name("legacy");
     let output = Command::new(rdog_binary_path())
+        .env("HOME", test_isolated_home())
         .args([
             "control",
             "--transport",
@@ -2151,6 +2197,7 @@ fn legacy_peer_mode_config_should_report_migration_error() {
     );
 
     let output = Command::new(rdog_binary_path())
+        .env("HOME", test_isolated_home())
         .args(["daemon", "-c", &config_path.display().to_string()])
         .output()
         .expect("daemon should run");
@@ -2193,6 +2240,7 @@ fn run_control_multi_one_shot(
 
     let run_once = || {
         Command::new(rdog_binary_path())
+            .env("HOME", test_isolated_home())
             .args(&full_args)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -2644,8 +2692,8 @@ fn agent_runtime_should_answer_task_message_via_echo_decision() {
     .expect("daemon should report ready");
 
     let agent_name = format!("rt-helper-{}.lab", std::process::id());
-    // 伴生 agent 子进程: EchoDecision (内置), 连 daemon
     let mut agent = Command::new(rdog_binary_path())
+        .env("HOME", test_isolated_home())
         .args([
             "agent",
             "--name",
@@ -2666,7 +2714,6 @@ fn agent_runtime_should_answer_task_message_via_echo_decision() {
     let agent_err = agent.stderr.take().expect("agent stderr");
     let agent_log = Arc::new(Mutex::new(String::new()));
     let _ = spawn_output_collector_to(agent_out, Arc::clone(&agent_log));
-    // stderr (log 输出) 也进诊断 buffer: agent 内部错误不能再静默
     let _ = spawn_output_collector_to(agent_err, Arc::clone(&agent_log));
 
     let args: &[&str] = &[
@@ -2680,7 +2727,7 @@ fn agent_runtime_should_answer_task_message_via_echo_decision() {
         "lab",
     ];
 
-    // 就绪等待: agent 完成 mailbox 注册 (registered:true 可查)
+    // 就绪等待: agent 完成 mailbox 注册
     let mut registered = false;
     for _ in 0..40 {
         thread::sleep(Duration::from_millis(250));
@@ -2696,7 +2743,10 @@ fn agent_runtime_should_answer_task_message_via_echo_decision() {
     }
     assert!(registered, "agent 应完成 mailbox 注册");
 
-    // 投递 task, 订阅委派方 inbox 等 echo 回复
+    // 投递 task 并等 echo 回复。结构契约: reply_sub 与 task publisher 在
+    // 同一个 session, session 必须活到等待结束 (drop 后 sub 失效)。
+    // 声明传播窗口: sub/publisher 声明后 sleep 200ms 再 pub, 等待期间
+    // 持续 recv (流量本身也促进路由收敛)。
     let sent_at_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis())
@@ -2705,26 +2755,27 @@ fn agent_runtime_should_answer_task_message_via_echo_decision() {
     let task_message = format!(
         "{{\"v\":1,\"id\":\"rt-e2e-1\",\"from\":\"{sender}\",\"to\":\"{agent_name}\",\"kind\":\"task\",\"payload\":\"HELLO_AGENT\",\"sent_at\":{sent_at_ms}}}"
     );
-    let reply_inbox = format!("rdog/lab/agent/{sender}/inbox");
     let mut saw_reply = false;
     {
+        // 单一 session: reply_sub 先声明并留 1s 传播窗口 (zenoh 声明传播是
+        // 异步的, sub 未传播时 agent 的 reply pub 无匹配被丢), 再投 task。
+        // session 必须活到等待结束 (drop 后 sub 失效)。
         let zenoh_session = open_authenticated_test_session(&entrypoint);
         let reply_sub = zenoh_session
-            .declare_subscriber(reply_inbox)
+            .declare_subscriber(format!("rdog/lab/agent/{sender}/inbox"))
             .wait()
             .expect("reply sub");
         let publisher = zenoh_session
             .declare_publisher(format!("rdog/lab/agent/{agent_name}/inbox"))
             .wait()
             .expect("task publisher");
-        thread::sleep(Duration::from_millis(200));
+        thread::sleep(Duration::from_secs(1));
         publisher
             .put(task_message.as_str())
             .wait()
             .expect("task delivery");
 
-        // 10s 窗口等回复
-        let deadline = Instant::now() + Duration::from_secs(10);
+        let deadline = Instant::now() + Duration::from_secs(15);
         while Instant::now() < deadline {
             if let Ok(Some(sample)) = reply_sub.recv_timeout(Duration::from_millis(300)) {
                 if let Ok(payload) = sample.payload().try_to_string() {
@@ -2738,9 +2789,25 @@ fn agent_runtime_should_answer_task_message_via_echo_decision() {
             }
         }
     }
+
+    // 诊断: daemon mailbox 是否见过 task (区分 pub 未达 vs agent 未收)
+    let mut mailbox_saw_task = false;
+    for _ in 0..10 {
+        let (status, stdout, _) = run_control_multi_one_shot(
+            args,
+            &[&format!("@agent-inbox:{agent_name}")],
+            Duration::from_secs(10),
+        );
+        if status.success() && stdout.contains("HELLO_AGENT") {
+            mailbox_saw_task = true;
+            break;
+        }
+        thread::sleep(Duration::from_millis(200));
+    }
+
     assert!(
         saw_reply,
-        "agent 应以 echo 回复 task; agent_log:\n{}",
+        "agent 应以 echo 回复 task; mailbox_saw_task={mailbox_saw_task}; agent_log:\n{}",
         agent_log.lock().unwrap()
     );
 
@@ -2749,11 +2816,6 @@ fn agent_runtime_should_answer_task_message_via_echo_decision() {
     stop_child(&mut daemon);
     let _ = fs::remove_file(&config_path);
 }
-
-// ============================================================================
-// agent card e2e (issue #75): agent 启动发布卡片 -> @agent-card 查询命中;
-// 外部重新 pub 高版本卡片 -> 查询反映最新 (托管语义, daemon 不解释内容)
-// ============================================================================
 
 #[test]
 fn agent_card_should_be_published_and_queryable_with_version_updates() {
@@ -2771,6 +2833,7 @@ fn agent_card_should_be_published_and_queryable_with_version_updates() {
 
     let agent_name = format!("card-helper-{}.lab", std::process::id());
     let mut agent = Command::new(rdog_binary_path())
+        .env("HOME", test_isolated_home())
         .args([
             "agent",
             "--name",
@@ -2935,6 +2998,7 @@ fn agent_message_delivered_before_agent_start_should_be_recovered_via_mailbox() 
 
     // 3. 起 agent: 补拉路径应拿到 pre-start 消息并回复
     let mut agent = Command::new(rdog_binary_path())
+        .env("HOME", test_isolated_home())
         .args([
             "agent",
             "--name",
@@ -3143,15 +3207,20 @@ enabled = true
 
 #[test]
 fn tls_enabled_daemon_should_serve_ca_client_and_reject_wrong_ca() {
-    // 前置: 本机 TLS 材料 (幂等; CI 干净环境自动生成)
-    let user_dir = dirs_home_rdkg().expect("home should resolve");
+    // 前置: 隔离 HOME 内的 TLS 材料 (幂等; 测试目录自持)
+    let user_dir = dirs_home_rdkg();
     assert!(
         std::process::Command::new(rdog_binary_path())
+            .env("HOME", test_isolated_home())
             .args(["auth", "tls-init"])
             .status()
             .expect("tls-init should run")
             .success(),
-        "rdog auth tls-init 应成功"
+        "rdog auth tls-init 应成功 (隔离 HOME)"
+    );
+    assert!(
+        test_isolated_home().join(".rdog/tls/ca.pem").exists(),
+        "TLS 材料应在隔离 HOME 内"
     );
 
     let daemon_name = unique_name("tls-e2e");
@@ -3161,6 +3230,7 @@ fn tls_enabled_daemon_should_serve_ca_client_and_reject_wrong_ca() {
     let _ = user_dir;
 
     let mut daemon = Command::new(rdog_binary_path())
+        .env("HOME", test_isolated_home())
         .args(["daemon", "-c", config_path.to_str().unwrap()])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -3248,4 +3318,201 @@ fn tls_enabled_daemon_should_serve_ca_client_and_reject_wrong_ca() {
 /// 测试辅助: home 目录 (仅用于 tls-init 前置的存在性说明)。
 fn dirs_home_rdkg() -> Option<std::path::PathBuf> {
     std::env::var("HOME").ok().map(std::path::PathBuf::from)
+}
+
+// ============================================================================
+// 诊断对拍 (issue: 测试 session pub 在 agent 存在时不到达 daemon):
+// 同款投递, 唯一变量 = agent 进程是否在跑
+// ============================================================================
+
+#[test]
+fn diag_pub_reaches_mailbox_with_and_without_agent() {
+    let daemon_name = unique_name("diag-pub");
+    let listen_port = next_port();
+    let (mut daemon, config_path, entrypoint, buffer) =
+        start_zenoh_daemon_with_combined_output(&daemon_name, listen_port);
+    wait_until_output_contains(
+        &mut daemon,
+        &buffer,
+        "zenoh router daemon ready",
+        Duration::from_secs(8),
+    )
+    .expect("daemon should report ready");
+
+    let agent_name = format!("diag-h-{}.lab", std::process::id());
+    let sent_at_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let message_for = |tag: &str| {
+        format!(
+            "{{\"v\":1,\"id\":\"diag-{tag}\",\"from\":\"orch.lab\",\"to\":\"{agent_name}\",\"kind\":\"task\",\"payload\":\"DIAG_{tag}\",\"sent_at\":{sent_at_ms}}}"
+        )
+    };
+    let query_inbox = |needle: &str| -> bool {
+        for _ in 0..15 {
+            thread::sleep(Duration::from_millis(200));
+            let (status, stdout, _) = run_control_multi_one_shot(
+                &[
+                    "--transport",
+                    "zenoh",
+                    "--target-name",
+                    &daemon_name,
+                    "--entry-point",
+                    &entrypoint,
+                    "--namespace",
+                    "lab",
+                ],
+                &[&format!("@agent-inbox:{agent_name}")],
+                Duration::from_secs(10),
+            );
+            if status.success() && stdout.contains(needle) {
+                return true;
+            }
+        }
+        false
+    };
+
+    // 连接健康探测: authenticated session 直接 query daemon control key。
+    // zenoh::open 即使 connect 失败也返回 session (异步重连), pub 会静默
+    // 排队 — 必须用 query 证明链路活着, 否则后续断言全是伪命题。
+    {
+        let session = open_authenticated_test_session(&entrypoint);
+        let replies = session
+            .get(format!(
+                "rdog/lab/daemon/{daemon_name}/member/{daemon_name}/control"
+            ))
+            .payload("@ping")
+            .timeout(Duration::from_secs(5))
+            .wait()
+            .expect("probe query should dispatch");
+        let mut probe_ok = false;
+        if let Ok(reply) = replies.recv() {
+            if let Ok(sample) = reply.result() {
+                if let Ok(payload) = sample.payload().try_to_string() {
+                    probe_ok = payload.contains("pong");
+                }
+            }
+        }
+        assert!(probe_ok, "探测: authenticated session 的 query 应通");
+    }
+
+    // 阶段 1: 无 agent, 纯 pub session 投递 -> mailbox 应缓存
+    {
+        let session = open_authenticated_test_session(&entrypoint);
+        let publisher = session
+            .declare_publisher(format!("rdog/lab/agent/{agent_name}/inbox"))
+            .wait()
+            .expect("publisher");
+        publisher
+            .put(message_for("noagent").as_str())
+            .wait()
+            .expect("pub noagent");
+        thread::sleep(Duration::from_millis(200));
+    }
+    assert!(
+        query_inbox("DIAG_noagent"),
+        "阶段1: 无 agent 时 pub 应达 mailbox; daemon_log:\n{}",
+        buffer.lock().unwrap()
+    );
+
+    // 阶段 2: 起 agent (消费会 ack; 观察点改为 agent 处理后的 pending 空 +
+    // 新投递能否再达 — 若 agent 存在阻断 pub, 新消息不会出现也不会被处理)
+    let mut agent = Command::new(rdog_binary_path())
+        .env("HOME", test_isolated_home())
+        .args([
+            "agent",
+            "--name",
+            &agent_name,
+            "--namespace",
+            "lab",
+            "--target-name",
+            &daemon_name,
+            "--entry-point",
+            &entrypoint,
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("agent should start");
+    // 等 agent 注册
+    let mut registered = false;
+    for _ in 0..40 {
+        thread::sleep(Duration::from_millis(250));
+        let (status, _stdout, _) = run_control_multi_one_shot(
+            &[
+                "--transport",
+                "zenoh",
+                "--target-name",
+                &daemon_name,
+                "--entry-point",
+                &entrypoint,
+                "--namespace",
+                "lab",
+            ],
+            &[&format!("@agent-inbox:{agent_name}")],
+            Duration::from_secs(10),
+        );
+        // 注册后 noagent 消息会被 agent 消费, registered 状态依旧可查
+        if status.success() {
+            registered = true;
+            break;
+        }
+    }
+    assert!(registered, "agent 应注册 (control 查询仍通)");
+
+    // 阶段 3: agent 在跑, 同款纯 pub 投递
+    {
+        let session = open_authenticated_test_session(&entrypoint);
+        let publisher = session
+            .declare_publisher(format!("rdog/lab/agent/{agent_name}/inbox"))
+            .wait()
+            .expect("publisher");
+        thread::sleep(Duration::from_millis(200));
+        publisher
+            .put(message_for("withagent").as_str())
+            .wait()
+            .expect("pub withagent");
+    }
+    // agent 若收到会处理+ack (pending 空); 阻断则 pending 也空。
+    // 用 daemon 侧证据区分: 等 2s 让 agent 消费, 然后查 reply 是否到了
+    // orchestrator inbox (经 sub 收不到 — 用 daemon 日志? card 缓存?
+    // 最简: orch.lab 的 reply 需要有人 sub; 这里用 mailbox of orch?
+    // daemon 通配 sub 只入 mailbox… orch 也会被缓存! 查 orch mailbox!)
+    thread::sleep(Duration::from_secs(2));
+    let reply_cached = {
+        let mut hit = false;
+        for _ in 0..15 {
+            let (status, stdout, _) = run_control_multi_one_shot(
+                &[
+                    "--transport",
+                    "zenoh",
+                    "--target-name",
+                    &daemon_name,
+                    "--entry-point",
+                    &entrypoint,
+                    "--namespace",
+                    "lab",
+                ],
+                &["@agent-inbox:orch.lab"],
+                Duration::from_secs(10),
+            );
+            if status.success() && stdout.contains("echo:DIAG_withagent") {
+                hit = true;
+                break;
+            }
+            thread::sleep(Duration::from_millis(200));
+        }
+        hit
+    };
+    assert!(
+        reply_cached,
+        "agent 在跑时投递应被处理, reply 应达 orch mailbox (daemon 侧证据)"
+    );
+
+    agent.kill().expect("agent should stop");
+    let _ = agent.wait();
+    stop_child(&mut daemon);
+    let _ = fs::remove_file(&config_path);
 }
