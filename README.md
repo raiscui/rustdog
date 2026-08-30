@@ -17,6 +17,9 @@ It still supports the original port listener and reverse shell workflows, but th
 - real remote PTY sessions for TUI programs such as `codex`, `vim`, shells, and REPLs
 - GUI-oriented actions such as `@key`, `@paste`, `@screenshot`, `@click`, `@drag`, and `@wheel`
 - structured responses that are easy for a code agent to parse
+- background task primitives (`@spawn` / `@task-status` / `@task-output` / `@task-cancel`) so long commands never block a control session
+- companion agent messaging (per-agent inbox with at-least-once mailbox, capability cards, `rdog agent` hosting)
+- transport security: usrpwd session auth (default-on, zero-config on localhost) and optional TLS encryption (`rdog auth tls-init`)
 
 
 ## Rename and compatibility
@@ -266,6 +269,10 @@ The usual shape is:
 | PTY detach | `@pty-detach:{session_id:"..."}` | `@pty-detached ...` | Keep remote PTY running |
 | PTY attach | `@pty-attach:{session_id:"..."}` | `@pty-attached ...` | Reclaim remote PTY |
 | PTY close | `@pty-close:{session_id:"..."}` | `@pty-closed ...` | Terminate remote PTY |
+| Background spawn | `@spawn#1:cargo build --release` | `@response {"id":1,"task":"t-a1b2c3d4","state":"running"}` | Long commands without blocking the session |
+| Task status / output / cancel | `@task-status:t-...` / `@task-output:t-...` / `@task-cancel:t-...` | structured `@response` (state machine + tail output) | Manage background tasks |
+| Agent mailbox | `@agent-register:NAME` / `@agent-inbox:NAME` / `@agent-ack:NAME:MSG_ID` | structured `@response` | Companion-agent message loop (at-least-once) |
+| Agent capability card | `@agent-card:NAME` | structured `@response` | Discover what a companion agent offers |
 
 Important behavior:
 
@@ -303,6 +310,10 @@ Important behavior:
 For the formal protocol, see [`specs/control-line-protocol.md`](./specs/control-line-protocol.md).
 
 For the PTY lifecycle, detach / attach, and resize rules, see [`specs/pty-control-plan.md`](./specs/pty-control-plan.md).
+
+For background tasks, task progress frames, companion agents, and the mailbox contract, see [`specs/rdog-task-spawn-control-plan.md`](./specs/rdog-task-spawn-control-plan.md) and [`specs/rdog-agent-messaging-plan.md`](./specs/rdog-agent-messaging-plan.md).
+
+For authentication (usrpwd, default-on) and TLS encryption (`rdog auth tls-init`), see [`specs/rdog-authentication-plan.md`](./specs/rdog-authentication-plan.md) and [`specs/rdog-tls-plan.md`](./specs/rdog-tls-plan.md).
 
 ## Code agent workflow
 
