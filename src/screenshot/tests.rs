@@ -39,6 +39,38 @@ impl Write for TraceBufferWriter {
     }
 }
 
+/// 锁毒化免疫获取: 持锁线程 panic 会毒化 Mutex, 但本锁只保护
+/// "同进程不并发执行 trace 段" 这一时序约定, 没有可被破坏的数据不变量,
+/// panic 后恢复 inner 继续用是安全的。修复连锁挂: bounded 测试在 CI 慢机
+/// 上计时窗口内 panic 时, 其余 3 个 trace 测试不再于 lock().expect 处连锁挂。
+
+/// CI 慢机时序倍率: bounded 测试的窗口 (200ms deadline / 3s worker / 8s 轮询)
+/// 按比例放大, 快机保持 1x 不变。CI runner 的调度抖动会让 200ms recv 窗口
+/// 在 worker 尚未起跑时先炸 (panic -> 锁毒化 -> 连锁挂, 见 LATER_PLANS 2026-08-28)。
+#[cfg(target_os = "macos")]
+fn test_timing_scale() -> u64 {
+    if std::env::var("CI")
+        .map(|v| v == "true" || v == "1")
+        .unwrap_or(false)
+    {
+        4
+    } else {
+        1
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn scaled(millis: u64) -> Duration {
+    Duration::from_millis(millis * test_timing_scale())
+}
+
+#[cfg(target_os = "macos")]
+fn timeout_trace_lock() -> std::sync::MutexGuard<'static, ()> {
+    TIMEOUT_TRACE_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 #[cfg(target_os = "macos")]
 impl<'writer> tracing_subscriber::fmt::MakeWriter<'writer> for TraceBuffer {
     type Writer = TraceBufferWriter;
@@ -50,9 +82,7 @@ impl<'writer> tracing_subscriber::fmt::MakeWriter<'writer> for TraceBuffer {
 
 #[cfg(target_os = "macos")]
 fn capture_trace<R>(operation: impl FnOnce() -> R) -> (R, String) {
-    let _guard = TIMEOUT_TRACE_TEST_LOCK
-        .lock()
-        .expect("timeout trace test lock should not be poisoned");
+    let _guard = timeout_trace_lock();
     let buffer = TraceBuffer::default();
     let subscriber = tracing_subscriber::fmt()
         .without_time()
@@ -75,9 +105,7 @@ fn capture_trace<R>(operation: impl FnOnce() -> R) -> (R, String) {
 #[cfg(target_os = "macos")]
 #[test]
 fn bounded_capture_should_timeout_once_and_keep_worker_count_bounded() {
-    let _guard = TIMEOUT_TRACE_TEST_LOCK
-        .lock()
-        .expect("timeout trace test lock should not be poisoned");
+    let _guard = timeout_trace_lock();
     static TEST_CAPTURE_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
     TEST_CAPTURE_IN_FLIGHT.store(false, Ordering::Release);
 
@@ -85,9 +113,9 @@ fn bounded_capture_should_timeout_once_and_keep_worker_count_bounded() {
         "primary",
         "test",
         &TEST_CAPTURE_IN_FLIGHT,
-        Duration::from_millis(200),
+        scaled(200),
         || {
-            thread::sleep(Duration::from_millis(3000));
+            thread::sleep(scaled(3000));
             Ok::<_, std::io::Error>(())
         },
     )
@@ -98,7 +126,7 @@ fn bounded_capture_should_timeout_once_and_keep_worker_count_bounded() {
         "primary",
         "test",
         &TEST_CAPTURE_IN_FLIGHT,
-        Duration::from_millis(200),
+        scaled(200),
         || Ok::<_, std::io::Error>(()),
     )
     .expect_err("a timed-out backend must not create a second worker");
@@ -106,13 +134,13 @@ fn bounded_capture_should_timeout_once_and_keep_worker_count_bounded() {
 
     // 第三次捕获轮询等待慢 worker (3s) 退出后拿回 gate: 固定 sleep 需要超过
     // worker 剩余运行时间, 在 CI 上不可靠; busy 语义下 TimedOut 即"再试"。
-    let release_deadline = std::time::Instant::now() + Duration::from_secs(8);
+    let release_deadline = std::time::Instant::now() + scaled(8_000);
     loop {
         match capture_with_timeout(
             "primary",
             "test",
             &TEST_CAPTURE_IN_FLIGHT,
-            Duration::from_millis(200),
+            scaled(200),
             || Ok::<_, std::io::Error>(42),
         ) {
             Ok(value) => {
@@ -148,9 +176,9 @@ fn capture_fallback_should_trace_sck_timeout_and_xcap_transition() {
                     "primary",
                     "sck-rs",
                     &TEST_CAPTURE_IN_FLIGHT,
-                    Duration::from_millis(200),
+                    scaled(200),
                     || {
-                        thread::sleep(Duration::from_millis(3000));
+                        thread::sleep(scaled(3000));
                         Ok::<_, std::io::Error>(42)
                     },
                 )
