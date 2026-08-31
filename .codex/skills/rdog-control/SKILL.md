@@ -1,7 +1,7 @@
 ---
 name: rdog-control
-version: "2.28-wechat-noax-restore"
-description: "Use for rdog control on a local or named machine: health, shell, GUI, browser, window, AX, PTY, flow, verification, and safety."
+version: "2.30-task-agent"
+description: "Use for rdog control on a local or named machine: health, shell, GUI, browser, window, AX, PTY, flow, background tasks, companion agents, verification, and safety."
 ---
 
 # Rdog Control
@@ -220,6 +220,26 @@ across turns.
 Success requires fresh PID, display/window ownership, page or URL state, and the
 intended content change. `performed:true` or a screenshot alone is incomplete.
 
+## Background Tasks (Phase 3)
+
+`@spawn` runs a shell command in the background and answers immediately -
+the same session keeps serving other requests while it runs:
+
+```bash
+rdog control @spawn#11:cargo build --release   # -> {"task":"t-a1b2c3d4","state":"running"}
+rdog control @task-status:t-a1b2c3d4           # state + exit_code when terminal
+rdog control @task-output:t-a1b2c3d4           # tail (default 80 lines)
+rdog control @task-cancel:t-a1b2c3d4           # sync kill; idempotent on terminal
+```
+
+Terminal frames (`@task-completed` / `@task-failed`) are pushed on the session
+channel; `canceled` reuses `@task-failed` with `"canceled":true`. `@spawn`
+tasks emit no progress frames - poll `@task-output` for details.
+Daemon restart: old task ids honestly report `task not found`.
+
+Companion agents (hosted processes consuming task messages) live on their own
+lane - see `references/agent-messaging.md` for the full loop.
+
 ## Other Lanes
 
 | Need | First action |
@@ -230,6 +250,9 @@ intended content change. `performed:true` or a screenshot alone is incomplete.
 | One shell command | `@cmd` or `@script` |
 | Finite workflow | `@flow` |
 | Stateful terminal | `rdog control TARGET --pty -- COMMAND` |
+| Long command (non-blocking) | `@spawn` then `@task-status` / `@task-output` / `@task-cancel` |
+| Delegate task to companion agent | `@agent-register` / `@agent-inbox` / `@agent-ack` |
+| Agent capability discovery | `@agent-card:NAME` |
 
 本节和上面的具体 lane 合同已经覆盖常规评测路径。若当前 cwd 没有额外参考文件,
 直接依据本 skill 和 daemon 的结构化响应继续;禁止执行 `find /`、`locate` 或其他
