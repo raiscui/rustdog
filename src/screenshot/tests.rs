@@ -194,7 +194,8 @@ fn capture_fallback_should_trace_sck_timeout_and_xcap_transition() {
     assert!(events.contains("fallback_backend=\"xcap\""));
     assert!(!events.contains("screenshot_capture_failed"));
 
-    thread::sleep(Duration::from_millis(400));
+    // 等泄漏 worker 自然退出 (无法取消 Objective-C 调用), 缩放跟随其他窗口
+    thread::sleep(scaled(400));
 }
 
 #[cfg(target_os = "macos")]
