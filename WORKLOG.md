@@ -942,3 +942,184 @@ control_actions::execute_ax_action
   产知识最密集的地方
 - "环境决定性失败"家族三条 solution 互相引用成谱系, 后续遇到
   本地/CI 差异可直接按谱系排查
+
+## [2026-09-01 12:10:00] [Session ID: wayfinder-ocr-chart] 任务名称: Wayfinder 建图 - OCR 辅助内容识别
+
+### 任务内容
+- 为"集成 OCR 辅助 no-AX app 内容识别"建 Wayfinder map (GitHub issue #95) 与 6 张 child ticket (#96-#101)
+- 覆盖: GitHub Issues (map/sub-issues/dependencies), 本地六文件报备
+
+### 完成过程
+- 两轮 grilling 与用户逐项确认 8 项决策 (终点=规格+决策 / 引擎开放比选 / macOS 先行 / 通用 no-AX 内容层 / @screenshot include_ocr / 纯 os-logical 坐标 / 跟随截图生命周期 / 三件套验收)
+- 摸底: rusto-rs 仅 12 stars/v0.2.5 (RapidOCR+MNN); e2e 已外挂 tesseract (eng); WeChat no-AX 政策允许路径正是 OCR 要补的环节
+- sub-issues API 挂 6 张票, native dependencies 拉 7 条阻塞边, T1 引擎比选 (#96) 派后台 research subagent
+
+### 总结感悟
+- rusto-rs 是用户点名项但成熟度过低, 开放比选 + Apple Vision 纳入候选是更稳的路径; 最终由 #96 research + #99 prototype (HITL) 双证据拍板
+- 政策红线已在 map Notes 固化: OCR 文本不得当作 AX 语义 ref, 坐标动作仍走 guarded coordinate 门禁
+
+## [2026-09-01 16:30:00] [Session ID: wayfinder-ocr-chart] 任务名称: Wayfinder work-through - OCR map 三票推进
+
+### 任务内容
+- 以 work-through 模式推进 map #95: 解决 #98 (政策衔接, grilling)、#96 (引擎比选, 后台 research)、#100 (模型分发, 后台 research)、#97 (manifest schema, grilling)
+- #99 由"WeChat OCR 选型 demo"重定义为"Vision 量化数据采集"
+- 用户拍板 Apple Vision; CONTEXT.md 新增术语 "OCR 内容层"
+
+### 完成过程
+- #98: 一轮 grilling 4 项 (政策 v2 纳入 OCR / skill 政策段+cookbook / 坐标时效复用现有门禁 / 正例+负例验收), resolution+close+map 回写
+- #96/#100: 后台 research subagent 完成, 均核验过 comment/close/map 三步落盘; 关键发现 = Vision zh-Hans 需 macOS 11+ (rev2) 且不支持语言会静默降级, daemon 必须 fail-closed 探测
+- #97: 两轮 grilling 6 项 (行级 box / rdog.ocr.v1 / 请求级失败 / confidence 透传 / 双层共存 / 引擎原序), resolution+close+map 回写; #99 重定义 body+title
+
+### 总结感悟
+- Vision "不支持语言静默降级"是 fail-open 陷阱的典型样本, 与仓库 TERM=dumb 环境决定性失败家族同源: 显式探测 + 显式指定语言是唯一防御
+- research 豁免单票规则很好用: 两张 research 票全程后台并行, HITL 票才占用用户会话
+- map 的 Decisions so far 已成体系 (5 行索引), #101 规格票的素材基本齐备, 只差 #99 的量化数据
+
+## [2026-09-02 10:45:00] [Session ID: wayfinder-ocr-chart] 任务名称: #99 Vision 真实 WeChat 截图量化数据采集
+
+### 任务内容
+- 完成 map #95 的 #99 prototype 票: Vision OCR 在真实 WeChat 深色模式窗口的三档分辨率量化评测
+- 产出: 指标表 + 失效类清单 + #101 阈值建议 (resolution comment), 标注图本地留档
+
+### 完成过程
+- 环境摸底: pgrep + CGWindowList 定位窗口 (坑: owner 名是本地化 '微信' 不是 'WeChat'), screencapture -l 定向截图
+- Swift vision_ocr.swift: supportedRecognitionLanguages 探测 + zh-Hans accurate + 三次计时 (冷/热) + 归一化坐标转像素 + JSON 落盘; 标注改用 Python PIL (AppKit NSGraphicsContext 在脚本模式 nil 崩溃)
+- 评测: agent 人工转写为 GT, difflib 行级最佳匹配 (含相邻3行拼接); 逐行点名区分"真漏检"与"评测伪影"
+- 收尾: resolution (不含任何聊天内容) + close + map 第五条决策回写
+
+### 总结感悟
+- 数据挖掘三连: 50% 缩放召回反超原图 (91% vs 87%, Vision 内部自缩放), <40% 是悬崖 (63% + 置信度塌 0.30), 置信度离散桶 0.30 好坏混杂不能当硬阈值
+- 评测脚本自身会造假: 三处归一化缺陷把 5 条正常识别伪装成 miss; "逐行点名"是区分脚本伪影与真失败的必要步骤
+- CGWindowList owner 名跟系统语言走, 窗口定位代码必须不依赖 owner 名或同时匹配中英
+
+## [2026-09-02 11:30:00] [Session ID: wayfinder-ocr-chart] 任务名称: #101 规格撰写 + map #95 到站
+
+### 任务内容
+- 终点交付 specs/rdog-ocr-content-layer-plan.md (11 节正式规格, 含已校验 mermaid 链路图)
+- 配套: AGENTS.md 索引 / evidence-gate 政策 v2 / SKILL.md 一句更新 (cookbook 留实现期)
+- map #95 全 6 票关闭后到站 close
+
+### 完成过程
+- 规格汇总 5 项已关决策 + #99 实测阈值; beautiful-mermaid-rs 校验 mermaid 语法通过
+- evidence-gate Guidance 增补第 6 条 (政策 v2 + 新红线), frontmatter last_updated/tag 同步
+- SKILL.md 在 WeChat 政策段插入 include_ocr 一句 (token-lean, 标注 spec 路径与 "never AX refs")
+
+### 总结感悟
+- Wayfinder 全程跑通: research 两票后台并行, grilling/prototype 三票用户在环, 决策密度高且每票有 resolution 落盘
+- 规格刻意把 cookbook 留给实现期: 描述不存在的协议行为必然失真, 文档清单分 [x]/[ ] 是诚实边界
+
+## [2026-09-02 13:00:00] [Session ID: wayfinder-ocr-chart] 任务名称: OCR 引擎性能横评与 spec v1.1 修订
+
+### 任务内容
+- 用户反馈 Vision 太慢 -> 同截图同 GT 横评 Vision fast / oar-ocr v6 tiny / tesseract chi_sim
+- 结论: oar-ocr 全面胜出, 用户拍板换主引擎并完全移除 Vision; spec 修订至 v1.1
+- 证据与拍板均固化到 #96 (追加 comment x2)
+
+### 完成过程
+- oar-ocr: /tmp/ocr99/oar_bench harness (auto-download feature, OAR_HOME 隔离, v6 tiny 6MB 模型), 推理 ~0.35s 尺度不敏感, 召回 89/93/83%, 热加载 77ms
+- Vision fast: swift 变体实测, 中文不可用 (17%/2%/0%, 系统性乱码) — "fast 档救速度"路线排除
+- tesseract chi_sim: 3.3s 出局; 排障发现 Leptonica 读不了 /tmp 绝对路径, 相对路径/管道可绕
+- spec v1.1 整体重写 (修订记录制), AGENTS.md 索引与 #96 追溯 comment 同步
+
+### 总结感悟
+- 初版引擎决策时"性能"只有文档级证据, 这次证明实测横评不可省: fast 档不可用和 oar 的尺度鲁棒性都是意料外事实
+- 引擎反转但政策/schema/链路不动 — 前期把引擎无关层 (schema v1/失败语义框架/政策红线) 独立设计, 修订成本大幅下降
+- Wayfinder 图关闭后用户新证据触发的引擎重审: 走"追加证据 comment + 窄修订 + 追溯 comment", 不重开图
+
+## [2026-09-02 14:10:00] [Session ID: wayfinder-ocr-chart] 任务名称: rusto-rs (MNN) 补测入组
+
+### 任务内容
+- 用户点名补测 MNN 路线 (rusto-rs), 同截图同 GT 同协议入组横评
+- 结论: 不动摇 oar-ocr 主引擎; 证据固化 #96 追加 comment
+
+### 完成过程
+- 克隆 rusto-rs, 修正 tier 名下载 PP-OCRv6 tiny 模型 (det 2.2M/rec 4.7M/dict 27K), release 编译 1m13s (bin 名 rusto-rs 非 rusto)
+- 基准: 三图 x3 次, TSV 输出转 eval JSON; 发现 dict 档位错配致高置信度乱码, 重下正确字典后复测
+- 评测: 行级召回 30/26/15% (det 跨栏合并 32 大框), 文本层召回 87% (认字同档), 冷进程 1.0s (地板 0.48s)
+
+### 总结感悟
+- "高置信度乱码"是 rec 字典错配的指纹: 模型/字典/后处理三件套必须同源同档, 任何 OCR 集成都要先跑 GT 冒烟再采信置信度
+- 行级召回与文本层召回要分开看: 前者衡量"框好不好点", 后者衡量"字认得对不对", 混用会误判引擎优劣
+
+## [2026-09-02 16:00:00] [Session ID: wayfinder-ocr-chart] 任务名称: OCR 内容层第一阶段实现 (spec v1.1)
+
+### 任务内容
+- 实现 specs/rdog-ocr-content-layer-plan.md 的第一阶段: oar-ocr 引擎接入 + @screenshot include_ocr 协议 + rdog.ocr.v1 manifest 层 + fail-closed reason code
+
+### 完成过程
+- codegraph 摸底: ScreenshotRequest/parser/ScreenshotManifest/bundle builder/错误透传约定 (io::Error JSON 对象 -> render_control_action_error_response 透传 + 注入 code/id)
+- 新模块 src/control_ocr.rs: schema 类型 + OcrError (OCR_ENGINE_UNAVAILABLE/OCR_TIMEOUT) + 专用 worker 线程常驻引擎 (OnceLock + mpsc), 初始化等待 (60s, 含模型下载) 与推理超时 (2s) 分离
+- 接线: include_ocr 字段 (parser 重复报错) / ScreenshotManifest.ocr + WindowScreenshotManifest.ocr / composite 原点 virtual_bounds + window 路径原点 captured_os_rect (对裁剪图 OCR, 不跑整桌面) / primary 兼容入口显式拒绝
+- 测试: control_ocr 单测 (reason code/JSON 载荷/坐标换算) + parser 测试 (含 WeChat 窗口入口用例) + 真机冒烟 (env 门控 #[ignore] 测试)
+- 排障: E0433 (不点名 oar_ocr_core 类型, 字段访问内联 min/max); 冒烟超时假阳性 -> 磁盘满 (清 4.3GB); debug profile ONNX 慢 5-20x (冒烟须 --release)
+- 体积: 无 oar 19M / 含 oar 46M (+27MB) 回填 spec §8
+
+### 总结感悟
+- 镜像 include_ax 模式接新层非常顺: 前期 schema/失败语义独立于引擎设计, 引擎反转后接线照画
+- "环境缺失应显式失败而非跳过"纪律再次生效: 冒烟测试 env 缺失 panic 而非静默 pass
+- 磁盘满会造成超时/断言类假阳性: 排障先查 df 再怀疑代码; 编译产物 (incremental/多 target) 是 mac 开发机磁盘杀手
+- rg 的 -r 是 replace 不是 recursive, 用错会把输出整个换掉
+
+## [2026-09-02 17:00:00] [Session ID: wayfinder-ocr-chart] 任务名称: live OCR 三件套 e2e 实现
+
+### 任务内容
+- 新增 tests/control_ocr_e2e.rs: 计算器三件套 + 负例, RDOG_OCR_LIVE_E2E 门控 + VIA_TERMINAL 模式
+- ort 链接方式核实: 静态链接 (无 dylib 伴随, 主二进制自包含), spec §8 已回填
+
+### 完成过程
+- 复用 control_mouse_e2e/support.rs (ControlSession/start_daemon 模式) + control_ax_e2e 的 via-terminal 方案 (.command 脚本 + open -a Terminal + OAR_HOME export + 日志/端口就绪轮询)
+- 排障: TCC 归属链问题 (agent shell spawn 的 daemon 无屏幕录制归属) -> 二进制按 install-signed 方案重签 identifier=rdog 仍不够 -> via-terminal 后错误显式化为 code 77 -> 需 Terminal 一次性授权
+- 教训: e2e 门控测试不能用 --ignored 过滤 (env 门控测试直接跑); oar 模型缓存文件名是 pp-ocrv6_tiny_*.onnx 不是 det.mnn (与 rusto 混淆)
+
+### 总结感悟
+- repo 已有三层 live e2e 基建: opt-in env 门控 / via-terminal TCC 归属 / spawn 点 env 注入 checklist — 新 e2e 全部照搬零发明
+- TCC 问题是权限归属链问题, 不是签名问题: 重签解决"跨构建保留", 解决不了"从哪生"
+
+## [2026-09-02 18:00:00] [Session ID: wayfinder-ocr-chart] 任务名称: live OCR 三件套 e2e 验收
+
+### 任务内容
+- tests/control_ocr_e2e.rs (计算器三件套 + 负例, env 门控 + via-terminal) 实现与 live 调试
+- python 驱动下三件套闭环一次通过; rust harness 不稳定项开票 #102
+
+### 完成过程
+- TCC 排障链: adhoc 随机身份 -> install-signed 方案重签 identifier=rdog -> Terminal 屏幕录制授权 -> via-terminal 模式捕获成功
+- live 调试发现并修复: Calculator 重开恢复上次显示值 (显示区 "5" 污染按钮 "5" 定位) / 首次点击被窗口激活吞掉 / 遮挡窗口不进截图 (每截图前 activate) / 单帧 OCR 按钮抖动 (重拍 + conf>=0.5 + 候选对)
+- 坐标偏移假说被全局画框验证推翻: OCR 框在全局坐标对位准确, 偏移是跨 run 窗口级联的假象
+
+### 总结感悟
+- live GUI e2e 的不稳定三兄弟: 窗口遮挡 / 焦点吞点击 / 位置级联 — 每次截图前 activate + 同帧断言 + 重拍是标准防御
+- "推翻自己的偏移结论"靠的是全局坐标画框这个决定性实验: 假设要用可证伪实验检验, 不能靠连续推理
+- TCC 归属链: 重签解决跨构建保留, via-terminal 解决"从哪生", 两者缺一不可
+
+## [2026-09-02 19:40:00] [Session ID: wayfinder-ocr-chart] 任务名称: live 三件套闭环通过 + 陈旧帧缺陷发现
+
+### 任务内容
+- live OCR 三件套 (读/定位点击/fresh 验证 + 负例) 在 python 驱动下完整通过
+- 发现窗口截图路径陈旧帧缺陷, 开票 #103; e2e 稳定化项在 #102
+
+### 完成过程
+- 多轮排障: 点击吞没 (activate 前置) / Calculator 状态恢复 (显示区残留污染定位 -> 按钮区域过滤) / 单帧按钮抖动 (重拍 + conf 过滤 + 候选对) / 坐标偏移假说 (全局画框证伪)
+- 决定性对照: daemon window capture (README 旧帧) vs screencapture 真值 (Calculator "77") 同刻分叉
+- 小图 2x 放大预处理落地 (借鉴 BK98), 大小图冒烟均过
+
+### 总结感悟
+- 陈旧帧缺陷的发现路径: OCR 定位失败 -> 不猜, 拿 screencapture 真值对照 daemon 输出 -> 同刻分叉即证据
+- composite 有 stale 守卫而 window 没有, 是防御不对称; "fresh 证据"承诺要求所有截图路径同权新鲜
+- 点击 "77" 是 OCR->点击精度最好的正面证据: 两次独立实验的框中心都精确命中按钮
+
+## [2026-09-02 21:50:00] [Session ID: wayfinder-ocr-chart] 任务名称: #102 处理 - overlay 渲染调试与显示器休眠发现
+
+### 任务内容
+- 调试 overlay 面板 0x0 渲染问题; 发现显示器休眠/锁屏是最大混杂因素
+- overlay 实现重构为子进程架构 + 主 runloop 手动冲刷; 完成面板创建与窗口注册 (正确 bounds/layer)
+
+### 完成过程
+- 诊断链: 面板对象自认配置成功 (frame/level/visible) 但 CGWindowList 0x0 layer0 -> 补 finishLaunching 无效 -> 全屏截图全黑实锤显示器休眠 -> caffeinate 唤醒恢复
+- objc2 0.6 学习: mtm.alloc::<T>() / MainThreadMarker::new_unchecked 的 AppKit 风险 / runMode_beforeDate 手动 runloop / NSDefaultRunLoopMode 是 extern static 需 unsafe
+- 发现 runloop 缺失问题: 不跑主 runloop, 窗口订购永不提交到窗口服务器 (注册 0x0)
+- 诚实纠偏: #103 结论加了休眠混杂因素注释, 需亮屏重验
+
+### 总结感悟
+- "截图全黑 = 显示器休眠"应是 live GUI 测试的第一前置检查 (亮度均值一算便知)
+- AppKit helper UI 的正道: 子进程承载主线程 AppKit, 父子间 stdin/IPC; 任何"后台线程 unchecked MTM"的取巧都会在真实 AppKit 校验下崩
+- runMode_before_date 在无任务时立即返回, 30ms 预算不等于 30ms 等待, 循环需自控节奏

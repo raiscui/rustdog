@@ -1,7 +1,7 @@
 ---
 title: "GUI 坐标 hit-test 必须独立证明目标归属 (owner evidence gate)"
 date: 2026-08-22
-last_updated: 2026-08-22
+last_updated: 2026-09-02
 module: control
 component: gui-targeting
 problem_type: best_practice
@@ -12,6 +12,7 @@ tags:
   - ax-hit-test
   - foreign-tree
   - wechat-no-ax
+  - ocr-content-layer
   - fail-closed
 verified_by:
   - "rg -ni 'copyelementatposition|hit_test|hit-test' src/ -> 0 命中 (坐标 hit-test 发现路径不在 main)"
@@ -56,6 +57,11 @@ macOS 应用的标准 `AXChildren` 树可能缺少内容节点。一种自然的
    coordinate 动作 + 动作后新截图。不重用 `发现` / `直播` / `发布` 等 AX 派生
    ref。重新启用前必须通过受控重叠窗口 owner 回归、真实 `文件传输助手` 命中、
    focused/occluded 多状态重复验证和全链路 fail-closed。
+6. **OCR 内容层 (政策 v2, 2026-09-02)**: WeChat 允许路径升级为 `@window-find` →
+   fresh screenshot (`include_ocr:true`) → OCR 行级文本框 os-logical 坐标走
+   guarded coordinate 动作 → 动作后 fresh 截图仲裁。新增红线: OCR 文本框不是
+   AX 语义身份, 不进 ref/epoch 体系; 引擎不可用时请求级失败 (fail-closed),
+   缺层不得被解读为"无文字"。规格与实测基线: `specs/rdog-ocr-content-layer-plan.md`。
 
 ## Evidence
 

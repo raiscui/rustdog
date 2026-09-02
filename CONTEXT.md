@@ -104,3 +104,9 @@ _Avoid_: Untargeted paste, direct low-level type-text workflow
 `action:"type"` 未提供 target 时的低级 paste 路径。
 它不拥有目标资源的 successor/postcondition 契约,只能作为无目标输入能力使用。
 _Avoid_: Verified text mutation
+
+**OCR 内容层**:
+对无法提供 AX 内容树的 app,在 fresh screenshot 上运行文本识别得到的
+os-logical 文本框集合。它只是坐标定位辅助,不是 AX 语义身份,
+其上的动作仍走 guarded coordinate 门禁与动作后 fresh 截图仲裁。
+_Avoid_: OCR ref, semantic OCR target, AX replacement
