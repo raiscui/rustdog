@@ -20,8 +20,6 @@ use std::io;
 
 /// 识别框数量上限 (超长按钮列表截断)
 const BOX_CAP: usize = 32;
-/// overlay 事件循环 tick 间隔
-const TICK: std::time::Duration = std::time::Duration::from_millis(30);
 /// 面板初始不透明度 (后 40% 存活期线性淡出)
 const BASE_ALPHA: f64 = 0.45;
 
@@ -136,8 +134,6 @@ pub fn run_overlay_main() -> io::Result<()> {
         .expect("rdog overlay 子命令必须运行在进程主线程");
     let app = objc2_app_kit::NSApplication::sharedApplication(mtm);
     app.setActivationPolicy(objc2_app_kit::NSApplicationActivationPolicy::Accessory);
-    // 无事件循环的 helper 进程必须手动完成启动, 否则窗口不合成 (onscreen=false)
-    app.finishLaunching();
     // 无事件循环的 helper 进程必须手动完成启动, 否则窗口订购被延迟到永远
     app.finishLaunching();
 
@@ -223,7 +219,7 @@ pub fn run_overlay_main() -> io::Result<()> {
 
 
 struct ActivePanel {
-    panel: objc2::rc::Retained<objc2_app_kit::NSPanel>,
+    panel: objc2::rc::Retained<objc2_app_kit::NSWindow>,
     created: std::time::Instant,
     ttl: std::time::Duration,
     base_alpha: f64,
@@ -241,7 +237,7 @@ fn make_panel(
     main_height: f64,
     rect: [i32; 4],
     color: PanelColor,
-) -> objc2::rc::Retained<objc2_app_kit::NSPanel> {
+) -> objc2::rc::Retained<objc2_app_kit::NSWindow> {
     let (r, g, b, alpha) = match color {
         PanelColor::Green => (0.15, 1.0, 0.35, BASE_ALPHA),
         PanelColor::Blue => (0.2, 0.55, 1.0, 0.28),
@@ -255,13 +251,20 @@ fn make_panel(
         ),
         objc2_foundation::NSSize::new(rect[2] as f64, rect[3] as f64),
     );
-    let panel = objc2_app_kit::NSPanel::initWithContentRect_styleMask_backing_defer(
-        mtm.alloc::<objc2_app_kit::NSPanel>(),
-        frame,
-        objc2_app_kit::NSWindowStyleMask::Borderless,
-        objc2_app_kit::NSBackingStoreType::Buffered,
-        false,
-    );
+    // 必须用 NSWindow 而不是 NSPanel: 实测 (issue #102, swift 对照矩阵) macOS 对
+    // NSPanel+Borderless 组合拒绝合成 (注册正确但 onscreen=false 永不上屏),
+    // NSWindow+Borderless 正常合成; overlay 需要的点击穿透/置顶/全空间
+    // 都是 NSWindow 原生能力, NSPanel 并非必需。
+    // (objc2 将该 init 标为 unsafe, 需显式块)
+    let panel = unsafe {
+        objc2_app_kit::NSWindow::initWithContentRect_styleMask_backing_defer(
+            mtm.alloc::<objc2_app_kit::NSWindow>(),
+            frame,
+            objc2_app_kit::NSWindowStyleMask::Borderless,
+            objc2_app_kit::NSBackingStoreType::Buffered,
+            false,
+        )
+    };
     panel.setTitle(&objc2_foundation::NSString::from_str("rdog-overlay"));
     panel.setLevel(objc2_app_kit::NSFloatingWindowLevel);
     panel.setIgnoresMouseEvents(true); // 点击穿透: overlay 永不拦截用户输入
