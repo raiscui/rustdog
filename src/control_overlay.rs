@@ -15,6 +15,8 @@
 // 可视化永不影响控制主流程。开关: RDOG_OVERLAY=0/false 关闭。非 macOS no-op。
 // ============================================================================
 
+// 仅 macOS 子进程消费 serde 事件; 非 macOS 无事件结构, 避免 unused import
+#[cfg(target_os = "macos")]
 use serde::Deserialize;
 use std::io;
 
@@ -24,6 +26,8 @@ const BOX_CAP: usize = 32;
 const BASE_ALPHA: f64 = 0.45;
 
 /// 事件 JSON (daemon -> overlay 子进程, stdin 按行)
+/// (仅 macOS 子进程消费; Linux 上 daemon 侧在 submit 入口短路, 不产生事件)
+#[cfg(target_os = "macos")]
 #[derive(Debug, Deserialize)]
 struct OverlayEvent {
     color: String,
@@ -61,7 +65,8 @@ fn enabled() -> bool {
 }
 
 fn submit(color: &str, ttl_ms: u64, rects: impl Iterator<Item = [i32; 4]>) {
-    if !enabled() {
+    // AppKit overlay 仅存在于 macOS; 其他平台编译期短路, 不 spawn 无谓子进程
+    if !cfg!(target_os = "macos") || !enabled() {
         return;
     }
     // 过滤退化矩形, 截断超长列表 (超长按钮列表场景)
@@ -124,10 +129,18 @@ fn submit(color: &str, ttl_ms: u64, rects: impl Iterator<Item = [i32; 4]>) {
 
 // ----------------------------------------------------------------------------
 // overlay 子进程主循环 (rdog overlay): 主线程跑 AppKit + stdin 事件
+// (AppKit 仅 macOS; 非 macOS 无可视化层, 子命令为 no-op 立即退出)
 // ----------------------------------------------------------------------------
+
+/// 非 macOS: 无 AppKit 可视化层, 子命令立即退出 (daemon 侧已编译期短路)
+#[cfg(not(target_os = "macos"))]
+pub fn run_overlay_main() -> io::Result<()> {
+    Ok(())
+}
 
 /// `rdog overlay` 子命令入口: 从 stdin 读 JSON 行事件并绘制。
 /// stdin EOF (daemon 退出) 后自动结束。
+#[cfg(target_os = "macos")]
 pub fn run_overlay_main() -> io::Result<()> {
     // AppKit 事件/绘制在子进程主线程执行, MTM 合法获取 (非 unchecked)
     let mtm = objc2::MainThreadMarker::new()
@@ -218,6 +231,7 @@ pub fn run_overlay_main() -> io::Result<()> {
 }
 
 
+#[cfg(target_os = "macos")]
 struct ActivePanel {
     panel: objc2::rc::Retained<objc2_app_kit::NSWindow>,
     created: std::time::Instant,
@@ -225,6 +239,7 @@ struct ActivePanel {
     base_alpha: f64,
 }
 
+#[cfg(target_os = "macos")]
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum PanelColor {
     Green,
@@ -232,6 +247,7 @@ enum PanelColor {
     Orange,
 }
 
+#[cfg(target_os = "macos")]
 fn make_panel(
     mtm: objc2::MainThreadMarker,
     main_height: f64,
