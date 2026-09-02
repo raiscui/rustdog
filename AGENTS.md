@@ -139,6 +139,16 @@ Issues 和 Wayfinder maps 使用 GitHub Issues。详见 `docs/agents/issue-track
   - 用途: 与 `specs/rdog-stable-signing-identity.md` 及 `self-learning.macos-codesign-stable-dr-check` skill 互链的 solution 载体
   - 何时阅读: 排查 `cargo install` 重编后 TCC 授权失效, 或修改本地安装/发布流程前
 
+- `docs/solutions/best-practices/macos-live-gui-testing-environment-gates.md`
+  - 主题: macOS live GUI 自动化测试的环境门禁 (显示器休眠/权限归属链/焦点吞没/遮挡)
+  - 用途: 固化 live e2e 三阶段门禁 (前置休眠与授权检查 / 截图前 activate 与同帧断言 / 系统工具真值对照) 与单帧识别抖动的防御 (重拍 + conf 过滤 + 候选回退)
+  - 何时阅读: 编写或排查依赖屏幕捕获、合成输入、窗口枚举的 live e2e / 真机冒烟, 或遇到"间歇失败、重跑即过"类症状前
+
+- `docs/solutions/design-patterns/appkit-helper-subprocess-isolation.md`
+  - 主题: AppKit helper UI 的子进程隔离 (daemon 非主线程建 NSPanel 触发 ObjC 异常 abort 整个进程)
+  - 用途: 固化"同二进制子命令 + stdin JSON 事件"的子进程架构、手动 runloop 冲刷 (否则窗口 0x0 不可见) 与生命周期 (stdin EOF 自动退出)
+  - 何时阅读: 长驻 Rust 服务需要任何 AppKit UI (overlay/通知/托盘), 或排查 `Rust cannot catch foreign exceptions, aborting` 类崩溃前
+
 - `docs/glossary.md`
   - 主题: `@computer-act` surface 术语表 (CUA、verify policy、outcome 三态、retry strategy、density metrics、GuiTransaction)
   - 用途: ADR-0001 到 0006 的配套 glossary; `verify_failed` 已标注被 outcome 三态取代的历史语义
@@ -162,6 +172,11 @@ Issues 和 Wayfinder maps 使用 GitHub Issues。详见 `docs/agents/issue-track
   - 主题: rdog ax-diff 的小红书首页 before/after AX snapshot fixture
   - 用途: 给 cookbook 的 AX JSON diff 章节和 CI smoke 脚本一个可直接复用的最小例子
   - 何时阅读: 需要给 agent / 测试脚本演示 `rdog ax-diff` 输入/输出格式时
+
+- `.codex/skills/rdog-control/references/cookbook-wechat-ocr.md`
+  - 主题: WeChat / no-AX app 的 OCR 内容层 cookbook (`rdog.ocr.v1` 定位与 guarded coordinate 动作)
+  - 用途: 固定 `@screenshot include_ocr:true` 读 OCR 行级框、文本匹配规则 (子串/续行拼接/conf 软参考)、fresh 窗口 rect 内 guarded coordinate 点击、动作后 fresh 验证与失败路径 (`OCR_ENGINE_UNAVAILABLE`/`OCR_TIMEOUT`/stale frame)
+  - 何时阅读: 用户要按可见文本定位/点击 WeChat 等 no-AX app 内容, 或需要 OCR 内容层的标准操作序列与红线 (OCR 文本永不当 AX ref) 时
 
 - `archive/manifests/ARCHIVE_MANIFEST__2026-04-06_continuous-learning.md`
   - 主题: 2026-04-06 持续学习批次的支线上下文归档说明

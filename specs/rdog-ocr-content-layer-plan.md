@@ -151,7 +151,7 @@ flowchart TD
 - [x] 政策 v2: `docs/solutions/best-practices/gui-target-owner-evidence-gate.md` Guidance 增补 OCR 内容层条款 (引擎无关, 修订不需改动)
 - [x] skill 一句更新: `.codex/skills/rdog-control/SKILL.md` WeChat 政策段指向 OCR 链路 (引擎无关)
 - [x] 术语: `CONTEXT.md` 新增 **OCR 内容层** (仅坐标辅助, 非 AX 语义身份)
-- [ ] `references/cookbook-wechat-ocr.md`: 实现期交付 (依赖真实协议行为, 现在写会失真)
+- [x] `references/cookbook-wechat-ocr.md`: 已交付 (2026-09-02, 基于真实协议行为与 live 验收: include_ocr 请求/rdog.ocr.v1 boxes/匹配规则/guarded coordinate/fresh 验证/失败路径)
 
 ## 11. Fog 预留 (map #95 Not yet specified, 本 spec 不实现)
 
