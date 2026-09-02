@@ -256,9 +256,17 @@ fn find_calculator_window(session: &mut ControlSession) -> String {
         value.get("code").is_none(),
         "window-find 不应报错: {value}"
     );
-    let window_id = value["matches"][0]["window_id"]
-        .as_str()
-        .expect("window-find should return matches[0].window_id")
+    // 不能取 matches[0]: 鼠标悬停在按钮上时 AX 会把 tooltip 注册成窗口且
+    // 排在前面 (interactable:false), 必须选可交互的真窗口 (#102 实测)。
+    let matches = value["matches"]
+        .as_array()
+        .expect("window-find should return matches");
+    let window_id = matches
+        .iter()
+        .find(|m| m["state"]["interactable"] == serde_json::Value::Bool(true))
+        .or_else(|| matches.first())
+        .and_then(|m| m["window_id"].as_str())
+        .expect("window-find should return an interactable window_id")
         .to_owned();
     assert!(!window_id.is_empty(), "window_id should not be empty");
     window_id
@@ -319,6 +327,55 @@ fn capture_window_with_ocr(
 /// 在按钮区域按全等文本定位文本框 (conf>=0.5 过滤误读框),
 /// 返回框中心 os-logical 坐标。显示区残留值 (Calculator 重开恢复上次显示)
 /// 会污染同名按钮定位, 因此只在最上方显示框之下找按钮。
+/// 在截图 OCR 层的最顶行 (显示区) 查找以 `suffix` 结尾的文本, 返回框中心。
+/// 与 locate_button 互补: fresh 点击验证要找的是显示结果, 而显示区
+/// 恰是 locate_button 的排除区 (top 行), 用错函数会永远 miss (#102 根因)。
+/// 用 ends_with 而非全等: Calculator 的表达式状态会跨运行持久化 (清
+/// savedState 也不退), 显示区常带历史残留前缀, 本轮点击生效的证据是
+/// "显示值以本轮 marker 结尾"。
+fn locate_display_text(manifest: &serde_json::Value, suffix: &str) -> Option<(i32, i32)> {
+    let boxes = manifest["ocr"]["boxes"].as_array()?;
+    if boxes.is_empty() {
+        return None;
+    }
+    let top = boxes
+        .iter()
+        .filter_map(|b| b["bbox"][1].as_i64())
+        .min()?;
+    let top_bottom = boxes
+        .iter()
+        .filter_map(|b| {
+            let y = b["bbox"][1].as_i64()?;
+            let h = b["bbox"][3].as_i64()?;
+            (y == top).then_some(y + h)
+        })
+        .max()?;
+    for box_ in boxes {
+        let Some(box_text) = box_["text"].as_str() else {
+            continue;
+        };
+        if !box_text.trim().ends_with(suffix) {
+            continue;
+        }
+        let confidence = box_["confidence"].as_f64()?;
+        if confidence < 0.5 {
+            continue;
+        }
+        let bbox = box_["bbox"].as_array()?;
+        let y = bbox[1].as_i64()?;
+        if y > top_bottom {
+            continue; // 按钮区, 不是显示区
+        }
+        let x = bbox[0].as_i64()?;
+        let w = bbox[2].as_i64()?;
+        let h = bbox[3].as_i64()?;
+        let center_x = i32::try_from(x + w / 2).ok()?;
+        let center_y = i32::try_from(y + h / 2).ok()?;
+        return Some((center_x, center_y));
+    }
+    None
+}
+
 fn locate_button(manifest: &serde_json::Value, text: &str) -> Option<(i32, i32)> {
     let boxes = manifest["ocr"]["boxes"].as_array()?;
     if boxes.is_empty() {
@@ -472,6 +529,14 @@ fn live_ocr_three_piece_calculator_flow() {
     let mut marker_final = String::new();
     let mut one_y_final = i32::MAX;
     for attempt in 1..=3 {
+        // 鼠标残留会触发按钮 tooltip, 而 AX 会把 tooltip 注册成窗口并劫持
+        // window rect (实测 215x18 的 tooltip rect 让 composite 裁到 tooltip
+        // 文本, 后续 OCR 全 miss)。每轮开始先把鼠标移出计算器窗口。
+        session.send(r#"@mouse-move#699:{x:200,y:600,coordinate_space:"os-logical"}"#);
+        session.send("\n"); // 行协议以换行收口, 漏 \n 该行永不执行 (#102 实测)
+        session.wait_for_all("move mouse away", &[r#""id":699"#], Duration::from_secs(10));
+        std::thread::sleep(Duration::from_millis(300)); // 等已弹出的 tooltip 消失
+
         // AC 归零 (带重拍定位): 清掉上一轮残留
         if let Ok((_, located)) =
             capture_and_locate(&mut session, &workdir, &window_id, &["AC"], 2)
@@ -486,11 +551,25 @@ fn live_ocr_three_piece_calculator_flow() {
 
         let ((one_x, one_y), (two_x, two_y), marker, initial) =
             locate_digit_pair(&mut session, &workdir, &window_id);
-        // 初始层不应已有显示结果 (作为状态变化的对照基线)
-        assert!(
-            locate_button(&initial, &marker).is_none(),
-            "初始截图不应已包含显示结果 \"{marker}\""
-        );
+        // Calculator 的表达式显示会跨运行持久化 (savedState/defaults 清理都
+        // 不退), 残留尾巴可能恰好以 marker 结尾, 使"初始不应已含结果"的强
+        // 断言误判。此时点一个扰动数字改变末尾, 让"显示以 marker 结尾"重新
+        // 成为本轮点击的证据, 而不是直接 fail。
+        if locate_display_text(&initial, &marker).is_some() {
+            let Some((nudge_x, nudge_y)) = locate_button(&initial, "8") else {
+                panic!("初始显示已以 \"{marker}\" 结尾且扰动数字 8 不可定位");
+            };
+            session.send(&format!(
+                r#"@click#604:{{x:{nudge_x},y:{nudge_y},button:"left",count:1,hold_ms:80,coordinate_space:"os-logical"}}"#
+            ));
+            session.send("\n");
+            session.wait_for_all(
+                "nudge click to break suffix collision",
+                &[r#""id":604"#],
+                Duration::from_secs(30),
+            );
+            std::thread::sleep(Duration::from_millis(400));
+        }
 
         // 点击前显式置前: 首次点击若被窗口激活吞掉会少一位数字 (实测)。
         activate_calculator();
@@ -511,9 +590,20 @@ fn live_ocr_three_piece_calculator_flow() {
             "click 应答不应是错误: {click_output}"
         );
 
-        // fresh 截图仲裁: 显示结果出现才算本轮成功
+        // fresh 截图仲裁: 显示结果出现才算本轮成功 (在显示区找, 不在按钮区)
         let after = capture_window_with_ocr(&mut session, &workdir, &window_id);
-        let Some((display_x, display_y)) = locate_button(&after, &marker) else {
+        // 诊断: 打印显示区与全部 OCR 文本, 失败轮可直接看到点击后的真实显示
+        let display_texts: Vec<&str> = after["ocr"]["boxes"]
+            .as_array()
+            .map(|boxes| {
+                boxes
+                    .iter()
+                    .filter_map(|b| b["text"].as_str())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        eprintln!("[ocr-e2e] 第 {attempt} 轮点击后 OCR 全文: {display_texts:?}");
+        let Some((display_x, display_y)) = locate_display_text(&after, &marker) else {
             eprintln!("[ocr-e2e] 第 {attempt} 轮未出现 \"{marker}\", 重试");
             continue;
         };
