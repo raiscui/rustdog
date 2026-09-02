@@ -200,6 +200,7 @@ This is a temporary fail-closed policy based on the 2026-07-14 ownership probe.
 - The restriction applies to WeChat content targeting. `@window-find`, `@window-activate`, screenshot capture, guarded mouse actions, `@paste`, and targeted `@key` remain allowed.
 - Use `@window-find` to resolve the current WeChat window, then capture a fresh visual observation with `include_screenshot:true`, `include_windows:true`, and `include_ax:false`.
 - Locate visible controls from screenshot pixels plus the resolved window/display geometry. Use `guard.display`, and confirm the point is still inside the fresh window rect before coordinate actions.
+- When the daemon ships the OCR content layer, prefer `include_ocr:true` on that fresh screenshot request and locate content by OCR line boxes (`rdog.ocr.v1`, os-logical bbox) instead of pixel guessing; OCR boxes are coordinate hints, never AX refs (spec: `specs/rdog-ocr-content-layer-plan.md`).
 - If the window is hidden, occluded, or stale, activate it and capture a new screenshot before deriving coordinates. Do not use AX hit-testing to bypass occlusion.
 - Verify every action with a fresh screenshot and window state. If visual ownership or coordinates are ambiguous, stop without clicking or typing.
 

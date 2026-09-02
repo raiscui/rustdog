@@ -41,6 +41,7 @@ pub(crate) fn parse_screenshot_payload(input: &str) -> io::Result<ScreenshotRequ
     let mut coordinate_space = None::<ScreenshotCoordinateSpace>;
     let mut quality = None::<u8>;
     let mut include_ax = None::<bool>;
+    let mut include_ocr = None::<bool>;
     let mut ax_required = None::<bool>;
     let mut ax_mode = None::<AxMode>;
     let mut ax_depth = None::<u8>;
@@ -138,6 +139,15 @@ pub(crate) fn parse_screenshot_payload(input: &str) -> io::Result<ScreenshotRequ
                     ));
                 }
                 include_ax = Some(parse_bool_field("@screenshot", "include_ax", raw_value)?);
+            }
+            "include_ocr" => {
+                if include_ocr.is_some() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "@screenshot 对象 payload 的 `include_ocr` 字段重复",
+                    ));
+                }
+                include_ocr = Some(parse_bool_field("@screenshot", "include_ocr", raw_value)?);
             }
             "ax_required" => {
                 if ax_required.is_some() {
@@ -255,6 +265,7 @@ pub(crate) fn parse_screenshot_payload(input: &str) -> io::Result<ScreenshotRequ
         coordinate_space,
         quality: quality.unwrap_or(DEFAULT_SCREENSHOT_QUALITY),
         include_ax: include_ax.unwrap_or(false),
+        include_ocr: include_ocr.unwrap_or(false),
         ax_required: ax_required.unwrap_or(false),
         ax_mode,
         ax_depth: ax_depth.unwrap_or(ax_preset.depth),

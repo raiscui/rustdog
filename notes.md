@@ -739,3 +739,20 @@ query.rs (verb) 与 selector 富化留在 control_ax 侧。缓存不动。
 
 #62 先 (CI 修通 + 4 个测试平台适配) → #63 后 (update branch 后 ubuntu 首次
 可验证)。#63 的 control_actions.rs import 块与 #62 10d495e 同内容, 收敛无冲突。
+
+## [2026-09-02 17:08:30] [Session ID: sess_68ea20f1-1318-4541-85bc-08d0ca1ddbd8] 笔记: overlay onscreen=false 假设链 (读码阶段, 未验证)
+
+### 现象 (来自 #102 comment, 已验证事实)
+- 面板在 CGWindowList 注册正确 (bounds 400x300, layer 3) 但 onscreen=false
+- runMode_beforeDate 冲刷后 frame 从 0x0 -> 400x300 (说明 runloop 冲刷有效果, 但订购仍未上屏)
+- finishLaunching / orderFrontRegardless / display() / wantsLayer+CGColor 均无效
+
+### 候选假设 (按优先)
+1. **CATransaction 提交路径缺失**: orderFront 的窗口合成事务靠 runloop before-waiting observer 提交; 空 runloop 上 runMode_beforeDate 立即返回, observer 可能未触发 -> 窗口停在"已注册未合成"状态。此假设与"注册正确但 onscreen=false"精确吻合。
+   - 证伪实验: swift 对照 (同款结构不跑 app.run 只跑 RunLoop.main.run(before:)); 若 swift 同样不可见 => 架构问题, 正解是跑完整 app.run() + NSTimer poll channel; 若 swift 可见 => rust 绑定用法问题
+2. **borderless NSPanel + Accessory + ignoresMouseEvents 组合被合成器拒绝** (无内容 => 无 backing store)
+   - 证伪实验: 普通 NSWindow + 标题栏样式对照
+3. 代码笔误: finishLaunching 连调两次 (control_overlay.rs:140-142), 待清理; 是否参与失败路径未知
+### 反证检查
+- 若假设1成立, 为何 runMode 冲刷让 frame 从 0x0 变正确? => frame 更新走 CGSSetWindowBounds (AppKit 直接调用) 与 CATransaction commit 是两条路径, 吻合
+- 推翻条件: swift 对照可见 + rust 在同一 runloop 结构下不可见 => 假设1不成立

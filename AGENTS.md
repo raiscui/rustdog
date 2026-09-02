@@ -433,6 +433,11 @@ Issues 和 Wayfinder maps 使用 GitHub Issues。详见 `docs/agents/issue-track
   - 用途: 固定"install 后用固定 identifier + 自定义 DR (`designated => identifier \"rdog\"`) 重签, DR 跨构建字节级稳定, TCC 授权保留"的决策, 以及一次性迁移成本与验收方法
   - 何时阅读: 修改本地安装/发布流程、封装 `install-signed` 脚本、排查 daemon 权限反复失效, 或评审 macOS 授权生命周期方案前
 
+- `specs/rdog-ocr-content-layer-plan.md`
+  - 主题: OCR 内容层正式规格 (Wayfinder map #95 终点交付, no-AX app 通用内容识别, WeChat 首验收场景; v1.1 引擎修订)
+  - 用途: 固定 oar-ocr (PP-OCRv6 tiny) 第一引擎 (~0.35s / 召回 89-93%, Vision 因慢 2.6x + fast 档中文不可用已移除)、`@screenshot include_ocr` 与 `rdog.ocr.v1` manifest 层 schema、请求级失败 reason code、OCR 坐标 guarded coordinate 动作链路 (政策 v2)、模型 auto-download/OAR_HOME 分发与 e2e 注入纪律、三件套+识别错误负例验收矩阵
+  - 何时阅读: 实现/评审 daemon OCR 能力、修改 `@screenshot include_ocr` 协议或 `ocr_*` reason code、WeChat 等无 AX app 的内容定位, 或回顾 OCR 引擎/分发/阈值决策前
+
 
 ## [2026-08-30 11:00:00] [Session ID: current] 积压核验处置 (Phase 1-3 + 认证 A/B + 测试隔离全链复盘)
 

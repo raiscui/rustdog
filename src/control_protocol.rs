@@ -344,6 +344,9 @@ pub struct ScreenshotRequest {
     pub coordinate_space: ScreenshotCoordinateSpace,
     pub quality: u8,
     pub include_ax: bool,
+    /// OCR 内容层 (specs/rdog-ocr-content-layer-plan.md): 请求识别文本框,
+    /// 结果作为 manifest 的 `rdog.ocr.v1` 层返回。引擎不可用时请求级失败。
+    pub include_ocr: bool,
     pub ax_required: bool,
     pub ax_mode: AxMode,
     pub ax_depth: u8,
@@ -361,6 +364,7 @@ impl Default for ScreenshotRequest {
             coordinate_space: ScreenshotCoordinateSpace::OsLogical,
             quality: DEFAULT_SCREENSHOT_QUALITY,
             include_ax: false,
+            include_ocr: false,
             ax_required: false,
             ax_mode: AxMode::Full,
             ax_depth: DEFAULT_AX_DEPTH,

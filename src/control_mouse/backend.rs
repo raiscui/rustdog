@@ -2,6 +2,7 @@ use super::{
     plan::{MouseExecutionPlan, MousePlanStep},
     report::{MouseExecutionReport, MouseReleaseRecovery},
 };
+use crate::control_overlay;
 use enigo::{Axis, Button, Coordinate, Direction, Enigo, InputError, Mouse};
 use std::{io, thread, time::Duration};
 
@@ -34,13 +35,26 @@ pub fn perform_mouse_plan<B: MouseBackend>(
     plan: &MouseExecutionPlan,
 ) -> io::Result<MouseExecutionReport> {
     let mut pressed_button = None::<Button>;
+    // 最近一次 os-logical 移动坐标: 点击命中时在屏幕上闪烁提示用户
+    let mut last_os_point = None::<(i32, i32)>;
 
     for step in &plan.steps {
         let result = match *step {
-            MousePlanStep::Move { x, y, coordinate } => backend.move_mouse(x, y, coordinate),
+            MousePlanStep::Move { x, y, coordinate } => {
+                if coordinate == Coordinate::Abs {
+                    last_os_point = Some((x, y));
+                }
+                backend.move_mouse(x, y, coordinate)
+            }
             MousePlanStep::Button { button, direction } => {
                 let result = backend.button(button, direction);
                 if result.is_ok() {
+                    // 可视化反馈: 点击/按下时在屏幕上闪烁标记, 让用户看到 agent 动作
+                    if matches!(direction, Direction::Click | Direction::Press) {
+                        if let Some((x, y)) = last_os_point {
+                            control_overlay::flash_click(x, y);
+                        }
+                    }
                     match direction {
                         Direction::Press => pressed_button = Some(button),
                         Direction::Release if pressed_button == Some(button) => {
