@@ -434,6 +434,46 @@ fn parse_should_support_screenshot_ax_fields() {
 }
 
 #[test]
+fn parse_should_support_screenshot_include_ocr_field() {
+    assert_eq!(
+        parse_control_line(r#"@screenshot:{include_ocr:true}"#).unwrap(),
+        ControlParseResult::Control(ControlRequest {
+            request_id: None,
+            command: ControlCommand::Screenshot(ScreenshotRequest {
+                include_ocr: true,
+                ..ScreenshotRequest::default()
+            }),
+        })
+    );
+
+    // WeChat 等 no-AX 场景主入口: 窗口截图 + OCR, 显式关掉 AX 层
+    assert_eq!(
+        parse_control_line(
+            r#"@screenshot:{target:"window",window:{window_id:"pid:123/window:0"},include_ocr:true,include_ax:false}"#
+        )
+        .unwrap(),
+        ControlParseResult::Control(ControlRequest {
+            request_id: None,
+            command: ControlCommand::Screenshot(ScreenshotRequest {
+                target: ScreenshotTarget::Window,
+                window: Some(ScreenshotWindowTarget {
+                    window_id: Some("pid:123/window:0".to_owned()),
+                    ref_id: None,
+                    observation_id: None,
+                }),
+                include_ocr: true,
+                ..ScreenshotRequest::default()
+            }),
+        })
+    );
+
+    // 字段重复必须显式报错, 与 include_ax 行为一致
+    let err = parse_control_line(r#"@screenshot:{include_ocr:true,include_ocr:false}"#)
+        .unwrap_err();
+    assert!(err.to_string().contains("`include_ocr` 字段重复"));
+}
+
+#[test]
 fn parse_should_support_observe_command() {
     assert_eq!(
         parse_control_line("@observe").unwrap(),

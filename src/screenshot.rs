@@ -23,6 +23,7 @@ use std::{
 use crate::{
     ax_query::{capture_default_ax_snapshot, current_ax_platform},
     control_ax::{resolve_current_ax_target_rect, AxSnapshot, AxTarget, AxTreeRequest},
+    control_ocr::{recognize_to_manifest, OcrManifest},
     control_display_scope::{
         resolve_display_scope, resolve_observation_window_ref, DisplayRect, DisplayScope,
         DisplayScopeResolution, DisplaySelector, DisplaySummary, DISPLAY_ID_STABILITY_SESSION,
@@ -374,10 +375,12 @@ fn build_window_screenshot_outcome_with_id(
 
     // 先复用唯一的 composite builder 统一所有 display scale / rotation 处理。
     // 裁剪只在该逻辑坐标已经归一化之后发生,不再另起一套像素换算公式。
+    // include_ocr=false: 窗口路径对裁剪后的窗口图单独跑 OCR (见下), 不 OCR 整个桌面。
     let composite = build_screenshot_bundle_with_ax_and_layout(
         displays,
         screenshot_id,
         None,
+        false,
         ScreenshotBundleLayout::Composite,
     )?
     .composite;
@@ -394,6 +397,27 @@ fn build_window_screenshot_outcome_with_id(
     .to_image();
     let image_filename = format!("screenshot-{screenshot_id}-window.jpg");
     let manifest_filename = format!("screenshot-{screenshot_id}-window-manifest.json");
+    // OCR 内容层 (spec v1.1): 对窗口裁剪图跑识别, 原点取 captured_os_rect 左上,
+    // 产出 os-logical 文本框。窗口路径是 WeChat 等 no-AX 场景的主入口。
+    let ocr_manifest = if request.include_ocr {
+        let manifest = recognize_to_manifest(
+            &image,
+            (captured_os_rect.x, captured_os_rect.y),
+        )?;
+        // 可视化反馈: 标出局部截图的区域范围 + 识别框 (用户实时可见)
+        crate::control_overlay::show_capture_region([
+            captured_os_rect.x,
+            captured_os_rect.y,
+            captured_os_rect.width as i32,
+            captured_os_rect.height as i32,
+        ]);
+        let rects: Vec<[i32; 4]> = manifest.boxes.iter().map(|b| b.bbox).collect();
+        crate::control_overlay::show_ocr_boxes(&rects);
+        Some(manifest)
+    } else {
+        None
+    };
+
     let manifest = WindowScreenshotManifest {
         schema: "rdog.screenshot.window.v1",
         screenshot_id,
@@ -412,6 +436,7 @@ fn build_window_screenshot_outcome_with_id(
             width: image.width(),
             height: image.height(),
         },
+        ocr: ocr_manifest,
     };
     let manifest_json = serde_json::to_vec_pretty(&manifest)
         .map_err(|err| io::Error::other(format!("窗口截图 manifest 序列化失败: {err}")))?;
@@ -525,8 +550,13 @@ fn build_screenshot_parts_with_id_and_ax(
 ) -> io::Result<(Vec<ControlFrame>, ScreenshotBundleSummary)> {
     validate_coordinate_space(request)?;
 
-    let bundle =
-        build_screenshot_bundle_with_ax_and_layout(displays, screenshot_id, accessibility, layout)?;
+    let bundle = build_screenshot_bundle_with_ax_and_layout(
+        displays,
+        screenshot_id,
+        accessibility,
+        request.include_ocr,
+        layout,
+    )?;
     let image_filename = match layout {
         ScreenshotBundleLayout::Composite => {
             format!("screenshot-{screenshot_id}-virtual-desktop.jpg")
@@ -618,6 +648,12 @@ fn validate_primary_request(request: &ScreenshotRequest) -> io::Result<()> {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "primary screenshot 必须使用 display=primary 且 layout=single",
+        ));
+    }
+    if request.include_ocr {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "primary 兼容入口不支持 include_ocr;请用默认 composite 路径或 target=window",
         ));
     }
     validate_coordinate_space(request)
@@ -822,6 +858,9 @@ struct ScreenshotManifest {
     displays: Vec<DisplayManifest>,
     #[serde(skip_serializing_if = "Option::is_none")]
     accessibility: Option<AxSnapshot>,
+    /// OCR 内容层 (spec v1.1): composite 上的识别文本框, os-logical 坐标。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ocr: Option<OcrManifest>,
 }
 
 #[derive(Serialize)]
@@ -836,6 +875,9 @@ struct WindowScreenshotManifest<'a> {
     visibility: &'static str,
     window: WindowScreenshotTargetManifest<'a>,
     image_size: Size,
+    /// OCR 内容层 (spec v1.1): 窗口裁剪图上的识别文本框, os-logical 坐标。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ocr: Option<OcrManifest>,
 }
 
 #[derive(Serialize)]
@@ -910,6 +952,7 @@ fn build_scoped_screenshot_bundle(
         vec![display],
         screenshot_id,
         None,
+        false,
         ScreenshotBundleLayout::SingleDisplay,
     )
 }
@@ -924,6 +967,7 @@ fn build_screenshot_bundle_with_ax(
         displays,
         screenshot_id,
         accessibility,
+        false,
         ScreenshotBundleLayout::Composite,
     )
 }
@@ -932,6 +976,7 @@ fn build_screenshot_bundle_with_ax_and_layout(
     displays: Vec<CapturedDisplay>,
     screenshot_id: &str,
     accessibility: Option<AxSnapshot>,
+    include_ocr: bool,
     layout: ScreenshotBundleLayout,
 ) -> io::Result<ScreenshotBundle> {
     if displays.is_empty() {
@@ -994,6 +1039,22 @@ fn build_screenshot_bundle_with_ax_and_layout(
         });
     }
 
+    // OCR 内容层 (spec v1.1): composite 是 logical 像素, 文本框像素坐标
+    // 加 virtual_bounds 左上即为 os-logical, 与鼠标坐标直接互通。
+    // 引擎不可用/超时在这里 fail-closed 上抛, 不产出缺层 manifest。
+    let ocr_manifest = if include_ocr {
+        let manifest = recognize_to_manifest(
+            &composite,
+            (virtual_bounds.x, virtual_bounds.y),
+        )?;
+        // 可视化反馈: 在屏幕上标出识别到的文本框 (用户可实时看到 agent "读到"了什么)
+        let rects: Vec<[i32; 4]> = manifest.boxes.iter().map(|b| b.bbox).collect();
+        crate::control_overlay::show_ocr_boxes(&rects);
+        Some(manifest)
+    } else {
+        None
+    };
+
     let manifest = ScreenshotManifest {
         schema: "rdog.screenshot.v1",
         screenshot_id: screenshot_id.to_owned(),
@@ -1013,6 +1074,7 @@ fn build_screenshot_bundle_with_ax_and_layout(
         gaps,
         displays: display_manifests,
         accessibility,
+        ocr: ocr_manifest,
     };
 
     let display_count = manifest.display_count;

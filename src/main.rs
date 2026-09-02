@@ -36,6 +36,9 @@ mod control_gui_bench;
 mod control_invocation;
 mod control_mouse;
 mod control_observation;
+mod control_ocr;
+mod control_overlay;
+
 mod control_protocol;
 mod control_recording;
 mod control_resource_lane;
@@ -629,6 +632,9 @@ fn run(opts: input::Opts) -> Result<(), String> {
             log_file,
         } => {
             run_hidden_daemon(config, child, log_file)?;
+        }
+        Command::Overlay => {
+            control_overlay::run_overlay_main().map_err(|err| err.to_string())?;
         }
         Command::Config { command } => match command {
             ConfigCommand::Init { force } => {

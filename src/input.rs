@@ -28,6 +28,9 @@ pub enum AuthCommand {
 
 #[derive(Subcommand, Debug)]
 pub enum Command {
+    /// 可视化反馈子进程 (由 daemon 自动 spawn 绘制识别框/点击标记, 不要手动调用)
+    Overlay,
+
     /// Start a listener for incoming connections
     #[clap(alias = "l")]
     Listen {
