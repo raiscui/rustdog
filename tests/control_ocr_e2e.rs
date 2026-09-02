@@ -208,12 +208,13 @@ fn quit_calculator() {
         .status();
 }
 
+/// 截图/点击前置: 把计算器带到前台。必须用 `open -a` (LaunchServices 真激活,
+/// 实测点击可落); @window-activate 的 activate_app 不产生真前台 (raise_window
+/// AXError -25205), 非前台窗口的点击首击会被系统吞掉 (实测 two 点击反复
+/// 落空, open -a 后同坐标立即生效)。
 fn activate_calculator() {
-    // 被遮挡的窗口不出现在 screen-composited 截图里, 每次截图前必须置前
-    let _ = Command::new("osascript")
-        .arg("-e")
-        .arg(r#"tell application "Calculator" to activate"#)
-        .status();
+    let _ = Command::new("open").args(["-a", "Calculator"]).status();
+    std::thread::sleep(Duration::from_millis(300));
 }
 
 /// 最新一张截图的 manifest (客户端把 @savefile 落到 workdir/rdog_downloads)。
@@ -441,27 +442,34 @@ fn capture_and_locate(
 }
 
 /// 从候选数字对里找一对当前都能可靠定位的按钮。
-/// 单帧 OCR 对个别按钮有漏检/误读抖动 (实测 "2" 偶发误读, conf 0.12),
-/// 候选列表 + 重拍让流程对单帧抖动稳健。
+/// 单帧 OCR 对个别按钮有漏检/误读抖动 (实测 "1" 三帧连缺、"1"↔"3" 混淆
+/// 导致定位到错误按钮, #102 诊断日志实锤); 候选列表优先选实测稳定的
+/// 数字 (7/8/9/4/5/6 每帧都在), 重拍兜底剩余抖动。
 fn locate_digit_pair(
     session: &mut ControlSession,
     workdir: &Path,
     window_id: &str,
 ) -> ((i32, i32), (i32, i32), String, serde_json::Value) {
-    for [first, second] in [["1", "3"], ["7", "5"], ["4", "9"]] {
+    for [first, second] in [["4", "6"], ["6", "4"], ["5", "6"]] {
         for _ in 0..2 {
             let initial = capture_window_with_ocr(session, workdir, window_id);
             if let (Some(a), Some(b)) = (
                 locate_button(&initial, first),
                 locate_button(&initial, second),
             ) {
+                // 几何一致性校验: 同行且同列 = OCR 检测框错位 (实测帧内
+                // "456" 会漂成 "445"/"544", 文本错挂到邻格), 拒绝重拍。
+                if (a.1 - b.1).abs() <= 10 && (a.0 - b.0).abs() < 30 {
+                    std::thread::sleep(Duration::from_millis(300));
+                    continue;
+                }
                 let marker = format!("{first}{second}");
                 return ((a.0, a.1), (b.0, b.1), marker, initial);
             }
             std::thread::sleep(Duration::from_millis(300));
         }
     }
-    panic!("候选数字对 (1,3)/(7,5)/(4,9) 全部无法定位; 识别质量不足以支撑按文本点击");
+    panic!("候选数字对 (4,6)/(6,4)/(5,6) 全部无法定位; 识别质量不足以支撑按文本点击");
 }
 
 /// e2e 前置严格校验: 门控开启后任何前置缺失都 panic, 不静默跳过。
@@ -537,17 +545,14 @@ fn live_ocr_three_piece_calculator_flow() {
         session.wait_for_all("move mouse away", &[r#""id":699"#], Duration::from_secs(10));
         std::thread::sleep(Duration::from_millis(300)); // 等已弹出的 tooltip 消失
 
-        // AC 归零 (带重拍定位): 清掉上一轮残留
-        if let Ok((_, located)) =
-            capture_and_locate(&mut session, &workdir, &window_id, &["AC"], 2)
-        {
-            let (ac_x, ac_y) = located[0].expect("AC located");
-            session.send(&format!(
-                r#"@click#600:{{x:{ac_x},y:{ac_y},button:"left",count:1,hold_ms:80,coordinate_space:"os-logical"}}"#
-            ));
-            session.wait_for_all("AC reset click", &[r#""id":600"#], Duration::from_secs(30));
-            std::thread::sleep(Duration::from_millis(400));
-        }
+        // 归零: 新版 macOS 15 计算器没有 AC 按钮 (首行=退格/+/-/%/÷, 实测
+        // 图像确认), Esc 是清零等价键 (实测 Esc 后显示区归 0)。每轮开始
+        // Esc 保证干净起点, 残留撞车由下方扰动机制兜底。
+        activate_calculator();
+        session.send(r#"@key#600:{key:"Escape",mode:"press_release"}"#);
+        session.send("\n");
+        session.wait_for_all("Esc clear", &[r#""id":600"#], Duration::from_secs(10));
+        std::thread::sleep(Duration::from_millis(400));
 
         let ((one_x, one_y), (two_x, two_y), marker, initial) =
             locate_digit_pair(&mut session, &workdir, &window_id);
@@ -574,15 +579,25 @@ fn live_ocr_three_piece_calculator_flow() {
         // 点击前显式置前: 首次点击若被窗口激活吞掉会少一位数字 (实测)。
         activate_calculator();
         std::thread::sleep(Duration::from_millis(300));
+        // 两次点击必须串行 (发一条等一条): 连发时实测第二条的 move 不生效,
+        // 两下都落在 one 位置 ("77"/"44"/"11" 模式, #102 诊断日志实锤)。
         session.send(&format!(
-            r#"@click#601:{{x:{one_x},y:{one_y},button:"left",count:1,hold_ms:80,coordinate_space:"os-logical"}}
-@click#602:{{x:{two_x},y:{two_y},button:"left",count:1,hold_ms:80,coordinate_space:"os-logical"}}
-@cmd#603:"sleep 0.6"
-"#
+            r#"@click#601:{{x:{one_x},y:{one_y},button:"left",count:1,hold_ms:80,coordinate_space:"os-logical"}}"#
         ));
+        session.send("\n");
+        session.wait_for_all(
+            "first ocr-guided click",
+            &[r#""id":601"#],
+            Duration::from_secs(30),
+        );
+        std::thread::sleep(Duration::from_millis(200));
+        session.send(&format!(
+            r#"@click#602:{{x:{two_x},y:{two_y},button:"left",count:1,hold_ms:80,coordinate_space:"os-logical"}}"#
+        ));
+        session.send("\n");
         let click_output = session.wait_for_all(
-            "two ocr-guided clicks",
-            &[r#""id":601"#, r#""id":602"#],
+            "second ocr-guided click",
+            &[r#""id":602"#],
             Duration::from_secs(30),
         );
         assert!(
