@@ -44,7 +44,14 @@ pub fn perform_mouse_plan<B: MouseBackend>(
                 if coordinate == Coordinate::Abs {
                     last_os_point = Some((x, y));
                 }
-                backend.move_mouse(x, y, coordinate)
+                let result = backend.move_mouse(x, y, coordinate);
+                if result.is_ok() {
+                    // 实测 (#102): warp/moved 事件与紧随的 click 之间需要让
+                    // WindowServer 收敛, 否则 click 落在移动前的旧位置
+                    // (跨显示器移动尤甚, 表现为两次点击都落在 one 位置)。
+                    thread::sleep(Duration::from_millis(40));
+                }
+                result
             }
             MousePlanStep::Button { button, direction } => {
                 let result = backend.button(button, direction);
