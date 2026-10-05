@@ -15,7 +15,6 @@ target-win-baseline
 
 .vscode
 archive
-openspec
 rdog_downloads
 *.log
 .history

@@ -43,7 +43,10 @@ uuid = { version = "1.18.1", features = ["v4"] }
 xcap = "0.9.4"
 # OCR 内容层第一引擎 (spec v1.1 §2): auto-download 提供模型按需下载
 oar-ocr = { version = "0.9.2", optional = true, features = ["auto-download"] }
-zenoh = { version = "1.8.0", default-features = false, features = ["transport_serial", "transport_tcp", "transport_udp", "transport_unixpipe", "auth_usrpwd", "transport_tls"] }
+# transport_unixpipe 仅 unix 可编: zenoh 1.8.0 的 zenoh-link 在 windows-msvc 目标下
+# transport_unixpipe 的 re-export 缺 cfg 门, 交叉编译报 unresolved imports (2026-10-05 实测);
+# windows 走主条目 (无 unixpipe), unix 平台由下方 cfg(unix) 条目补回
+zenoh = { version = "1.8.0", default-features = false, features = ["transport_serial", "transport_tcp", "transport_udp", "auth_usrpwd", "transport_tls"] }
 
 [dev-dependencies]
 # agent mailbox e2e: 测试进程直接 zenoh pub 投递 inbox 消息
@@ -67,6 +70,9 @@ objc2-app-kit = { version = "0.3.2", default-features = false, features = [
 ] }
 
 [target.'cfg(unix)'.dependencies]
+# transport_unixpipe 仅 unix 可编: zenoh 1.8.0 的 zenoh-link 在 windows-msvc 目标下
+# transport_unixpipe re-export 缺 cfg 门, 交叉编译 unresolved (2026-10-05 实测), 分平台拆
+zenoh = { version = "1.8.0", default-features = false, features = ["transport_serial", "transport_tcp", "transport_udp", "transport_unixpipe", "auth_usrpwd", "transport_tls"] }
 termios = "0.3"
 signal-hook = "0.3.17"
 portable-pty = "0.9.0"

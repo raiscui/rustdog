@@ -477,6 +477,17 @@ pub fn run_pty_attach_client_transport(
     run_pty_client_threaded_stdin_loop(transport, ready, fail_on_nonzero_exit)
 }
 
+// windows stub (2026-10-05 win 交叉构建补丁): PTY-attach 面尚未在 windows 实现,
+// 调用方 (shell.rs/daemon_bridge.rs) 无条件引用此符号 — 返回 Unsupported 保编译,
+// screenshot/click 等 control 面不受影响; 正式实现可基于 portable-pty 的 ConPTY。
+#[cfg(windows)]
+pub fn open_attached_pty_session(_request: PtyOpenRequest) -> io::Result<AttachedPtySession> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "pty attach is not implemented on windows yet",
+    ))
+}
+
 #[cfg(unix)]
 pub fn open_attached_pty_session(request: PtyOpenRequest) -> io::Result<AttachedPtySession> {
     let session_id = uuid::Uuid::new_v4().to_string();
