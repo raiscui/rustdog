@@ -1504,3 +1504,98 @@ fn fake_display_with_native(
         image,
     }
 }
+
+// ─────────────────────────────────────────────────────────
+// 第 2 层: os_logical 换算 (2026-10-06 Windows HiDPI 修复)
+// ─────────────────────────────────────────────────────────
+
+/// Windows 语义: DPI-aware 后 os_rect 是物理像素, 逻辑 = 物理 / 本屏 scale。
+#[cfg(not(target_os = "macos"))]
+#[test]
+fn to_os_logical_divides_by_scale_on_windows_semantics() {
+    // 4K@200% 主屏: 物理 (0,0,3840,2160) → 逻辑 (0,0,1920,1080)
+    let rect = LogicalRect {
+        x: 0,
+        y: 0,
+        width: 3840,
+        height: 2160,
+    };
+    let logical = rect.to_os_logical(2.0);
+    assert_eq!(
+        logical,
+        LogicalRect {
+            x: 0,
+            y: 0,
+            width: 1920,
+            height: 1080
+        }
+    );
+}
+
+/// 副屏带负偏移 (多屏常见): 换算必须保留负坐标, 且每屏用自己的 scale。
+#[cfg(not(target_os = "macos"))]
+#[test]
+fn to_os_logical_preserves_negative_offset_with_per_display_scale() {
+    // 主屏 200% 左, 副屏 100% 右: 副屏物理 x=3840, scale=1 → 逻辑 x=3840
+    let secondary = LogicalRect {
+        x: 3840,
+        y: 0,
+        width: 1920,
+        height: 1080,
+    };
+    assert_eq!(secondary.to_os_logical(1.0), secondary);
+    // 混合缩放: 副屏物理 x=3840 且 scale=1.5 → 逻辑 x=2560
+    let mixed = LogicalRect {
+        x: 3840,
+        y: 0,
+        width: 2880,
+        height: 1620,
+    };
+    let got = mixed.to_os_logical(1.5);
+    assert_eq!(got.x, 2560);
+    assert_eq!(got.width, 1920);
+}
+
+/// macOS 语义: CGDisplayBounds 本就是 points (逻辑), 不除 —
+/// Retina 屏上除以 backingScale 会把正确坐标变错 (规格偏差修正的回归防线)。
+#[cfg(target_os = "macos")]
+#[test]
+fn to_os_logical_is_identity_on_macos() {
+    let rect = LogicalRect {
+        x: -100,
+        y: 25,
+        width: 1920,
+        height: 1080,
+    };
+    // Retina 2x: 若错误地除, 结果会缩半 — 断言原样即防线
+    assert_eq!(rect.to_os_logical(2.0), rect);
+}
+
+/// 非法 scale (xcap 失败回填 0 或负值) 按 1.0 兜底, 防除零。
+#[test]
+fn to_os_logical_survives_invalid_scale() {
+    let rect = LogicalRect {
+        x: 10,
+        y: 20,
+        width: 300,
+        height: 400,
+    };
+    assert_eq!(rect.to_os_logical(0.0), rect);
+    assert_eq!(rect.to_os_logical(-1.5), rect);
+    assert_eq!(rect.to_os_logical(f32::NAN), rect);
+}
+
+/// 1.25 这类非整数缩放: 逻辑坐标取整误差必须 ≤ 1px。
+#[cfg(not(target_os = "macos"))]
+#[test]
+fn to_os_logical_rounds_reasonably_on_fractional_scale() {
+    let rect = LogicalRect {
+        x: 0,
+        y: 0,
+        width: 2400,
+        height: 1500,
+    };
+    let logical = rect.to_os_logical(1.25);
+    assert_eq!(logical.width, 1920);
+    assert_eq!(logical.height, 1200);
+}

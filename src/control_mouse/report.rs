@@ -36,7 +36,7 @@ impl MouseAction {
 ///
 /// 这里直接生成 JSON value 字符串,上层只负责按 request id 包一层。
 /// 这样可以避免把 mouse metadata 当普通 stdout 再做一次 JSON 转义。
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct MouseExecutionReport {
     pub action: MouseAction,
     pub coordinate_space: Option<MouseCoordinateSpace>,
@@ -59,6 +59,15 @@ pub struct MouseExecutionReport {
     pub wheel_order: Vec<&'static str>,
     pub released: Option<bool>,
     pub release_recovery: MouseReleaseRecovery,
+    /// 命中的 display (display catalog id), 供 agent 把落点与屏对应。
+    pub display_id: Option<String>,
+    /// 命中屏的 scale factor — Windows HiDPI 下 agent 靠它理解
+    /// 截图像素与 os-logical 坐标的换算关系, 不必猜。
+    pub applied_scale_factor: Option<f32>,
+    /// 实际传给 OS 后端的坐标。语义 = "backend 输入":
+    /// 现阶段 = 协议坐标原样 (enigo 透传); Windows 原生后端落地后 = 物理
+    /// 坐标 (logical x scale)。字段名保持稳定, 值随后端演进。
+    pub resolved_os_point: Option<MousePoint>,
 }
 
 impl MouseExecutionReport {
@@ -130,6 +139,15 @@ impl MouseExecutionReport {
                 MouseReleaseRecovery::ReleaseSucceeded => "release-succeeded",
                 MouseReleaseRecovery::ReleaseFailed => "release-failed",
             });
+        if let Some(display_id) = &self.display_id {
+            value["display_id"] = json!(display_id);
+        }
+        if let Some(scale) = self.applied_scale_factor {
+            value["applied_scale_factor"] = json!(scale);
+        }
+        if let Some(point) = &self.resolved_os_point {
+            value["resolved_os_point"] = json!({ "x": point.x, "y": point.y });
+        }
         }
 
         serde_json::to_string(&value).expect("mouse report should serialize")
@@ -163,6 +181,9 @@ pub(crate) fn base_report(
         wheel_order: Vec::new(),
         released: None,
         release_recovery: MouseReleaseRecovery::NotNeeded,
+        display_id: None,
+        applied_scale_factor: None,
+        resolved_os_point: None,
     }
 }
 

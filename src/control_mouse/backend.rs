@@ -2,6 +2,8 @@ use super::{
     plan::{MouseExecutionPlan, MousePlanStep},
     report::{MouseExecutionReport, MouseReleaseRecovery},
 };
+use crate::control_display_scope::display_contains_point;
+use crate::control_mouse::request::MousePoint;
 use crate::control_overlay;
 use enigo::{Axis, Button, Coordinate, Direction, Enigo, InputError, Mouse};
 use std::{io, thread, time::Duration};
@@ -84,7 +86,32 @@ pub fn perform_mouse_plan<B: MouseBackend>(
         }
     }
 
-    Ok(plan.report.clone())
+    let mut report = plan.report.clone();
+    enrich_report_with_display(&mut report, last_os_point);
+    Ok(report)
+}
+
+/// 用 display catalog 补全点击落点的归属信息 (display_id / scale)。
+///
+/// 失败静默: 归属信息是**增强证据**, 拿不到 (catalog 枚举失败/无命中屏)
+/// 不该让一次成功的点击变成失败 —— 坐标本身已经执行成功。
+/// 无命中屏 (坐标在所有屏之外) 同样静默, agent 可从缺字段判断异常。
+fn enrich_report_with_display(report: &mut MouseExecutionReport, os_point: Option<(i32, i32)>) {
+    let Some((x, y)) = os_point else {
+        return;
+    };
+    report.resolved_os_point = Some(MousePoint { x, y });
+    let Ok(displays) = crate::screenshot::current_display_summaries() else {
+        return;
+    };
+    let Some(display) = displays
+        .iter()
+        .find(|display| display_contains_point(display, x, y))
+    else {
+        return;
+    };
+    report.display_id = Some(display.display_id.clone());
+    report.applied_scale_factor = Some(display.scale_factor);
 }
 
 fn recover_after_mouse_failure<B: MouseBackend>(

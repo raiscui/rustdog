@@ -27,7 +27,7 @@ pub enum MousePlanStep {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct MouseExecutionPlan {
     pub steps: Vec<MousePlanStep>,
     pub report: MouseExecutionReport,

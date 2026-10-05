@@ -772,6 +772,52 @@ struct LogicalRect {
 }
 
 impl LogicalRect {
+    /// OS 原生坐标 → OS 逻辑坐标 (`os-logical` 契约空间, 即 @click 接受的空间)。
+    ///
+    /// 各平台 OS 原生坐标语义不同 (2026-10-06 源码取证 xcap 0.9.4):
+    /// - macOS: `CGDisplayBounds` 返回 AppKit **points, 本就是逻辑坐标** —
+    ///   scale_factor 只是 Retina 比率, **除法反而引入错误**;
+    /// - Windows: DPI-aware 进程 (第 1 层落地后) 的 monitor rect 是**物理像素**,
+    ///   逻辑 = 物理 / 该屏 scale (96-DPI 基准);
+    /// - Linux X11: 像素即逻辑, scale 恒 1。
+    ///
+    /// 规格 `windows-hidpi-coordinate-fix-plan.md` 写的
+    /// "os_logical_rect = os_rect / scale" 是 Windows 视角的规则;
+    /// macOS 上必须原样, 这是施工时取证发现的规格偏差 (已记入提交)。
+    fn to_os_logical(self, scale_factor: f32) -> LogicalRect {
+        let scale = normalized_scale(scale_factor);
+        #[cfg(target_os = "macos")]
+        {
+            let _ = scale;
+            self
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            // 混合 DPI 多屏下每屏用**自己的** scale 换算, 不能用系统统一值。
+            let x = (f64::from(self.x) / scale).round() as i32;
+            let y = (f64::from(self.y) / scale).round() as i32;
+            let width = (f64::from(self.width) / scale).round() as u32;
+            let height = (f64::from(self.height) / scale).round() as u32;
+            LogicalRect {
+                x,
+                y,
+                width,
+                height,
+            }
+        }
+    }
+}
+
+/// 归一化 scale: xcap 失败回填 1.0, 非法值 (<=0) 同样按 1.0 兜底, 防除零。
+fn normalized_scale(scale_factor: f32) -> f64 {
+    if scale_factor.is_finite() && scale_factor > 0.0 {
+        f64::from(scale_factor)
+    } else {
+        1.0
+    }
+}
+
+impl LogicalRect {
     fn right(self) -> i64 {
         i64::from(self.x) + i64::from(self.width)
     }
@@ -851,6 +897,10 @@ struct ScreenshotManifest {
     partial: bool,
     backend_policy: &'static str,
     virtual_bounds: LogicalRect,
+    /// 虚拟桌面在 `os-logical` 空间 (@click 接受的坐标空间) 的边界。
+    /// Windows HiDPI 下与 virtual_bounds (OS 原生=物理) 不同, 换算规则见
+    /// LogicalRect::to_os_logical; agent 用它即可精确换算, 不必猜 scale。
+    os_logical_bounds: LogicalRect,
     image_size: Size,
     display_count: usize,
     transforms: ScreenshotTransforms,
@@ -906,6 +956,9 @@ struct DisplayManifest {
     primary: bool,
     backend: &'static str,
     os_rect: LogicalRect,
+    /// 该屏在 os-logical 空间的 rect (Windows = os_rect / 本屏 scale;
+    /// macOS = os_rect 原样, 见 to_os_logical 取证注释)。
+    os_logical_rect: LogicalRect,
     image_rect: LogicalRect,
     native_capture_size: Size,
     scale_factor: f32,
@@ -990,6 +1043,13 @@ fn build_screenshot_bundle_with_ax_and_layout(
 
     let virtual_bounds =
         build_virtual_bounds(displays.iter().map(|display| display.metadata.os_rect))?;
+    // os-logical 虚拟桌面边界: 各屏原生 rect 换算成逻辑后再取并集 bounds。
+    // 分屏各自换算 (混合 DPI 下每屏 scale 不同), 再用并集 bounds 汇总。
+    let os_logical_bounds = build_virtual_bounds(
+        displays
+            .iter()
+            .map(|display| display.metadata.os_rect.to_os_logical(display.metadata.scale_factor)),
+    )?;
     let image_size = Size {
         width: virtual_bounds.width,
         height: virtual_bounds.height,
@@ -1031,6 +1091,10 @@ fn build_screenshot_bundle_with_ax_and_layout(
             primary: display.metadata.is_primary,
             backend: display.metadata.backend.as_str(),
             os_rect: display.metadata.os_rect,
+            os_logical_rect: display
+                .metadata
+                .os_rect
+                .to_os_logical(display.metadata.scale_factor),
             image_rect,
             native_capture_size: display.metadata.native_capture_size,
             scale_factor: display.metadata.scale_factor,
@@ -1065,6 +1129,7 @@ fn build_screenshot_bundle_with_ax_and_layout(
         partial: false,
         backend_policy: backend_policy_for_current_platform(),
         virtual_bounds,
+        os_logical_bounds,
         image_size,
         display_count: display_manifests.len(),
         transforms: ScreenshotTransforms {
