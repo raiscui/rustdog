@@ -49,6 +49,7 @@ mod control_web;
 mod control_window;
 mod daemon;
 mod hidden_mode;
+mod win_dpi;
 mod input;
 mod listener;
 mod pty_control;
@@ -71,6 +72,10 @@ mod unixshell;
 mod winshell;
 
 fn main() {
+    // DPI awareness 必须在任何窗口创建之前设置 (Windows 只接受第一次,
+    // 首窗后锁定) — 因此放在绝对最前, 覆盖所有子命令含 hidden-daemon --child。
+    win_dpi::enable_dpi_awareness();
+
     let opts = input::Opts::parse();
 
     // 先初始化日志,后续所有错误都统一走顶层退出码。
