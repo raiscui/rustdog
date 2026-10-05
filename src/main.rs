@@ -31,6 +31,7 @@ mod control_computer_act;
 mod control_core;
 mod control_display;
 mod control_display_scope;
+mod control_file_transfer;
 mod control_flow;
 mod control_frames;
 mod control_gui_bench;

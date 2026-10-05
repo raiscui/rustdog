@@ -287,6 +287,15 @@ impl ControlActionExecutor for SystemControlActionExecutor {
                 io::ErrorKind::Unsupported,
                 "@cdp* 由 control_core 直接走 CDP lane,不应进入默认 executor 分支",
             )),
+            // 文件传输五 verb 同理由 control_core 专门分支处理
+            ControlCommand::FilePutFile(_)
+            | ControlCommand::FileGetFile(_)
+            | ControlCommand::FileChunk(_)
+            | ControlCommand::FileEnd(_)
+            | ControlCommand::FileRead(_) => Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "@file* / @put-file / @get-file 由 control_core 直接走文件传输 lane,不应进入默认 executor 分支",
+            )),
             // Phase 1 后台任务四原语: 由 control_core 专门分支直接处理
             // (specs/rdog-task-spawn-control-plan.md), 不走 executor 兜底
             ControlCommand::Spawn(_)

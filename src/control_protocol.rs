@@ -78,6 +78,13 @@ pub enum ControlCommand {
     Cdp(crate::control_cdp::CdpRequest),
     /// 列出 debug 端口上的 targets
     CdpTargets(u16),
+    /// 双向分块文件传输 (specs/file-transfer-control-spec.md)
+    /// 变体存原始 JSON payload (与 Script 同模式, 执行层解析)
+    FilePutFile(String),
+    FileGetFile(String),
+    FileChunk(String),
+    FileEnd(String),
+    FileRead(String),
     /// 在指定页执行 JS (Runtime.evaluate)
     CdpEval(crate::control_cdp::CdpEvalRequest),
     MouseMove(MouseMoveRequest),
@@ -664,6 +671,11 @@ pub fn parse_control_line(line: &str) -> io::Result<ControlParseResult> {
             ControlCommand::SelectorRefind(parse_selector_refind_payload(payload)?)
         }
         "cdp" => ControlCommand::Cdp(crate::control_cdp::parse_cdp_request(payload)?),
+        "put-file" => ControlCommand::FilePutFile(payload.to_owned()),
+        "get-file" => ControlCommand::FileGetFile(payload.to_owned()),
+        "file-chunk" => ControlCommand::FileChunk(payload.to_owned()),
+        "file-end" => ControlCommand::FileEnd(payload.to_owned()),
+        "file-read" => ControlCommand::FileRead(payload.to_owned()),
         "cdp-targets" => {
             ControlCommand::CdpTargets(crate::control_cdp::parse_cdp_targets_request(payload)?)
         }

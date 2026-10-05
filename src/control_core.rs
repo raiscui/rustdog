@@ -238,6 +238,21 @@ pub fn execute_explicit_control_request<E: ControlActionExecutor>(
                 Err(err) => cdp_denied_or_error_response(request.request_id, &err),
             }
         }
+        ControlCommand::FilePutFile(payload) => file_transfer_outcome(request.request_id, || {
+            crate::control_file_transfer::execute_put_file(&payload)
+        }),
+        ControlCommand::FileGetFile(payload) => file_transfer_outcome(request.request_id, || {
+            crate::control_file_transfer::execute_get_file(&payload)
+        }),
+        ControlCommand::FileChunk(payload) => file_transfer_outcome(request.request_id, || {
+            crate::control_file_transfer::execute_file_chunk(&payload)
+        }),
+        ControlCommand::FileEnd(payload) => file_transfer_outcome(request.request_id, || {
+            crate::control_file_transfer::execute_file_end(&payload)
+        }),
+        ControlCommand::FileRead(payload) => file_transfer_outcome(request.request_id, || {
+            crate::control_file_transfer::execute_file_read(&payload)
+        }),
         ControlCommand::Capabilities => match current_capabilities_report_json() {
             Ok(report_json) => ControlExecutionOutcome::from_response_line(
                 render_structured_success_response(request.request_id, &report_json),
@@ -481,6 +496,24 @@ fn task_output_json(report: &crate::task_control::TaskOutputReport) -> String {
         report.truncated,
         report.total_written
     )
+}
+
+/// 文件传输五 verb 的统一执行壳: 成功 → 结构化 JSON 响应, 失败 → action error。
+fn file_transfer_outcome(
+    request_id: Option<u64>,
+    execute: impl FnOnce() -> std::io::Result<serde_json::Value>,
+) -> ControlExecutionOutcome {
+    match execute() {
+        Ok(value) => ControlExecutionOutcome::from_response_line(
+            render_structured_success_response(
+                request_id,
+                &value.to_string(),
+            ),
+        ),
+        Err(err) => ControlExecutionOutcome::from_response_line(
+            render_control_action_error_response(request_id, &err),
+        ),
+    }
 }
 
 /// CDP 错误分流: 关闭态 (lane disabled) 是 permission 语义 (错误信封带
