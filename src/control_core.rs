@@ -204,6 +204,40 @@ pub fn execute_explicit_control_request<E: ControlActionExecutor>(
                 ),
             }
         }
+        ControlCommand::Cdp(cdp_request) => {
+            match crate::control_cdp::execute_cdp(&cdp_request) {
+                Ok(value) => ControlExecutionOutcome::from_response_line(
+                    render_structured_success_response(
+                        request.request_id,
+                        &serde_json::to_string(&value)
+                            .expect("cdp result should serialize"),
+                    ),
+                ),
+                Err(err) => cdp_denied_or_error_response(request.request_id, &err),
+            }
+        }
+        ControlCommand::CdpTargets(port) => {
+            match crate::control_cdp::execute_cdp_targets(*port) {
+                Ok(value) => ControlExecutionOutcome::from_response_line(
+                    render_structured_success_response(
+                        request.request_id,
+                        &serde_json::to_string(&value).expect("cdp targets should serialize"),
+                    ),
+                ),
+                Err(err) => cdp_denied_or_error_response(request.request_id, &err),
+            }
+        }
+        ControlCommand::CdpEval(cdp_eval_request) => {
+            match crate::control_cdp::execute_cdp_eval(&cdp_eval_request) {
+                Ok(value) => ControlExecutionOutcome::from_response_line(
+                    render_structured_success_response(
+                        request.request_id,
+                        &serde_json::to_string(&value).expect("cdp eval should serialize"),
+                    ),
+                ),
+                Err(err) => cdp_denied_or_error_response(request.request_id, &err),
+            }
+        }
         ControlCommand::Capabilities => match current_capabilities_report_json() {
             Ok(report_json) => ControlExecutionOutcome::from_response_line(
                 render_structured_success_response(request.request_id, &report_json),
@@ -447,6 +481,31 @@ fn task_output_json(report: &crate::task_control::TaskOutputReport) -> String {
         report.truncated,
         report.total_written
     )
+}
+
+/// CDP 错误分流: 关闭态 (lane disabled) 是 permission 语义 (错误信封带
+/// lane 字段供 agent 分辨), 其他错误走一般 action error。
+fn cdp_denied_or_error_response(
+    request_id: Option<u64>,
+    err: &io::Error,
+) -> ControlExecutionOutcome {
+    let message = err.to_string();
+    if message.contains("[cdp] enabled") {
+        let envelope = serde_json::json!({
+            "kind": "error",
+            "error": "permission_denied",
+            "lane": "cdp",
+            "message": message,
+        });
+        ControlExecutionOutcome::from_response_line(render_structured_success_response(
+            request_id,
+            &envelope.to_string(),
+        ))
+    } else {
+        ControlExecutionOutcome::from_response_line(
+            render_control_action_error_response(request_id, &io::Error::other(err.to_string())),
+        )
+    }
 }
 
 pub fn render_structured_success_response(request_id: Option<u64>, value_json: &str) -> String {

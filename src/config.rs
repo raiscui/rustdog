@@ -42,6 +42,7 @@ pub struct DaemonConfig {
     pub key: KeyConfig,
     pub auth: AuthConfig,
     pub tls: TlsConfig,
+    pub cdp: CdpConfig,
     pub observation: ObservationConfig,
     pub hidden: HiddenResidentConfig,
     pub outbound: OutboundConfig,
@@ -54,6 +55,22 @@ pub struct DaemonConfig {
 /// `enabled = true` 时 listen endpoints 的 tcp/ 切换为 tls/ 并注入
 /// ~/.rdog/tls/ 的证书材料 (rdog auth tls-init 生成)。默认 false:
 /// 加密是增量能力, 不做默认安全翻转 (与 [auth] 的语义差异已在 spec 记录)。
+/// CDP 远程通道配置 (specs/cdp-remote-lane-spec.md 决策 3)。
+///
+/// `enabled = false` (默认) 时 `@cdp*` 全部拒绝 — CDP 等同被控端任意
+/// 代码执行, 默认不开放。开启后也仅连本机回环 debug 端口。
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct CdpConfig {
+    pub enabled: bool,
+}
+
+impl Default for CdpConfig {
+    fn default() -> Self {
+        Self { enabled: false }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct TlsConfig {

@@ -58,6 +58,9 @@ struct CapabilitySet {
     accessibility: CapabilityEntry,
     window_control: CapabilityEntry,
     type_text: CapabilityEntry,
+    /// CDP lane (specs/cdp-remote-lane-spec.md): 配置驱动的开关态,
+    /// 非 platform probe — disabled 是安全默认而非"平台不支持"。
+    cdp: CapabilityEntry,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -112,6 +115,31 @@ enum PermissionProbe {
     Unknown,
 }
 
+/// CDP lane 的能力条目: 纯配置开关 (默认 disabled), 不做平台探测。
+/// notes 给出可照做的开启指引 — 与 @cdp* 拒绝错误的关键字一致。
+fn cdp_capability() -> CapabilityEntry {
+    let enabled = crate::control_cdp::cdp_enabled();
+    CapabilityEntry {
+        status: if enabled {
+            CapabilityStatus::Available
+        } else {
+            CapabilityStatus::PermissionDenied
+        },
+        backend: "chrome-devtools-protocol",
+        error_code: None,
+        permissions: Vec::new(),
+        failure_hints: Vec::new(),
+        notes: if enabled {
+            vec!["@cdp / @cdp-targets / @cdp-eval 仅连 127.0.0.1 的 debug 端口"]
+        } else {
+            vec![
+                "默认关闭 (安全模型: CDP 等同被控端任意代码执行)",
+                "开启: daemon 配置 [cdp] enabled = true 后重启 daemon",
+            ]
+        },
+    }
+}
+
 fn build_capabilities_report(snapshot: CapabilityProbeSnapshot) -> CapabilitiesReport {
     let capabilities = CapabilitySet {
         line_control: available(
@@ -137,6 +165,7 @@ fn build_capabilities_report(snapshot: CapabilityProbeSnapshot) -> CapabilitiesR
         accessibility: accessibility_capability(&snapshot),
         window_control: window_control_capability(&snapshot),
         type_text: type_text_capability(&snapshot),
+        cdp: cdp_capability(),
     };
 
     let status = if report_has_permission_denied(&capabilities) {

@@ -24,6 +24,7 @@ mod config;
 mod control_actions;
 mod control_ax;
 mod control_bootstrap;
+mod control_cdp;
 mod control_capabilities;
 mod control_client_input;
 mod control_computer_act;
@@ -615,6 +616,8 @@ fn run(opts: input::Opts) -> Result<(), String> {
         } => {
             let daemon_config = config::load_daemon_config_unvalidated(config.as_deref())
                 .map_err(|err| err.to_string())?;
+            // CDP lane 开关随配置初始化 (默认 false; spec 安全模型: 默认关闭)
+            control_cdp::configure(daemon_config.cdp.enabled);
             let transport = resolve_daemon_transport(transport, &daemon_config);
 
             match transport {
@@ -736,6 +739,7 @@ fn run_hidden_daemon(
             hidden_mode::enable_hidden_session();
             let daemon_config = config::load_daemon_config(config_path.as_deref())
                 .map_err(|err| err.to_string())?;
+            control_cdp::configure(daemon_config.cdp.enabled);
 
             // ------------------------------------------------------------
             // 这里额外校验一次内部传下来的日志路径,避免 parent/child

@@ -279,6 +279,14 @@ impl ControlActionExecutor for SystemControlActionExecutor {
                 io::ErrorKind::Unsupported,
                 "@screenshot 由 control_core 直接走 screenshot producer,不应进入默认 executor 分支",
             )),
+            // CDP 三 verb 同理由 control_core 专门分支处理 (权限门在 control_cdp 内部),
+            // 不进入默认 executor 兜底 — 与 screenshot 同构
+            ControlCommand::Cdp(_)
+            | ControlCommand::CdpTargets(_)
+            | ControlCommand::CdpEval(_) => Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "@cdp* 由 control_core 直接走 CDP lane,不应进入默认 executor 分支",
+            )),
             // Phase 1 后台任务四原语: 由 control_core 专门分支直接处理
             // (specs/rdog-task-spawn-control-plan.md), 不走 executor 兜底
             ControlCommand::Spawn(_)

@@ -31,6 +31,9 @@ impl ControlActionExecutor for FakeExecutor {
             .push(command.clone());
 
         let stdout = match command {
+            ControlCommand::Cdp(_)
+            | ControlCommand::CdpTargets(_)
+            | ControlCommand::CdpEval(_) => b"CDP:mock\n".to_vec(),
             ControlCommand::Key(request) => format!("KEY:{}\n", request.key).into_bytes(),
             ControlCommand::Paste(request) => match &request.kind {
                 PasteRequestKind::GlobalHotkey => b"PASTE:global-hotkey\n".to_vec(),

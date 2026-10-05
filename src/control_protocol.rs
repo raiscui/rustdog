@@ -74,6 +74,12 @@ pub enum ControlCommand {
     PtyDetach(PtyDetachRequest),
     PtyAttach(PtyAttachRequest),
     Screenshot(ScreenshotRequest),
+    /// CDP 远程通道 (specs/cdp-remote-lane-spec.md): 透传任意 CDP 方法
+    Cdp(crate::control_cdp::CdpRequest),
+    /// 列出 debug 端口上的 targets
+    CdpTargets(u16),
+    /// 在指定页执行 JS (Runtime.evaluate)
+    CdpEval(crate::control_cdp::CdpEvalRequest),
     MouseMove(MouseMoveRequest),
     MouseButton(MouseButtonRequest),
     Click(ClickRequest),
@@ -656,6 +662,13 @@ pub fn parse_control_line(line: &str) -> io::Result<ControlParseResult> {
         }
         "selector-refind" => {
             ControlCommand::SelectorRefind(parse_selector_refind_payload(payload)?)
+        }
+        "cdp" => ControlCommand::Cdp(crate::control_cdp::parse_cdp_request(payload)?),
+        "cdp-targets" => {
+            ControlCommand::CdpTargets(crate::control_cdp::parse_cdp_targets_request(payload)?)
+        }
+        "cdp-eval" => {
+            ControlCommand::CdpEval(crate::control_cdp::parse_cdp_eval_request(payload)?)
         }
         "capabilities" => {
             return Err(io::Error::new(
