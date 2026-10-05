@@ -86,6 +86,27 @@ $p = Start-Process -FilePath X; "started"      # 立即返回
 $p = Start-Process -FilePath X -Wait            # 卡死控制面
 ```
 
+### 附带坑：多行/复杂 PowerShell 走 SSH 会被引号吃掉
+
+**现象**：`ssh host "powershell -NoProfile -Command \"...多行...\""` 发过去
+**静默无输出**，目标侧文件一个没删 —— 看起来执行了，实际命令根本没送达。
+
+**根因**：SSH 的多层引号 + PowerShell 的转义规则叠加，多行脚本在传输中被
+截断或解析失败，且不报错。
+
+**正解**：复杂 PowerShell 一律 **scp 传 .ps1 再执行**（当天实测可靠）：
+
+```bash
+# ❌ 静默失败
+ssh host "powershell -Command \"多行...; 多行...\""
+
+# ✅ 可靠
+scp script.ps1 host:C:/Users/x/script.ps1
+ssh host "powershell -ExecutionPolicy Bypass -File C:\Users\x\script.ps1"
+```
+
+这条在 @cmd / @spawn 的远程清理与批量脚本场景会反复遇到。
+
 ---
 
 ## P1 — 契约缺口：坐标空间与解释器语义没有前置声明
