@@ -1,6 +1,6 @@
 # CDP 远程通道规格
 
-> 状态：**提案**（待拍板 4 项决策）
+> 状态：**决策已定**（2026-10-06 用户确认全部采纳推荐方案）
 > 来源：2026-10-05 远程验证 Electron 自动更新链时，CDP 只能手工搓一次性脚本
 
 ## 目标
@@ -78,8 +78,10 @@ CDP 是唯一能拿到 DOM 的路。
 
 ---
 
-## 待拍板的决策
+## 决策记录（2026-10-06 已定）
 
+
+> **结论：四项全部采纳推荐方案**（A/B/C 见各节标注），本文其余部分按此为准。
 ### 决策 1：CDP client 放哪一端
 
 | 方案 | 形态 | 评价 |
@@ -161,14 +163,15 @@ CDP = 被控端任意代码执行能力：**debug 端口一旦可达，连接者
 
 ---
 
-## 进入施工前需定
+## 进入施工前仍需定
 
-1. Electron 启动包装是否纳入本期（决策 4 的 B/C）
-2. 同步 WS 栈选型：`tungstenite` vs `tokio-tungstenite`
-3. 首批 verb 清单：`@cdp-targets` / `@cdp-eval` / `@cdp-query` / `@cdp-console` /
+以下不属上述四项决策，是实现细节待确认：
+
+
+1. 同步 WS 栈选型：`tungstenite` vs `tokio-tungstenite`
+2. 首批 verb 清单：`@cdp-targets` / `@cdp-eval` / `@cdp-query` / `@cdp-console` /
    `@cdp-screenshot` / `@cdp-raw` 是否够用
-4. console 事件形态：一次性拉取 vs 长连接流式（流式对 line-based 协议是额外
-   负担，建议先做一次性拉取）
+3. console 事件形态：一次性拉取 vs 长连接流式（建议先做一次性拉取）
 
 ---
 
