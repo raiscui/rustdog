@@ -34,6 +34,7 @@ mod control_flow;
 mod control_frames;
 mod control_gui_bench;
 mod control_invocation;
+mod control_line_read;
 mod control_mouse;
 mod control_observation;
 mod control_ocr;

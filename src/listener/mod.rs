@@ -1,12 +1,15 @@
 use colored::Colorize;
 use rustyline::error::ReadlineError;
 #[cfg(unix)]
-use std::io::BufRead;
 #[cfg(unix)]
 use std::io::IsTerminal;
 use std::io::{self, stdin, stdout, Read, Result, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
 use std::thread::{self, JoinHandle};
+
+use crate::control_line_read::{
+    read_line_limited, LineOutcome, MAX_CONTROL_MESSAGE_BYTES,
+};
 
 #[cfg(unix)]
 mod termios_handler;
@@ -282,21 +285,28 @@ fn line_reader_decorator(
 ) -> Result<()> {
     let stdin = stdin();
     let mut reader = io::BufReader::new(stdin.lock());
-    let mut line = String::new();
+    let mut buf = Vec::new();
+    let mut sink = Vec::new();
 
     loop {
         if should_stop() {
             return Ok(());
         }
 
-        line.clear();
-        let bytes_read = reader.read_line(&mut line)?;
-        if bytes_read == 0 {
-            return Ok(());
+        match read_line_limited(&mut reader, &mut buf, &mut sink, MAX_CONTROL_MESSAGE_BYTES)?
+        {
+            // 管道喂进来的超长行: 丢弃后继续, 不让无界读拖垮 shell 模式
+            LineOutcome::TooLong { consumed_bytes } => {
+                eprintln!(
+                    "[rdog] 输入行超过 {} 字节上限, 已丢弃 ({} 字节)",
+                    MAX_CONTROL_MESSAGE_BYTES,
+                    consumed_bytes
+                );
+                continue;
+            }
+            LineOutcome::Eof => return Ok(()),
+            LineOutcome::Line(command) => f(command)?,
         }
-
-        let command = line.trim_end_matches(['\r', '\n']).to_owned();
-        f(command)?;
     }
 }
 

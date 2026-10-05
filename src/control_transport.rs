@@ -3,18 +3,25 @@ use rand::random;
 use serde::{Deserialize, Serialize};
 use sha1::{Digest, Sha1};
 use std::{
-    io::{self, BufRead, BufReader, ErrorKind, Read, Write},
+    io::{self, BufReader, ErrorKind, Read, Write},
     net::{Shutdown, TcpStream},
     time::Duration,
 };
 use url::Url;
+
+use crate::control_line_read::{
+    read_line_limited, LineOutcome, MAX_CONTROL_MESSAGE_BYTES,
+};
 
 const WEBSOCKET_GUID: &str = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 const MAX_HTTP_HANDSHAKE_BYTES: usize = 16 * 1024;
 // phase 2 起,控制面已经允许 `@savefile` 承载单张 JPEG/base64 screenshot。
 // 64 KiB 对这类 payload 明显不够,这里先把 phase 1 的单消息上限抬到 8 MiB。
 // 这仍然是“单条消息有边界”的保守口径,只是从命令级文本扩到了单文件结果。
-const MAX_MESSAGE_BYTES: usize = 8 * 1024 * 1024;
+// 单消息上限的单一真相源在 control_line_read::MAX_CONTROL_MESSAGE_BYTES。
+// 2026-10-06: 原先本文件的 MAX_MESSAGE_BYTES (8 MiB) 只守 websocket payload,
+// TCP line / 控制端 stdin / shell 监听三条路径全部无界读 (BufRead::read_line),
+// 一条超长消息就能把 daemon 读到内存耗尽。现在三条路径统一走 read_line_limited。
 
 #[derive(Debug, Copy, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
@@ -168,6 +175,10 @@ pub fn accept_websocket_stream(mut stream: TcpStream) -> io::Result<ControlTrans
 pub(crate) struct TcpLineTransport {
     reader: BufReader<TcpStream>,
     writer: TcpStream,
+    /// 读行缓冲 (跨调用复用, 避免每行重新分配)
+    read_buf: Vec<u8>,
+    /// 超限行的丢弃缓冲 (只在超限阶段使用)
+    discard_buf: Vec<u8>,
 }
 
 pub(crate) struct TcpLineWriter {
@@ -179,24 +190,37 @@ impl TcpLineTransport {
         Ok(Self {
             reader: BufReader::new(stream.try_clone()?),
             writer: stream,
+            read_buf: Vec::new(),
+            discard_buf: Vec::new(),
         })
     }
 
     fn read_message(&mut self) -> io::Result<Option<String>> {
         loop {
-            let mut line = String::new();
-            let bytes_read = self.reader.read_line(&mut line)?;
-
-            if bytes_read == 0 {
-                return Ok(None);
+            match read_line_limited(
+                &mut self.reader,
+                &mut self.read_buf,
+                &mut self.discard_buf,
+                MAX_CONTROL_MESSAGE_BYTES,
+            )? {
+                // 超限行: 已被消费丢弃, 流仍对齐 —— 记日志后继续服务,
+                // 不终止连接 (可恢复的坏行 != 连接死亡)。
+                LineOutcome::TooLong { consumed_bytes } => {
+                    log::warn!(
+                        "控制消息超过 {} 字节上限, 已丢弃 ({} 字节); 连接保持",
+                        MAX_CONTROL_MESSAGE_BYTES,
+                        consumed_bytes
+                    );
+                    continue;
+                }
+                LineOutcome::Eof => return Ok(None),
+                LineOutcome::Line(line) => {
+                    if line.is_empty() {
+                        continue;
+                    }
+                    return Ok(Some(line));
+                }
             }
-
-            let line = line.trim_end_matches(['\r', '\n']);
-            if line.is_empty() {
-                continue;
-            }
-
-            return Ok(Some(line.to_owned()));
         }
     }
 
@@ -551,7 +575,7 @@ impl WebSocketFrame {
 
         let masked = header[1] & 0b1000_0000 != 0;
         let payload_len = read_payload_len(stream, header[1] & 0b0111_1111)?;
-        if payload_len > MAX_MESSAGE_BYTES {
+        if payload_len > MAX_CONTROL_MESSAGE_BYTES {
             return Err(io::Error::new(ErrorKind::InvalidData, "websocket 消息过大"));
         }
 

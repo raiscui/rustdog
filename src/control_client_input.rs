@@ -1,5 +1,9 @@
 use rustyline::{error::ReadlineError, DefaultEditor};
-use std::io::{self, BufRead, IsTerminal};
+use std::io::{self, IsTerminal};
+
+use crate::control_line_read::{
+    read_line_limited, LineOutcome, MAX_CONTROL_MESSAGE_BYTES,
+};
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum ControlStdinAction {
@@ -52,17 +56,27 @@ fn for_each_buffered_line(
     mut on_line: impl FnMut(String) -> io::Result<ControlStdinAction>,
 ) -> io::Result<()> {
     let mut reader = io::BufReader::new(stdin.lock());
-    let mut line = String::new();
+    let mut buf = Vec::new();
+    let mut sink = Vec::new();
 
     loop {
-        line.clear();
-        let bytes_read = reader.read_line(&mut line)?;
-        if bytes_read == 0 {
-            return Ok(());
-        }
-
-        if on_line(line.trim_end_matches(['\r', '\n']).to_owned())? == ControlStdinAction::Break {
-            return Ok(());
+        match read_line_limited(&mut reader, &mut buf, &mut sink, MAX_CONTROL_MESSAGE_BYTES)? {
+            // 超限行: 已消费丢弃, 提示后继续读 —— 控制端敲了一行超长文本
+            // 不应该导致整个会话退出。
+            LineOutcome::TooLong { consumed_bytes } => {
+                eprintln!(
+                    "[rdog] 输入行超过 {} 字节上限, 已丢弃 ({} 字节)",
+                    MAX_CONTROL_MESSAGE_BYTES,
+                    consumed_bytes
+                );
+                continue;
+            }
+            LineOutcome::Eof => return Ok(()),
+            LineOutcome::Line(line) => {
+                if on_line(line)? == ControlStdinAction::Break {
+                    return Ok(());
+                }
+            }
         }
     }
 }
