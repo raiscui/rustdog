@@ -1,6 +1,6 @@
 # Windows HiDPI 坐标链路修复方案
 
-> 状态：**提案**（待拍板 3 项）
+> 状态：**决策已定**（2026-10-06 用户确认三项全部采纳推荐方案）
 > 来源：2026-10-05 Windows 真机远程验证，HiDPI 屏上 `@click` 连续点空三次
 
 ## 目标
@@ -170,9 +170,15 @@ macOS/Linux 继续走 enigo（`CGEvent` / `XTest` 的坐标语义本来就正确
 
 ---
 
-## 待拍板
+## 决策记录（2026-10-06 已定）
+
+> **结论：三项全部采纳推荐方案** —— 三层全做（1+2+3）、Windows 侧替换 enigo
+> 而非叠加、DPI awareness 用代码调 API 而非 exe manifest。
+
 
 ### 决策 1：第 3 层做不做
+
+**已采纳 B（三层全做）**
 
 | 方案 | 覆盖 | 代价 |
 | --- | --- | --- |
@@ -184,6 +190,8 @@ macOS/Linux 继续走 enigo（`CGEvent` / `XTest` 的坐标语义本来就正确
 
 ### 决策 2：Windows 后端是替换还是叠加
 
+**已采纳 A（替换）**
+
 | 方案 | 说明 |
 | --- | --- |
 | A. 替换（推荐） | Windows 全面走原生 `SetCursorPos`/`mouse_event`，enigo 只服务 macOS/Linux |
@@ -192,6 +200,8 @@ macOS/Linux 继续走 enigo（`CGEvent` / `XTest` 的坐标语义本来就正确
 **推荐 A**。留一条"坐标可能不对"的回退路径，等于留一个静默出错的口子。
 
 ### 决策 3：DPI awareness 的设置方式
+
+**已采纳 A（代码调 API）**
 
 | 方案 | 说明 |
 | --- | --- |
@@ -234,3 +244,21 @@ macOS/Linux 继续走 enigo（`CGEvent` / `XTest` 的坐标语义本来就正确
 - [显示感知控制链规格](rdog-display-aware-control-chain-plan.md) —— display scope 与 guard
 - [远程被控端实战反馈](../docs/solutions/best-practices/remote-control-blocked-command-pitfalls.md)
   —— P1-1 即本问题
+
+---
+
+## 建议施工顺序
+
+坐标三层是 CDP 与文件传输的**共同地基**（后两者都需要正确的屏幕/窗口坐标
+才能定位 DOM 元素与文件路径在界面上的位置），因此排在前面。
+
+| 序 | 项 | 依赖 |
+| --- | --- | --- |
+| 1 | 帧长度上限（`split_object_fields`，`control_frames.rs:1124`） | 无 —— 是 CDP 与文件传输的共同前置 |
+| 2 | 坐标第 1 层：DPI awareness | 无 |
+| 3 | 坐标第 2 层：manifest 补 os_logical_bounds 与每屏 scale | 依赖 2（scale 要先正确） |
+| 4 | 坐标第 3 层：Windows 原生鼠标后端 | 依赖 2 |
+| 5 | CDP 最小闭环（`@cdp-targets` + `@cdp-eval` + 权限门） | 依赖 3（定位元素要用正确坐标） |
+| 6 | 文件传输（分块/续传/校验） | 依赖 1 |
+
+第 1、2 项各自独立可验，适合作为起步。
