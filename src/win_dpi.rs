@@ -46,7 +46,7 @@ pub fn enable_dpi_awareness() {
         // "system DPI unaware" 抬到 "system DPI aware", 多数场景已够。
         // SAFETY: 同上, legacy API 同样只影响本进程。
         let legacy_ok =
-            unsafe { windows_sys::Win32::UI::HiDpi::SetProcessDPIAware() };
+            unsafe { windows_sys::Win32::UI::WindowsAndMessaging::SetProcessDPIAware() };
         if legacy_ok == 0 {
             log::warn!(
                 "SetProcessDpiAwarenessContext 与 SetProcessDPIAware 均失败 — \

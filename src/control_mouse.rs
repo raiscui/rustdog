@@ -7,6 +7,7 @@ mod target;
 
 #[allow(unused_imports)]
 pub use backend::{perform_mouse_plan, MouseBackend};
+pub mod win_backend;
 pub use parser::{
     parse_click_payload, parse_drag_payload, parse_mouse_button_payload, parse_mouse_move_payload,
     parse_wheel_payload,

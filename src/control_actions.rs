@@ -1022,8 +1022,19 @@ fn platform_paste_delivered_via() -> &'static str {
 }
 
 pub(crate) fn execute_mouse_plan(plan: MouseExecutionPlan) -> io::Result<ActionExecutionResult> {
-    let mut enigo = Enigo::new(&Settings::default()).map_err(to_io_error)?;
-    let report = perform_mouse_plan(&mut enigo, &plan).map_err(to_io_error)?;
+    // Windows 走原生后端 (SetCursorPos + SendInput, 见 control_mouse/win_backend.rs
+    // 头注): enigo 的 Abs 归一化在多屏/混合 DPI 下无解。键相关 (paste 等) 不受
+    // 坐标影响, 继续走 enigo。
+    #[cfg(windows)]
+    let report = {
+        let mut backend = crate::control_mouse::win_backend::WinNativeMouseBackend::new();
+        perform_mouse_plan(&mut backend, &plan).map_err(to_io_error)?
+    };
+    #[cfg(not(windows))]
+    let report = {
+        let mut enigo = Enigo::new(&Settings::default()).map_err(to_io_error)?;
+        perform_mouse_plan(&mut enigo, &plan).map_err(to_io_error)?
+    };
 
     Ok(ActionExecutionResult {
         exit_code: 0,
