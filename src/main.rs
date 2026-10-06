@@ -902,11 +902,18 @@ fn zenoh_daemon_banner(
         .or(config.zenoh.daemon_name.as_deref())
         .unwrap_or("<未配置>");
 
-    let namespace =
-        match crate::zenoh_identity::resolve_namespace(namespace_override, Some(daemon_name)) {
-            Ok(namespace) => namespace,
-            Err(err) => format!("<解析失败: {err}>"),
-        };
+    // 与 run_zenoh_router 同一条裁决链 (配置为主 + 冲突报错), 不另算 —
+    // 横幅一旦自己推一遍就成了第二个真相源。
+    let namespace = match crate::zenoh_identity::merge_config_namespace(
+        &config.zenoh.namespace,
+        namespace_override,
+    )
+    .and_then(|effective_override| {
+        crate::zenoh_identity::resolve_namespace(effective_override.as_deref(), Some(daemon_name))
+    }) {
+        Ok(namespace) => namespace,
+        Err(err) => format!("<解析失败: {err}>"),
+    };
 
     let listen = match crate::zenoh_runtime::compose_listen_endpoints(
         &config.zenoh,
@@ -1162,21 +1169,37 @@ mod tests {
 
     #[test]
     fn zenoh_daemon_banner_should_follow_explicit_overrides() {
-        // --namespace / --name 是运行期真正的覆盖来源, 横幅必须跟着它们走,
-        // 否则用户传了参数却看到配置里的旧名字, 又是一次"配置说了不算"。
-        let config = DaemonConfig {
+        // 拍板 (2026-10-06): 配置为主, 命令行只用于 control 连别人。
+        // 配置没写 namespace 时 CLI override 照旧生效; 配置与 CLI 同给 = 冲突,
+        // 横幅如实显示解析失败, 正式报错由 run_zenoh_router 抛出。
+        let config_without_namespace = DaemonConfig {
             zenoh: ZenohConfig {
                 enabled: true,
-                namespace: "lab".to_string(),
+                namespace: String::new(),
                 daemon_name: Some("configured.lab".to_string()),
                 ..ZenohConfig::default()
             },
             ..DaemonConfig::default()
         };
 
-        let banner = zenoh_daemon_banner(&config, Some("other"), Some("override.other"));
+        let banner =
+            zenoh_daemon_banner(&config_without_namespace, Some("other"), Some("override.other"));
         assert!(banner.contains("name=override.other"), "{banner}");
         assert!(banner.contains("namespace=other"), "{banner}");
+
+        let config_with_namespace = DaemonConfig {
+            zenoh: ZenohConfig {
+                namespace: "lab".to_string(),
+                ..config_without_namespace.zenoh
+            },
+            ..DaemonConfig::default()
+        };
+        let banner =
+            zenoh_daemon_banner(&config_with_namespace, Some("other"), Some("override.other"));
+        assert!(
+            banner.contains("namespace=<解析失败") && banner.contains("同时给出"),
+            "配置与 CLI 同给要显示冲突报错: {banner}"
+        );
     }
 
     #[test]

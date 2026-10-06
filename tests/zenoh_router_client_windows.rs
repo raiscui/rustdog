@@ -40,17 +40,16 @@ fn rdog_binary_path() -> PathBuf {
 
 fn spawn_output_collector(
     mut reader: impl Read + Send + 'static,
-) -> (Arc<Mutex<String>>, thread::JoinHandle<()>) {
-    let buffer = Arc::new(Mutex::new(String::new()));
-    let shared = Arc::clone(&buffer);
-    let handle = thread::spawn(move || {
+    buffer: Arc<Mutex<String>>,
+) -> thread::JoinHandle<()> {
+    thread::spawn(move || {
         let mut chunk = [0_u8; 1024];
         loop {
             match reader.read(&mut chunk) {
                 Ok(0) => return,
                 Ok(len) => {
                     let text = String::from_utf8_lossy(&chunk[..len]);
-                    shared
+                    buffer
                         .lock()
                         .expect("collector buffer lock should work")
                         .push_str(&text);
@@ -58,9 +57,7 @@ fn spawn_output_collector(
                 Err(_) => return,
             }
         }
-    });
-
-    (buffer, handle)
+    })
 }
 
 fn wait_until_output_contains(
@@ -98,14 +95,27 @@ fn wait_until_output_contains(
     ))
 }
 
-fn start_zenoh_daemon_with_config(config_path: &str) -> Child {
-    Command::new(rdog_binary_path())
+fn start_zenoh_daemon_with_config(config_path: &str) -> (Child, Arc<Mutex<String>>) {
+    let mut child = Command::new(rdog_binary_path())
         .args(["daemon", "-c", config_path])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .expect("zenoh daemon with config should start")
+        .expect("zenoh daemon with config should start");
+
+    // ready 横幅走 log::info!(stderr), stdout 是空的 — 两个流都要收进同一
+    // buffer, 只收 stdout 会永远等不到 marker (本测试带 cfg(windows) 门,
+    // 从未在 mac 上编译执行过, 假设直到首次真机跑才被检验)
+    let buffer = Arc::new(Mutex::new(String::new()));
+    if let Some(stdout) = child.stdout.take() {
+        spawn_output_collector(stdout, Arc::clone(&buffer));
+    }
+    if let Some(stderr) = child.stderr.take() {
+        spawn_output_collector(stderr, Arc::clone(&buffer));
+    }
+
+    (child, buffer)
 }
 
 fn run_control(args: &[&str], line: &str) -> (ExitStatus, String, String) {
@@ -209,12 +219,10 @@ fn windows_zenoh_router_client_smoke_should_ping_and_run_request_id_command() {
     let config_path = write_temp_zenoh_daemon_config(&daemon_name, listen_port);
     let config_path_string = config_path.display().to_string();
     let entry_point = format!("tcp/127.0.0.1:{listen_port}");
-    let mut daemon = start_zenoh_daemon_with_config(&config_path_string);
-    let daemon_stdout = daemon.stdout.take().expect("daemon stdout should exist");
-    let (buffer, _collector) = spawn_output_collector(daemon_stdout);
+    let (mut daemon, daemon_output) = start_zenoh_daemon_with_config(&config_path_string);
     wait_until_output_contains(
         &mut daemon,
-        &buffer,
+        &daemon_output,
         "zenoh router daemon ready",
         Duration::from_secs(8),
     )
@@ -274,12 +282,10 @@ fn windows_zenoh_router_client_should_reach_daemon_via_fixed_listen_endpoint() {
     let config_path = write_temp_zenoh_daemon_config(&daemon_name, listen_port);
     let config_path_string = config_path.display().to_string();
     let entry_point = format!("tcp/127.0.0.1:{listen_port}");
-    let mut daemon = start_zenoh_daemon_with_config(&config_path_string);
-    let daemon_stdout = daemon.stdout.take().expect("daemon stdout should exist");
-    let (buffer, _collector) = spawn_output_collector(daemon_stdout);
+    let (mut daemon, daemon_output) = start_zenoh_daemon_with_config(&config_path_string);
     wait_until_output_contains(
         &mut daemon,
-        &buffer,
+        &daemon_output,
         "zenoh router daemon ready",
         Duration::from_secs(8),
     )

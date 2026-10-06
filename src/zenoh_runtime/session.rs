@@ -59,7 +59,7 @@ pub fn open_router_session_tls(
 fn insert_tls_listen_config(config: &mut Config, tls: &TlsListenConfig) -> io::Result<()> {
     let insert = |config: &mut Config, key: &str, value: &str| -> io::Result<()> {
         config
-            .insert_json5(key, &format!("\"{value}\""))
+            .insert_json5(key, &json5_string(value)?)
             .map_err(to_io_error)
     };
     insert(
@@ -111,7 +111,7 @@ fn insert_tls_connect_material(config: &mut Config) -> io::Result<()> {
     config
         .insert_json5(
             "transport/link/tls/root_ca_certificate",
-            &format!("\"{}\"", ca.display()),
+            &json5_string(&ca.display().to_string())?,
         )
         .map_err(to_io_error)?;
     let client_cert = tls_dir.join("client/cert.pem");
@@ -120,13 +120,13 @@ fn insert_tls_connect_material(config: &mut Config) -> io::Result<()> {
         config
             .insert_json5(
                 "transport/link/tls/connect_certificate",
-                &format!("\"{}\"", client_cert.display()),
+                &json5_string(&client_cert.display().to_string())?,
             )
             .map_err(to_io_error)?;
         config
             .insert_json5(
                 "transport/link/tls/connect_private_key",
-                &format!("\"{}\"", client_key.display()),
+                &json5_string(&client_key.display().to_string())?,
             )
             .map_err(to_io_error)?;
     }
@@ -200,6 +200,15 @@ pub struct TlsListenConfig {
     pub enable_mtls: bool,
 }
 
+/// 把字符串序列化成合法 JSON 字符串字面量 (引号与转义齐全)。
+///
+/// 禁止手拼 `format!("\"{}\"", value)`: json5 解析层会把值里的反斜杠当转义吃掉,
+/// Windows 路径 `C:\Users\...` 会坏成 `C:Users...` — 打开时报 os error 123
+/// (文件名、目录名或卷标语法不正确), macOS 上路径无反斜杠所以从不暴露 (2026-10-06 真机定谳)。
+fn json5_string(value: &str) -> io::Result<String> {
+    serde_json::to_string(value).map_err(|err| io::Error::other(format!("JSON 字符串序列化失败: {err}")))
+}
+
 /// 带认证的 session 打开 (issue #82/#88)。
 ///
 /// client 凭证注入 user/password; daemon 侧注入 users_file (usrpwd) 与
@@ -214,20 +223,20 @@ fn open_session_auth(
 ) -> io::Result<Session> {
     let mut config = Config::default();
     config
-        .insert_json5("mode", &format!("\"{mode}\""))
+        .insert_json5("mode", &json5_string(mode)?)
         .map_err(to_io_error)?;
 
     if let Some(credentials) = client_credentials {
         config
             .insert_json5(
                 "transport/auth/usrpwd/user",
-                &format!("\"{}\"", credentials.user),
+                &json5_string(&credentials.user)?,
             )
             .map_err(to_io_error)?;
         config
             .insert_json5(
                 "transport/auth/usrpwd/password",
-                &format!("\"{}\"", credentials.password),
+                &json5_string(&credentials.password)?,
             )
             .map_err(to_io_error)?;
     }
@@ -236,7 +245,7 @@ fn open_session_auth(
             .insert_json5(
                 // zenoh 1.8 键名是 dictionary_file (旧文档的 users_file 已改名)
                 "transport/auth/usrpwd/dictionary_file",
-                &format!("\"{}\"", users_file.display()),
+                &json5_string(&users_file.display().to_string())?,
             )
             .map_err(to_io_error)?;
     }

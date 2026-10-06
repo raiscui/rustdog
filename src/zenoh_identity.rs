@@ -125,6 +125,39 @@ pub fn resolve_namespace(
     }
 }
 
+/// daemon 自启路径的 namespace 来源合并 (2026-10-06 拍板)。
+///
+/// 口径: **配置为主, 命令行只用于 control 场景"连别人"** ——
+/// - `[zenoh].namespace` 与 `--namespace` 同时给出 = 显式冲突, 报错而非静默裁决
+///   (谁赢都不对, 错配只会把人引去错误的寻址空间);
+/// - 只有配置 → 用配置;
+/// - 只有命令行 → 用命令行;
+/// - 都没有 → 返回 None, 交由 `resolve_namespace` 落名字后缀推断。
+///
+/// 返回值语义上就是 resolve_namespace 的 explicit_namespace 入参 ——
+/// 本函数只管来源合并, 校验与推断仍归 resolve_namespace 单一真相源。
+pub fn merge_config_namespace(
+    config_namespace: &str,
+    cli_override: Option<&str>,
+) -> io::Result<Option<String>> {
+    let config_ns = config_namespace.trim();
+    let cli_ns = cli_override.map(str::trim).filter(|value| !value.is_empty());
+
+    if !config_ns.is_empty() {
+        if let Some(cli) = cli_ns {
+            return Err(io::Error::new(
+                ErrorKind::InvalidInput,
+                format!(
+                    "[zenoh].namespace (`{config_ns}`) 与 --namespace (`{cli}`) 同时给出: \
+                     daemon 自启以配置为主, --namespace 只用于 control 连别的 daemon, 请二选一"
+                ),
+            ));
+        }
+        return validate_namespace(config_ns).map(|_| Some(config_ns.to_string()));
+    }
+    Ok(cli_ns.map(str::to_string))
+}
+
 pub fn member_id_from_daemon_name(daemon_name: &str) -> &str {
     daemon_name
 }
@@ -261,6 +294,48 @@ mod tests {
             .expect_err("namespace mismatch should fail");
 
         assert!(err.to_string().contains("不一致"));
+    }
+
+    // ── merge_config_namespace: 配置为主 + 冲突报错 (拍板 2026-10-06) ──
+
+    #[test]
+    fn merge_config_namespace_should_reject_config_and_cli_together() {
+        let err = merge_config_namespace("lab", Some("prod"))
+            .expect_err("config+CLI 同时给出必须报错, 不静默裁决");
+
+        assert!(
+            err.to_string().contains("二选一"),
+            "错误信息要指出两个来源并给出可照做的指引: {err}"
+        );
+    }
+
+    #[test]
+    fn merge_config_namespace_should_prefer_config_when_cli_absent() {
+        let merged = merge_config_namespace("lab", None).expect("config-only should merge");
+
+        assert_eq!(merged.as_deref(), Some("lab"));
+    }
+
+    #[test]
+    fn merge_config_namespace_should_pass_cli_through_when_config_empty() {
+        let merged = merge_config_namespace("", Some("prod")).expect("cli-only should merge");
+
+        assert_eq!(merged.as_deref(), Some("prod"));
+    }
+
+    #[test]
+    fn merge_config_namespace_should_return_none_when_both_absent() {
+        let merged = merge_config_namespace("", None).expect("both absent should merge");
+
+        assert_eq!(merged, None, "两者皆空交给 resolve_namespace 落名字后缀推断");
+    }
+
+    #[test]
+    fn merge_config_namespace_should_validate_config_value() {
+        let err = merge_config_namespace("has space", None)
+            .expect_err("配置里的非法 namespace 也要被校验拦下");
+
+        assert!(err.to_string().contains("空白字符"));
     }
 
     #[test]

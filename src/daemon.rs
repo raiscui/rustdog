@@ -146,8 +146,14 @@ pub fn run_zenoh_router(
         )
     })?;
 
-    let resolved_namespace = crate::zenoh_identity::resolve_namespace(
+    // namespace 来源合并 (拍板 2026-10-06): 配置为主, 配置与 --namespace
+    // 同给即报错; 合并后的显式值再交 resolve_namespace 做校验/后缀推断。
+    let effective_override = crate::zenoh_identity::merge_config_namespace(
+        &config.zenoh.namespace,
         namespace_override.as_deref(),
+    )?;
+    let resolved_namespace = crate::zenoh_identity::resolve_namespace(
+        effective_override.as_deref(),
         Some(&daemon_name),
     )?;
 
