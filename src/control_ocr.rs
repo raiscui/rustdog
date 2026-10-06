@@ -153,16 +153,79 @@ static OCR_JOB_SENDER: OnceLock<mpsc::Sender<OcrJob>> = OnceLock::new();
 /// Ok = 可用; Err = 构建失败 (所有后续请求 fail-closed)。
 static ENGINE_READY: OnceLock<Result<(), OcrError>> = OnceLock::new();
 
+/// 一张待识别图像 → os-logical 坐标的换算参数。
+///
+/// 公式与 manifest 的 `transforms.image_to_os`、
+/// `ScreenshotFrame::to_os_logical_point` (src/control_mouse/screenshot_frame.rs)
+/// **逐字同源**:
+///     os_x = os_logical_bounds.x + (image_rect.x + image_x) * image_to_click_scale.x
+///
+/// 三项缺一不可, 少任何一项都会让框落到屏幕另一处:
+///   - 只加原点不做缩放 = 4K@200% 下整整差 2 倍 (2026-10-06 真机缺陷);
+///   - 只缩放不加 `image_offset` = 窗口裁剪图的框整体偏移一个裁剪原点。
+///
+/// 已知边界 (与 manifest 同一条, 不新增误差类别): 这是覆盖全桌面的线性映射,
+/// 整桌面统一缩放时精确; 混合 DPI 多屏下窗口跨屏本就有近似, 逐屏精确换算需走
+/// `displays[].os_logical_rect`, 而 OCR 层拿不到逐屏清单。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct OcrImageSpace {
+    /// 该图像像素 (0,0) 对应的 os-logical 坐标 (已含 image_offset 的平移)。
+    origin: (i32, i32),
+    /// 图上一个像素横跨多少 os-logical 单位 (4K@200% 下 0.5, macOS 下 1.0)。
+    scale: (f64, f64),
+}
+
+impl OcrImageSpace {
+    /// `os_origin`: 虚拟桌面图左上角的 os-logical 坐标。
+    /// `image_offset`: 本次识别图在全虚拟桌面图内的左上角 —— 全屏/单屏图传 (0,0),
+    ///   窗口裁剪图传它的 `image_rect` 原点。
+    /// `scale`: manifest 的 `image_to_click_scale` (由 os_logical_bounds / 图像标尺算出)。
+    pub(crate) fn new(
+        os_origin: (i32, i32),
+        image_offset: (i32, i32),
+        scale: (f64, f64),
+    ) -> Self {
+        Self {
+            // 浮点全程保留到末端再取整: 先按标尺折算偏移再取整, 与 to_os_logical_point
+            // 的 `(image_x * scale).round()` 同语义。
+            origin: (
+                (f64::from(os_origin.0) + f64::from(image_offset.0) * scale.0).round() as i32,
+                (f64::from(os_origin.1) + f64::from(image_offset.1) * scale.1).round() as i32,
+            ),
+            scale,
+        }
+    }
+
+    /// 图上像素框 [x, y, w, h] → os-logical 框。宽高同样要乘标尺:
+    /// 只缩放原点会让 2 倍宽的框套在真实文字的一半位置上。
+    fn box_to_os_logical(self, bbox: [f32; 4]) -> [i32; 4] {
+        [
+            (f64::from(self.origin.0) + f64::from(bbox[0]) * self.scale.0).round() as i32,
+            (f64::from(self.origin.1) + f64::from(bbox[1]) * self.scale.1).round() as i32,
+            (f64::from(bbox[2]) * self.scale.0).round() as i32,
+            (f64::from(bbox[3]) * self.scale.1).round() as i32,
+        ]
+    }
+}
+
 /// 对一张截图图像做 OCR, 产出 os-logical 坐标的 manifest ocr 层。
 ///
-/// `origin` 是该图像像素 (0,0) 对应的 os-logical 坐标:
-///   - composite 路径传 virtual_bounds 左上;
-///   - window 裁剪路径传 captured_os_rect 左上。
+/// `space` 描述该图像像素空间到 os-logical 的换算 (`OcrImageSpace`), 两条路径
+/// 各自的取法见该类型的注释。
 pub(crate) fn recognize_to_manifest(
     image: &RgbaImage,
-    origin: (i32, i32),
+    space: OcrImageSpace,
 ) -> Result<OcrManifest, OcrError> {
-    let regions = recognize_regions(image)?;
+    Ok(build_manifest(recognize_regions(image)?, space))
+}
+
+/// 引擎原始区域 → manifest ocr 层。
+///
+/// 与引擎解耦单独成函数: feature-off 时构造不出识别结果, 而坐标换算是本层最容易
+/// 写错的部分 (2026-10-06 真机: 只平移不缩放, 框自称 os-logical 实为物理像素,
+/// 坐标范围 73~2099 远超 1080)。单测直接调它即可覆盖真实换算逻辑, 不用在测试里
+/// 重抄一遍公式 —— 重抄的测试与实现各错各的, 绿灯什么也证明不了。
+fn build_manifest(regions: Vec<RawOcrRegion>, space: OcrImageSpace) -> OcrManifest {
     let boxes = regions
         .into_iter()
         .enumerate()
@@ -170,22 +233,17 @@ pub(crate) fn recognize_to_manifest(
             index,
             text: region.text,
             confidence: region.confidence,
-            bbox: [
-                region.bbox[0].round() as i32 + origin.0,
-                region.bbox[1].round() as i32 + origin.1,
-                region.bbox[2].round() as i32,
-                region.bbox[3].round() as i32,
-            ],
+            bbox: space.box_to_os_logical(region.bbox),
         })
         .collect();
 
-    Ok(OcrManifest {
+    OcrManifest {
         schema: OCR_MANIFEST_SCHEMA,
         engine: OCR_ENGINE_NAME,
         language: OCR_LANGUAGE,
         coordinate_space: "os-logical",
         boxes,
-    })
+    }
 }
 
 /// RGBA -> RGB 并派发到 worker, 带超时等待结果。
@@ -401,35 +459,103 @@ mod tests {
     }
 
     #[test]
-    fn recognize_to_manifest_offsets_boxes_to_os_logical() {
-        // 引擎无关的坐标换算契约: 图像像素坐标 + origin = os-logical。
-        // 用 feature-off 路径构造不了识别结果, 这里直接验证 OcrBox 组装逻辑。
-        let region = RawOcrRegion {
-            text: "文件传输助手".to_owned(),
-            confidence: 0.98,
-            bbox: [10.0, 20.0, 100.0, 30.0],
-        };
-        let origin = (-1920, -50);
-        let manifest = OcrManifest {
-            schema: OCR_MANIFEST_SCHEMA,
-            engine: OCR_ENGINE_NAME,
-            language: OCR_LANGUAGE,
-            coordinate_space: "os-logical",
-            boxes: vec![OcrBox {
-                index: 0,
-                text: region.text,
-                confidence: region.confidence,
-                bbox: [
-                    region.bbox[0] as i32 + origin.0,
-                    region.bbox[1] as i32 + origin.1,
-                    region.bbox[2] as i32,
-                    region.bbox[3] as i32,
-                ],
+    fn image_pixels_map_into_os_logical_space_on_hidpi() {
+        // 4K@200% 真机场景: 图 3840×2160 / os_logical_bounds 1920×1080 / scale 0.5。
+        // 用真实采到的任务栏 OCR 框 ("MQTTX" bbox [487,1901,94,42] 同形) 做手算基准:
+        //   x  = 0 + 1210 * 0.5 = 605
+        //   y  = 0 + 2112 * 0.5 = 1056
+        //   w  = 94  * 0.5 = 47 , h = 42 * 0.5 = 21
+        // 旧实现 (只平移不缩放) 会吐出 [1210, 2112, 94, 42] —— 宽高也全错 2 倍。
+        let space = OcrImageSpace::new((0, 0), (0, 0), (0.5, 0.5));
+        let manifest = build_manifest(
+            vec![RawOcrRegion {
+                text: "MQTTX".to_owned(),
+                confidence: 0.98,
+                bbox: [1210.0, 2112.0, 94.0, 42.0],
             }],
-        };
-        assert_eq!(manifest.boxes[0].bbox, [-1910, -30, 100, 30]);
+            space,
+        );
+        assert_eq!(manifest.boxes[0].bbox, [605, 1056, 47, 21]);
         assert_eq!(manifest.schema, "rdog.ocr.v1");
         assert_eq!(manifest.coordinate_space, "os-logical");
+    }
+
+    #[test]
+    fn window_crop_origin_shifts_by_image_offset_times_scale() {
+        // 窗口裁剪图: 图上原点不是虚拟桌面原点, 必须先按标尺把裁剪偏移折进原点。
+        //   origin = (0,0) + (image_rect.x, image_rect.y) * 0.5 = (50, 100)
+        //   框 [10,20,100,30] -> (50+5, 100+10, 50, 15)
+        let space = OcrImageSpace::new((0, 0), (100, 200), (0.5, 0.5));
+        let manifest = build_manifest(
+            vec![RawOcrRegion {
+                text: "文件传输助手".to_owned(),
+                confidence: 0.98,
+                bbox: [10.0, 20.0, 100.0, 30.0],
+            }],
+            space,
+        );
+        assert_eq!(manifest.boxes[0].bbox, [55, 110, 50, 15]);
+    }
+
+    #[test]
+    fn ocr_boxes_stay_inside_declared_os_logical_bounds() {
+        // 2026-10-06 真机缺陷的判据式回归守卫: manifest 自称 os-logical 且
+        // os_logical_bounds 只有 1080 高, boxes 的 y 就不该越过 1080。
+        // 这里的输入是当时实测到的图上像素坐标 (y 范围 73~2099), 换成 os-logical 后
+        // 必须整体落回 1920×1080。哪天又退回"只平移不缩放", y=2099 会当场炸红。
+        let os_logical_bounds = (0_i32, 0_i32, 1920_i32, 1080_i32);
+        let space = OcrImageSpace::new((os_logical_bounds.0, os_logical_bounds.1), (0, 0), (0.5, 0.5));
+        let regions = vec![
+            // 任务栏最下一行 (实测 y=2099, 旧实现直接超界 2 倍)
+            RawOcrRegion {
+                text: "MQTTX".to_owned(),
+                confidence: 0.98,
+                bbox: [487.0, 2099.0, 94.0, 42.0],
+            },
+            // 画面最上一行 (实测 y=73)
+            RawOcrRegion {
+                text: "顶部标题".to_owned(),
+                confidence: 0.95,
+                bbox: [100.0, 73.0, 300.0, 40.0],
+            },
+            // 右下角: 右/下边界允许恰好等于边界值 (图上最右像素换算后正好落在末位)
+            RawOcrRegion {
+                text: "右下角".to_owned(),
+                confidence: 0.91,
+                bbox: [3700.0, 2100.0, 140.0, 60.0],
+            },
+        ];
+        let manifest = build_manifest(regions, space);
+        assert_eq!(manifest.boxes.len(), 3);
+        for box_ in &manifest.boxes {
+            let [x, y, w, h] = box_.bbox;
+            assert!(
+                x >= os_logical_bounds.0,
+                "{} 的 x={} 越出 os_logical_bounds 左界",
+                box_.text,
+                x
+            );
+            assert!(
+                y >= os_logical_bounds.1,
+                "{} 的 y={} 越出 os_logical_bounds 上界",
+                box_.text,
+                y
+            );
+            assert!(
+                x + w <= os_logical_bounds.0 + os_logical_bounds.2,
+                "{} 的右边界 x+w={} 越出 os_logical_bounds 宽度 {}",
+                box_.text,
+                x + w,
+                os_logical_bounds.2
+            );
+            assert!(
+                y + h <= os_logical_bounds.1 + os_logical_bounds.3,
+                "{} 的下边界 y+h={} 越出 os_logical_bounds 高度 {} (今天暴露的正是这一条)",
+                box_.text,
+                y + h,
+                os_logical_bounds.3
+            );
+        }
     }
 
     #[test]
@@ -455,7 +581,10 @@ mod tests {
         let image = image::open(&image_path)
             .unwrap_or_else(|err| panic!("无法读取冒烟图像 {image_path}: {err}"))
             .to_rgba8();
-        let manifest = recognize_to_manifest(&image, (0, 0)).expect("OCR 识别应成功");
+        // 冒烟图当作全屏图处理: 图上原点即 os-logical 原点, 无裁剪偏移;
+        // scale 1.0 表示输入图已经是 os-logical 分辨率 (未知时无从判断, 取不缩放)。
+        let space = OcrImageSpace::new((0, 0), (0, 0), (1.0, 1.0));
+        let manifest = recognize_to_manifest(&image, space).expect("OCR 识别应成功");
         assert!(
             !manifest.boxes.is_empty(),
             "冒烟图像应识别出至少一个文本框, 实际 0 框"

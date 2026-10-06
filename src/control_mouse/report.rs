@@ -1,3 +1,4 @@
+use super::backend::AppliedPointSpace;
 use super::request::{
     ClickRequest, DragRequest, MouseButtonMode, MouseButtonName, MouseButtonRequest,
     MouseCoordinateSpace, MousePoint, WheelRequest,
@@ -64,10 +65,22 @@ pub struct MouseExecutionReport {
     /// 命中屏的 scale factor — Windows HiDPI 下 agent 靠它理解
     /// 截图像素与 os-logical 坐标的换算关系, 不必猜。
     pub applied_scale_factor: Option<f32>,
-    /// 实际传给 OS 后端的坐标。语义 = "backend 输入":
-    /// 现阶段 = 协议坐标原样 (enigo 透传); Windows 原生后端落地后 = 物理
-    /// 坐标 (logical x scale)。字段名保持稳定, 值随后端演进。
+    /// **实际发给操作系统**的那个点 —— 与 plan 里的协议坐标不是一回事。
+    ///
+    /// 2026-10-06 之前这里记的是换算前的协议 os-logical 坐标, 于是 Windows
+    /// 原生后端 (`SetCursorPos` 收物理像素) 上回执报的是一个从没点过的位置,
+    /// 4K@200% 机器上恰好差一个 scale 倍。数据源是后端的回报 (见
+    /// `backend::AppliedPoint`), 不是调用方的入参。
+    ///
+    /// 它处在哪个坐标空间由 [`Self::resolved_os_point_space`] 标明, 不要凭
+    /// 字段名或平台猜; 需要协议坐标时读 `x`/`y`/`from`/`to` + 顶层
+    /// `coordinate_space`。
     pub resolved_os_point: Option<MousePoint>,
+    /// `resolved_os_point` 所处的坐标空间 (`os-logical` / `physical`)。
+    ///
+    /// 必须与 `resolved_os_point` 成对出现 —— 只给点不给空间, 等于让 agent 猜
+    /// 缩放, 而这正是 2026-10-06 那个缺陷的形态。
+    pub resolved_os_point_space: Option<AppliedPointSpace>,
 }
 
 impl MouseExecutionReport {
@@ -139,15 +152,19 @@ impl MouseExecutionReport {
                 MouseReleaseRecovery::ReleaseSucceeded => "release-succeeded",
                 MouseReleaseRecovery::ReleaseFailed => "release-failed",
             });
+        }
         if let Some(display_id) = &self.display_id {
             value["display_id"] = json!(display_id);
         }
         if let Some(scale) = self.applied_scale_factor {
             value["applied_scale_factor"] = json!(scale);
         }
+        // 落点与其空间成对输出: 见 resolved_os_point_space 的字段文档。
         if let Some(point) = &self.resolved_os_point {
             value["resolved_os_point"] = json!({ "x": point.x, "y": point.y });
         }
+        if let Some(space) = &self.resolved_os_point_space {
+            value["resolved_os_point_space"] = json!(space.as_protocol_str());
         }
 
         serde_json::to_string(&value).expect("mouse report should serialize")
@@ -184,6 +201,7 @@ pub(crate) fn base_report(
         display_id: None,
         applied_scale_factor: None,
         resolved_os_point: None,
+        resolved_os_point_space: None,
     }
 }
 

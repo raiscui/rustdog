@@ -23,7 +23,7 @@ use std::{
 use crate::{
     ax_query::{capture_default_ax_snapshot, current_ax_platform},
     control_ax::{resolve_current_ax_target_rect, AxSnapshot, AxTarget, AxTreeRequest},
-    control_ocr::{recognize_to_manifest, OcrManifest},
+    control_ocr::{recognize_to_manifest, OcrImageSpace, OcrManifest},
     control_display_scope::{
         resolve_display_scope, resolve_observation_window_ref, DisplayRect, DisplayScope,
         DisplayScopeResolution, DisplaySelector, DisplaySummary, DISPLAY_ID_STABILITY_SESSION,
@@ -398,17 +398,25 @@ fn build_window_screenshot_outcome_with_id(
     .to_image();
     let image_filename = format!("screenshot-{screenshot_id}-window.jpg");
     let manifest_filename = format!("screenshot-{screenshot_id}-window-manifest.json");
-    // OCR 内容层 (spec v1.1): 对窗口裁剪图跑识别, 原点取 captured_os_rect 左上。
+    // 换算标尺取整张合成图的尺寸, 不是这次裁出来的窗口图 —— 见 ImageToClickScale 注释。
+    let virtual_image_size = Size {
+        width: virtual_bounds.width,
+        height: virtual_bounds.height,
+    };
+    let image_to_click_scale = ImageToClickScale::from_virtual_image(virtual_image_size, os_logical_bounds);
+    // OCR 内容层 (spec v1.1): 对窗口裁剪图跑识别, 图上像素 → os-logical。
     // 窗口路径是 WeChat 等 no-AX 场景的主入口。
-    // 已知偏差 (非本组范围, 留档): recognize_to_manifest 只做平移不做缩放, 而这里
-    // 传的原点与图上像素同属 OS 原生空间, 所以 Windows HiDPI 下 boxes 实际是原生
-    // 像素坐标, 与 OcrManifest 声明的 os-logical 差一个 scale。修它要改 OCR 层契约
-    // (加缩放参数) 或在 manifest 侧逐框换算, 属另一组的活。
+    // 裁剪图的图上原点不等于虚拟桌面原点, 换算必须带上 image_rect 平移项 ——
+    // 与 transforms.image_to_os / @click 引用式端点同一条公式。
+    // 2026-10-06 真机修复: 此前只做平移不做缩放, 且传的是 OS 原生空间的裁剪原点,
+    // Windows HiDPI 下 boxes 实为原生像素坐标, 与声明的 os-logical 差一个 scale。
     let ocr_manifest = if request.include_ocr {
-        let manifest = recognize_to_manifest(
-            &image,
-            (captured_os_rect.x, captured_os_rect.y),
-        )?;
+        let space = OcrImageSpace::new(
+            (os_logical_bounds.x, os_logical_bounds.y),
+            (image_rect.x, image_rect.y),
+            (image_to_click_scale.x, image_to_click_scale.y),
+        );
+        let manifest = recognize_to_manifest(&image, space)?;
         // 可视化反馈: 标出局部截图的区域范围 + 识别框 (用户实时可见)
         crate::control_overlay::show_capture_region([
             captured_os_rect.x,
@@ -421,12 +429,6 @@ fn build_window_screenshot_outcome_with_id(
         Some(manifest)
     } else {
         None
-    };
-
-    // 换算标尺取整张合成图的尺寸, 不是这次裁出来的窗口图 —— 见 ImageToClickScale 注释。
-    let virtual_image_size = Size {
-        width: virtual_bounds.width,
-        height: virtual_bounds.height,
     };
 
     let manifest = WindowScreenshotManifest {
@@ -451,10 +453,7 @@ fn build_window_screenshot_outcome_with_id(
         },
         virtual_image_size,
         image_rect,
-        image_to_click_scale: ImageToClickScale::from_virtual_image(
-            virtual_image_size,
-            os_logical_bounds,
-        ),
+        image_to_click_scale,
         transforms: ScreenshotTransforms::window(),
         ocr: ocr_manifest,
     };
@@ -1196,16 +1195,21 @@ fn build_screenshot_bundle_with_ax_and_layout(
         });
     }
 
-    // OCR 内容层 (spec v1.1): 识别框像素坐标加 virtual_bounds 左上 (图上原点)。
+    // OCR 内容层 (spec v1.1): 图上像素 → os-logical, 换算与 transforms 同源。
     // 引擎不可用/超时在这里 fail-closed 上抛, 不产出缺层 manifest。
-    // 已知偏差 (非本组范围, 留档): composite 是 OS 原生像素 (Windows HiDPI 下 = 物理),
-    // recognize_to_manifest 只平移不缩放, 所以 boxes 仍是原生像素坐标, 与其声明的
-    // os-logical 差一个 scale; 图↔click 的换算本身已由 transforms 给出, boxes 换算待另票。
+    // composite 是 OS 原生像素 (Windows HiDPI 下 = 物理), 必须乘标尺才是 os-logical;
+    // 标尺与下面 manifest 里的 image_to_click_scale 是同一个值, 不另算第二份。
+    // 2026-10-06 真机修复: 此前只平移不缩放, boxes 自称 os-logical 实为物理像素
+    // (y 范围 73~2099 远超 1080), 拿框直接 @click 会点偏整整 2 倍。
+    let image_to_click_scale = ImageToClickScale::from_virtual_image(image_size, os_logical_bounds);
     let ocr_manifest = if include_ocr {
-        let manifest = recognize_to_manifest(
-            &composite,
-            (virtual_bounds.x, virtual_bounds.y),
-        )?;
+        // 全虚拟桌面图的图上原点就是 os_logical_bounds 左上, 没有裁剪偏移项。
+        let space = OcrImageSpace::new(
+            (os_logical_bounds.x, os_logical_bounds.y),
+            (0, 0),
+            (image_to_click_scale.x, image_to_click_scale.y),
+        );
+        let manifest = recognize_to_manifest(&composite, space)?;
         // 可视化反馈: 在屏幕上标出识别到的文本框 (用户可实时看到 agent "读到"了什么)
         let rects: Vec<[i32; 4]> = manifest.boxes.iter().map(|b| b.bbox).collect();
         crate::control_overlay::show_ocr_boxes(&rects);
@@ -1227,7 +1231,7 @@ fn build_screenshot_bundle_with_ax_and_layout(
         virtual_bounds,
         os_logical_bounds,
         image_size,
-        image_to_click_scale: ImageToClickScale::from_virtual_image(image_size, os_logical_bounds),
+        image_to_click_scale,
         display_count: display_manifests.len(),
         transforms: ScreenshotTransforms::composite(),
         gaps,

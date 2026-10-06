@@ -1,4 +1,5 @@
 use super::*;
+use crate::control_mouse::backend::{AppliedPoint, AppliedPointSpace};
 use enigo::{Axis, Button, Coordinate, Direction, InputError};
 
 #[derive(Default)]
@@ -6,6 +7,11 @@ struct FakeMouseBackend {
     calls: Vec<MousePlanStep>,
     fail_on_call: Option<usize>,
     release_fail: bool,
+    /// 冒充一个**做了坐标换算**的后端: 回报自己"实际发给 OS"的落点。
+    ///
+    /// `None` = 老实的透传后端 (enigo 语义: 落点 = 协议点, 空间 os-logical)。
+    /// 用它可以证伪"回执只是把 plan 里的协议点抄了一遍"这种接线。
+    applied_point_override: Option<AppliedPoint>,
 }
 
 impl FakeMouseBackend {
@@ -19,8 +25,22 @@ impl FakeMouseBackend {
 }
 
 impl MouseBackend for FakeMouseBackend {
-    fn move_mouse(&mut self, x: i32, y: i32, coordinate: Coordinate) -> Result<(), InputError> {
-        self.record_or_fail(MousePlanStep::Move { x, y, coordinate })
+    fn move_mouse(
+        &mut self,
+        x: i32,
+        y: i32,
+        coordinate: Coordinate,
+    ) -> Result<Option<AppliedPoint>, InputError> {
+        self.record_or_fail(MousePlanStep::Move { x, y, coordinate })?;
+        // 相对移动没有绝对落点, 与两个真后端一致地回 None。
+        Ok(if coordinate == Coordinate::Abs {
+            Some(self.applied_point_override.unwrap_or(AppliedPoint {
+                point: MousePoint { x, y },
+                space: AppliedPointSpace::OsLogical,
+            }))
+        } else {
+            None
+        })
     }
 
     fn button(&mut self, button: Button, direction: Direction) -> Result<(), InputError> {
@@ -175,6 +195,7 @@ fn drag_failure_after_press_should_attempt_release() {
         fail_on_call: Some(4),
         release_fail: false,
         calls: Vec::new(),
+        applied_point_override: None,
     };
 
     let err = perform_mouse_plan(&mut backend, &plan).unwrap_err();
@@ -205,6 +226,7 @@ fn drag_failure_should_report_release_failure() {
         fail_on_call: Some(4),
         release_fail: true,
         calls: Vec::new(),
+        applied_point_override: None,
     };
 
     let err = perform_mouse_plan(&mut backend, &plan).unwrap_err();
@@ -265,6 +287,89 @@ fn report_should_render_structured_mouse_json() {
     assert!(report_json.contains(r#""action":"move""#));
     assert!(report_json.contains(r#""coordinate_space":"os-logical""#));
     assert!(report_json.contains(r#""x":10"#));
+}
+
+/// 回归断言 (2026-10-06 真机取证): 回执 `resolved_os_point` 必须是**后端真正
+/// 发给操作系统的那一点**, 而不是 plan 里的协议坐标。
+///
+/// 起因: Windows 走 `WinNativeMouseBackend`, 内部按命中屏 scale 把 os-logical
+/// 换算成物理像素才 `SetCursorPos`; 回执此前记的是换算前的协议点 —— 在 4K@200%
+/// 的机器上等于报了一个屏幕上根本不存在的位置, agent 拿它判断"点了哪里"必被带偏。
+///
+/// 这里让假后端冒充"做过换算"的后端: 入参 (605,1056), 回报 (1210,2112)/physical。
+/// 若接线仍是抄 plan 的协议点, 断言立刻红。三处一起断: 数据源 (后端回报)、
+/// 空间标签、以及 JSON 真的把这两个字段吐出去 (此前它们被误嵌在
+/// `release_recovery` 分支内, 正常回执永远吐不出来)。
+#[test]
+fn receipt_reports_the_point_the_backend_actually_applied() {
+    let plan = build_click_plan(&ClickRequest {
+        x: Some(605),
+        y: Some(1056),
+        target: None,
+        guard: None,
+        button: MouseButtonName::Left,
+        count: 1,
+        hold_ms: 0,
+        interval_ms: 0,
+        coordinate_space: MouseCoordinateSpace::OsLogical,
+    })
+    .unwrap();
+    let mut backend = FakeMouseBackend {
+        applied_point_override: Some(AppliedPoint {
+            point: MousePoint { x: 1210, y: 2112 },
+            space: AppliedPointSpace::Physical,
+        }),
+        ..Default::default()
+    };
+
+    let report = perform_mouse_plan(&mut backend, &plan).unwrap();
+
+    assert_eq!(
+        report.resolved_os_point,
+        Some(MousePoint { x: 1210, y: 2112 }),
+        "回执落点应取后端回报的值, 而非 plan 里的协议坐标"
+    );
+    assert_eq!(
+        report.resolved_os_point_space,
+        Some(AppliedPointSpace::Physical),
+        "落点空间由后端申报; 只给点不给空间等于让 agent 自己猜缩放"
+    );
+    // 协议坐标仍原样留在请求字段 —— agent 要换算回自己的截图时用得着, 不能被
+    // 物理落点顶替 (那是另一个空间的数)。
+    assert_eq!((report.x, report.y), (Some(605), Some(1056)));
+
+    let value: serde_json::Value =
+        serde_json::from_str(&report.to_value_json()).expect("回执应是合法 JSON");
+    assert_eq!(value["resolved_os_point"]["x"], 1210);
+    assert_eq!(value["resolved_os_point"]["y"], 2112);
+    assert_eq!(value["resolved_os_point_space"], "physical");
+}
+
+/// 不做换算的后端 (enigo 语义) 必须**如实回报同一个坐标与同一个空间** ——
+/// 修好 Windows 侧不能把 macOS 侧说成别的空间, 反向漂移同样是撒谎。
+#[test]
+fn passthrough_backend_reports_the_same_point_as_os_logical() {
+    let plan = build_click_plan(&ClickRequest {
+        x: Some(120),
+        y: Some(340),
+        target: None,
+        guard: None,
+        button: MouseButtonName::Left,
+        count: 1,
+        hold_ms: 0,
+        interval_ms: 0,
+        coordinate_space: MouseCoordinateSpace::OsLogical,
+    })
+    .unwrap();
+    let mut backend = FakeMouseBackend::default();
+
+    let report = perform_mouse_plan(&mut backend, &plan).unwrap();
+
+    assert_eq!(report.resolved_os_point, Some(MousePoint { x: 120, y: 340 }));
+    assert_eq!(
+        report.resolved_os_point_space,
+        Some(AppliedPointSpace::OsLogical)
+    );
 }
 
 /// 顶层 `screenshot` 与显式坐标是并列写法: 带 screenshot 时 x/y 是图上像素,

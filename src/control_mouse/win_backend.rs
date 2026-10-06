@@ -29,8 +29,14 @@
 // 变成另一条 unused warning。
 #[cfg(windows)]
 use super::backend::MouseBackend;
+// `resolve_abs_move` (跨平台可测) 要构造 AppliedPoint, 所以这两个类型跟它
+// 一起 gate 到 any(windows, test)。
+#[cfg(any(windows, test))]
+use super::backend::{AppliedPoint, AppliedPointSpace};
 #[cfg(any(windows, test))]
 use crate::control_display_scope::DisplaySummary;
+#[cfg(any(windows, test))]
+use crate::control_mouse::request::MousePoint;
 #[cfg(windows)]
 use crate::screenshot::current_display_summaries;
 #[cfg(windows)]
@@ -134,26 +140,56 @@ fn logical_point_to_native(x: i32, y: i32, displays: &[DisplaySummary]) -> (i32,
     )
 }
 
+/// 把一次绝对移动解析成**后端要交给 OS 的落点** —— [`Self::move_mouse`] 里
+/// 喂给 `SetCursorPos` 的数字, 与回执 `resolved_os_point` 里的数字, 来自同一次
+/// 计算, 不会各算各的走偏。
+///
+/// 空间恒为 [`AppliedPointSpace::Physical`]: DPI-aware 进程里 `SetCursorPos`
+/// 收物理像素。回执必须跟着这个换算走 —— 报换算前的协议逻辑点, 等于报了一
+/// 个屏幕上根本不存在的位置 (4K@200% 下差整整一倍)。
+///
+/// 带 `any(windows, test)`: 与 [`logical_point_to_native`] 同理, 线上调用点
+/// 只有下面的 `#[cfg(windows)] impl`, 但这条语义断言要能在 mac 上验 Windows。
+#[cfg(any(windows, test))]
+fn resolve_abs_move(x: i32, y: i32, displays: &[DisplaySummary]) -> AppliedPoint {
+    let (native_x, native_y) = logical_point_to_native(x, y, displays);
+    AppliedPoint {
+        point: MousePoint {
+            x: native_x,
+            y: native_y,
+        },
+        space: AppliedPointSpace::Physical,
+    }
+}
+
 #[cfg(windows)]
 impl MouseBackend for WinNativeMouseBackend {
-    fn move_mouse(&mut self, x: i32, y: i32, coordinate: Coordinate) -> Result<(), InputError> {
+    fn move_mouse(
+        &mut self,
+        x: i32,
+        y: i32,
+        coordinate: Coordinate,
+    ) -> Result<Option<AppliedPoint>, InputError> {
         match coordinate {
             Coordinate::Abs => {
                 let displays = current_display_summaries()
                     .map_err(|_| InputError::Simulate("display catalog unavailable"))?;
-                let (native_x, native_y) = logical_point_to_native(x, y, &displays);
+                let applied = resolve_abs_move(x, y, &displays);
+                let native_x = applied.point.x;
+                let native_y = applied.point.y;
                 log::debug!("win mouse: logical ({x},{y}) → native ({native_x},{native_y})");
                 // SAFETY: SetCursorPos 只移动本会话的光标, 无指针参数。
                 if unsafe { SetCursorPos(native_x, native_y) } == 0 {
                     log::warn!("SetCursorPos({native_x},{native_y}) 失败");
                     return Err(InputError::Simulate("SetCursorPos failed"));
                 }
-                Ok(())
+                // 回报的落点就是上面那次 SetCursorPos 收到的数字。
+                Ok(Some(applied))
             }
             // 协议当前只产生 Abs (coordinate_space 只支持 os-logical 绝对坐标)。
             // 相对移动仍走 SendInput 相对量保底, 不走 enigo (其相对路径受
-            // 鼠标加速曲线影响)。
-            Coordinate::Rel => send_mouse_move_relative(x, y),
+            // 鼠标加速曲线影响)。相对量没有绝对落点, 如实回 None 而不猜。
+            Coordinate::Rel => send_mouse_move_relative(x, y).map(|()| None::<AppliedPoint>),
         }
     }
 
@@ -254,6 +290,22 @@ mod tests {
         let displays = vec![display("1", true, (0, 0, 3840, 2160), 2.0)];
         let (x, y) = logical_point_to_native(1920, 1080, &displays);
         assert_eq!((x, y), (3840, 2160));
+    }
+
+    /// 回执语义锁 (2026-10-06): Windows 后端下回执报的必须是**换算后的物理坐标**,
+    /// 且空间标签为 physical。
+    ///
+    /// 这条不是重复上面的纯换算用例 —— 它断言的是**接线**: `resolve_abs_move`
+    /// 同时产出 `SetCursorPos` 收到的数字与回执 `resolved_os_point` 的数字。
+    /// 换成直接调 `logical_point_to_native` 的旧写法, 本用例就测不到"回执有没有
+    /// 跟着换算走"这件事 (它只会证明算术对)。取样点是 2026-10-06 那台真机
+    /// (4K@200%) 的实际点击坐标。
+    #[test]
+    fn abs_move_reports_the_converted_physical_point() {
+        let displays = vec![display("1", true, (0, 0, 3840, 2160), 2.0)];
+        let applied = resolve_abs_move(605, 1056, &displays);
+        assert_eq!(applied.point, MousePoint { x: 1210, y: 2112 });
+        assert_eq!(applied.space, AppliedPointSpace::Physical);
     }
 
     /// 混合 DPI 的"逻辑空间空洞": 每屏独立 96-DPI 基准意味着主屏逻辑右缘

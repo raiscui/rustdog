@@ -8,8 +8,53 @@ use crate::control_overlay;
 use enigo::{Axis, Button, Coordinate, Direction, Enigo, InputError, Mouse};
 use std::{io, thread, time::Duration};
 
+/// 绝对移动后端**真正交给操作系统**的那个点 (回执 `resolved_os_point` 的数据源)。
+///
+/// # 为什么回执必须是它而不是 plan 里的协议点 (2026-10-06 真机取证)
+///
+/// `MousePlanStep::Move` 里装的是协议 os-logical 坐标, 但那个数字**不等于**落点:
+/// macOS/Linux 走 enigo 原样透传 (落点 = 协议点); Windows 走 WinNative 后端,
+/// 内部按命中屏的 scale 换算成物理像素才交给 `SetCursorPos`。
+/// 回执此前记的是换算前的协议点 —— 在 4K@200% 的机器上等于报了一个"从没点过
+/// 的位置", agent 拿它当"实际点了屏幕哪里"看必然被带偏 (实际点的是双倍坐标)。
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub struct AppliedPoint {
+    pub point: MousePoint,
+    /// 落点自身所处的空间, 由后端如实申报, 不由调用方推断。
+    pub space: AppliedPointSpace,
+}
+
+/// 落点所处的坐标空间。与回执顶层的 `coordinate_space` (请求空间) **不是**
+/// 一回事 —— 请求永远是 os-logical, 落点则取决于后端怎么解释它。
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum AppliedPointSpace {
+    /// OS 逻辑坐标 (`os-logical`): macOS 的 points、X11 的像素, 与协议坐标同空间。
+    OsLogical,
+    /// 物理像素: Windows 原生后端 `SetCursorPos` 接收的空间。
+    Physical,
+}
+
+impl AppliedPointSpace {
+    pub fn as_protocol_str(self) -> &'static str {
+        match self {
+            Self::OsLogical => "os-logical",
+            Self::Physical => "physical",
+        }
+    }
+}
+
 pub trait MouseBackend {
-    fn move_mouse(&mut self, x: i32, y: i32, coordinate: Coordinate) -> Result<(), InputError>;
+    /// 移动鼠标。
+    ///
+    /// `Coordinate::Abs` 必须回传**实际发给 OS** 的点与它的坐标空间 (回执靠它
+    /// 如实报告落点); `Coordinate::Rel` 回 `None` —— 后端无从得知绝对落点,
+    /// 不猜、不造。
+    fn move_mouse(
+        &mut self,
+        x: i32,
+        y: i32,
+        coordinate: Coordinate,
+    ) -> Result<Option<AppliedPoint>, InputError>;
     fn button(&mut self, button: Button, direction: Direction) -> Result<(), InputError>;
     fn scroll(&mut self, length: i32, axis: Axis) -> Result<(), InputError>;
 }
@@ -42,8 +87,19 @@ pub const MOUSE_BACKEND_NAME: &str = "win-native";
 pub const MOUSE_BACKEND_NAME: &str = "enigo";
 
 impl MouseBackend for Enigo {
-    fn move_mouse(&mut self, x: i32, y: i32, coordinate: Coordinate) -> Result<(), InputError> {
-        Mouse::move_mouse(self, x, y, coordinate)
+    fn move_mouse(
+        &mut self,
+        x: i32,
+        y: i32,
+        coordinate: Coordinate,
+    ) -> Result<Option<AppliedPoint>, InputError> {
+        Mouse::move_mouse(self, x, y, coordinate)?;
+        // enigo 原样透传协议坐标, OS 侧就在这个空间里解读它
+        // (macOS points / X11 像素), 所以落点 = 入参, 无换算可言。
+        Ok((coordinate == Coordinate::Abs).then_some(AppliedPoint {
+            point: MousePoint { x, y },
+            space: AppliedPointSpace::OsLogical,
+        }))
     }
 
     fn button(&mut self, button: Button, direction: Direction) -> Result<(), InputError> {
@@ -64,31 +120,35 @@ pub fn perform_mouse_plan<B: MouseBackend>(
     plan: &MouseExecutionPlan,
 ) -> io::Result<MouseExecutionReport> {
     let mut pressed_button = None::<Button>;
-    // 最近一次 os-logical 移动坐标: 点击命中时在屏幕上闪烁提示用户
-    let mut last_os_point = None::<(i32, i32)>;
+    // 最近一次绝对移动的两个视角, 消费者不同不能混用:
+    // - 协议点 (os-logical): 给 overlay 闪烁提示, 它按 os-logical 契约收坐标;
+    // - 后端回报的落点: 给回执, Windows 上是换算后的物理像素。
+    let mut last_protocol_point = None::<MousePoint>;
+    let mut last_applied_point = None::<AppliedPoint>;
 
     for step in &plan.steps {
         let result = match *step {
-            MousePlanStep::Move { x, y, coordinate } => {
-                if coordinate == Coordinate::Abs {
-                    last_os_point = Some((x, y));
-                }
-                let result = backend.move_mouse(x, y, coordinate);
-                if result.is_ok() {
+            MousePlanStep::Move { x, y, coordinate } => match backend.move_mouse(x, y, coordinate) {
+                Ok(applied) => {
+                    if coordinate == Coordinate::Abs {
+                        last_protocol_point = Some(MousePoint { x, y });
+                        last_applied_point = applied;
+                    }
                     // 实测 (#102): warp/moved 事件与紧随的 click 之间需要让
                     // WindowServer 收敛, 否则 click 落在移动前的旧位置
                     // (跨显示器移动尤甚, 表现为两次点击都落在 one 位置)。
                     thread::sleep(Duration::from_millis(40));
+                    Ok(())
                 }
-                result
-            }
+                Err(err) => Err(err),
+            },
             MousePlanStep::Button { button, direction } => {
                 let result = backend.button(button, direction);
                 if result.is_ok() {
                     // 可视化反馈: 点击/按下时在屏幕上闪烁标记, 让用户看到 agent 动作
                     if matches!(direction, Direction::Click | Direction::Press) {
-                        if let Some((x, y)) = last_os_point {
-                            control_overlay::flash_click(x, y);
+                        if let Some(point) = last_protocol_point {
+                            control_overlay::flash_click(point.x, point.y);
                         }
                     }
                     match direction {
@@ -114,20 +174,27 @@ pub fn perform_mouse_plan<B: MouseBackend>(
     }
 
     let mut report = plan.report.clone();
-    enrich_report_with_display(&mut report, last_os_point);
+    enrich_report_with_display(&mut report, last_applied_point);
     Ok(report)
 }
 
-/// 用 display catalog 补全点击落点的归属信息 (display_id / scale)。
+/// 用后端回报的真实落点补全回执, 并挂上 display catalog 的归属信息。
+///
+/// 落点与 catalog 必须在**同一空间**里比对 —— 这由平台自身保证:
+/// macOS 的 `DisplaySummary.os_rect` 是 points (协议逻辑坐标), Windows
+/// DPI-aware 进程里是物理像素 (物理落点), X11 像素即逻辑
+/// (见 `screenshot::LogicalRect::to_os_logical` 头注的平台取证)。
 ///
 /// 失败静默: 归属信息是**增强证据**, 拿不到 (catalog 枚举失败/无命中屏)
 /// 不该让一次成功的点击变成失败 —— 坐标本身已经执行成功。
 /// 无命中屏 (坐标在所有屏之外) 同样静默, agent 可从缺字段判断异常。
-fn enrich_report_with_display(report: &mut MouseExecutionReport, os_point: Option<(i32, i32)>) {
-    let Some((x, y)) = os_point else {
+fn enrich_report_with_display(report: &mut MouseExecutionReport, applied: Option<AppliedPoint>) {
+    let Some(applied) = applied else {
         return;
     };
-    report.resolved_os_point = Some(MousePoint { x, y });
+    let MousePoint { x, y } = applied.point;
+    report.resolved_os_point = Some(applied.point);
+    report.resolved_os_point_space = Some(applied.space);
     let Ok(displays) = crate::screenshot::current_display_summaries() else {
         return;
     };
