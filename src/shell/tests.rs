@@ -613,9 +613,13 @@ fn control_receiver_should_execute_gui_bench_all_variants() {
 
 #[test]
 fn control_receiver_should_write_gui_bench_artifact_for_ci_collection() {
-    let expected_path =
-        Path::new("target/rdog-bench/computer-use-density__xhs-left-nav-home__all.json");
-    let _ = fs::remove_file(expected_path);
+    // 产物路径按段 join 构造, 不写死正斜杠: 产品侧走
+    // `PathBuf::from("target").join("rdog-bench")`, Windows 上 display() 是反斜杠,
+    // 写死正斜杠的字面量与之比不上。
+    let expected_path = Path::new("target")
+        .join("rdog-bench")
+        .join("computer-use-density__xhs-left-nav-home__all.json");
+    let _ = fs::remove_file(&expected_path);
 
     let (mut client, server) = connected_pair();
     let executor = SystemControlActionExecutor::default();

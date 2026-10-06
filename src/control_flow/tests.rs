@@ -4,14 +4,78 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+/// 测试用 default shell: Windows 走 PowerShell, unix 走 sh。
+///
+/// 与 `task_control.rs` 测试同一口径, 也与 `shell/tests.rs` 的
+/// `control_test_shell` 一致: 产品侧 `build_shell_command` 对 pwsh 走
+/// `-NoLogo -NoProfile -NonInteractive -Command`, 这条参数链就是 Windows 的
+/// 在役路径, 不给测试另造一条。
+const TEST_SHELL: &str = if cfg!(windows) {
+    "powershell.exe"
+} else {
+    "sh"
+};
+
+/// 跨平台命令词汇表 —— flow payload 里的命令文本按平台落到各自方言。
+///
+/// @flow 的 shell lane 真正要守的是 stdout/stderr 捕获、退出码、超时、
+/// 截断、Expect 短路这些**平台无关**的契约; 平台相关的只是命令写法本身。
+/// 逐条翻译而不是整块加 `#[cfg(unix)]` 剔除。
+mod cmd {
+    /// stdout 打 out-line, stderr 打 err-line, 以退出码 7 结束。
+    ///
+    /// Windows 侧 stderr 走 `[Console]::Error.WriteLine` 直写进程 stderr 句柄
+    /// (`Write-Error` 的 Error 流在 5.1 与 pwsh 7 序列化形态不一致)。
+    pub(super) const OUT_ERR_EXIT_7: &str = if cfg!(windows) {
+        "Write-Output out-line; [Console]::Error.WriteLine('err-line'); exit 7"
+    } else {
+        r#"printf 'out-line\n'; printf 'err-line\n' >&2; exit 7"#
+    };
+
+    /// 打印 `$FLOW_TEST` 与当前工作目录, 中间用冒号连接。
+    ///
+    /// 值已是 **JSON 转义后**的形态 (unix 分支的双引号写作 `\"`), 因为它要
+    /// 直接落进 payload 的 JSON 字符串, 不再经第二层转义。
+    pub(super) const SCRIPT_ENV_CWD_JSON: &str = if cfg!(windows) {
+        r#"Write-Output ($env:FLOW_TEST + ':' + $PWD)"#
+    } else {
+        r#"printf '%s:%s' \"$FLOW_TEST\" \"$PWD\""#
+    };
+
+    /// 睡 ~2s (配合 step 级 timeout_ms 验超时标记)。
+    pub(super) const IDLE_2S: &str = if cfg!(windows) {
+        "Start-Sleep 2"
+    } else {
+        "sleep 2"
+    };
+
+    /// stdout 打 9 字节, stderr 打 9 字节 (配合 max_output_bytes 验截断)。
+    pub(super) const BIG_OUT_ERR: &str = if cfg!(windows) {
+        "Write-Output 123456789; [Console]::Error.WriteLine('abcdefghi')"
+    } else {
+        "printf 123456789; printf abcdefghi >&2"
+    };
+
+    /// 以退出码 3 结束 (两平台同形)。
+    pub(super) const EXIT_3: &str = "exit 3";
+
+    /// Expect 失败后**不该**被执行的第二条命令 (留可搜索的标记)。
+    pub(super) const SHOULD_NOT_RUN: &str = if cfg!(windows) {
+        "Write-Output should-not-run"
+    } else {
+        "printf should-not-run"
+    };
+}
+
 #[test]
 fn shell_lane_should_capture_stdout_stderr_and_exit_code() {
-    let request = parse_flow_payload(
-        r#"{"schema":"rdog.flow.v1","policy":{"allow_shell":true},"steps":[{"Cmd":{"run":"printf 'out-line\n'; printf 'err-line\n' >&2; exit 7","capture":"cmd1"}},{"Expect":{"kind":"cmd_exit_code","capture":"cmd1","code":7}},{"Expect":{"kind":"cmd_stdout_contains","capture":"cmd1","contains":"out-line"}},{"Expect":{"kind":"cmd_stderr_contains","capture":"cmd1","contains":"err-line"}},{"Exit":null}]}"#,
-    )
+    let request = parse_flow_payload(&format!(
+        r#"{{"schema":"rdog.flow.v1","policy":{{"allow_shell":true}},"steps":[{{"Cmd":{{"run":"{}","capture":"cmd1"}}}},{{"Expect":{{"kind":"cmd_exit_code","capture":"cmd1","code":7}}}},{{"Expect":{{"kind":"cmd_stdout_contains","capture":"cmd1","contains":"out-line"}}}},{{"Expect":{{"kind":"cmd_stderr_contains","capture":"cmd1","contains":"err-line"}}}},{{"Exit":null}}]}}"#,
+        cmd::OUT_ERR_EXIT_7
+    ))
     .unwrap();
 
-    let report = execute_flow_shell_lane(&request, "sh");
+    let report = execute_flow_shell_lane(&request, TEST_SHELL);
     assert!(report.is_success(), "report should pass: {report:?}");
     assert_eq!(report.completed_steps, 5);
     assert!(report.exit_requested);
@@ -28,16 +92,22 @@ fn shell_lane_should_capture_stdout_stderr_and_exit_code() {
 fn shell_lane_should_apply_cwd_env_and_script_text() {
     let dir = temp_flow_dir("cwd-env");
     fs::create_dir_all(&dir).expect("temp dir should create");
+    // 只在 unix 侧 canonicalize: mac 的 temp_dir() 常是 `/var/...` 符号链接,
+    // 而 shell 报的是真实路径 `/private/var/...`, 不解析必然对不上; 反过来
+    // Windows 的 canonicalize 会加 `\\?\` verbatim 前缀, 反而与 `$PWD` 报出的
+    // 普通路径对不上 —— 那边保持原样传入即可。
+    #[cfg(unix)]
     let dir = fs::canonicalize(&dir).expect("temp dir should canonicalize");
     let dir = dir.to_str().expect("temp dir should be utf8");
     let request = parse_flow_payload(&format!(
-        r#"{{"schema":"rdog.flow.v1","policy":{{"allow_shell":true}},"steps":[{{"Script":{{"text":"printf '%s:%s' \"$FLOW_TEST\" \"$PWD\"","cwd":"{}","env":{{"FLOW_TEST":"ok"}},"capture":"script1"}}}},{{"Expect":{{"kind":"cmd_stdout_contains","capture":"script1","contains":"ok:{}"}}}}]}}"#,
+        r#"{{"schema":"rdog.flow.v1","policy":{{"allow_shell":true}},"steps":[{{"Script":{{"text":"{}","cwd":"{}","env":{{"FLOW_TEST":"ok"}},"capture":"script1"}}}},{{"Expect":{{"kind":"cmd_stdout_contains","capture":"script1","contains":"ok:{}"}}}}]}}"#,
+        cmd::SCRIPT_ENV_CWD_JSON,
         escape_json(dir),
         escape_json(dir),
     ))
     .unwrap();
 
-    let report = execute_flow_shell_lane(&request, "sh");
+    let report = execute_flow_shell_lane(&request, TEST_SHELL);
     assert!(report.is_success(), "report should pass: {report:?}");
     let result = report
         .captures
@@ -48,12 +118,13 @@ fn shell_lane_should_apply_cwd_env_and_script_text() {
 
 #[test]
 fn shell_lane_should_mark_timeout_and_continue_to_expect() {
-    let request = parse_flow_payload(
-        r#"{"schema":"rdog.flow.v1","policy":{"allow_shell":true,"timeout_ms":1000},"steps":[{"Cmd":{"run":"sleep 2","timeout_ms":50,"capture":"slow"}},{"Expect":{"kind":"cmd_exit_code","capture":"slow","code":0}}]}"#,
-    )
+    let request = parse_flow_payload(&format!(
+        r#"{{"schema":"rdog.flow.v1","policy":{{"allow_shell":true,"timeout_ms":1000}},"steps":[{{"Cmd":{{"run":"{}","timeout_ms":50,"capture":"slow"}}}},{{"Expect":{{"kind":"cmd_exit_code","capture":"slow","code":0}}}}]}}"#,
+        cmd::IDLE_2S
+    ))
     .unwrap();
 
-    let report = execute_flow_shell_lane(&request, "sh");
+    let report = execute_flow_shell_lane(&request, TEST_SHELL);
     let result = report.captures.get("slow").expect("slow should capture");
     assert!(result.timed_out);
     assert!(
@@ -69,12 +140,13 @@ fn shell_lane_should_mark_timeout_and_continue_to_expect() {
 
 #[test]
 fn shell_lane_should_truncate_stdout_and_stderr_by_policy() {
-    let request = parse_flow_payload(
-        r#"{"schema":"rdog.flow.v1","policy":{"allow_shell":true,"max_output_bytes":4},"steps":[{"Cmd":{"run":"printf 123456789; printf abcdefghi >&2","capture":"big"}}]}"#,
-    )
+    let request = parse_flow_payload(&format!(
+        r#"{{"schema":"rdog.flow.v1","policy":{{"allow_shell":true,"max_output_bytes":4}},"steps":[{{"Cmd":{{"run":"{}","capture":"big"}}}}]}}"#,
+        cmd::BIG_OUT_ERR
+    ))
     .unwrap();
 
-    let report = execute_flow_shell_lane(&request, "sh");
+    let report = execute_flow_shell_lane(&request, TEST_SHELL);
     assert!(report.is_success(), "report should pass: {report:?}");
     let result = report.captures.get("big").expect("big should capture");
     assert_eq!(result.stdout, "1234");
@@ -84,12 +156,14 @@ fn shell_lane_should_truncate_stdout_and_stderr_by_policy() {
 
 #[test]
 fn shell_lane_should_stop_on_expect_failure() {
-    let request = parse_flow_payload(
-        r#"{"schema":"rdog.flow.v1","policy":{"allow_shell":true},"steps":[{"Cmd":{"run":"exit 3","capture":"cmd1"}},{"Expect":{"kind":"cmd_exit_code","capture":"cmd1","code":0}},{"Cmd":{"run":"printf should-not-run","capture":"after"}}]}"#,
-    )
+    let request = parse_flow_payload(&format!(
+        r#"{{"schema":"rdog.flow.v1","policy":{{"allow_shell":true}},"steps":[{{"Cmd":{{"run":"{}","capture":"cmd1"}}}},{{"Expect":{{"kind":"cmd_exit_code","capture":"cmd1","code":0}}}},{{"Cmd":{{"run":"{}","capture":"after"}}}}]}}"#,
+        cmd::EXIT_3,
+        cmd::SHOULD_NOT_RUN,
+    ))
     .unwrap();
 
-    let report = execute_flow_shell_lane(&request, "sh");
+    let report = execute_flow_shell_lane(&request, TEST_SHELL);
     let failure = report.failed_step.expect("expect should fail");
     assert_eq!(failure.index, 1);
     assert_eq!(failure.kind, "Expect");
@@ -249,7 +323,7 @@ fn checked_gui_transaction_consumes_successor_chain() {
     let output = execute_flow_runtime(
         None,
         &request,
-        "sh",
+        TEST_SHELL,
         Some(&mut |line| {
             seen.push(line.to_owned());
             let response = responses[response_index].clone();
@@ -282,7 +356,7 @@ fn checked_gui_transaction_stops_on_nonzero_response() {
     let output = execute_flow_runtime(
         None,
         &request,
-        "sh",
+        TEST_SHELL,
         Some(&mut |_line| {
             calls += 1;
             if calls == 1 {
@@ -314,7 +388,7 @@ fn checked_gui_transaction_fails_closed_when_successor_is_missing() {
     let output = execute_flow_runtime(
         None,
         &request,
-        "sh",
+        TEST_SHELL,
         Some(&mut |_line| {
             ControlExecutionOutcome::from_response_line(transaction_response(1, true, None))
         }),

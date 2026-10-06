@@ -864,23 +864,24 @@ impl UiScriptStep {
 mod tests {
     use super::*;
     use crate::control_protocol::{parse_control_line, ControlCommand, ControlParseResult};
-    use std::path::PathBuf;
 
-    fn fixture_path(name: &str) -> PathBuf {
-        Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("tests")
-            .join("fixtures")
-            .join("ui_script")
-            .join(name)
-    }
-
-    fn parse_fixture(name: &str) -> io::Result<UiScriptProgram> {
-        parse_script_file(&fixture_path(name))
+    /// 解析一段 UI script 文本。
+    ///
+    /// fixture 由调用方用 `include_str!` 在**编译期**内嵌 (与
+    /// `control_observation/selector.rs` 的 golden fixture 同一手法), 而不是
+    /// 运行时拿 `env!("CARGO_MANIFEST_DIR")` 拼磁盘路径: 后者在交叉编译
+    /// (mac 上构建 Windows 目标) 时会把**构建机**的绝对路径烤进二进制,
+    /// 换到 Windows 真机上那个路径根本不存在, 8 条 fixture 用例全红。
+    fn parse_fixture(source: &str) -> io::Result<UiScriptProgram> {
+        parse_script_json(source)
     }
 
     #[test]
     fn parser_should_accept_iced_compatible_fixture() {
-        let program = parse_fixture("iced_compatible_basic.json").unwrap();
+        let program = parse_fixture(include_str!(
+            "../tests/fixtures/ui_script/iced_compatible_basic.json"
+        ))
+        .unwrap();
         assert_eq!(program.steps.len(), 7);
 
         let dry_run = compile_dry_run(&program).unwrap();
@@ -901,7 +902,10 @@ mod tests {
 
     #[test]
     fn runner_should_inject_scope_into_observe_and_mouse_guard() {
-        let program = parse_fixture("rdog_target_scope_observe_expect.json").unwrap();
+        let program = parse_fixture(include_str!(
+            "../tests/fixtures/ui_script/rdog_target_scope_observe_expect.json"
+        ))
+        .unwrap();
         let dry_run = compile_dry_run(&program).unwrap();
 
         assert_eq!(dry_run.summary.backend_request_count, 2);
@@ -914,7 +918,10 @@ mod tests {
 
     #[test]
     fn parser_should_accept_window_size_precondition_fixture() {
-        let program = parse_fixture("window_size_precondition.json").unwrap();
+        let program = parse_fixture(include_str!(
+            "../tests/fixtures/ui_script/window_size_precondition.json"
+        ))
+        .unwrap();
         let dry_run = compile_dry_run(&program).unwrap();
 
         assert_eq!(dry_run.summary.backend_request_count, 1);
@@ -927,7 +934,10 @@ mod tests {
 
     #[test]
     fn runner_should_compile_window_size_resize_to_window_resize_control_line() {
-        let program = parse_fixture("window_size_resize.json").unwrap();
+        let program = parse_fixture(include_str!(
+            "../tests/fixtures/ui_script/window_size_resize.json"
+        ))
+        .unwrap();
         let dry_run = compile_dry_run(&program).unwrap();
 
         assert_eq!(dry_run.summary.backend_request_count, 1);
@@ -958,7 +968,10 @@ mod tests {
 
     #[test]
     fn runner_should_keep_expect_payload_for_real_runner() {
-        let program = parse_fixture("ping_expect_response.json").unwrap();
+        let program = parse_fixture(include_str!(
+            "../tests/fixtures/ui_script/ping_expect_response.json"
+        ))
+        .unwrap();
         let dry_run = compile_dry_run(&program).unwrap();
 
         assert_eq!(dry_run.summary.backend_request_count, 1);
@@ -985,20 +998,29 @@ mod tests {
 
     #[test]
     fn parser_should_reject_multi_key_step_fixture() {
-        let err = parse_fixture("negative_multi_key_step.json").unwrap_err();
+        let err = parse_fixture(include_str!(
+            "../tests/fixtures/ui_script/negative_multi_key_step.json"
+        ))
+        .unwrap_err();
         assert!(err.to_string().contains("必须只有一个 key"));
     }
 
     #[test]
     fn runner_should_reject_missing_coordinate_space_fixture() {
-        let program = parse_fixture("negative_missing_coordinate_space.json").unwrap();
+        let program = parse_fixture(include_str!(
+            "../tests/fixtures/ui_script/negative_missing_coordinate_space.json"
+        ))
+        .unwrap();
         let err = compile_dry_run(&program).unwrap_err();
         assert!(err.to_string().contains("缺少 coordinate_space"));
     }
 
     #[test]
     fn parser_should_reject_window_size_without_mode_fixture() {
-        let err = parse_fixture("negative_window_size_without_mode.json").unwrap_err();
+        let err = parse_fixture(include_str!(
+            "../tests/fixtures/ui_script/negative_window_size_without_mode.json"
+        ))
+        .unwrap_err();
         assert!(err
             .to_string()
             .contains("mode:\"precondition\" 或 mode:\"resize\""));

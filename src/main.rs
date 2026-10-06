@@ -80,19 +80,44 @@ fn main() {
 
     let opts = input::Opts::parse();
 
+    // 日志目标在这里一次算清,init_logger 和下面的错误出口共用同一个判定结果,
+    // 避免"日志写到哪"这件事在同一个进程里被推导两次而漂移。
+    let log_target = hidden_mode::log_target_for_command(&opts.command);
+
     // 先初始化日志,后续所有错误都统一走顶层退出码。
-    if let Err(err) = init_logger(&opts.command) {
+    if let Err(err) = init_logger(&log_target) {
         eprintln!("Failed to initialize logger: {err}");
         exit(1);
     }
 
     if let Err(err) = run(opts) {
         log::error!("{err}");
+        // ------------------------------------------------------------
+        // 启动失败必须让人看见 —— 哪怕日志主体被 RDOG_LOG_FILE 改道到了文件。
+        //
+        // 2026-10-06 真机实测 (Windows 11): 同一份二进制、同一条
+        // `rdog daemon -c bad.toml`, 唯一差别是设不设 RDOG_LOG_FILE:
+        // 不设 → stderr 519 字节; 设了 → stderr 0 字节, 519 字节全进了文件,
+        // 且没有任何一行提示说明日志去了哪。环境变量一旦被 setx 写进用户环境,
+        // 后面每一条命令都走改道这条路, 现场据此把"日志去文件了"
+        // 误判成"daemon 静默崩溃", 排查为此多绕了好几轮。
+        //
+        // 这里只对"文件背后还有操作者"的形态镜像一份: hidden child 的 stderr
+        // 接的是 Stdio::null(), 通知没有收件人, 只会变成一次无意义的写入失败。
+        // hidden child 仍然只有日志文件这一个现场, 契约不变。
+        // ------------------------------------------------------------
+        if let hidden_mode::LogTarget::File {
+            console_observer: true,
+            ..
+        } = &log_target
+        {
+            eprintln!("error: {err}");
+        }
         exit(1);
     }
 }
 
-fn init_logger(command: &Command) -> Result<(), String> {
+fn init_logger(log_target: &hidden_mode::LogTarget) -> Result<(), String> {
     let level = std::env::var("RDOG_LOG_LEVEL")
         .ok()
         .as_deref()
@@ -106,8 +131,7 @@ fn init_logger(command: &Command) -> Result<(), String> {
         })
         .unwrap_or(log::LevelFilter::Info);
 
-    let log_target = hidden_mode::log_target_for_command(command);
-    init_tracing(level, &log_target)?;
+    init_tracing(level, log_target)?;
 
     let dispatch = Dispatch::new()
         .format(|out, message, record| {
@@ -139,7 +163,7 @@ fn init_logger(command: &Command) -> Result<(), String> {
             .chain(stderr())
             .apply()
             .map_err(|err| err.to_string()),
-        hidden_mode::LogTarget::File(path) => {
+        hidden_mode::LogTarget::File { path, .. } => {
             let file = fern::log_file(&path)
                 .map_err(|err| format!("failed to open log file {}: {err}", path.display()))?;
             dispatch.chain(file).apply().map_err(|err| err.to_string())
@@ -156,7 +180,7 @@ fn init_logger(command: &Command) -> Result<(), String> {
 fn init_tracing(level: log::LevelFilter, target: &hidden_mode::LogTarget) -> Result<(), String> {
     let writer = match target {
         hidden_mode::LogTarget::Stderr => BoxMakeWriter::new(stderr),
-        hidden_mode::LogTarget::File(path) => {
+        hidden_mode::LogTarget::File { path, .. } => {
             let file = fern::log_file(path).map_err(|err| {
                 format!("failed to open tracing log file {}: {err}", path.display())
             })?;

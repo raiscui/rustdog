@@ -906,6 +906,23 @@ mod tests {
         figment::Error::from(err.to_string())
     }
 
+    /// 把"用户 home"指向 jail 目录, 使 `<home>/.rdog` 解析到 jail 内。
+    ///
+    /// 按平台设**该平台真正被读的那个变量** (`resolve_user_config_dir` 走
+    /// `cfg!(windows)` 分支: unix 读 `$HOME`, Windows 读 `%USERPROFILE%`)。
+    /// 只设 HOME 在 Windows 上必然落到 "未设置用户配置目录" 分支 ——
+    /// `jail.clear_env()` 会把两个变量连同进程其余环境一起抹掉, 测试进程里
+    /// 本来有值的 USERPROFILE 也在内, 那是纯测试侧的 unix 假设。
+    fn point_home_at_jail(jail: &mut Jail) -> PathBuf {
+        let home = jail.directory().to_path_buf();
+        let home_value = home.to_string_lossy();
+        #[cfg(windows)]
+        jail.set_env("USERPROFILE", home_value.as_ref());
+        #[cfg(not(windows))]
+        jail.set_env("HOME", home_value.as_ref());
+        home
+    }
+
     mod load_daemon_config {
         use super::*;
 
@@ -1003,8 +1020,7 @@ shell = "/bin/bash"
         }
 
         fn write_user_config(jail: &mut figment::Jail, contents: &str) -> PathBuf {
-            let home = jail.directory().to_path_buf();
-            jail.set_env("HOME", home.to_string_lossy().as_ref());
+            let home = point_home_at_jail(jail);
             let user_dir = home.join(".rdog");
             std::fs::create_dir_all(&user_dir).expect("user dir should be created");
             let path = user_dir.join(default_platform_config_file_name());
@@ -1719,13 +1735,6 @@ shell = "/bin/bash"
     mod write_example_config_file {
         use super::*;
         use std::fs;
-
-        /// 把 HOME 指向 jail 目录,使 `~/.rdog` 解析到 `<jail>/.rdog`。
-        fn point_home_at_jail(jail: &mut figment::Jail) -> PathBuf {
-            let home = jail.directory().to_path_buf();
-            jail.set_env("HOME", home.to_string_lossy().as_ref());
-            home
-        }
 
         fn user_config_dir(home: &Path) -> PathBuf {
             home.join(".rdog")

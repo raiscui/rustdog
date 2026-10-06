@@ -419,6 +419,17 @@ mod tests {
         format!("{tag}-{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos())
     }
 
+    /// 把路径转义成能塞进 JSON 字符串字面量的形态。
+    ///
+    /// 这批用例刻意走**手拼 JSON 文本** (而非 `json!`) 打真实文本协议入口,
+    /// 代价是路径必须自己转义: Windows 的 `C:\Users\...` 里那个裸反斜杠是
+    /// 非法 JSON 转义, 直接插进 payload 会被产品侧正确拒成 "invalid escape"
+    /// —— 产品没错, 是测试拼串时漏了转义。转义规则与 `control_flow/tests.rs`
+    /// 的同名助手保持一致。
+    fn escape_json(input: &str) -> String {
+        input.replace('\\', "\\\\").replace('"', "\\\"")
+    }
+
     #[test]
     fn rejects_parent_dir_traversal() {
         for bad in ["../../etc/passwd", "a/b/../../../x", "../evil"] {
@@ -451,7 +462,7 @@ mod tests {
 
         let open = execute_put_file(&format!(
             r#"{{"transfer_id":"{tid}","path":"{}","size":{},"sha256":"{sha}"}}"#,
-            target.display(),
+            escape_json(&target.display().to_string()),
             payload.len()
         ))
         .unwrap();
@@ -486,7 +497,7 @@ mod tests {
 
         execute_put_file(&format!(
             r#"{{"transfer_id":"{tid}","path":"{}","size":5}}"#,
-            target.display()
+            escape_json(&target.display().to_string())
         ))
         .unwrap();
         let data = BASE64_STANDARD.encode(b"abcde");
@@ -514,7 +525,7 @@ mod tests {
         let tid = unique_id("ooo");
         execute_put_file(&format!(
             r#"{{"transfer_id":"{tid}","path":"{}","size":10}}"#,
-            target.display()
+            escape_json(&target.display().to_string())
         ))
         .unwrap();
         let data = BASE64_STANDARD.encode(b"xxxxx");
@@ -536,7 +547,7 @@ mod tests {
         let tid = unique_id("dl");
         let meta = execute_get_file(&format!(
             r#"{{"transfer_id":"{tid}","path":"{}"}}"#,
-            source.display()
+            escape_json(&source.display().to_string())
         ))
         .unwrap();
         let size = meta["size"].as_u64().unwrap();
@@ -572,7 +583,7 @@ mod tests {
         let tid = unique_id("big");
         execute_put_file(&format!(
             r#"{{"transfer_id":"{tid}","path":"{}","size":1}}"#,
-            dir.join("big.bin").display()
+            escape_json(&dir.join("big.bin").display().to_string())
         ))
         .unwrap();
         let big = "A".repeat(CHUNK_BASE64_LIMIT + 1);

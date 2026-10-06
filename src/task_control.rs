@@ -569,8 +569,80 @@ pub struct TaskOutputReport {
 mod tests {
     use super::*;
 
+    /// 测试用 shell: Windows 走 PowerShell, unix 走 /bin/sh。
+    ///
+    /// 选 PowerShell 而非 cmd.exe, 与仓库既有测试 (`shell/tests.rs` 的
+    /// `control_test_shell`) 同一口径: 产品侧 `build_shell_command` 对 pwsh
+    /// 走 `-NoLogo -NoProfile -NonInteractive -Command`, 这条参数链本来就是
+    /// Windows 的在役路径; 且 `Start-Sleep` 是进程内 cmdlet, `cancel_task`
+    /// 直接 kill 掉 powershell.exe 就能收回, 不会像 `cmd /C` 套外部程序那样
+    /// 留下收不掉的孤儿子进程。
+    const TEST_SHELL: &str = if cfg!(windows) {
+        "powershell.exe"
+    } else {
+        "/bin/sh"
+    };
+
+    /// 语义命令词汇表 —— 每条测试只说"我要长跑 / 要非零退出 / 要 200 行输出",
+    /// 平台方言在这一处收敛 (单一真相源), 测试正文保持平台中立。
+    ///
+    /// 退出码 / stdout / stderr / kill 收割这些才是 @spawn 真正要守的契约,
+    /// 它们与平台无关; 真正 unix 特有的是这些命令的**写法**, 故逐条翻译而不是
+    /// 整条加 `#[cfg(unix)]` 剔除 (剔除 = Windows 上恰好最需要覆盖的面全裸奔)。
+    mod cmd {
+        /// 长时占用约 5s (验 @spawn 即答, 不阻塞 lane)。
+        pub(super) const IDLE_5S: &str = if cfg!(windows) {
+            "Start-Sleep 5"
+        } else {
+            "sleep 5"
+        };
+        /// 长时占用约 30s (验 cancel 收割 / started 帧之后再被 kill)。
+        pub(super) const IDLE_30S: &str = if cfg!(windows) {
+            "Start-Sleep 30"
+        } else {
+            "sleep 30"
+        };
+        /// 成功退出、不产生输出。
+        pub(super) const NOOP: &str = if cfg!(windows) { "exit 0" } else { "true" };
+        /// 以退出码 3 结束。
+        pub(super) const EXIT_3: &str = "exit 3";
+        /// 打印一行到 stdout。
+        pub(super) const ECHO_HELLO: &str = "echo hello";
+        /// 打印一行到 stderr。
+        ///
+        /// Windows 侧走 `[Console]::Error.WriteLine` 直写进程 stderr 句柄,
+        /// 而不是 `Write-Error` 的 Error 流 —— 后者的宿主序列化形态在
+        /// Windows PowerShell 5.1 与 pwsh 7 之间不一致, 断言会变成在测
+        /// PowerShell 版本而不是在测 @spawn 的 stdout/stderr 合流。
+        pub(super) const ECHO_ERR: &str = if cfg!(windows) {
+            "[Console]::Error.WriteLine('err')"
+        } else {
+            "echo err 1>&2"
+        };
+        /// stdout 打 out, stderr 打 err, stdout 再打 done (验合流顺序)。
+        pub(super) const OUT_ERR_DONE: &str = if cfg!(windows) {
+            "Write-Output out; [Console]::Error.WriteLine('err'); Write-Output done"
+        } else {
+            "echo out; echo err 1>&2; echo done"
+        };
+        /// 1..200 逐行输出 (验尾部行数截断)。
+        pub(super) const LINES_1_200: &str = if cfg!(windows) { "1..200" } else { "seq 1 200" };
+        /// 打印当前工作目录 (验 cwd 生效)。
+        pub(super) const PWD: &str = if cfg!(windows) {
+            "Write-Output $PWD"
+        } else {
+            "pwd"
+        };
+        /// 先打一行标记再长睡 1s (验 running 期间可查状态)。
+        pub(super) const ECHO_THEN_IDLE_1S: &str = if cfg!(windows) {
+            "Write-Output task-e2e; Start-Sleep 1"
+        } else {
+            "echo task-e2e; sleep 1"
+        };
+    }
+
     fn spawn_quick(command: &str) -> String {
-        spawn_task("/bin/sh", command, None).expect("quick spawn should succeed")
+        spawn_task(TEST_SHELL, command, None).expect("quick spawn should succeed")
     }
 
     /// 等待任务到达终态 (测试辅助, 上限 10s)。
@@ -589,7 +661,7 @@ mod tests {
     #[test]
     fn spawn_should_return_immediately_for_long_running_command() {
         let started = std::time::Instant::now();
-        let task_id = spawn_quick("sleep 5");
+        let task_id = spawn_quick(cmd::IDLE_5S);
         let elapsed = started.elapsed();
         assert!(
             elapsed < Duration::from_secs(2),
@@ -601,7 +673,7 @@ mod tests {
 
     #[test]
     fn completed_task_should_carry_exit_code_zero() {
-        let task_id = spawn_quick("echo hello");
+        let task_id = spawn_quick(cmd::ECHO_HELLO);
         let snapshot = wait_terminal(&task_id);
         assert_eq!(snapshot.state, TaskState::Completed);
         assert_eq!(snapshot.exit_code, Some(0));
@@ -609,7 +681,7 @@ mod tests {
 
     #[test]
     fn failed_task_should_carry_nonzero_exit_code() {
-        let task_id = spawn_quick("exit 3");
+        let task_id = spawn_quick(cmd::EXIT_3);
         let snapshot = wait_terminal(&task_id);
         assert_eq!(snapshot.state, TaskState::Failed);
         assert_eq!(snapshot.exit_code, Some(3));
@@ -617,7 +689,7 @@ mod tests {
 
     #[test]
     fn output_should_capture_stdout_and_stderr_merged() {
-        let task_id = spawn_quick("echo out; echo err 1>&2; echo done");
+        let task_id = spawn_quick(cmd::OUT_ERR_DONE);
         wait_terminal(&task_id);
         let report = task_output(&task_id, DEFAULT_OUTPUT_TAIL_LINES).unwrap();
         assert!(report.output.contains("out"));
@@ -628,18 +700,20 @@ mod tests {
 
     #[test]
     fn output_tail_lines_should_limit_result() {
-        let task_id = spawn_quick("seq 1 200");
+        let task_id = spawn_quick(cmd::LINES_1_200);
         wait_terminal(&task_id);
         let report = task_output(&task_id, 5).unwrap();
-        let line_count = report.output.trim().lines().count();
-        assert!(line_count <= 5, "尾部行数应不超过 5, 实际 {line_count}");
-        assert!(report.output.contains("200"));
-        assert!(!report.output.contains("1\n2\n3\n4\n5\n6\n"));
+        // 逐行 trim 后再比: Windows 行尾是 CRLF, 拿 `1\n2\n3\n4\n5\n6\n`
+        // 这种 LF 字面量去 contains 会恒真 —— 断言看着在, 实际什么都没守。
+        let lines: Vec<&str> = report.output.trim().lines().map(str::trim).collect();
+        assert!(lines.len() <= 5, "尾部行数应不超过 5, 实际 {}", lines.len());
+        assert_eq!(lines.last(), Some(&"200"), "尾部应停在末行 200");
+        assert!(!lines.contains(&"1"), "尾部 5 行不该含首行 1: {lines:?}");
     }
 
     #[test]
     fn cancel_running_task_should_reap_canceled_state() {
-        let task_id = spawn_quick("sleep 30");
+        let task_id = spawn_quick(cmd::IDLE_30S);
         let snapshot = cancel_task(&task_id).unwrap();
         assert_eq!(snapshot.state, TaskState::Canceled);
         // 进程已死: 不再占用 running 名额
@@ -649,7 +723,7 @@ mod tests {
 
     #[test]
     fn cancel_terminal_task_should_be_idempotent() {
-        let task_id = spawn_quick("true");
+        let task_id = spawn_quick(cmd::NOOP);
         wait_terminal(&task_id);
         let snapshot = cancel_task(&task_id).unwrap();
         assert_eq!(snapshot.state, TaskState::Completed);
@@ -665,7 +739,7 @@ mod tests {
 
     #[test]
     fn spawn_empty_command_should_be_rejected() {
-        let err = spawn_task("/bin/sh", "   ", None).unwrap_err();
+        let err = spawn_task(TEST_SHELL, "   ", None).unwrap_err();
         assert!(err.to_string().contains("不能为空"));
     }
 
@@ -673,7 +747,7 @@ mod tests {
     fn spawn_with_cwd_should_execute_in_that_directory() {
         let temp = std::env::temp_dir().join("rdog-task-cwd-test");
         std::fs::create_dir_all(&temp).unwrap();
-        let task_id = spawn_task("/bin/sh", "pwd", Some(temp.to_str().unwrap())).unwrap();
+        let task_id = spawn_task(TEST_SHELL, cmd::PWD, Some(temp.to_str().unwrap())).unwrap();
         wait_terminal(&task_id);
         let report = task_output(&task_id, DEFAULT_OUTPUT_TAIL_LINES).unwrap();
         assert!(
@@ -690,7 +764,7 @@ mod tests {
         let executor = crate::control_actions::SystemControlActionExecutor::default();
         let outcome = crate::control_core::parse_and_execute_control_line(
             line,
-            "/bin/sh",
+            TEST_SHELL,
             &executor,
             &executor.cancel_registry(),
         );
@@ -742,7 +816,7 @@ mod tests {
     #[test]
     fn e2e_spawn_should_answer_immediately_and_not_block_lane() {
         let started = std::time::Instant::now();
-        let response = execute_line("@spawn#101:sleep 30");
+        let response = execute_line(&format!("@spawn#101:{}", cmd::IDLE_30S));
         assert!(
             started.elapsed() < Duration::from_secs(2),
             "@spawn 必须即答"
@@ -770,7 +844,10 @@ mod tests {
 
     #[test]
     fn e2e_task_lifecycle_through_protocol() {
-        let response = execute_line("@spawn {command:\"echo task-e2e; sleep 1\"}");
+        let response = execute_line(&format!(
+            "@spawn {{command:\"{}\"}}",
+            cmd::ECHO_THEN_IDLE_1S
+        ));
         let task_id = extract_task_id(&response);
 
         // running 期间可查状态
@@ -800,9 +877,9 @@ mod tests {
 
     #[test]
     fn consecutive_spawns_should_have_strictly_increasing_seq() {
-        let first = spawn_quick("true");
-        let second = spawn_quick("true");
-        let third = spawn_quick("true");
+        let first = spawn_quick(cmd::NOOP);
+        let second = spawn_quick(cmd::NOOP);
+        let third = spawn_quick(cmd::NOOP);
         let first_seq = task_snapshot(&first).unwrap().seq;
         let second_seq = task_snapshot(&second).unwrap().seq;
         let third_seq = task_snapshot(&third).unwrap().seq;
@@ -815,7 +892,7 @@ mod tests {
 
     #[test]
     fn session_lane_frames_should_drain_only_for_bound_session() {
-        let task_id = spawn_quick("true");
+        let task_id = spawn_quick(cmd::NOOP);
         // bind 前其他 session drain 不到
         assert!(drain_session_frames("sess-other").is_empty());
         // 未绑定 lane 的主 session 也 drain 不到 (帧在 pending 滞留)
@@ -839,7 +916,7 @@ mod tests {
 
     #[test]
     fn canceled_task_terminal_frame_should_reuse_task_failed_with_flag() {
-        let task_id = spawn_quick("sleep 30");
+        let task_id = spawn_quick(cmd::IDLE_30S);
         bind_task_lane(&task_id, "sess-main");
         let _ = drain_session_frames("sess-main"); // 取走 started
         cancel_task(&task_id).unwrap();
@@ -857,7 +934,7 @@ mod tests {
 
     #[test]
     fn legacy_unbound_task_frames_should_not_leak_beyond_cap() {
-        let task_id = spawn_quick("echo x");
+        let task_id = spawn_quick(cmd::ECHO_ERR);
         let registry = registry().lock().unwrap();
         let entry = &registry[&task_id];
         assert!(entry.pending_frames.len() <= MAX_PENDING_FRAMES_PER_TASK);
@@ -866,7 +943,7 @@ mod tests {
 
     #[test]
     fn bind_task_lane_from_spawn_response_should_parse_both_envelope_shapes() {
-        let task_id = spawn_quick("true");
+        let task_id = spawn_quick(cmd::NOOP);
         // 有 request id 的 value 信封形状
         let with_id = format!(
             "@response {{\"id\":101,\"value\":{{\"task\":\"{task_id}\",\"state\":\"running\"}}}}"
@@ -880,7 +957,7 @@ mod tests {
         }
 
         // 无信封裸对象形状
-        let task2 = spawn_quick("true");
+        let task2 = spawn_quick(cmd::NOOP);
         let bare = format!("@response {{\"task\":\"{task2}\",\"state\":\"running\"}}");
         assert!(bind_task_lane_from_spawn_response(&bare, "sess-b"));
         // 非 spawn 响应静默 false

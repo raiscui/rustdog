@@ -21,7 +21,26 @@ pub enum LogTarget {
     /// 改 init_logger 走 stderr 之后保留 `Stdout` 名字做向后兼容。
     /// 2026-06-20 改名为 `Stderr`,把"日志走 stderr"事实写进 enum 名字。
     Stderr,
-    File(PathBuf),
+    /// 日志改道到文件。两种落到文件的形态受众不同,用 `console_observer` 区分。
+    File {
+        path: PathBuf,
+        /// 文件背后是否还坐着一个盯着控制台的操作者。
+        ///
+        /// 2026-10-06 真机实测 (Windows 11 / ssh 前台会话): 同一份 rdog.exe、同一条
+        /// `rdog daemon -c bad.toml`, 唯一差别是设不设 `RDOG_LOG_FILE`:
+        ///   - 不设 → stderr 519 字节 (info 横幅 + warn + error 全在)
+        ///   - 设了 → stderr **0 字节**, 同样 519 字节进了文件
+        /// 环境变量一旦被 `setx` 写进用户环境, 后面每一条命令都走"改道"这条路,
+        /// 而 stderr 一个字节都没有、也没有任何提示说明日志去了哪 ——
+        /// 现场据此把"日志去文件了"误判成"daemon 静默崩溃"。
+        ///
+        /// 两种形态的差别就在"还有没有人看控制台":
+        ///   - hidden child 由 `CREATE_NO_WINDOW | DETACHED_PROCESS` 拉起, stderr 接的是
+        ///     `Stdio::null()`, 操作者根本不在 → 通知没有收件人, 只会变成无意义的写入失败。
+        ///   - `rdog daemon` + `RDOG_LOG_FILE` 是**前台**改道, 操作者就站在控制台前,
+        ///     他需要知道失败原因 —— 哪怕日志主体被改走了。
+        console_observer: bool,
+    },
 }
 
 /// 长驻命令把日志改道到文件的环境变量。
@@ -61,12 +80,20 @@ fn resolve_log_target(command: &Command, env_log_file: Option<&str>) -> LogTarge
             child: true,
             log_file: Some(path),
             ..
-        } => LogTarget::File(path.clone()),
+        } => LogTarget::File {
+            path: path.clone(),
+            // child 已经脱离控制台, 没有任何操作者等着看 stderr。
+            console_observer: false,
+        },
         // `rdog daemon` 默认仍走 stderr(前台语义不变),但允许用 RDOG_LOG_FILE 显式改道。
         // 只对 daemon 生效:hidden-daemon 的 parent 是瞬时进程,它的落点由下面的 spawn
         // 告知行负责,让它也读环境变量只会把 parent 和 child 的日志拆到两个文件。
         Command::Daemon { .. } => match env_log_file.map(str::trim) {
-            Some(path) if !path.is_empty() => LogTarget::File(PathBuf::from(path)),
+            Some(path) if !path.is_empty() => LogTarget::File {
+                path: PathBuf::from(path),
+                // 这是前台改道, 操作者还在控制台前 —— 失败必须让他看得见。
+                console_observer: true,
+            },
             _ => LogTarget::Stderr,
         },
         _ => LogTarget::Stderr,
@@ -129,7 +156,7 @@ mod tests {
         // 谁在挂了 RDOG_LOG_FILE 的 shell 里跑测试, 这条用例就会假红。
         match resolve_log_target(&command, None) {
             LogTarget::Stderr => {}
-            LogTarget::File(path) => panic!("unexpected file target: {}", path.display()),
+            LogTarget::File { path, .. } => panic!("unexpected file target: {}", path.display()),
         }
     }
 
@@ -142,7 +169,7 @@ mod tests {
         };
 
         match log_target_for_command(&command) {
-            LogTarget::File(path) => assert_eq!(path, PathBuf::from("rdog_hidden.log")),
+            LogTarget::File { path, .. } => assert_eq!(path, PathBuf::from("rdog_hidden.log")),
             // 这个测试只是验证 hidden child 不会落到 stderr 这条分支。
             // (注:LogTarget 早期叫 Stdout 且真的写 stdout,2026-06-19 切到 stderr,
             // 2026-06-20 改名为 Stderr 以反映实际语义。)
@@ -165,7 +192,7 @@ mod tests {
         // 2026-10-05 的直接教训: 常驻命令的 stderr 常常绑在一个没人接的控制台上,
         // 窗口一关日志就没了。RDOG_LOG_FILE 是这条逃生口。
         match resolve_log_target(&daemon_command(), Some("rdog_daemon.log")) {
-            LogTarget::File(path) => assert_eq!(path, PathBuf::from("rdog_daemon.log")),
+            LogTarget::File { path, .. } => assert_eq!(path, PathBuf::from("rdog_daemon.log")),
             LogTarget::Stderr => panic!("daemon with RDOG_LOG_FILE should write to file"),
         }
     }
@@ -177,7 +204,7 @@ mod tests {
         for value in [None, Some(""), Some("   ")] {
             match resolve_log_target(&daemon_command(), value) {
                 LogTarget::Stderr => {}
-                LogTarget::File(path) => {
+                LogTarget::File { path, .. } => {
                     panic!("blank RDOG_LOG_FILE {value:?} should fall back to stderr, got {path:?}")
                 }
             }
@@ -196,7 +223,7 @@ mod tests {
 
         match resolve_log_target(&command, Some("rdog_daemon.log")) {
             LogTarget::Stderr => {}
-            LogTarget::File(path) => {
+            LogTarget::File { path, .. } => {
                 panic!("connect should stay on stderr, got {}", path.display())
             }
         }
@@ -213,7 +240,48 @@ mod tests {
         };
 
         match resolve_log_target(&command, Some("rdog_daemon.log")) {
-            LogTarget::File(path) => assert_eq!(path, PathBuf::from("rdog_hidden.log")),
+            LogTarget::File { path, .. } => assert_eq!(path, PathBuf::from("rdog_hidden.log")),
+            LogTarget::Stderr => panic!("hidden child should not use stderr"),
+        }
+    }
+
+    /// 两条落到文件的路径,受众不同 —— 这是 2026-10-06 修复的判据本身。
+    ///
+    /// 判错任一方向都会坏: 把 hidden child 也当成"有人在看", 每次启动都往
+    /// `Stdio::null()` 上白写一次错误, 纯噪音; 反过来把前台改道当成"没人看",
+    /// 就退回成今天这样"操作者敲一条命令、静默退出、stderr 0 字节"。
+    #[test]
+    fn file_target_should_mark_who_the_console_observer_is() {
+        match resolve_log_target(&daemon_command(), Some("rdog_daemon.log")) {
+            LogTarget::File {
+                path,
+                console_observer,
+            } => {
+                assert_eq!(path, PathBuf::from("rdog_daemon.log"));
+                assert!(
+                    console_observer,
+                    "前台 daemon 被 RDOG_LOG_FILE 改道时操作者还在控制台前"
+                );
+            }
+            LogTarget::Stderr => panic!("daemon with RDOG_LOG_FILE should write to file"),
+        }
+
+        let child = Command::HiddenDaemon {
+            config: None,
+            child: true,
+            log_file: Some(PathBuf::from("rdog_hidden.log")),
+        };
+        match resolve_log_target(&child, None) {
+            LogTarget::File {
+                path,
+                console_observer,
+            } => {
+                assert_eq!(path, PathBuf::from("rdog_hidden.log"));
+                assert!(
+                    !console_observer,
+                    "hidden child 已脱离控制台, 不该再往 stderr 通知"
+                );
+            }
             LogTarget::Stderr => panic!("hidden child should not use stderr"),
         }
     }
