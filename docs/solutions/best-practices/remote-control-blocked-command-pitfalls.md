@@ -6,7 +6,7 @@ module: control plane
 component: cmd/spawn/screenshot/window-lane
 problem_type: feedback
 severity: high
-status: proposed
+status: active
 tags:
   - control-plane
   - blocking
@@ -17,6 +17,9 @@ tags:
   - agent-ux
 verified_by:
   - "Windows 真机远程控制实战 2026-10-05 (vdcoo@rais-razer.local, Win11 x64): 约 200 次 control 调用, 8 小时连续作业"
+  - "2026-10-06 commit a7ecbec 逐项落地 P0-1 / P1-1 / P1-3 / P2, 见下方「落地情况」小节"
+  - "2026-10-06 Windows 11 真机 (4K@200%) 复验六项全绿: 启动横幅 / @ping 结构化 / @cmd 超时后控制面存活 / @window-find 列出 320 窗口 / 截图坐标换算命中开始按钮 (点击后 37.22% 像素变化, 关闭后 0.00%) / @cmd 引号容错"
+resolution_type: "P0-1 / P1-1 / P1-3 / P2 已由 commit a7ecbec 落地并真机复验; P0-2 / P1-2 / P3-1 部分落地 (只覆盖 bind_state/uptime 与 shell 回显, 未覆盖队列深度与 worker 忙闲); P3-2 / P4 完全未做"
 related_skills:
   - rdog-control
 ---
@@ -38,7 +41,46 @@ related_skills:
 
 ---
 
+## 落地情况 (2026-10-06 · commit a7ecbec)
+
+本文提出的改进项已由 `a7ecbec` 逐条施工，并在 Windows 11 真机
+(4K@200%) 上复验。**未落地的条目全部保留在下方原章节里作为待办**，
+下表是唯一的进度真相源 —— 读某一节的问题描述时，回来看这张表看它现在什么状态。
+
+| 条目 | 状态 | 依据 (源码 / 验证) |
+| --- | --- | --- |
+| **P0-1** `@cmd` 超时 + 杀进程树 | **已落地** | `src/control_actions.rs:672-695` (`RDOG_SHELL_LANE_TIMEOUT_MS`, 默认 120s)、`:737-807` 超时/取消分支、Windows 走 `taskkill /F /T`、unix 走进程组。真机复验: 15s 超时后 `@ping` 仍活 |
+| **P0-1** 协议层显式区分"排队中"与"已死锁" | **未落地** | 全仓无 `busy` 语义、无控制面 worker 队列深度字段。超时只是不再无限期挂死，客户端仍分不出"慢"与"死"。`src/control_session.rs:73` 的 `queued_frames` 是**出站帧队列**，与此无关 |
+| **P1-1** 截图↔click 坐标换算前置声明 | **已落地** | `src/screenshot.rs:437` manifest 补 `click_coordinate_space`，`src/control_mouse/target.rs:417` 补 `image_to_click_scale`；`transforms` 换算公式改用 `os_logical_bounds`。真机复验: 4K 图上 (1210,2112) → os-logical (605,1056) 点中开始菜单 |
+| **P1-1** `@click` 支持物理像素入口 | **已落地** | `src/control_mouse/screenshot_frame.rs` (418 行): 截图坐标 → os-logical 的进程内缓存 (TTL 10min / 容量 32)，`@click` 接受 `{screenshot, x, y}` 引用式端点 (`screenshot_frame.rs:127-128` 为换算式) |
+| **P1-1** 文档/skill 里的换算口诀 | **未核实** | 不在 `a7ecbec` 的 24 个改动文件内。`~/.zcode/skills/rdog-control` 不在本仓，需另行确认 |
+| **P1-2** `@spawn` 短等待语义 (`wait_ms`) | **未落地** | 全仓无 `wait_ms` 字段。**建议 1 原文的方案未被采纳也未被否决**，需重新拍板 |
+| **P1-3** 响应回显实际 shell | **部分落地 (范围有意收窄)** | 失败 / 超时 / 取消三类响应带 `shell` (`control_actions.rs:935/951/972`)，`@ping` 也带 (`control_actions.rs:993`)；**成功响应刻意不带** —— `control_actions.rs:782-786` 写明理由: 成功形状是既有契约，大量消费方按字符串读。原文"响应首行回显"是按全部响应提的，落地方案比建议窄 |
+| **P1-3** 裸路径缺引号的解释器提示 | **部分落地** | `src/control_protocol/parsers.rs:766` 对"含空格的裸路径"给 PowerShell `& "path" args` 提示。但提示文案里**没有点明当前解释器是 cmd 还是 PowerShell** —— 原文建议 2 的后半句未做 |
+| **P1-3** 自动给裸路径加引号 | **明确未做 (有意否决)** | `parsers.rs:887` 注释: 单 token 裸路径在 PowerShell / cmd 下本来就能跑，拦下就是假阳性。commit 记录为"只提示不代改写" |
+| **附带坑** 引号 payload 被判多余内容 | **已落地** | `parsers.rs` 增加闭合引号后的容错尾巴，并放宽引号内 shell 文本的转义 (修 `C:\Program Files` 被当转义序列) |
+| **附带坑** 多行 PowerShell 走 SSH 被引号吃掉 | **未落地 (agent 侧自律, 非产品问题)** | 仍是"复杂 PowerShell 一律 scp 传 .ps1 再执行" |
+| **P2** Windows window-find / activate / close | **已落地** | `src/control_window/windows.rs` (1308 行，本次首次被编译)；`src/control_window.rs:735/836/842` 三个 `execute_default_*` 入口。真机复验: `@window-find` 列出 320 个窗口 |
+| **P2** Windows window-resize | **有意推迟** | `src/control_window.rs:266-269` 注明: 窗口身份链 (EnumWindows) 已就位，但 resize 要确定外框与 per-monitor DPI 的尺寸语义，尚未验证。刻意不做成"平台整体 unsupported"，以免调用方分不出"能列窗口"与"能改尺寸" |
+| **P3-1** daemon 诊断 | **部分落地** | `@ping` 结构化 + `daemon::bind_state()` / `daemon::uptime()` 公开 (`control_actions.rs:987-996`)。**worker 忙闲与队列深度未做**，也**没有 reset session 入口** |
+| **P3-2** Windows 中文输出乱码 | **未落地** | 子进程输出仍走 `String::from_utf8_lossy` (`task_control.rs:96`、`control_actions.rs:611/927/948`)。无 `[Console]::OutputEncoding` 前缀、无 `-EncodedCommand` |
+| **P4** `@run` / `@run-and-wait` 组合原语 | **未落地** | 全仓无该 verb |
+| **运维侧新增** Windows 交叉编译配方 | **已补文档** | 见 `docs/solutions/runtime-errors/cross-compile-windows-rust-electron-tool.md`。此前 CI 无 Windows 覆盖、文档零记录 |
+
+**真机复验口径** (`task_plan.md` 2026-10-06 12:36 条目): 六项全部通过，
+无失败项; 远端跑的是当日 12:18 交叉编译的产物，SHA256 两端一致
+(`A2CDE103...`, Size 43611136)。
+
+**残留风险一句话**: 超时/坐标/窗口三条"卡住用户"的主线已通，
+剩下的是**可观测性欠账** —— P0-2 与 P3-1 都停在"能看出 daemon 活着"，
+没到"能看出它忙"；P3-2 的乱码会让下一轮远程排障继续靠猜。
+
+---
+
 ## P0 — 阻塞死锁：同步 shell lane 无超时，一次卡死拖垮整个控制面
+
+> **落地状态 (2026-10-06)**: 超时 + 杀进程树 **已落地**; "排队中"状态可见 **未落地**。
+> 详见上方「落地情况」小节。
 
 ### 现象
 
@@ -111,6 +153,9 @@ ssh host "powershell -ExecutionPolicy Bypass -File C:\Users\x\script.ps1"
 
 ## P1 — 契约缺口：坐标空间与解释器语义没有前置声明
 
+> **落地状态 (2026-10-06)**: P1-1 **已落地**; P1-2 **未落地**; P1-3 **部分落地**
+> (范围有意收窄)。详见上方「落地情况」小节。
+
 ### P1-1 截图坐标 ≠ click 坐标（高危，agent 连续踩坑）
 
 **现象**：4K 屏 + 200% 缩放，`@screenshot` 返回 3840×2160 的 jpg，
@@ -162,6 +207,9 @@ PowerShell 语法和 cmd 语法之间反复试。
 
 ## P2 — Windows 功能缺口：window lane 整体未实现
 
+> **落地状态 (2026-10-06)**: **find / activate / close 已落地** (本节描述的是 2026-10-05
+> 的状态，已过时); **resize 有意推迟**。详见上方「落地情况」小节。
+
 **现象**：`@window-find` 在 Windows 上直接返回
 `{"platform":"unsupported","status":"unsupported"}`，`@window-activate` /
 `@window-close` / `@window-resize` 同理。
@@ -187,6 +235,9 @@ AX tree 在 Windows 上成本高，可以继续标 unsupported —— 但窗口*
 
 ## P3 — 可观测性缺口
 
+> **落地状态 (2026-10-06)**: P3-1 **部分落地** (bind_state / uptime 有, worker 忙闲与
+> 队列深度无); P3-2 **未落地**。详见上方「落地情况」小节。
+
 ### P3-1 daemon 卡死时客户端无诊断手段
 
 今天遇到过 daemon 被占死后"看起来像不响应"。客户端没有健康检查、没有
@@ -208,6 +259,8 @@ worker 状态查询、没有"reset session"入口。
 
 ## P4 — 缺失的组合原语
 
+> **落地状态 (2026-10-06)**: **未落地**, 全仓无该 verb。详见上方「落地情况」小节。
+
 今天反复手搓同一个组合：**启动进程 → 等它退出 → 读退出码**。至少写了 5 次。
 
 建议提供 `@run`（同步 + 强制超时 + 返回退出码）或 `@run-and-wait`
@@ -217,14 +270,16 @@ worker 状态查询、没有"reset session"入口。
 
 ## 优先级建议
 
-| 级别 | 项 | 理由 |
-| --- | --- | --- |
-| **P0** | `execute_script` 超时 + 进程树清理 | 一次卡死拖垮整个控制面，且症状极具误导性 |
-| **P0** | 控制面"排队中"状态可见 | 让 agent/人能区分"慢"与"死" |
-| **P1** | 截图↔click 坐标换算前置声明 | 今天的实际时间黑洞 |
-| **P1** | `@spawn` 短等待语义 | 消灭无反馈轮询 |
-| **P2** | Windows window-find/activate/close | 高频场景，当前全靠退化 |
-| **P3** | daemon 诊断 + Windows 输出编码 | 可观测性 |
+状态列的逐条依据见上方「落地情况」小节。
+
+| 级别 | 项 | 理由 | 状态 (2026-10-06) |
+| --- | --- | --- | --- |
+| **P0** | `execute_script` 超时 + 进程树清理 | 一次卡死拖垮整个控制面，且症状极具误导性 | 已落地 (a7ecbec) |
+| **P0** | 控制面"排队中"状态可见 | 让 agent/人能区分"慢"与"死" | 未落地 |
+| **P1** | 截图↔click 坐标换算前置声明 | 今天的实际时间黑洞 | 已落地 (a7ecbec) |
+| **P1** | `@spawn` 短等待语义 | 消灭无反馈轮询 | 未落地 |
+| **P2** | Windows window-find/activate/close | 高频场景，当前全靠退化 | 已落地 (a7ecbec); resize 有意推迟 |
+| **P3** | daemon 诊断 + Windows 输出编码 | 可观测性 | 部分落地 (bind_state/uptime 有; 队列深度与乱码无) |
 
 ---
 

@@ -1,4 +1,5 @@
 use super::{
+    backend::MOUSE_BACKEND_NAME,
     report::{base_report, MouseAction, MouseExecutionReport},
     request::{
         validate_mouse_move_shape, validate_wheel_shape, ClickRequest, DragRequest,
@@ -63,7 +64,7 @@ pub fn build_mouse_move_plan(request: &MouseMoveRequest) -> io::Result<MouseExec
 
     Ok(MouseExecutionPlan {
         steps: vec![MousePlanStep::Move { x, y, coordinate }],
-        report: base_report(MouseAction::Move, Some(request.coordinate_space), "enigo")
+        report: base_report(MouseAction::Move, Some(request.coordinate_space), MOUSE_BACKEND_NAME)
             .with_point_fields(report_x, report_y, report_dx, report_dy),
     })
 }
@@ -96,7 +97,8 @@ pub fn build_mouse_button_plan(request: &MouseButtonRequest) -> io::Result<Mouse
 
     Ok(MouseExecutionPlan {
         steps,
-        report: base_report(MouseAction::Button, None, "enigo").with_button_fields(request),
+        report: base_report(MouseAction::Button, None, MOUSE_BACKEND_NAME)
+            .with_button_fields(request),
     })
 }
 
@@ -138,7 +140,7 @@ pub fn build_click_plan(request: &ClickRequest) -> io::Result<MouseExecutionPlan
 
     Ok(MouseExecutionPlan {
         steps,
-        report: base_report(MouseAction::Click, Some(request.coordinate_space), "enigo")
+        report: base_report(MouseAction::Click, Some(request.coordinate_space), MOUSE_BACKEND_NAME)
             .with_click_fields(request, point),
     })
 }
@@ -190,7 +192,7 @@ pub fn build_drag_plan(request: &DragRequest) -> io::Result<MouseExecutionPlan> 
 
     Ok(MouseExecutionPlan {
         steps,
-        report: base_report(MouseAction::Drag, Some(request.coordinate_space), "enigo")
+        report: base_report(MouseAction::Drag, Some(request.coordinate_space), MOUSE_BACKEND_NAME)
             .with_drag_fields(request, from, to),
     })
 }
@@ -230,7 +232,7 @@ pub fn build_wheel_plan(request: &WheelRequest) -> io::Result<MouseExecutionPlan
         report: base_report(
             MouseAction::Wheel,
             target_point.is_some().then_some(request.coordinate_space),
-            "enigo",
+            MOUSE_BACKEND_NAME,
         )
         .with_wheel_fields(request, target_point, wheel_order),
     })
@@ -314,4 +316,114 @@ fn ensure_supported_absolute_coordinate(x: i32, y: i32) -> io::Result<()> {
 
 fn invalid_input(message: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidInput, message.into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::control_mouse::request::{MouseDisplayGuard, MouseEndpoint};
+
+    /// 造一个最小的 os-logical 点端点 — 五个动作的 fixture 共用。
+    fn point(x: i32, y: i32) -> MouseEndpoint {
+        MouseEndpoint::Coordinate(MousePoint { x, y })
+    }
+
+    fn click_request() -> ClickRequest {
+        ClickRequest {
+            x: Some(1200),
+            y: Some(540),
+            target: None,
+            guard: None::<MouseDisplayGuard>,
+            button: MouseButtonName::Left,
+            count: 1,
+            hold_ms: 80,
+            interval_ms: 120,
+            coordinate_space: MouseCoordinateSpace::OsLogical,
+        }
+    }
+
+    /// 回归断言 (2026-10-06 真机取证): 回执 `backend` 字段必须报**当前平台
+    /// 真正发事件的那个后端**, 不能无条件写死 "enigo"。
+    ///
+    /// 起因: Windows 上 `@click` 实际走 `WinNativeMouseBackend`
+    /// (SetCursorPos + SendInput), 回执却一直报 "enigo" —— 行为对、标签撒谎。
+    /// 本用例两平台通用且不写死平台字符串: 期望值取自 `MOUSE_BACKEND_NAME`,
+    /// 五个动作 (click/move/button/drag/wheel) 一并覆盖, 结构体字段与序列化
+    /// JSON 两侧都断言, 防止只修一半。
+    ///
+    /// 已知局限 (2026-10-06 实测): macOS 上期望值本身就是 "enigo", 把写死的
+    /// "enigo" 换回点击位测试**照样绿** —— 这条断言只在 Windows 目标上
+    /// (期望 "win-native") 才具备判别力, 那边是否跑过需在统一编译环节确认。
+    #[test]
+    fn mouse_receipt_reports_the_backend_that_actually_runs() {
+        let plans = [
+            (
+                "click",
+                build_click_plan(&click_request()).unwrap(),
+            ),
+            (
+                "move",
+                build_mouse_move_plan(&MouseMoveRequest {
+                    x: Some(1200),
+                    y: Some(540),
+                    dx: None,
+                    dy: None,
+                    target: None,
+                    guard: None,
+                    coordinate_space: MouseCoordinateSpace::OsLogical,
+                })
+                .unwrap(),
+            ),
+            (
+                "button",
+                build_mouse_button_plan(&MouseButtonRequest {
+                    button: MouseButtonName::Left,
+                    mode: MouseButtonMode::Click,
+                    hold_ms: 80,
+                })
+                .unwrap(),
+            ),
+            (
+                "drag",
+                build_drag_plan(&DragRequest {
+                    from: point(100, 100),
+                    to: point(200, 200),
+                    guard: None,
+                    button: MouseButtonName::Left,
+                    duration_ms: 500,
+                    steps: 5,
+                    coordinate_space: MouseCoordinateSpace::OsLogical,
+                })
+                .unwrap(),
+            ),
+            (
+                "wheel",
+                build_wheel_plan(&WheelRequest {
+                    x: Some(1200),
+                    y: Some(540),
+                    target: None,
+                    guard: None,
+                    delta_x: 0,
+                    delta_y: 3,
+                    coordinate_space: MouseCoordinateSpace::OsLogical,
+                })
+                .unwrap(),
+            ),
+        ];
+
+        for (action, plan) in plans {
+            // 结构体字段与最终序列化 JSON 两侧都要对: 只改其中一侧的回归
+            // (例如有人改 to_value_json 绕开常量) 同样会被这里抓住。
+            assert_eq!(
+                plan.report.backend, MOUSE_BACKEND_NAME,
+                "@{action} 回执的 backend 字段应报实际执行的后端, 而非写死值"
+            );
+            let value: serde_json::Value =
+                serde_json::from_str(&plan.report.to_value_json()).expect("回执应是合法 JSON");
+            assert_eq!(
+                value["backend"], MOUSE_BACKEND_NAME,
+                "@{action} 序列化后的 backend 字段应报实际执行的后端"
+            );
+        }
+    }
 }

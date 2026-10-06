@@ -66,6 +66,20 @@ Portable release binaries will be published under:
 https://github.com/raiscui/rustdog/releases
 ```
 
+Cross-compiling for Windows from macOS/Linux must go through `cargo xwin`, not
+`cargo build --target x86_64-pc-windows-msvc` (the host `cc` fails to find MSVC
+headers inside `ring`):
+
+```bash
+cargo install cargo-xwin && rustup target add x86_64-pc-windows-msvc
+cargo xwin build --release --target x86_64-pc-windows-msvc
+```
+
+Prerequisites, the Windows resident-daemon carrier (`schtasks /SC ONLOGON` — a
+hidden child started from an SSH session still dies with that session), and the
+boundary between "builds" and "tests pass on the Windows target" are documented
+in [`docs/solutions/runtime-errors/cross-compile-windows-rust-electron-tool.md`](./docs/solutions/runtime-errors/cross-compile-windows-rust-electron-tool.md).
+
 ## Quick start
 
 ### Traditional listen / reverse shell
@@ -251,7 +265,7 @@ The usual shape is:
 
 | Capability | Example | Response shape | Use case |
 | --- | --- | --- | --- |
-| Ping | `@ping` | `@response "pong"` | Health check |
+| Ping | `@ping` | `@response {"ok":true,"pong":true,"uptime_ms":<ms>,"bind_state":"listening|backing_off|unbound","shell":"<shell>"}` | Health check; `bind_state` 区分"正在监听"与"bind 失败退避重试", `uptime_ms` 给运行时长 |
 | Bootstrap | `@bootstrap#1:{mode:"gui",capability_policy:"fresh"}` | `rdog.bootstrap.v1` structured `@response` + optional observe `@savefile` frames | One read-only GUI preflight: liveness, capabilities, observation, lane errors, and trace |
 | Capabilities | `@capabilities#1` | `rdog.capabilities.v1` structured `@response` | Choose a GUI / permission / platform lane before acting |
 | One-shot command | `@cmd#1:"pwd"` | `@response {"id":1,"value":"..."}` | Scripted automation |

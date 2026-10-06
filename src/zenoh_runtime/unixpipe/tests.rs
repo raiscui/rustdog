@@ -1,3 +1,13 @@
+// 本模块的用例全部针对 unixpipe (AF_UNIX 命名管道) 语义: socket 路径推导、
+// stale 文件清理、probe 超时、compose 注入 unixpipe endpoint, 依赖外部 `mkfifo`
+// 与 /tmp 下的真实 FIFO 文件。被测对象 (unixpipe_socket_path /
+// cleanup_stale_unixpipe_socket / try_unixpipe_probe / compose_listen_endpoints
+// 的 unix 分支) 在 unixpipe.rs 里全部带 #[cfg(unix)], 因此整块只在 unix 目标编译。
+//
+// 为什么门加在这里而不是父模块的 `mod tests;` 上: 同 local_default/tests.rs ——
+// 本文件是该测试唯一的引入点, 门内聚在测试文件里, 父模块保持 `#[cfg(test)]`。
+#![cfg(unix)]
+
 use super::*;
 use crate::zenoh_runtime::test_support::{env_test_guard, unique_test_dir};
 use std::{env, time::Instant};

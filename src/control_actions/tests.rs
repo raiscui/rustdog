@@ -1018,12 +1018,30 @@ fn to_io_error_should_upgrade_macos_accessibility_failures_to_permission_denied(
 // ============================================================================
 /// Helper 构造一个指定退出码的 ExitStatus (mock 测试帮手函数).
 ///
-/// Unix `ExitStatus::from_raw` 接收的是 wait4() status word (而不是裸 exit code).
-/// 退出码 `c` 在 wait status 里编码为 `(c << 8)`, 低 7 位必须为 0 (signal=None).
-/// 直接 `from_raw(c)` 会让 `.code()` 返 None, 不是 Some(c).
+/// `ExitStatusExt::from_raw` 的 raw 含义逐平台不同, 所以按平台分支:
+/// - Unix: 接收的是 wait4() status word (而不是裸 exit code). 退出码 `c` 在
+///   wait status 里编码为 `(c << 8)`, 低 7 位必须为 0 (signal=None). 直接
+///   `from_raw(c)` 会让 `.code()` 返 None, 不是 Some(c).
+/// - Windows: raw 就是进程退出码本身, `from_raw(c)` 直接得到 `.code() == Some(c)`.
+///
+/// 两个分支的对外契约一致: `.code() == Some(c as i32)`, `c == 0` 时 exit_ok()。
+///
+/// 为什么不能给 helper 本身加 `#[cfg(unix)]`: `MockOpenAppSuccess` 同时被
+/// 下方 macOS 行为测试和 `#[cfg(not(target_os = "macos"))]` 的
+/// `execute_open_app_emits_platform_unsupported_envelope_ignoring_mock` 消费,
+/// Windows 上后者要跑, 所以 Windows 分支必须存在。
 fn fake_exit_status(code: u8) -> std::process::ExitStatus {
-    use std::os::unix::process::ExitStatusExt;
-    std::process::ExitStatus::from_raw(i32::from(code) << 8)
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        std::process::ExitStatus::from_raw(i32::from(code) << 8)
+    }
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::ExitStatusExt;
+        std::process::ExitStatus::from_raw(u32::from(code))
+    }
 }
 
 /// Mock: 模拟 `Command::new("open")` 进程 spawn 失败 (PATH 缺失或不存在的 binary),

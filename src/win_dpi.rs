@@ -67,19 +67,23 @@ pub fn enable_dpi_awareness() {}
 mod tests {
     use super::*;
     use windows_sys::Win32::UI::HiDpi::{
-        GetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
+        GetThreadDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
     };
 
     /// 调用后进程 SHALL 处于 per-monitor v2 awareness。
-    /// 判据: GetProcessDpiAwarenessContext 返回值与目标常量一致。
+    /// 判据: awareness context 返回值与目标常量一致。
+    ///
+    /// 这里查的是**当前线程**的 context 而不是进程的: windows-sys 0.61.2 的
+    /// `Win32/UI/HiDpi` 只绑定了 `Set*` 一族与 `GetThreadDpiAwarenessContext`,
+    /// 没有 `GetProcessDpiAwarenessContext`; 进程级查询
+    /// (`GetDpiAwarenessContextForProcess`) 需要 `Win32_System_Threading` feature
+    /// 才能拿到 HANDLE。两者在本进程等价 —— `enable_dpi_awareness()` 由
+    /// `main()` 最开头调用, 早于任何线程创建, 测试线程继承进程设置。
     #[test]
     fn process_becomes_per_monitor_aware_v2() {
         enable_dpi_awareness();
-        let actual = unsafe { GetProcessDpiAwarenessContext(std::ptr::null_mut()) };
-        assert!(
-            !actual.is_null(),
-            "GetProcessDpiAwarenessContext 调用失败"
-        );
+        let actual = unsafe { GetThreadDpiAwarenessContext() };
+        assert!(!actual.is_null(), "GetThreadDpiAwarenessContext 调用失败");
         assert_eq!(
             actual, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
             "进程未处于 per-monitor v2 awareness"

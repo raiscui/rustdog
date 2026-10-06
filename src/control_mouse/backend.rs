@@ -14,6 +14,33 @@ pub trait MouseBackend {
     fn scroll(&mut self, length: i32, axis: Axis) -> Result<(), InputError>;
 }
 
+/// 当前平台**真正发事件**的鼠标后端名 —— 回执 `backend` 字段的单一真相源。
+///
+/// # 为什么需要它 (2026-10-06 真机取证)
+///
+/// Windows 上的 `@click` 走的是 `WinNativeMouseBackend` (`SetCursorPos` +
+/// `SendInput`), 不是 enigo。但回执里 `backend` 字段一直写死报 `"enigo"`
+/// —— 真机 4K@200% 上实测点得中 (行为对), 标签却在说谎。agent 拿这个字段
+/// 判断"到底谁发的物理坐标"时会被误导, 排 DPI 类问题会被直接带偏。
+///
+/// # 与分发点的耦合契约
+///
+/// 本常量必须与**唯一实例化后端的地方**成对修改 ——
+/// `control_actions::execute_mouse_plan` 的 `#[cfg(windows)]` 分支实例化
+/// `WinNativeMouseBackend`, `#[cfg(not(windows))]` 分支实例化 `Enigo`。
+/// 改那一侧的分发必须同时改这里的 cfg, 否则标签与实际路径再次脱节。
+///
+/// 注意这条"成对修改"靠人守: 常量与分发点是两处 cfg, 编译器不会拦。
+/// 回归断言 (`plan::tests::mouse_receipt_reports_the_backend_that_actually_runs`)
+/// 只在**标签与平台真值不一致的平台上**才咬人 —— 在 macOS 上期望值本身就是
+/// "enigo", 把写死的 "enigo" 换回去测试照样绿 (2026-10-06 实测确认)。
+/// 即 Windows 侧是否真按预期编译并跑过该用例, 需在 Windows 目标上验证。
+#[cfg(windows)]
+pub const MOUSE_BACKEND_NAME: &str = "win-native";
+
+#[cfg(not(windows))]
+pub const MOUSE_BACKEND_NAME: &str = "enigo";
+
 impl MouseBackend for Enigo {
     fn move_mouse(&mut self, x: i32, y: i32, coordinate: Coordinate) -> Result<(), InputError> {
         Mouse::move_mouse(self, x, y, coordinate)

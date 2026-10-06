@@ -1,7 +1,7 @@
 ---
 title: macOS 本地开发二进制的 TCC 授权身份稳定方案
 date: 2026-08-09
-last_updated: 2026-08-09
+last_updated: 2026-09-02
 module: build/release
 component: codesign
 problem_type: best_practice
@@ -14,8 +14,10 @@ tags:
   - cargo-install
   - adhoc-signing
   - authorization
+  - responsible-process
 verified_by:
   - "本机 codesign 取证 + 完整实施 (2026-08-09, rustdog issue #40)"
+  - "live OCR e2e 实证补充 (2026-09-02, rustdog #102/#103): 重编覆盖重签 + 归属链两个新维度"
 related_skills:
   - self-learning.macos-codesign-stable-dr-check
 ---
@@ -54,6 +56,23 @@ Accessibility + Screen Recording,之后重编/重装/升级不再需要。
 
 校验必须做 fail-closed:提取 canonical DR 归一化后精确匹配 identifier,
 不能依赖 codesign 的显示格式 (纯字母数字 identifier 会省略引号)。
+
+### 补充 (2026-09-02, live OCR e2e 实证的两个新维度)
+
+**1. 重签只对单个文件生效, 重编即回退**: 对 `target/release/<bin>` 手动重签后,
+任何一次 `cargo build` (哪怕只改了测试代码触发的增量重编) 都会把二进制覆盖回
+默认 adhoc 签名, TCC 身份随之丢失——症状是"明明重签过却又失败了"。重签必须是
+"构建之后、运行之前"的最后一步; live e2e 前置检查应断言 DR (见下方可复跑命令),
+不要信任上次的重签。根治做法是重签只发生在安装副本上 (install-signed 流程),
+target/ 下的开发副本每次构建后重签。
+
+**2. DR 只解决"跨构建保留", 不解决"从哪生" (responsible process 归属链)**:
+同一 DR 身份的二进制, 从用户终端手动 spawn 与从 agent shell / cargo test
+spawn, Screen Recording 的可用性不同——macOS 按 responsible process 归属
+判定权限。归属链不对时症状不是显式拒绝, 而是静默失败 (截屏返回空/旧帧, 或
+"没有可截图的显示器")。缓解: 由已授权宿主 (如 Terminal) 承载被测进程
+(`open -a Terminal <.command>` 模式, rustdog control_ax_e2e /
+control_ocr_e2e 的 `*_VIA_TERMINAL` 先例)。
 
 ## Evidence
 

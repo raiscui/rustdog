@@ -1,3 +1,13 @@
+// 本模块的用例全部围绕 unix FIFO 语义展开: 靠外部 `mkfifo` 命令造
+// <base>_uplink 管道, 断言 local-default registry 的 unixpipe_base 字段。
+// 被测对象 (find_local_daemon_name / register_local_default_daemon /
+// local_default_daemon_record_path ...) 在 local_default.rs 里全部带 #[cfg(unix)],
+// 因此整块只在 unix 目标编译。
+//
+// 为什么门加在这里而不是父模块的 `mod tests;` 上: 本文件是该测试唯一的引入点,
+// 门内聚在测试文件里, 父模块保持 `#[cfg(test)]` 即可, 平台归属一眼可见。
+#![cfg(unix)]
+
 use super::*;
 use crate::zenoh_runtime::test_support::{env_test_guard, unique_test_dir};
 use std::env;
