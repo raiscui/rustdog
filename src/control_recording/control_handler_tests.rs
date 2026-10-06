@@ -61,7 +61,6 @@ fn start_then_status_then_stop_emits_savefile_and_response() {
             duration_ms: None,
         },
     );
-    eprintln!("DEBUG start outcome frames = {:?}", start.outbound_frames);
     let start_value = first_response_value(&start);
     assert_eq!(start_value["kind"], "record-start");
     assert_eq!(start_value["status"], "recording");

@@ -45,10 +45,12 @@ fn bundle_is_deterministic_atomic_and_standard_tar_readable() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert_eq!(
-        String::from_utf8(output.stdout).unwrap(),
-        "manifest.json\njournal.jsonl\nflow.json\n"
-    );
+    // Windows 自带的 bsdtar 对 -tf 输出走 CRLF 行尾, 归一后再精确比对
+    // (平台行尾是外部工具的输出形态, 不是 bundle 的属性)
+    let stdout = String::from_utf8(output.stdout)
+        .unwrap()
+        .replace("\r\n", "\n");
+    assert_eq!(stdout, "manifest.json\njournal.jsonl\nflow.json\n");
 }
 
 #[test]

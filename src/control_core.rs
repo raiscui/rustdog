@@ -1252,10 +1252,21 @@ mod tests {
 
     #[test]
     fn explicit_request_should_execute_minimal_flow_shell_lane() {
+        // 双方言: Windows 走在役路径 powershell.exe (与 control_flow/tests.rs 的
+        // TEST_SHELL 一致, 产品 build_shell_command 对 pwsh 有专用参数链);
+        // printf 是 coreutils 命令 PowerShell 没有, 输出等价物是 Write-Output。
+        let (shell, echo_cmd) = if cfg!(windows) {
+            ("powershell.exe", "Write-Output flow-ok")
+        } else {
+            ("/bin/sh", "printf flow-ok")
+        };
+        let flow = format!(
+            r#"{{"schema":"rdog.flow.v1","policy":{{"allow_shell":true}},"steps":[{{"Cmd":{{"run":"{echo_cmd}","capture":"cmd1"}}}},{{"Expect":{{"kind":"cmd_stdout_contains","capture":"cmd1","contains":"flow-ok"}}}},{{"Exit":null}}]}}"#
+        );
         let cancel_registry = crate::cancellation::CancelRegistry::new();
         let response = parse_and_execute_control_line(
-            r#"@flow#44:{"schema":"rdog.flow.v1","policy":{"allow_shell":true},"steps":[{"Cmd":{"run":"printf flow-ok","capture":"cmd1"}},{"Expect":{"kind":"cmd_stdout_contains","capture":"cmd1","contains":"flow-ok"}},{"Exit":null}]}"#,
-            "/bin/sh",
+            &format!("@flow#44:{flow}"),
+            shell,
             &SystemControlActionExecutor::default(),
             &cancel_registry,
         )
@@ -1270,7 +1281,13 @@ mod tests {
         assert_eq!(parsed["id"], 44);
         assert_eq!(parsed["value"]["schema"], "rdog.flow.v1");
         assert_eq!(parsed["value"]["status"], "ok");
-        assert_eq!(parsed["value"]["captures"]["cmd1"]["stdout"], "flow-ok");
+        // 行尾归一: Write-Output 走 Windows 控制台的 CRLF, printf 不加行尾 —
+        // 行尾是 shell 的输出形态, 不是命令语义的一部分
+        let stdout = parsed["value"]["captures"]["cmd1"]["stdout"]
+            .as_str()
+            .unwrap_or_default()
+            .trim_end();
+        assert_eq!(stdout, "flow-ok");
     }
 
     #[test]

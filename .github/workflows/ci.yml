@@ -1,10 +1,12 @@
 name: CI
 
 # Run the full rdog test suite on every push to main and every PR.
-# Matrix covers macOS (the production target) and Ubuntu (most CI
-# runners). Windows is excluded because the recording e2e suite
-# uses `#[cfg(unix)]` and exercises POSIX-only control transport /
-# unixpipe fast path.
+# Matrix covers macOS (the production target), Ubuntu (most CI runners)
+# and Windows (2026-10-06 加入: 跨平台测试修复后 bin 单测可全平台跑).
+# Windows 执行记录很重要 — `#[cfg(windows)]` 门的测试 (win_dpi /
+# zenoh_router_client_windows 等) 在 mac/ubuntu 上从不编译, 假设从未被
+# 检验过, 真机实证已经连续抓出两颗这类雷 (伪句柄判据 / json5 转义).
+# recording e2e 套件仍限 unix (POSIX-only control transport / unixpipe).
 
 on:
   push:
@@ -24,8 +26,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
-    timeout-minutes: 30
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    timeout-minutes: 40
 
     steps:
       - name: Checkout

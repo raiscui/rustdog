@@ -159,12 +159,31 @@ pub fn write_bundle(
     }
     let sha256 = hash_file(&staging_path)?;
     fs::rename(&staging_path, &final_path)?;
-    File::open(output_dir)?.sync_all()?;
+    sync_dir_best_effort(output_dir);
     Ok(Bundle {
         path: final_path,
         size_bytes,
         sha256,
     })
+}
+
+/// 目录 fsync (crash 后目录项持久化) 只在 Unix 语义下成立且 **best-effort**:
+/// bundle 已 rename 落位, 加固失败不应反过来毁掉整个已成功的 commit。
+/// Windows 上 `File::open` 目录直接 ACCESS_DENIED (os error 5, 缺
+/// FILE_FLAG_BACKUP_SEMANTICS), FlushFileBuffers 对目录句柄还要管理员 —
+/// 这里曾经的 `File::open(dir)?.sync_all()?` 让 Windows 的每一次 stop
+/// 都报 BUNDLE_COMMIT_FAILED (2026-10-06 真机定谳, macOS 无此语义从不暴露)。
+fn sync_dir_best_effort(output_dir: &Path) {
+    #[cfg(unix)]
+    {
+        if let Ok(dir) = File::open(output_dir) {
+            let _ = dir.sync_all();
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = output_dir;
+    }
 }
 
 fn manifest_file(
