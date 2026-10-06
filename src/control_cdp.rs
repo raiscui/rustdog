@@ -307,14 +307,6 @@ fn cdp_call(ws_url: &str, method: &str, params: Option<&Value>) -> io::Result<Va
     }
 }
 
-// 小工具: 把 T 通过管道包成 Result (Rust 没有 |> ; 命名避免与 trait 冲突)
-trait Pipe: Sized {
-    fn pipe<T>(self, f: impl FnOnce(Self) -> T) -> T {
-        f(self)
-    }
-}
-impl<T> Pipe for T {}
-
 #[cfg(test)]
 mod tests {
     use super::*;

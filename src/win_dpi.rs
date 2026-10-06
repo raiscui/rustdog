@@ -67,26 +67,29 @@ pub fn enable_dpi_awareness() {}
 mod tests {
     use super::*;
     use windows_sys::Win32::UI::HiDpi::{
-        GetThreadDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
+        GetAwarenessFromDpiAwarenessContext, GetThreadDpiAwarenessContext,
+        DPI_AWARENESS_PER_MONITOR_AWARE,
     };
 
     /// 调用后进程 SHALL 处于 per-monitor v2 awareness。
-    /// 判据: awareness context 返回值与目标常量一致。
+    /// 判据: awareness context 经 `GetAwarenessFromDpiAwarenessContext`
+    /// 解析成 `DPI_AWARENESS` 枚举后等于 `PER_MONITOR_AWARE`。
     ///
-    /// 这里查的是**当前线程**的 context 而不是进程的: windows-sys 0.61.2 的
-    /// `Win32/UI/HiDpi` 只绑定了 `Set*` 一族与 `GetThreadDpiAwarenessContext`,
-    /// 没有 `GetProcessDpiAwarenessContext`; 进程级查询
-    /// (`GetDpiAwarenessContextForProcess`) 需要 `Win32_System_Threading` feature
-    /// 才能拿到 HANDLE。两者在本进程等价 —— `enable_dpi_awareness()` 由
-    /// `main()` 最开头调用, 早于任何线程创建, 测试线程继承进程设置。
+    /// 为什么不直接比句柄: `DPI_AWARENESS_CONTEXT` 是伪句柄, SDK 常量 (-4) 只是
+    /// 文档值 —— 2026-10-06 真机探针实证 Windows 11 返回的运行时句柄是 0x12/0x22
+    /// 一类内部值, 与 -4 的 `assert_eq!` 永远不成立 (微软文档同样明言伪句柄
+    /// 不可直接比较)。解析成枚举后 unaware/system/per-monitor 三级判据稳定;
+    /// V2 与 V1 在枚举层同为 per-monitor, 但本进程走的是
+    /// `SetProcessDpiAwarenessContext(PER_MONITOR_AWARE_V2)` 调用面, 级别归调用面管。
     #[test]
     fn process_becomes_per_monitor_aware_v2() {
         enable_dpi_awareness();
-        let actual = unsafe { GetThreadDpiAwarenessContext() };
-        assert!(!actual.is_null(), "GetThreadDpiAwarenessContext 调用失败");
+        let context = unsafe { GetThreadDpiAwarenessContext() };
+        assert!(!context.is_null(), "GetThreadDpiAwarenessContext 调用失败");
+        let awareness = unsafe { GetAwarenessFromDpiAwarenessContext(context) };
         assert_eq!(
-            actual, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
-            "进程未处于 per-monitor v2 awareness"
+            awareness, DPI_AWARENESS_PER_MONITOR_AWARE,
+            "进程未处于 per-monitor awareness"
         );
     }
 }
