@@ -323,9 +323,29 @@ fn window_control_capability(snapshot: &CapabilityProbeSnapshot) -> CapabilityEn
             ],
             vec!["use @window-find before interacting with hidden/minimized/occluded windows"],
         ),
+        // Windows 的窗口身份面 (find/activate/close) 走 user32 的 EnumWindows,
+        // 不需要可访问性权限。它与 @ax-* 是两件事 —— 窗口身份完整不等于
+        // 有可访问性树, 这里不因为窗口能力可用就去动 accessibility 条目。
+        CapabilityOs::Windows => available(
+            "windows-user32-window-identity",
+            vec![
+                "@window-find / @window-activate / @window-close are implemented over EnumWindows; \
+                 @window-resize is not implemented and returns WINDOW_RESIZE_UNSUPPORTED",
+                "window_id is pid:<PID>/hwnd:0x<HANDLE> and is short-lived: re-run @window-find \
+                 instead of reusing it across activations",
+                "the app field is the window CLASS name (GetClassNameW, e.g. Chrome_WidgetWin_1), \
+                 not the process image name; pid is the authoritative app identity, and \
+                 bundle_id queries always match 0 windows on Windows",
+                "candidate rects are os-logical (physical / that window's per-monitor scale); \
+                 do not feed them to Win32 APIs that expect physical pixels",
+                "SetForegroundWindow is subject to the Windows foreground lock — read the \
+                 verify block of the @window-activate response instead of assuming success",
+            ],
+        )
+        .with_permissions(vec!["windows.uipi"]),
         _ => unsupported(
             "macos-accessibility-window-state",
-            vec!["structured window control is currently implemented only on macOS"],
+            vec!["structured window control is currently implemented only on macOS and Windows"],
         ),
     }
 }
@@ -550,6 +570,21 @@ mod tests {
         assert_eq!(
             unsupported_report.capabilities.pty.status,
             CapabilityStatus::Unsupported
+        );
+        // 窗口身份面在 Windows 上已实现, 不能随 accessibility 一起塌成
+        // unsupported —— 那是两件事: EnumWindows 能答"谁/在哪", UIA 才能答
+        // "里面有哪些控件"。
+        assert_eq!(
+            unsupported_report.capabilities.window_control.status,
+            CapabilityStatus::Available
+        );
+        assert_eq!(
+            unsupported_report.capabilities.window_control.backend,
+            "windows-user32-window-identity"
+        );
+        assert_eq!(
+            unsupported_report.capabilities.window_control.permissions,
+            vec!["windows.uipi"]
         );
     }
 

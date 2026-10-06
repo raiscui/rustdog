@@ -637,7 +637,7 @@ fn control_should_use_single_positional_name_as_zenoh_target() {
         status.success(),
         "control shorthand should autodiscover router\nstdout:\n{stdout}\nstderr:\n{stderr}"
     );
-    assert!(stdout.contains(r#"@response "pong""#));
+    assert!(stdout.contains(r#""pong":true"#));
 }
 
 #[test]
@@ -2074,7 +2074,7 @@ fn control_session_should_reresolve_after_daemon_restart() {
         .expect("should send first ping");
     wait_until_buffer_contains(
         &control_buffer,
-        r#"@response "pong""#,
+        r#""pong":true"#,
         Duration::from_secs(8),
     )
     .expect("first ping should succeed");
@@ -2107,12 +2107,12 @@ fn control_session_should_reresolve_after_daemon_restart() {
 
     let output = wait_until_match_count_at_least(
         &control_buffer,
-        r#"@response "pong""#,
+        r#""pong":true"#,
         2,
         Duration::from_secs(8),
     )
     .expect("second ping should also succeed");
-    let pong_count = output.matches(r#"@response "pong""#).count();
+    let pong_count = output.matches(r#""pong":true"#).count();
     assert!(
         pong_count >= 2,
         "expected two pong responses, got output:\n{output}"
@@ -2298,7 +2298,7 @@ fn control_multi_one_shot_should_run_lines_in_order_for_zenoh_profile() {
         "multi one-shot should succeed\nstdout:\n{stdout}\nstderr:\n{stderr}"
     );
     let pong_pos = stdout
-        .find(r#"@response "pong""#)
+        .find(r#""pong":true"#)
         .expect("pong response should appear in stdout");
     let multi_pos = stdout
         .find(r#"@response {"id":7,"value":"MULTI_OK""#)
@@ -2337,7 +2337,7 @@ fn control_multi_one_shot_should_run_three_lines_in_order_for_zenoh_profile() {
         "3-line multi one-shot should succeed\nstdout:\n{stdout}\nstderr:\n{stderr}"
     );
     let pong = stdout
-        .find(r#"@response "pong""#)
+        .find(r#""pong":true"#)
         .expect("pong should appear");
     let a = stdout
         .find(r#"@response {"id":1,"value":"A""#)

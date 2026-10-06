@@ -24,6 +24,17 @@ pub enum LogTarget {
     File(PathBuf),
 }
 
+/// 长驻命令把日志改道到文件的环境变量。
+///
+/// 2026-10-05 在 Windows 上用 `Start-Process` 起 daemon,stderr 绑在一个转瞬即逝的
+/// 新控制台窗口上,窗口一关日志就没了 —— 于是"进程消失"被当成静默崩溃,排查为此多绕了
+/// 好几轮。常驻命令的调用方常常是计划任务 / 自动化,stderr 根本没人接,必须能落盘。
+///
+/// 这里用环境变量而不是给 `rdog daemon` 加 `--log-file`:子命令的 clap 定义不在本模块,
+/// 而常驻形态的日志落点本来就有配置真相源(`[hidden].log_file`,hidden child 走它),
+/// 环境变量只作为显式逃生口,不另立一条默认路径。
+pub const LOG_FILE_ENV: &str = "RDOG_LOG_FILE";
+
 #[cfg(any(windows, test))]
 pub fn enable_hidden_session() {
     HIDDEN_SESSION_ENABLED.store(true, Ordering::Relaxed);
@@ -35,12 +46,29 @@ pub fn hidden_session_enabled() -> bool {
 }
 
 pub fn log_target_for_command(command: &Command) -> LogTarget {
+    resolve_log_target(command, std::env::var(LOG_FILE_ENV).ok().as_deref())
+}
+
+/// 日志目标的判定本体,环境变量值由调用方传入。
+///
+/// 拆出纯函数是为了让单测不碰进程级环境变量 —— Rust 测试默认多线程并行,
+/// 真在测试里 `set_var` 会和"daemon 默认走 stderr"的用例互相污染。
+fn resolve_log_target(command: &Command, env_log_file: Option<&str>) -> LogTarget {
     match command {
+        // hidden child 的日志路径由 parent 通过 --log-file 钉死,优先级最高:
+        // parent/child 两侧的 config 校验已经比对过这条路径,环境变量不许在子进程里二次改道。
         Command::HiddenDaemon {
             child: true,
             log_file: Some(path),
             ..
         } => LogTarget::File(path.clone()),
+        // `rdog daemon` 默认仍走 stderr(前台语义不变),但允许用 RDOG_LOG_FILE 显式改道。
+        // 只对 daemon 生效:hidden-daemon 的 parent 是瞬时进程,它的落点由下面的 spawn
+        // 告知行负责,让它也读环境变量只会把 parent 和 child 的日志拆到两个文件。
+        Command::Daemon { .. } => match env_log_file.map(str::trim) {
+            Some(path) if !path.is_empty() => LogTarget::File(PathBuf::from(path)),
+            _ => LogTarget::Stderr,
+        },
         _ => LogTarget::Stderr,
     }
 }
@@ -97,7 +125,9 @@ mod tests {
             entry_point: Vec::new(),
         };
 
-        match log_target_for_command(&command) {
+        // 显式传 None 而不是走 log_target_for_command: 后者读进程环境变量,
+        // 谁在挂了 RDOG_LOG_FILE 的 shell 里跑测试, 这条用例就会假红。
+        match resolve_log_target(&command, None) {
             LogTarget::Stderr => {}
             LogTarget::File(path) => panic!("unexpected file target: {}", path.display()),
         }
@@ -116,6 +146,74 @@ mod tests {
             // 这个测试只是验证 hidden child 不会落到 stderr 这条分支。
             // (注:LogTarget 早期叫 Stdout 且真的写 stdout,2026-06-19 切到 stderr,
             // 2026-06-20 改名为 Stderr 以反映实际语义。)
+            LogTarget::Stderr => panic!("hidden child should not use stderr"),
+        }
+    }
+
+    fn daemon_command() -> Command {
+        Command::Daemon {
+            config: None,
+            transport: Some(Transport::Tcp),
+            namespace: None,
+            daemon_name: None,
+            entry_point: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn log_target_should_use_env_file_for_daemon() {
+        // 2026-10-05 的直接教训: 常驻命令的 stderr 常常绑在一个没人接的控制台上,
+        // 窗口一关日志就没了。RDOG_LOG_FILE 是这条逃生口。
+        match resolve_log_target(&daemon_command(), Some("rdog_daemon.log")) {
+            LogTarget::File(path) => assert_eq!(path, PathBuf::from("rdog_daemon.log")),
+            LogTarget::Stderr => panic!("daemon with RDOG_LOG_FILE should write to file"),
+        }
+    }
+
+    #[test]
+    fn log_target_should_fall_back_to_stderr_for_blank_env_file() {
+        // 空白/未设置都视为"没给路径": Windows 计划任务里空环境变量很常见,
+        // 把它当成路径会在 init_logger 阶段直接失败,daemon 根本起不来。
+        for value in [None, Some(""), Some("   ")] {
+            match resolve_log_target(&daemon_command(), value) {
+                LogTarget::Stderr => {}
+                LogTarget::File(path) => {
+                    panic!("blank RDOG_LOG_FILE {value:?} should fall back to stderr, got {path:?}")
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn log_target_should_not_leak_env_file_to_other_commands() {
+        // 环境变量只对 daemon 生效: control / listen 这类前台命令的 stdout 是解析面,
+        // 让它们改道会把 agent 的管道输出搅乱。
+        let command = Command::Connect {
+            shell: "powershell.exe".to_string(),
+            mode: crate::shell::ShellMode::Interactive,
+            host: vec!["127.0.0.1".to_string(), "5555".to_string()],
+        };
+
+        match resolve_log_target(&command, Some("rdog_daemon.log")) {
+            LogTarget::Stderr => {}
+            LogTarget::File(path) => {
+                panic!("connect should stay on stderr, got {}", path.display())
+            }
+        }
+    }
+
+    #[test]
+    fn hidden_child_log_file_should_win_over_env_file() {
+        // parent/child 两侧会比对 --log-file 与 config.hidden.log_file 是否一致,
+        // 子进程里再被环境变量改道会让这条校验形同虚设。
+        let command = Command::HiddenDaemon {
+            config: None,
+            child: true,
+            log_file: Some(PathBuf::from("rdog_hidden.log")),
+        };
+
+        match resolve_log_target(&command, Some("rdog_daemon.log")) {
+            LogTarget::File(path) => assert_eq!(path, PathBuf::from("rdog_hidden.log")),
             LogTarget::Stderr => panic!("hidden child should not use stderr"),
         }
     }

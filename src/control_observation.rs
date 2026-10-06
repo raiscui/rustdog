@@ -97,6 +97,10 @@ struct StoredObservation {
     header: ObservationHeader,
     refs: HashMap<String, ObservationRefEntry>,
     resource_epochs: HashMap<String, ResourceEpochSnapshot>,
+    /// 最近一次被解析引用的时刻, 容量淘汰时按它选牺牲品 (LRU)。
+    ///
+    /// 记录时等于 created_at, 每次成功 resolve 刷新一次。
+    last_used_unix_ms: u64,
 }
 
 #[derive(Debug)]
@@ -199,6 +203,7 @@ impl ObservationStore {
                 header: header.clone(),
                 refs,
                 resource_epochs,
+                last_used_unix_ms: now_ms,
             },
         );
         self.evict_over_capacity();
@@ -211,24 +216,11 @@ impl ObservationStore {
         ref_id: &str,
         now_ms: u64,
     ) -> io::Result<ObservationRefEntry> {
-        self.evict_expired(now_ms);
-        let Some(observation) = self.observations.get(observation_id) else {
-            return Err(observation_ref_error(
-                "OBSERVATION_EXPIRED",
-                "observation 已过期或不存在",
-                observation_id,
-                Some(ref_id),
-            ));
-        };
-
-        observation.refs.get(ref_id).cloned().ok_or_else(|| {
-            observation_ref_error(
-                "STALE_REF",
-                "observation ref 已失效或不存在",
-                observation_id,
-                Some(ref_id),
-            )
-        })
+        // 委托给唯一那条解析路径: TTL 驱逐、ref 查找、错误语义、以及 LRU 时钟
+        // 刷新必须只有一个实现点, 否则"这条观测算不算正在被使用"会随调用方
+        // 选了哪个 API 而变, 容量淘汰就失去了可预期性。
+        self.resolve_ref_with_header(observation_id, ref_id, now_ms)
+            .map(|(_, entry)| entry)
     }
 
     pub fn resolve_ref_with_header(
@@ -255,7 +247,13 @@ impl ObservationStore {
                 Some(ref_id),
             )
         })?;
-        Ok((observation.header.clone(), entry))
+        let header = observation.header.clone();
+        // 解析成功 = 这条 observation 正在被使用, 刷新 LRU 时钟 (容量淘汰时
+        // 让"正在用"的那条排在"录完没人碰"的那条后面)。
+        if let Some(observation) = self.observations.get_mut(observation_id) {
+            observation.last_used_unix_ms = now_ms;
+        }
+        Ok((header, entry))
     }
 
     /// 解析 ref 对应物理资源在 observation 创建时的 write epoch 快照。
@@ -298,7 +296,13 @@ impl ObservationStore {
                 None,
             ));
         };
-        Ok(observation.header.clone())
+        let header = observation.header.clone();
+        // header 解析同样是一次真实使用, 与 `resolve_ref_with_header` 保持同一条
+        // LRU 时钟, 否则 epoch 快速拒绝路径会把"正在用"的观测刷成最旧。
+        if let Some(observation) = self.observations.get_mut(observation_id) {
+            observation.last_used_unix_ms = now_ms;
+        }
+        Ok(header)
     }
 
     fn evict_expired(&mut self, now_ms: u64) {
@@ -319,15 +323,42 @@ impl ObservationStore {
         }
     }
 
+    /// 容量淘汰: 牺牲"最久没被用过"的那条, 而不是"最早创建"的那条。
+    ///
+    /// 观测的存活理由是**还有客户端在用它** —— observe 之后客户端要拿 ref 去落
+    /// 一串 mutation, 这串动作可能横跨数百毫秒甚至一次慢的 verify 往返。按创建
+    /// 顺序淘汰会在客户端正用着的时候把它连根拔掉(下一次 resolve 立刻
+    /// OBSERVATION_EXPIRED), 同时留下一堆录完就没人碰过的记录占着名额。LRU 让
+    /// 名额流向真正没被读过的记录, 这也正是有界缓存该有的语义。
+    ///
+    /// 上限本身没变, 所以内存边界与之前完全一致。
     fn evict_over_capacity(&mut self) {
         while self.observations.len() > self.max_observations
             || self.total_ref_count() > self.max_refs
         {
-            let Some(oldest) = self.order.pop_front() else {
+            let Some(victim) = self.least_recently_used_observation() else {
                 break;
             };
-            self.observations.remove(&oldest);
+            self.remove_observation(&victim);
         }
+    }
+
+    /// 选出淘汰对象: `last_used_unix_ms` 最小者; 同一毫秒内并列时按创建顺序
+    /// 取最早的, 保持"都没人碰过"的一批之间也有稳定、可预期的先后。
+    fn least_recently_used_observation(&self) -> Option<String> {
+        let oldest_use = self
+            .observations
+            .values()
+            .map(|observation| observation.last_used_unix_ms)
+            .min()?;
+        self.order
+            .iter()
+            .find(|id| {
+                self.observations
+                    .get(*id)
+                    .is_some_and(|observation| observation.last_used_unix_ms == oldest_use)
+            })
+            .cloned()
     }
 
     fn remove_observation(&mut self, observation_id: &str) {
@@ -1192,6 +1223,26 @@ mod tests {
         }
     }
 
+    /// 造一条带单个 ref 的 observation, 方便断言"某条观测还在不在"。
+    fn one_ref_record(
+        store: &mut ObservationStore,
+        backend_id: &str,
+        now_ms: u64,
+    ) -> ObservationHeader {
+        store.record(
+            "ax",
+            "@ax-tree",
+            root(),
+            vec![ObservationRefEntry {
+                ref_id: "@e1".to_owned(),
+                backend_id: backend_id.to_owned(),
+                kind: "window".to_owned(),
+            }],
+            0,
+            now_ms,
+        )
+    }
+
     fn temp_dir(name: &str) -> std::path::PathBuf {
         let nonce = current_unix_ms();
         env::temp_dir().join(format!("rdog-observation-{name}-{nonce}"))
@@ -1380,6 +1431,43 @@ mod tests {
                 .backend_id,
             "pid:2/window:0"
         );
+    }
+
+    #[test]
+    fn store_should_evict_least_recently_used_instead_of_oldest_created() {
+        // 客户端的用法是: observe 一次, 拿里面的 ref 落一串 mutation。这串动作
+        // 会横跨一段时间, 期间别的客户端还在持续 observe。所以"最早创建"的那条
+        // 恰恰可能是正在用的那条 —— 按创建顺序淘汰会在它正被读的时候连根拔掉,
+        // 下一次 resolve 立刻 OBSERVATION_EXPIRED。
+        //
+        // 这里让**最早创建**的那条被解析过一次(它成了最近使用), 再挤进来一条新的:
+        // LRU 应牺牲"录完就没人碰"的那条, 而不是被碰过的那条。
+        let mut store = ObservationStore::with_limits(300_000, 2, 20_000);
+        let in_use = one_ref_record(&mut store, "pid:1/window:0", 100);
+        let untouched = one_ref_record(&mut store, "pid:2/window:0", 101);
+        assert_eq!(
+            store
+                .resolve_ref(&in_use.observation_id, "@e1", 102)
+                .unwrap()
+                .backend_id,
+            "pid:1/window:0"
+        );
+
+        // 第三条挤进上限 2, 触发一次淘汰。
+        let _newcomer = one_ref_record(&mut store, "pid:3/window:0", 103);
+
+        assert_eq!(
+            store
+                .resolve_ref(&in_use.observation_id, "@e1", 104)
+                .unwrap()
+                .backend_id,
+            "pid:1/window:0"
+        );
+        assert!(store
+            .resolve_ref(&untouched.observation_id, "@e1", 104)
+            .unwrap_err()
+            .to_string()
+            .contains("OBSERVATION_EXPIRED"));
     }
 
     #[test]

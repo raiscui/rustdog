@@ -1,6 +1,11 @@
 use super::request::{
     ClickRequest, DragRequest, MouseAnchor, MouseCoordinateSpace, MouseDisplayGuard, MouseEndpoint,
-    MouseMoveRequest, MousePoint, MouseRefTarget, MouseSelectorTarget, WheelRequest,
+    MouseMoveRequest, MousePoint, MouseRefTarget, MouseScreenshotTarget, MouseSelectorTarget,
+    WheelRequest,
+};
+use super::screenshot_frame::{
+    lookup_screenshot_frame, ScreenshotFrame, SCREENSHOT_FRAME_CACHE_CAPACITY,
+    SCREENSHOT_FRAME_TTL_MS,
 };
 use crate::{
     control_ax::{resolve_current_ax_target_rect, AxRect, AxTarget},
@@ -380,7 +385,94 @@ fn prepare_endpoint(
         }),
         MouseEndpoint::ObservationRef(target) => resolve_observation_ref_endpoint(target, action),
         MouseEndpoint::Selector(target) => selector_endpoint_handoff(target, action),
+        MouseEndpoint::ScreenshotPoint(target) => {
+            resolve_screenshot_point_endpoint(target, action)
+        }
     }
+}
+
+/// 截图图上像素 → os-logical 点。换算只认缓存里那次截图的坐标系, 不重新枚举
+/// 显示器 —— 重新枚举拿到的是"现在"的布局, 与"那张图"未必是同一回事, 那正是
+/// 2026-10-05 点空三次的形态。
+fn resolve_screenshot_point_endpoint(
+    target: &MouseScreenshotTarget,
+    action: &'static str,
+) -> io::Result<PreparedEndpoint> {
+    let Some(frame) = lookup_screenshot_frame(&target.screenshot_id) else {
+        return Err(screenshot_frame_unavailable_error(action, target));
+    };
+    if !frame.contains_image_point(target.point) {
+        return Err(screenshot_point_outside_image_error(action, target, &frame));
+    }
+    let point = frame.to_os_logical_point(target.point);
+
+    Ok(PreparedEndpoint::Point {
+        point,
+        resolution: json!({
+            "source": "screenshot_image_pixel",
+            "screenshot_id": target.screenshot_id.as_str(),
+            "image_point": point_value(target.point),
+            "image_rect": frame_rect_value(&frame.image_rect),
+            "os_logical_bounds": frame_rect_value(&frame.os_logical_bounds),
+            "image_to_click_scale": {
+                "x": frame.image_to_click_scale.x,
+                "y": frame.image_to_click_scale.y,
+            },
+            "point": point_value(point),
+            "coordinate_space": "os-logical",
+        }),
+    })
+}
+
+fn screenshot_frame_unavailable_error(
+    action: &'static str,
+    target: &MouseScreenshotTarget,
+) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::InvalidInput,
+        json!({
+            "kind": "mouse-target-resolution",
+            "action": action,
+            "error_code": "SCREENSHOT_FRAME_UNAVAILABLE",
+            "performed": false,
+            "screenshot_id": target.screenshot_id.as_str(),
+            "ttl_ms": SCREENSHOT_FRAME_TTL_MS,
+            "message": format!(
+                "截图已过期或该 screenshot_id 从未被登记 (TTL {}s / 上限 {} 条), 请重新截图后再引用",
+                SCREENSHOT_FRAME_TTL_MS / 1000,
+                SCREENSHOT_FRAME_CACHE_CAPACITY,
+            ),
+        })
+        .to_string(),
+    )
+}
+
+fn screenshot_point_outside_image_error(
+    action: &'static str,
+    target: &MouseScreenshotTarget,
+    frame: &ScreenshotFrame,
+) -> io::Error {
+    let (image_width, image_height) = frame.image_size();
+    io::Error::new(
+        io::ErrorKind::InvalidInput,
+        json!({
+            "kind": "mouse-target-resolution",
+            "action": action,
+            "error_code": "SCREENSHOT_POINT_OUT_OF_IMAGE",
+            "performed": false,
+            "screenshot_id": target.screenshot_id.as_str(),
+            "image_point": point_value(target.point),
+            "image_size": {
+                "width": image_width,
+                "height": image_height,
+            },
+            "message": format!(
+                "图上像素 ({}, {}) 超出该截图范围 (宽 {image_width} × 高 {image_height}), 请按截图上的实际像素位置重报",
+                target.point.x, target.point.y
+            ),
+        })
+        .to_string(),
+    )
 }
 
 fn resolve_observation_ref_endpoint(
@@ -737,6 +829,17 @@ fn anchor_value(anchor: MouseAnchor) -> Value {
 }
 
 fn rect_value(rect: AxRect) -> Value {
+    json!({
+        "x": rect.x,
+        "y": rect.y,
+        "width": rect.width,
+        "height": rect.height,
+    })
+}
+
+/// 截图坐标系里的矩形 (os_logical_bounds / image_rect) 走同一套字段名,
+/// 让回执读起来和上面 AX rect 一致。
+fn frame_rect_value(rect: &DisplayRect) -> Value {
     json!({
         "x": rect.x,
         "y": rect.y,

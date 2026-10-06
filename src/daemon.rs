@@ -10,37 +10,112 @@ use std::{
     io::{self, ErrorKind},
     net::TcpListener,
     sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc,
+        atomic::{AtomicBool, AtomicU8, Ordering},
+        Arc, OnceLock,
     },
     thread::{self, JoinHandle},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 const ACCEPT_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
+/// accept 连续失败多少次才放弃当前 listener、转去重新 bind。
+///
+/// 退避期间 listener 保持 bound 是这次修复的全部要点:
+/// listener 一旦被 drop,退避窗口内的连接就是 `Connection refused (os error 61)`,
+/// 而进程其实一直活着 —— 客户端无从区分"daemon 没起来"和"daemon 正在退避"。
+const MAX_CONSECUTIVE_ACCEPT_ERRORS: u32 = 3;
+
+/// 停止接受新连接后,留给在途 control 会话线程的收尾窗口。
+const SESSION_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
+
+// ---------------------------------------------------------------------------
+// 健康状态 (@ping 消费面)
+// ---------------------------------------------------------------------------
+
+/// 监听绑定状态机的取值。
+const BIND_UNBOUND: u8 = 0;
+const BIND_LISTENING: u8 = 1;
+const BIND_BACKING_OFF: u8 = 2;
+
+/// `bind_state()` 的真相源,供 `@ping` 汇报"进程活着但暂时聋了"这第三种状态。
+///
+/// 2026-10-05 实战里 "daemon 起来 5 秒就没了" 与 "@ping 频繁 Connection refused"
+/// 是同一根因的两个症状:进程一直活着,只是那一刻正落在退避窗口里。
+/// 状态显式化之后,客户端才有机会区分开。
+static BIND_STATE: AtomicU8 = AtomicU8::new(BIND_UNBOUND);
+
+/// 首次进入 `run()` 的时刻,`@ping` 用它回报 daemon 已存活多久。
+static STARTED_AT: OnceLock<Instant> = OnceLock::new();
+
+/// 当前 inbound listener 的绑定状态。
+///
+/// outbound-only 的 daemon 恒为 `"unbound"` —— 它确实没有 TCP 监听面,
+/// 这不是降级信号,调用方要靠这个区分"没在听"和"听了但正在退避"。
+pub fn bind_state() -> &'static str {
+    bind_state_label(BIND_STATE.load(Ordering::Relaxed))
+}
+
+/// daemon 已运行时长。`run()` 尚未被调用过时返回 `Duration::ZERO`。
+pub fn uptime() -> Duration {
+    STARTED_AT
+        .get()
+        .map_or(Duration::ZERO, |started| started.elapsed())
+}
+
+/// 状态值到可上报字面量的映射。
+///
+/// 刻意留成纯函数:绑定状态是进程级全局量,直接对 `bind_state()` 断言
+/// 会和并行跑的 worker 单测互相踩,纯函数才有稳定的回归防线。
+fn bind_state_label(state: u8) -> &'static str {
+    match state {
+        BIND_LISTENING => "listening",
+        BIND_BACKING_OFF => "backing_off",
+        _ => "unbound",
+    }
+}
+
+fn set_bind_state(state: u8) {
+    BIND_STATE.store(state, Ordering::Relaxed);
+}
+
 /// 启动 daemon 模式并监督所有启用的 worker。
 pub fn run(config: DaemonConfig) -> io::Result<()> {
+    // 两端都关 = 一个 worker 都没有。历史行为是空 `handles` 直接 `Ok(())`,
+    // 于是 main 拿到退出码 0 且日志一字未留 —— 配置一改就"静默启动成功又立刻退出"。
+    if !config.inbound.enabled && !config.outbound.enabled {
+        return Err(io::Error::new(
+            ErrorKind::InvalidInput,
+            "inbound 与 outbound 均已禁用,daemon 没有任何 worker 可运行; 请至少启用一端, 或改用 zenoh transport",
+        ));
+    }
+
     install_recording_stack();
     let retry_interval = config.retry_interval();
     let observation_daemon_name = tcp_observation_daemon_name(&config);
     initialize_durable_observation_state(&config.observation, None, &observation_daemon_name)?;
+
+    // 停止标记必须跨 worker 共享。改造前 stop 在每个闭包里各建一份且从不置位,
+    // 于是 `stop` 参数在生产路径上事实上是死代码,SIGINT 只能靠进程默认行为硬杀。
+    let shutdown = Arc::new(AtomicBool::new(false));
+    install_shutdown_handlers(Arc::clone(&shutdown))?;
+    STARTED_AT.get_or_init(Instant::now);
+    set_bind_state(BIND_UNBOUND);
+
     let mut handles = Vec::new();
 
-    // 每个 worker 都持有自己的停止标记。
-    // 生产环境下不会主动置位,但测试会复用同一套循环。
     if config.outbound.enabled {
         let outbound = config.outbound.clone();
+        let stop = Arc::clone(&shutdown);
         handles.push(thread::spawn(move || {
-            let stop = Arc::new(AtomicBool::new(false));
             run_outbound_worker_until_stopped(&outbound, retry_interval, stop.as_ref())
         }));
     }
 
     if config.inbound.enabled {
         let inbound = config.inbound.clone();
+        let stop = Arc::clone(&shutdown);
         handles.push(thread::spawn(move || {
-            let stop = Arc::new(AtomicBool::new(false));
             run_inbound_worker_until_stopped(&inbound, retry_interval, stop.as_ref())
         }));
     }
@@ -49,6 +124,7 @@ pub fn run(config: DaemonConfig) -> io::Result<()> {
         join_worker(handle)?;
     }
 
+    set_bind_state(BIND_UNBOUND);
     Ok(())
 }
 
@@ -224,6 +300,7 @@ fn run_inbound_worker_until_stopped(
     while !stop.load(Ordering::Relaxed) {
         match TcpListener::bind(&address) {
             Ok(listener) => {
+                set_bind_state(BIND_LISTENING);
                 log::info!(
                     "daemon inbound listening on {}:{}",
                     host.green(),
@@ -231,14 +308,21 @@ fn run_inbound_worker_until_stopped(
                 );
 
                 listener.set_nonblocking(true)?;
+                let mut sessions: Vec<JoinHandle<()>> = Vec::new();
+                let mut consecutive_accept_errors: u32 = 0;
 
                 loop {
                     if stop.load(Ordering::Relaxed) {
+                        drain_sessions(&mut sessions);
+                        set_bind_state(BIND_UNBOUND);
                         return Ok(());
                     }
 
                     match listener.accept() {
                         Ok((stream, remote_addr)) => {
+                            consecutive_accept_errors = 0;
+                            reap_finished_sessions(&mut sessions);
+
                             // inbound listener 为了可轮询退出保持 nonblocking。
                             // 但真正交给 shell 的会话 socket 仍然要恢复为阻塞模式,
                             // 否则“暂时还没数据”会被误判成 `WouldBlock` 错误。
@@ -248,7 +332,7 @@ fn run_inbound_worker_until_stopped(
                             if mode == EndpointMode::Control {
                                 let shell_name = shell_name.to_owned();
                                 let host = host.to_owned();
-                                thread::spawn(move || {
+                                let session = thread::spawn(move || {
                                     let session_result = match transport {
                                         ControlTransportKind::Tcp => {
                                             shell::run_control_receiver_over_stream(
@@ -279,6 +363,7 @@ fn run_inbound_worker_until_stopped(
                                         );
                                     }
                                 });
+                                sessions.push(session);
                                 continue;
                             }
 
@@ -314,19 +399,72 @@ fn run_inbound_worker_until_stopped(
                         Err(err) if err.kind() == ErrorKind::WouldBlock => {
                             thread::sleep(ACCEPT_POLL_INTERVAL);
                         }
-                        Err(err) => {
-                            log::error!(
-                                "daemon inbound listener failed on {}:{}: {}",
+                        // EINTR 只是 accept 被信号打断,不代表 listener 坏了:
+                        // 立刻重试,既不退避也不计入失败预算。
+                        Err(err) if err.kind() == ErrorKind::Interrupted => {
+                            log::debug!(
+                                "daemon inbound accept interrupted on {}:{}, 立即重试: {}",
                                 host,
                                 port,
                                 err
                             );
-                            break;
+                        }
+                        Err(err) => {
+                            // accept 失败不等于端口该关。历史实现在这里直接 break:
+                            // listener 被 drop → 端口立即关闭 → 睡满 retry_seconds(默认 5 秒)
+                            // 才重新 bind,窗口内的连接全是 Connection refused,
+                            // 而进程一直活着。现在保留 listener 原地退避重试,
+                            // 只有连续失败到阈值才真正放弃这个 listener。
+                            consecutive_accept_errors += 1;
+
+                            if consecutive_accept_errors >= MAX_CONSECUTIVE_ACCEPT_ERRORS {
+                                log::error!(
+                                    "daemon inbound accept on {}:{} 连续失败 {} 次,放弃当前 listener 转去重新 bind: {}",
+                                    host,
+                                    port,
+                                    consecutive_accept_errors,
+                                    err
+                                );
+                                break;
+                            }
+
+                            set_bind_state(BIND_BACKING_OFF);
+                            log::warn!(
+                                "daemon inbound accept failed on {}:{} (第 {}/{} 次), listener 保持 bound,retry_in {} 秒: {}",
+                                host,
+                                port,
+                                consecutive_accept_errors,
+                                MAX_CONSECUTIVE_ACCEPT_ERRORS,
+                                retry_interval.as_secs(),
+                                err
+                            );
+
+                            if wait_before_retry(stop, retry_interval) {
+                                drain_sessions(&mut sessions);
+                                set_bind_state(BIND_UNBOUND);
+                                return Ok(());
+                            }
+
+                            set_bind_state(BIND_LISTENING);
+                            log::info!("daemon inbound 恢复监听 on {}:{}", host, port);
                         }
                     }
                 }
+
+                // 走到这里 = 连续 accept 失败到阈值,当前 listener 作废。
+                // 这里刻意**不**收尾在途会话: 它们各自持有已建立的 socket,
+                // 与 listener 无关; 等它们只会把重新 bind 的时间再往后推,
+                // 正好复刻这次要消灭的"端口关着还慢吞吞"窗口。
+                if !sessions.is_empty() {
+                    log::warn!(
+                        "daemon inbound 放弃旧 listener,{} 个在途会话转为游离",
+                        sessions.len()
+                    );
+                }
+                set_bind_state(BIND_BACKING_OFF);
             }
             Err(err) => {
+                set_bind_state(BIND_BACKING_OFF);
                 log::error!("daemon inbound bind failed on {}:{}: {}", host, port, err);
             }
         }
@@ -336,6 +474,7 @@ fn run_inbound_worker_until_stopped(
         }
     }
 
+    set_bind_state(BIND_UNBOUND);
     Ok(())
 }
 
@@ -354,6 +493,80 @@ fn wait_before_retry(stop: &AtomicBool, retry_interval: Duration) -> bool {
     );
     thread::sleep(retry_interval);
     stop.load(Ordering::Relaxed)
+}
+
+/// 把 unix 停止信号接到共享 shutdown 标志上。
+///
+/// 单独起一个线程消费 `Signals`:signal-hook 的 iterator 会一直阻塞,
+/// 收到第一个信号就 break 并关闭 handle,不留悬挂线程。
+///
+/// 覆盖范围:unix 侧 SIGINT / SIGTERM 走优雅退出;
+/// Windows 的 CTRL_CLOSE_EVENT 需要 console control handler(另走 Win32 消息泵),
+/// 这里不覆盖,Windows 侧仍用 taskkill 结束进程 —— 那种终止是硬杀,不保证收尾。
+#[cfg(unix)]
+fn install_shutdown_handlers(shutdown: Arc<AtomicBool>) -> io::Result<()> {
+    use signal_hook::consts::{SIGINT, SIGTERM};
+    use signal_hook::iterator::Signals;
+
+    let mut signals =
+        Signals::new([SIGINT, SIGTERM]).map_err(|err| io::Error::other(err.to_string()))?;
+    let handle = signals.handle();
+
+    thread::spawn(move || {
+        if let Some(signal) = signals.forever().next() {
+            log::info!("daemon 收到 {signal}, 停止接受新连接并等待在途会话收尾");
+            shutdown.store(true, Ordering::SeqCst);
+        }
+        handle.close();
+    });
+
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn install_shutdown_handlers(_shutdown: Arc<AtomicBool>) -> io::Result<()> {
+    Ok(())
+}
+
+/// 回收已结束的会话线程,只留还在跑的。
+///
+/// JoinHandle 本身很轻,但 8 小时长跑会攒下几百个死句柄;
+/// 不回收的话停机时要 join 的全是早已结束的线程,徒增噪音。
+fn reap_finished_sessions(sessions: &mut Vec<JoinHandle<()>>) {
+    sessions.retain(|handle| !handle.is_finished());
+}
+
+/// 停止接受新连接后,给在途会话一个**有限**的收尾窗口。
+///
+/// 无界 join 会让一次 SIGTERM 卡死在一个挂着的会话上 —— 宁可超时退出,
+/// 也不能把"干净退出"变成"永远退不出去"。窗口内结束的会话照常等待其结果。
+fn drain_sessions(sessions: &mut Vec<JoinHandle<()>>) {
+    if sessions.is_empty() {
+        return;
+    }
+
+    log::info!(
+        "daemon inbound 等待 {} 个在途会话收尾,最多 {} 秒",
+        sessions.len(),
+        SESSION_DRAIN_TIMEOUT.as_secs()
+    );
+
+    let deadline = Instant::now() + SESSION_DRAIN_TIMEOUT;
+
+    while Instant::now() < deadline {
+        reap_finished_sessions(sessions);
+        if sessions.is_empty() {
+            return;
+        }
+        thread::sleep(ACCEPT_POLL_INTERVAL);
+    }
+
+    if !sessions.is_empty() {
+        log::warn!(
+            "daemon inbound 仍有 {} 个会话未收尾,放弃等待",
+            sessions.len()
+        );
+    }
 }
 
 fn join_worker(handle: JoinHandle<io::Result<()>>) -> io::Result<()> {
@@ -594,6 +807,45 @@ mod tests {
         }
 
         panic!("condition was not satisfied before timeout");
+    }
+}
+
+/// 健康状态与启动前置校验的回归防线。
+///
+/// 刻意开在 unix 门之外: 这批改动来自 Windows 真机事故,
+/// 两条断言不能只在 unix 上跑。
+#[cfg(test)]
+mod health_state {
+    use super::*;
+
+    #[test]
+    fn bind_state_label_should_cover_the_whole_state_machine() {
+        assert_eq!(bind_state_label(BIND_LISTENING), "listening");
+        assert_eq!(bind_state_label(BIND_BACKING_OFF), "backing_off");
+        assert_eq!(bind_state_label(BIND_UNBOUND), "unbound");
+        // 未知取值不得漏出契约外的字面量 —— @ping 的消费面只认这三个
+        assert_eq!(bind_state_label(u8::MAX), "unbound");
+    }
+
+    #[test]
+    fn public_health_api_should_stay_inside_the_ping_contract() {
+        assert!(matches!(
+            bind_state(),
+            "listening" | "backing_off" | "unbound"
+        ));
+
+        let first = uptime();
+        let second = uptime();
+        // 单调: run() 未启动时恒为 Duration::ZERO,启动后随墙上时钟增长
+        assert!(second >= first);
+    }
+
+    #[test]
+    fn run_should_reject_config_with_both_endpoints_disabled() {
+        let err = run(DaemonConfig::default()).expect_err("两端都禁用时必须报错,不能静默 Ok 退出");
+
+        assert_eq!(err.kind(), ErrorKind::InvalidInput);
+        assert!(err.to_string().contains("inbound 与 outbound"));
     }
 }
 

@@ -232,7 +232,7 @@ fn windows_zenoh_router_client_smoke_should_ping_and_run_request_id_command() {
     let (ping_stdout, ping_stderr) = run_control_until_success(
         &control_args,
         "@ping",
-        r#"@response "pong""#,
+        r#""pong":true"#,
         Duration::from_secs(12),
     )
     .expect("ping should eventually succeed on Windows smoke path");
@@ -249,7 +249,7 @@ fn windows_zenoh_router_client_smoke_should_ping_and_run_request_id_command() {
     let _ = fs::remove_file(&config_path);
 
     assert!(
-        ping_stdout.contains(r#"@response "pong""#),
+        ping_stdout.contains(r#""pong":true"#),
         "unexpected ping stdout:\n{ping_stdout}\nstderr:\n{ping_stderr}"
     );
     assert!(
@@ -297,7 +297,7 @@ fn windows_zenoh_router_client_should_reach_daemon_via_fixed_listen_endpoint() {
     let (ping_stdout, ping_stderr) = run_control_until_success(
         &control_args,
         "@ping",
-        r#"@response "pong""#,
+        r#""pong":true"#,
         Duration::from_secs(12),
     )
     .expect("ping should succeed via fixed entry-point on Windows");
@@ -306,7 +306,7 @@ fn windows_zenoh_router_client_should_reach_daemon_via_fixed_listen_endpoint() {
     let _ = fs::remove_file(&config_path);
 
     assert!(
-        ping_stdout.contains(r#"@response "pong""#),
+        ping_stdout.contains(r#""pong":true"#),
         "unexpected ping stdout:\n{ping_stdout}\nstderr:\n{ping_stderr}"
     );
 }

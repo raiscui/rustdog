@@ -1,9 +1,10 @@
 use super::request::{
     validate_mouse_move_shape, validate_wheel_shape, ClickRequest, DragRequest, MouseAnchor,
     MouseButtonMode, MouseButtonName, MouseButtonRequest, MouseCoordinateSpace, MouseDisplayGuard,
-    MouseEndpoint, MouseMoveRequest, MousePoint, MouseRefTarget, MouseSelectorTarget, WheelRequest,
-    DEFAULT_MOUSE_CLICK_HOLD_MS, DEFAULT_MOUSE_CLICK_INTERVAL_MS, DEFAULT_MOUSE_DRAG_DURATION_MS,
-    DEFAULT_MOUSE_DRAG_STEPS, MAX_MOUSE_CLICK_COUNT, MAX_MOUSE_DRAG_STEPS,
+    MouseEndpoint, MouseMoveRequest, MousePoint, MouseRefTarget, MouseScreenshotTarget,
+    MouseSelectorTarget, WheelRequest, DEFAULT_MOUSE_CLICK_HOLD_MS, DEFAULT_MOUSE_CLICK_INTERVAL_MS,
+    DEFAULT_MOUSE_DRAG_DURATION_MS, DEFAULT_MOUSE_DRAG_STEPS, MAX_MOUSE_CLICK_COUNT,
+    MAX_MOUSE_DRAG_STEPS,
 };
 use crate::control_display_scope::parse_display_scope;
 use crate::control_observation::SelectorRefindPolicy;
@@ -149,6 +150,7 @@ pub fn parse_click_payload(input: &str) -> io::Result<ClickRequest> {
     let mut x = None::<i32>;
     let mut y = None::<i32>;
     let mut target = None::<MouseEndpoint>;
+    let mut screenshot_id = None::<String>;
     let mut guard = None::<MouseDisplayGuard>;
     let mut button = None::<MouseButtonName>;
     let mut count = None::<u8>;
@@ -164,6 +166,12 @@ pub fn parse_click_payload(input: &str) -> io::Result<ClickRequest> {
         match field_name.as_str() {
             "x" => assign_once(&mut x, "x", "@click", parse_i32_field("x", raw_value)?)?,
             "y" => assign_once(&mut y, "y", "@click", parse_i32_field("y", raw_value)?)?,
+            "screenshot" | "screenshot_id" => assign_once(
+                &mut screenshot_id,
+                "screenshot",
+                "@click",
+                parse_non_empty_string("@click.screenshot", raw_value)?,
+            )?,
             "target" => assign_once(
                 &mut target,
                 "target",
@@ -208,6 +216,29 @@ pub fn parse_click_payload(input: &str) -> io::Result<ClickRequest> {
             }
         }
     }
+
+    // 顶层 `screenshot` 是 `@click:{x:..,y:..}` 的并列写法: 语义上等价于
+    // `target:{screenshot:..}`, 在这里就归一成 endpoint, 下游不必再判一次
+    // "x/y 到底属不属于 target"。
+    let (x, y, target) = match (screenshot_id, target) {
+        (Some(_), Some(_)) => {
+            return Err(invalid_data(
+                "@click 的 `screenshot` 不能与 `target` 混用",
+            ))
+        }
+        (Some(screenshot_id), None) => (
+            None,
+            None,
+            Some(MouseEndpoint::ScreenshotPoint(MouseScreenshotTarget {
+                screenshot_id,
+                point: MousePoint {
+                    x: required_field(x, "@click", "x")?,
+                    y: required_field(y, "@click", "y")?,
+                },
+            })),
+        ),
+        (None, target) => (x, y, target),
+    };
 
     validate_click_target_shape(x, y, target.as_ref())?;
     Ok(ClickRequest {
@@ -391,6 +422,7 @@ fn parse_mouse_endpoint(input: &str, kind: &str) -> io::Result<MouseEndpoint> {
     let mut observation_id = None::<String>;
     let mut selector_id = None::<String>;
     let mut direct_id = None::<String>;
+    let mut screenshot_id = None::<String>;
     let mut auto_refind = None::<bool>;
     let mut policy = None::<SelectorRefindPolicy>;
     let mut min_confidence_milli = None::<u16>;
@@ -405,6 +437,12 @@ fn parse_mouse_endpoint(input: &str, kind: &str) -> io::Result<MouseEndpoint> {
         match field_name.as_str() {
             "x" => assign_once(&mut x, "x", kind, parse_i32_field("x", raw_value)?)?,
             "y" => assign_once(&mut y, "y", kind, parse_i32_field("y", raw_value)?)?,
+            "screenshot" | "screenshot_id" => assign_once(
+                &mut screenshot_id,
+                "screenshot",
+                kind,
+                parse_non_empty_string(&format!("{kind}.screenshot"), raw_value)?,
+            )?,
             "ref" | "ref_id" => assign_once(
                 &mut ref_id,
                 "ref",
@@ -468,19 +506,47 @@ fn parse_mouse_endpoint(input: &str, kind: &str) -> io::Result<MouseEndpoint> {
         }
     }
 
+    // anchor 在下面会被补成默认值, 判"有没有显式写过"必须赶在补默认之前。
+    let anchor_explicit = anchor.is_some() || offset_dx.is_some() || offset_dy.is_some();
     let anchor = anchor_from_parts(kind, anchor, offset_dx, offset_dy)?;
-    let has_coordinate = x.is_some() || y.is_some();
+    let has_screenshot = screenshot_id.is_some();
+    // 有 screenshot 时 x/y 是**图上像素**而不是 os-logical 坐标, 所以不能算作
+    // 独立的 coordinate target —— 否则 `{screenshot:"..",x:1,y:2}` 会被判成两类混用。
+    let has_coordinate = !has_screenshot && (x.is_some() || y.is_some());
     let has_ref = ref_id.is_some();
     let has_selector = selector_id.is_some();
     let has_id = direct_id.is_some();
     let endpoint_kind_count = usize::from(has_coordinate)
+        + usize::from(has_screenshot)
         + usize::from(has_ref)
         + usize::from(has_selector)
         + usize::from(has_id);
     if endpoint_kind_count != 1 {
         return Err(invalid_data(format!(
-            "{kind} 必须且只能包含 x/y、ref、selector_id、id 中的一类 target"
+            "{kind} 必须且只能包含 x/y、screenshot、ref、selector_id、id 中的一类 target"
         )));
+    }
+
+    if has_screenshot {
+        // 落点是字面像素, 没有"目标矩形"可锚, 也不存在 refind; 收下这些字段等于
+        // 默默忽略调用方的意图, 不如当场报错。
+        if anchor_explicit
+            || auto_refind.is_some()
+            || policy.is_some()
+            || min_confidence_milli.is_some()
+            || observation_id.is_some()
+        {
+            return Err(invalid_data(format!(
+                "{kind} screenshot target 不能携带 anchor/offset/selector 字段"
+            )));
+        }
+        return Ok(MouseEndpoint::ScreenshotPoint(MouseScreenshotTarget {
+            screenshot_id: required_field(screenshot_id, kind, "screenshot")?,
+            point: MousePoint {
+                x: required_field(x, kind, "x")?,
+                y: required_field(y, kind, "y")?,
+            },
+        }));
     }
 
     if has_coordinate {

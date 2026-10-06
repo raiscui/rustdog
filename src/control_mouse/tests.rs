@@ -266,3 +266,89 @@ fn report_should_render_structured_mouse_json() {
     assert!(report_json.contains(r#""coordinate_space":"os-logical""#));
     assert!(report_json.contains(r#""x":10"#));
 }
+
+/// 顶层 `screenshot` 与显式坐标是并列写法: 带 screenshot 时 x/y 是图上像素,
+/// 不能落回 `MouseEndpoint::Coordinate` (那是 os-logical)。
+#[test]
+fn click_with_screenshot_field_should_parse_into_screenshot_endpoint() {
+    let request = parse_click_payload(r#"{screenshot:"1759670400000",x:1104,y:213}"#)
+        .expect("screenshot click should parse");
+
+    assert_eq!(request.x, None);
+    assert_eq!(request.y, None);
+    assert_eq!(
+        request.target,
+        Some(MouseEndpoint::ScreenshotPoint(MouseScreenshotTarget {
+            screenshot_id: "1759670400000".to_owned(),
+            point: MousePoint { x: 1104, y: 213 },
+        }))
+    );
+}
+
+/// 不带 screenshot 的老写法语义不变 —— 回归防线: 少一个字段就把 os-logical
+/// 坐标解释成图上像素, 是最坏的一类退化。
+#[test]
+fn click_without_screenshot_field_should_stay_os_logical_coordinate() {
+    let request = parse_click_payload("{x:1104,y:213}").expect("coordinate click should parse");
+
+    assert_eq!(request.x, Some(1104));
+    assert_eq!(request.y, Some(213));
+    assert_eq!(request.target, None);
+}
+
+#[test]
+fn click_screenshot_field_should_reject_missing_pixel() {
+    let err = parse_click_payload(r#"{screenshot:"1759670400000"}"#)
+        .expect_err("screenshot click without x/y should fail");
+
+    assert!(err.to_string().contains("`x`"), "{err}");
+}
+
+#[test]
+fn click_screenshot_field_should_reject_mixing_with_target() {
+    let err = parse_click_payload(r#"{screenshot:"a",target:{x:1,y:2}}"#)
+        .expect_err("screenshot with target should fail");
+
+    assert!(err.to_string().contains("不能与 `target` 混用"), "{err}");
+}
+
+/// 端点内写法与顶层写法同义, 让 @drag/@wheel/@mouse-move 的 target 也能引用截图。
+#[test]
+fn screenshot_endpoint_should_parse_inside_target() {
+    let request = parse_drag_payload(
+        r#"{from:{screenshot:"1759670400000",x:10,y:20},to:{x:30,y:40}}"#,
+    )
+    .expect("drag with screenshot endpoint should parse");
+
+    assert_eq!(
+        request.from,
+        MouseEndpoint::ScreenshotPoint(MouseScreenshotTarget {
+            screenshot_id: "1759670400000".to_owned(),
+            point: MousePoint { x: 10, y: 20 },
+        })
+    );
+}
+
+/// 图上像素点是字面坐标, 没有目标矩形可锚: 收下 anchor 等于默默忽略调用方意图。
+#[test]
+fn screenshot_endpoint_should_reject_anchor_fields() {
+    let err = parse_click_payload(r#"{target:{screenshot:"a",x:1,y:2,anchor:"center"}}"#)
+        .expect_err("screenshot endpoint with anchor should fail");
+
+    assert!(
+        err.to_string().contains("不能携带 anchor/offset/selector 字段"),
+        "{err}"
+    );
+}
+
+#[test]
+fn screenshot_endpoint_should_not_mix_with_ref_target() {
+    let err =
+        parse_click_payload(r#"{target:{screenshot:"a",x:1,y:2,ref:"@e1",observation_id:"o"}}"#)
+            .expect_err("screenshot endpoint mixed with ref should fail");
+
+    assert!(
+        err.to_string().contains("必须且只能包含 x/y、screenshot、ref"),
+        "{err}"
+    );
+}

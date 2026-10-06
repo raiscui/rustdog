@@ -74,7 +74,7 @@ run_control_pipe() {
 probe_existing_daemon() {
     local output
 
-    if output="$(run_control_pipe '@ping' 2>&1)" && [[ "$output" == *'@response "pong"'* ]]; then
+    if output="$(run_control_pipe '@ping' 2>&1)" && [[ "$output" == *'"pong":true'* ]]; then
         reused_existing_daemon="1"
         log "reusing existing mac.lab daemon"
         return 0
@@ -126,7 +126,7 @@ run_ping_smoke() {
     local output
 
     output="$(run_control_pipe '@ping' 2>&1)"
-    [[ "$output" == *'@response "pong"'* ]] || fail "expected @response \"pong\" from @ping, got: $output"
+    [[ "$output" == *'"pong":true'* ]] || fail "expected structured \"pong\":true from @ping, got: $output"
     log "pipe @ping smoke passed"
 }
 
@@ -213,7 +213,7 @@ text = text.replace("\r", "")
 
 if "pong" not in text:
     raise SystemExit(f"TTY smoke did not show pong. output={text!r}")
-if '@response "pong"' in text:
+if '@response ' in text:
     raise SystemExit(f"TTY smoke leaked raw protocol line. output={text!r}")
 PY
 

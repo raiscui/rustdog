@@ -96,11 +96,24 @@ pub struct MouseSelectorTarget {
     pub anchor: MouseAnchor,
 }
 
+/// 某张截图上的图上像素点 —— 坐标空间是**那张图的像素**, 不是 os-logical。
+///
+/// 存在的理由是 2026-10-05 现场那三次点空: agent 手里只有一张图, 报图上像素是它唯一
+/// 说得出口的坐标, 差一个 scale 的换算不该由它心算。resolver 用截图缓存换算完就
+/// 归一成 os-logical 点, 下游流程与显式坐标完全一致。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MouseScreenshotTarget {
+    pub screenshot_id: String,
+    /// 相对该截图左上角的像素坐标。
+    pub point: MousePoint,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MouseEndpoint {
     Coordinate(MousePoint),
     ObservationRef(MouseRefTarget),
     Selector(MouseSelectorTarget),
+    ScreenshotPoint(MouseScreenshotTarget),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

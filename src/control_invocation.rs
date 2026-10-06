@@ -284,8 +284,7 @@ pub(crate) fn send_single_control_line_tcp(
     port: u16,
     line: &str,
 ) -> Result<(), String> {
-    let mut transport = control_transport::ControlTransport::connect_tcp(host, port)
-        .map_err(|err| err.to_string())?;
+    let mut transport = connect_control_tcp(host, port)?;
     send_single_control_line_transport(&mut transport, line)
 }
 
@@ -375,10 +374,35 @@ fn send_control_lines_tcp(
     lines: &[String],
     artifacts_dir: &Path,
 ) -> Result<Vec<ControlLineExchange>, String> {
-    let mut transport = control_transport::ControlTransport::connect_tcp(host, port)
-        .map_err(|err| err.to_string())?;
+    let mut transport = connect_control_tcp(host, port)?;
     collect_control_lines_from_transport(&mut transport, lines, artifacts_dir)
         .map_err(|err| err.to_string())
+}
+
+/// 建立 control TCP 连接, 并把建连失败翻译成能指导排查的提示。
+///
+/// 裸的 `Connection refused (os error 61)` 不携带任何可行动信息, 而远程场景下
+/// "进程在跑但连不上" 有四种成因完全不同的可能, 只有第 (2) 种需要用户改配置。
+fn connect_control_tcp(
+    host: &str,
+    port: u16,
+) -> Result<control_transport::ControlTransport, String> {
+    control_transport::ControlTransport::connect_tcp_with_retry(host, port)
+        .map_err(|err| describe_tcp_connect_failure(host, port, &err))
+}
+
+fn describe_tcp_connect_failure(host: &str, port: u16, err: &std::io::Error) -> String {
+    format!(
+        "无法连接 daemon {host}:{port} ({err})。可能原因: \
+         (1) daemon 未启动; \
+         (2) daemon 走了 zenoh 路径 —— zenoh.enabled 为 true (仓库自带的 rdog_win.toml \
+         的 `[zenoh]` 段就是这个默认值) 时, run_zenoh_router 会显式关掉 inbound/outbound, \
+         TCP 端口根本不 bind, 进程在跑但连不上; 控制端显式用 \
+         `--transport tcp {host} {port}` 时最容易撞上。解法是被控端把 \
+         inbound.enabled 打开, 或把 zenoh.enabled 关掉; \
+         (3) Windows 防火墙拦截; \
+         (4) daemon 正在 bind 重试的退避窗口内"
+    )
 }
 
 /// WebSocket 多 line one-shot 入口,语义同 `send_control_lines_tcp`。
@@ -560,7 +584,8 @@ fn print_control_line_exchange(exchange: &ControlLineExchange) -> std::io::Resul
 #[cfg(test)]
 mod tests {
     use super::{
-        extract_one_shot_lines, parse_port, resolve_control_invocation, ControlInvocation,
+        describe_tcp_connect_failure, extract_one_shot_lines, parse_port,
+        resolve_control_invocation, ControlInvocation,
     };
     use crate::input::Transport;
 
@@ -707,6 +732,23 @@ mod tests {
         let err = parse_port("420692223").unwrap_err();
 
         assert!(err.contains("Invalid port"));
+    }
+
+    #[test]
+    fn describe_tcp_connect_failure_should_name_target_and_all_four_causes() {
+        let message = describe_tcp_connect_failure(
+            "192.168.50.57",
+            5555,
+            &std::io::Error::from(std::io::ErrorKind::ConnectionRefused),
+        );
+
+        assert!(message.contains("192.168.50.57:5555"));
+        // 进程在跑但连不上的真实成因: zenoh.enabled 时 TCP 端口压根没 bind。
+        assert!(message.contains("zenoh.enabled"));
+        assert!(message.contains("inbound"));
+        for marker in ["(1)", "(2)", "(3)", "(4)"] {
+            assert!(message.contains(marker), "缺少成因编号 {marker}");
+        }
     }
 
     // ------------------------------------------------------------

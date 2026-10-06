@@ -263,6 +263,11 @@ pub struct WindowCapabilities {
     pub find: String,
     pub activate: String,
     pub close: String,
+    /// resize 是独立 verb: Windows 侧窗口身份链 (EnumWindows) 已就位, 但
+    /// resize 要额外确定外框与 per-monitor DPI 的尺寸语义, 尚未验证。
+    /// 不做成"平台整体 unsupported"是为了让调用方能区分"能列窗口"与"能改尺寸"。
+    pub resize: String,
+    /// Space 切换是 macOS Mission Control 专属概念, 其他平台恒为 None。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub space_switch: Option<String>,
 }
@@ -502,21 +507,40 @@ impl WindowResizeBox {
 }
 
 impl WindowCapabilities {
+    /// 全量可用 (含 resize) 的窗口身份面。当前只有 macOS 的 AX backend 达到。
     pub fn complete() -> Self {
         Self {
             find: "complete".to_owned(),
             activate: "complete".to_owned(),
             close: "complete".to_owned(),
-            space_switch: Some("limited".to_owned()),
+            resize: "complete".to_owned(),
+            // space_switch 只描述 macOS 的 Space 切换; 其他平台即使拿到这份
+            // "全量"描述也不代表会切 Space, 所以按平台取, 不写死。
+            space_switch: cfg!(target_os = "macos").then(|| "limited".to_owned()),
         }
     }
 
-    #[cfg(not(target_os = "macos"))]
+    /// Windows: find / activate / close 走 EnumWindows 窗口身份链;
+    /// resize 单独标不支持, `@ax-*` 的不支持由 accessibility capability 声明。
+    #[cfg(target_os = "windows")]
+    pub fn windows() -> Self {
+        Self {
+            find: "complete".to_owned(),
+            activate: "complete".to_owned(),
+            close: "complete".to_owned(),
+            resize: "unsupported".to_owned(),
+            space_switch: None,
+        }
+    }
+
+    /// 窗口身份面整体没实现的平台 (Linux 等)。
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     pub fn unsupported() -> Self {
         Self {
             find: "unsupported".to_owned(),
             activate: "unsupported".to_owned(),
             close: "unsupported".to_owned(),
+            resize: "unsupported".to_owned(),
             space_switch: None,
         }
     }
@@ -615,7 +639,7 @@ fn resize_moved_toward_requested(before: u32, after: u32, requested: u32) -> boo
 }
 
 impl WindowFindResponse {
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     pub fn unsupported(platform: impl Into<String>) -> Self {
         let meta = WindowSnapshotMeta::now();
         Self {
@@ -1778,14 +1802,24 @@ fn matches_pid(expected: Option<i32>, actual: i32) -> bool {
     }
 }
 
+// 平台分派是三路的: macos (AX backend) / windows (EnumWindows 窗口身份面) /
+// 其余 (unsupported)。unsupported 分支一律回 `std::env::consts::OS` 而不是
+// 字面量 "unsupported" —— 调用方要能从响应里自证自己身处哪个平台,
+// 字符串 "unsupported" 把平台名一起吞掉了, 远程排障时无法区分"平台没实现"
+// 与"平台是谁都不知道"。
 #[cfg(target_os = "macos")]
 fn platform_find(request: &WindowFindRequest) -> io::Result<WindowFindResponse> {
     macos::find(request)
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "windows")]
+fn platform_find(request: &WindowFindRequest) -> io::Result<WindowFindResponse> {
+    windows::find(request)
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 fn platform_find(_request: &WindowFindRequest) -> io::Result<WindowFindResponse> {
-    Ok(WindowFindResponse::unsupported("unsupported"))
+    Ok(WindowFindResponse::unsupported(std::env::consts::OS))
 }
 
 #[cfg(target_os = "macos")]
@@ -1793,9 +1827,17 @@ fn platform_activate(request: &WindowActivateRequest) -> io::Result<WindowAction
     macos::activate(request)
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "windows")]
+fn platform_activate(request: &WindowActivateRequest) -> io::Result<WindowActionReport> {
+    windows::activate(request)
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 fn platform_activate(_request: &WindowActivateRequest) -> io::Result<WindowActionReport> {
-    Ok(WindowActionReport::unsupported("activate", "unsupported"))
+    Ok(WindowActionReport::unsupported(
+        "activate",
+        std::env::consts::OS,
+    ))
 }
 
 #[cfg(target_os = "macos")]
@@ -1803,9 +1845,17 @@ fn platform_close(request: &WindowCloseRequest) -> io::Result<WindowActionReport
     macos::close(request)
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "windows")]
+fn platform_close(request: &WindowCloseRequest) -> io::Result<WindowActionReport> {
+    windows::close(request)
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 fn platform_close(_request: &WindowCloseRequest) -> io::Result<WindowActionReport> {
-    Ok(WindowActionReport::unsupported("close", "unsupported"))
+    Ok(WindowActionReport::unsupported(
+        "close",
+        std::env::consts::OS,
+    ))
 }
 
 #[cfg(target_os = "macos")]
@@ -1813,9 +1863,17 @@ fn platform_resize(request: &WindowResizeRequest) -> io::Result<WindowActionRepo
     macos::resize(request)
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "windows")]
+fn platform_resize(request: &WindowResizeRequest) -> io::Result<WindowActionReport> {
+    windows::resize(request)
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 fn platform_resize(_request: &WindowResizeRequest) -> io::Result<WindowActionReport> {
-    Ok(WindowActionReport::unsupported("resize", "unsupported"))
+    Ok(WindowActionReport::unsupported(
+        "resize",
+        std::env::consts::OS,
+    ))
 }
 
 #[cfg(target_os = "macos")]
@@ -1825,18 +1883,31 @@ fn platform_resolve_target_rect(
     macos::resolve_target_rect(target)
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "windows")]
+fn platform_resolve_target_rect(
+    target: &WindowCommandTarget,
+) -> io::Result<WindowResolvedTargetRect> {
+    windows::resolve_target_rect(target)
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 fn platform_resolve_target_rect(
     _target: &WindowCommandTarget,
 ) -> io::Result<WindowResolvedTargetRect> {
     Err(io::Error::new(
         io::ErrorKind::Unsupported,
-        "当前平台不支持 window target rect resolver",
+        format!(
+            "当前平台 ({}) 不支持 window target rect resolver",
+            std::env::consts::OS
+        ),
     ))
 }
 
 #[cfg(target_os = "macos")]
 mod macos;
+
+#[cfg(target_os = "windows")]
+mod windows;
 
 #[cfg(target_os = "macos")]
 pub(crate) use self::macos::frontmost_pid;
@@ -2207,6 +2278,20 @@ mod tests {
         assert!(json.contains("\"source_command\":\"@window-find\""));
         assert!(json.contains("\"selector_count\":1"));
         assert!(json.contains("\"ref\":\"@e1\""));
+    }
+
+    /// `complete()` 只描述窗口身份面本模块实现的 verb, 不许顺带声称
+    /// "会切 Space" —— Space 是 macOS 专属概念, Windows/Linux 拿到同一份
+    /// 描述时必须没有这个字段, 否则调用方会按不存在的语义排障。
+    #[test]
+    fn complete_capabilities_should_only_claim_space_switch_on_macos() {
+        let capabilities = WindowCapabilities::complete();
+        assert_eq!(capabilities.resize, "complete");
+        assert_eq!(
+            capabilities.space_switch.is_some(),
+            cfg!(target_os = "macos"),
+            "space_switch 是 macOS 专属语义, 其它平台必须是 None"
+        );
     }
 
     #[test]

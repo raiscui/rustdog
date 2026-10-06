@@ -31,7 +31,7 @@
 //! - 目录打包不做 (决策 4): 协议按单文件设计, 未来组包在上层加
 
 use std::collections::HashMap;
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 

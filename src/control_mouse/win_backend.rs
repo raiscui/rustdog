@@ -23,9 +23,17 @@
 //! `native = os_rect.origin + (logical - os_logical.origin) × scale`。
 //! 纯函数 [`logical_point_to_native`] 可脱离 Win32 单测。
 
+// 这三个 import 只被下面那个 `#[cfg(windows)] impl MouseBackend`
+// (move_mouse / button / scroll) 用到, 跨平台单测一律不碰 (单测只调换算纯函数),
+// 所以 gate 必须是纯 `windows` —— 加 `test` 会让它们在测试构建里白导入,
+// 变成另一条 unused warning。
+#[cfg(windows)]
 use super::backend::MouseBackend;
+#[cfg(any(windows, test))]
 use crate::control_display_scope::DisplaySummary;
+#[cfg(windows)]
 use crate::screenshot::current_display_summaries;
+#[cfg(windows)]
 use enigo::{Axis, Button, Coordinate, Direction, InputError};
 #[cfg(windows)]
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
@@ -53,6 +61,12 @@ impl WinNativeMouseBackend {
 /// 逻辑矩形 = 物理 / scale (Windows DPI-aware 下 os_rect 恒为物理, 本模块
 /// 只编译进 windows 目标, 因此这里直接用除法语义 — 与
 /// screenshot::LogicalRect::to_os_logical 的非 mac 分支一致)。
+///
+/// 下面三个纯函数带 `any(windows, test)`: 线上唯一的调用点是下面那个
+/// `#[cfg(windows)] impl` 的 `move_mouse`, 而它们的单测是跨平台跑的 (mac 上验
+/// Windows 换算语义)。不 gate 的话, 非 Windows 的非测试构建会把这三样报成
+/// "never used" —— 那是构建目标的差异, 不是换算没接上。
+#[cfg(any(windows, test))]
 struct ScreenMapping {
     os_x: i32,
     os_y: i32,
@@ -63,6 +77,7 @@ struct ScreenMapping {
     scale: f64,
 }
 
+#[cfg(any(windows, test))]
 fn screen_mapping_of(display: &DisplaySummary) -> ScreenMapping {
     let scale = if display.scale_factor.is_finite() && display.scale_factor > 0.0 {
         f64::from(display.scale_factor)
@@ -86,6 +101,13 @@ fn screen_mapping_of(display: &DisplaySummary) -> ScreenMapping {
 /// 屏内换算并加上屏的物理偏移 — 混合 DPI 多屏下每屏 scale 不同, 不能用
 /// 统一系统值。点落在所有屏之外时按主屏 scale 线性外推 (与旧行为兼容:
 /// 至少有确定性的落点而不是报错中断整个点击链)。
+///
+/// 接线核对 (2026-10-06): 唯一调用点是本文件 `#[cfg(windows)] impl
+/// MouseBackend::move_mouse` 的 `Coordinate::Abs` 分支, 而该 backend 由
+/// `control_actions::execute_mouse_plan` 的 `#[cfg(windows)]` 分支实例化 ——
+/// Windows 上 `@click` 的 os-logical → 物理换算是接上的, 别被非 Windows 构建
+/// 上的 "never used" 警告误导成缺实现。
+#[cfg(any(windows, test))]
 fn logical_point_to_native(x: i32, y: i32, displays: &[DisplaySummary]) -> (i32, i32) {
     let mut fallback_scale = 1.0_f64;
     for display in displays {

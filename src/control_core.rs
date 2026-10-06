@@ -3,7 +3,7 @@ use std::io;
 use crate::control_recording::control_handler::{with_recording_handler, RecordRequest};
 use crate::control_recording::session::ConnectionId;
 use crate::{
-    control_actions::{build_shell_command, ControlActionExecutor},
+    control_actions::{build_ping_response_json, build_shell_command, ControlActionExecutor},
     control_bootstrap::build_bootstrap_outcome,
     control_capabilities::current_capabilities_report_json,
     control_flow::execute_flow_request,
@@ -30,8 +30,15 @@ pub fn execute_explicit_control_request<E: ControlActionExecutor>(
     cancel_registry: &crate::cancellation::CancelRegistry,
 ) -> ControlExecutionOutcome {
     match &request.command {
+        // @ping 即答, 不进 cancel registry (它没有任何可中止的在途动作)。
+        // 响应体复用 executor 分支的同一个构造函数, 保证两条路径的
+        // ping 形状永远一致 —— 响应体是 `build_ping_response_json` 的
+        // 单一真相源, 这里不再拼裸串。
         ControlCommand::Ping => ControlExecutionOutcome::from_response_line(
-            render_response_string(request.request_id, "pong"),
+            render_structured_success_response(
+                request.request_id,
+                &build_ping_response_json(shell),
+            ),
         ),
         ControlCommand::Record(record_request) => {
             handle_record_command(record_request, request.request_id)
@@ -755,7 +762,7 @@ mod tests {
     }
 
     #[test]
-    fn explicit_request_should_wrap_ping_as_response_line() {
+    fn explicit_request_should_wrap_ping_as_structured_response_line() {
         let cancel_registry = crate::cancellation::CancelRegistry::new();
         let response = execute_explicit_control_request(
             &ControlRequest {
@@ -768,7 +775,23 @@ mod tests {
         )
         .into_single_response_line();
 
-        assert_eq!(response, r#"@response {"id":7,"value":"pong"}"#);
+        // 锁的是"结构化而非裸串": 旧实现回 {"id":7,"value":"pong"},
+        // 那个 value 是 JSON string。uptime_ms / bind_state 是远程排障唯一
+        // 能区分"正在监听"与"bind 失败在退避重试"的依据, 短路成裸串就白做。
+        let json = response.trim_start_matches("@response ");
+        let value: serde_json::Value = serde_json::from_str(json)
+            .unwrap_or_else(|err| panic!("@ping 响应应是 JSON: {response}, err={err}"));
+        assert_eq!(value["id"], serde_json::json!(7));
+        let ping = &value["value"];
+        assert!(ping.is_object(), "@ping 的 value 应是对象, 实际: {ping}");
+        assert_eq!(ping["pong"], serde_json::json!(true));
+        assert_eq!(ping["shell"], serde_json::json!("/bin/sh"));
+        for field in ["ok", "uptime_ms", "bind_state"] {
+            assert!(
+                !ping[field].is_null(),
+                "@ping 结构化响应缺 {field} 字段: {ping}"
+            );
+        }
     }
 
     #[test]

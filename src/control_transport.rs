@@ -4,7 +4,8 @@ use serde::{Deserialize, Serialize};
 use sha1::{Digest, Sha1};
 use std::{
     io::{self, BufReader, ErrorKind, Read, Write},
-    net::{Shutdown, TcpStream},
+    net::{Shutdown, TcpStream, ToSocketAddrs},
+    thread,
     time::Duration,
 };
 use url::Url;
@@ -15,6 +16,19 @@ use crate::control_line_read::{
 
 const WEBSOCKET_GUID: &str = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 const MAX_HTTP_HANDSHAKE_BYTES: usize = 16 * 1024;
+/// 单次 TCP 拨号的超时上限。
+///
+/// `TcpStream::connect` 不接受超时, 对端不可达时 (VPN 掉线 / 防火墙静默丢包)
+/// 它会一直挂在 connect 上, 用户看到的只是"命令卡住了", 拿不到任何错误去判断
+/// 是网络问题还是 daemon 没起来。
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
+/// `ConnectionRefused` 之后的指数退避 (毫秒)。
+///
+/// 只覆盖 "daemon 刚重启 / 刚 listen 上" 这种瞬时窗口: 上一次拨号落在端口还没
+/// bind 完成的瞬间, 退避一次就能连上。刻意只压 3 次 —— daemon 侧自己也有 bind
+/// 重试窗口 (`[daemon].retry_seconds`), 两边叠加会变成十几秒的假死, 那比直接
+/// 报错更难排查。refused 本身是立即返回的, 所以这段退避的最坏代价是 1.4s。
+const CONNECT_RETRY_BACKOFF_MS: [u64; 3] = [200, 400, 800];
 // phase 2 起,控制面已经允许 `@savefile` 承载单张 JPEG/base64 screenshot。
 // 64 KiB 对这类 payload 明显不够,这里先把 phase 1 的单消息上限抬到 8 MiB。
 // 这仍然是“单条消息有边界”的保守口径,只是从命令级文本扩到了单文件结果。
@@ -44,13 +58,43 @@ pub(crate) enum ControlTransportWriter {
 
 impl ControlTransport {
     pub fn connect_tcp(host: &str, port: u16) -> io::Result<Self> {
-        let stream = TcpStream::connect((host, port))?;
+        let stream = connect_tcp_stream(host, port)?;
         Self::from_tcp_stream(stream)
+    }
+
+    /// `connect_tcp` + 只对 `ConnectionRefused` 的指数退避重试。
+    ///
+    /// 只重试 refused: 它是"这个端口此刻没人 listen"的确定结论, 对端一旦起来,
+    /// 重拨就能成。TimedOut / NetworkUnreachable / AddrNotAvailable 都是路由或
+    /// 主机层面的结论, 重拨只是把同一个失败多复述几遍, 还会把调用方的超时预算
+    /// 白白吃掉。
+    pub fn connect_tcp_with_retry(host: &str, port: u16) -> io::Result<Self> {
+        let mut retried = 0usize;
+        loop {
+            let err = match Self::connect_tcp(host, port) {
+                Ok(transport) => return Ok(transport),
+                Err(err) => err,
+            };
+
+            let Some(backoff_ms) = CONNECT_RETRY_BACKOFF_MS.get(retried) else {
+                return Err(err);
+            };
+            if !is_retryable_connect_error(err.kind()) {
+                return Err(err);
+            }
+
+            log::debug!(
+                "control 连接 {host}:{port} 被拒绝, 第 {} 次重拨前等待 {backoff_ms}ms: {err}",
+                retried + 1
+            );
+            thread::sleep(Duration::from_millis(*backoff_ms));
+            retried += 1;
+        }
     }
 
     pub fn connect_websocket(raw_url: &str) -> io::Result<Self> {
         let request = WebSocketClientRequest::parse(raw_url)?;
-        let mut stream = TcpStream::connect((request.host.as_str(), request.port))?;
+        let mut stream = connect_tcp_stream(request.host.as_str(), request.port)?;
         write_client_handshake(&mut stream, &request)?;
         read_server_handshake(&mut stream, &request.expected_accept)?;
         Ok(Self::WebSocket(WebSocketTextTransport::new(stream, true)))
@@ -107,6 +151,36 @@ impl ControlTransportWriter {
             Self::WebSocket(writer) => writer.write_message(message),
         }
     }
+}
+
+/// 带超时的 TCP 拨号。
+///
+/// 只能先解析地址再逐个 `connect_timeout`: 解析失败按原样上抛 —— 那是地址写错,
+/// 重试没有意义。同一台主机解析出多个地址时按顺序试, 保留最后一个真实拨号错误,
+/// 这样调用方看到的仍然是内核给出的那一句 (例如 `Connection refused`)。
+fn connect_tcp_stream(host: &str, port: u16) -> io::Result<TcpStream> {
+    let mut last_error = None;
+    for address in (host, port).to_socket_addrs()? {
+        match TcpStream::connect_timeout(&address, CONNECT_TIMEOUT) {
+            Ok(stream) => return Ok(stream),
+            Err(err) => last_error = Some(err),
+        }
+    }
+
+    Err(last_error.unwrap_or_else(|| {
+        io::Error::new(
+            ErrorKind::InvalidInput,
+            format!("{host}:{port} 没有解析出任何 socket 地址"),
+        )
+    }))
+}
+
+/// 只有 `ConnectionRefused` 值得重拨。
+///
+/// 它是"端口此刻没有 listener"的确定信号, daemon 起来之后重拨必然能成;
+/// 其余 kind 描述的是主机可达性/路由层的事实, 重拨只是把同一个错误重复几遍。
+fn is_retryable_connect_error(kind: ErrorKind) -> bool {
+    matches!(kind, ErrorKind::ConnectionRefused)
 }
 
 pub fn accept_websocket_stream(mut stream: TcpStream) -> io::Result<ControlTransport> {
@@ -701,6 +775,64 @@ mod tests {
             "listener should bind after retries: {:?}",
             last_error.expect("bind retry should record last error")
         );
+    }
+
+    #[test]
+    fn only_connection_refused_should_be_retryable() {
+        // 重试策略的单一真相源: refused 可重拨, 其余是路由/主机层结论不可重拨。
+        assert!(is_retryable_connect_error(ErrorKind::ConnectionRefused));
+
+        for kind in [
+            ErrorKind::TimedOut,
+            ErrorKind::NetworkUnreachable,
+            ErrorKind::AddrNotAvailable,
+            ErrorKind::NetworkDown,
+            ErrorKind::PermissionDenied,
+            ErrorKind::InvalidInput,
+        ] {
+            assert!(
+                !is_retryable_connect_error(kind),
+                "{kind:?} 不该触发重拨"
+            );
+        }
+    }
+
+    #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "Windows 下端口释放/重绑时机不稳定,建连退避由 unix 侧用例覆盖"
+    )]
+    fn connect_tcp_with_retry_should_succeed_when_listener_binds_late() {
+        // 占一个端口再立刻放掉, 制造"拨号时没人 listen"的瞬时窗口。
+        let probe = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("probe should bind");
+        let port = probe.local_addr().expect("probe should expose addr").port();
+        drop(probe);
+
+        let server = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(50));
+            let listener = std::net::TcpListener::bind(("127.0.0.1", port)).expect("late bind");
+            let (_stream, _) = listener.accept().expect("late accept");
+            thread::sleep(Duration::from_millis(50));
+        });
+
+        // 第一次拨号必然 refused, 退避 200ms 后的第二次拨号应当成功。
+        let transport = ControlTransport::connect_tcp_with_retry("127.0.0.1", port)
+            .expect("retry should redial after ConnectionRefused");
+        let _ = transport.close();
+
+        server.join().expect("server thread should finish");
+    }
+
+    #[test]
+    fn connect_tcp_stream_should_surface_refused_for_closed_loopback_port() {
+        // 退避逻辑挂在 ConnectionRefused 上, 这条断言守住的是那个前提本身:
+        // "没人 listen" 在各平台上都归一到同一个 kind, 不会退化成不可重试的形态。
+        let probe = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("probe should bind");
+        let port = probe.local_addr().expect("probe should expose addr").port();
+        drop(probe);
+
+        let err = connect_tcp_stream("127.0.0.1", port).expect_err("closed port should be refused");
+        assert_eq!(err.kind(), ErrorKind::ConnectionRefused);
     }
 
     #[test]

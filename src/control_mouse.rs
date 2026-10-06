@@ -3,10 +3,16 @@ mod parser;
 mod plan;
 mod report;
 mod request;
+mod screenshot_frame;
 mod target;
 
 #[allow(unused_imports)]
 pub use backend::{perform_mouse_plan, MouseBackend};
+#[allow(unused_imports)]
+pub use screenshot_frame::{
+    remember_screenshot_frame, ScreenshotFrame, ScreenshotImageToClickScale,
+    SCREENSHOT_FRAME_CACHE_CAPACITY, SCREENSHOT_FRAME_TTL_MS,
+};
 pub mod win_backend;
 pub use parser::{
     parse_click_payload, parse_drag_payload, parse_mouse_button_payload, parse_mouse_move_payload,
@@ -23,8 +29,9 @@ pub use report::MouseExecutionReport;
 pub use request::{
     ClickRequest, DragRequest, MouseAnchor, MouseButtonMode, MouseButtonName, MouseButtonRequest,
     MouseCoordinateSpace, MouseDisplayGuard, MouseEndpoint, MouseMoveRequest, MousePoint,
-    MouseRefTarget, MouseSelectorTarget, WheelRequest, DEFAULT_MOUSE_CLICK_HOLD_MS,
-    DEFAULT_MOUSE_CLICK_INTERVAL_MS, DEFAULT_MOUSE_DRAG_DURATION_MS, DEFAULT_MOUSE_DRAG_STEPS,
+    MouseRefTarget, MouseScreenshotTarget, MouseSelectorTarget, WheelRequest,
+    DEFAULT_MOUSE_CLICK_HOLD_MS, DEFAULT_MOUSE_CLICK_INTERVAL_MS, DEFAULT_MOUSE_DRAG_DURATION_MS,
+    DEFAULT_MOUSE_DRAG_STEPS,
 };
 pub use target::{
     prepare_click_request, prepare_drag_request, prepare_mouse_move_request, prepare_wheel_request,

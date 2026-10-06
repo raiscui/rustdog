@@ -249,12 +249,12 @@ fn control_mode_should_bridge_agent_protocol_to_daemon_inbound() {
         .expect("simple client should flush ping request");
     let output = read_socket_output_until_contains(
         &mut simple_client,
-        r#"@response "pong""#,
+        r#""pong":true"#,
         Duration::from_secs(5),
     )
     .expect("should read simple ping response");
     assert!(
-        output.contains(r#"@response "pong""#),
+        output.contains(r#""pong":true"#),
         "simple command ping did not receive pong. output so far:\n{output}",
     );
 

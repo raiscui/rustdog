@@ -364,6 +364,7 @@ fn build_window_screenshot_outcome_with_id(
     validate_captured_displays(&displays)?;
     let virtual_bounds =
         build_virtual_bounds(displays.iter().map(|display| display.metadata.os_rect))?;
+    let os_logical_bounds = build_os_logical_bounds(&displays)?;
     let captured_os_rect = requested_os_rect
         .intersection(virtual_bounds)
         .ok_or_else(|| {
@@ -397,8 +398,12 @@ fn build_window_screenshot_outcome_with_id(
     .to_image();
     let image_filename = format!("screenshot-{screenshot_id}-window.jpg");
     let manifest_filename = format!("screenshot-{screenshot_id}-window-manifest.json");
-    // OCR 内容层 (spec v1.1): 对窗口裁剪图跑识别, 原点取 captured_os_rect 左上,
-    // 产出 os-logical 文本框。窗口路径是 WeChat 等 no-AX 场景的主入口。
+    // OCR 内容层 (spec v1.1): 对窗口裁剪图跑识别, 原点取 captured_os_rect 左上。
+    // 窗口路径是 WeChat 等 no-AX 场景的主入口。
+    // 已知偏差 (非本组范围, 留档): recognize_to_manifest 只做平移不做缩放, 而这里
+    // 传的原点与图上像素同属 OS 原生空间, 所以 Windows HiDPI 下 boxes 实际是原生
+    // 像素坐标, 与 OcrManifest 声明的 os-logical 差一个 scale。修它要改 OCR 层契约
+    // (加缩放参数) 或在 manifest 侧逐框换算, 属另一组的活。
     let ocr_manifest = if request.include_ocr {
         let manifest = recognize_to_manifest(
             &image,
@@ -418,11 +423,18 @@ fn build_window_screenshot_outcome_with_id(
         None
     };
 
+    // 换算标尺取整张合成图的尺寸, 不是这次裁出来的窗口图 —— 见 ImageToClickScale 注释。
+    let virtual_image_size = Size {
+        width: virtual_bounds.width,
+        height: virtual_bounds.height,
+    };
+
     let manifest = WindowScreenshotManifest {
         schema: "rdog.screenshot.window.v1",
         screenshot_id,
         coordinate_space: "os-logical",
         image_coordinate_space: "window-logical-pixels",
+        click_coordinate_space: "os-logical",
         capture_status: "complete",
         source: "display-composite-crop",
         visibility: "screen-composited",
@@ -432,10 +444,18 @@ fn build_window_screenshot_outcome_with_id(
             captured_os_rect,
             clipped: requested_os_rect != captured_os_rect,
         },
+        os_logical_bounds,
         image_size: Size {
             width: image.width(),
             height: image.height(),
         },
+        virtual_image_size,
+        image_rect,
+        image_to_click_scale: ImageToClickScale::from_virtual_image(
+            virtual_image_size,
+            os_logical_bounds,
+        ),
+        transforms: ScreenshotTransforms::window(),
         ocr: ocr_manifest,
     };
     let manifest_json = serde_json::to_vec_pretty(&manifest)
@@ -893,6 +913,11 @@ struct ScreenshotManifest {
     layout: &'static str,
     coordinate_space: &'static str,
     image_coordinate_space: &'static str,
+    /// `@click` 接受、且与本 manifest 的 os-logical 字段直接互通的空间。
+    /// 2026-10-05 Windows 真机 (4K@200%) 的时间黑洞: manifest 只声明了两个空间的
+    /// 名字, 却没给标尺, agent 只能猜 3840÷2; 显式点明"哪个空间能和 @click 互通"
+    /// 后, 配合 image_to_click_scale / transforms 就能一步换算。
+    click_coordinate_space: &'static str,
     capture_status: &'static str,
     partial: bool,
     backend_policy: &'static str,
@@ -902,6 +927,9 @@ struct ScreenshotManifest {
     /// LogicalRect::to_os_logical; agent 用它即可精确换算, 不必猜 scale。
     os_logical_bounds: LogicalRect,
     image_size: Size,
+    /// 图上 1 像素 = 多少 os-logical 单位 (4K@200% 下 0.5), 乘它即可得到 @click 坐标。
+    /// 调用方拿到就能一次换算, 不用自己读四个数算比例。
+    image_to_click_scale: ImageToClickScale,
     display_count: usize,
     transforms: ScreenshotTransforms,
     gaps: Vec<LogicalRect>,
@@ -919,12 +947,27 @@ struct WindowScreenshotManifest<'a> {
     screenshot_id: &'a str,
     coordinate_space: &'static str,
     image_coordinate_space: &'static str,
+    /// 与全屏 manifest 同名同义。窗口截图是"看不见 AX 树"场景 (微信等) 的主入口,
+    /// 坐标换算的缺口在这里同样会咬人, 所以口径必须与全屏一致。
+    click_coordinate_space: &'static str,
     capture_status: &'static str,
     /// 说明图像来自可见 desktop composite,不是不可遮挡的原生 window surface。
     source: &'static str,
     visibility: &'static str,
     window: WindowScreenshotTargetManifest<'a>,
+    /// 虚拟桌面在 os-logical 空间的边界, 窗口图的换算原点与标尺同样取自这里。
+    os_logical_bounds: LogicalRect,
     image_size: Size,
+    /// 全虚拟桌面图 (composite) 的尺寸, 换算公式里的标尺, **不是**本次裁剪出的窗口图。
+    /// 与 image_size 同时给出, 免得调用方把裁剪尺寸当标尺用。
+    virtual_image_size: Size,
+    /// 本窗口图在全虚拟桌面图 (composite 像素) 内的位置。
+    /// 裁剪图原点不等于虚拟桌面原点, 所以窗口的换算公式比全屏多一项平移。
+    image_rect: LogicalRect,
+    /// 图上 1 像素 = 多少 os-logical 单位 (4K@200% 下 0.5), 乘它即可得到 @click 坐标。
+    /// 坐标系属性而非裁剪属性: 由 virtual_image_size / os_logical_bounds 决定, 与截哪块窗口无关。
+    image_to_click_scale: ImageToClickScale,
+    transforms: ScreenshotTransforms,
     /// OCR 内容层 (spec v1.1): 窗口裁剪图上的识别文本框, os-logical 坐标。
     #[serde(skip_serializing_if = "Option::is_none")]
     ocr: Option<OcrManifest>,
@@ -938,10 +981,66 @@ struct WindowScreenshotTargetManifest<'a> {
     clipped: bool,
 }
 
+/// 换算公式串, 只允许出现同一份 manifest 里真实存在的字段名 —— 逐字照抄即可执行,
+/// 不依赖调用方先记住"哪个 bounds 是哪个空间的"这种易错前提。
+///
+/// 方向统一为 `os-logical` (与 @click 一致), 不再用 virtual_bounds 做换算:
+/// virtual_bounds 是 OS 原生空间, DPI-aware 进程在 Windows 上是**物理像素**,
+/// 直接加它等于让 agent 在图上像素与逻辑坐标之间漏掉一个 scale (4K@200% 下差 2 倍)。
+///
+/// 已知边界: 这是一条覆盖全桌面的线性映射, 只有整桌面统一缩放时精确。混合 DPI
+/// (主屏 200% + 副屏 100%) 下, 全屏 manifest 应改用 `displays[].os_logical_rect`
+/// 与 `displays[].image_rect` 逐屏换算; 窗口 manifest 没有逐屏清单, 只能取整桌面
+/// 近似 —— 窗口跨屏时这一点必须知道。
 #[derive(Serialize)]
 struct ScreenshotTransforms {
     image_to_os: &'static str,
     os_to_image: &'static str,
+}
+
+impl ScreenshotTransforms {
+    /// 全虚拟桌面图 / 单屏图: 图上原点就是虚拟桌面左上角。
+    fn composite() -> Self {
+        Self {
+            image_to_os: "os_x = os_logical_bounds.x + image_x * image_to_click_scale.x; os_y = os_logical_bounds.y + image_y * image_to_click_scale.y",
+            os_to_image: "image_x = (os_x - os_logical_bounds.x) * image_size.width / os_logical_bounds.width; image_y = (os_y - os_logical_bounds.y) * image_size.height / os_logical_bounds.height",
+        }
+    }
+
+    /// 窗口裁剪图: 先把图上坐标挪进全虚拟桌面图的坐标系, 再套 composite 的同一套换算。
+    /// os_to_image 用 virtual_image_size 而非 image_size —— 后者是裁剪后的窗口图尺寸,
+    /// 4K 屏上拿 800 当标尺会让比例从 2 缩成 0.42, 落点直接飞掉。
+    fn window() -> Self {
+        Self {
+            image_to_os: "os_x = os_logical_bounds.x + (image_rect.x + image_x) * image_to_click_scale.x; os_y = os_logical_bounds.y + (image_rect.y + image_y) * image_to_click_scale.y",
+            os_to_image: "image_x = (os_x - os_logical_bounds.x) * virtual_image_size.width / os_logical_bounds.width - image_rect.x; image_y = (os_y - os_logical_bounds.y) * virtual_image_size.height / os_logical_bounds.height - image_rect.y",
+        }
+    }
+}
+
+/// 图上 1 像素 = 多少 os-logical 单位, 方向 image→click (与 transforms.image_to_os
+/// 同一方向, 拿到就能直接乘)。
+///
+/// 4K@200% 下是 **0.5**: 图上一个像素横跨半个逻辑单位, 乘 0.5 才是 @click 坐标。
+/// 反向 (click→image, 即 os_to_image 用的方向) 是它的倒数 2.0, 不要与本字段混用。
+#[derive(Debug, Copy, Clone, PartialEq, Serialize)]
+struct ImageToClickScale {
+    x: f64,
+    y: f64,
+}
+
+impl ImageToClickScale {
+    /// `virtual_image_size` 恒指**全虚拟桌面图**尺寸, 与本次 capture 裁了多少无关:
+    /// 每像素对应多少逻辑单位是坐标系属性, 只由整桌面决定 (统一缩放时)。
+    fn from_virtual_image(virtual_image_size: Size, os_logical_bounds: LogicalRect) -> Self {
+        // 分母非零由 build_virtual_bounds 保证 (0 宽高直接报错), 断言只把该不变量写在
+        // 消费点: 真出现 0 分母时 serde_json 会把 INFINITY 悄悄序列化成 null, 反而更难查。
+        debug_assert!(virtual_image_size.width > 0 && virtual_image_size.height > 0);
+        Self {
+            x: f64::from(os_logical_bounds.width) / f64::from(virtual_image_size.width),
+            y: f64::from(os_logical_bounds.height) / f64::from(virtual_image_size.height),
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -1043,13 +1142,7 @@ fn build_screenshot_bundle_with_ax_and_layout(
 
     let virtual_bounds =
         build_virtual_bounds(displays.iter().map(|display| display.metadata.os_rect))?;
-    // os-logical 虚拟桌面边界: 各屏原生 rect 换算成逻辑后再取并集 bounds。
-    // 分屏各自换算 (混合 DPI 下每屏 scale 不同), 再用并集 bounds 汇总。
-    let os_logical_bounds = build_virtual_bounds(
-        displays
-            .iter()
-            .map(|display| display.metadata.os_rect.to_os_logical(display.metadata.scale_factor)),
-    )?;
+    let os_logical_bounds = build_os_logical_bounds(&displays)?;
     let image_size = Size {
         width: virtual_bounds.width,
         height: virtual_bounds.height,
@@ -1103,9 +1196,11 @@ fn build_screenshot_bundle_with_ax_and_layout(
         });
     }
 
-    // OCR 内容层 (spec v1.1): composite 是 logical 像素, 文本框像素坐标
-    // 加 virtual_bounds 左上即为 os-logical, 与鼠标坐标直接互通。
+    // OCR 内容层 (spec v1.1): 识别框像素坐标加 virtual_bounds 左上 (图上原点)。
     // 引擎不可用/超时在这里 fail-closed 上抛, 不产出缺层 manifest。
+    // 已知偏差 (非本组范围, 留档): composite 是 OS 原生像素 (Windows HiDPI 下 = 物理),
+    // recognize_to_manifest 只平移不缩放, 所以 boxes 仍是原生像素坐标, 与其声明的
+    // os-logical 差一个 scale; 图↔click 的换算本身已由 transforms 给出, boxes 换算待另票。
     let ocr_manifest = if include_ocr {
         let manifest = recognize_to_manifest(
             &composite,
@@ -1125,17 +1220,16 @@ fn build_screenshot_bundle_with_ax_and_layout(
         layout: layout.as_str(),
         coordinate_space: "os-logical",
         image_coordinate_space: layout.image_coordinate_space(),
+        click_coordinate_space: "os-logical",
         capture_status: "complete",
         partial: false,
         backend_policy: backend_policy_for_current_platform(),
         virtual_bounds,
         os_logical_bounds,
         image_size,
+        image_to_click_scale: ImageToClickScale::from_virtual_image(image_size, os_logical_bounds),
         display_count: display_manifests.len(),
-        transforms: ScreenshotTransforms {
-            image_to_os: "os_x=image_x+virtual_bounds.x; os_y=image_y+virtual_bounds.y",
-            os_to_image: "image_x=os_x-virtual_bounds.x; image_y=os_y-virtual_bounds.y",
-        },
+        transforms: ScreenshotTransforms::composite(),
         gaps,
         displays: display_manifests,
         accessibility,
@@ -1493,6 +1587,19 @@ fn build_virtual_bounds(rects: impl IntoIterator<Item = LogicalRect>) -> io::Res
         width,
         height,
     })
+}
+
+/// 虚拟桌面在 `os-logical` 空间的并集边界。
+///
+/// 必须逐屏用自己的 scale 换算后再取并集: 混合 DPI 下每屏 scale 不同, 先并集
+/// 再换算会把副屏的偏移和尺寸一起算错。composite 与 window 两条 manifest 路径
+/// 共用这一个实现, 避免同一换算规则出现第二份。
+fn build_os_logical_bounds(displays: &[CapturedDisplay]) -> io::Result<LogicalRect> {
+    build_virtual_bounds(
+        displays
+            .iter()
+            .map(|display| display.metadata.os_rect.to_os_logical(display.metadata.scale_factor)),
+    )
 }
 
 fn os_rect_to_image_rect(

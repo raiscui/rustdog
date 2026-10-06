@@ -910,7 +910,7 @@ fn control_one_shot_should_send_ping_and_exit_for_tcp_lane() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(
-        stdout.contains(r#"@response "pong""#),
+        stdout.contains(r#""pong":true"#),
         "stdout did not contain @response pong: {stdout}"
     );
 
@@ -1055,7 +1055,7 @@ fn control_one_shot_should_accept_two_at_lines_and_run_in_order_for_tcp_lane() {
     );
     // 两条响应都在,且顺序为 1) ping 2) capabilities#1
     let pong_pos = stdout
-        .find(r#"@response "pong""#)
+        .find(r#""pong":true"#)
         .expect("pong should appear");
     let caps_pos = stdout
         .find(r#"@response {"id":1,"value":{"capabilities""#)
@@ -1121,7 +1121,7 @@ fn control_multi_one_shot_should_run_lines_in_order_for_tcp_lane() {
     );
     // 三条响应都在,且顺序为 1) ping 2) capabilities 3) cmd#7 READY
     let pong_pos = stdout
-        .find(r#"@response "pong""#)
+        .find(r#""pong":true"#)
         .expect("pong should appear");
     let caps_pos = stdout
         .find(r#"@response {"id":1,"value":{"capabilities""#)
@@ -1182,7 +1182,7 @@ fn control_multi_one_shot_should_run_with_one_line_for_tcp_lane() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(
-        stdout.contains(r#"@response "pong""#),
+        stdout.contains(r#""pong":true"#),
         "stdout did not contain pong: {stdout}"
     );
 

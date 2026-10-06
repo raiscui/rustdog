@@ -585,7 +585,31 @@ pub(super) fn require_non_empty_payload<T>(
     Ok(constructor(payload))
 }
 
+/// quoted payload 的两处放宽维度: 闭合引号之后的尾巴, 以及未知反斜杠转义。
+///
+/// 这两维必须绑在一个枚举里而不是两个布尔开关 —— 它们是同一个契约的两种形态:
+/// 「这条 payload 是不是 shell 文本」。是 shell 文本就整体放宽, 不是就维持严格
+/// 契约, 中间态(尾巴放宽但转义收紧, 或反之)没有对应的真实场景, 只会让调用方
+/// 以为自己拿到了 shell 语义却仍被反斜杠拦下。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum QuotedPayloadPolicy {
+    /// 严格契约: 闭合引号后必须整行结束, 未知转义序列报错。
+    /// 绝大多数控制命令 (窗口标题 / 按键名 / 目标选择器) 的既有契约。
+    Strict,
+    /// `@cmd` 的 shell 文本契约:
+    /// - 闭合引号后允许继续有内容, 剩余原文原样拼在引号内容之后
+    ///   (`"X=" + (Get-Item ...)` 是合法写法, 远程 Windows 真机 2026-10-05 实战:
+    ///   `@cmd:"X=" + ...` 直接吃到 code 64);
+    /// - 只有 `\"` 是转义, 其余 `\` 一律按字面反斜杠还原 (见
+    ///   `parse_quoted_payload_with` 的转义分支)。
+    ShellText,
+}
+
 pub(crate) fn parse_quoted_payload(input: &str) -> io::Result<String> {
+    parse_quoted_payload_with(input, QuotedPayloadPolicy::Strict)
+}
+
+fn parse_quoted_payload_with(input: &str, policy: QuotedPayloadPolicy) -> io::Result<String> {
     if !input.starts_with('"') {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -598,18 +622,41 @@ pub(crate) fn parse_quoted_payload(input: &str) -> io::Result<String> {
 
     for (index, ch) in input.char_indices().skip(1) {
         if escaped {
-            match ch {
-                '"' => result.push('"'),
-                '\\' => result.push('\\'),
-                'n' => result.push('\n'),
-                'r' => result.push('\r'),
-                't' => result.push('\t'),
-                other => {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        format!("不支持的转义序列: \\{other}"),
-                    ))
-                }
+            // 两种契约对"反斜杠意味着什么"的判断根本不同, 所以先按契约算出
+            // 该落成哪个字符, 算不出来再按契约决定是报错还是按字面还原。
+            //
+            // 关键分歧在 `\n` / `\r` / `\t` / `\\`: 严格契约把它们当转义, 而
+            // shell 文本里它们是路径的日常形态 —— `\notes.txt` 的 `\n`、
+            // `\temp` 的 `\t`、UNC 的 `\\server\share` 的 `\\`。按转义处理会把
+            // 一条合法 Windows 路径改写成带换行符的垃圾, 且协议层无从察觉。
+            let unescaped = match (policy, ch) {
+                (_, '"') => Some('"'),
+                (QuotedPayloadPolicy::Strict, '\\') => Some('\\'),
+                (QuotedPayloadPolicy::Strict, 'n') => Some('\n'),
+                (QuotedPayloadPolicy::Strict, 'r') => Some('\r'),
+                (QuotedPayloadPolicy::Strict, 't') => Some('\t'),
+                _ => None,
+            };
+
+            match unescaped {
+                Some(character) => result.push(character),
+                None => match policy {
+                    // 严格契约: 反斜杠只可能是转义符, 认不出就报错。
+                    QuotedPayloadPolicy::Strict => {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            format!("不支持的转义序列: \\{ch}"),
+                        ))
+                    }
+                    // shell 文本契约: 只有 `\"` 走转义通道 (协议引号必须能出现在
+                    // payload 内部), 其余一律还原成字面 `\` + 原字符。这样
+                    // Windows 路径能逐字节穿过协议层, 而不是被判成"未支持的
+                    // 转义"或被偷偷改写。
+                    QuotedPayloadPolicy::ShellText => {
+                        result.push('\\');
+                        result.push(ch);
+                    }
+                },
             }
             escaped = false;
             continue;
@@ -618,14 +665,25 @@ pub(crate) fn parse_quoted_payload(input: &str) -> io::Result<String> {
         match ch {
             '\\' => escaped = true,
             '"' => {
+                // 尾部不 trim 就判空: KeepAsRawText 要把空白原样保留,
+                // 尾随空白是调用方 shell 文本的分隔依据。
                 if input[index + 1..].trim().is_empty() {
                     return Ok(result);
                 }
 
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!("控制指令 payload 后存在多余内容: {input}"),
-                ));
+                return match policy {
+                    QuotedPayloadPolicy::Strict => Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("控制指令 payload 后存在多余内容: {input}"),
+                    )),
+                    // 剩余原文直接拼上去, 不注入任何分隔符 —— `;` `|` `+`
+                    // 这些连接符属于调用方的 shell 文本, 我们插一个空格进去
+                    // 就等于替用户改写了命令。
+                    QuotedPayloadPolicy::ShellText => {
+                        result.push_str(&input[index + 1..]);
+                        Ok(result)
+                    }
+                };
             }
             other => result.push(other),
         }
@@ -643,16 +701,253 @@ pub(crate) fn parse_quoted_payload(input: &str) -> io::Result<String> {
 /// payload;其它控制命令仍继续使用严格的 quoted/object 契约。
 pub(super) fn parse_cmd_payload(input: &str) -> io::Result<String> {
     let trimmed = input.trim();
+
     if trimmed.starts_with('"') {
-        return parse_quoted_payload(trimmed);
+        let payload = parse_quoted_payload_with(trimmed, QuotedPayloadPolicy::ShellText)?;
+        // 剥掉调用方自己加的引号之后还要再判一次: `@cmd:"C:\a b\x.exe" --silent`
+        // 还原出来仍然是劈开的裸路径, 放过去只会把报错换成 shell 那句更难查的
+        // CommandNotFoundException。
+        return reject_split_windows_path(&payload);
     }
 
-    if trimmed.is_empty() || input.contains(['\r', '\n']) || trimmed.starts_with('{') {
+    let payload = reject_split_windows_path(trimmed)?;
+
+    if trimmed.starts_with('{') {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "@cmd 对象 payload 还没有承接的字段: `@cmd` 的执行面只带一段单行 shell 文本 \
+                 (ControlCommand::Script 是 String 载荷), 选 shell / 设超时 / 写临时脚本都没有落点。\
+                 当前支持 raw 或 quoted 两种形式; 长脚本先用 `@put-file` + `@file-chunk` + \
+                 `@file-end` 传成被控端上的 .ps1, 再 `@cmd:& \"<脚本路径>\"` 执行。payload: {input}"
+            ),
+        ));
+    }
+
+    if trimmed.is_empty() || input.contains(['\r', '\n']) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             format!("@cmd payload 必须是非空、单行的 quoted 或 raw shell 文本: {input}"),
         ));
     }
 
-    Ok(trimmed.to_owned())
+    Ok(payload)
+}
+
+fn reject_split_windows_path(payload: &str) -> io::Result<String> {
+    match windows_unquoted_space_path_hint(payload) {
+        Some(hint) => Err(io::Error::new(io::ErrorKind::InvalidData, hint)),
+        None => Ok(payload.to_owned()),
+    }
+}
+
+/// Windows 解释器把 payload 按空白拆 token, 带空格的裸路径必然被劈成两段:
+/// `C:\Users\x\Uninstall Yino.exe` 会被当成 `C:\Users\x\Uninstall` 这个命令去找,
+/// 报出来的是 `CommandNotFoundException` —— 与真实病因 (路径写法) 毫无关联。
+///
+/// 判据只问一件事: **可执行路径到达后缀之前有没有跨过空白**。payload 以盘符开头,
+/// 且第一个可执行后缀之前就已经出现空格 —— 这条命令在 bash/zsh/sh/pwsh/cmd 下
+/// 都不可能跑通, 所以在协议层拦下不是"解释器语义检查", 而是拦下一条必然失败
+/// 的命令。路径后面跟多少参数都拦得住, 因为空格在参数之前就已经出现了。
+fn windows_unquoted_space_path_hint(payload: &str) -> Option<String> {
+    let first = payload.split_whitespace().next()?;
+    if !starts_with_windows_drive(first) {
+        return None;
+    }
+
+    let (suffix_start, suffix_end) = first_windows_executable_suffix_span(payload)?;
+    if !payload[..suffix_start].contains(' ') {
+        return None;
+    }
+
+    let path = payload[..suffix_end].trim_end();
+    Some(format!(
+        "payload 里的 Windows 可执行路径含空格却没有加引号, 任何 shell 都会把 \
+         `{path}` 的第一段当命令名去找: PowerShell 下写 `& \"{path}\" args` \
+         (调用运算符), cmd.exe 下写 `\"\"{path}\"\" args` (整体双引号); \
+         rdog 只提示不替你改写命令。payload: {payload}"
+    ))
+}
+
+fn starts_with_windows_drive(token: &str) -> bool {
+    // 盘符一定是 ASCII, 所以按字节判断既安全又比 char 迭代直白。
+    let bytes = token.as_bytes();
+    bytes.len() > 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' && bytes[2] == b'\\'
+}
+
+/// 找出文本里最早出现的可执行后缀, 返回 (后缀起点, 后缀终点) 字节下标。
+///
+/// `.cmd` / `.ps1` 与 `.exe` 在 Windows 上是同一类坑 (裸 token 规则一致), 漏掉它们
+/// 会让使用者以为规则只对可执行文件生效。
+fn first_windows_executable_suffix_span(text: &str) -> Option<(usize, usize)> {
+    const EXECUTABLE_SUFFIXES: [&str; 4] = [".exe", ".ps1", ".bat", ".cmd"];
+    // 只折 ASCII 大写, 字节长度不变, 所以在 folded 上的下标可直接用于 text。
+    let folded = text.to_ascii_lowercase();
+    EXECUTABLE_SUFFIXES
+        .iter()
+        .filter_map(|suffix| folded.find(*suffix).map(|start| (start, suffix)))
+        .min_by_key(|(start, _)| *start)
+        .map(|(start, suffix)| (start, start + suffix.len()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ------------------------------------------------------------
+    // @cmd quoted 尾巴宽容 (quoted 前缀 + 剩余原文)
+    // ------------------------------------------------------------
+
+    #[test]
+    fn cmd_quoted_payload_should_keep_text_after_closing_quote() {
+        // 远程 Windows 实战踩到的写法: 字符串字面量后面还跟着表达式。
+        let payload = parse_cmd_payload(r#""X=" + (Get-Item C:\Windows\System32)"#).unwrap();
+        assert_eq!(payload, r#"X= + (Get-Item C:\Windows\System32)"#);
+    }
+
+    #[test]
+    fn cmd_quoted_payload_should_not_inject_separator_into_tail() {
+        // 分隔符属于调用方的 shell 文本, 我们插空格就等于替用户改写命令。
+        let payload = parse_cmd_payload(r#""a";"b""#).unwrap();
+        assert_eq!(payload, r#"a;"b""#);
+    }
+
+    #[test]
+    fn cmd_quoted_payload_should_still_unescape_inside_quotes() {
+        let payload = parse_cmd_payload(r#""a\"b" ; ls"#).unwrap();
+        assert_eq!(payload, r#"a"b ; ls"#);
+    }
+
+    #[test]
+    fn cmd_quoted_payload_without_tail_should_stay_strict() {
+        assert_eq!(parse_cmd_payload(r#""echo hi""#).unwrap(), "echo hi");
+    }
+
+    #[test]
+    fn cmd_quoted_payload_should_still_reject_unclosed_quote() {
+        let err = parse_cmd_payload(r#""echo hi"#).unwrap_err();
+        assert!(err.to_string().contains("未闭合"));
+    }
+
+    #[test]
+    fn strict_quoted_payload_should_still_reject_trailing_content() {
+        // 非 @cmd 的命令保持原有严格契约: 共用扫描核心不代表契约一起放宽。
+        let err = parse_quoted_payload(r#""a" junk"#).unwrap_err();
+        assert!(err.to_string().contains("多余内容"));
+    }
+
+    // ------------------------------------------------------------
+    // @cmd raw / 对象 / 多行
+    // ------------------------------------------------------------
+
+    #[test]
+    fn cmd_raw_payload_should_pass_through() {
+        assert_eq!(
+            parse_cmd_payload("Get-Process | Where-Object Name -eq rdog").unwrap(),
+            "Get-Process | Where-Object Name -eq rdog"
+        );
+    }
+
+    #[test]
+    fn cmd_object_payload_should_report_missing_wiring() {
+        let err = parse_cmd_payload(r#"{"command":"ls","shell":"powershell"}"#).unwrap_err();
+        let message = err.to_string();
+        assert!(message.contains("还没有承接的字段"));
+        // 长脚本的真解法要指向已存在的上传 lane, 不能只说"不支持"。
+        assert!(message.contains("@put-file"));
+    }
+
+    #[test]
+    fn cmd_payload_should_still_reject_multiline() {
+        // 控制协议是行式的, 换行必然被当成新行, 这里必须继续拒绝。
+        let err = parse_cmd_payload("echo a\necho b").unwrap_err();
+        assert!(err.to_string().contains("单行"));
+    }
+
+    // ------------------------------------------------------------
+    // Windows 路径提示
+    // ------------------------------------------------------------
+
+    #[test]
+    fn cmd_windows_path_with_spaces_should_hint_both_shells() {
+        let err = parse_cmd_payload(r"C:\Users\vdcoo\yino-test\Uninstall Yino.exe").unwrap_err();
+        let message = err.to_string();
+        assert!(message.contains(r#"& "C:\Users\vdcoo\yino-test\Uninstall Yino.exe""#));
+        assert!(message.contains(r#"""C:\Users\vdcoo\yino-test\Uninstall Yino.exe""#));
+    }
+
+    #[test]
+    fn cmd_windows_path_with_spaces_before_flag_should_hint() {
+        let err = parse_cmd_payload(r"C:\Program Files\Yino\uninstall.exe --silent").unwrap_err();
+        assert!(err.to_string().contains("调用运算符"));
+    }
+
+    #[test]
+    fn cmd_windows_path_without_spaces_should_pass() {
+        // 单 token 裸路径在 PowerShell / cmd 下本来就能跑, 拦下就是假阳性。
+        assert_eq!(
+            parse_cmd_payload(r"C:\Windows\System32\sc.exe query").unwrap(),
+            r"C:\Windows\System32\sc.exe query"
+        );
+    }
+
+    #[test]
+    fn cmd_windows_path_with_plain_args_should_still_hint() {
+        // 空格出现在路径里, 参数有几个都不改变结局: PowerShell 只会去找
+        // `C:\Program` 这个命令。
+        let err = parse_cmd_payload(r"C:\Program Files\Yino\app.exe run local").unwrap_err();
+        assert!(err
+            .to_string()
+            .contains(r#"& "C:\Program Files\Yino\app.exe" args"#));
+    }
+
+    #[test]
+    fn cmd_windows_path_without_spaces_and_with_args_should_pass() {
+        assert_eq!(
+            parse_cmd_payload(r"C:\Windows\System32\sc.exe query TermService").unwrap(),
+            r"C:\Windows\System32\sc.exe query TermService"
+        );
+    }
+
+    #[test]
+    fn cmd_non_windows_shell_text_should_never_hint() {
+        assert_eq!(
+            parse_cmd_payload("cargo build --release").unwrap(),
+            "cargo build --release"
+        );
+        assert_eq!(
+            parse_cmd_payload("Write-Output hello world").unwrap(),
+            "Write-Output hello world"
+        );
+    }
+
+    #[test]
+    fn cmd_quoted_windows_path_should_be_rechecked_after_unescaping() {
+        // 引号是 rdog 自己剥掉的, 剥完还是劈开的裸路径就必须在这里拦下。
+        let err = parse_cmd_payload(r#""C:\Program Files\Yino\uninstall.exe" --silent"#)
+            .unwrap_err();
+        assert!(err.to_string().contains("调用运算符"));
+    }
+
+    #[test]
+    fn cmd_quoted_windows_path_with_args_should_pass() {
+        // 单 token 路径 + flag: 剥掉引号后本来就能跑, 不该误伤。
+        assert_eq!(
+            parse_cmd_payload(r#""C:\Yino\uninstall.exe" --silent"#).unwrap(),
+            r"C:\Yino\uninstall.exe --silent"
+        );
+    }
+
+    #[test]
+    fn cmd_quoted_string_constant_should_pass() {
+        // 字符串常量: 首个 token 不是盘符, 或者路径不是可执行后缀, 判据都不该命中。
+        assert_eq!(
+            parse_cmd_payload(r#"Write-Output "C:\Program Files\Yino\uninstall.exe""#).unwrap(),
+            r#"Write-Output "C:\Program Files\Yino\uninstall.exe""#
+        );
+        assert_eq!(
+            parse_cmd_payload(r#""C:\Program Files\Yino\notes.txt""#).unwrap(),
+            r"C:\Program Files\Yino\notes.txt"
+        );
+    }
 }

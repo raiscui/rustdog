@@ -15,8 +15,11 @@ use crate::{
     },
     // Phase F-1: 三个 error_envelope wrapper helper (Cancelled / PlatformUnsupported /
     // PermissionDenied), 让手写 JSON payload 跟其它 error_code 走同一 envelope 形状。
+    // 2026-10-06: 同步 shell lane 的超时 / 取消也走同一 envelope (Timeout / Cancelled),
+    // 不手写 error_code + retry 字段, 免得两条路径的 retry 语义漂移。
     control_computer_act::error_envelope::{
-        cancelled_envelope_json, permission_denied_envelope_json,
+        cancelled_envelope_json, error_envelope, permission_denied_envelope_json,
+        ComputerActErrorCode,
     },
     control_frames::{default_savefile_directory, SaveFileFrame},
     control_gui_bench::build_gui_bench_response_json,
@@ -46,10 +49,10 @@ use enigo::{Direction, Enigo, Key, Keyboard, Settings};
 use std::{
     io,
     path::{Path, PathBuf},
-    process::{Command, Output},
+    process::{Child, Command, ExitStatus, Stdio},
     sync::Arc,
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 /// 控制动作执行后的统一返回。
@@ -270,11 +273,13 @@ impl ControlActionExecutor for SystemControlActionExecutor {
             ControlCommand::Paste(request) => execute_paste(request),
             ControlCommand::Ping => Ok(ActionExecutionResult {
                 exit_code: 0,
-                stdout: b"pong".to_vec(),
+                stdout: Vec::new(),
                 stderr: Vec::new(),
-                response_value_json: None,
+                response_value_json: Some(build_ping_response_json(shell)),
             }),
-            ControlCommand::Script(script_text) => execute_script(shell, script_text),
+            ControlCommand::Script(script_text) => {
+                execute_script_cancellable(shell, script_text, cancel)
+            }
             ControlCommand::Screenshot(_) => Err(io::Error::new(
                 io::ErrorKind::Unsupported,
                 "@screenshot 由 control_core 直接走 screenshot producer,不应进入默认 executor 分支",
@@ -628,9 +633,366 @@ fn run_open_app_on_macos(
     }
 }
 
+/// 同步 shell lane 的兜底超时。
+///
+/// 2026-10-05 Windows 真机实测: `@cmd:Start-Process ... -Wait` 之后**后续所有
+/// control 命令都没有执行**。根因不是解析失败 / 权限 / 断连, 而是 worker 排队 —
+/// 裸 `Command::output()` 无限期等子进程退出, 一次就能占死这条控制 lane。
+/// `@spawn` 是异步的没这个问题, 但协议层不暴露这个差异, 只能靠踩坑发现。
+const DEFAULT_SHELL_LANE_TIMEOUT: Duration = Duration::from_secs(120);
+/// 环境变量覆盖同步 shell lane 超时 (毫秒)。按调用时读取而非启动时缓存:
+/// 远程排障常常是"这台机器上的 rdog 就该更慢", 改 env 重启 daemon 即生效。
+const SHELL_LANE_TIMEOUT_ENV: &str = "RDOG_SHELL_LANE_TIMEOUT_MS";
+/// 收割轮询间隔: 与 `@spawn` waiter 同量级, 远小于超时误差可接受范围。
+const SHELL_WAIT_POLL_INTERVAL: Duration = Duration::from_millis(10);
+/// 先温和终止、再升级强杀之间的宽限窗。
+const TERMINATION_GRACE: Duration = Duration::from_millis(200);
+/// 超时 exit_code: 沿用 GNU `timeout` 的 124, 与脚本自身的退出码区隔开。
+const SHELL_TIMEOUT_EXIT_CODE: i32 = 124;
+/// 取消 exit_code 与 `@wait` 取消 (以及 parse error) 对齐, 都用 64。
+const SHELL_CANCELLED_EXIT_CODE: i32 = 64;
+
+/// 子进程被收割循环打断的原因。
+///
+/// 区分二者是因为处置相反: 超时 = 没人管, 该换 `@spawn`; 取消 = 有人管,
+/// 调用方本来就知道发生了什么, 不该再被告知"请改用 @spawn"。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ShellInterruption {
+    Timeout(Duration),
+    Cancelled,
+}
+
+/// 读 `RDOG_SHELL_LANE_TIMEOUT_MS` 得到同步 shell lane 的超时。
+///
+/// `None` = 不限时。刻意留这个逃生口: 确实存在必须跑超长命令的作业, 但那
+/// 正确做法是 `@spawn` + 轮询; 写 0 的人是自己选择承担占死 lane 的风险, 所以
+/// 落一条 warn 让事后能查到"当时为什么没兜住"。
+///
+/// 解析失败按默认走 —— 远程作业时一个手滑的环境变量不该把控制面锁死。
+fn shell_lane_timeout() -> Option<Duration> {
+    match parse_shell_lane_timeout(std::env::var(SHELL_LANE_TIMEOUT_ENV).ok()) {
+        Ok(timeout) => {
+            if timeout.is_none() {
+                log::warn!(
+                    "{} 被设为 0: 同步 shell lane 不再有兜底超时, 阻塞命令会占死控制面",
+                    SHELL_LANE_TIMEOUT_ENV
+                );
+            }
+            timeout
+        }
+        Err(raw) => {
+            log::warn!(
+                "{}={raw:?} 不是合法毫秒数, 回落到默认 {}ms",
+                SHELL_LANE_TIMEOUT_ENV,
+                DEFAULT_SHELL_LANE_TIMEOUT.as_millis()
+            );
+            Some(DEFAULT_SHELL_LANE_TIMEOUT)
+        }
+    }
+}
+
+/// 纯函数形态的超时解析, 便于单测覆盖边界取值 (不碰进程级 env)。
+fn parse_shell_lane_timeout(raw: Option<String>) -> Result<Option<Duration>, String> {
+    let Some(raw) = raw else {
+        return Ok(Some(DEFAULT_SHELL_LANE_TIMEOUT));
+    };
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(Some(DEFAULT_SHELL_LANE_TIMEOUT));
+    }
+    trimmed
+        .parse::<u64>()
+        .map(|ms| (ms > 0).then_some(Duration::from_millis(ms)))
+        .map_err(|err| format!("{trimmed:?} ({err})"))
+}
+
+/// 同步执行一段 shell 脚本 (默认超时, 不接 cancel token)。
+///
+/// 给没有 in-flight token 的调用方 (`@computer-act` 的 open_url 折叠路径等) 用。
 pub(crate) fn execute_script(shell: &str, script_text: &str) -> io::Result<ActionExecutionResult> {
-    let output = build_shell_command(shell, script_text).output()?;
-    Ok(from_process_output(output))
+    execute_script_with_timeout(shell, script_text, shell_lane_timeout(), None)
+}
+
+/// executor 入口: 额外把 in-flight cancellation token 接进收割循环。
+///
+/// `@cancel#seq` 此前只能打断 `@wait` 的 sleep, 对 `@cmd` 完全无效 —— 信号发出去
+/// 了, 被取消的命令照跑到底。这里把 token 接进同一个轮询循环, cancel 与超时共用
+/// 一套杀进程树路径, 不会因为"是谁触发的"而走出两套终止语义。
+pub(crate) fn execute_script_cancellable(
+    shell: &str,
+    script_text: &str,
+    cancel: Option<&CancellationToken>,
+) -> io::Result<ActionExecutionResult> {
+    execute_script_with_timeout(shell, script_text, shell_lane_timeout(), cancel)
+}
+
+/// 同步 shell lane 的真正执行体: spawn + 轮询收割 + 兜底超时 / 取消时杀整棵进程树。
+///
+/// 为什么不用 `Command::output()`: 它无限期等子进程, 而"不退出"恰恰是远程 shell
+/// lane 最高频的故障形态 (交互式等待、`-Wait`、GUI 程序弹模态框), 一次就够把
+/// 这条控制 lane 的 worker 占死, 对外表现成"命令没生效"。
+///
+/// 为什么 kill 的是**进程树**而不是组长: 只杀 shell 的话, `Start-Process` /
+/// 后台 `&` 起的孙进程会脱离父进程继续跑, 既占资源又可能继续持有管道写端。
+pub(crate) fn execute_script_with_timeout(
+    shell: &str,
+    script_text: &str,
+    timeout: Option<Duration>,
+    cancel: Option<&CancellationToken>,
+) -> io::Result<ActionExecutionResult> {
+    let mut command = build_shell_command(shell, script_text);
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    isolate_process_group(&mut command);
+
+    let started_at = Instant::now();
+    let mut child = command.spawn()?;
+    let child_id = child.id();
+
+    // stdout / stderr 各一个 reader 线程: 主线程只做 try_wait 收割。若在这里同步
+    // 读管道, 管道写端写满会反压子进程, 子进程卡在 write 上反而拖过超时判定。
+    let stdout_reader = child.stdout.take().map(spill_stream_to_vec);
+    let stderr_reader = child.stderr.take().map(spill_stream_to_vec);
+
+    let deadline = timeout.map(|timeout| started_at + timeout);
+    let mut interrupted = None;
+    let status = loop {
+        if let Some(status) = child.try_wait()? {
+            break Some(status);
+        }
+        // cancel 先于 timeout 判定: 显式意图优先于兜底, 否则两条路径同时成立时
+        // 报出来的是"超时", 会把"我已经 cancel 了"误报成"我不知道你在跑"。
+        if cancel.is_some_and(|token| token.is_cancelled()) {
+            interrupted = Some(ShellInterruption::Cancelled);
+            break reap_after_terminate(&mut child, child_id);
+        }
+        if let Some(deadline) = deadline.filter(|deadline| Instant::now() >= *deadline) {
+            interrupted = Some(ShellInterruption::Timeout(
+                deadline.duration_since(started_at),
+            ));
+            break reap_after_terminate(&mut child, child_id);
+        }
+        thread::sleep(SHELL_WAIT_POLL_INTERVAL);
+    };
+
+    // 必须先杀完再 join: 进程树没了管道写端才会 EOF, 顺序反了会挂在 join 上。
+    let stdout = join_spilled_stream(stdout_reader);
+    let stderr = join_spilled_stream(stderr_reader);
+    let exit_code = status.and_then(|status| status.code()).unwrap_or(-1);
+
+    // 成功形状刻意不动 (stdout 非空 → `"<stdout>"`, 空 → `0`): 那是
+    // `control_core::render_control_response_payload` 的既有契约, 大量消费方
+    // (含集成测试 tests/control_lanes.rs) 按字符串读。只有失败 / 超时 / 取消
+    // 才升级成对象 —— 那正是"看不出自己在哪个解释器里"会让人无从自纠的场景。
+    let (exit_code, response_value_json) = match interrupted {
+        Some(ShellInterruption::Timeout(timeout)) => (
+            SHELL_TIMEOUT_EXIT_CODE,
+            Some(build_shell_timeout_response_json(shell, timeout, &stderr)),
+        ),
+        Some(ShellInterruption::Cancelled) => (
+            SHELL_CANCELLED_EXIT_CODE,
+            Some(build_shell_cancelled_response_json(shell, &stderr)),
+        ),
+        None if exit_code == 0 && stderr.is_empty() => (0, None),
+        None => (
+            exit_code,
+            Some(build_shell_failure_response_json(
+                shell, exit_code, &stdout, &stderr,
+            )),
+        ),
+    };
+
+    Ok(ActionExecutionResult {
+        exit_code,
+        stdout,
+        stderr,
+        response_value_json,
+    })
+}
+
+/// 把子进程输出整流读完 (无上限, 与 `Command::output()` 的既有语义一致)。
+///
+/// `R` 必须 `Send + 'static`: 读取发生在 `thread::spawn` 起的 reader 线程里, 主线程
+/// 只做 `try_wait` 收割。`move` 闭包把 `reader` 整个搬进新线程, 而 `spawn` 要求
+/// `F: Send + 'static`, 两个约束都由被捕获的 `R` 承担 —— 只写 `Send` 会漏掉
+/// `'static` (E0277 过了、E0310 接着报), 两条必须成对出现。
+///
+/// 唯一调用方传的是 `ChildStdout` / `ChildStderr` (管道句柄), 两者都是
+/// `'static + Send` 的拥有型句柄, 所以这两条约束由 std 的管道类型兑现, 不外溢到调用方。
+fn spill_stream_to_vec<R: io::Read + Send + 'static>(
+    mut reader: R,
+) -> thread::JoinHandle<Vec<u8>> {
+    thread::spawn(move || {
+        let mut bytes = Vec::new();
+        // 读失败 (管道被强杀打断) 时把已读部分带回去, 不让半个输出静默消失
+        let _ = reader.read_to_end(&mut bytes);
+        bytes
+    })
+}
+
+fn join_spilled_stream(handle: Option<thread::JoinHandle<Vec<u8>>>) -> Vec<u8> {
+    handle
+        .and_then(|handle| handle.join().ok())
+        .unwrap_or_default()
+}
+
+/// 先温和终止、再升级强杀地收掉整棵进程树, 顺带 reap 组长。
+fn reap_after_terminate(child: &mut Child, child_id: u32) -> Option<ExitStatus> {
+    terminate_process_tree(child, child_id, TerminationSignal::Terminate);
+    let grace_deadline = Instant::now() + TERMINATION_GRACE;
+    while Instant::now() < grace_deadline {
+        if let Ok(Some(status)) = child.try_wait() {
+            return Some(status);
+        }
+        thread::sleep(SHELL_WAIT_POLL_INTERVAL);
+    }
+    terminate_process_tree(child, child_id, TerminationSignal::Kill);
+    child.wait().ok()
+}
+
+enum TerminationSignal {
+    Terminate,
+    Kill,
+}
+
+/// 让子进程自成进程组: 终止时才能一次信号覆盖整棵树, 而不误伤 daemon 自己。
+#[cfg(unix)]
+fn isolate_process_group(command: &mut Command) {
+    use std::os::unix::process::CommandExt as _;
+
+    command.process_group(0);
+}
+
+#[cfg(not(unix))]
+fn isolate_process_group(_command: &mut Command) {}
+
+/// 终止整棵进程树。
+///
+/// unix: 负 pid 的进程组信号 (先 SIGTERM 后 SIGKILL)。
+/// 2026-08-28 CI 实测 (strace) 的坑: 外部 `/usr/bin/kill` 在 GNU coreutils 上会把
+/// `["-TERM", "-<pid>"]` 解析成 `kill(-2, SIGTERM)` —— 信号发往进程组 2 而非目标组,
+/// ESRCH 静默失败, 孤儿子孙继续持有 stdout 写端把收割拖死。所以走进程内 `libc::kill(2)`。
+#[cfg(unix)]
+fn terminate_process_tree(child: &mut Child, child_id: u32, signal: TerminationSignal) {
+    let signum = match signal {
+        TerminationSignal::Terminate => libc::SIGTERM,
+        TerminationSignal::Kill => libc::SIGKILL,
+    };
+    // SAFETY: kill(2) 只投递信号, 不触碰本进程内存; 负 pid 即进程组信号。
+    unsafe {
+        libc::kill(-(child_id as libc::pid_t), signum);
+    }
+    // 兜底: 进程组已空时组信号会 ESRCH, 单进程 kill 确保组长必定终结
+    let _ = child.kill();
+}
+
+/// Windows 没有 POSIX 式可投递信号的进程组, 用 `taskkill /T` 递归杀子树。
+///
+/// 只 `child.kill()` 不够: `Start-Process` 起的孙进程不受父进程 kill 影响, 会
+/// 继续跑 —— 正是 2026-10-05 真机排查安装器时踩到的残留形态。
+#[cfg(windows)]
+fn terminate_process_tree(child: &mut Child, child_id: u32, _signal: TerminationSignal) {
+    let kill_result = Command::new("taskkill")
+        .args(["/F", "/T", "/PID", &child_id.to_string()])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+    if !matches!(kill_result, Ok(exit) if exit.success()) {
+        log::warn!("taskkill /F /T /PID {child_id} 未成功: {kill_result:?}");
+    }
+    let _ = child.kill();
+}
+
+/// 既非 unix 也非 windows 的平台没有进程树概念, 只能尽力杀组长。
+#[cfg(not(any(unix, windows)))]
+fn terminate_process_tree(child: &mut Child, _child_id: u32, _signal: TerminationSignal) {
+    let _ = child.kill();
+}
+
+/// `@cmd` 超时的 E2 错误 envelope (走 `error_envelope`, 不手写 error_code / retry)。
+///
+/// 顶层额外补 `shell`: 远程排障时"这条命令到底在 cmd.exe 还是 powershell 里跑"
+/// 决定了脚本该怎么改写, 失败响应不带它等于让调用方盲猜语法。
+fn build_shell_timeout_response_json(shell: &str, timeout: Duration, stderr: &[u8]) -> String {
+    let mut envelope = error_envelope(
+        ComputerActErrorCode::Timeout,
+        format!(
+            "同步 shell lane 超过 {}ms 未退出, 已终止整个子进程树;\
+             长时间等待请改用 `@spawn` + `@task-status` 轮询",
+            duration_ms(timeout)
+        ),
+        Some(serde_json::json!({
+            "shell": shell,
+            "timeout_ms": duration_ms(timeout),
+            "terminated_process_tree": true,
+            "stderr": String::from_utf8_lossy(stderr),
+        })),
+    );
+    // 默认 hint 写的是"调高 timeout_ms" —— 本 lane 没有这个参数, 指向一个不存在的
+    // 旋钮比不提示更糟, 换成这里真实存在的两个出口。
+    envelope["retry"]["hint"] = serde_json::json!(format!(
+        "改用 `@spawn` + `@task-status` 轮询; 或调高 {SHELL_LANE_TIMEOUT_ENV}"
+    ));
+    envelope["shell"] = serde_json::Value::from(shell);
+    envelope.to_string()
+}
+
+/// `@cmd` 被 `@cancel#seq` 取消的 E2 envelope。
+fn build_shell_cancelled_response_json(shell: &str, stderr: &[u8]) -> String {
+    let mut envelope = error_envelope(
+        ComputerActErrorCode::Cancelled,
+        "同步 shell lane 被 @cancel#seq 取消, 已终止整个子进程树",
+        Some(serde_json::json!({
+            "shell": shell,
+            "cancelled_at_step": "shell_lane_wait_loop",
+            "terminated_process_tree": true,
+            "stderr": String::from_utf8_lossy(stderr),
+        })),
+    );
+    envelope["shell"] = serde_json::Value::from(shell);
+    envelope.to_string()
+}
+
+/// `@cmd` 非零退出的响应体。
+///
+/// 形状对齐 `control_core::render_control_response_payload` 的失败对象
+/// (`exit_code` / `stdout` / `stderr` 原样保留, 老消费方不受影响), 只补
+/// `ok` / `error_code` / `shell`。
+fn build_shell_failure_response_json(
+    shell: &str,
+    exit_code: i32,
+    stdout: &[u8],
+    stderr: &[u8],
+) -> String {
+    serde_json::json!({
+        "ok": false,
+        "error_code": "shell_exit_nonzero",
+        "exit_code": exit_code,
+        "stdout": String::from_utf8_lossy(stdout),
+        "stderr": String::from_utf8_lossy(stderr),
+        "shell": shell,
+    })
+    .to_string()
+}
+
+fn duration_ms(duration: Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+}
+
+/// `@ping` 的结构化响应体。
+///
+/// 裸 "pong" 只能证明 daemon 进程还活着, 分不出"正在监听"与"bind 失败在退避
+/// 重试" —— 远程排障时这两种情形的处置完全相反 (继续等 vs 查端口/防火墙/端口占用)。
+/// `bind_state` / `uptime` 由 daemon 侧持有 (`daemon::bind_state` / `daemon::uptime`),
+/// 本层只做序列化, 不自建状态跟踪, 免得出现第二份真相源。
+pub(crate) fn build_ping_response_json(shell: &str) -> String {
+    serde_json::json!({
+        "ok": true,
+        "pong": true,
+        "uptime_ms": duration_ms(crate::daemon::uptime()),
+        "bind_state": crate::daemon::bind_state(),
+        "shell": shell,
+    })
+    .to_string()
 }
 
 pub(crate) fn build_shell_command(shell: &str, command_text: &str) -> Command {
@@ -1693,14 +2055,167 @@ fn looks_like_macos_accessibility_permission_denied(message: &str) -> bool {
         || lower.contains("not trusted for accessibility")
 }
 
-fn from_process_output(output: Output) -> ActionExecutionResult {
-    ActionExecutionResult {
-        exit_code: output.status.code().unwrap_or(-1),
-        stdout: output.stdout,
-        stderr: output.stderr,
-        response_value_json: None,
-    }
-}
-
 #[cfg(test)]
 mod tests;
+
+// 同步 shell lane (超时 / 杀进程树 / shell 回显) 的单测内联在此: 本轮并行改造
+// 只把 control_actions.rs 划给本组, tests.rs 归别的组, 新增用例先落这里,
+// 文件归属恢复后合并回 tests.rs 即可 (用例本身不依赖内联)。
+#[cfg(test)]
+mod shell_lane_tests {
+    use super::*;
+
+    #[test]
+    fn parse_shell_lane_timeout_should_cover_boundary_values() {
+        assert_eq!(
+            parse_shell_lane_timeout(None),
+            Ok(Some(DEFAULT_SHELL_LANE_TIMEOUT)),
+            "未设置时应回落到默认 120s"
+        );
+        assert_eq!(
+            parse_shell_lane_timeout(Some(String::new())),
+            Ok(Some(DEFAULT_SHELL_LANE_TIMEOUT)),
+            "空串等同未设置"
+        );
+        assert_eq!(
+            parse_shell_lane_timeout(Some("500".to_owned())),
+            Ok(Some(Duration::from_millis(500)))
+        );
+        assert_eq!(
+            parse_shell_lane_timeout(Some(" 250 ".to_owned())),
+            Ok(Some(Duration::from_millis(250))),
+            "两侧空白应容忍, 免得 env 里手滑一个空格就回落默认"
+        );
+        assert_eq!(
+            parse_shell_lane_timeout(Some("0".to_owned())),
+            Ok(None),
+            "0 = 显式关闭兜底超时"
+        );
+        assert!(
+            parse_shell_lane_timeout(Some("abc".to_owned())).is_err(),
+            "非法值应报错让调用方回落默认, 而不是被当成 0 关掉超时"
+        );
+    }
+
+    #[test]
+    fn shell_failure_response_should_carry_actual_shell_and_legacy_keys() {
+        let json = build_shell_failure_response_json("/bin/zsh", 3, b"out", b"err");
+        let value: serde_json::Value = serde_json::from_str(&json).expect("失败响应应是合法 JSON");
+        // 老消费方按这三个键读, 不能因为补 shell 就改名或挪位置
+        assert_eq!(value["exit_code"], 3);
+        assert_eq!(value["stdout"], "out");
+        assert_eq!(value["stderr"], "err");
+        assert_eq!(value["shell"], "/bin/zsh");
+        assert_eq!(value["ok"], false);
+        assert_eq!(value["error_code"], "shell_exit_nonzero");
+    }
+
+    #[test]
+    fn ping_response_should_be_structured_with_bind_state_and_uptime() {
+        let json = build_ping_response_json("/usr/bin/powershell.exe");
+        let value: serde_json::Value = serde_json::from_str(&json).expect("ping 响应应是合法 JSON");
+        assert_eq!(value["pong"], true);
+        assert_eq!(value["shell"], "/usr/bin/powershell.exe");
+        assert!(
+            value["uptime_ms"].is_u64(),
+            "uptime_ms 应是数字, 实际 {}",
+            value["uptime_ms"]
+        );
+        let bind_state = value["bind_state"].as_str().expect("bind_state 应是字符串");
+        assert!(
+            ["listening", "backing_off", "unbound"].contains(&bind_state),
+            "bind_state 取值应受 daemon 侧三态约束, 实际 {bind_state}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn script_success_should_keep_legacy_bare_stdout_response_shape() {
+        // 兼容护栏: 成功形状是 `"<stdout>"`, 不是对象。改动会让
+        // tests/control_lanes.rs 等按字符串读的集成用例全线红。
+        let result = execute_script_with_timeout(
+            "/bin/sh",
+            "printf READY",
+            Some(Duration::from_secs(5)),
+            None,
+        )
+        .expect("脚本应执行成功");
+        assert_eq!(result.exit_code, 0);
+        assert_eq!(result.stdout, b"READY");
+        assert!(
+            result.response_value_json.is_none(),
+            "成功时不该有结构化响应: {:?}",
+            result.response_value_json
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn shell_lane_timeout_should_release_lane_instead_of_blocking_forever() {
+        let started_at = Instant::now();
+        let result = execute_script_with_timeout(
+            "/bin/sh",
+            "sleep 30",
+            Some(Duration::from_millis(200)),
+            None,
+        )
+        .expect("超时是预期路径, 不该是 IO 错误");
+        let elapsed = started_at.elapsed();
+
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "兜底超时应在 200ms 附近收口, 实际 {elapsed:?}"
+        );
+        assert_eq!(result.exit_code, SHELL_TIMEOUT_EXIT_CODE);
+        let value: serde_json::Value = serde_json::from_str(
+            result
+                .response_value_json
+                .as_deref()
+                .expect("超时应带结构化错误"),
+        )
+        .expect("超时响应应是合法 JSON");
+        assert_eq!(value["ok"], false);
+        assert_eq!(value["error_code"], "timeout");
+        assert_eq!(value["retry"]["strategy"], "wait_and_retry");
+        assert_eq!(value["shell"], "/bin/sh");
+        assert_eq!(value["evidence"]["timeout_ms"], 200);
+        assert_eq!(value["evidence"]["terminated_process_tree"], true);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn shell_lane_timeout_should_terminate_grandchildren_not_only_the_shell() {
+        // 只杀组长的话, 后台 `&` 起的孙进程会活下来继续跑 —— 那正是 2026-10-05
+        // Windows 真机上 `Start-Process` 残留的同构形态。
+        let pid_file = std::env::temp_dir().join("rdog-shell-lane-timeout-grandchild.pid");
+        let _ = std::fs::remove_file(&pid_file);
+        let script = format!("sleep 30 & echo $! > '{}'; wait", pid_file.display());
+
+        let result =
+            execute_script_with_timeout("/bin/sh", &script, Some(Duration::from_millis(200)), None)
+                .expect("超时是预期路径");
+        assert_eq!(result.exit_code, SHELL_TIMEOUT_EXIT_CODE);
+
+        let raw_pid = std::fs::read_to_string(&pid_file).expect("脚本应写出后台子进程 pid");
+        let grandchild_pid: i32 = raw_pid.trim().parse().expect("pid 应可解析");
+        assert!(
+            wait_process_gone(grandchild_pid, Duration::from_secs(5)),
+            "孙进程 {grandchild_pid} 在超时后仍存活 = 只杀了组长没杀整棵树"
+        );
+    }
+
+    /// 等 pid 从进程表消失 (被 SIGKILL 后要先过 zombie → init 收尸的一小段时间)。
+    #[cfg(unix)]
+    fn wait_process_gone(pid: i32, budget: Duration) -> bool {
+        let deadline = Instant::now() + budget;
+        while Instant::now() < deadline {
+            // SAFETY: kill(pid, 0) 只做存在性探测, 不投递信号。
+            let alive = unsafe { libc::kill(pid, 0) } == 0;
+            if !alive {
+                return true;
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+        false
+    }
+}

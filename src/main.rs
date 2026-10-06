@@ -132,16 +132,16 @@ fn init_logger(command: &Command) -> Result<(), String> {
         // ------------------------------------------------------------
         // 非 hidden 命令的日志走 stderr(Unix 习惯:错误/警告不应混入 stdout,
         // 否则 agent 走 pipe / redirect 解析 stdout 时会被噪音打断)。
-        // hidden 子进程走 file 不变,保持 Windows 隐藏 resident 模式契约。
+        // hidden 子进程走 file 不变,保持 Windows 隐藏 resident 模式契约;
+        // `rdog daemon` 也能用 RDOG_LOG_FILE 显式改道落盘(见 hidden_mode::LOG_FILE_ENV)。
         // ------------------------------------------------------------
         hidden_mode::LogTarget::Stderr => dispatch
             .chain(stderr())
             .apply()
             .map_err(|err| err.to_string()),
         hidden_mode::LogTarget::File(path) => {
-            let file = fern::log_file(&path).map_err(|err| {
-                format!("failed to open hidden log file {}: {err}", path.display())
-            })?;
+            let file = fern::log_file(&path)
+                .map_err(|err| format!("failed to open log file {}: {err}", path.display()))?;
             dispatch.chain(file).apply().map_err(|err| err.to_string())
         }
     }
@@ -158,10 +158,7 @@ fn init_tracing(level: log::LevelFilter, target: &hidden_mode::LogTarget) -> Res
         hidden_mode::LogTarget::Stderr => BoxMakeWriter::new(stderr),
         hidden_mode::LogTarget::File(path) => {
             let file = fern::log_file(path).map_err(|err| {
-                format!(
-                    "failed to open hidden tracing log file {}: {err}",
-                    path.display()
-                )
+                format!("failed to open tracing log file {}: {err}", path.display())
             })?;
             BoxMakeWriter::new(file)
         }
@@ -619,15 +616,51 @@ fn run(opts: input::Opts) -> Result<(), String> {
                 .map_err(|err| err.to_string())?;
             // CDP lane 开关随配置初始化 (默认 false; spec 安全模型: 默认关闭)
             control_cdp::configure(daemon_config.cdp.enabled);
+            // 先记下 transport 由谁决定, 横幅才能如实写出来源。
+            // 只报"走了 Zenoh"而不报来源, 用户会反过来怀疑 rdog_win.toml 写错了,
+            // 而不是意识到自己没写 `--transport tcp`。
+            let transport_source = match transport {
+                Some(_) => "命令行 --transport",
+                None if daemon_config.zenoh.enabled => "配置 [zenoh].enabled = true",
+                None => "默认 TCP",
+            };
             let transport = resolve_daemon_transport(transport, &daemon_config);
 
             match transport {
                 Transport::Tcp => {
                     config::validate_tcp_daemon_profile(&daemon_config)
                         .map_err(|err| err.to_string())?;
+                    // 横幅先于 spawn / run: Windows 上进程马上就转入隐藏常驻,
+                    // 这个窗口是用户唯一能当场读到"实际生效配置"的机会。
+                    let banner = tcp_daemon_banner(&daemon_config);
+                    log::info!("{banner}");
+                    // 校验在 spawn 之前跑完: 隐藏 child 起来就脱离控制台,
+                    // 配置有问题时必须让本命令当场报错,不能等 child 静默退出。
+                    if spawn_windows_resident_daemon(
+                        config.as_deref(),
+                        &daemon_config.hidden.log_file,
+                    )? {
+                        return Ok(());
+                    }
                     daemon::run(daemon_config).map_err(|err| err.to_string())?;
                 }
                 Transport::Zenoh => {
+                    let banner = zenoh_daemon_banner(
+                        &daemon_config,
+                        namespace.as_deref(),
+                        daemon_name.as_deref(),
+                    );
+                    log::info!("{banner}");
+                    // ------------------------------------------------------------
+                    // 2026-10-05 远程作业的头号误判源头: 仓库自带的 rdog_win.toml 里
+                    // `[zenoh].enabled = true`, transport 因此判成 Zenoh, 而
+                    // run_zenoh_router 会把 TCP inbound/outbound 一起关掉 ——
+                    // 配置文件里躺着的 `[inbound].port = 5555` 于是永远没人 bind。
+                    // 用户连 5555 失败,看不到任何 daemon 侧日志,只能判成"进程崩了"。
+                    // ------------------------------------------------------------
+                    log::warn!(
+                        "daemon 本次以 Zenoh transport 启动 (来源: {transport_source}): TCP inbound/outbound 已被强制关闭, 配置里的 [inbound]/[outbound] 端口不会 bind。要用 TCP 请显式 `rdog daemon --transport tcp`"
+                    );
                     daemon::run_zenoh_router(daemon_config, namespace, daemon_name, entry_point)
                         .map_err(|err| err.to_string())?;
                 }
@@ -725,6 +758,181 @@ fn resolve_daemon_transport(
     })
 }
 
+/// Windows 上让 `rdog daemon` 自动转成隐藏常驻进程。
+///
+/// 2026-10-05 实测: 用 `Start-Process` 直接起的 daemon 会随那个转瞬即逝的控制台窗口
+/// 一起消失,当天最后靠 schtasks /SC ONLOGON 才稳住。项目里本来就有完整的隐藏 spawn
+/// 路径(`hidden_mode::spawn_hidden_daemon_process`,CREATE_NO_WINDOW |
+/// DETACHED_PROCESS),所以这里不新增参数,直接复用 —— 目标就是"敲 `rdog daemon` 就常驻"。
+///
+/// 只在 TCP transport 上启用: hidden child 走的是 `daemon::run` 且不接受 transport 覆盖,
+/// 把 Zenoh 路由也塞进去会静默变成 TCP 语义,比不做还糟。
+///
+/// 逃生口: 环境变量 `RDOG_DAEMON_FOREGROUND` 置 1/true/yes 时保持前台。
+/// 自动隐藏化之后,前台是唯一能实时看 stderr / 用 Ctrl-C 停掉的方式;没有这个开关,
+/// 想边跑边看日志的人就只能去翻日志文件。用环境变量而不是新参数,是因为常驻形态的
+/// 调用方(计划任务 / 脚本)本来就在拼环境,多一个必填 CLI 参数反而更容易漏。
+///
+/// 返回 `true` 表示"已交给隐藏 child",调用方必须立即返回,不要再前台 run。
+/// 非 Windows 恒为 `false`,unix 侧行为保持不变。
+fn spawn_windows_resident_daemon(
+    config_path: Option<&Path>,
+    log_file: &Path,
+) -> Result<bool, String> {
+    #[cfg(windows)]
+    {
+        let foreground = matches!(
+            std::env::var("RDOG_DAEMON_FOREGROUND")
+                .ok()
+                .as_deref()
+                .map(str::trim),
+            Some("1" | "true" | "yes")
+        );
+        if foreground {
+            log::info!("RDOG_DAEMON_FOREGROUND 已置位, 保持前台运行, 不转隐藏常驻");
+            return Ok(false);
+        }
+
+        hidden_mode::spawn_hidden_daemon_process(config_path, log_file)
+            .map_err(|err| err.to_string())?;
+        announce_hidden_resident(log_file);
+        return Ok(true);
+    }
+
+    #[cfg(not(windows))]
+    {
+        let _ = (config_path, log_file);
+        Ok(false)
+    }
+}
+
+/// 隐藏常驻 spawn 成功后的终端告知。
+///
+/// 2026-10-05 的误判链条: stderr 绑在一个转瞬即逝的控制台窗口上,窗口一关日志就没了,
+/// 于是"进程消失"被读成"静默崩溃"。这一行把日志落点钉在屏幕上,窗口关掉后仍照着它找。
+#[cfg(windows)]
+fn announce_hidden_resident(log_file: &Path) {
+    println!("rdog daemon 已转入 Windows 隐藏常驻进程, 本命令立即返回。");
+    println!("日志文件: {}", describe_log_path(log_file));
+    println!("停止: taskkill /IM rdog.exe /F  (按进程名匹配, 会一并结束其它 rdog 进程)");
+}
+
+/// 日志落点文案: 相对路径按当前工作目录展开成绝对路径。
+///
+/// 隐藏常驻进程的 CWD 与用户敲命令的目录可能不同(计划任务尤其如此),
+/// 只回显 `rdog_hidden.log` 这种相对路径等于没告诉用户日志在哪。
+#[cfg(any(windows, test))]
+fn describe_log_path(path: &Path) -> String {
+    if path.is_absolute() {
+        return path.display().to_string();
+    }
+
+    match std::env::current_dir() {
+        Ok(dir) => dir.join(path).display().to_string(),
+        Err(_) => path.display().to_string(),
+    }
+}
+
+/// TCP daemon 的启动横幅文案: 一次把 transport / host:port / mode / shell 讲完。
+///
+/// 单独抽成纯函数是为了能直接断言文案 —— 这条横幅的价值全在"别再让人对着一个
+/// 没人监听的端口猜",文案本身错了就等于没打。
+fn tcp_daemon_banner(config: &config::DaemonConfig) -> String {
+    let inbound = if config.inbound.enabled {
+        format!(
+            "inbound={}(mode={}, shell={}, transport={})",
+            describe_endpoint_address(config.inbound.host.as_deref(), config.inbound.port),
+            endpoint_mode_label(config.inbound.mode),
+            config.inbound.shell.as_deref().unwrap_or("<未配置>"),
+            control_transport_label(config.inbound.transport),
+        )
+    } else {
+        "inbound=未启用".to_string()
+    };
+
+    let outbound = if config.outbound.enabled {
+        format!(
+            "outbound={}(mode={}, shell={})",
+            describe_endpoint_address(config.outbound.host.as_deref(), config.outbound.port),
+            endpoint_mode_label(config.outbound.mode),
+            config.outbound.shell.as_deref().unwrap_or("<未配置>"),
+        )
+    } else {
+        "outbound=未启用".to_string()
+    };
+
+    format!("daemon 启动: transport=tcp {inbound} {outbound}")
+}
+
+/// Zenoh router 的启动横幅文案。
+///
+/// namespace 与 listen_endpoints 都调用运行期真正使用的那两个解析函数,不复刻推断规则:
+/// 横幅一旦自己算一遍,就成了第二个真相源,正好重演它要防的那个误判。
+/// 解析失败时把结论写进横幅,错误本身仍由 `run_zenoh_router` 正式抛出。
+fn zenoh_daemon_banner(
+    config: &config::DaemonConfig,
+    namespace_override: Option<&str>,
+    daemon_name_override: Option<&str>,
+) -> String {
+    let daemon_name = daemon_name_override
+        .or(config.zenoh.daemon_name.as_deref())
+        .unwrap_or("<未配置>");
+
+    let namespace =
+        match crate::zenoh_identity::resolve_namespace(namespace_override, Some(daemon_name)) {
+            Ok(namespace) => namespace,
+            Err(err) => format!("<解析失败: {err}>"),
+        };
+
+    let listen = match crate::zenoh_runtime::compose_listen_endpoints(
+        &config.zenoh,
+        &namespace,
+        daemon_name,
+    ) {
+        Ok(composed) => composed.listen_endpoints.join(", "),
+        Err(err) => format!("<解析失败: {err}>"),
+    };
+
+    format!(
+        "daemon 启动: transport=zenoh({}) name={daemon_name} namespace={namespace} listen=[{listen}] tcp=不启动",
+        zenoh_mode_label(config.zenoh.mode)
+    )
+}
+
+/// 端点地址文案: 缺 host/port 时明说缺哪一项,不用占位符糊过去。
+fn describe_endpoint_address(host: Option<&str>, port: Option<u16>) -> String {
+    match (host, port) {
+        (Some(host), Some(port)) => format!("{host}:{port}"),
+        (host, port) => format!(
+            "{}:{}",
+            host.unwrap_or("<host 未配置>"),
+            port.map(|value| value.to_string())
+                .unwrap_or_else(|| "<port 未配置>".to_string())
+        ),
+    }
+}
+
+fn endpoint_mode_label(mode: config::EndpointMode) -> &'static str {
+    match mode {
+        config::EndpointMode::Interactive => "interactive",
+        config::EndpointMode::Control => "control",
+    }
+}
+
+fn control_transport_label(kind: control_transport::ControlTransportKind) -> &'static str {
+    match kind {
+        control_transport::ControlTransportKind::Tcp => "tcp",
+        control_transport::ControlTransportKind::WebSocket => "websocket",
+    }
+}
+
+fn zenoh_mode_label(mode: config::ZenohMode) -> &'static str {
+    match mode {
+        config::ZenohMode::Router => "router",
+        config::ZenohMode::PeerLegacy => "peer-legacy",
+    }
+}
+
 fn run_hidden_daemon(
     config_path: Option<PathBuf>,
     child: bool,
@@ -741,6 +949,10 @@ fn run_hidden_daemon(
             let daemon_config = config::load_daemon_config(config_path.as_deref())
                 .map_err(|err| err.to_string())?;
             control_cdp::configure(daemon_config.cdp.enabled);
+            // 横幅必须由 child 打: 它已经脱离控制台, 日志文件是唯一留下来的现场。
+            // parent 打的那份会跟着 parent 的窗口一起消失, 正是 2026-10-05 踩的坑。
+            let banner = tcp_daemon_banner(&daemon_config);
+            log::info!("{banner}");
 
             // ------------------------------------------------------------
             // 这里额外校验一次内部传下来的日志路径,避免 parent/child
@@ -770,6 +982,7 @@ fn run_hidden_daemon(
             &daemon_config.hidden.log_file,
         )
         .map_err(|err| err.to_string())?;
+        announce_hidden_resident(&daemon_config.hidden.log_file);
         return Ok(());
     }
 
@@ -782,11 +995,198 @@ fn run_hidden_daemon(
 
 #[cfg(test)]
 mod tests {
-    use super::resolve_daemon_transport;
+    use super::{
+        describe_endpoint_address, describe_log_path, resolve_daemon_transport, tcp_daemon_banner,
+        zenoh_daemon_banner,
+    };
     use crate::{
-        config::{DaemonConfig, ZenohConfig},
+        config::{
+            DaemonConfig, EndpointMode, InboundConfig, OutboundConfig, UnixpipeConfig, ZenohConfig,
+            ZenohMode,
+        },
+        control_transport::ControlTransportKind,
         input::Transport,
     };
+    use std::path::PathBuf;
+
+    /// rdog_win.toml 的 inbound 段形态: 5555 + control lane + powershell。
+    fn win_inbound() -> InboundConfig {
+        InboundConfig {
+            enabled: true,
+            host: Some("0.0.0.0".to_string()),
+            port: Some(5555),
+            shell: Some("powershell.exe".to_string()),
+            mode: EndpointMode::Control,
+            transport: ControlTransportKind::Tcp,
+        }
+    }
+
+    #[test]
+    fn tcp_daemon_banner_should_print_effective_lane_fields() {
+        // 横幅的价值全在这四个字段上: transport / host:port / mode / shell。
+        let config = DaemonConfig {
+            inbound: win_inbound(),
+            ..DaemonConfig::default()
+        };
+
+        let banner = tcp_daemon_banner(&config);
+        assert!(banner.contains("transport=tcp"), "{banner}");
+        assert!(
+            banner.contains(
+                "inbound=0.0.0.0:5555(mode=control, shell=powershell.exe, transport=tcp)"
+            ),
+            "{banner}"
+        );
+        assert!(banner.contains("outbound=未启用"), "{banner}");
+    }
+
+    #[test]
+    fn tcp_daemon_banner_should_name_disabled_lanes() {
+        // 端点没开时不能只字不提: 配置里明明写着 5555, 横幅却对它闭口不谈,
+        // 用户只会读成"没注意", 而事实是根本没人 bind —— 2026-10-05 误判的形状。
+        let config = DaemonConfig {
+            zenoh: ZenohConfig {
+                enabled: true,
+                ..ZenohConfig::default()
+            },
+            inbound: InboundConfig {
+                enabled: false,
+                host: Some("0.0.0.0".to_string()),
+                port: Some(5555),
+                ..InboundConfig::default()
+            },
+            ..DaemonConfig::default()
+        };
+
+        let banner = tcp_daemon_banner(&config);
+        assert!(banner.contains("inbound=未启用"), "{banner}");
+        assert!(banner.contains("outbound=未启用"), "{banner}");
+    }
+
+    #[test]
+    fn tcp_daemon_banner_should_mark_missing_host_and_port() {
+        let config = DaemonConfig {
+            inbound: InboundConfig {
+                enabled: true,
+                ..InboundConfig::default()
+            },
+            outbound: OutboundConfig {
+                enabled: true,
+                host: Some("10.0.0.5".to_string()),
+                port: Some(4444),
+                shell: Some("cmd.exe".to_string()),
+                mode: EndpointMode::Interactive,
+            },
+            ..DaemonConfig::default()
+        };
+
+        let banner = tcp_daemon_banner(&config);
+        assert!(
+            banner.contains("inbound=<host 未配置>:<port 未配置>"),
+            "{banner}"
+        );
+        assert!(banner.contains("outbound=10.0.0.5:4444"), "{banner}");
+        assert!(banner.contains("mode=interactive"), "{banner}");
+    }
+
+    #[test]
+    fn zenoh_daemon_banner_should_state_that_tcp_will_not_start() {
+        // rdog_win.toml 的真实形态: zenoh.enabled = true 而 inbound 段里还躺着 5555。
+        // 横幅必须把 "TCP 不启动" 写出来, 否则配置里的端口号就是纯误导。
+        let config = DaemonConfig {
+            zenoh: ZenohConfig {
+                enabled: true,
+                mode: ZenohMode::Router,
+                namespace: "lab".to_string(),
+                daemon_name: Some("dongfeng-unity.lab".to_string()),
+                listen_endpoints: vec!["udp/0.0.0.0:7447".to_string()],
+                // unixpipe 在 unix 上默认开着, compose 会往列表最前注入一条,
+                // 让断言依赖注入结果就等于依赖 $TMPDIR 长度。夹具里显式关掉, 只测显式部分。
+                unixpipe: UnixpipeConfig {
+                    enabled: false,
+                    ..UnixpipeConfig::default()
+                },
+                ..ZenohConfig::default()
+            },
+            ..DaemonConfig::default()
+        };
+
+        let banner = zenoh_daemon_banner(&config, None, None);
+        assert!(banner.contains("transport=zenoh(router)"), "{banner}");
+        assert!(banner.contains("name=dongfeng-unity.lab"), "{banner}");
+        assert!(banner.contains("namespace=lab"), "{banner}");
+        assert!(banner.contains("listen=[udp/0.0.0.0:7447]"), "{banner}");
+        assert!(banner.contains("tcp=不启动"), "{banner}");
+    }
+
+    #[test]
+    fn zenoh_daemon_banner_should_report_unresolvable_identity_instead_of_inventing_one() {
+        // 解析不出来就如实说解析失败: 横幅自己另算一套 namespace 推断,
+        // 就等于立了第二个真相源, 正好重演它要防的误判。
+        let config = DaemonConfig {
+            zenoh: ZenohConfig {
+                enabled: true,
+                ..ZenohConfig::default()
+            },
+            ..DaemonConfig::default()
+        };
+
+        let banner = zenoh_daemon_banner(&config, None, None);
+        assert!(banner.contains("name=<未配置>"), "{banner}");
+        assert!(banner.contains("namespace=<解析失败"), "{banner}");
+    }
+
+    #[test]
+    fn zenoh_daemon_banner_should_follow_explicit_overrides() {
+        // --namespace / --name 是运行期真正的覆盖来源, 横幅必须跟着它们走,
+        // 否则用户传了参数却看到配置里的旧名字, 又是一次"配置说了不算"。
+        let config = DaemonConfig {
+            zenoh: ZenohConfig {
+                enabled: true,
+                namespace: "lab".to_string(),
+                daemon_name: Some("configured.lab".to_string()),
+                ..ZenohConfig::default()
+            },
+            ..DaemonConfig::default()
+        };
+
+        let banner = zenoh_daemon_banner(&config, Some("other"), Some("override.other"));
+        assert!(banner.contains("name=override.other"), "{banner}");
+        assert!(banner.contains("namespace=other"), "{banner}");
+    }
+
+    #[test]
+    fn describe_log_path_should_keep_absolute_path_as_is() {
+        // 用 current_dir 拼绝对路径: 写死 "/var/log/..." 在 Windows 上不算绝对路径
+        // (缺盘符), 会掉进相对分支, 让这条用例只在 unix 上成立。
+        let path = std::env::current_dir()
+            .expect("cwd")
+            .join("rdog_daemon.log");
+        assert_eq!(describe_log_path(&path), path.display().to_string());
+    }
+
+    #[test]
+    fn describe_log_path_should_expand_relative_path_against_cwd() {
+        // 隐藏常驻进程的 CWD 未必是用户敲命令的目录, 只回显相对路径等于没告诉用户日志在哪。
+        let described = describe_log_path(&PathBuf::from("rdog_hidden.log"));
+        assert!(described.ends_with("rdog_hidden.log"), "{described}");
+    }
+
+    #[test]
+    fn describe_endpoint_address_should_name_the_missing_half() {
+        assert_eq!(
+            describe_endpoint_address(Some("127.0.0.1"), Some(5555)),
+            "127.0.0.1:5555"
+        );
+        assert_eq!(
+            describe_endpoint_address(None, Some(5555)),
+            "<host 未配置>:5555"
+        );
+        assert_eq!(
+            describe_endpoint_address(Some("0.0.0.0"), None),
+            "0.0.0.0:<port 未配置>"
+        );
+    }
 
     #[test]
     fn resolve_daemon_transport_should_infer_zenoh_from_config_when_flag_is_missing() {

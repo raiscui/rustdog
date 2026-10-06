@@ -713,6 +713,32 @@ mod tests {
         task.to_owned()
     }
 
+    /// 断言 @ping 回的是结构化诊断体, 而不是裸 JSON 串 `"pong"`。
+    ///
+    /// 判据刻意落在 `value.is_object()` 上: 裸串形态下 `value` 是 JSON string
+    /// (带 request id 时在 `{"id":..,"value":...}` 信封里, 无 id 时就是
+    /// 裸的 `"pong"`), 两种形态都会被 `is_object()` 当场拒掉, 而
+    /// `contains("pong")` 对二者一视同仁 —— 这正是旧断言的盲区。
+    fn assert_ping_is_structured(response: &str) {
+        let json = response.trim_start_matches("@response ");
+        let value: serde_json::Value = serde_json::from_str(json)
+            .unwrap_or_else(|err| panic!("@ping 响应应是 JSON: {response}, err={err}"));
+        // 带 request id 时会包进 {"id":..,"value":{...}} 信封; 无 id 时原样输出。
+        let ping = if value.get("value").is_some() {
+            &value["value"]
+        } else {
+            &value
+        };
+        assert!(ping.is_object(), "@ping 的响应体应是对象, 实际: {ping}");
+        assert_eq!(ping["pong"], serde_json::json!(true), "{ping}");
+        for field in ["ok", "uptime_ms", "bind_state", "shell"] {
+            assert!(
+                !ping[field].is_null(),
+                "@ping 结构化响应缺 {field} 字段: {ping}"
+            );
+        }
+    }
+
     #[test]
     fn e2e_spawn_should_answer_immediately_and_not_block_lane() {
         let started = std::time::Instant::now();
@@ -731,7 +757,11 @@ mod tests {
         let ping_started = std::time::Instant::now();
         let ping = execute_line("@ping");
         assert!(ping_started.elapsed() < Duration::from_secs(1));
-        assert!(ping.contains("pong"), "{ping}");
+        // 排障用的 @ping 必须回**结构化**体: 裸 "pong" 与 {"pong":true,...}
+        // 都能满足 contains("pong"), 旧断言因此盖不住 "结构化响应被短路成裸串"
+        // 这个洞 —— 而裸串恰恰没有 bind_state, 也就分不出"正在监听"与
+        // "bind 失败在退避重试"。这里按解析后的字段断言, 两侧形态都断得掉。
+        assert_ping_is_structured(&ping);
 
         let task_id = extract_task_id(&response);
         let cancel = execute_line(&format!("@task-cancel:{task_id}"));

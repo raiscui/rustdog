@@ -276,9 +276,11 @@ fn wheel_coordinate(request: &WheelRequest) -> io::Result<Option<MousePoint>> {
 fn endpoint_coordinate(endpoint: &MouseEndpoint, label: &str) -> io::Result<MousePoint> {
     match endpoint {
         MouseEndpoint::Coordinate(point) => Ok(*point),
-        MouseEndpoint::ObservationRef(_) | MouseEndpoint::Selector(_) => Err(invalid_input(
-            format!("{label} 需要先经过 mouse target resolver 才能构建执行 plan"),
-        )),
+        MouseEndpoint::ObservationRef(_)
+        | MouseEndpoint::Selector(_)
+        | MouseEndpoint::ScreenshotPoint(_) => Err(invalid_input(format!(
+            "{label} 需要先经过 mouse target resolver 才能构建执行 plan"
+        ))),
     }
 }
 
