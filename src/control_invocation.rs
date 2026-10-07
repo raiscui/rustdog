@@ -392,16 +392,28 @@ fn connect_control_tcp(
 }
 
 fn describe_tcp_connect_failure(host: &str, port: u16, err: &std::io::Error) -> String {
+    // 2026-10-07: 四行排查文案每次连接失败全量刷屏, agent 高频调用下纯噪音。
+    // 默认一行给方向; RDOG_CONNECT_VERBOSE=1 保留完整排查清单 (老用户兜底)。
+    if std::env::var("RDOG_CONNECT_VERBOSE")
+        .ok()
+        .map(|v| matches!(v.trim(), "1" | "true" | "yes"))
+        .unwrap_or(false)
+    {
+        return format!(
+            "无法连接 daemon {host}:{port} ({err})。可能原因: \
+             (1) daemon 未启动; \
+             (2) daemon 走了 zenoh 路径 —— zenoh.enabled 为 true (仓库自带的 rdog_win.toml \
+             的 `[zenoh]` 段就是这个默认值) 时, run_zenoh_router 会显式关掉 inbound/outbound, \
+             TCP 端口根本不 bind, 进程在跑但连不上; 控制端显式用 \
+             `--transport tcp {host} {port}` 时最容易撞上。解法是被控端把 \
+             inbound.enabled 打开, 或把 zenoh.enabled 关掉; \
+             (3) Windows 防火墙拦截; \
+             (4) daemon 正在 bind 重试的退避窗口内"
+        );
+    }
     format!(
-        "无法连接 daemon {host}:{port} ({err})。可能原因: \
-         (1) daemon 未启动; \
-         (2) daemon 走了 zenoh 路径 —— zenoh.enabled 为 true (仓库自带的 rdog_win.toml \
-         的 `[zenoh]` 段就是这个默认值) 时, run_zenoh_router 会显式关掉 inbound/outbound, \
-         TCP 端口根本不 bind, 进程在跑但连不上; 控制端显式用 \
-         `--transport tcp {host} {port}` 时最容易撞上。解法是被控端把 \
-         inbound.enabled 打开, 或把 zenoh.enabled 关掉; \
-         (3) Windows 防火墙拦截; \
-         (4) daemon 正在 bind 重试的退避窗口内"
+        "无法连接 daemon {host}:{port}: {err} — 检查被控端 daemon 是否在跑 / 端口与防火墙 \
+         (详细排查: RDOG_CONNECT_VERBOSE=1)"
     )
 }
 
@@ -736,19 +748,31 @@ mod tests {
 
     #[test]
     fn describe_tcp_connect_failure_should_name_target_and_all_four_causes() {
-        let message = describe_tcp_connect_failure(
+        // 2026-10-07: 默认精简为一行 + 方向指引; 四成因全量清单走 RDOG_CONNECT_VERBOSE。
+        std::env::set_var("RDOG_CONNECT_VERBOSE", "1");
+        let verbose = describe_tcp_connect_failure(
             "192.168.50.57",
             5555,
             &std::io::Error::from(std::io::ErrorKind::ConnectionRefused),
         );
-
-        assert!(message.contains("192.168.50.57:5555"));
+        assert!(verbose.contains("192.168.50.57:5555"));
         // 进程在跑但连不上的真实成因: zenoh.enabled 时 TCP 端口压根没 bind。
-        assert!(message.contains("zenoh.enabled"));
-        assert!(message.contains("inbound"));
+        assert!(verbose.contains("zenoh.enabled"));
+        assert!(verbose.contains("inbound"));
         for marker in ["(1)", "(2)", "(3)", "(4)"] {
-            assert!(message.contains(marker), "缺少成因编号 {marker}");
+            assert!(verbose.contains(marker), "缺少成因编号 {marker}");
         }
+
+        std::env::remove_var("RDOG_CONNECT_VERBOSE");
+        let brief = describe_tcp_connect_failure(
+            "192.168.50.57",
+            5555,
+            &std::io::Error::from(std::io::ErrorKind::ConnectionRefused),
+        );
+        assert!(brief.contains("192.168.50.57:5555"));
+        assert!(brief.contains("daemon 是否在跑"));
+        assert!(brief.contains("RDOG_CONNECT_VERBOSE"));
+        assert!(!brief.contains("(4)"), "精简态不应刷四成因清单");
     }
 
     // ------------------------------------------------------------

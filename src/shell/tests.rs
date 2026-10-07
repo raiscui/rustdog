@@ -47,6 +47,9 @@ impl ControlActionExecutor for FakeExecutor {
                 }
             },
             ControlCommand::Script(payload) => format!("SCRIPT:{payload}\n").into_bytes(),
+            ControlCommand::Run(request) => {
+                format!("RUN:{}:{:?}\n", request.path, request.args).into_bytes()
+            }
             ControlCommand::Ping => b"PONG\n".to_vec(),
             ControlCommand::Screenshot(request) => {
                 format!("SCREENSHOT:{}\n", request.quality).into_bytes()

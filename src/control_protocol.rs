@@ -87,6 +87,8 @@ pub enum ControlCommand {
     FileRead(String),
     /// 在指定页执行 JS (Runtime.evaluate)
     CdpEval(crate::control_cdp::CdpEvalRequest),
+    /// 直接 spawn 可执行文件, 同步等退出 + 退出码 (不经 shell, 参数逐个原样)
+    Run(crate::control_actions::RunRequest),
     MouseMove(MouseMoveRequest),
     MouseButton(MouseButtonRequest),
     Click(ClickRequest),
@@ -615,6 +617,7 @@ pub fn parse_control_line(line: &str) -> io::Result<ControlParseResult> {
             let payload = parse_cmd_payload(raw_payload)?;
             require_non_empty_payload("cmd", payload, ControlCommand::Script)?
         }
+        "run" => ControlCommand::Run(crate::control_actions::parse_run_payload(payload)?),
         "pty" => ControlCommand::PtyOpen(parse_pty_payload(payload)?),
         // @spawn 用 raw_payload (与 @cmd 同理): shell 文本必须保留物理行边界,
         // 不能被上层的 trim 隐藏前导/尾随空白

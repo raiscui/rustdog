@@ -280,6 +280,7 @@ impl ControlActionExecutor for SystemControlActionExecutor {
             ControlCommand::Script(script_text) => {
                 execute_script_cancellable(shell, script_text, cancel)
             }
+            ControlCommand::Run(request) => execute_run(request),
             ControlCommand::Screenshot(_) => Err(io::Error::new(
                 io::ErrorKind::Unsupported,
                 "@screenshot 由 control_core 直接走 screenshot producer,不应进入默认 executor 分支",
@@ -2253,4 +2254,131 @@ mod shell_lane_tests {
         }
         false
     }
+}
+
+/* ==========================================================================
+ * @run — 直接 spawn 可执行文件, 同步等退出 + 退出码 (2026-10-07, P4)
+ * --------------------------------------------------------------------------
+ * 与 @cmd 的分工: @cmd 走 shell 解释文本 (引号/转义地狱); @run 的 path 与
+ * args 是结构化字段, 逐参数原样传递 — "启动安装器 / 跑 CLI 工具再读退出码"
+ * 这类组合不再需要 shell 引号变形。收割/超时/杀树复用 @cmd 的同款语义
+ * (轮询 try_wait + 超时杀树, 不用 Command::output() 的无限期等待)。
+ * ========================================================================== */
+
+/// @run 的入参 (JSON payload)。
+#[derive(serde::Deserialize, Debug, Clone, PartialEq)]
+pub(crate) struct RunRequest {
+    /// 可执行文件路径 (必填, 原样传递不经 shell)。
+    pub path: String,
+    /// 参数数组 (逐个原样, 不经 shell 二次解释)。
+    #[serde(default)]
+    pub args: Vec<String>,
+    /// 同步等待超时 (毫秒), 默认 120s; 超时杀整棵树并回 Timeout envelope。
+    #[serde(default)]
+    pub timeout_ms: Option<u64>,
+    /// 窗口形态: "hidden" (默认, CREATE_NO_WINDOW) / "visible" (GUI 安装器等要看窗)。
+    #[serde(default)]
+    pub window: Option<String>,
+    /// 是否同步等退出; 默认 true。false = 启动即回 pid (fire-and-forget)。
+    #[serde(default)]
+    pub wait: Option<bool>,
+}
+
+#[derive(serde::Deserialize, Debug)]
+#[serde(untagged)]
+enum RunPayload {
+    Request(RunRequest),
+}
+
+pub(crate) fn parse_run_payload(payload: &str) -> io::Result<RunRequest> {
+    serde_json::from_str::<RunPayload>(payload)
+        .map_err(|err| io::Error::other(format!("@run payload 解析失败: {err}")))
+        .map(|RunPayload::Request(req)| req)
+}
+
+const RUN_DEFAULT_TIMEOUT_MS: u64 = 120_000;
+/// 回执里的 stdout / stderr 尾部截断 (安装器输出可达 MB 级, 全量回传会撑爆控制帧)。
+const RUN_OUTPUT_TAIL_BYTES: usize = 2048;
+
+fn output_tail(bytes: &[u8]) -> String {
+    let start = bytes.len().saturating_sub(RUN_OUTPUT_TAIL_BYTES);
+    String::from_utf8_lossy(&bytes[start..]).to_string()
+}
+
+pub(crate) fn execute_run(req: &RunRequest) -> io::Result<ActionExecutionResult> {
+    let hidden = req.window.as_deref().map(str::trim) != Some("visible");
+    let mut command = Command::new(&req.path);
+    command.args(&req.args);
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    isolate_process_group(&mut command);
+    if hidden {
+        suppress_shell_window(&mut command);
+    }
+
+    let started_at = Instant::now();
+    let mut child = command.spawn().map_err(|e| {
+        io::Error::other(format!("启动 {} 失败: {e}", req.path))
+    })?;
+
+    let wait = req.wait.unwrap_or(true);
+    if !wait {
+        let pid = child.id();
+        // fire-and-forget: 让子进程脱离 (收收割线程读空管道即可), 回执只带 pid。
+        let stdout_reader = child.stdout.take().map(spill_stream_to_vec);
+        let stderr_reader = child.stderr.take().map(spill_stream_to_vec);
+        std::thread::spawn(move || {
+            let _ = child.wait();
+            let _ = join_spilled_stream(stdout_reader);
+            let _ = join_spilled_stream(stderr_reader);
+        });
+        return Ok(ActionExecutionResult {
+            exit_code: 0,
+            stdout: format!("{{\"pid\":{pid}}}").into_bytes(),
+            stderr: Vec::new(),
+            response_value_json: None,
+        });
+    }
+
+    let timeout_ms = req.timeout_ms.unwrap_or(RUN_DEFAULT_TIMEOUT_MS);
+    let timeout = Some(Duration::from_millis(timeout_ms));
+
+    let stdout_reader = child.stdout.take().map(spill_stream_to_vec);
+    let stderr_reader = child.stderr.take().map(spill_stream_to_vec);
+
+    let deadline = started_at + timeout.unwrap();
+    let status = loop {
+        if let Some(status) = child.try_wait()? {
+            break Some(status);
+        }
+        if Instant::now() >= deadline {
+            let pid = child.id();
+            let _ = reap_after_terminate(&mut child, pid);
+            let duration = started_at.elapsed();
+            return Ok(ActionExecutionResult {
+                exit_code: SHELL_TIMEOUT_EXIT_CODE,
+                stdout: output_tail(&join_spilled_stream(stdout_reader)).into_bytes(),
+                stderr: format!(
+                    "@run 超时 (timeout_ms={timeout_ms}), 进程树已终止: {} {:?}",
+                    req.path, req.args
+                )
+                .into_bytes(),
+                response_value_json: Some(format!(
+                    "{{\"error\":\"Timeout\",\"timeout_ms\":{timeout_ms},\"duration_ms\":{}}}",
+                    duration.as_millis()
+                )),
+            });
+        }
+        thread::sleep(SHELL_WAIT_POLL_INTERVAL);
+    };
+
+    let stdout = output_tail(&join_spilled_stream(stdout_reader));
+    let stderr = output_tail(&join_spilled_stream(stderr_reader));
+    let exit_code = status.and_then(|status| status.code()).unwrap_or(-1);
+
+    Ok(ActionExecutionResult {
+        exit_code,
+        stdout: stdout.into_bytes(),
+        stderr: stderr.into_bytes(),
+        response_value_json: None,
+    })
 }
