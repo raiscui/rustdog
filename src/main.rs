@@ -977,31 +977,14 @@ fn run_hidden_daemon(
             // 现有 daemon 配置加载与生命周期逻辑。
             // ------------------------------------------------------------
             hidden_mode::enable_hidden_session();
-            let daemon_config = config::load_daemon_config(config_path.as_deref())
-                .map_err(|err| err.to_string())?;
-            control_cdp::configure(daemon_config.cdp.enabled);
-            // 横幅必须由 child 打: 它已经脱离控制台, 日志文件是唯一留下来的现场。
-            // parent 打的那份会跟着 parent 的窗口一起消失, 正是 2026-10-05 踩的坑。
-            let banner = tcp_daemon_banner(&daemon_config);
-            log::info!("{banner}");
-
-            // ------------------------------------------------------------
-            // 这里额外校验一次内部传下来的日志路径,避免 parent/child
-            // 之间参数漂移时静默退回 stdout。
-            // ------------------------------------------------------------
-            let Some(resolved_log_file) = log_file else {
-                return Err("hidden child is missing internal --log-file".to_string());
-            };
-
-            if resolved_log_file != daemon_config.hidden.log_file {
-                return Err(format!(
-                    "hidden child log path mismatch: cli={}, config={}",
-                    resolved_log_file.display(),
-                    daemon_config.hidden.log_file.display()
-                ));
+            // child 已脱离控制台 (stderr 全 null), Err 只走 eprintln 等于丢现场 —
+            // logger 的 target 此时就是 log_file, 错误必须 log 一份才留得住
+            // (2026-10-07: schtasks 会话 child 静默死, 零取证绕了三轮)。
+            let outcome = run_hidden_daemon_child(config_path.as_deref(), log_file.as_deref());
+            if let Err(err) = &outcome {
+                log::error!("hidden child 启动失败: {err}");
             }
-
-            daemon::run(daemon_config).map_err(|err| err.to_string())?;
+            outcome?;
             return Ok(());
         }
 
@@ -1022,6 +1005,39 @@ fn run_hidden_daemon(
         let _ = (config_path, child, log_file);
         Err("hidden-daemon is only supported on Windows".to_string())
     }
+}
+
+/// hidden child 的实际启动体 (从 run_hidden_daemon 抽出, 让外层能统一兜底落盘)。
+#[cfg(windows)]
+fn run_hidden_daemon_child(
+    config_path: Option<&std::path::Path>,
+    log_file: Option<&std::path::Path>,
+) -> Result<(), String> {
+    let daemon_config = config::load_daemon_config(config_path).map_err(|err| err.to_string())?;
+    control_cdp::configure(daemon_config.cdp.enabled);
+    // 横幅必须由 child 打: 它已经脱离控制台, 日志文件是唯一留下来的现场。
+    // parent 打的那份会跟着 parent 的窗口一起消失, 正是 2026-10-05 踩的坑。
+    let banner = tcp_daemon_banner(&daemon_config);
+    log::info!("{banner}");
+
+    // ------------------------------------------------------------
+    // 这里额外校验一次内部传下来的日志路径,避免 parent/child
+    // 之间参数漂移时静默退回 stdout。
+    // ------------------------------------------------------------
+    let Some(resolved_log_file) = log_file else {
+        return Err("hidden child is missing internal --log-file".to_string());
+    };
+
+    if resolved_log_file != daemon_config.hidden.log_file {
+        return Err(format!(
+            "hidden child log path mismatch: cli={}, config={}",
+            resolved_log_file.display(),
+            daemon_config.hidden.log_file.display()
+        ));
+    }
+
+    daemon::run(daemon_config).map_err(|err| err.to_string())?;
+    Ok(())
 }
 
 #[cfg(test)]

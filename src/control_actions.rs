@@ -740,9 +740,10 @@ pub(crate) fn execute_script_with_timeout(
     timeout: Option<Duration>,
     cancel: Option<&CancellationToken>,
 ) -> io::Result<ActionExecutionResult> {
-    let mut command = build_shell_command(shell, script_text);
+    let mut command = build_shell_command(shell, &prepend_output_encoding_init(shell, script_text));
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
     isolate_process_group(&mut command);
+    suppress_shell_window(&mut command);
 
     let started_at = Instant::now();
     let mut child = command.spawn()?;
@@ -864,6 +865,40 @@ fn isolate_process_group(command: &mut Command) {
 
 #[cfg(not(unix))]
 fn isolate_process_group(_command: &mut Command) {}
+
+/// Windows: @cmd 的 shell 是无人看窗的命令执行桥 — 不加 CREATE_NO_WINDOW 的话,
+/// Win11 默认终端 (Windows Terminal) 会为每个 spawn 开一个可见窗, 长会话下
+/// 被控桌面窗堆积成灾 (2026-10-07 真机实证)。可与 process_group 旗标共存。
+#[cfg(windows)]
+fn suppress_shell_window(command: &mut Command) {
+    use std::os::windows::process::CommandExt as _;
+
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    command.creation_flags(CREATE_NO_WINDOW);
+}
+
+#[cfg(not(windows))]
+fn suppress_shell_window(_command: &mut Command) {}
+
+/// Windows: 让 powershell/cmd 的输出走 UTF-8 — 控制台默认代码页 (简中 936/GBK)
+/// 下的中文经 from_utf8_lossy 全变乱码 (2026-10-07 真机实证, 回执里中文全不可读)。
+/// powershell 用 [Console]::OutputEncoding 重定向写端编码; cmd 用 chcp 65001。
+/// 仅 Windows 注入 (unix 侧本就是 UTF-8, 注入反而污染命令)。
+#[cfg(windows)]
+fn prepend_output_encoding_init(shell: &str, command_text: &str) -> String {
+    match shell_program_name(shell).as_deref() {
+        Some("powershell") | Some("powershell.exe") | Some("pwsh") | Some("pwsh.exe") => {
+            format!("[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; {command_text}")
+        }
+        Some("cmd") | Some("cmd.exe") => format!("chcp 65001 >nul & {command_text}"),
+        _ => command_text.to_string(),
+    }
+}
+
+#[cfg(not(windows))]
+fn prepend_output_encoding_init(_shell: &str, command_text: &str) -> String {
+    command_text.to_string()
+}
 
 /// 终止整棵进程树。
 ///
