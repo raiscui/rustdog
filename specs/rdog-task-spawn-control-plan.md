@@ -107,7 +107,7 @@ sequenceDiagram
     C->>D: @spawn#1:~/proj: cargo build
     D-->>C: @response id=1 task=t-a1b2
     C->>D: @ping
-    D-->>C: @response 0 pong
+    D-->>C: @response pong=true bind_state=listening uptime_ms=N
     C->>D: @task-status:t-a1b2
     D-->>C: @response running
     C->>D: @task-output:t-a1b2

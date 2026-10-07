@@ -897,3 +897,19 @@ R1/R3 已实施完成 (PR #61 分支), R2 认识修正为"若做则全族统一 
 - 与 screenshot 锁毒化族并列的第二个抽签 flake 族; 若再出现 3+ 次考虑
   与 screenshot 一起修 (读 docs/solutions/best-practices/
   parallel-test-global-state-single-lock.md 的适用性)
+
+## [2026-09-02 18:20:00] [Session ID: sess_68ea20f1-1318-4541-85bc-08d0ca1ddbd8] OCR 交接续档遗留 (PR #104 合并前后处置)
+
+- #102 后半: overlay NSWindow 修复后 rust e2e 连跑 3 次验收 — 需受控时段 (用户空闲, 计算器窗口无干扰), 环境准备: caffeinate + Terminal daemon + 重签
+- #103 受控重验: 方法已回写票 (AXValue 直写 + include_ocr 判读 + 所在屏 screencapture -D 真值); 先读 src/screenshot.rs 确认 composite-crop 的 window 路径守卫生效范围, 避免修已不存在的路径
+- cookbook-wechat-ocr.md (spec §10 挂账): 依赖 #102/#103 收口后的真实协议行为
+- NSPanel+Borderless 不合成经验: 在 #102 关闭时 Capture 进 docs/solutions (与 appkit-helper-subprocess-isolation 互链, 该文件是并行会话产物, 不动)
+- process_lease 抽签族本轮又现 (本机 1 次 + CI macos 1 次): 累计观察中, 若达 3+ 次按上条方案与 screenshot 族一起修
+- /tmp/ocr99 旧调试 png (含 wechat 隐私截图) 仍保留, 待用户确认后删除; oar_home 模型缓存勿删
+
+## [2026-09-02 19:26:00] [Session ID: sess_68ea20f1-1318-4541-85bc-08d0ca1ddbd8] 追加 (承接同日早条目)
+
+- #102 live 三件套单次绿验收: 重启后 (干净窗口环境) 跑一次验收命令即可; 剩余问题与方向已回写票 (单帧误读 / AC 的 AX 标识 dump / via-terminal 窗口泄漏治理)
+- 睡眠显示器输入 fail-closed 显式化 (#103 降级项): 睡眠时 sck/xcap 已天然超时报错, 缺显式 "display asleep" reason code, 需要更好恢复路径时再评估
+- CI unixpipe 抽签新成员 (prepare_unixpipe_listener_should_recover_stale_owner_guard_and_files): 裸 PID 复用撞活进程, 修法 = 测试用自 spawn 子进程 PID; 与 process_lease 族同观察, 3+ 次一并修
+- NSPanel+Borderless 不合成经验 Capture (前条目已记): #102 关闭时与 appkit-helper-subprocess-isolation solution 互链

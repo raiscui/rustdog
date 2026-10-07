@@ -88,7 +88,7 @@ sequenceDiagram
 ## 验收口径
 
 - `daemon inbound mode=control transport=websocket` 可成功握手
-- `@ping` 返回 `@response "pong"`
+- `@ping` 返回结构化 `@response {"ok":true,"pong":true,"uptime_ms":<ms>,"bind_state":"listening|backing_off|unbound","shell":"<shell>"}`
 - `@cmd#42:"printf READY"` 返回带同一 `id` 的成功响应
 - JSON agent `{"type":"ping"}` 返回 `{"type":"pong"}`
 - TCP control 现有测试不回归

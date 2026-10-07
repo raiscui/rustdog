@@ -1,0 +1,14 @@
+{
+  "schemaVersion": "mimosa-hook-status/v1",
+  "recordedAt": "2026-08-22T05:12:16.808Z",
+  "sessionId": "sess_fa3b551c-de58-45c9-bc09-c59c55387e86",
+  "event": "PostToolUse",
+  "toolName": "Edit",
+  "file": "docs/solutions/best-practices/gui-target-owner-evidence-gate.md",
+  "outcome": "clear",
+  "coverage": "complete",
+  "findingCount": 0,
+  "durationMs": 3,
+  "hostState": "hook_complete",
+  "reportHint": ".mimosa/reports/"
+}

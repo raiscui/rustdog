@@ -264,7 +264,7 @@ __rdog_session_open__:sess-42
 例如:
 
 ```text
-@response "pong"
+@response {"ok":true,"pong":true,"uptime_ms":<ms>,"bind_state":"listening|backing_off|unbound","shell":"<shell>"}
 @response {"id":42,"value":"READY"}
 @savefile {"id":7,"filename":"screenshot-...-virtual-desktop.jpg","mime":"image/jpeg","encoding":"base64","data":"..."}
 @savefile {"id":7,"filename":"screenshot-...-manifest.json","mime":"application/json","encoding":"base64","data":"..."}

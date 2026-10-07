@@ -100,7 +100,7 @@ flowchart LR
 | 能力 | 输入示例 | 返回形态 | 适合 agent 做什么 |
 | --- | --- | --- | --- |
 | one-shot CLI 入口 | `rdog control mac.lab @ping` / `rdog control mac.lab @ping @capabilities#1 @cmd#7:"..."` / `rdog control 127.0.0.1 5555 @capabilities#1` / `rdog control --url ws://... @ping` | line-control 协议原样响应(同下面各 `@<kind>` 行) | 不依赖 stdin / heredoc / `printf`,直接在命令尾部拼一行或多行 `@<line>` 就能发并等收口退出;N=1 和 N>1 统一复用 `send_control_lines_*` 管线,共享同一条 transport 与 frame 收口逻辑 |
-| 活性检查 | `@ping` | `@response "pong"` | 判断目标是否在线 |
+| 活性检查 | `@ping` | `@response {"ok":true,"pong":true,"uptime_ms":<ms>,"bind_state":"listening|backing_off|unbound","shell":"<shell>"}` | 判断目标是否在线; 裸 `"pong"` 分不出"正在监听"与"bind 失败在退避重试", 必须读 `bind_state` |
 | Bootstrap | `@bootstrap#1:{mode:"gui",capability_policy:"fresh"}` | `rdog.bootstrap.v1` structured `@response` + optional observe `@savefile` frames | 新 GUI 任务的一次只读起手探测,同时拿 liveness / capabilities / observation / lane errors |
 | 能力诊断 | `@capabilities#1` | `rdog.capabilities.v1` structured `@response` | 在 GUI / 权限 / 平台敏感动作前确定可用 lane |
 | 观察 | `@observe#2:{mode:"hybrid",include_screenshot:true,include_ax:true,include_windows:true}` | `rdog.observe.v1` observation bundle + optional `@savefile` frames | 推荐的 GUI 观察入口,先读屏幕/AX/窗口/ref/selector 摘要 |
@@ -612,7 +612,7 @@ RDOG
 预期至少包含:
 
 ```text
-@response "pong"
+@response {"ok":true,"pong":true,"uptime_ms":<ms>,"bind_state":"listening|backing_off|unbound","shell":"<shell>"}
 @response {"id":1,"value":"READY"}
 @response "PLAIN_OK"
 @response {"id":2,"value":{"kind":"mouse","action":"move",...}}

@@ -756,3 +756,20 @@ query.rs (verb) 与 selector 富化留在 control_ax 侧。缓存不动。
 ### 反证检查
 - 若假设1成立, 为何 runMode 冲刷让 frame 从 0x0 变正确? => frame 更新走 CGSSetWindowBounds (AppKit 直接调用) 与 CATransaction commit 是两条路径, 吻合
 - 推翻条件: swift 对照可见 + rust 在同一 runloop 结构下不可见 => 假设1不成立
+
+## [2026-09-02 18:06:00] [Session ID: sess_68ea20f1-1318-4541-85bc-08d0ca1ddbd8] 笔记: overlay 根因验证结论 (已验证, 替代前条假设链)
+
+### 验证结论 (决定性证据)
+- **根因: macOS 对 NSPanel+Borderless 组合拒绝合成**。注册进窗口服务器 (bounds/level 正确) 但 onscreen=false 永不上屏。
+- 与 activation policy (accessory/regular/prohibited 三种全试) / level (floating/normal) / ignoresMouseEvents (true/false) 均无关 — 属性矩阵 7 变体一次锁定。
+- NSWindow+Borderless 正常合成 (onscreen=true); NSPanel+Titled 也正常。修复 = 换 NSWindow, 无能力损失。
+- swift 对照与 rust 无关: 同构 swift 代码复现同样症状, 排除 objc2 绑定层。
+
+### 前条假设链处置
+- 假设 1 (CATransaction 提交缺失/需完整 app.run): **被变体 B 推翻** (完整 app.run 同样不可见)
+- 假设 2 (borderless 组合被合成器拒绝): **证实**, 但精确定位到 NSPanel+Borderless 特定组合 (比"无 drawRect 内容"更具体 — c4 无 layer 色也上屏, 只是内容黑)
+
+### 方法学沉淀
+- swift 属性矩阵 (单文件参数化 + CGWindowList 自查) 是定位窗口合成问题的最快路径: 7 变体 ~40s 出决定性证据
+- "窗口可见"三证据: CGWindowList onscreen + 屏幕截图区域像素特征 + 有效真值对照 (真值必须抓窗口所在 display)
+- overlay 新遗留: 多屏坐标用 mainScreen 高度换算, 非目标屏时 Y 偏 (记 #102, 衔接 display scope spec)

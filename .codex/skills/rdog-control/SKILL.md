@@ -266,6 +266,22 @@ rdog control <target> 5555 '@cmd:powershell -NoProfile -ExecutionPolicy Bypass -
 复杂表达式一律走 `-ExprFile` (表达式写本地文件 scp 过去) — 单行 `-Expr`
 的内层引号在 rdog 控制链路多层转义下必炸。
 
+### @run — 裸 exe 同步执行 + 退出码 (2026-10-07)
+
+不经 shell: path/args 结构化逐参传递, 免引号转义; 收割/超时/杀树与 @cmd 同款。
+
+```bash
+# 同步等退出, 回 {exit_code,...}; 超时 (默认 120s) 杀树回 Timeout envelope
+rdog control <target> 5555 '@run:{"path":"C:\\Windows\\System32\\cmd.exe","args":["/c","exit 7"]}'
+# 启动不等待 (fire-and-forget), 立即回 {"pid":N}
+rdog control <target> 5555 '@run:{"path":"...","args":[...],"wait":false}'
+# GUI 安装器要看窗: "window":"visible" (默认 hidden = CREATE_NO_WINDOW)
+```
+
+- 中文输出的 CLI 先在 args 里自带 `chcp 65001&&` (@run 直接 spawn 裸 exe, 不做
+  @cmd 那样的编码注入 — 不改写用户参数语义)。
+- stdout/stderr 回执只带**尾部 2KB** (安装器输出 MB 级, 全量回传撑爆控制帧)。
+
 ### 通用坑 (两形态都适用)
 
 - **app 重启后 target 重取** (GET /json), 旧 WS 报 "other side closed"。
@@ -315,6 +331,7 @@ lane - see `references/agent-messaging.md` for the full loop.
 | Finite workflow | `@flow` |
 | Stateful terminal | `rdog control TARGET --pty -- COMMAND` |
 | Long command (non-blocking) | `@spawn` then `@task-status` / `@task-output` / `@task-cancel` |
+| 跑裸 exe/安装器要退出码 (免 shell 引号) | `@run:{...}` (结构化 path+args, 见 @run 一节) |
 | Electron/Chromium DOM 级驱动 (AX 不可用/需读 JS 状态) | CDP Lane (见上; rdog 拉起 + ssh 隧道 + 裸 CDP) |
 | Delegate task to companion agent | `@agent-register` / `@agent-inbox` / `@agent-ack` |
 | Agent capability discovery | `@agent-card:NAME` |
