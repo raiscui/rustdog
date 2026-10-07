@@ -221,6 +221,69 @@ across turns.
 Success requires fresh PID, display/window ownership, page or URL state, and the
 intended content change. `performed:true` or a screenshot alone is incomplete.
 
+## CDP Lane (Electron/Chromium 深度驱动, Windows 首选)
+
+**定位**: 与 AX lane / Browser lane 互补不是替代。当 ①目标平台的 AX lane 整体
+unsupported (Windows 实测如此) ②截图+坐标点击被 HiDPI 换算、前台窗口遮挡反复
+搅局 ③需要读 JS 状态 (localStorage / IndexedDB / window 变量 / React 挂载态) 时,
+CDP 是唯一稳定通道 — DOM 级操作零坐标, 跨平台一致。**rdog 不桥接 CDP 流量**;
+组合拳分工 = rdog 把 app 带参拉起到正确交互会话 (`@cmd` Start-Process +
+`--remote-debugging-port=9222`, CDP 只绑被控机 loopback) + 截屏做视觉取证,
+CDP 驱动业务断言与输入。两条实现形态:
+
+### 形态 A — daemon 内置 CDP lane (rdog 3.0+ 原生, 首选)
+
+daemon 内置 CDP client (tungstenite, 连被控机 loopback 的 debug 端口), 控制端
+直接发 verb, **不需要 ssh/隧道**:
+
+```bash
+# 被控端: rdog.toml 显式开启 (安全模型: CDP 等同任意代码执行, 默认关)
+#   [cdp]
+#   enabled = true
+# 控制端:
+rdog control <target> 5555 '@cdp-targets:9222'      # 列 targets (页面/worker)
+rdog control <target> 5555 '@cdp-eval:9222,{"expression":"document.title"}'
+rdog control <target> 5555 '@cdp:9222,{"method":"Runtime.evaluate","params":{...}}'
+# @capabilities 会报告 "cdp":{"backend":"chrome-devtools-protocol"} 开关状态
+```
+
+⚠️ **未签名进程出站可能被安全软件按进程拦** (实测: 同机 loopback,
+powershell/裸 TcpClient 通, 未签名 rdog-cdp.exe 连 9222 → 10060 静默丢 SYN,
+提权/portproxy 都绕不过 — WFP 驱动层按进程签名)。识别特征 = 10060 出现在
+connect 且白名单进程同目标 200。治本 = 给 exe 签名或加入安全软件信任区;
+无法治本时用形态 B。
+
+### 形态 B — CDP-over-@cmd (兜底, 免拦截免 ssh)
+
+daemon 的 `@cmd` shell (powershell = Microsoft 签名, 白名单内) 跑 CDP 客户端
+脚本: 被控机放一个 `cdp-eval.ps1` (ClientWebSocket 连 debug 端口,
+Runtime.evaluate 回值; 支持 `-ExprFile` 传复杂表达式免引号转义), 控制端:
+
+```bash
+rdog control <target> 5555 '@cmd:powershell -NoProfile -ExecutionPolicy Bypass -File C:\path\cdp-eval.ps1 -Port 9222 -ExprFile C:\path\expr.txt'
+```
+
+复杂表达式一律走 `-ExprFile` (表达式写本地文件 scp 过去) — 单行 `-Expr`
+的内层引号在 rdog 控制链路多层转义下必炸。
+
+### 通用坑 (两形态都适用)
+
+- **app 重启后 target 重取** (GET /json), 旧 WS 报 "other side closed"。
+- React 白屏定位: evaluate
+  `document.getElementById('root').childElementCount` (=0 即崩) +
+  console 收集 (Runtime.enable + Log.enable + Page.reload, 收
+  exceptionThrown / consoleAPICalled / Log.entryAdded)。
+- **rdog 3.0 的 `daemon` 子命令强制转隐藏常驻** (spawn detached child 后立即
+  返回): schtasks 会话里 detached child 可能静默死 (child 校验
+  `[hidden].log_file` 与 parent 推导不一致即 exit)。**配方 = 前台启动 bat**:
+  `set RDOG_DAEMON_FOREGROUND=1` + `rdog daemon --config ...` 写成 bat,
+  schtasks /IT 跑 bat (bat 常驻 = daemon 常驻, 落用户交互会话 Session 1)。
+- Electron 主进程与渲染层是两个取证面 — 渲染层 CDP 拿不到主进程状态; 需要主
+  进程信息时让 renderer 挂全局 getter (`window.__xxxGetter`), main 进程经
+  `event.sender.executeJavaScript` 回取。
+- 视觉证据 (布局/像素/渲染结果) 仍用 rdog `@screenshot`; 文件对话框/OS 权限
+  弹窗等不可达 DOM 的系统级操作用 rdog 点击/按键。
+
 ## Background Tasks (Phase 3)
 
 `@spawn` runs a shell command in the background and answers immediately -
@@ -252,6 +315,7 @@ lane - see `references/agent-messaging.md` for the full loop.
 | Finite workflow | `@flow` |
 | Stateful terminal | `rdog control TARGET --pty -- COMMAND` |
 | Long command (non-blocking) | `@spawn` then `@task-status` / `@task-output` / `@task-cancel` |
+| Electron/Chromium DOM 级驱动 (AX 不可用/需读 JS 状态) | CDP Lane (见上; rdog 拉起 + ssh 隧道 + 裸 CDP) |
 | Delegate task to companion agent | `@agent-register` / `@agent-inbox` / `@agent-ack` |
 | Agent capability discovery | `@agent-card:NAME` |
 
