@@ -221,3 +221,45 @@ DPI 修正 / zenoh namespace / recording 修复), 它们当时连一行账本都
 (载体断言全平台必跑, 记账检查只在 push 到 main 跑)。
 
 - 提交: a884bad
+
+### 追加: Windows CI 红的根因修复 + Actions 复开 (同日续)
+
+起因: 上一次 CI (2026-10-06, commit `ff171de`) 的 **windows job 是红的**
+(1007 passed / 2 failed), 而**仓库级 GitHub Actions 当时是关闭的**
+(`repos/raiscui/rustdog/actions/permissions` → `enabled: false`),
+所以这批红没人看见, main 上这段历史一直没有 CI 把关。推送后复核时才发现。
+
+**两个失败的根因是同一个**: Windows 上同一个路径有两种拼法。
+- `execute_control_command_should_run_script_via_shell`: 并发单测里
+  `figment::Jail` 把进程级 cwd 切到带 `\\?\` verbatim 前缀的临时目录,
+  cmd.exe 认不了这种 cwd → 打 "UNC paths are not supported" 告警 →
+  挂在"stderr 必须为空"这条断言上 (脚本本身照常执行, stdout/exit_code 都对)。
+  修法: 与 unix 侧同类放行 (`is_deleted_cwd_shell_warning`) 对称, 放行这一类
+  环境噪音; 判据做成**语言无关** (中文 Windows 上是中文文案, 真机实测),
+  共同特征 = 告警带 verbatim 路径 + 提到 "CMD.EXE"。
+- `shell_lane_should_apply_cwd_env_and_script_text`: runner 的 TEMP 是 **8.3 短名**
+  (`RUNNER~1`), 而 PowerShell 的 `$PWD` 报的是**长名** (`runneradmin`);
+  同一目录两种拼法。修法: 期望值改走 `shell_visible_path()` (canonicalize
+  把短名解析成长名, 再去 `\\?\` 前缀), unix 侧行为不变。
+
+**顺带捞出两个从未执行的测试**: `src/control_protocol/tests.rs` 里两个 `@run`
+解析测试被**嵌套在**另一个测试函数体内 —— 嵌套的 `#[test]` fn 不被框架收集,
+断言从来没跑过 (`@run` 原语的解析契约一直是没测的)。证据 = 编译告警
+`function run_payload_requires_path is never used`。提到模块级后两个都通过。
+修完全仓 0 个 "never used" 告警 —— 这类缺陷就这一处。
+
+**真机实证** (rais-razer.local, Win11): scp 一个 .ps1 过去跑, 复现了
+cmd.exe 在 verbatim cwd 下的告警原文 (中文 Windows 版), 并用普通 cwd 做对照
+(stderr 为空) —— 证明这条告警**只**在 verbatim cwd 下出现, 放行它不会掩盖真失败。
+真机无 Rust 工具链, Windows 侧最终由 CI runner 验证。
+
+**本地环境两个坑** (与本仓无关, 但下次会再遇到):
+- `rustup` 组件下载在本机被环境权限门挡住 (`~/.rustup/downloads/` 里 rename
+  返回 EPERM) → 仓库 pin 了 `channel = "stable"` 而本机没装 stable,
+  `cargo` 会卡在下载阶段。绕法: `cargo +1.95.0 ...` (用已装的具体版本)。
+- 本机跑全量单测有 **37 个失败**, 与本次改动**无关** (stash 对照: 改动前后
+  失败集完全一致, 通过数 1026 → 1032): 32 个 recording 家族是
+  `PermissionMissing("input_monitoring")` (本 agent 进程没有 macOS TCC 授权),
+  4 个 unixpipe 是仓库已记录的 PID 复用抽签族。
+
+- 提交: a040124
