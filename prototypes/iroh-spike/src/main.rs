@@ -94,6 +94,8 @@ struct Opts {
     quic_bind: String,
     quic_port: u16,
     bind_addr: String,
+    linger: u64,
+    pre_delay: u64,
     tls_cert: String,
     tls_key: String,
     relay: String,
@@ -110,6 +112,8 @@ impl Opts {
             quic_bind: "0.0.0.0:34780".to_string(),
             quic_port: 34780,
             bind_addr: String::new(),
+            linger: 0,
+            pre_delay: 0,
             tls_cert: String::new(),
             tls_key: String::new(),
             bytes: MAX_CONTROL_MESSAGE_BYTES,
@@ -125,6 +129,12 @@ impl Opts {
                     o.quic_port = args.get(i + 1).and_then(|v| v.parse().ok()).unwrap_or(o.quic_port)
                 }
                 "--bind-addr" => o.bind_addr = args.get(i + 1).cloned().unwrap_or_default(),
+                "--pre-delay" => {
+                    o.pre_delay = args.get(i + 1).and_then(|v| v.parse().ok()).unwrap_or(0)
+                }
+                "--linger" => {
+                    o.linger = args.get(i + 1).and_then(|v| v.parse().ok()).unwrap_or(0)
+                }
                 "--tls-cert" => o.tls_cert = args.get(i + 1).cloned().unwrap_or_default(),
                 "--tls-key" => o.tls_key = args.get(i + 1).cloned().unwrap_or_default(),
                 "--relay" => o.relay = args.get(i + 1).cloned().unwrap_or_default(),
@@ -242,6 +252,11 @@ async fn run_client(opts: &Opts) -> Result<()> {
         serde_json::from_str(&opts.target).context("解析 --target(EndpointAddr JSON)")?;
 
     let endpoint = build_endpoint(relay_url, opts.quic_port, opts.relay_only, &opts.bind_addr).await?;
+    // 等第一轮 QAD/net_report 跑完:公网候选(global_v4)必须先进候选集,打洞才有意义。
+    if opts.pre_delay > 0 {
+        tracing::info!(secs = opts.pre_delay, "等待首轮 QAD 完成");
+        tokio::time::sleep(std::time::Duration::from_secs(opts.pre_delay)).await;
+    }
     tracing::info!(
         target = %target.id.fmt_short(),
         relay_only = opts.relay_only,
@@ -291,6 +306,16 @@ async fn run_client(opts: &Opts) -> Result<()> {
     match rx.recv() {
         Ok(Some(line)) => println!("{line}"),
         _ => eprintln!("客户端未拿到响应"),
+    }
+
+    // --linger: 拿到响应后不立刻退出,给 iroh 的路径升级(打洞成功 → Direct)留窗口。
+    // relay 路径是"先建立连接",直连是"后续升级"(UPGRADE_INTERVAL=60s)。
+    if opts.linger > 0 {
+        tracing::info!(secs = opts.linger, "保持连接,等待路径升级");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(opts.linger);
+        while std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_secs(1));
+        }
     }
     Ok(())
 }
