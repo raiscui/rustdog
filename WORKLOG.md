@@ -263,3 +263,18 @@ cmd.exe 在 verbatim cwd 下的告警原文 (中文 Windows 版), 并用普通 c
   4 个 unixpipe 是仓库已记录的 PID 复用抽签族。
 
 - 提交: a040124
+
+### 追加: Actions 复开 + CI 终态 (同日续)
+
+- **仓库级 Actions 此前是关闭的** (`enabled: false`) → 2026-10-06 之后 main 没有
+  CI 把关; 那个 commit 写"Windows 全量 1009 清零" 但**它自己的 run 就是红的**。
+  已开回 (`enabled: true`)。
+- 触发完整矩阵: 首轮 Windows 红 6 个 (4 个 flow shell lane 30s 超时 + shell
+  receiver + control_core), **只重跑失败 job 即全绿**; 判定 runner 偶发
+  (flow lane 产品代码逐行未变, 10-06 那次同一份代码能跑)。
+- **终态**: macOS ✅ / Ubuntu ✅ / Windows ✅ (`1013 passed; 0 failed`) /
+  `knowledge carriers` ✅ (新加的载体守卫 job 生效并通过)。
+- 测试总数 1009 → 1013: +2 是从嵌套里提出来的 `@run` 测试 (原先从未执行),
+  +2 是本轮新增的跨平台单测。
+- 纪律 (已记 LATER_PLANS): Windows job 首轮红**先重跑再归因**; 同轮产品代码
+  未变 + 重跑即绿 = runner 偶发, 连续三轮红在同一组测试上才按真缺陷查。

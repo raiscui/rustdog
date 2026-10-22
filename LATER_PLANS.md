@@ -958,4 +958,43 @@ R1/R3 已实施完成 (PR #61 分支), R2 认识修正为"若做则全族统一 
   `specs/rdog-multi-display-screenshot-coordinate-plan.md`、
   `specs/rdog-mouse-control-coordinate-plan.md`) **都是错的** (HiDPI 下差 2 倍),
   已全部改为"以 manifest 的 `transforms` 字段为准 + 权威公式"
-  (`src/control_mouse/screenshot_frame.rs:17`)。
+  (`src/control_mouse/screenshot_frame.rs:17`)。第 6 处
+  (skill `references/control-workflow.md:339`, 散文写法) 是本轮建守卫时被抓到的。
+
+## [2026-10-22 15:30:00] [Session ID: mvs_04f490f87a924c96ac1cb0adcbd30806] 追加: Windows CI 复开 + 首轮红的归因纪律
+
+### 已落地
+
+- **仓库级 GitHub Actions 此前是关闭的** (`actions/permissions` → `enabled: false`),
+  2026-10-06 之后 main 一直没有 CI 把关 —— 那个 commit message 写"Windows 全量
+  1009 清零", 但**它自己的 CI run 就是红的** (1007 passed / 2 failed)。
+  2026-10-22 已开回 (`enabled: true`), 并触发完整矩阵:
+  **macOS / Ubuntu / Windows / knowledge-carriers 四个 job 全绿**,
+  Windows `1013 passed; 0 failed` (测试总数 1009 → 1013: +2 是从嵌套里提出来的
+  `@run` 测试, +2 是本轮新增的跨平台单测)。
+- 两个 Windows 失败的根因已修 (Windows 路径形态差异), 见 WORKLOG 同日条目。
+
+### 待观察: Windows runner 偶发"起 shell 30 秒挂起"
+
+Actions 复开后的**第一轮** Windows job 报了 6 个失败, 其中 4 个是 flow shell lane
+超时 (30s, stdout/stderr 全空, exit_code 1), 外加 1 个 shell receiver bootstrap
+(ConnectionReset) 与 1 个 control_core flow 测试。**只重跑失败 job 即全绿**。
+
+判定为 runner 环境偶发, 依据:
+- flow lane 的**产品代码逐行未变** (`src/control_flow/process.rs` 不在
+  `ff171de..HEAD` 的 diff 里; `set_command_process_group` 在 Windows 是 no-op)
+- 10-06 那次同一份 flow 代码是能跑的 (脚本 1844ms 出结果, 只是路径比较对不上)
+- 10-06 那次全量 5.59s, 这一轮 72.79s —— 慢的 13 倍, 慢在被 30s 超时拖住
+
+**纪律**: Windows job 首轮红**先重跑再归因**。同轮内产品代码未变 + 重跑即绿 =
+  runner 偶发, 不是回归; 这与本仓已记录的 "CI 抽签族" (screenshot 锁毒化 /
+  process_lease / unixpipe PID 复用) 同一族。若同一 job 连续三轮红在同一组测试上,
+  才按真缺陷查。
+
+### 未决 (不在本轮范围)
+
+- 首轮那 4 个 flow 超时的**根因未定位** (PowerShell 起进程后 30s 无输出且无报错)。
+  若再现, 建议的排查方向: shell spawn 的 stdin 继承 (当前 `Stdio` 未设 null)、
+  Windows runner 的 Defender 扫描、PowerShell 首次启动的 NGEN 预热。
+- 真机 (rais-razer.local) 无 Rust 工具链, 本机又因 rustup 组件下载被环境权限门
+  挡住 (见 WORKLOG 同日条目) → **Windows 侧验证目前只能靠 CI runner**。
