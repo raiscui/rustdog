@@ -193,3 +193,31 @@ a 通过 / b 通过 / c 通过 / d 通过 / e 通过 / f 通过 —— 六项全
 **教训**: 上面 14 个里有 6 个是**功能代码** (CDP lane / 文件传输 / 帧上限 /
 DPI 修正 / zenoh namespace / recording 修复), 它们当时连一行账本都没留下 ——
 不是"记漏了一句", 是**根本没意识到要记**。所以守卫是必要的, 不是形式主义。
+
+### 追加: 三条改进建议守卫化 (同日续, 提交 a884bad)
+
+用户让把本轮报告里的三条项目级改进建议真正做掉。三条都落成**可执行守卫**,
+不只写进建议清单 —— 约定正文在 `docs/agents/knowledge-carriers.md`。
+
+1. **载体断言清单化** → `scripts/check-carrier-assertions.py`
+   权威换算式从 `src/screenshot.rs` **抽取**(不硬编码), 逐轴比对载体里给出的每个
+   换算式; 断言清单与文档双向对账。**顺带抓到第 6 处载体漂移**:
+   skill `references/control-workflow.md:339` 的散文写法
+   ("convert ... by adding virtual_bounds.x/y") —— 上一轮按公式字面量 grep 没命中。
+2. **进度表加「最后复核」列** → `remote-control-blocked-command-pitfalls.md`
+   的「落地情况」表 17 行逐行补日期 (每行都对当前代码核过); 优先级建议表不再
+   自带表级日期(会自己过期), 改为指向唯一真相源。
+3. **提交即记账** → `scripts/check-bookkeeping.py`
+   范围 = 最近一个已被账本引用的 commit 之后; 每个 commit 要么被账本引用, 要么
+   只改账本文件(记账提交豁免, 不自我递归)。
+
+**两个守卫都做了反向验证**(注入回归看它是否真会红), 并据此修掉守卫自身的漏洞:
+载体守卫第一版有 3 个洞 —— 指针豁免过宽(改一处、别处提过 transforms 就能免检)、
+免责词表把 `not the` 误当免责标记(一行里旧公式+正确否定陈述会整行被豁免)、
+整串比对必假阳性(权威串单行 `;` 分隔, 载体分两行/只写 x 轴) → 改成
+**去空白后按轴做前缀匹配**。
+
+接入: AGENTS.md 新增 "Knowledge carriers" 小节; CI 新增 `knowledge-carriers` job
+(载体断言全平台必跑, 记账检查只在 push 到 main 跑)。
+
+- 提交: a884bad
