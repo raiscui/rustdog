@@ -144,9 +144,27 @@ python3 scripts/check-bookkeeping.py
 
 - 范围 = 当前分支上，**最近一个已被账本引用的 commit 之后**的全部 commit
 - 每个 commit 要么被账本引用（sha 出现），要么**只改账本文件**（记账提交豁免）
-- 否则判为"漏记账"，退出码 1
+- 否则判为"漏记账"
 
 **豁免**是有限的：只改账本文件的提交豁免。功能代码提交不豁免 —— 哪怕它很小。
+
+### 两种模式：CI 只报告，本地才阻断
+
+| 模式 | 触发 | 漏账时的行为 | 用在哪 |
+| --- | --- | --- | --- |
+| `--report-only` | 显式加该参数 | 打印报告 + 发 `::warning::` 注解，**退出码永远 0** | **CI**（push 到 main 时） |
+| 默认（strict） | 不加参数 | 打印报告，退出码 1 | 本地 pre-flight |
+
+**为什么 CI 不阻断**：账本滞后是**流程债**，不是代码缺陷。为了让一条流程债把别人
+的推送卡住（还可能在 PR 阶段误报，因为工作 commit 的记账条目通常在**后续**的
+提交里才落盘），不值得。改成只报告 + `::warning::` 注解后，漏账条目会显示在提交
+/PR 视图里 —— 看得见，但不挡路。
+
+**要硬门禁就在本地跑**：
+
+```bash
+python3 scripts/check-bookkeeping.py          # strict, 漏账退出码 1
+```
 
 ### sha 互引的方向
 
@@ -159,7 +177,7 @@ python3 scripts/check-bookkeeping.py
 
 | 场景 | 结果 |
 | --- | --- |
-| 抽掉 WORKLOG 里的「提交账目」表（模拟账本滞后） | 红 ✓，报出 3 个未记账 commit |
+| 抽掉 WORKLOG 里的「提交账目」表（模拟账本滞后） | 报出 3 个未记账 commit（strict 退出码 1；report-only 退出码 0 + 注解） |
 | 账目齐全 | 绿 ✓ |
 
 **已知盲区**：
@@ -177,9 +195,12 @@ python3 scripts/check-bookkeeping.py
 三条约定都有守卫，收口时一并跑：
 
 ```bash
-python3 scripts/check-carrier-assertions.py   # 约定 ①
-python3 scripts/check-bookkeeping.py          # 约定 ③
+python3 scripts/check-carrier-assertions.py   # 约定 ① (CI 上是硬门禁)
+python3 scripts/check-bookkeeping.py          # 约定 ③ (本地 strict: 漏账退出码 1)
 ```
+
+CI 里的口径不同：约定 ① 是**硬门禁**（载体与代码分叉是真缺陷），约定 ③
+**只报告不阻断**（`--report-only` + `::warning::` 注解）。
 
 约定 ② 没有脚本 —— 状态表的「最后复核」列靠 review 时人眼看。当前仓里
 **进度/状态表只有 1 处**：`docs/solutions/best-practices/remote-control-blocked-command-pitfalls.md`

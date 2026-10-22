@@ -114,7 +114,9 @@ jobs:
         run: python3 scripts/check-carrier-assertions.py
 
       # 约定 ③: 工作 commit 必须进六文件账本。
-      # 只在 push 到 main 时判定 —— PR 阶段的工作 commit 还没到记账点。
-      - name: Commits are accounted in the ledger
+      # **只报告不阻断**: 账本滞后是流程债, 不该卡住别人推送; 漏账条目用
+      # ::warning:: 注解显示在提交/PR 视图, 而不是把整轮 CI 拉红。
+      # 本地要硬门禁就跑 `python3 scripts/check-bookkeeping.py` (默认 strict)。
+      - name: Commits accounted in the ledger (report only)
         if: github.event_name == 'push'
-        run: python3 scripts/check-bookkeeping.py --limit 50
+        run: python3 scripts/check-bookkeeping.py --report-only --limit 50

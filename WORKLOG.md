@@ -278,3 +278,17 @@ cmd.exe 在 verbatim cwd 下的告警原文 (中文 Windows 版), 并用普通 c
   +2 是本轮新增的跨平台单测。
 - 纪律 (已记 LATER_PLANS): Windows job 首轮红**先重跑再归因**; 同轮产品代码
   未变 + 重跑即绿 = runner 偶发, 连续三轮红在同一组测试上才按真缺陷查。
+
+### 追加: 记账检查改成"CI 只报告不阻断" (同日续)
+
+用户裁定: 账本滞后是**流程债**, 不该在 push 到 main 时硬拦别人的推送。
+
+- `scripts/check-bookkeeping.py` 新增 `--report-only`: 永远退出码 0, 但打印完整
+  报告; 在 GitHub Actions 环境额外发 `::warning::` 注解 —— 漏账条目会显示在
+  **提交/PR 视图**里, 而不是只埋进日志 (不阻断但看得见)。
+- 默认仍是 **strict** (漏账退出码 1), 留给本地 pre-flight 用。
+- CI 的 `knowledge-carriers` job 改用 `--report-only`; **载体断言检查保持硬门禁**
+  (载体与代码分叉是真缺陷, 不是流程债)。
+- 反向验证: 剥掉账本里所有真实 sha 制造 9 个漏记账 commit →
+  strict `exit=1` (报 9 条) / report-only `exit=0` (同样报 9 条 + 9 条注解)。
+- 约定正文 (`docs/agents/knowledge-carriers.md`) 与 AGENTS.md 同步写清两种模式的分工。

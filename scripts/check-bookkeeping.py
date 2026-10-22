@@ -2,7 +2,7 @@
 """提交即记账 — 检查 git 提交是否都进了六文件账本。
 
 背景 (2026-10-22 实锤):
-    2026-10-07 ~ 2026-10-20 期间的产出 (五个 commit + 一次跨机实战 + 一次
+    2026-10-07 ~ 10-20 期间的产出 (五个 commit + 一次跨机实战 + 一次
     wayfinder 建图) **一条六文件记录都没有**。知识还在 git 里, 不算丢失 ——
     但**索引缺失**: 下个会话读 task_plan.md 会以为 10-06 之后无事发生。
     这类账本滞后比知识缺失更隐蔽。
@@ -16,16 +16,24 @@
         b) 它只改了账本文件 (记账提交本身, 豁免)
       否则判为"漏记账"
 
+两种模式:
+    默认 (strict)  = 漏记账 -> 退出码 1, 适合本地 pre-flight
+    --report-only   = 只报告, 永远退出码 0, 适合 CI (不阻断推送)
+      在 GitHub Actions 里会额外发 `::warning::` 注解, 所以漏账条目会显示在
+      提交/PR 视图里, 而不是淹没在日志中。
+
 用法:
     python3 scripts/check-bookkeeping.py [--repo-root .] [--since <ref>] [--limit 30]
+    python3 scripts/check-bookkeeping.py --report-only
     python3 scripts/check-bookkeeping.py --ref-only [HEAD]   # 只打印可粘贴的 sha
 
-退出码: 0 = 全部已记账; 1 = 有漏记账; 2 = 用法/环境错误
+退出码: 0 = 全部已记账 (或 report-only); 1 = 有漏记账 (仅 strict); 2 = 用法/环境错误
 """
 
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import subprocess
 import sys
@@ -92,6 +100,11 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--since", default=None, help="起点 ref (如 origin/main)")
     parser.add_argument("--limit", type=int, default=30, help="无 --since 时回看多少个 commit")
     parser.add_argument(
+        "--report-only",
+        action="store_true",
+        help="只报告不失败 (CI 用): 永远退出 0, 但漏账条目会发 ::warning:: 注解",
+    )
+    parser.add_argument(
         "--ref-only",
         nargs="?",
         const="HEAD",
@@ -151,15 +164,28 @@ def main(argv: list[str]) -> int:
     print(f"  已记账: {accounted}  记账提交(豁免): {exempt}  漏记账: {len(unaccounted)}")
 
     if unaccounted:
-        print(f"\nFAIL: {len(unaccounted)} 个 commit 没有进账本", file=sys.stderr)
+        mode = "只报告 (report-only)" if args.report_only else "阻断 (strict)"
+        print(f"\n{'⚠️' if args.report_only else '❌'} {len(unaccounted)} 个 commit 没有进账本 [{mode}]")
         for short, subject, files in unaccounted:
-            print(f"  {short} {subject}", file=sys.stderr)
-            print(f"      改了: {', '.join(files[:6])}", file=sys.stderr)
+            print(f"  {short} {subject}")
+            print(f"      改了: {', '.join(files[:6])}")
+            # GitHub Actions 注解: 漏账条目会显示在提交/PR 视图, 而不是只埋进日志
+            if os.environ.get("GITHUB_ACTIONS"):
+                print(
+                    f"::warning title=提交未进账本::"
+                    f"{short} {subject} —— 六文件里找不到这个 commit 的条目"
+                )
         print(
             "\n修法: 在 WORKLOG.md (或 notes/LATER_PLANS/…) 的对应条目末尾写一行\n"
             "  - 提交: <sha>\n"
             "再提交该账本改动 (纯账本提交本身豁免)。\n"
-            "取 sha: python3 scripts/check-bookkeeping.py --ref-only HEAD",
+            "取 sha: python3 scripts/check-bookkeeping.py --ref-only HEAD"
+        )
+        if args.report_only:
+            print("\n(report-only 模式: 不阻断, 但漏账条目已按 ::warning:: 注解上报)")
+            return 0
+        print(
+            "\n(strict 模式: 退出码 1。CI 用 --report-only, 本地 pre-flight 用默认 strict。)",
             file=sys.stderr,
         )
         return 1
