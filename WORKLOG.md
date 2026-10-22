@@ -292,3 +292,4 @@ cmd.exe 在 verbatim cwd 下的告警原文 (中文 Windows 版), 并用普通 c
 - 反向验证: 剥掉账本里所有真实 sha 制造 9 个漏记账 commit →
   strict `exit=1` (报 9 条) / report-only `exit=0` (同样报 9 条 + 9 条注解)。
 - 约定正文 (`docs/agents/knowledge-carriers.md`) 与 AGENTS.md 同步写清两种模式的分工。
+- 提交: a39be21
