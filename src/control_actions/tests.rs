@@ -412,7 +412,9 @@ fn execute_control_command_should_run_script_via_shell() {
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        output.stderr.is_empty() || is_deleted_cwd_shell_warning(&stderr),
+        output.stderr.is_empty()
+            || is_deleted_cwd_shell_warning(&stderr)
+            || is_verbatim_cwd_shell_warning(&stderr),
         "unexpected shell stderr: {stderr}"
     );
 }
@@ -581,6 +583,47 @@ fn is_deleted_cwd_shell_warning(stderr: &str) -> bool {
     // 并发单测里 `figment::Jail` 会切换并清理进程级 cwd。
     // `/bin/sh` 继承到这个瞬间状态时,可能只是在启动阶段打印 getcwd 警告。
     stderr.contains("getcwd") && stderr.contains("No such file")
+}
+
+/// cmd.exe 在 cwd 是 `\\?\` verbatim 路径时打的告警。
+///
+/// 并发单测里 `figment::Jail` 把进程级 cwd 切到自己的临时目录, 那个路径带
+/// `\\?\` 前缀; cmd.exe 认不了这种 cwd, 会打印
+/// "UNC paths are not supported. Defaulting to Windows directory."。
+///
+/// 这是**环境噪音**, 不是脚本失败: 脚本本身照常执行 (stdout / exit_code 都对),
+/// 同一台机器上换成普通 cwd 就完全没有这条 stderr (2026-10-22 真机实测对照)。
+/// unix 侧的 `is_deleted_cwd_shell_warning` 放的是同一类环境噪音, 两边对称。
+///
+/// **判据必须语言无关**: 英文 runner 上是 "UNC paths are not supported",
+/// 而中文 Windows 上是另一套中文文案 —— 两条共同的语言无关特征是
+/// 告警里带 verbatim 路径 (`\\?\C:\...`) 且提到 "CMD.EXE"。
+/// (2026-10-06 windows CI 实测: 这条告警让
+/// `execute_control_command_should_run_script_via_shell` 挂在 stderr 断言上)
+fn is_verbatim_cwd_shell_warning(stderr: &str) -> bool {
+    stderr.contains("UNC paths are not supported")
+        || stderr.contains("Defaulting to Windows directory")
+        || (stderr.contains("CMD.EXE") && stderr.contains(r"\\?\"))
+}
+
+#[test]
+fn is_verbatim_cwd_shell_warning_should_match_both_locales() {
+    // 英文 runner (2026-10-06 CI 实测原文)
+    let english = "'\\\\?\\C:\\Users\\runneradmin\\AppData\\Local\\Temp\\.tmpUNiCFR'\r\n\
+                    CMD.EXE was started with the above path as the current directory.\r\n\
+                    UNC paths are not supported.  Defaulting to Windows directory.\r\n";
+    assert!(is_verbatim_cwd_shell_warning(english));
+
+    // 中文 Windows (2026-10-22 真机实测: 文案是中文的, 但共同特征不变)
+    let chinese = "'\\\\?\\C:\\Users\\vdcoo\\AppData\\Local\\Temp\\rdog-probe-54724'\r\n\
+                   CMD.EXE 是作为当前目录的路径启动的。\r\n\
+                   UNC 路径不支持，默认值为 Windows 目录。\r\n";
+    assert!(is_verbatim_cwd_shell_warning(chinese));
+
+    // 普通 cwd 下不该命中 (真机对照: stderr 为空)
+    assert!(!is_verbatim_cwd_shell_warning(""));
+    // 别的 stderr 噪声不该被当成这类告警
+    assert!(!is_verbatim_cwd_shell_warning("some other shell error\n"));
 }
 
 #[test]

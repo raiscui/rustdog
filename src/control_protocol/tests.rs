@@ -101,31 +101,6 @@ fn parse_should_support_key_paste_script_cmd_and_screenshot() {
             command: ControlCommand::Script("echo hi".to_owned()),
         })
     );
-    #[test]
-    fn run_payload_parses_into_structured_request() {
-        // @run: 结构化 JSON — path 必填, args/timeout_ms/window/wait 可选
-        let parsed = parse_control_line(
-            r#"@run:{"path":"C:\\tools\\setup.exe","args":["/S"],"timeout_ms":180000,"window":"visible"}"#,
-        )
-        .unwrap();
-        let ControlParseResult::Control(req) = parsed else {
-            panic!("expected control request");
-        };
-        let ControlCommand::Run(run) = req.command else {
-            panic!("expected Run command");
-        };
-        assert_eq!(run.path, "C:\\tools\\setup.exe");
-        assert_eq!(run.args, vec!["/S".to_owned()]);
-        assert_eq!(run.timeout_ms, Some(180000));
-        assert_eq!(run.window.as_deref(), Some("visible"));
-        assert_eq!(run.wait, None);
-    }
-
-    #[test]
-    fn run_payload_requires_path() {
-        assert!(parse_control_line(r#"@run:{"args":["/S"]}"#).is_err());
-        assert!(parse_control_line("@run:").is_err());
-    }
     assert_eq!(
         parse_control_line(
             r#"@savefile:{filename:"shot.jpg",mime:"image/jpeg",encoding:"base64",data:"QUJD"}"#
@@ -167,6 +142,32 @@ fn parse_should_support_key_paste_script_cmd_and_screenshot() {
             }),
         })
     );
+}
+
+#[test]
+fn run_payload_parses_into_structured_request() {
+    // @run: 结构化 JSON — path 必填, args/timeout_ms/window/wait 可选
+    let parsed = parse_control_line(
+        r#"@run:{"path":"C:\\tools\\setup.exe","args":["/S"],"timeout_ms":180000,"window":"visible"}"#,
+    )
+    .unwrap();
+    let ControlParseResult::Control(req) = parsed else {
+        panic!("expected control request");
+    };
+    let ControlCommand::Run(run) = req.command else {
+        panic!("expected Run command");
+    };
+    assert_eq!(run.path, "C:\\tools\\setup.exe");
+    assert_eq!(run.args, vec!["/S".to_owned()]);
+    assert_eq!(run.timeout_ms, Some(180000));
+    assert_eq!(run.window.as_deref(), Some("visible"));
+    assert_eq!(run.wait, None);
+}
+
+#[test]
+fn run_payload_requires_path() {
+    assert!(parse_control_line(r#"@run:{"args":["/S"]}"#).is_err());
+    assert!(parse_control_line("@run:").is_err());
 }
 
 #[test]

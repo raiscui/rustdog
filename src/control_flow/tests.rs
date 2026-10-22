@@ -92,18 +92,15 @@ fn shell_lane_should_capture_stdout_stderr_and_exit_code() {
 fn shell_lane_should_apply_cwd_env_and_script_text() {
     let dir = temp_flow_dir("cwd-env");
     fs::create_dir_all(&dir).expect("temp dir should create");
-    // 只在 unix 侧 canonicalize: mac 的 temp_dir() 常是 `/var/...` 符号链接,
-    // 而 shell 报的是真实路径 `/private/var/...`, 不解析必然对不上; 反过来
-    // Windows 的 canonicalize 会加 `\\?\` verbatim 前缀, 反而与 `$PWD` 报出的
-    // 普通路径对不上 —— 那边保持原样传入即可。
-    #[cfg(unix)]
-    let dir = fs::canonicalize(&dir).expect("temp dir should canonicalize");
-    let dir = dir.to_str().expect("temp dir should be utf8");
+    // 期望值必须与 shell **报出来的形态**一致, 否则永远对不上:
+    // unix 侧是符号链接 (/var vs /private/var), windows 侧是 8.3 短名 vs 长名
+    // (RUNNER~1 vs runneradmin)。详见 shell_visible_path 的注释。
+    let dir = shell_visible_path(&dir);
     let request = parse_flow_payload(&format!(
         r#"{{"schema":"rdog.flow.v1","policy":{{"allow_shell":true}},"steps":[{{"Script":{{"text":"{}","cwd":"{}","env":{{"FLOW_TEST":"ok"}},"capture":"script1"}}}},{{"Expect":{{"kind":"cmd_stdout_contains","capture":"script1","contains":"ok:{}"}}}}]}}"#,
         cmd::SCRIPT_ENV_CWD_JSON,
-        escape_json(dir),
-        escape_json(dir),
+        escape_json(&dir),
+        escape_json(&dir),
     ))
     .unwrap();
 
@@ -177,6 +174,49 @@ fn temp_flow_dir(name: &str) -> std::path::PathBuf {
         .expect("system time should be after unix epoch")
         .as_millis();
     std::env::temp_dir().join(format!("rdog-flow-{name}-{millis}-{}", std::process::id()))
+}
+
+/// 去掉 Windows 的 `\\?\` verbatim 前缀。
+///
+/// Rust 的 `fs::canonicalize` 在 Windows 上一定返回 `\\?\C:\...` 这种形态
+/// (走 `GetFinalPathNameByHandle`), 而 shell 报出来的是**不带前缀**的普通路径,
+/// 直接拿去比较必然对不上。
+fn strip_verbatim_prefix(path: &str) -> &str {
+    path.strip_prefix(r"\\?\").unwrap_or(path)
+}
+
+/// 把路径转成"shell 报出来的形态", 用于构造期望值。
+///
+/// 两侧都要 canonicalize, 但要解决的形态问题不同:
+/// - unix: mac 的 `temp_dir()` 常是 `/var/...` 符号链接, 而 shell 报的是真实路径
+///   `/private/var/...`, 不解析必然对不上
+/// - windows: runner 的 TEMP 常是 **8.3 短名** (`C:\Users\RUNNER~1\...`),
+///   而 PowerShell 的 `$PWD` 报的是**长名** (`C:\Users\runneradmin\...`),
+///   不解析就短名/长名对不上 (2026-10-06 windows CI 实测红);
+///   canonicalize 顺带把短名解析成长名, 再去掉 `\\?\` 前缀就是 shell 的形态
+///
+/// 去前缀这一步**无条件**做: unix 路径不会以 `\\?\` 开头, 所以那边是 no-op;
+/// 写成无条件就不需要在函数里放 cfg 分支 (cfg 块当尾表达式在 Windows 侧
+/// 会被当成语句, 返回值类型对不上)。
+fn shell_visible_path(path: &std::path::Path) -> String {
+    let canonical = fs::canonicalize(path).expect("temp dir should canonicalize");
+    let text = canonical.to_string_lossy().into_owned();
+    strip_verbatim_prefix(&text).to_owned()
+}
+
+#[test]
+fn strip_verbatim_prefix_should_only_remove_the_windows_verbatim_prefix() {
+    assert_eq!(
+        strip_verbatim_prefix(r"\\?\C:\Users\runneradmin\AppData\Local\Temp"),
+        r"C:\Users\runneradmin\AppData\Local\Temp"
+    );
+    // 普通路径原样返回
+    assert_eq!(
+        strip_verbatim_prefix(r"C:\Users\runneradmin\AppData\Local\Temp"),
+        r"C:\Users\runneradmin\AppData\Local\Temp"
+    );
+    // 前缀不完整时不能误伤 (只认完整的 `\\?\`)
+    assert_eq!(strip_verbatim_prefix(r"\\C:\Temp"), r"\\C:\Temp");
 }
 
 fn escape_json(input: &str) -> String {
