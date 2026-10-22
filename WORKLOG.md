@@ -161,3 +161,35 @@ a 通过 / b 通过 / c 通过 / d 通过 / e 通过 / f 通过 —— 六项全
   args / mklink), 比编一个机制有用得多。
 - 六文件对 10-07~10-20 零记录 = 这段时间的产出只能靠 git commit 反推。**账本
   滞后比知识缺失更隐蔽**: 知识还在 git 里, 但没人知道该在哪读。
+
+### 补记: 10-05 ~ 10-22 提交账目 (sha 互引)
+
+2026-10-22 建「提交即记账」守卫时 (`scripts/check-bookkeeping.py`) 扫出的实际欠账:
+10-05 以来 21 个 commit 里有 **14 个从未进过账本**。下表一次性补记, 作为该时段
+的索引入口 —— 之后每个工作 commit 由 `WORKLOG` 条目末尾的 `- 提交: <sha>` 互引。
+
+| 提交 | 时间 | 内容 | 知识落点 |
+| --- | --- | --- | --- |
+| `f6d2c92` | 10-06 00:26 | 实战反馈补 SSH 多行 PowerShell 静默失败坑 | solution `remote-control-blocked-command-pitfalls.md` P0 附带坑 |
+| `e909147` | 10-06 01:09 | line-based 协议加帧长度上限, 堵无界读 | `specs/control-line-protocol.md` |
+| `2a541b9` | 10-06 02:35 | CDP 远程通道最小闭环 (`@cdp-targets` / `@cdp-eval` / `@cdp`) | `specs/cdp-remote-lane-spec.md` + skill CDP Lane 节 |
+| `2a1740e` | 10-06 03:17 | 双向分块文件传输 (续传 / sha256 / 路径穿越拒绝) | `specs/file-transfer-control-spec.md` |
+| `73a1034` | 10-06 13:09 | 点击后端标签如实上报 + Windows 测试目标平台门 + 跨平台配方 | solution `remote-control-blocked-command-pitfalls.md` P1-3 |
+| `765e0a7` | 10-06 14:06 | OCR 坐标换算进 os-logical + 点击落点回传真值 | `specs/rdog-ocr-content-layer-plan.md` |
+| `82fd029` | 10-06 15:00 | Windows 测试可移植性 47→8 失败 + daemon 失败可见性 | 本仓 Windows CI 面 (`ff171de` 补 runner) |
+| `35e7c73` | 10-06 15:31 | awareness 断言改枚举判据 (伪句柄运行时值 ≠ SDK 哨兵) | `specs/windows-hidpi-coordinate-fix-plan.md` |
+| `b940525` | 10-06 15:59 | zenoh namespace 配置为主 + 冲突报错; json5 路径转义修 Windows usrpwd 崩溃 | `specs/zenoh-control-plane-plan.md` |
+| `ff171de` | 10-06 16:17 | Windows bundle commit ACCESS_DENIED + CI 加 windows runner (全量 1009 清零) | `.github/workflows/ci.yml` |
+| `9c4feba` | 10-07 23:08 | CDP lane 真机实测形态入册 (形态 A daemon 内置 / 形态 B CDP-over-@cmd) | skill `SKILL.md` CDP Lane 节 |
+| `c094a92` | 10-08 01:39 | `@run` 原语入册 + 并行会话在途文档顺带入库 | `specs/rdog-task-spawn-control-plan.md` + skill |
+| `b65680f` | 10-22 13:49 | 载体漂移修正 + continuous-learning 复盘 (5 处换算公式) | 本条目 + `docs/solutions/best-practices/electron-main-process-forensics.md` (新建) |
+| `bdfe746` | 10-22 13:49 | 补提交流水线归档删除侧 (上一 commit `--only` 漏了删除侧) | `archive/manifests/ARCHIVE_MANIFEST__2026-10-22_default_history_rollover.md` |
+
+已在账本中 (无需补记): `7264f6b` (DPI awareness 地基) / `510dc2d` (manifest 补
+`os_logical_bounds`) / `b2c3b33` (Windows 原生鼠标后端) / `a7ecbec` (Windows 真机
+实战改进落地) / `536afd0` (真机实战三修) / `f7b94bd` (`@run` P4 原语落地) —
+这 6 个的 sha 已在 `task_plan.md` / `notes.md` 的 10-06 条目里出现。
+
+**教训**: 上面 14 个里有 6 个是**功能代码** (CDP lane / 文件传输 / 帧上限 /
+DPI 修正 / zenoh namespace / recording 修复), 它们当时连一行账本都没留下 ——
+不是"记漏了一句", 是**根本没意识到要记**。所以守卫是必要的, 不是形式主义。

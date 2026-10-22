@@ -19,6 +19,16 @@ Issues 和 Wayfinder maps 使用 GitHub Issues。详见 `docs/agents/issue-track
 
 使用 single-context 布局。canonical glossary 是根级 `CONTEXT.md` (录制回放与 GUI mutation 域); `@computer-act` surface 的 CUA/verify/observability 术语在 `docs/glossary.md` (ADR 配套, 与 CONTEXT.md 分工不重叠)。消费规则见 `docs/agents/domain.md`。
 
+### Knowledge carriers
+
+载体 (skill / README / specs / docs / 六文件) 的三条维护约定, 各自配一个可执行守卫。详见 `docs/agents/knowledge-carriers.md`。
+
+1. **载体断言必须指向真相源**: 公式 / 坐标换算 / 协议常量 / 状态机语义 / 超时默认值必须能指回 `src/` 的唯一定义; 优先写指针 (如 manifest 的 `transforms.image_to_os`) 而不是手抄公式。守卫: `python3 scripts/check-carrier-assertions.py`
+2. **进度表必须带「最后复核」列**: 逐行填状态最后一次对代码/真机核实过的日期 (没核过写 `未核`)。表级日期不够 —— 每行会各自过期。
+3. **提交即记账**: 每个工作 commit 都要在六文件里有条目并写 `- 提交: <sha>`; 纯账本提交豁免。守卫: `python3 scripts/check-bookkeeping.py`
+
+改动上述载体后, 跑这两个守卫; 违反约定 ① 的实测代价: 同一份过时的换算公式曾同时住在 6 处载体, Windows 4K@200% 下差 2 倍 (2026-10-22 修复, 见 `docs/solutions/best-practices/remote-control-blocked-command-pitfalls.md`)。
+
 ## 何时优先阅读
 
 - 修改 `src/control_protocol.rs`、`src/shell.rs`、`tests/control_lanes.rs`、`tests/control_mode.rs` 前,先看 line-control 协议规格。

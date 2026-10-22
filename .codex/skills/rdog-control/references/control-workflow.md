@@ -336,7 +336,7 @@ On multi-display hosts, add `guard:{display:{...}}` so the resolved point cannot
 Selector mouse targets are gated:
 `auto_refind:false` returns no-action handoff and a recovery `@selector-refind` command.
 `auto_refind:true` may execute only when typed refind returns `rebound` and the fresh ref verifies to a current rect.
-For the default composite screenshot, convert `image_x/image_y` to OS coordinates by adding `virtual_bounds.x/y`.
+For the default composite screenshot, convert `image_x/image_y` to OS coordinates with the manifest's own `transforms.image_to_os` (`os_x = os_logical_bounds.x + image_x * image_to_click_scale.x`). `virtual_bounds` is the OS-native rect and is not the click-space origin on HiDPI screens. Window-crop manifests add the `image_rect` offset term. Prefer `@click:{screenshot:"<id>",x,y}` over hand arithmetic.
 Do not click into display gaps.
 For raw button flows, `@mouse-button mode:"press"` does not auto-release; send the matching `mode:"release"` if the flow is interrupted.
 

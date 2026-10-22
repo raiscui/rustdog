@@ -94,3 +94,27 @@ jobs:
       - name: Recording e2e tests
         if: runner.os != 'Windows'
         run: cargo test --test recording_e2e
+
+  # 知识载体守卫 (docs/agents/knowledge-carriers.md 的约定 ① / ③)。
+  # 与平台无关, 纯静态检查, 所以单独一个 job, 不进测试矩阵。
+  knowledge-carriers:
+    name: knowledge carriers
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # 记账检查要读 git 历史 (判定 commit 是否进账本), shallow clone 不够
+          fetch-depth: 0
+
+      # 约定 ①: 载体 (skill / README / specs) 里的断言必须与 src/ 真相源一致。
+      # 2026-10-22 实测: 同一份过时的换算公式曾同时住在 6 处载体, HiDPI 下差 2 倍。
+      - name: Carrier assertions match src/
+        run: python3 scripts/check-carrier-assertions.py
+
+      # 约定 ③: 工作 commit 必须进六文件账本。
+      # 只在 push 到 main 时判定 —— PR 阶段的工作 commit 还没到记账点。
+      - name: Commits are accounted in the ledger
+        if: github.event_name == 'push'
+        run: python3 scripts/check-bookkeeping.py --limit 50

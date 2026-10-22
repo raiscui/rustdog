@@ -53,25 +53,25 @@ related_skills:
 下表是唯一的进度真相源 —— 读某一节的问题描述时，回来看这张表看它现在什么状态。
 （表中"已落地"字样均按 **2026-10-22 对当前代码的复核**写，不是当时的宣称。）
 
-| 条目 | 状态 | 依据 (源码 / 验证) |
-| --- | --- | --- |
-| **P0-1** `@cmd` 超时 + 杀进程树 | **已落地** | `src/control_actions.rs:672-695` (`RDOG_SHELL_LANE_TIMEOUT_MS`, 默认 120s)、`:737-807` 超时/取消分支、Windows 走 `taskkill /F /T`、unix 走进程组。真机复验: 15s 超时后 `@ping` 仍活 |
-| **P0-1** 协议层显式区分"排队中"与"已死锁" | **未落地** | 全仓无 `busy` 语义、无控制面 worker 队列深度字段。超时只是不再无限期挂死，客户端仍分不出"慢"与"死"。`src/control_session.rs:73` 的 `queued_frames` 是**出站帧队列**，与此无关 |
-| **P1-1** 截图↔click 坐标换算前置声明 | **已落地** | `src/screenshot.rs:437` manifest 补 `click_coordinate_space`，`src/control_mouse/target.rs:417` 补 `image_to_click_scale`；`transforms` 换算公式改用 `os_logical_bounds`。真机复验: 4K 图上 (1210,2112) → os-logical (605,1056) 点中开始菜单 |
-| **P1-1** `@click` 支持物理像素入口 | **已落地** | `src/control_mouse/screenshot_frame.rs` (418 行): 截图坐标 → os-logical 的进程内缓存 (TTL 10min / 容量 32)，`@click` 接受 `{screenshot, x, y}` 引用式端点 (`screenshot_frame.rs:127-128` 为换算式) |
-| **P1-1** 文档/skill 里的换算口诀 | **已核实, 且发现写错 (2026-10-22 已修, 5 处)** | 同一份单段式公式 `os_x = image_x + virtual_bounds.x` 出现在 **5 处载体**: skill `.codex/skills/rdog-control/references/protocol.md` (2 处)、`README.md`、`specs/code-agent-rdog-control-usage.md`、`specs/rdog-multi-display-screenshot-coordinate-plan.md`、`specs/rdog-mouse-control-coordinate-plan.md` —— **在 HiDPI / 窗口裁剪图下不成立**: Windows 4K@200% 时 `virtual_bounds` 是物理像素 (与 os-logical 差 2 倍), 裁剪图还少一项 `image_rect` 平移。权威公式在 `src/control_mouse/screenshot_frame.rs:17`, 5 处已全部改为"以 manifest 的 `transforms` 字段为准 + 权威公式" |
-| **P1-2** `@spawn` 短等待语义 (`wait_ms`) | **未落地** | 全仓无 `@spawn` 的 `wait_ms` 字段 (`wait_ms` 只出现在 `open_app`)。**建议 1 原文的方案未被采纳也未被否决**, 需重新拍板。`@run` 的 `wait` / `timeout_ms` 是另一条原语, 不覆盖本条 |
-| **P1-3** 响应回显实际 shell | **部分落地 (范围有意收窄)** | 失败 / 超时 / 取消三类响应带 `shell` (`control_actions.rs:935/951/972`)，`@ping` 也带 (`control_actions.rs:993`)；**成功响应刻意不带** —— `control_actions.rs:782-786` 写明理由: 成功形状是既有契约，大量消费方按字符串读。原文"响应首行回显"是按全部响应提的，落地方案比建议窄 |
-| **P1-3** 裸路径缺引号的解释器提示 | **部分落地** | `src/control_protocol/parsers.rs:766` 对"含空格的裸路径"给 PowerShell `& "path" args` 提示。但提示文案里**没有点明当前解释器是 cmd 还是 PowerShell** —— 原文建议 2 的后半句未做 |
-| **P1-3** 自动给裸路径加引号 | **明确未做 (有意否决)** | `parsers.rs:887` 注释: 单 token 裸路径在 PowerShell / cmd 下本来就能跑，拦下就是假阳性。commit 记录为"只提示不代改写" |
-| **附带坑** 引号 payload 被判多余内容 | **已落地** | `parsers.rs` 增加闭合引号后的容错尾巴，并放宽引号内 shell 文本的转义 (修 `C:\Program Files` 被当转义序列) |
-| **附带坑** 多行 PowerShell 走 SSH 被引号吃掉 | **未落地 (agent 侧自律, 非产品问题)** | 仍是"复杂 PowerShell 一律 scp 传 .ps1 再执行" |
-| **P2** Windows window-find / activate / close | **已落地** | `src/control_window/windows.rs` (1308 行，本次首次被编译)；`src/control_window.rs:735/836/842` 三个 `execute_default_*` 入口。真机复验: `@window-find` 列出 320 个窗口 |
-| **P2** Windows window-resize | **有意推迟 (2026-10-22 复核仍如此)** | `src/control_window/windows.rs:88` 仍显式返回 `windows_resize_not_implemented`; `src/control_window.rs:266-269` 注明: 窗口身份链 (EnumWindows) 已就位，但 resize 要确定外框与 per-monitor DPI 的尺寸语义，尚未验证。刻意不做成"平台整体 unsupported"，以免调用方分不出"能列窗口"与"能改尺寸" |
-| **P3-1** daemon 诊断 | **部分落地** | `@ping` 结构化 + `daemon::bind_state()` / `daemon::uptime()` 公开 (`control_actions.rs:987-996`)。**worker 忙闲与队列深度未做**，也**没有 reset session 入口** |
-| **P3-2** Windows 中文输出乱码 | **已落地 (2026-10-07, commit 536afd0)** | `src/control_actions.rs:886-892`: powershell 注入 `[Console]::OutputEncoding=[System.Text.Encoding]::UTF8`, cmd 走 `chcp 65001`。注意: `@run` 直接 spawn 裸 exe, **不做**这层编码注入, 需自己在 args 里带 `chcp 65001&&` |
-| **P4** `@run` / `@run-and-wait` 组合原语 | **已落地 (2026-10-08, commit f7b94bd)** | `src/control_protocol.rs:620` 路由 `"run"`; `src/control_actions.rs:2293-2332`: `{path, args, timeout_ms, window, wait}` 结构化逐参 spawn 裸 exe (**不经 shell, 无引号层**), 同步等退出+退出码, 超时杀树, `wait=false` 启动即回 pid, `window=visible` 供 GUI 安装器; 回执 stdout/stderr 只带尾部 2KB |
-| **运维侧新增** Windows 交叉编译配方 | **已补文档** | 见 `docs/solutions/runtime-errors/cross-compile-windows-rust-electron-tool.md`。此前 CI 无 Windows 覆盖、文档零记录 |
+| 条目 | 状态 | 依据 (源码 / 验证) | 最后复核 |
+| --- | --- | --- | --- |
+| **P0-1** `@cmd` 超时 + 杀进程树 | **已落地** | `src/control_actions.rs:672-695` (`RDOG_SHELL_LANE_TIMEOUT_MS`, 默认 120s)、`:737-807` 超时/取消分支、Windows 走 `taskkill /F /T`、unix 走进程组。真机复验: 15s 超时后 `@ping` 仍活 | 2026-10-22 |
+| **P0-1** 协议层显式区分"排队中"与"已死锁" | **未落地** | 全仓无 `busy` 语义、无控制面 worker 队列深度字段。超时只是不再无限期挂死，客户端仍分不出"慢"与"死"。`src/control_session.rs:73` 的 `queued_frames` 是**出站帧队列**，与此无关 | 2026-10-22 |
+| **P1-1** 截图↔click 坐标换算前置声明 | **已落地** | `src/screenshot.rs:437` manifest 补 `click_coordinate_space`，`src/control_mouse/target.rs:417` 补 `image_to_click_scale`；`transforms` 换算公式改用 `os_logical_bounds`。真机复验: 4K 图上 (1210,2112) → os-logical (605,1056) 点中开始菜单 | 2026-10-22 |
+| **P1-1** `@click` 支持物理像素入口 | **已落地** | `src/control_mouse/screenshot_frame.rs` (418 行): 截图坐标 → os-logical 的进程内缓存 (TTL 10min / 容量 32)，`@click` 接受 `{screenshot, x, y}` 引用式端点 (`screenshot_frame.rs:127-128` 为换算式) | 2026-10-22 |
+| **P1-1** 文档/skill 里的换算口诀 | **已核实, 且发现写错 (2026-10-22 已修, 5 处)** | 同一份单段式公式 `os_x = image_x + virtual_bounds.x` 出现在 **5 处载体**: skill `.codex/skills/rdog-control/references/protocol.md` (2 处)、`README.md`、`specs/code-agent-rdog-control-usage.md`、`specs/rdog-multi-display-screenshot-coordinate-plan.md`、`specs/rdog-mouse-control-coordinate-plan.md` —— **在 HiDPI / 窗口裁剪图下不成立**: Windows 4K@200% 时 `virtual_bounds` 是物理像素 (与 os-logical 差 2 倍), 裁剪图还少一项 `image_rect` 平移。权威公式在 `src/control_mouse/screenshot_frame.rs:17`, 5 处已全部改为"以 manifest 的 `transforms` 字段为准 + 权威公式" | 2026-10-22 |
+| **P1-2** `@spawn` 短等待语义 (`wait_ms`) | **未落地** | 全仓无 `@spawn` 的 `wait_ms` 字段 (`wait_ms` 只出现在 `open_app`)。**建议 1 原文的方案未被采纳也未被否决**, 需重新拍板。`@run` 的 `wait` / `timeout_ms` 是另一条原语, 不覆盖本条 | 2026-10-22 |
+| **P1-3** 响应回显实际 shell | **部分落地 (范围有意收窄)** | 失败 / 超时 / 取消三类响应带 `shell` (`control_actions.rs:935/951/972`)，`@ping` 也带 (`control_actions.rs:993`)；**成功响应刻意不带** —— `control_actions.rs:782-786` 写明理由: 成功形状是既有契约，大量消费方按字符串读。原文"响应首行回显"是按全部响应提的，落地方案比建议窄 | 2026-10-22 |
+| **P1-3** 裸路径缺引号的解释器提示 | **部分落地** | `src/control_protocol/parsers.rs:766` 对"含空格的裸路径"给 PowerShell `& "path" args` 提示。但提示文案里**没有点明当前解释器是 cmd 还是 PowerShell** —— 原文建议 2 的后半句未做 | 2026-10-22 |
+| **P1-3** 自动给裸路径加引号 | **明确未做 (有意否决)** | `parsers.rs:887` 注释: 单 token 裸路径在 PowerShell / cmd 下本来就能跑，拦下就是假阳性。commit 记录为"只提示不代改写" | 2026-10-22 |
+| **附带坑** 引号 payload 被判多余内容 | **已落地** | `parsers.rs` 增加闭合引号后的容错尾巴，并放宽引号内 shell 文本的转义 (修 `C:\Program Files` 被当转义序列) | 2026-10-22 |
+| **附带坑** 多行 PowerShell 走 SSH 被引号吃掉 | **未落地 (agent 侧自律, 非产品问题)** | 仍是"复杂 PowerShell 一律 scp 传 .ps1 再执行" | 2026-10-22 |
+| **P2** Windows window-find / activate / close | **已落地** | `src/control_window/windows.rs` (1308 行，本次首次被编译)；`src/control_window.rs:735/836/842` 三个 `execute_default_*` 入口。真机复验: `@window-find` 列出 320 个窗口 | 2026-10-22 |
+| **P2** Windows window-resize | **有意推迟 (2026-10-22 复核仍如此)** | `src/control_window/windows.rs:88` 仍显式返回 `windows_resize_not_implemented`; `src/control_window.rs:266-269` 注明: 窗口身份链 (EnumWindows) 已就位，但 resize 要确定外框与 per-monitor DPI 的尺寸语义，尚未验证。刻意不做成"平台整体 unsupported"，以免调用方分不出"能列窗口"与"能改尺寸" | 2026-10-22 |
+| **P3-1** daemon 诊断 | **部分落地** | `@ping` 结构化 + `daemon::bind_state()` / `daemon::uptime()` 公开 (`control_actions.rs:987-996`)。**worker 忙闲与队列深度未做**，也**没有 reset session 入口** | 2026-10-22 |
+| **P3-2** Windows 中文输出乱码 | **已落地 (2026-10-07, commit 536afd0)** | `src/control_actions.rs:886-892`: powershell 注入 `[Console]::OutputEncoding=[System.Text.Encoding]::UTF8`, cmd 走 `chcp 65001`。注意: `@run` 直接 spawn 裸 exe, **不做**这层编码注入, 需自己在 args 里带 `chcp 65001&&` | 2026-10-22 |
+| **P4** `@run` / `@run-and-wait` 组合原语 | **已落地 (2026-10-08, commit f7b94bd)** | `src/control_protocol.rs:620` 路由 `"run"`; `src/control_actions.rs:2293-2332`: `{path, args, timeout_ms, window, wait}` 结构化逐参 spawn 裸 exe (**不经 shell, 无引号层**), 同步等退出+退出码, 超时杀树, `wait=false` 启动即回 pid, `window=visible` 供 GUI 安装器; 回执 stdout/stderr 只带尾部 2KB | 2026-10-22 |
+| **运维侧新增** Windows 交叉编译配方 | **已补文档** | 见 `docs/solutions/runtime-errors/cross-compile-windows-rust-electron-tool.md`。此前 CI 无 Windows 覆盖、文档零记录 | 2026-10-22 |
 
 **真机复验口径** (`task_plan.md` 2026-10-06 12:36 条目): 六项全部通过，
 无失败项; 远端跑的是当日 12:18 交叉编译的产物，SHA256 两端一致
@@ -338,9 +338,10 @@ worker 状态查询、没有"reset session"入口。
 
 ## 优先级建议
 
-状态列的逐条依据见上方「落地情况」小节。
+状态列的逐条依据与**最后复核日期**见上方「落地情况」表 (本表不重复日期 ——
+重复的日期本身也会过期, 单一真相源才活得住)。
 
-| 级别 | 项 | 理由 | 状态 (2026-10-22 复核) |
+| 级别 | 项 | 理由 | 状态 |
 | --- | --- | --- | --- |
 | **P0** | `execute_script` 超时 + 进程树清理 | 一次卡死拖垮整个控制面，且症状极具误导性 | 已落地 (a7ecbec) |
 | **P0** | 控制面"排队中"状态可见 | 让 agent/人能区分"慢"与"死" | **仍未落地** |

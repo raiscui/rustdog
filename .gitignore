@@ -20,6 +20,7 @@ rdog_downloads
 .history
 
 # rdog eval runner
+__pycache__/
 runner/__pycache__/
 runner/lib/__pycache__/
 
