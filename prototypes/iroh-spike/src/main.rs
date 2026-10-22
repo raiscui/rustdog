@@ -90,6 +90,12 @@ fn main() -> Result<()> {
 #[derive(Default)]
 struct Opts {
     http_bind: String,
+    https_bind: String,
+    quic_bind: String,
+    quic_port: u16,
+    bind_addr: String,
+    tls_cert: String,
+    tls_key: String,
     relay: String,
     target: String,
     relay_only: bool,
@@ -99,7 +105,13 @@ struct Opts {
 impl Opts {
     fn parse(args: &[String]) -> Self {
         let mut o = Opts {
-            http_bind: "127.0.0.1:0".to_string(),
+            http_bind: "127.0.0.1:34780".to_string(),
+            https_bind: "127.0.0.1:34781".to_string(),
+            quic_bind: "0.0.0.0:34780".to_string(),
+            quic_port: 34780,
+            bind_addr: String::new(),
+            tls_cert: String::new(),
+            tls_key: String::new(),
             bytes: MAX_CONTROL_MESSAGE_BYTES,
             ..Default::default()
         };
@@ -107,6 +119,14 @@ impl Opts {
         while i < args.len() {
             match args[i].as_str() {
                 "--http-bind" => o.http_bind = args.get(i + 1).cloned().unwrap_or_default(),
+                "--https-bind" => o.https_bind = args.get(i + 1).cloned().unwrap_or_default(),
+                "--quic-bind" => o.quic_bind = args.get(i + 1).cloned().unwrap_or_default(),
+                "--quic-port" => {
+                    o.quic_port = args.get(i + 1).and_then(|v| v.parse().ok()).unwrap_or(o.quic_port)
+                }
+                "--bind-addr" => o.bind_addr = args.get(i + 1).cloned().unwrap_or_default(),
+                "--tls-cert" => o.tls_cert = args.get(i + 1).cloned().unwrap_or_default(),
+                "--tls-key" => o.tls_key = args.get(i + 1).cloned().unwrap_or_default(),
                 "--relay" => o.relay = args.get(i + 1).cloned().unwrap_or_default(),
                 "--target" => o.target = args.get(i + 1).cloned().unwrap_or_default(),
                 "--bytes" => {
@@ -134,7 +154,23 @@ async fn run_relay(opts: &Opts) -> Result<()> {
     // `ServerConfig` 是 `#[non_exhaustive]`,外部 crate 不能用结构体字面量 ——
     // 只能 default 出来再逐字段赋值。
     let mut config = iroh_relay::server::ServerConfig::default();
-    config.relay = Some(iroh_relay::server::RelayConfig::new(addr));
+    let mut relay_config = iroh_relay::server::RelayConfig::new(addr);
+    // QUIC/QAD 端点必须由 relay **自己**起 TLS:
+    // QuicConfig 文档原文 "If neither is set the QUIC server will fail to spawn"。
+    // (nginx 反代不了 QUIC/UDP —— 这是 F3 的结论)
+    if !opts.tls_cert.is_empty() && !opts.tls_key.is_empty() {
+        let server_config = load_server_config(&opts.tls_cert, &opts.tls_key)?;
+        let https_bind: SocketAddr = opts.https_bind.parse().context("解析 --https-bind")?;
+        relay_config.tls = Some(iroh_relay::server::TlsConfig::new(
+            https_bind,
+            iroh_relay::server::CertConfig::Manual { server_config },
+        ));
+    }
+    config.relay = Some(relay_config);
+    // QUIC server = QAD(QUIC Address Discovery)探测目标。
+    // 没有它 → 端点拿不到自己的公网映射地址 → 打洞必败(实测 F2)。
+    let quic_bind: SocketAddr = opts.quic_bind.parse().context("解析 --quic-bind")?;
+    config.quic = Some(iroh_relay::server::QuicConfig::new(quic_bind));
     let server = iroh_relay::server::Server::spawn(config)
         .await
         .context("启动内嵌 iroh-relay server")?;
@@ -159,7 +195,7 @@ async fn run_relay(opts: &Opts) -> Result<()> {
 /// **daemon 角色**:绑定 endpoint,接受连接,用 rdog 的行协议应答。
 async fn run_node(opts: &Opts) -> Result<()> {
     let relay_url = parse_relay(&opts.relay)?;
-    let endpoint = build_endpoint(relay_url.clone(), false).await?;
+    let endpoint = build_endpoint(relay_url.clone(), opts.quic_port, false, &opts.bind_addr).await?;
 
     // 目录服务下发的内容形状:EndpointId + RelayUrl。
     let addr = EndpointAddr::from_parts(
@@ -205,7 +241,7 @@ async fn run_client(opts: &Opts) -> Result<()> {
     let target: EndpointAddr =
         serde_json::from_str(&opts.target).context("解析 --target(EndpointAddr JSON)")?;
 
-    let endpoint = build_endpoint(relay_url, opts.relay_only).await?;
+    let endpoint = build_endpoint(relay_url, opts.quic_port, opts.relay_only, &opts.bind_addr).await?;
     tracing::info!(
         target = %target.id.fmt_short(),
         relay_only = opts.relay_only,
@@ -269,14 +305,26 @@ fn parse_relay(s: &str) -> Result<RelayUrl> {
 ///
 /// `relay_only = true` 时用 `clear_ip_transports()` **移除所有 IP 传输**,
 /// 端点因此没有直连路径,只能走 relay —— 这是稳定公开 API,用来强制测 relay 路径。
-async fn build_endpoint(relay_url: RelayUrl, relay_only: bool) -> Result<Endpoint> {
-    let relay_cfg = iroh_relay::RelayConfig::new(relay_url, None);
+async fn build_endpoint(
+    relay_url: RelayUrl,
+    quic_port: u16,
+    relay_only: bool,
+    bind_addr: &str,
+) -> Result<Endpoint> {
+    // quic 端口 = QAD 探测目标;不给它 → net_report 报 udp_v4:false → 无公网候选。
+    let quic = iroh_relay::RelayQuicConfig::new(quic_port);
+    let relay_cfg = iroh_relay::RelayConfig::new(relay_url, Some(quic));
     let relay_map = RelayMap::from_iter([relay_cfg]);
     let mut builder = Endpoint::builder(presets::Minimal)
         .relay_mode(RelayMode::Custom(relay_map))
         // ALPN 必须两端都注册:connect 侧传 ALPN,accept 侧要声明支持它,
         // 否则握手报 "peer doesn't support any known protocol"。
         .alpns(vec![ALPN.to_vec()]);
+    // 绑定**固定**的本地 UDP 口:公网侧节点的候选端口必须是可预知、可预放行的,
+    // 否则安全组无法预先开放,直连永远建不起来。
+    if !bind_addr.is_empty() {
+        builder = builder.bind_addr(bind_addr)?;
+    }
     if relay_only {
         builder = builder.clear_ip_transports();
     }
@@ -296,4 +344,29 @@ fn serve_lines(bridge: &mut LineBridge) -> Result<()> {
         bridge.write_message(&resp)?;
     }
     Ok(())
+}
+
+
+/// 从 PEM 读证书链与私钥,构造 rustls ServerConfig。
+///
+/// 照抄 iroh-relay 自己的 `load_cert_config` 写法(`builder_with_provider` + ring)。
+fn load_server_config(
+    cert_path: &str,
+    key_path: &str,
+) -> Result<rustls::ServerConfig> {
+    use std::{io::BufReader, sync::Arc};
+
+    let certs = rustls_pemfile::certs(&mut BufReader::new(std::fs::File::open(cert_path)?))
+        .collect::<Result<Vec<_>, _>>()
+        .with_context(|| format!("解析证书 {cert_path}"))?;
+    let key = rustls_pemfile::private_key(&mut BufReader::new(std::fs::File::open(key_path)?))
+        .with_context(|| format!("解析私钥 {key_path}"))?
+        .ok_or_else(|| anyhow::anyhow!("私钥文件里没有找到 key"))?;
+
+    rustls::ServerConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
+        .with_safe_default_protocol_versions()
+        .context("ring provider 的协议版本")?
+        .with_no_client_auth()
+        .with_single_cert(certs, key)
+        .context("构造 TLS ServerConfig")
 }
