@@ -1,0 +1,12 @@
+# wayfinder #124 原型 spike:独立 crate,不进 rdog 主 workspace。
+# [workspace] 空表 = 让 cargo 把本目录当成独立 workspace 根,避免被上层 workspace 接管。
+[workspace]
+
+[package]
+name = "iroh-spike"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+tokio = { version = "1.54.1", features = ["full"] }
