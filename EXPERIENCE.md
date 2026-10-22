@@ -573,3 +573,42 @@
   混用会误判引擎优劣; 评测脚本自身的归一化缺陷 (全半角标点/单字符行过滤/
   拆行拼接被打断) 会把正常识别伪装成失败, 结论前必须逐行点名区分
 - 升级条件: 第二次引擎/模型评测复用同一脚本骨架 (脚本入库为 bench 工具) 且再次有效
+
+## [2026-10-22 14:30:00] [Session ID: mvs_04f490f87a924c96ac1cb0adcbd30806] 流程类候选两条 (inbox)
+
+### 候选 A: 载体里的"断言类内容"与代码真相源无对账机制
+
+- 场景: skill / references / README / specs / solution 里手写的**公式、坐标换算、
+  协议常量、状态机语义、超时默认值**这类断言, 与 `src/` 里的权威定义各活各的
+- 实例 (2026-10-22 清点): 同一份过时的单段式换算公式共出现在 **5 处载体**
+  (skill `references/protocol.md` ×2、`README.md`、`specs/code-agent-rdog-control-usage.md`、
+  `specs/rdog-multi-display-screenshot-coordinate-plan.md`、
+  `specs/rdog-mouse-control-coordinate-plan.md`), HiDPI 下差 2 倍。权威定义在
+  `src/control_mouse/screenshot_frame.rs:17` 与 manifest 的 `transforms` 字段
+- 为什么难发现: 代码里的正确公式要"被找到"才会被用, 载体里的错误公式是 agent 的
+  **默认路径** —— 错的更容易被信; 且原始设计面向 macOS (scale=1) 时旧式**成立**,
+  macOS-only 的验证永远看不见
+- 已补的教训 (本轮落地): 载体应写"**去 manifest 读 transforms**"这种**指向真相源
+  的指针**, 而不是手抄公式 —— 指针不会过期, 手抄的会
+- 缺什么 (证据缺口): 5 处是**人工清点**出来的, 没有"改动 skill 后自动核对"的机制;
+  常量清单还没成型
+- 升级条件: ①把 skill + references + README + specs 里的换算/坐标/协议常量列成
+  清单并对照 `src/` 跑完一轮 (找齐后 ≥5 处即说明清单化有效); 或 ②再次出现同类
+  传播。届时升级为 `self-learning.*` skill 或校验脚本 (触发条件 = 改 skill 的
+  协议/坐标章节前; 步骤 = 清单核对; 验证 = 差异清零)
+
+### 候选 B: 工作产出与六文件账本之间没有强制同步点
+
+- 场景: 10-07 ~ 10-20 期间的产出 (五个 commit + 一次跨机实战 + 一次 wayfinder
+  建图) **没有一条六文件记录**; 只能靠 `git log` 反推"发生过什么", 没人知道
+  该去哪读
+- 为什么难发现: 知识还在 git 里, 不算丢失 —— 但**索引缺失**: 下个会话读
+  `task_plan.md` 会以为 10-06 之后无事发生
+- 缺什么 (证据缺口): 还没统计过历史上出现过几次账本滞后; 也没有判据说明
+  "什么样的产出必须同时进六文件" (commit 级别的产出算不算?)
+- 升级条件: 出现第二次账本滞后 (或明确统计出历史滞后次数 ≥2), 届时定一条
+  "提交即记账"的同步点 —— 候选形态: `WORKLOG` 条目与 commit 互引, 或在
+  continuous-learning 的检查清单里加"本轮 commit 是否都有对应账本条目"这一步
+- 相关: EPIPHANY_LOG 2026-10-22 条目 (载体分叉的完整分析),
+  `docs/solutions/best-practices/remote-control-blocked-command-pitfalls.md`
+  (落地表本身也是"会过期的进度真相源")

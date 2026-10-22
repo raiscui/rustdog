@@ -243,14 +243,20 @@ Default values:
 
 The default screenshot captures all active displays as one virtual-desktop JPEG.
 It also returns a manifest JSON file.
-The manifest is the coordinate source of truth for later mouse work:
+The manifest is the coordinate source of truth for later mouse work — read
+`transforms.image_to_os` / `transforms.os_to_image` from it. For the default
+full-desktop image they read:
 
 ```text
-os_x = image_x + virtual_bounds.x
-os_y = image_y + virtual_bounds.y
-image_x = os_x - virtual_bounds.x
-image_y = os_y - virtual_bounds.y
+os_x = os_logical_bounds.x + image_x * image_to_click_scale.x
+os_y = os_logical_bounds.y + image_y * image_to_click_scale.y
+image_x = (os_x - os_logical_bounds.x) * image_size.width / os_logical_bounds.width
+image_y = (os_y - os_logical_bounds.y) * image_size.height / os_logical_bounds.height
 ```
+
+Window-crop manifests additionally carry the `image_rect` offset term (see
+"Mouse Control" below). `virtual_bounds` is the OS-native (physical on HiDPI)
+rect and must not be used as the click-space origin.
 
 Use the explicit compatibility path when only the primary display is needed:
 
@@ -583,11 +589,32 @@ P3 scoring contract:
 ## Mouse Control
 
 Mouse commands reuse the screenshot manifest coordinate contract.
-For absolute desktop actions, use `coordinate_space:"os-logical"` and convert from the composite screenshot manifest:
+For absolute desktop actions, use `coordinate_space:"os-logical"` and convert from the screenshot manifest:
 
 ```text
-os_x = image_x + virtual_bounds.x
-os_y = image_y + virtual_bounds.y
+os_x = os_logical_bounds.x + (image_rect.x + image_x) * image_to_click_scale.x
+os_y = os_logical_bounds.y + (image_rect.y + image_y) * image_to_click_scale.y
+```
+
+`os_logical_bounds` / `image_rect` / `image_to_click_scale` all come from the
+same manifest (`transforms.image_to_os` is the machine-readable form of this
+same formula). Three terms, not one: `os_logical_bounds` is the origin (in
+os-logical space), `image_rect` is the offset of this image inside the full
+virtual-desktop image (non-zero only for window crops), and
+`image_to_click_scale` is how many os-logical units one image pixel is worth
+(0.5 on a 4K screen at 200% scaling). Dropping the scale term double-counts on
+HiDPI; dropping the `image_rect` term shifts every window-crop click by the
+window origin.
+
+The manifest is self-describing — read `transforms.image_to_os` /
+`transforms.os_to_image` from the bundle instead of transcribing the formula
+from this file.
+
+Do not do the arithmetic by hand — `@click` accepts a screenshot reference and
+the daemon applies the formula:
+
+```text
+@click#18:{screenshot:"<screenshot-id>",x:1104,y:213,button:"left",count:1}
 ```
 
 Common requests:

@@ -1,6 +1,6 @@
 # 任务计划: rustdog OCR 内容层 (live 阶段)
 
-> 本文件由前档 `task_plan_2026-09-02.md` (1684 行, Wayfinder #95 到站 + OCR 第一阶段实现 + live e2e 调试) 续档而来。
+> 本文件由前档 `archive/default_history/task_plan_2026-09-02_ocr_content_layer_rollover.md` (1684 行, Wayfinder #95 到站 + OCR 第一阶段实现 + live e2e 调试) 续档而来。
 > 前档完整记录: 引擎横评反转、#96-#101 六票、TCC/显示休眠排障链。
 > 交接文档: /tmp/rdog-ocr-handoff-2026-09-02.md
 
@@ -111,3 +111,30 @@ rdog.exe (target/x86_64-pc-windows-msvc/release/rdog.exe, 43611136 bytes, Oct 6 
 - 远端计划任务状态已变更: 原 RdogDaemon2 已删, 新建 RdogVerify (ONCE/23:59 + /Run)。
   rdog.toml 追加了 `[hidden] log_file` 段 (原文件已备份为 rdog.toml.bak)。
   是否恢复/改造成用户原本的 ONLOGON 常驻任务, 由用户定。
+
+## [2026-10-22 14:30:00] [Session ID: mvs_04f490f87a924c96ac1cb0adcbd30806] 状态更新: continuous-learning 完整复盘 (补记 10-07~10-20 缺口)
+
+### 本轮做了什么
+- [x] 六文件回读分组 + 23 份 solution + 22 个 open issue + 4 个 worktree 清点
+- [x] Scoped Refresh: `remote-control-blocked-command-pitfalls.md` 落地表重判
+      (P3-2 / P4 已落地, P1-1 换算口诀已核实且**发现有误**, P0-2 / P1-2 / P3-1
+      仍欠账, P2 resize 仍不支持) + 补 2026-10-11 增量节
+- [x] Capture: 新建 `docs/solutions/best-practices/electron-main-process-forensics.md`
+- [x] 修载体缺陷: skill `references/protocol.md` 的换算公式改为代码权威公式
+      (`src/control_mouse/screenshot_frame.rs:17`); SKILL.md 10-11 三招口径校正
+- [x] 知识卫生: 24/24 solution 双校验全绿 (修前 2 份 FM 失败 + 5 条 claims flag);
+      AGENTS.md 补 2 条遗漏索引
+- [x] 归档: `task_plan_2026-09-02.md` / `WORKLOG_2026-09-02.md` → `archive/default_history/`
+      + manifest; 未勾选项转出核对无缺口
+- [x] 六文件更新 + 延期项移交 issue
+
+### 补记: 10-07 ~ 10-20 的账本缺口
+六文件此前停在 10-06, 但期间有实质产出 (10-06 a7ecbec 之后的 10-07/10-08 五个
+commit + 10-11 跨机 Electron 调试 + 10-20 跨网互联 wayfinder 建图 13 个 issue)。
+本轮已把 10-07/10-11 的内容按证据分级补记进 solution 与六文件; **10-20 的
+跨网互联 effort 仍是零本地载体** (13 条已锁定约束只活在 issue #106 正文里),
+已记 LATER_PLANS, 等该 effort 自己产出 spec + ADR + 跨网域 glossary 时补齐。
+
+### 状态
+- 本轮无业务代码改动 (纯知识载体), 24 份 solution 校验全绿
+- 下一步建议见最终报告的项目优化建议三条

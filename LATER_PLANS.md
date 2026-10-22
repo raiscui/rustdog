@@ -913,3 +913,49 @@ R1/R3 已实施完成 (PR #61 分支), R2 认识修正为"若做则全族统一 
 - 睡眠显示器输入 fail-closed 显式化 (#103 降级项): 睡眠时 sck/xcap 已天然超时报错, 缺显式 "display asleep" reason code, 需要更好恢复路径时再评估
 - CI unixpipe 抽签新成员 (prepare_unixpipe_listener_should_recover_stale_owner_guard_and_files): 裸 PID 复用撞活进程, 修法 = 测试用自 spawn 子进程 PID; 与 process_lease 族同观察, 3+ 次一并修
 - NSPanel+Borderless 不合成经验 Capture (前条目已记): #102 关闭时与 appkit-helper-subprocess-isolation solution 互链
+
+## [2026-10-22 14:30:00] [Session ID: mvs_04f490f87a924c96ac1cb0adcbd30806] continuous-learning 复盘新产生的延期项
+
+### 已移交远端 (issue 为进度真相源, 本地只留指针)
+
+- **控制面 busy 语义 + 队列深度可见性** — https://github.com/raiscui/rustdog/issues/121
+  (enhancement)。对应 `remote-control-blocked-command-pitfalls.md` 落地表的 P0-2 与
+  P3-1 两行: `@ping` 已有 `bind_state` / `uptime`, 缺"排队中"与"worker 忙闲"。
+  与 issue #116 (控制面/bulk 面分开调度) 口径要对齐, 别出两套队列定义。
+- **rdog 控制链路单引号消失的层级未定位** — https://github.com/raiscui/rustdog/issues/122
+  (bug)。2026-10-11 现象已观察, 但静态核实**全仓找不到剥单引号的代码路径**
+  (协议层只认双引号, one-shot 行直接来自 argv), 所以**不定性为 rdog 缺陷**。
+  定位前 agent 侧的稳妥解法已固定: `@run` 结构化 args (不经 shell, 无引号层) 或
+  ssh `mklink` 无空格链接。
+- **混合 DPI 多屏的截图→点击换算** — https://github.com/raiscui/rustdog/issues/123
+  (enhancement)。当前按整桌面统一缩放近似, 代码注释已声明边界
+  (`src/control_mouse/screenshot_frame.rs:22-23`), 但逐屏数据
+  (`displays[].os_logical_rect`) 已在 manifest 里却没被换算路径用上。
+  单屏场景必须保持逐字节一致 (已验证的 4K@200% 真机结论)。
+
+### 本地保留 (不建 issue, 证据不足以远端跟踪)
+
+- **载体里的公式类断言缺对账机制**: 本轮发现 skill 的换算公式与代码权威公式
+  不一致 (见 EPIPHANY_LOG 同日条目)。这不是一个能靠一次修复结清的缺陷, 而是
+  一类"skill / protocol.md / references 里手写的公式与代码真相源无自动对账"的
+  流程短板。最小可行做法: 把 skill 与 references 里出现的**换算/坐标/协议常量**
+  列成清单, 在 solution 校验时人工对照 `src/` 的权威定义核一遍; 更彻底的做法是
+  从代码生成 (成本高, 暂不做)。
+- **10-20 跨网互联 wayfinder 的 13 条已锁定约束零本地载体**: 约束目前只活在
+  issue #106 正文 (含"云端只跑 rdog 一个二进制"与"标准 ICE 需要 TURN"这条最硬的
+  未决张力)。本仓没有对应 spec / ADR / 跨网域 glossary, `AGENTS.md` 也没有该域
+  索引。**该 effort 自己产出 spec + ADR + glossary 时补齐**, 本轮不代写
+  (用户明确"规格优先, 评审通过后另开实现")。
+
+### 已在本轮结清的旧条目
+
+- `remote-control-blocked-command-pitfalls.md` 的 P3-2 (Windows 输出乱码) 与
+  P4 (`@run` 组合原语) 此前在落地表里仍写"未落地", 实为 10-07 / 10-08 已落地,
+  本轮已按代码复核改正 —— **旧表不是真相源, 表里"未落地"也可能只是过期**。
+- P1-1 "文档/skill 里的换算口诀"此前记"未核实", 本轮核实后发现同一份单段式
+  公式在 **5 处载体** (skill `references/protocol.md` ×2、`README.md`、
+  `specs/code-agent-rdog-control-usage.md`、
+  `specs/rdog-multi-display-screenshot-coordinate-plan.md`、
+  `specs/rdog-mouse-control-coordinate-plan.md`) **都是错的** (HiDPI 下差 2 倍),
+  已全部改为"以 manifest 的 `transforms` 字段为准 + 权威公式"
+  (`src/control_mouse/screenshot_frame.rs:17`)。

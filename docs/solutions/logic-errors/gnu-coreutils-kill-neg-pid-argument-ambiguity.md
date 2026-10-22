@@ -7,6 +7,8 @@ component: control-flow-process
 problem_type: logic_error
 severity: medium
 status: active
+root_cause: "外部 kill 命令的负 pid 参数在 GNU coreutils 上被解析成 kill(-2, SIGTERM) (ESRCH), 信号发往了错误的进程组; 孤儿子孙继续持有 stdout/stderr 管道写端, 把 join_stream_reader 的 read() 阻塞到自然 EOF, 把超时时长拖满"
+resolution_type: "terminate_process_tree (unix) 改用进程内 libc::kill 直发进程组信号 + child.kill() 兜底直杀组长; 不再走外部 kill 命令, 消除 GNU/BSD 参数解析差异、PATH 依赖与 spawn 开销"
 tags:
   - linux
   - process-group

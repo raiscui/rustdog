@@ -88,14 +88,23 @@ manifest schema 固定为 `rdog.screenshot.v1`。
 - `displays[].rotation`
 - `accessibility` 可选字段,仅在 `include_ax:true` 时出现
 
-默认 logical composite 下,换算公式固定为:
+默认 logical composite 下,换算公式以 manifest 自带的 `transforms.image_to_os` /
+`transforms.os_to_image` 为准:
 
 ```text
-os_x = image_x + virtual_bounds.x
-os_y = image_y + virtual_bounds.y
-image_x = os_x - virtual_bounds.x
-image_y = os_y - virtual_bounds.y
+os_x = os_logical_bounds.x + image_x * image_to_click_scale.x
+os_y = os_logical_bounds.y + image_y * image_to_click_scale.y
+image_x = (os_x - os_logical_bounds.x) * image_size.width / os_logical_bounds.width
+image_y = (os_y - os_logical_bounds.y) * image_size.height / os_logical_bounds.height
 ```
+
+> **校正 (2026-10-22)**: 本节原先写的是单段式
+> `os_x = image_x + virtual_bounds.x` —— 那是 **HiDPI 层落地前** 的形态, 隐含
+> "整桌面与 os-logical 1:1" 的假设。Windows HiDPI (4K@200%) 下 `virtual_bounds`
+> 是 OS 原生物理矩形 (3840 宽) 而 os-logical 是 1920, 单段式会差整整 2 倍;
+> 窗口裁剪图还额外缺 `image_rect` 平移项。权威定义在
+> `src/control_mouse/screenshot_frame.rs` 与 manifest 的 `transforms` 字段
+> (由 `src/screenshot.rs` 生成, 代码是唯一真相源)。
 
 必须满足:
 

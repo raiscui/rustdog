@@ -101,3 +101,65 @@
 ### 后续讨论入口
 - 入口: tests/recording_e2e.rs read_response_line 加超时时的原始行日志,
   在 CI 复现一轮看 @record-start 到底回了什么 (error envelope? 超时空?)
+
+## [2026-10-22 14:30:00] [Session ID: mvs_04f490f87a924c96ac1cb0adcbd30806] 主题: "未核实"是知识库里最贵的三个字 —— 错的版本还住在 agent 真正会读的文件里
+
+### 发现来源
+- 本轮 continuous-learning 回读 `remote-control-blocked-command-pitfalls.md` 的落地表,
+  发现 P1-1 行 (2026-10-06 写下) 记着"文档/skill 里的换算口诀 —— **未核实**"
+- 核实动作: 打开 skill `.codex/skills/rdog-control/references/protocol.md`, 对照
+  `src/control_mouse/screenshot_frame.rs:17` 的权威公式
+
+### 核心问题
+- skill 给的是 `os_x = image_x + virtual_bounds.x`; 代码的权威公式是
+  `os_x = os_logical_bounds.x + (image_rect.x + image_x) * image_to_click_scale.x`
+- 差三处: **原点** (`virtual_bounds` 物理像素 vs `os_logical_bounds` 逻辑像素)、
+  **标尺** (缺 `image_to_click_scale`, Windows 4K@200% 下差 2 倍)、
+  **平移** (缺 `image_rect`, 窗口裁剪图整体偏移一个窗口原点)
+- 后果: 这正是 2026-10-05 那场实战"连续三次点空、浪费约 20 分钟"的同一个坑 ——
+  **代码里早就有正确公式, 但错的那份留在了 agent 实际会读的地方**
+- 该行挂了 16 天没人核: 因为它标的是"未核实" —— 既不提醒、也不负责
+- **不是孤例**: 顺藤清点后, 同一份单段式公式共出现在 **5 处载体** ——
+  skill `references/protocol.md` (2 处)、`README.md`、`specs/code-agent-rdog-control-usage.md`、
+  `specs/rdog-multi-display-screenshot-coordinate-plan.md`、
+  `specs/rdog-mouse-control-coordinate-plan.md`。最早写死在 2026-05/07 的两份
+  coordinate plan 里, 后面的载体是**照抄**传播的
+- 为什么一直没被发现: 原始设计面向 macOS (scale_factor = 1,
+  `virtual_bounds == os_logical_bounds`), 单段式在 macOS 上**逐字成立**;
+  HiDPI 层 (2026-10-06) 才让它失效, 而 macOS-only 的验证看不见 —— 与本仓
+  `env-deterministic-ci-red-vs-local-green` 那族"本地绿/别的环境红"同源
+
+### 为什么重要
+- 知识库里的"未核实"如果只是个待办标签, 它会静默过期; 本例过期后还带着一个
+  **主动误导**的公式, 比没有更贵
+- 载体之间没有对账机制时, **错的那份更容易被信**: 代码里的正确公式要先被找到
+  才会被用, 而 skill 里的错误公式是 agent 的默认路径
+- 同类风险面不止公式: 坐标换算、协议常量、状态机语义、超时默认值, 只要是
+  手写进 skill / references / README 的断言, 就有机会与代码真相源分叉
+
+### 未来风险
+- 下一轮 skill 瘦身 / 文案改写若再动这几段, 可能把"公式"换成"描述"而丢掉精度
+- `docs/solutions/` 的落地表是"进度真相源", 但它同样会过期 (本轮发现 P3-2 / P4
+  在表里写了 16 天"未落地", 而代码里早已落地) —— **表里的"未落地"也可能只是过期,
+  不代表事实**
+
+### 当前结论
+- 已修: skill `references/protocol.md` 的换算公式 (2 处) 改为代码权威公式并指向
+  manifest 自带的 `transforms` 字段; `README.md`、
+  `specs/code-agent-rdog-control-usage.md`、
+  `specs/rdog-multi-display-screenshot-coordinate-plan.md`、
+  `specs/rdog-mouse-control-coordinate-plan.md` 同步校正 (前两份 spec 保留"校正"注记);
+  `remote-control-blocked-command-pitfalls.md` 落地表按代码复核重判
+- 已开票: 三条延期项见 LATER_PLANS (issue #121 / #122 / #123)
+- 未决: **载体公式类断言没有自动对账机制** —— 本轮是**人工清点**出 5 处分叉后逐个
+  修的, 下一个载体再抄一次仍然会错。最小可行做法: 把 skill / references /
+  README / specs 里的换算与协议常量列成清单, 在 solution 校验时人工对照 `src/`
+  核一遍; 更彻底是从代码生成 (成本高, 暂不做)
+- 顺带发现: 载体应优先写"**去 manifest 读 transforms**"这类**指向真相源的指针**,
+  而不是**手抄公式** —— 指针不会过期, 手抄的会。本轮已把 5 处改成指针 + 公式并存
+
+### 后续讨论入口
+- `src/control_mouse/screenshot_frame.rs:15-23` — 权威公式与边界注释的所在地
+- `.codex/skills/rdog-control/references/protocol.md` — 本轮被修的错公式载体
+- `docs/solutions/best-practices/remote-control-blocked-command-pitfalls.md`
+  落地表 — 本轮重判的进度真相源

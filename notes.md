@@ -773,3 +773,46 @@ query.rs (verb) 与 selector 富化留在 control_ax 侧。缓存不动。
 - swift 属性矩阵 (单文件参数化 + CGWindowList 自查) 是定位窗口合成问题的最快路径: 7 变体 ~40s 出决定性证据
 - "窗口可见"三证据: CGWindowList onscreen + 屏幕截图区域像素特征 + 有效真值对照 (真值必须抓窗口所在 display)
 - overlay 新遗留: 多屏坐标用 mainScreen 高度换算, 非目标屏时 Y 偏 (记 #102, 衔接 display scope spec)
+
+## [2026-10-22 14:30:00] [Session ID: mvs_04f490f87a924c96ac1cb0adcbd30806] 笔记: skill 换算公式与代码权威公式分叉 (载体漂移实证)
+
+### 结论
+- 权威公式 (`src/control_mouse/screenshot_frame.rs:17`):
+  `os_x = os_logical_bounds.x + (image_rect.x + image_x) * image_to_click_scale.x`
+- manifest 自带机器可读版本 (`src/screenshot.rs:1004/1014`):
+  `transforms.image_to_os` / `transforms.os_to_image` (composite 与 window 两套)
+- **同一份过时的单段式公式 `os_x = image_x + virtual_bounds.x` 共出现在 5 处载体**:
+  skill `.codex/skills/rdog-control/references/protocol.md` (2 处)、
+  `README.md`、`specs/code-agent-rdog-control-usage.md`、
+  `specs/rdog-multi-display-screenshot-coordinate-plan.md`、
+  `specs/rdog-mouse-control-coordinate-plan.md` —— 全部**在 HiDPI 与窗口裁剪图下是错的**
+- 差三项:
+
+| 项 | 旧单段式 | 权威式 | 差在哪 |
+| --- | --- | --- | --- |
+| 原点 | `virtual_bounds` | `os_logical_bounds` | `virtual_bounds` 是 OS 原生物理像素矩形 (`src/screenshot.rs:1547`), `os_logical_bounds` 是逐屏 `to_os_logical(scale_factor)` 后合并 (`src/screenshot.rs:1601-1607`)。Windows 4K@200% 下两者宽 3840 vs 1920 |
+| 标尺 | 无 | `image_to_click_scale` | `os_logical_bounds.width / virtual_image_size.width` (`src/screenshot.rs:1039`) = 1 图像像素值多少 os-logical 单位 (4K@200% 下 0.5)。少了它坐标直接翻倍 |
+| 平移 | 无 | `image_rect` | 窗口裁剪图在全虚拟桌面图内的位置, 少了它窗口截图上的点整体偏移一个窗口原点 |
+
+### 为什么这次能抓出来
+- `remote-control-blocked-command-pitfalls.md` 的落地表把 P1-1 记成"**未核实**"
+  挂了 16 天; 本轮做落地表复核时顺手核了, 核出来是错的
+- 2026-10-05 那场实战"连续三次点空、浪费约 20 分钟"就是同一个坑 —— 当时
+  归因成"agent 算错", 实际是**给 agent 的尺子本身是错的**
+- 为什么 5 处都没被发现: 原始设计面向 macOS (scale_factor=1,
+  `virtual_bounds == os_logical_bounds`), 单段式在 macOS 上**逐字成立**;
+  HiDPI 层 (2026-10-06) 才让它失效, 而 macOS-only 的验证看不见
+
+### 修法
+- 5 处载体全部改为"**以 manifest 的 `transforms` 字段为准**" + 权威公式 (指针优先,
+  公式为辅) —— 指针不会过期, 手抄的会
+- skill 另给"不要手算, 用 `@click:{screenshot:"<id>",x,y}` 引用式入口"
+  (daemon 侧按同一公式换算, `screenshot_frame.rs:127-128`)
+- 落地表该行改为"已核实, 且发现写错 (2026-10-22 已修, 5 处)"
+- 混合 DPI 多屏 (逐屏缩放不同) 是**另一条**已知边界, 不在本次修复范围,
+  已开票 issue #123
+
+### 方法学沉淀
+- 载体里的公式类断言要能指回代码里的唯一定义; 指不回去的, 多半是抄来的,
+  抄的时候丢条件
+- "未核实"要有到期动作, 否则它会带着一个主动误导的公式静默过期

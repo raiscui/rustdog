@@ -281,6 +281,8 @@ rdog control <target> 5555 '@run:{"path":"...","args":[...],"wait":false}'
 - 中文输出的 CLI 先在 args 里自带 `chcp 65001&&` (@run 直接 spawn 裸 exe, 不做
   @cmd 那样的编码注入 — 不改写用户参数语义)。
 - stdout/stderr 回执只带**尾部 2KB** (安装器输出 MB 级, 全量回传撑爆控制帧)。
+- **被控机路径含空格时首选这个原语**: `{path, args}` 逐参传递, 整条链不经 shell,
+  没有引号层 (`@cmd` 那种裸 shell 行的引号在远端未必保得住)。
 
 ### 通用坑 (两形态都适用)
 
@@ -299,6 +301,28 @@ rdog control <target> 5555 '@run:{"path":"...","args":[...],"wait":false}'
   `event.sender.executeJavaScript` 回取。
 - 视觉证据 (布局/像素/渲染结果) 仍用 rdog `@screenshot`; 文件对话框/OS 权限
   弹窗等不可达 DOM 的系统级操作用 rdog 点击/按键。
+
+### Windows 实战三招 (2026-10-11 TB13 跨机测试沉淀)
+
+- **带空格路径拉起: 首选 `@run`, 别在控制行里靠引号**: 现场见过 `Start-Process
+  '带 空格'` 的单引号到 daemon 侧消失、路径被空格断词; 但 **rdog 源码里找不到
+  剥单引号的代码路径** (协议层只认双引号, one-shot 行直接来自 argv), 消失层级
+  尚未定位, 所以别依赖引号能活到远端。`@run` 的 `{path, args}` 结构化逐参 spawn
+  裸 exe, 整条链**没有 shell 也就没有引号层**; 必须走 shell 时用 ssh 建无空格
+  链接 `mklink C:\link.exe "C:\real path.exe"` (ssh 引号自己全控), rdog 只跑无空格
+  路径。注意目标卷可能禁用 8.3 短名 (`dir /x` 无短名列), 通配符也不是解法。
+- **main 进程取证 = --inspect**: renderer CDP 看不到主进程。拉起加 `--inspect=9230`,
+  ps1 客户端要**不过滤 type 的变体** (node target 的 type 不是 `page`, `Where type -eq
+  'page'` 会取空)。字段事实: `ipcMain._events` 只存 on() 注册, `handle()` 存
+  `_invokeHandlers` (Map) — 查挂载清单两处都要看; handler 可直接手动调用
+  (`_events[ch]({sender:null}, payload)` 或 `_invokeHandlers.get(ch)({sender:null},...)`)
+  一步验证「handler→状态→消费面」全链, 免黑盒对猜。
+- **发送链 vs 行为错, 双通道一次分清**: 疑似「renderer 发了 main 没收到」时, renderer
+  CDP (9222) 发 + main inspector (9230) 手动调消费 handler 读态 — inspector 侧行为正确
+  则失效点在发送链, 反之在 handler 逻辑。单侧取证永远在对猜 (实证: busy 疑云三轮黑盒
+  猜测, 双通道一击定谳)。
+- 方法学与适用边界: `docs/solutions/best-practices/electron-main-process-forensics.md`
+  (同场实战另两条沉淀: `docs/solutions/best-practices/remote-control-blocked-command-pitfalls.md`)
 
 ## Background Tasks (Phase 3)
 

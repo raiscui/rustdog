@@ -1,6 +1,6 @@
 # WORKLOG: rustdog
 
-> 本文件由前档 `WORKLOG_2026-09-02.md` (1125 行) 续档而来。前档含 Wayfinder #95 全程、
+> 本文件由前档 `archive/default_history/WORKLOG_2026-09-02_ocr_content_layer_rollover.md` (1125 行) 续档而来。前档含 Wayfinder #95 全程、
 > OCR 引擎横评、live e2e 调试链、#102/#103 票据记录。续档原因: 超 1000 行。
 > 交接文档: /tmp/rdog-ocr-handoff-2026-09-02.md
 
@@ -99,3 +99,65 @@
 
 ### 结论 (a~f)
 a 通过 / b 通过 / c 通过 / d 通过 / e 通过 / f 通过 —— 六项全绿。
+
+## [2026-10-22 14:30:00] [Session ID: mvs_04f490f87a924c96ac1cb0adcbd30806] 任务名称: continuous-learning 完整复盘 (补记 10-07~10-20 缺口 + 载体漂移修复)
+
+### 任务内容
+- 用户显式调用 `$continuous-learning`, 跑完整流程: 六文件回读 → Gate/Capture →
+  Scoped Refresh → 载体同步 → 双校验 → 归档 → 六文件更新 → issue 检索与报告。
+- 起因: 六文件最新条目停在 2026-10-06, 但 git 已到 10-08, 工作区还留着一份
+  10-11 的未提交 SKILL.md 改动 —— 说明 10-07 之后的产出**没有进账本**。
+
+### 完成过程
+1. **回读与分组**: 六文件 (task_plan 113 / notes 775 / WORKLOG 101 / LATER_PLANS 915 /
+   ERRORFIX 321 / EPIPHANY_LOG 103 / EXPERIENCE 575 行) + 23 份 solution + 22 个 open
+   issue + 4 个 worktree。确认本工作区无并行会话占用 (其余会话都在 pireel /
+   zcode-collab / xtalk), 那份未提交 SKILL.md 是 10-11 遗留, 无人认领。
+2. **发现载体漂移 (本轮最有价值的产出)**:
+   - `remote-control-blocked-command-pitfalls.md` 的落地表停在 10-06, 但 10-07
+     (536afd0, UTF-8) 与 10-08 (f7b94bd, `@run`) 已把 P3-2 / P4 做掉 —— 表里
+     仍写着"未落地 / 全仓无该 verb"。
+   - 该表 P1-1 行记"文档/skill 里的换算口诀 —— **未核实**"。本轮核实发现
+     同一份单段式公式 `os_x = image_x + virtual_bounds.x` **在 5 处载体里都是错的**
+     (skill `references/protocol.md` ×2、`README.md`、`specs/code-agent-rdog-control-usage.md`、
+     `specs/rdog-multi-display-screenshot-coordinate-plan.md`、
+     `specs/rdog-mouse-control-coordinate-plan.md`): Windows 4K@200% 时
+     `virtual_bounds` 是物理像素 (与 os-logical 差 2 倍), 窗口裁剪图还少一项
+     `image_rect` 平移。权威公式在 `src/control_mouse/screenshot_frame.rs:17`。
+     5 处已全部改为"以 manifest 的 `transforms` 字段为准 + 权威公式"。
+   - 这正是 2026-10-05 那场实战"连续三次点空、浪费约 20 分钟"的同一个坑 ——
+     换了载体 (代码里有公式) 但**错的那份留在了 agent 实际会读的地方**;
+     且原始设计面向 macOS (scale=1) 时旧式成立, 所以 macOS-only 的验证看不见它。
+3. **Capture**: 新建 `docs/solutions/best-practices/electron-main-process-forensics.md`
+   (渲染层 CDP 看不见主进程时的 `--inspect` 取证面 + 双通道定位法),
+   七项门禁逐条过。
+4. **Scoped Refresh**: 重写落地表 6 行 + 补 "2026-10-11 增量" 一节 (带空格路径 /
+   主进程取证 / 双通道 / 附带修掉的公式缺陷)。**并撤回一处未证实的断言**:
+   原 skill 写"rdog 链路会剥单引号", 但全仓 `trim_matches` 只有三处且都作用于
+   双引号, one-shot 行直接来自 argv —— **rdog 源码里找不到剥单引号的代码路径**,
+   该机制层级尚未定位, 改写为"现象已观察 + 机制未定位 + 解法不依赖定位"。
+5. **知识卫生**: 24 份 solution 双校验全绿 (修前 2 份 frontmatter 失败:
+   `problem_type: feedback` 不在枚举、`logic_error` 缺 `root_cause`/`resolution_type`;
+   另裁决 cross-compile 文档 5 条 claims flag)。AGENTS.md 补 2 条遗漏索引
+   (remote-control / cross-compile-windows)。
+6. **归档**: `task_plan_2026-09-02.md` + `WORKLOG_2026-09-02.md` →
+   `archive/default_history/` (git mv), manifest 见
+   `archive/manifests/ARCHIVE_MANIFEST__2026-10-22_default_history_rollover.md`;
+   核对未勾选项转出, **无缺口**。
+
+### 总结感悟
+- **"未核实"是知识库里最贵的三个字**: 落地表里 P1-1 那行挂了 16 天没人核, 核出来
+  是错的 —— 而且不是一处, 是 5 处照抄传播。标着待核实的项需要一个明确的到期动作,
+  否则它既不提醒也不负责。
+- **错的那份往往不在代码里, 在 agent 真正会读的那个文件里**: 代码有权威公式,
+  但 skill 给的是另一套 —— 载体之间没有对账机制时, 错的那个反而更容易被信。
+- **载体该写"指向真相源的指针", 不该手抄公式**: 指针不会过期, 手抄的会。
+  5 处已改成"读 manifest 的 `transforms` 字段"为主、公式为辅。
+- **旧式在原始目标平台上成立, 才让它活这么久**: macOS scale=1 时单段式逐字正确,
+  macOS-only 的验证永远看不见 HiDPI 下的 2 倍偏差 —— 与本仓
+  `env-deterministic-ci-red-vs-local-green` 那族同源。
+- **现场断言要先落到代码路径再落纸面**: "rdog 剥单引号"听着像产品缺陷, 但静态
+  找不到对应代码; 老实写成"机制未定位", 并给不依赖定位的解法 (`@run` 结构化
+  args / mklink), 比编一个机制有用得多。
+- 六文件对 10-07~10-20 零记录 = 这段时间的产出只能靠 git commit 反推。**账本
+  滞后比知识缺失更隐蔽**: 知识还在 git 里, 但没人知道该在哪读。

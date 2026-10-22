@@ -300,7 +300,7 @@ Important behavior:
 - Bare `@screenshot` defaults to all active displays: `display:"all", layout:"composite", coordinate_space:"os-logical"`.
 - `@screenshot:{display:"primary",layout:"single"}` is the explicit compatibility path for a single primary-display JPEG.
 - Default screenshot results are a bundle: one virtual-desktop JPEG `@savefile`, one manifest JSON `@savefile`, then a final `@response` whose value has `kind:"screenshot-bundle"`.
-- The manifest is the coordinate source of truth. For the default logical composite, `os_x = image_x + virtual_bounds.x` and `os_y = image_y + virtual_bounds.y`.
+- The manifest is the coordinate source of truth. Read `transforms.image_to_os` / `transforms.os_to_image` from it; for the default full-desktop image `os_x = os_logical_bounds.x + image_x * image_to_click_scale.x` (same for y). `virtual_bounds` is OS-native and is not the click-space origin on HiDPI screens.
 - `@observe` is read-only. It returns a `rdog.observe.v1` bundle with `visual`, `accessibility`, `windows`, `refs`, `selectors`, and `recovery` sections.
 - `@observe` with `scope.display` emits a real `single-display` visual bundle. Its manifest keeps global `os_rect` coordinates and uses a zero-origin `image_rect`.
 - `@window-activate` accepts `guard.display` and verifies fresh `frontmost` / focused-window state before returning `status:"ok"`.

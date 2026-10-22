@@ -409,7 +409,11 @@ durable observation state 当前由 daemon 写入这些文件:
 - `target:{selector_id:"...",auto_refind:false}` 是 no-action handoff,只返回 recovery `@selector-refind`。
   `auto_refind:true` 只有在 typed refind decision 为 `rebound` 且 fresh target 验证到当前 rect 后才会执行 mouse。
 - `@click`、`@drag`、带 `x/y` 的 `@wheel` 使用 `coordinate_space:"os-logical"`,并在响应里标记 `target_resolution.source:"coordinate_fallback"`。
-- 对默认 composite screenshot,图片点位换算为 `os_x = image_x + virtual_bounds.x`, `os_y = image_y + virtual_bounds.y`。
+- 对默认 composite screenshot,图片点位换算以 manifest 自带的 `transforms.image_to_os` /
+  `transforms.os_to_image` 为准 (全桌面图: `os_x = os_logical_bounds.x + image_x *
+  image_to_click_scale.x`; 窗口裁剪图另带 `image_rect` 平移项)。**不要**用
+  `os_x = image_x + virtual_bounds.x` —— `virtual_bounds` 是 OS 原生(物理)矩形,
+  在 Windows HiDPI 下与 os-logical 差一个 scale。
 - 如果点位落在 display gap 或 manifest 范围外,agent 应该先拒绝,不要把猜出来的坐标发送给 daemon。
 - `@mouse-move#id:{dx:0,dy:0,coordinate_space:"relative"}` 是安全 smoke,不会改变有效指针位置。
 - `@mouse-button mode:"press"` 是原始按下,不会自动 release。

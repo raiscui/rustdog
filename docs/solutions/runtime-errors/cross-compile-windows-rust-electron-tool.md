@@ -107,15 +107,17 @@ PS> Get-Process rdog
 
 两层, 静态 + 动态各占一半:
 
-**静态**: `ring v0.17.14` (`Cargo.lock` 内为传递依赖) 的 `build.rs` 会把 `.c/.S` 源文件
-交给 `cc` crate 现场编译。`cc` crate 在 `x86_64-pc-windows-msvc` 下期望一个
+**静态**: `ring v0.17.14` (`Cargo.lock` 内为传递依赖) 的 `build.rs` 会把 `.c` 与 `.S`
+源文件交给 `cc` crate 现场编译。`cc` crate 在 `x86_64-pc-windows-msvc` 下期望一个
 MSVC 工具链 (或者像 `cargo-xwin` 那样注入 clang-cl + Windows SDK 头);
 裸 `cargo build --target` 只设了 `TARGET`/`HOST`, **没有换 C 编译器、没有提供头文件根**,
 于是 `cc` 落到宿主 (macOS) 的 clang 上, 按 macOS 的 include 路径去找
 `assert.h` —— 而这是 MSVC CRT 头, macOS 上根本没有。
 
 **动态**: `cargo xwin build --release --target x86_64-pc-windows-msvc` 跑通,
-产物 `target/x86_64-pc-windows-msvc/release/rdog.exe` 43,611,136 bytes。
+产物 target/x86_64-pc-windows-msvc/release/rdog.exe 43,611,136 bytes
+(构建期生成路径, 不入库 —— 干净工作树里本来就不存在, 校验脚本会因此对
+"仓库内是否存在该路径"报 flag, 属预期)。
 `cargo-xwin` 会自动拉取并缓存 Windows CRT/SDK 头, 把 `CC`/`AR` 指向 `clang-cl`,
 把链接器指向 `lld-link`, 从而把上面那个"宿主 cc"换成"带 Windows SDK 的 clang-cl"。
 **同一天同一份代码, 换掉 xwin 就红、去掉 xwin 就绿** —— 这条对照本身就是根因判据。
@@ -163,7 +165,7 @@ OpenSSH for Windows 的 sshd 会把每个会话的进程收进一个 job object,
 /Users/cuiluming/.cargo/bin/cargo build --release --target x86_64-pc-windows-msvc
 ```
 
-产物: `target/x86_64-pc-windows-msvc/release/rdog.exe`
+产物: target/x86_64-pc-windows-msvc/release/rdog.exe (构建期生成, 不入库)
 
 `cargo xwin` 不止 `build`, `check` / `clippy` / `test` 子命令同样带这套环境
 (`cargo xwin --help`), 需要做 Windows 目标的静态检查时用 `cargo xwin check --all-targets`
@@ -247,7 +249,7 @@ ssh -i ~/.ssh/id_rsa vdcoo@rais-razer.local \
 | CI 无 Windows 覆盖 | 读 `.github/workflows/ci.yml:27` | `os: [ubuntu-latest, macos-latest]` |
 | 隐藏 spawn 标志 | 读 `src/hidden_mode.rs:85-86,102-107` | `CREATE_NO_WINDOW \| DETACHED_PROCESS` |
 | 自动隐藏化的边界与注释 | 读 `src/main.rs:761-800` | 仅 TCP transport, `RDOG_DAEMON_FOREGROUND` 逃生口 |
-| 产物尺寸与时间 | `ls -la target/x86_64-pc-windows-msvc/release/rdog.exe` | 43611136 bytes, Oct 6 12:18 |
+| 产物尺寸与时间 | `ls -la target/x86_64-pc-windows-msvc/release/rdog.exe` (构建期生成, 不入库) | 43611136 bytes, Oct 6 12:18 |
 
 ### 边界 — "能构建" 与 "目标下测试能跑" 是两件事
 
@@ -269,7 +271,7 @@ error: could not compile `rustdog` (bin "rdog" test) due to 112 previous errors;
 | 47 | `src/zenoh_runtime/unixpipe/tests.rs` | unixpipe 测试引用 unix-only 函数 |
 | 13 / 11 / 9 | `src/control_ax.rs` / `src/pty_control.rs` / `src/control_window.rs` | 平台分支在 Windows 下走空实现 |
 | 2 / 2 / 3 | `src/zenoh_runtime/session.rs` / `src/control_actions/tests.rs` / `src/control_actions.rs` | 同上 |
-| 各 1 | `unixpipe.rs` / `target_resolve.rs` / `win_dpi.rs` / `screenshot.rs` / `listener/mod.rs` / `control_overlay.rs` / `error_envelope.rs` / `control_cdp.rs` / `control_ax/types.rs` | 零散 |
+| 各 1 | `unixpipe.rs` / `target_resolve.rs` / `win_dpi.rs` / `screenshot.rs` / `src/listener/mod.rs` / `control_overlay.rs` / `error_envelope.rs` / `control_cdp.rs` / `src/control_ax/types.rs` | 零散 |
 
 **成因 (静态核实)**: `src/zenoh_runtime.rs:12` 的 `mod unixpipe;` **没有 `#[cfg(unix)]` 门** ——
 第 7-8 行的 `#[cfg(unix)]` 门的是 `pub(crate) mod process_lease;`, 不是它。
@@ -328,5 +330,5 @@ CI 矩阵里没有 Windows 这一格, 意味着**未来新增的 Windows 代码�
   这一处是"测试目标边界"一节里 112 个错误的主因
 - `src/control_window/windows.rs` —— 本次首次被编译的 1308 行 Windows 原生窗口面
 - `.github/workflows/ci.yml:26-27` —— 当前测试矩阵 (无 Windows)
-- [`../../best-practices/remote-control-blocked-command-pitfalls.md`](../best-practices/remote-control-blocked-command-pitfalls.md)
+- [`../best-practices/remote-control-blocked-command-pitfalls.md`](../best-practices/remote-control-blocked-command-pitfalls.md)
   —— 本次 Windows 真机 8 小时作业的问题清单; 本文的坑 2 是其中 P2 的运维侧续篇

@@ -144,6 +144,21 @@ Issues 和 Wayfinder maps 使用 GitHub Issues。详见 `docs/agents/issue-track
   - 用途: 固化 live e2e 三阶段门禁 (前置休眠与授权检查 / 截图前 activate 与同帧断言 / 系统工具真值对照) 与单帧识别抖动的防御 (重拍 + conf 过滤 + 候选回退)
   - 何时阅读: 编写或排查依赖屏幕捕获、合成输入、窗口枚举的 live e2e / 真机冒烟, 或遇到"间歇失败、重跑即过"类症状前
 
+- `docs/solutions/runtime-errors/cross-compile-windows-rust-electron-tool.md`
+  - 主题: Windows 交叉编译必须走 `cargo xwin` (宿主 cc 缺 MSVC CRT/SDK 头, ring 编不过) + 隐藏 child 活不过 ssh 会话 (常驻交给 schtasks)
+  - 用途: 固定"macOS 上交叉编译 Windows 产物"的正确工具链与"daemon 静默秒死"的成因判据, 附 cfg 门控与 windows-sys feature 的踩坑
+  - 何时阅读: 需要出 Windows 版 rdog 二进制 (或验远端 Windows 部署), 或排查 Windows 侧 daemon 进程秒退前
+
+- `docs/solutions/best-practices/remote-control-blocked-command-pitfalls.md`
+  - 主题: rdog 被当作长时远程运维通道时的实测反馈 — 阻塞死锁、截图↔click 坐标空间、`@cmd` 解释器语义、Windows 功能缺口与组合原语 (`@run`), 附逐条落地进度表
+  - 用途: 固定 Windows 真机 8 小时连续作业暴露的契约缺口与它们的当前落地状态; 带空格路径远程拉起 (首选 `@run` 结构化 args)、换算公式权威来源 (`src/control_mouse/screenshot_frame.rs`)
+  - 何时阅读: 用 rdog 远程控 Windows/跨机做真实作业前, 改 `@cmd`/`@run`/截图坐标/窗口 lane 前, 或需要知道哪些能力已落地哪些还欠账时
+
+- `docs/solutions/best-practices/electron-main-process-forensics.md`
+  - 主题: Electron 主进程取证 — 渲染层 CDP 看不见主进程时的 `--inspect` 取证面与双通道定位法
+  - 用途: 固定"主进程挂载清单在 `ipcMain._events` 与 `_invokeHandlers` 两处"、取 target 不能按 `type` 过滤, 以及用"渲染层发 + 主进程手动调 handler"一次分开发送链与 handler 逻辑
+  - 何时阅读: 远程调试 Electron 应用 (主进程状态 / IPC / busy 疑云) 前, 或改 skill 的 CDP Lane 配方前
+
 - `docs/solutions/design-patterns/appkit-helper-subprocess-isolation.md`
   - 主题: AppKit helper UI 的子进程隔离 (daemon 非主线程建 NSPanel 触发 ObjC 异常 abort 整个进程)
   - 用途: 固化"同二进制子命令 + stdin JSON 事件"的子进程架构、手动 runloop 冲刷 (否则窗口 0x0 不可见) 与生命周期 (stdin EOF 自动退出)

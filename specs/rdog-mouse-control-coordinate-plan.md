@@ -49,14 +49,20 @@ selector target 默认不是 action:
 
 ### 2.1 单一真相源
 
-`@screenshot` manifest 已经定义:
+`@screenshot` manifest 已经定义 (manifest 自带 `transforms.image_to_os` /
+`transforms.os_to_image`, 以它为准):
 
 ```text
-os_x = image_x + virtual_bounds.x
-os_y = image_y + virtual_bounds.y
-image_x = os_x - virtual_bounds.x
-image_y = os_y - virtual_bounds.y
+os_x = os_logical_bounds.x + image_x * image_to_click_scale.x
+os_y = os_logical_bounds.y + image_y * image_to_click_scale.y
+image_x = (os_x - os_logical_bounds.x) * image_size.width / os_logical_bounds.width
+image_y = (os_y - os_logical_bounds.y) * image_size.height / os_logical_bounds.height
 ```
+
+> **校正 (2026-10-22)**: 本节原先写的是单段式 `os_x = image_x + virtual_bounds.x`
+> —— 那是 **HiDPI 层落地前** 的形态。Windows HiDPI 下 `virtual_bounds` 是物理矩形,
+> 与 os-logical 差一个 scale; 窗口裁剪图另带 `image_rect` 平移项。权威定义在
+> `src/control_mouse/screenshot_frame.rs` 与 manifest 的 `transforms` 字段。
 
 鼠标控制接受的绝对坐标就是 manifest 的 `os-logical` 坐标。
 如果 agent 从截图图片上选中像素点 `(image_x, image_y)`,必须先用 manifest 换算成 `(os_x, os_y)`,再发送鼠标指令。
