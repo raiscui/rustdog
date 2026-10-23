@@ -226,8 +226,9 @@ intended content change. `performed:true` or a screenshot alone is incomplete.
 **定位**: 与 AX lane / Browser lane 互补不是替代。当 ①目标平台的 AX lane 整体
 unsupported (Windows 实测如此) ②截图+坐标点击被 HiDPI 换算、前台窗口遮挡反复
 搅局 ③需要读 JS 状态 (localStorage / IndexedDB / window 变量 / React 挂载态) 时,
-CDP 是唯一稳定通道 — DOM 级操作零坐标, 跨平台一致。**rdog 不桥接 CDP 流量**;
-组合拳分工 = rdog 把 app 带参拉起到正确交互会话 (`@cmd` Start-Process +
+CDP 可提供 DOM/JS 证据, 避免坐标定位; 原生窗口与落盘结果仍需独立核验.
+**rdog 内置 CDP lane 由 daemon 连接目标机 loopback**, 也可通过下述脚本形态执行.
+组合拳分工 = rdog 把 app 带参拉起到正确交互会话 (`@run` 或 `@cmd` Start-Process +
 `--remote-debugging-port=9222`, CDP 只绑被控机 loopback) + 截屏做视觉取证,
 CDP 驱动业务断言与输入。两条实现形态:
 
@@ -266,7 +267,7 @@ rdog control <target> 5555 '@cmd:powershell -NoProfile -ExecutionPolicy Bypass -
 复杂表达式一律走 `-ExprFile` (表达式写本地文件 scp 过去) — 单行 `-Expr`
 的内层引号在 rdog 控制链路多层转义下必炸。
 
-### @run — 裸 exe 同步执行 + 退出码 (2026-10-07)
+### @run — 裸 exe 同步执行 + 退出码
 
 不经 shell: path/args 结构化逐参传递, 免引号转义; 收割/超时/杀树与 @cmd 同款。
 
@@ -283,6 +284,30 @@ rdog control <target> 5555 '@run:{"path":"...","args":[...],"wait":false}'
 - stdout/stderr 回执只带**尾部 2KB** (安装器输出 MB 级, 全量回传撑爆控制帧)。
 - **被控机路径含空格时首选这个原语**: `{path, args}` 逐参传递, 整条链不经 shell,
   没有引号层 (`@cmd` 那种裸 shell 行的引号在远端未必保得住)。
+- `wait:false` 只证明已取得 PID, 不证明 GUI ready 或能脱离父进程长期存活.
+  `@cmd`/客户端超时也不证明没有启动. 重发前核对 exe 路径、profile、PID、
+  Windows Session、窗口和端口; 已有目标实例时继续观察, 避免重复启动.
+
+### Windows 作业前后核查
+
+1. 先读目标 `@ping`/`@capabilities`, 以远端实际回执判断能力, 不以本地 client
+   或文档版本推定 daemon 支持 `@run`. `code:64` 时先看 error, 区分未知命令与
+   payload 错误. 旧 daemon 的能力缺口不授权自动更新或重启共享实例.
+2. GUI 作业先确认 daemon 与目标进程属于同一交互 Session, 再 fresh
+   `@window-find` 定位. SSH Session0 的窗口句柄为 0 不证明应用已退出.
+   命名发现失败不等于主机失联; 只有已核实的 TCP/SSH 入口才可作为替代.
+3. shell 初始化真相源为 `src/control_actions.rs::build_shell_command`.
+   PowerShell 默认关闭 progress, Windows shell 复用 UTF-8 初始化;
+   旧 daemon 或 `@run` 显式启动 PowerShell 时, 调用脚本自行设置
+   `$ProgressPreference='SilentlyContinue'`. 不整体丢弃 stderr/CLIXML.
+   `shell_stderr` 表示退出码为 0 但仍有 stderr, `shell_exit_nonzero` 才表示
+   非零退出; 两者都保留诊断, 不能直接代替 fresh 业务状态核验.
+4. 截图必须匹配 fresh PID/window、display 与实际项目/profile. 全桌面图可能
+   拍到别的工作区或遮挡窗口; 不把图片存在当成目标页面验收.
+5. Windows 的非交互 shell 经 `build_shell_command` 启动时使用
+   `CREATE_NO_WINDOW`, 包括 agent shell; taskkill helper 也隐藏终端.
+   `@run` 保留自己的 window 可见性选项, PTY 保留交互终端语义.
+   这只隐藏执行 helper, 不隐藏命令显式启动的 GUI app.
 
 ### 通用坑 (两形态都适用)
 
@@ -339,6 +364,14 @@ rdog control @task-cancel:t-a1b2c3d4           # sync kill; idempotent on termin
 Terminal frames (`@task-completed` / `@task-failed`) are pushed on the session
 channel; `canceled` reuses `@task-failed` with `"canceled":true`. `@spawn`
 tasks emit no progress frames - poll `@task-output` for details.
+`@task-cancel` terminates and reaps the task process tree: Unix tasks use an
+isolated process group; Windows uses checked `taskkill /F /T /PID`. A kill or
+wait error remains retryable and cannot be reported as `canceled`; if the root
+process already exited, use its actual exit status. A child detached before
+cancellation is outside the guaranteed tree, so verify task-owned PIDs and
+ports before retrying or declaring cleanup complete. Do not kill by process
+name when another task or app may own a matching process.
+
 Daemon restart: old task ids honestly report `task not found`.
 
 Companion agents (hosted processes consuming task messages) live on their own
@@ -359,6 +392,12 @@ lane - see `references/agent-messaging.md` for the full loop.
 | Electron/Chromium DOM 级驱动 (AX 不可用/需读 JS 状态) | CDP Lane (见上; rdog 拉起 + ssh 隧道 + 裸 CDP) |
 | Delegate task to companion agent | `@agent-register` / `@agent-inbox` / `@agent-ack` |
 | Agent capability discovery | `@agent-card:NAME` |
+
+When a control call appears stuck, issue `@ping` through a separate control
+invocation or connection. Read its `control` snapshot as scoped Zenoh ingress
+evidence: same-session requests remain FIFO, and a client timeout does not prove
+the request did not execute. Check current task/process state before retrying;
+do not reset or restart a shared daemon to clear the snapshot.
 
 本节和上面的具体 lane 合同已经覆盖常规评测路径。若当前 cwd 没有额外参考文件,
 直接依据本 skill 和 daemon 的结构化响应继续;禁止执行 `find /`、`locate` 或其他

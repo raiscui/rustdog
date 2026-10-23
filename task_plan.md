@@ -138,3 +138,7 @@ commit + 10-11 跨机 Electron 调试 + 10-20 跨网互联 wayfinder 建图 13 �
 ### 状态
 - 本轮无业务代码改动 (纯知识载体), 24 份 solution 校验全绿
 - 下一步建议见最终报告的项目优化建议三条
+
+## [2026-10-23 20:27:06] [Session ID: 01a168b3-33af-7c53-9c6b-0fb808d7e9dc] 支线索引: yino 使用反馈优化
+
+启用 `yino_rdog_feedback` 支线, 检索 pireel 当前与 archive 上下文, 分析 rdog 需求/缺陷并实施已证实且可验证的调整. 过程见 task_plan__yino_rdog_feedback.md.

@@ -39,6 +39,11 @@ Issues 和 Wayfinder maps 使用 GitHub Issues。详见 `docs/agents/issue-track
 
 ## 长期文件索引
 
+- `specs/yino-rdog-usage-improvement-plan.md`
+  - 主题: yino 上下文与 archive 中的 rdog 使用反馈、缺陷对账与分阶段优化方案
+  - 用途: 关联现场来源、当前实现、shell 输出调整和未验证边界
+  - 何时阅读: 调整 shell 初始化、Windows 生命周期回执、能力预检或复核 yino 使用反馈前
+
 - `specs/control-line-protocol.md`
   - 主题: 当前 line-control 协议正式规格
   - 用途: 定义 `@response`、可选 request id、`@cmd#id` 与裸 shell 行共存边界

@@ -25,7 +25,9 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use crate::control_actions::build_shell_command;
+use crate::control_actions::{
+    build_shell_command, isolate_process_group, terminate_process_tree, TerminationSignal,
+};
 use crate::control_frames::{ControlFrame, TaskCompletedFrame, TaskFailedFrame, TaskStartedFrame};
 
 /// 输出 ring buffer 硬上限 (1MB): 超出部分丢头部, 保留最新尾部。
@@ -194,6 +196,7 @@ pub fn spawn_task(shell: &str, command: &str, cwd: Option<&str>) -> io::Result<S
     command_builder
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    isolate_process_group(&mut command_builder);
     if let Some(cwd) = cwd.filter(|cwd| !cwd.trim().is_empty()) {
         command_builder.current_dir(cwd);
     }
@@ -424,10 +427,16 @@ pub fn task_output(task_id: &str, tail_lines: usize) -> io::Result<TaskOutputRep
 ///   (registry 状态保持, client 可重试)
 /// - 终态: 幂等返回当前状态 (spec 固定)
 pub fn cancel_task(task_id: &str) -> io::Result<TaskSnapshot> {
-    // 阶段 1: registry 锁内做 kill + 收割 child; 锁内绝不调 finalize_task
-    // (它内部要再拿 registry 锁, std Mutex 不可重入, 持锁调用必死锁)。
-    // 锁顺序约定 (全库唯一处): registry -> child。waiter 只单拿 child/registry, 无环。
-    let cancel_outcome = {
+    cancel_task_with(task_id, |child, child_id| {
+        terminate_process_tree(child, child_id, TerminationSignal::Kill)
+    })
+}
+
+fn cancel_task_with(
+    task_id: &str,
+    terminate: impl FnOnce(&mut Child, u32) -> io::Result<()>,
+) -> io::Result<TaskSnapshot> {
+    let child_handle = {
         let registry = registry().lock().expect("task registry lock should work");
         let Some(entry) = registry.get(task_id) else {
             return Err(task_not_found(task_id));
@@ -441,40 +450,75 @@ pub fn cancel_task(task_id: &str) -> io::Result<TaskSnapshot> {
                 exit_code: entry.exit_code,
             });
         }
-        let mut child_guard = entry.child.lock().expect("task child lock should work");
-        if let Some(child) = child_guard.as_mut() {
-            let kill_result = child.kill();
-            let wait_status = child.wait();
-            child_guard.take();
-            match (kill_result, wait_status) {
-                (Ok(()), Ok(status)) => Some(status.code().unwrap_or(-1)),
-                (Err(err), _) => {
-                    return Err(io::Error::other(format!("@task-cancel kill 失败: {err}")));
-                }
-                (Ok(()), Err(err)) => {
-                    return Err(io::Error::other(format!(
-                        "@task-cancel kill 后 wait 失败: {err}"
-                    )));
-                }
-            }
-        } else {
-            None
-        }
+        Arc::clone(&entry.child)
     };
 
-    // 阶段 2: registry 锁外写终态
-    if let Some(exit_code) = cancel_outcome {
-        finalize_task(task_id, exit_code, |entry| {
-            entry.state = TaskState::Canceled;
-        });
+    // 保持 child 单收割方协议, 但不让 taskkill / wait 阻塞全局 registry。
+    let cancel_outcome = {
+        let mut child_guard = child_handle.lock().expect("task child lock should work");
+        let outcome = match child_guard.as_mut() {
+            Some(child) => {
+                let child_id = child.id();
+                match child.try_wait() {
+                    Ok(Some(status)) => {
+                        let exit_code = status.code().unwrap_or(-1);
+                        Some((exit_code, state_for_exit_code(exit_code)))
+                    }
+                    Ok(None) => match terminate(child, child_id) {
+                        Ok(()) => {
+                            let status = child.wait().map_err(|err| {
+                                io::Error::other(format!("@task-cancel 等待进程退出失败: {err}"))
+                            })?;
+                            Some((status.code().unwrap_or(-1), TaskState::Canceled))
+                        }
+                        Err(kill_err) => match child.try_wait() {
+                            Ok(Some(status)) => {
+                                let exit_code = status.code().unwrap_or(-1);
+                                Some((exit_code, state_for_exit_code(exit_code)))
+                            }
+                            Ok(None) => {
+                                return Err(io::Error::other(format!(
+                                    "@task-cancel 进程树终止失败: {kill_err}"
+                                )));
+                            }
+                            Err(wait_err) => {
+                                return Err(io::Error::other(format!(
+                                    "@task-cancel 进程树终止失败: {kill_err}; 检查进程状态失败: {wait_err}"
+                                )));
+                            }
+                        },
+                    },
+                    Err(err) => {
+                        return Err(io::Error::other(format!(
+                            "@task-cancel 检查进程状态失败: {err}"
+                        )));
+                    }
+                }
+            }
+            None => None,
+        };
+        if outcome.is_some() {
+            drop(child_guard.take());
+        }
+        outcome
+    };
+
+    if let Some((exit_code, state)) = cancel_outcome {
+        finalize_task(task_id, exit_code, |entry| entry.state = state);
     }
 
-    // 阶段 3: 罕见竞态 — waiter 刚 take 走 child 还没写终态时, 短等它落笔,
-    // 保证 cancel 响应绝大多数情况下就是 canceled 终态
     if let Some(snapshot) = wait_terminal_briefly(task_id) {
         return Ok(snapshot);
     }
     task_snapshot(task_id)
+}
+
+fn state_for_exit_code(exit_code: i32) -> TaskState {
+    if exit_code == 0 {
+        TaskState::Completed
+    } else {
+        TaskState::Failed
+    }
 }
 
 /// 最多 2s 轮询等待任务到达终态, 用于 cancel 竞态窗口的响应收口。
@@ -719,6 +763,239 @@ mod tests {
         // 进程已死: 不再占用 running 名额
         let registry = registry().lock().unwrap();
         assert!(registry[&task_id].state.is_terminal());
+    }
+
+    #[test]
+    fn cancel_failure_should_leave_task_running_and_retryable() {
+        let task_id = spawn_quick(cmd::IDLE_30S);
+        let error = cancel_task_with(&task_id, |_child, _child_id| {
+            Err(io::Error::other("injected tree cleanup failure"))
+        })
+        .unwrap_err();
+        let state = task_snapshot(&task_id).unwrap().state;
+        let child_retained = {
+            let registry = registry().lock().unwrap();
+            let retained = registry[&task_id].child.lock().unwrap().is_some();
+            retained
+        };
+        let retry = cancel_task(&task_id).unwrap();
+
+        assert!(error.to_string().contains("injected tree cleanup failure"));
+        assert_eq!(state, TaskState::Running);
+        assert!(child_retained, "失败后应保留 child 句柄供重试");
+        assert_eq!(retry.state, TaskState::Canceled);
+    }
+
+    #[test]
+    fn cancel_wait_should_not_hold_registry_lock() {
+        let task_id = spawn_quick(cmd::IDLE_30S);
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let cancel_task_id = task_id.clone();
+        let cancel_thread = thread::spawn(move || {
+            cancel_task_with(&cancel_task_id, move |child, child_id| {
+                entered_tx
+                    .send(())
+                    .map_err(|err| io::Error::other(format!("通知进入取消闭包失败: {err}")))?;
+                release_rx
+                    .recv()
+                    .map_err(|err| io::Error::other(format!("等待取消测试放行失败: {err}")))?;
+                terminate_process_tree(child, child_id, TerminationSignal::Kill)
+            })
+        });
+        let cancel_entered = entered_rx.recv_timeout(Duration::from_secs(3)).is_ok();
+
+        let (snapshot_tx, snapshot_rx) = std::sync::mpsc::channel();
+        let snapshot_task_id = task_id.clone();
+        let snapshot_thread = thread::spawn(move || {
+            let _ = snapshot_tx.send(task_snapshot(&snapshot_task_id));
+        });
+        let snapshot_before_release = snapshot_rx.recv_timeout(Duration::from_secs(2));
+        let snapshot_returned_while_cancel_waited = matches!(&snapshot_before_release, Ok(Ok(_)));
+
+        let _ = release_tx.send(());
+        let cancel_result = cancel_thread.join().ok().and_then(|result| result.ok());
+        let snapshot_result = match snapshot_before_release {
+            Ok(result) => Some(result),
+            Err(_) => snapshot_rx.recv_timeout(Duration::from_secs(3)).ok(),
+        };
+        let snapshot_thread_joined = snapshot_thread.join().is_ok();
+        let cleanup_state = cancel_task(&task_id).map(|snapshot| snapshot.state).ok();
+
+        assert!(cancel_entered, "取消闭包应进入阻塞区");
+        assert!(
+            snapshot_returned_while_cancel_waited,
+            "取消等待期间 task_snapshot 不应被 registry 锁阻塞"
+        );
+        assert!(snapshot_result.is_some_and(|result| result.is_ok()));
+        assert!(snapshot_thread_joined, "snapshot 线程应能收敛");
+        assert_eq!(
+            cancel_result.map(|snapshot| snapshot.state),
+            Some(TaskState::Canceled)
+        );
+        assert_eq!(cleanup_state, Some(TaskState::Canceled));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn spawned_task_should_not_allocate_a_console() {
+        let script = concat!(
+            "Add-Type -Namespace Rdog -Name ConsoleProbe -MemberDefinition ",
+            "'[DllImport(\"kernel32.dll\")] public static extern ",
+            "System.IntPtr GetConsoleWindow();'; ",
+            "[Rdog.ConsoleProbe]::GetConsoleWindow().ToInt64()"
+        );
+        let task_id = spawn_quick(script);
+        let snapshot = wait_terminal(&task_id);
+        let output = task_output(&task_id, DEFAULT_OUTPUT_TAIL_LINES).unwrap();
+
+        assert_eq!(snapshot.state, TaskState::Completed);
+        assert_eq!(output.output.trim(), "0");
+    }
+
+    #[cfg(windows)]
+    struct WindowsTaskCleanup {
+        task_id: String,
+        ready_files: Vec<std::path::PathBuf>,
+        unrelated: Option<Child>,
+    }
+
+    #[cfg(windows)]
+    impl Drop for WindowsTaskCleanup {
+        fn drop(&mut self) {
+            let _ = cancel_task(&self.task_id);
+            if let Some(mut unrelated) = self.unrelated.take() {
+                let _ = unrelated.kill();
+                let _ = unrelated.wait();
+            }
+            for path in &self.ready_files {
+                let _ = std::fs::remove_file(path);
+            }
+        }
+    }
+
+    #[cfg(windows)]
+    fn quote_powershell(text: &str) -> String {
+        text.replace('\'', "''")
+    }
+
+    #[cfg(windows)]
+    fn listener_script(ready_file: &std::path::Path) -> String {
+        let ready_file = quote_powershell(&ready_file.to_string_lossy());
+        format!(
+            "$listener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, 0); $listener.Start(); [System.IO.File]::WriteAllText('{ready_file}', [string]$listener.LocalEndpoint.Port); $deadline = [DateTime]::UtcNow.AddSeconds(30); while ([DateTime]::UtcNow -lt $deadline) {{ Start-Sleep -Milliseconds 50 }}; $listener.Stop()"
+        )
+    }
+
+    #[cfg(windows)]
+    fn descendant_listener_script(ready_file: &std::path::Path) -> String {
+        let child_script = quote_powershell(&listener_script(ready_file));
+        format!(
+            "$childScript = '{child_script}'; $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($childScript)); $child = Start-Process -FilePath (Join-Path $PSHOME 'powershell.exe') -ArgumentList @('-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', $encoded) -WindowStyle Hidden -PassThru; $deadline = [DateTime]::UtcNow.AddSeconds(30); while ([DateTime]::UtcNow -lt $deadline) {{ Start-Sleep -Milliseconds 50 }}"
+        )
+    }
+
+    #[cfg(windows)]
+    fn wait_listener_port(path: &std::path::Path) -> Option<u16> {
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while std::time::Instant::now() < deadline {
+            let port = std::fs::read_to_string(path)
+                .ok()
+                .and_then(|value| value.trim().parse::<u16>().ok());
+            if let Some(port) = port.filter(|port| listener_is_open(*port)) {
+                return Some(port);
+            }
+            thread::sleep(Duration::from_millis(25));
+        }
+        None
+    }
+
+    #[cfg(windows)]
+    fn listener_is_open(port: u16) -> bool {
+        let address = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+        std::net::TcpStream::connect_timeout(&address, Duration::from_millis(150)).is_ok()
+    }
+
+    #[cfg(windows)]
+    fn wait_listener_closed(port: u16) -> bool {
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while std::time::Instant::now() < deadline {
+            if !listener_is_open(port) {
+                return true;
+            }
+            thread::sleep(Duration::from_millis(25));
+        }
+        false
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn cancel_should_stop_windows_descendant_listener_and_preserve_unrelated_listener() {
+        let nonce = uuid::Uuid::new_v4();
+        let target_ready = std::env::temp_dir().join(format!("rdog-target-{nonce}.port"));
+        let unrelated_ready = std::env::temp_dir().join(format!("rdog-unrelated-{nonce}.port"));
+        let task_id = spawn_quick(&descendant_listener_script(&target_ready));
+        let mut cleanup = WindowsTaskCleanup {
+            task_id: task_id.clone(),
+            ready_files: vec![target_ready.clone(), unrelated_ready.clone()],
+            unrelated: None,
+        };
+        cleanup.unrelated = Some(
+            build_shell_command(TEST_SHELL, &listener_script(&unrelated_ready))
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .expect("应启动独立 listener"),
+        );
+        let target_port = wait_listener_port(&target_ready);
+        let unrelated_port = wait_listener_port(&unrelated_ready);
+        let both_started = target_port.is_some() && unrelated_port.is_some();
+        let cancel = cancel_task(&task_id);
+        let target_closed = target_port.is_some_and(wait_listener_closed);
+        let unrelated_alive = unrelated_port.is_some_and(listener_is_open);
+        let canceled = cancel.is_ok_and(|snapshot| snapshot.state == TaskState::Canceled);
+
+        drop(cleanup);
+
+        assert!(both_started, "两个 listener 都应在独立端口就绪");
+        assert!(canceled, "任务树清理成功后才应回 canceled");
+        assert!(target_closed, "取消后任务子树的 listener 端口仍可连接");
+        assert!(unrelated_alive, "取消任务树误杀了无关 listener");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cancel_should_stop_descendants_and_preserve_unrelated_process() {
+        let path = std::env::temp_dir().join(format!("rdog-task-child-{}", uuid::Uuid::new_v4()));
+        let task = spawn_quick(&format!("sleep 30 & echo $! > '{}'; wait", path.display()));
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        let pid = loop {
+            if let Ok(text) = std::fs::read_to_string(&path) {
+                if let Ok(pid) = text.trim().parse::<i32>() {
+                    break pid;
+                }
+            }
+            assert!(std::time::Instant::now() < deadline, "子进程未写 PID");
+            thread::sleep(Duration::from_millis(20));
+        };
+        let mut unrelated = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        cancel_task(&task).unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        // 只探测本测试创建并取回 PID 的子进程; 失败时也收回现场.
+        while unsafe { libc::kill(pid, 0) } == 0 && std::time::Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(20));
+        }
+        let descendant_alive = unsafe { libc::kill(pid, 0) } == 0;
+        let unrelated_alive = unrelated.try_wait().unwrap().is_none();
+        unsafe { libc::kill(pid, libc::SIGKILL) };
+        let _ = unrelated.kill();
+        let _ = unrelated.wait();
+        let _ = std::fs::remove_file(path);
+        assert!(!descendant_alive, "取消后子进程 {pid} 仍存活");
+        assert!(unrelated_alive, "取消误杀了其他任务的进程");
     }
 
     #[test]

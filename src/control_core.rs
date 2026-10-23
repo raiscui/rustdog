@@ -29,6 +29,9 @@ pub fn execute_explicit_control_request<E: ControlActionExecutor>(
     executor: &E,
     cancel_registry: &crate::cancellation::CancelRegistry,
 ) -> ControlExecutionOutcome {
+    // 探活不计入执行负载, 其余协议执行共享同一份实时诊断状态.
+    let _execution = (!matches!(request.command, ControlCommand::Ping))
+        .then(crate::control_diagnostics::executing);
     match &request.command {
         // @ping 即答, 不进 cancel registry (它没有任何可中止的在途动作)。
         // 响应体复用 executor 分支的同一个构造函数, 保证两条路径的
@@ -375,6 +378,8 @@ pub fn execute_literal_shell_line(command: &str, shell: &str) -> ControlExecutio
     if command.is_empty() {
         return ControlExecutionOutcome::default();
     }
+
+    let _execution = crate::control_diagnostics::executing();
 
     match build_shell_command(shell, command).output() {
         Ok(output) => ControlExecutionOutcome::from_response_line(render_control_response_payload(

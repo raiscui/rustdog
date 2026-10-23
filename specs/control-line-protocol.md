@@ -219,7 +219,27 @@ printf 'PLAIN_OK'
 
 ### `@ping`
 
-用于最小活性检查。
+用于最小活性检查,也返回 daemon 当前的入站控制请求快照. `pong`、`uptime_ms`、
+`bind_state` 和 `shell` 保持现有含义;响应新增 `control` 对象:
+
+```json
+{"control":{"busy":true,"active_requests":1,"queued_requests":2,"oldest_queued_ms":37,"longest_active_ms":204,"queue_scope":"zenoh-ingress"}}
+```
+
+- `busy` 表示本地记录到至少一个 active 或 queued 请求;`active_requests` 是统一协议/裸
+  shell 执行入口记录的嵌套请求数,不是 worker 线程数,且不计 `@ping` 本身.
+- `queued_requests` 与 `oldest_queued_ms` 覆盖 Zenoh 默认 FIFO ingress 从回调入队到
+  worker 出队的等待,包含 FIFO 背压等待;范围包括主/legacy queryable 和 session bridge.
+- 该快照不含 TCP/WebSocket 内核缓冲、尚未到达 daemon 的网络请求或 PTY 原始 stdin 数据帧,
+  也不代表全局所有队列都已清空. 不保留命令正文.
+- 经协议解析的 `@key` 等控制请求仍可能进入 active/queued 计数;这里排除的是 PTY 原始 stdin
+  字节帧,不是所有发生于 PTY session 的控制消息.
+- 独立 `@ping` 和 session-open payload 在 query callback 分支绕过业务 FIFO worker.
+  session open 仍会在 callback 路径同步建立 bridge;不据此承诺处理时延,并发下其他连接
+  是否持续可用已由 Windows 11 真实 SDK busy 回归验证: legacy Ping 与 observer session-open/
+  bridgePing/close 均完成. 该结果只覆盖测试配置,不承诺通用时延. 同一 session 内仍按 FIFO
+  执行;排查 busy 时从独立 `rdog control` 调用/连接发 `@ping`. 客户端超时不证明请求未执行,
+  也不能据此重发非幂等命令.
 
 示例:
 
@@ -601,6 +621,19 @@ compact `app:APP` 必须通过 fresh exact window query 解析为唯一且可交
 其语义是“在接收端主机本地执行命令文本”。
 
 ### `@cmd`
+
+非交互 shell 的初始化统一由 `src/control_actions.rs::build_shell_command` 负责:
+PowerShell 关闭 progress 输出, Windows PowerShell/cmd 使用既有 UTF-8 初始化.
+`@script`、`@cmd`、后台 task、flow 和裸 shell 复用该入口; 直接执行 `@run`
+与交互 PTY 不改写参数或会话. 用户脚本可显式重设 progress 偏好.
+Windows builder-created shell 使用 `CREATE_NO_WINDOW`, 避免非交互执行短暂弹出终端;
+同一 builder 的其他调用方也遵循此行为. 这不隐藏命令显式启动的 GUI app.
+`@run` 保留自己的 window 可见性选项, PTY 保留交互终端语义.
+
+同步脚本的错误分类以 `build_shell_failure_response_json` 为准: 非零退出为
+`shell_exit_nonzero`; 退出码为 0 但 stderr 非空为 `shell_stderr`.
+二者都保留 `ok:false`、实际退出码、stdout、stderr 与 shell, 不吞掉真实诊断,
+也不把执行回执代替应用启动/关闭/保存的 fresh 终态验证.
 
 表示显式 shell 请求别名。
 它的执行语义和现有 shell 请求路径保持一致。

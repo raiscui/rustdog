@@ -6,7 +6,9 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crate::control_actions::build_shell_command;
+use crate::control_actions::{
+    build_shell_command, isolate_process_group, terminate_process_tree, TerminationSignal,
+};
 
 use super::{FlowCmdStep, FlowCommandResult, FlowPolicy, FlowScriptStep};
 
@@ -51,7 +53,7 @@ fn execute_command_with_timeout(
     max_output_bytes: usize,
 ) -> Result<FlowCommandResult, String> {
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
-    set_command_process_group(&mut command);
+    isolate_process_group(&mut command);
 
     let start = Instant::now();
     let mut child = command
@@ -80,7 +82,7 @@ fn execute_command_with_timeout(
             Some(status) => break Some(status),
             None if Instant::now() >= deadline => {
                 timed_out = true;
-                break terminate_timed_out_child(&mut child, child_id);
+                break terminate_timed_out_child(&mut child, child_id)?;
             }
             None => thread::sleep(Duration::from_millis(10)),
         }
@@ -100,61 +102,62 @@ fn execute_command_with_timeout(
     })
 }
 
-fn terminate_timed_out_child(child: &mut Child, child_id: u32) -> Option<std::process::ExitStatus> {
-    terminate_process_tree(child, child_id, TerminationSignal::Terminate);
+fn terminate_timed_out_child(
+    child: &mut Child,
+    child_id: u32,
+) -> Result<Option<std::process::ExitStatus>, String> {
+    terminate_process_tree(child, child_id, TerminationSignal::Terminate)
+        .map_err(|err| format!("终止 flow 命令进程树失败: {err}"))?;
     let grace_deadline = Instant::now() + Duration::from_millis(200);
     while Instant::now() < grace_deadline {
-        if let Ok(Some(status)) = child.try_wait() {
-            return Some(status);
+        if let Some(status) = child
+            .try_wait()
+            .map_err(|err| format!("等待 flow 命令状态失败: {err}"))?
+        {
+            return Ok(Some(status));
         }
         thread::sleep(Duration::from_millis(10));
     }
 
-    terminate_process_tree(child, child_id, TerminationSignal::Kill);
-    child.wait().ok()
+    terminate_process_tree(child, child_id, TerminationSignal::Kill)
+        .map_err(|err| format!("强制终止 flow 命令进程树失败: {err}"))?;
+    child
+        .wait()
+        .map(Some)
+        .map_err(|err| format!("收割 flow 命令失败: {err}"))
 }
 
-enum TerminationSignal {
-    Terminate,
-    Kill,
-}
+#[cfg(all(test, windows))]
+mod tests {
+    use super::*;
 
-#[cfg(unix)]
-fn set_command_process_group(command: &mut Command) {
-    use std::os::unix::process::CommandExt as _;
+    #[test]
+    fn flow_shell_should_not_allocate_a_console() {
+        let step = FlowCmdStep {
+            run: concat!(
+                "Add-Type -Namespace Rdog -Name ConsoleProbe -MemberDefinition ",
+                "'[DllImport(\"kernel32.dll\")] public static extern ",
+                "System.IntPtr GetConsoleWindow();'; ",
+                "[Rdog.ConsoleProbe]::GetConsoleWindow().ToInt64()"
+            )
+            .to_owned(),
+            shell: Some("powershell.exe".to_owned()),
+            cwd: None,
+            env: BTreeMap::new(),
+            timeout_ms: Some(10_000),
+            capture: None,
+        };
+        let result = execute_cmd_step(
+            &step,
+            "powershell.exe",
+            &FlowPolicy::default(),
+            Duration::from_secs(10),
+        )
+        .expect("flow shell 应成功运行 console probe");
 
-    command.process_group(0);
-}
-
-#[cfg(not(unix))]
-fn set_command_process_group(_command: &mut Command) {}
-
-#[cfg(unix)]
-fn terminate_process_tree(child: &mut Child, child_id: u32, signal: TerminationSignal) {
-    // 2026-08-28 CI 实测 (strace): 外部 /usr/bin/kill 在 GNU coreutils 上会把
-    // ["-TERM", "-<pid>"] 解析成 kill(-2, SIGTERM) — 信号发往进程组 2 而非
-    // 目标组, ESRCH 静默失败。孤儿子孙进程因此存活并持有 stdout/stderr 管道
-    // 写端, join_stream_reader 阻塞到其自然退出, shell_lane 超时上限被突破
-    // (ubuntu CI duration_ms=2001)。macOS 的 BSD kill 对同参数无此歧义,
-    // 所以仅 linux 暴露。改用进程内 libc::kill(2) 直发进程组信号, 消灭
-    // 外部命令的参数解析歧义 + PATH 依赖 + spawn 开销三重脆弱点。
-    let signum = match signal {
-        TerminationSignal::Terminate => libc::SIGTERM,
-        TerminationSignal::Kill => libc::SIGKILL,
-    };
-    // 负 pid = 进程组信号: 一次性覆盖组长 (shell) 与全部子孙 (如 sleep)
-    let process_group_id = -(child_id as libc::pid_t);
-    // ESRCH (组已消亡) 与其余发送失败都只能尽力而为, 与原实现的吞错语义一致
-    unsafe {
-        libc::kill(process_group_id, signum);
+        assert_eq!(result.exit_code, Some(0), "{}", result.stderr);
+        assert_eq!(result.stdout.trim(), "0");
     }
-    // 兜底: 直杀 child 本体 (SIGKILL 单进程), 确保组长必定终结
-    let _ = child.kill();
-}
-
-#[cfg(not(unix))]
-fn terminate_process_tree(child: &mut Child, _child_id: u32, _signal: TerminationSignal) {
-    let _ = child.kill();
 }
 
 struct LimitedStreamCapture {

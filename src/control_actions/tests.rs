@@ -18,6 +18,92 @@ use std::sync::{
 };
 
 #[test]
+fn shell_builder_suppresses_powershell_progress_without_hiding_errors() {
+    // 只关闭 progress; 用户脚本和真实错误流必须原样保留.
+    for shell in ["powershell", "powershell.exe", "pwsh", "pwsh.exe"] {
+        let command = build_shell_command(shell, "Write-Error 'real-error'; exit 7");
+        let args: Vec<_> = command.get_args().collect();
+        let script = args.last().unwrap().to_str().unwrap();
+        assert!(script.contains("$ProgressPreference='SilentlyContinue';"));
+        assert!(script.ends_with("Write-Error 'real-error'; exit 7"));
+        assert!(!script.contains("$ErrorActionPreference"));
+        #[cfg(windows)]
+        assert!(script.contains("[Console]::OutputEncoding=[System.Text.Encoding]::UTF8;"));
+    }
+}
+
+#[cfg(windows)]
+#[test]
+fn shell_builder_should_not_allocate_a_console() {
+    let script = concat!(
+        "Add-Type -Namespace Rdog -Name ConsoleProbe -MemberDefinition ",
+        "'[DllImport(\"kernel32.dll\")] public static extern ",
+        "System.IntPtr GetConsoleWindow();'; ",
+        "[Rdog.ConsoleProbe]::GetConsoleWindow().ToInt64()"
+    );
+    let output = build_shell_command("powershell.exe", script)
+        .output()
+        .expect("应启动无控制台的 PowerShell probe");
+
+    assert!(output.status.success(), "{:?}", output.stderr);
+    assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "0");
+}
+
+#[test]
+fn shell_builder_preserves_non_powershell_command_text() {
+    for shell in ["sh", "bash", "zsh"] {
+        let command = build_shell_command(shell, "printf 'original text'");
+        assert_eq!(command.get_args().last().unwrap(), "printf 'original text'");
+    }
+    #[cfg(windows)]
+    assert_eq!(
+        build_shell_command("cmd.exe", "echo 中文")
+            .get_args()
+            .last()
+            .unwrap(),
+        "chcp 65001 >nul & echo 中文"
+    );
+}
+
+#[test]
+fn shell_stderr_is_not_reported_as_nonzero_exit() {
+    #[cfg(windows)]
+    let (shell, script) = ("cmd.exe", "echo diagnostic 1>&2 & exit /b 0");
+    #[cfg(not(windows))]
+    let (shell, script) = ("/bin/sh", "printf diagnostic >&2; exit 0");
+    let result = execute_script(shell, script).unwrap();
+    let response: serde_json::Value =
+        serde_json::from_str(result.response_value_json.as_deref().unwrap()).unwrap();
+    assert_eq!(result.exit_code, 0);
+    assert_eq!(response["ok"], false);
+    assert_eq!(response["error_code"], "shell_stderr");
+    assert!(response["stderr"].as_str().unwrap().contains("diagnostic"));
+    assert_eq!(response["shell"], shell);
+}
+
+#[cfg(windows)]
+#[test]
+fn powershell_progress_should_be_silent_but_real_errors_preserved() {
+    // Windows PowerShell 的重定向 progress 会生成 CLIXML, 不能作为脚本失败依据.
+    let result = execute_script(
+        "powershell.exe",
+        "Write-Progress -Activity probe -Status running -PercentComplete 50; Write-Output '中文完成'",
+    )
+    .unwrap();
+    assert_eq!(result.exit_code, 0);
+    assert!(result.stderr.is_empty(), "{:?}", result);
+    assert!(String::from_utf8_lossy(&result.stdout).contains("中文完成"));
+    assert!(result.response_value_json.is_none());
+
+    let result = execute_script("powershell.exe", "Write-Error 'real-error'; exit 7").unwrap();
+    let response: serde_json::Value =
+        serde_json::from_str(result.response_value_json.as_deref().unwrap()).unwrap();
+    assert_eq!(result.exit_code, 7);
+    assert_eq!(response["error_code"], "shell_exit_nonzero");
+    assert!(String::from_utf8_lossy(&result.stderr).contains("real-error"));
+}
+
+#[test]
 fn ax_get_ref_capture_uses_the_observation_target_window() {
     let observation = record_observation(
         "ax",

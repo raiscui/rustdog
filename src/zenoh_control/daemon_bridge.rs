@@ -38,6 +38,16 @@ pub(super) fn open_daemon_session_bridge(
         build_session_to_control_key_with_root(keyexpr_root, namespace, session_id);
     let subscriber = session
         .declare_subscriber(to_daemon_key)
+        .with(crate::control_diagnostics::channel(
+            |sample: &zenoh::sample::Sample| {
+                sample.payload().try_to_string().map_or(true, |line| {
+                    !matches!(
+                        crate::control_frames::PtyStdinFrame::parse_wire_message(&line),
+                        Ok(Some(_))
+                    )
+                })
+            },
+        ))
         .wait()
         .map_err(to_io_error)?;
     let publisher = Arc::new(Mutex::new(
@@ -120,6 +130,7 @@ pub(super) fn open_daemon_session_bridge(
 
             match subscriber.recv_timeout(recv_timeout) {
                 Ok(Some(sample)) => {
+                    let sample = sample.dequeue();
                     let Ok(line) = sample.payload().try_to_string().map_err(to_io_error) else {
                         continue;
                     };

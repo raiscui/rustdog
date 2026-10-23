@@ -1,14 +1,14 @@
 ---
 title: "GNU coreutils kill 的负 pid 参数歧义: 外部 kill 命令发进程组信号不可靠"
 date: 2026-08-28
-last_updated: 2026-08-28
+last_updated: 2026-10-23
 module: control-flow
 component: control-flow-process
 problem_type: logic_error
 severity: medium
 status: active
 root_cause: "外部 kill 命令的负 pid 参数在 GNU coreutils 上被解析成 kill(-2, SIGTERM) (ESRCH), 信号发往了错误的进程组; 孤儿子孙继续持有 stdout/stderr 管道写端, 把 join_stream_reader 的 read() 阻塞到自然 EOF, 把超时时长拖满"
-resolution_type: "terminate_process_tree (unix) 改用进程内 libc::kill 直发进程组信号 + child.kill() 兜底直杀组长; 不再走外部 kill 命令, 消除 GNU/BSD 参数解析差异、PATH 依赖与 spawn 开销"
+resolution_type: "terminate_process_tree 已统一到 src/control_actions.rs, 供 flow/task 共用; Unix 通过 libc::kill 发送进程组信号并返回错误, 仅在 ESRCH 且 child.try_wait 确认组长已退出时收口"
 tags:
   - linux
   - process-group
@@ -21,6 +21,7 @@ verified_by:
   - "docker ubuntu:24.04 strace 实证: /usr/bin/kill -TERM -<pgid> 实际执行 kill(-2, SIGTERM) = -1 ESRCH (2026-08-28)"
   - "docker python 复刻 process.rs 全逻辑: TOTAL duration=2.008s, stdout_join_wait=1.937s (孤儿持管道)"
   - "ubuntu CI run 33145050743 (e1f61dc): unit tests 首次全绿, shell_lane_should_mark_timeout 通过"
+  - "2026-10-23 Native control-plane nextest 40/40; includes process-tree cancellation paths, but is not a new Linux-specific strace reproduction"
 ---
 
 # GNU coreutils kill 的负 pid 参数歧义: 外部 kill 命令发进程组信号不可靠
@@ -47,24 +48,20 @@ verified_by:
    `/usr/bin/kill -TERM -2555` 实际执行 `kill(-2, SIGTERM) = -1 ESRCH` —
    信号被发往进程组 2 而非目标进程组 2555, 静默失败。BSD kill (macOS)
    对同参数正确解析为负 pid, 所以仅 linux 暴露。
-2. **孤儿管道写端放大**: `child.kill()` (SIGKILL 单进程) 杀死 shell 后,
+2. **孤儿管道写端放大**: 旧实现中的 `child.kill()` (SIGKILL 单进程) 杀死 shell 后,
    子进程 (如 `sleep 2`) 因组信号未达成为孤儿, 继续持有 stdout/stderr 管道
    写端; `join_stream_reader` 阻塞在 `read()` 等 EOF, 直到孤儿子孙自然退出,
    duration 被拉满。
 
 ## Fix
 
-`terminate_process_tree` (unix) 改用进程内 syscall 直发:
-
-```rust
-let process_group_id = -(child_id as libc::pid_t);
-unsafe { libc::kill(process_group_id, signum); }
-let _ = child.kill();  // 兜底直杀组长
-```
-
-`Cargo.toml` 的 `[target.'cfg(unix)'.dependencies]` 加 `libc = "0.2"`
-(依赖树已有, 零编译成本)。消灭外部命令的三重脆弱点: 参数解析歧义
-(GNU/BSD 差异) + PATH 依赖 + spawn 开销。
+当前唯一实现位于 `src/control_actions.rs::terminate_process_tree`,由
+`src/control_flow/process.rs` 与 `src/task_control.rs` 共用; Unix 子进程组由
+`src/control_actions.rs::isolate_process_group` 建立. Unix 路径使用进程内 `libc::kill`
+直接发送进程组信号,函数返回 `io::Result<()>` 并把发送错误交给调用方处理.
+`ESRCH` 只在 `child.try_wait()` 确认组长已退出时视为竞态收口;不再无条件
+`child.kill()` 或吞掉信号错误. 因而不会再调用外部 `kill`,避免 GNU/BSD 参数解析差异、
+PATH 依赖与额外进程启动.
 
 ## Verification (可复跑)
 

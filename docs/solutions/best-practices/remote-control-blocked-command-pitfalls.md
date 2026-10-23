@@ -1,7 +1,7 @@
 ---
 title: 远程被控端实战反馈 — 阻塞死锁、坐标空间与 Windows 功能缺口
 date: 2026-10-06
-last_updated: 2026-10-22
+last_updated: 2026-10-23
 module: control plane
 component: cmd/spawn/screenshot/window-lane
 problem_type: best_practice
@@ -19,9 +19,9 @@ verified_by:
   - "Windows 真机远程控制实战 2026-10-05 (vdcoo@rais-razer.local, Win11 x64): 约 200 次 control 调用, 8 小时连续作业"
   - "2026-10-06 commit a7ecbec 逐项落地 P0-1 / P1-1 / P1-3 / P2, 见下方「落地情况」小节"
   - "2026-10-06 Windows 11 真机 (4K@200%) 复验六项全绿: 启动横幅 / @ping 结构化 / @cmd 超时后控制面存活 / @window-find 列出 320 窗口 / 截图坐标换算命中开始按钮 (点击后 37.22% 像素变化, 关闭后 0.00%) / @cmd 引号容错"
-  - "2026-10-22 复核当前代码: @run 已存在 (src/control_protocol.rs:620), UTF-8 强制已存在 (src/control_actions.rs:886), 坐标换算权威公式在 src/control_mouse/screenshot_frame.rs:17"
+  - "2026-10-22 复核: @run 已存在; UTF-8 初始化当时仅覆盖 execute_script_with_timeout (2026-10-23 调用链校正); 坐标换算权威定义见 src/control_mouse/screenshot_frame.rs"
   - "2026-10-11 跨机 Electron 调试增量 (带空格路径拉起 / 主进程取证 / 双通道定位), 已并入「2026-10-11 增量」小节"
-resolution_type: "P0-1 / P1-1 / P1-3 / P2 已由 commit a7ecbec 落地并真机复验; P4 已由 commit f7b94bd 落地; P3-2 已由 commit 536afd0 落地; P0-2 / P1-2 / P3-1 仍部分落地 (只覆盖 bind_state/uptime 与 shell 回显, 未覆盖队列深度与 worker 忙闲); P2 resize 仍显式不支持"
+resolution_type: "P0-1 / P1-1 / P1-3 / P2 已由 commit a7ecbec 落地并真机复验; P4 已由 commit f7b94bd 落地; P0-2 / P3-1 / P3-2 与 Windows task cancel/hidden-shell control matrix 已通过 Native 与 Windows 11 指定回归; P1-2 仍未落地; P2 resize 仍显式不支持"
 related_solutions:
   - docs/solutions/best-practices/electron-main-process-forensics.md
 related_skills:
@@ -48,15 +48,15 @@ related_skills:
 ## 落地情况 (2026-10-06 · commit a7ecbec)
 
 本文提出的改进项已由 `a7ecbec` 逐条施工，并在 Windows 11 真机
-(4K@200%) 上复验；后续 `536afd0` / `f7b94bd` 又补掉了 P3-2 与 P4。
+(4K@200%) 上复验; 后续 `536afd0` / `f7b94bd` 分别补充同步脚本编码与 P4.
 **未落地的条目全部保留在下方原章节里作为待办**，
 下表是唯一的进度真相源 —— 读某一节的问题描述时，回来看这张表看它现在什么状态。
-（表中"已落地"字样均按 **2026-10-22 对当前代码的复核**写，不是当时的宣称。）
+(每行复核日期见最后一列; P3-2 于 2026-10-23 校正覆盖范围.)
 
 | 条目 | 状态 | 依据 (源码 / 验证) | 最后复核 |
 | --- | --- | --- | --- |
-| **P0-1** `@cmd` 超时 + 杀进程树 | **已落地** | `src/control_actions.rs:672-695` (`RDOG_SHELL_LANE_TIMEOUT_MS`, 默认 120s)、`:737-807` 超时/取消分支、Windows 走 `taskkill /F /T`、unix 走进程组。真机复验: 15s 超时后 `@ping` 仍活 | 2026-10-22 |
-| **P0-1** 协议层显式区分"排队中"与"已死锁" | **未落地** | 全仓无 `busy` 语义、无控制面 worker 队列深度字段。超时只是不再无限期挂死，客户端仍分不出"慢"与"死"。`src/control_session.rs:73` 的 `queued_frames` 是**出站帧队列**，与此无关 | 2026-10-22 |
+| **P0-1** `@cmd` 超时 + 杀进程树 | **已落地** | `src/control_actions.rs::{shell_lane_timeout,execute_script_with_timeout,reap_after_terminate,terminate_process_tree}` 是超时与终止路径的真相源; Windows 检查 `taskkill /F /T /PID`, Unix 向隔离进程组发信号. 历史真机复验: 15s 超时后 `@ping` 仍活 | 2026-10-23 |
+| **P0-2** `@ping` 入站忙闲与排队诊断 | **Native/Windows 指定回归通过** | Native 首轮 39/40 暴露 receiver close 后 queued 未清; `ChannelReceiver` 修复后最新相关 nextest 40/40 (7.739s), 原断言保留. Windows 11 真实 SDK busy 时 legacy Ping、observer session-open/bridgePing/close 与 queue close 清理通过. `control` 范围、same-session FIFO 及网络/PTY边界见 `specs/control-line-protocol.md`; 不代表全局队列或请求终态 | 2026-10-23 |
 | **P1-1** 截图↔click 坐标换算前置声明 | **已落地** | `src/screenshot.rs:437` manifest 补 `click_coordinate_space`，`src/control_mouse/target.rs:417` 补 `image_to_click_scale`；`transforms` 换算公式改用 `os_logical_bounds`。真机复验: 4K 图上 (1210,2112) → os-logical (605,1056) 点中开始菜单 | 2026-10-22 |
 | **P1-1** `@click` 支持物理像素入口 | **已落地** | `src/control_mouse/screenshot_frame.rs` (418 行): 截图坐标 → os-logical 的进程内缓存 (TTL 10min / 容量 32)，`@click` 接受 `{screenshot, x, y}` 引用式端点 (`screenshot_frame.rs:127-128` 为换算式) | 2026-10-22 |
 | **P1-1** 文档/skill 里的换算口诀 | **已核实, 且发现写错 (2026-10-22 已修, 5 处)** | 同一份单段式公式 `os_x = image_x + virtual_bounds.x` 出现在 **5 处载体**: skill `.codex/skills/rdog-control/references/protocol.md` (2 处)、`README.md`、`specs/code-agent-rdog-control-usage.md`、`specs/rdog-multi-display-screenshot-coordinate-plan.md`、`specs/rdog-mouse-control-coordinate-plan.md` —— **在 HiDPI / 窗口裁剪图下不成立**: Windows 4K@200% 时 `virtual_bounds` 是物理像素 (与 os-logical 差 2 倍), 裁剪图还少一项 `image_rect` 平移。权威公式在 `src/control_mouse/screenshot_frame.rs:17`, 5 处已全部改为"以 manifest 的 `transforms` 字段为准 + 权威公式" | 2026-10-22 |
@@ -68,8 +68,10 @@ related_skills:
 | **附带坑** 多行 PowerShell 走 SSH 被引号吃掉 | **未落地 (agent 侧自律, 非产品问题)** | 仍是"复杂 PowerShell 一律 scp 传 .ps1 再执行" | 2026-10-22 |
 | **P2** Windows window-find / activate / close | **已落地** | `src/control_window/windows.rs` (1308 行，本次首次被编译)；`src/control_window.rs:735/836/842` 三个 `execute_default_*` 入口。真机复验: `@window-find` 列出 320 个窗口 | 2026-10-22 |
 | **P2** Windows window-resize | **有意推迟 (2026-10-22 复核仍如此)** | `src/control_window/windows.rs:88` 仍显式返回 `windows_resize_not_implemented`; `src/control_window.rs:266-269` 注明: 窗口身份链 (EnumWindows) 已就位，但 resize 要确定外框与 per-monitor DPI 的尺寸语义，尚未验证。刻意不做成"平台整体 unsupported"，以免调用方分不出"能列窗口"与"能改尺寸" | 2026-10-22 |
-| **P3-1** daemon 诊断 | **部分落地** | `@ping` 结构化 + `daemon::bind_state()` / `daemon::uptime()` 公开 (`control_actions.rs:987-996`)。**worker 忙闲与队列深度未做**，也**没有 reset session 入口** | 2026-10-22 |
-| **P3-2** Windows 中文输出乱码 | **已落地 (2026-10-07, commit 536afd0)** | `src/control_actions.rs:886-892`: powershell 注入 `[Console]::OutputEncoding=[System.Text.Encoding]::UTF8`, cmd 走 `chcp 65001`。注意: `@run` 直接 spawn 裸 exe, **不做**这层编码注入, 需自己在 args 里带 `chcp 65001&&` | 2026-10-22 |
+| **P3-1** daemon 诊断 | **Native/Windows 指定回归通过** | `@ping` 保留 `daemon::bind_state()` / `daemon::uptime()` 并附带 P0-2 scoped ingress snapshot; Windows busy-query 用例验证独立 legacy Ping 与 observer bridge 可用. 没有 reset session API; 字段边界见 `specs/control-line-protocol.md` | 2026-10-23 |
+| **P3-2** Windows 中文输出乱码 | **Windows 11 对照通过** | `src/control_actions.rs::build_shell_command` 统一 PowerShell/cmd 初始化, 覆盖同步、后台 task、flow、裸 shell; Windows 用例验证 progress 被抑制, 中文 UTF-8 与真实 `Write-Error` 保留, stderr 分类正确. `@run` 直接执行, 不改写 args. 测试使用 `--no-default-features`, 不覆盖 OCR | 2026-10-23 |
+| **附带坑** `@task-cancel` 后台任务进程树收割 | **Native/Windows 隔离回归通过** | `src/task_control.rs::cancel_task` 在 registry 锁外终止并收割; Unix `@spawn` 用 `src/control_actions.rs::isolate_process_group`, Windows 检查 `taskkill /F /T /PID`. Windows 11 用例确认目标 listener 退出、无关 listener 仍活、取消失败可重试且不持全局 registry 锁. 已脱离父 shell 的子孙仍不保证覆盖. | 2026-10-23 |
+| **附带坑** Windows 非交互 shell 闪现终端 | **Windows 11 rdog 路径通过** | `src/control_actions.rs::build_shell_command` 设置 `CREATE_NO_WINDOW`; 新 test-exe 的 builder/task/flow 三路实测 `GetConsoleWindow=0`. `@run` window 选项和 PTY 不受影响, 命令显式启动的 GUI app 仍可见. 该结果不覆盖 OCR | 2026-10-23 |
 | **P4** `@run` / `@run-and-wait` 组合原语 | **已落地 (2026-10-08, commit f7b94bd)** | `src/control_protocol.rs:620` 路由 `"run"`; `src/control_actions.rs:2293-2332`: `{path, args, timeout_ms, window, wait}` 结构化逐参 spawn 裸 exe (**不经 shell, 无引号层**), 同步等退出+退出码, 超时杀树, `wait=false` 启动即回 pid, `window=visible` 供 GUI 安装器; 回执 stdout/stderr 只带尾部 2KB | 2026-10-22 |
 | **运维侧新增** Windows 交叉编译配方 | **已补文档** | 见 `docs/solutions/runtime-errors/cross-compile-windows-rust-electron-tool.md`。此前 CI 无 Windows 覆盖、文档零记录 | 2026-10-22 |
 
@@ -77,10 +79,11 @@ related_skills:
 无失败项; 远端跑的是当日 12:18 交叉编译的产物，SHA256 两端一致
 (`A2CDE103...`, Size 43611136)。
 
-**残留风险一句话**: 超时/坐标/窗口三条"卡住用户"的主线已通，
-组合原语 (P4) 与输出编码 (P3-2) 也已补齐；
-剩下的是**可观测性欠账** —— P0-2 与 P3-1 都停在"能看出 daemon 活着"，
-没到"能看出它忙"。
+**残留风险一句话**: Native 40/40 与 Windows 11 指定 control-plane 矩阵通过; Windows 构建
+排除 OCR, feature-off 额外用例通过但不验证 OCR 识别. 快照不观测网络/内核缓冲、PTY 原始
+stdin 数据帧或所有任务终态; detached 子孙也不保证能被取消收割. Windows debug-map 后处理
+失败、33 条既有告警和 `ENGINE_READY` 独立等待问题仍未解决;共享 daemon 保护字段前后对账及
+隔离测试清理已通过,详细边界见 `specs/yino-rdog-usage-improvement-plan.md`.
 
 ---
 
@@ -136,9 +139,10 @@ renderer CDP 发 + main inspector 手动调消费 handler 读态：inspector 侧
 
 ---
 
-## P0 — 阻塞死锁：同步 shell lane 无超时，一次卡死拖垮整个控制面
+## P0 — 同步 shell lane 长时间占用控制面
 
-> **落地状态 (2026-10-06)**: 超时 + 杀进程树 **已落地**; "排队中"状态可见 **未落地**。
+> **状态复核 (2026-10-23)**: 超时 + 杀进程树已落地; `@ping` busy/ingress 计数通过 Native
+> 40/40 与 Windows 11 指定回归. 这些计数只描述 Zenoh ingress 范围,不等于全局队列或死锁判定.
 > 详见上方「落地情况」小节。
 
 ### 现象
@@ -146,9 +150,10 @@ renderer CDP 发 + main inspector 手动调消费 handler 读态：inspector 侧
 执行 `@cmd:Start-Process ... -Wait` 之后，**后续所有 control 命令都没有执行**。
 用户侧观察是"命令好像没生效，只有我打断它之后才会继续"。
 
-### 根因（源码实证）
+### 历史根因（2026-10-06 修复前）
 
-`src/control_actions.rs:614` 的 `execute_script`:
+当时的 `execute_script` 用 `Command::output()` 无期限等待子进程退出. 以下为修复前的
+代码形态,不是当前源码:
 
 ```rust
 pub(crate) fn execute_script(shell: &str, script_text: &str) -> io::Result<ActionExecutionResult> {
@@ -157,28 +162,27 @@ pub(crate) fn execute_script(shell: &str, script_text: &str) -> io::Result<Actio
 }
 ```
 
-`Command::output()` 无限期等待子进程退出。`-Wait` 类命令不返回 → 控制面 worker
-被占死 → 后续请求排队 → 对客户端表现为"命令没执行"。
+`-Wait` 类命令不返回时,控制面 worker 会被占用,同一执行 lane 的后续请求排队,
+客户端表现为"命令没执行". 当前同步 shell lane 已有超时和进程树终止;仍可能占用
+lane 至超时,应使用 `@spawn` 运行长任务.
 
-这个**症状与病因严重错配**：不是解析失败、不是权限问题、不是网络断连，而是排队。
-客户端没有任何信号能区分这三种，agent（和人）都会往错误方向归因。
+当时这个**症状与病因严重错配**: 不是解析失败或权限错误,而是同一 lane 排队.
+当前 `@ping` 提供 scoped ingress busy/queue 快照,但不判定死锁,也不覆盖网络缓冲;
+客户端超时仍不能证明请求未执行.
 
-值得注意的是，`@spawn`（`task_control.rs::spawn_task`）是异步的，**没有这个问题** ——
-差异没有在协议层暴露出来，agent 只能靠踩坑发现。
+`@spawn` (`src/task_control.rs::spawn_task`) 立即返回 task id,任务执行与控制 lane 分开.
 
-### 建议
+### 当前处置
 
-1. **`execute_script` 加超时**（必做）。超时后杀掉**进程树**（不是只杀 shell ——
-   `Start-Process` 起的子进程会残留，正是今天排查 Windows 安装器时踩到的形态）。
-2. **协议层显式区分"排队中"与"已死锁"**：控制面 worker 忙时，客户端应收到
-   明确的 `busy` 语义（可附队列深度/已等待时长），而不是静默等待。
-3. **`@cmd` 响应里回显实际使用的 shell**（见 P1-3），让 agent 知道自己在哪个
-   解释器里。
+1. 长任务走 `@spawn` 并用 `@task-status` / `@task-output` 查询.
+2. 同步 shell lane 的超时与进程树清理见上方 P0-1 行;排查排队时用独立 control
+   调用发送 `@ping`,其计数范围见 P0-2 行和 `specs/control-line-protocol.md`.
+3. `@cmd` shell 回显范围见 P1-3 行.
 
 ### 反模式（agent 侧自律）
 
-在 rdog 修好之前，**远程 shell lane 内禁止任何阻塞等待**。要等长任务用
-`@spawn` + `@task-status` 轮询；必须同步等时显式加超时：
+为避免长任务占用同步控制 lane,使用 `@spawn` + `@task-status` 轮询;
+必须同步等待时,将 `@cmd` 的超时纳入预期,并用独立 control 调用观察 `@ping`:
 
 ```powershell
 # ✅ 正确
@@ -294,30 +298,29 @@ AX tree 在 Windows 上成本高，可以继续标 unsupported —— 但窗口*
 
 ## P3 — 可观测性缺口
 
-> **落地状态 (2026-10-06)**: P3-1 **部分落地** (bind_state / uptime 有, worker 忙闲与
-> 队列深度无); P3-2 **未落地**。详见上方「落地情况」小节。
+> **状态复核 (2026-10-23)**: P3-1 的 scoped ingress 状态已通过 Native/Windows 指定回归;
+> P3-2 的 Windows PowerShell 对照通过,但 `--no-default-features` 不覆盖 OCR. 详见上表。
 
 ### P3-1 daemon 卡死时客户端无诊断手段
 
-今天遇到过 daemon 被占死后"看起来像不响应"。客户端没有健康检查、没有
-worker 状态查询、没有"reset session"入口。
+历史现象是 daemon 被长任务占用后"看起来像不响应"。当时客户端没有 worker 状态查询。
+当前实现通过独立 `@ping` 返回 busy 与 ingress 队列计数,仍不提供 reset session;
+客户端超时也不能据此判断请求未执行或 daemon 已死锁.
 
-**建议**：`@ping` 响应里带 worker 忙闲状态与当前排队深度；长时间无响应时
-`@ping` 应明确区分"网络不通"与"worker 被占"。
+`@ping` 的字段语义和局限以 `specs/control-line-protocol.md` 为准.
 
 ### P3-2 Windows 中文输出乱码
 
 `@task-output` 回传 PowerShell 输出时，GBK/UTF-8 混杂（截图里能看到
 "�޷�..."）。agent 只能靠猜测。
 
-**建议**：daemon 侧统一按 UTF-8 读子进程输出（PowerShell 加
-`[Console]::OutputEncoding = [Text.Encoding]::UTF8` 前缀，或用 `-EncodedCommand`
-传 UTF-16LE 脚本）。
-
-> **落地状态 (2026-10-07)**: **已落地**。`src/control_actions.rs:886-892` 对
-> powershell 注入 `[Console]::OutputEncoding=[System.Text.Encoding]::UTF8`,
-> cmd 走 `chcp 65001`。例外: `@run` 直接 spawn 裸 exe, 不做这层注入 ——
-> 它不改写用户参数语义, 需要中文输出的 CLI 自己带 `chcp 65001&&`。
+> **2026-10-23 校正与验证**: 既有 UTF-8 初始化只由同步 `execute_script_with_timeout`
+> 调用, 不能据此断言后台 task 的编码已修复. 本轮移到
+> `src/control_actions.rs::build_shell_command`, 让现有 shell 调用方共享初始化,
+> 并在 PowerShell 源头关闭 progress. `@run` 不改写 args, 调用者负责所选程序
+> 的编码. Windows 11 对照确认 progress 不输出、中文为 UTF-8、真实 error 保留且
+> stderr 分类正确. 测试使用 `--no-default-features`, 不是 OCR 验收; 构建与共享 daemon
+> 限制见 `specs/yino-rdog-usage-improvement-plan.md`.
 
 ---
 

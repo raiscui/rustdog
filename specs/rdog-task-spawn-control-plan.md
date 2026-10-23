@@ -133,9 +133,17 @@ sequenceDiagram
   daemon 退出时子进程的处理沿用 PTY 现有策略)。
 - **取消**: task registry 内建 kill (实现修订, 2026-08-28): 原计划泛化 `CancelRegistry`,
   实现时发现它以 u64 request seq 为主键, 而 task 生命周期跨请求、id 为字符串, 不适合复用。
-  实际机制与 PTY close 同款: `@task-cancel` 同步 kill + 收割 (child 共享句柄单收割方协议,
-  waiter 线程 50ms try_wait 轮询), 响应即为 canceled 终态; 对已终态 task 幂等返回现态。
+  `@task-cancel` 先在 registry 锁内取得 child 共享句柄, 再于 registry 锁外终止进程树并等待
+  根进程收割; child 句柄锁仍保证 waiter 与 cancel 只有一方收割. Unix `@spawn` 隔离进程组,
+  取消时向该组发信号; Windows 使用经结果检查的 `taskkill /F /T /PID`.
+  只有终止与等待成功后才写 `canceled`; 失败会把 child 句柄放回 registry, 保留 `running`
+  并返回错误供调用方重试. 若根进程已自然退出, 按实际退出码落 `completed`/`failed`.
+  已脱离父 shell 的子进程不保证仍属于可终止的树;调用方应核对目标进程及端口,
+  不能仅凭 task 终态断言所有派生进程已消失. 对已终态 task 仍幂等返回现态.
   `@cancel#seq` 语义不变, 仍只管 in-flight 同步命令。
+  2026-10-23 验收: Native 相关 nextest 40/40 通过; Windows 11 隔离用例确认目标 listener
+  收割、无关 listener 存活、取消失败可重试且不持全局 registry 锁. test-exe 与其他控制面
+  验收范围见 `specs/yino-rdog-usage-improvement-plan.md`; 不覆盖已脱离父 shell 的子孙.
 - **命令解析**: `@spawn` 走 shell 行还是裸 argv 由实现 ticket 定;
   关键约束是 COMMAND 部分不能被 compact 参数解析误拆(含空格/引号的命令要完整传递)。
 

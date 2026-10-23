@@ -244,16 +244,6 @@ pub fn run_router_daemon(config: ZenohDaemonRuntimeConfig, shell: &str) -> io::R
         .wait()
         .map_err(to_io_error)?;
     let key_input_event_publisher = declare_key_input_event_publisher(&session, &config)?;
-    let queryable = session
-        .declare_queryable(&control_key)
-        .complete(true)
-        .wait()
-        .map_err(to_io_error)?;
-    let legacy_queryable = session
-        .declare_queryable(&legacy_control_key)
-        .complete(true)
-        .wait()
-        .map_err(to_io_error)?;
     let key_input_event_key = key_input_event_publisher
         .as_ref()
         .map(|publisher| publisher.keyexpr.clone())
@@ -261,6 +251,35 @@ pub fn run_router_daemon(config: ZenohDaemonRuntimeConfig, shell: &str) -> io::R
     let executor =
         build_router_control_executor(key_input_event_publisher, config.key_delivery_backend);
     let active_session_bridges = Arc::new(Mutex::new(HashSet::new()));
+
+    let queryable = session
+        .declare_queryable(&control_key)
+        .complete(true)
+        .with(control_query_handler(
+            &session,
+            KEYEXPR_ROOT,
+            &config.namespace,
+            shell,
+            &control_key,
+            &executor,
+            &active_session_bridges,
+        ))
+        .wait()
+        .map_err(to_io_error)?;
+    let legacy_queryable = session
+        .declare_queryable(&legacy_control_key)
+        .complete(true)
+        .with(control_query_handler(
+            &session,
+            LEGACY_KEYEXPR_ROOT,
+            &config.namespace,
+            shell,
+            &legacy_control_key,
+            &executor,
+            &active_session_bridges,
+        ))
+        .wait()
+        .map_err(to_io_error)?;
 
     log::info!(
         "zenoh router daemon ready: namespace={}, service_name(daemon_name)={}, member_id={}, alive_key={}, control_key={}, key_input_event_key={}, listen_endpoints={:?}, request_timeout_ms={}",
@@ -352,7 +371,7 @@ pub fn run_router_daemon(config: ZenohDaemonRuntimeConfig, shell: &str) -> io::R
                 &legacy_control_key_for_reply,
                 &legacy_executor,
                 &legacy_active_session_bridges,
-                query,
+                query.dequeue(),
             ) {
                 log::warn!("legacy Zenoh control query failed: {err}");
             }
@@ -368,11 +387,60 @@ pub fn run_router_daemon(config: ZenohDaemonRuntimeConfig, shell: &str) -> io::R
             &control_key,
             &executor,
             &active_session_bridges,
-            query,
+            query.dequeue(),
         )?;
     }
 
     Err(io::Error::other("Zenoh control queryable channel closed"))
+}
+
+/// 独立探活和新观察连接不排在长命令后面; 业务请求仍走原来的串行 FIFO.
+fn control_query_handler(
+    session: &zenoh::Session,
+    keyexpr_root: &'static str,
+    namespace: &str,
+    shell: &str,
+    control_key: &str,
+    executor: &SystemControlActionExecutor,
+    active_session_bridges: &Arc<Mutex<HashSet<String>>>,
+) -> (
+    zenoh::handlers::Callback<zenoh::query::Query>,
+    crate::control_diagnostics::ChannelReceiver<zenoh::query::Query>,
+) {
+    let (send, receive) = crate::control_diagnostics::channel(|_| true);
+    let session = session.clone();
+    let namespace = namespace.to_owned();
+    let shell = shell.to_owned();
+    let control_key = control_key.to_owned();
+    let executor = executor.clone();
+    let bridges = Arc::clone(active_session_bridges);
+    let callback = zenoh::handlers::Callback::from(move |query: zenoh::query::Query| {
+        let probe = query.payload().and_then(|payload| payload.try_to_string().ok()).is_some_and(|payload| {
+            if matches!(parse_session_open_payload(&payload), Ok(Some(_))) {
+                return true;
+            }
+            parse_session_bridge_request(&payload).ok().is_some_and(|request| {
+                matches!(parse_control_line(&request.line), Ok(ControlParseResult::Control(request)) if matches!(request.command, ControlCommand::Ping))
+            })
+        });
+        if probe {
+            if let Err(err) = handle_daemon_control_query(
+                &session,
+                keyexpr_root,
+                &namespace,
+                &shell,
+                &control_key,
+                &executor,
+                &bridges,
+                query,
+            ) {
+                log::warn!("Zenoh control probe failed: {err}");
+            }
+        } else {
+            send.call(query);
+        }
+    });
+    (callback, receive)
 }
 
 fn handle_daemon_control_query(
@@ -393,14 +461,12 @@ fn handle_daemon_control_query(
     })?;
     let payload = payload.try_to_string().map_err(to_io_error)?;
     if let Some(session_id) = parse_session_open_payload(payload.as_ref())? {
-        let should_open = {
-            let mut bridges = active_session_bridges
-                .lock()
-                .expect("active_session_bridges lock should work");
-            bridges.insert(session_id.clone())
-        };
-        if should_open {
-            open_daemon_session_bridge(
+        // 建立订阅期间同 ID 的 open 必须等待, 不能在 bridge 尚未 ready 时先 ACK.
+        let mut bridges = active_session_bridges
+            .lock()
+            .expect("active_session_bridges lock should work");
+        if bridges.insert(session_id.clone()) {
+            if let Err(err) = open_daemon_session_bridge(
                 session,
                 keyexpr_root,
                 namespace,
@@ -408,8 +474,12 @@ fn handle_daemon_control_query(
                 shell,
                 executor.clone(),
                 Arc::clone(active_session_bridges),
-            )?;
+            ) {
+                bridges.remove(&session_id);
+                return Err(err);
+            }
         }
+        drop(bridges);
         query
             .reply(control_key.to_owned(), "@response 0")
             .wait()
@@ -1095,6 +1165,190 @@ fn should_flush_tty_input_after_request(line: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct BusyWorker {
+        cancel: crate::cancellation::CancellationToken,
+        thread: Option<thread::JoinHandle<()>>,
+        marker: std::path::PathBuf,
+    }
+
+    impl Drop for BusyWorker {
+        fn drop(&mut self) {
+            // 先 signal 再 join, 断言失败也不遗留长等待或污染诊断计数.
+            self.cancel.signal();
+            if let Some(worker) = self.thread.take() {
+                let _ = worker.join();
+            }
+            let _ = std::fs::remove_file(&self.marker);
+        }
+    }
+
+    #[test]
+    fn diagnostic_ping_should_bypass_busy_query_worker_and_preserve_queue() {
+        let _lock = crate::control_diagnostics::TEST_LOCK.lock().unwrap();
+        // 仅使用本 session 的本地投递, 不发现或连接其他任务的 router/daemon.
+        let mut config = zenoh::Config::default();
+        config.insert_json5("mode", "\"peer\"").unwrap();
+        config
+            .insert_json5("scouting/multicast/enabled", "false")
+            .unwrap();
+        config.insert_json5("listen/endpoints", "[]").unwrap();
+        let session = zenoh::open(config).wait().unwrap();
+        let key = format!("rdog-test/{}", uuid::Uuid::new_v4());
+        let marker = std::env::temp_dir().join(format!("rdog-busy-{}", uuid::Uuid::new_v4()));
+        #[cfg(windows)]
+        let (shell, script) = (
+            "powershell.exe",
+            format!(
+                "[IO.File]::WriteAllText('{}','ready'); Start-Sleep -Seconds 30",
+                marker.to_string_lossy().replace('\'', "''")
+            ),
+        );
+        #[cfg(not(windows))]
+        let (shell, script) = (
+            "/bin/sh",
+            format!(
+                "printf ready > '{}'; sleep 30",
+                marker.to_string_lossy().replace('\'', "'\\''")
+            ),
+        );
+        let executor = SystemControlActionExecutor::default();
+        let bridges = Arc::new(Mutex::new(HashSet::new()));
+        let queryable = session
+            .declare_queryable(key.clone())
+            .complete(true)
+            .with(control_query_handler(
+                &session,
+                KEYEXPR_ROOT,
+                "isolated-test",
+                shell,
+                &key,
+                &executor,
+                &bridges,
+            ))
+            .wait()
+            .unwrap();
+        let first = session
+            .get(key.clone())
+            .payload(format!("@cmd#1:{script}"))
+            .timeout(Duration::from_secs(20))
+            .wait()
+            .unwrap();
+        let request = queryable
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap()
+            .unwrap();
+        let worker_session = session.clone();
+        let worker_key = key.clone();
+        let worker_executor = executor.clone();
+        let worker_bridges = Arc::clone(&bridges);
+        let worker_shell = shell.to_owned();
+        let cancel = executor.cancel_registry().register(1);
+        let worker = thread::spawn(move || {
+            handle_daemon_control_query(
+                &worker_session,
+                KEYEXPR_ROOT,
+                "isolated-test",
+                &worker_shell,
+                &worker_key,
+                &worker_executor,
+                &worker_bridges,
+                request.dequeue(),
+            )
+            .unwrap()
+        });
+        let mut worker = BusyWorker {
+            cancel,
+            thread: Some(worker),
+            marker: marker.clone(),
+        };
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while !marker.exists() {
+            assert!(std::time::Instant::now() < deadline, "worker 未进入执行");
+            thread::sleep(Duration::from_millis(10));
+        }
+        let second = session
+            .get(key.clone())
+            .payload("@wait#2:{duration_ms:0}")
+            .timeout(Duration::from_secs(15))
+            .wait()
+            .unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while queryable.handler().is_empty() {
+            assert!(std::time::Instant::now() < deadline, "业务请求未入队");
+            thread::sleep(Duration::from_millis(10));
+        }
+        thread::sleep(Duration::from_millis(20));
+        let ping = session
+            .get(key.clone())
+            .payload("@ping#3")
+            .timeout(Duration::from_secs(2))
+            .wait()
+            .unwrap();
+        let reply = ping.recv_timeout(Duration::from_secs(2)).unwrap().unwrap();
+        let reply = reply.result().unwrap().payload().try_to_string().unwrap();
+        let value: serde_json::Value =
+            serde_json::from_str(reply.strip_prefix("@response ").unwrap()).unwrap();
+        let control = value
+            .get("control")
+            .or_else(|| value.get("value").and_then(|v| v.get("control")))
+            .unwrap()
+            .clone();
+        #[cfg(windows)]
+        {
+            // 真正的新观察连接也必须能在旧 query worker 忙时建立并完成探活.
+            let observer_id = format!("observer-{}", uuid::Uuid::new_v4());
+            let to_control = build_session_to_control_key_with_root(
+                KEYEXPR_ROOT, "isolated-test", &observer_id,
+            );
+            let replies = session.declare_subscriber(to_control).wait().unwrap();
+            let open = session.get(key.clone())
+                .payload(self::session_payload::render_session_open_payload(&observer_id))
+                .timeout(Duration::from_secs(2)).wait().unwrap();
+            open.recv_timeout(Duration::from_secs(2)).unwrap().unwrap().result().unwrap();
+            assert!(bridges.lock().unwrap().contains(&observer_id));
+            let to_daemon = crate::zenoh_identity::build_session_to_daemon_key_with_root(
+                KEYEXPR_ROOT, "isolated-test", &observer_id,
+            );
+            session.put(to_daemon.clone(), "@ping#4").wait().unwrap();
+            let response = replies.recv_timeout(Duration::from_secs(2)).unwrap().unwrap();
+            let text = response.payload().try_to_string().unwrap();
+            let observer: serde_json::Value = serde_json::from_str(text.strip_prefix("@response ").unwrap()).unwrap();
+            assert_eq!(observer["id"], 4);
+            session.put(to_daemon, self::session_payload::render_session_close_payload(&observer_id)).wait().unwrap();
+            replies.recv_timeout(Duration::from_secs(2)).unwrap().unwrap();
+            assert!(!bridges.lock().unwrap().contains(&observer_id));
+        }
+        // 先恢复本测试的 worker, 再断言结果, 失败也不留下长等待.
+        worker.cancel.signal();
+        worker.thread.take().unwrap().join().unwrap();
+        first.recv_timeout(Duration::from_secs(2)).unwrap().unwrap();
+        let queued = queryable
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap()
+            .unwrap();
+        handle_daemon_control_query(
+            &session,
+            KEYEXPR_ROOT,
+            "isolated-test",
+            "unused",
+            &key,
+            &executor,
+            &bridges,
+            queued.dequeue(),
+        )
+        .unwrap();
+        second
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap()
+            .unwrap();
+        assert_eq!(value["id"], 3);
+        assert_eq!(control["busy"], true);
+        assert!(control["active_requests"].as_u64().unwrap() >= 1);
+        assert!(control["queued_requests"].as_u64().unwrap() >= 1);
+        assert!(control["oldest_queued_ms"].as_u64().unwrap() >= 1);
+        assert_eq!(crate::control_diagnostics::snapshot()["queued_requests"], 0);
+    }
 
     #[test]
     fn key_request_should_trigger_tty_flush_guard() {

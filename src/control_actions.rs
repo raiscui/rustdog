@@ -741,10 +741,9 @@ pub(crate) fn execute_script_with_timeout(
     timeout: Option<Duration>,
     cancel: Option<&CancellationToken>,
 ) -> io::Result<ActionExecutionResult> {
-    let mut command = build_shell_command(shell, &prepend_output_encoding_init(shell, script_text));
+    let mut command = build_shell_command(shell, script_text);
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
     isolate_process_group(&mut command);
-    suppress_shell_window(&mut command);
 
     let started_at = Instant::now();
     let mut child = command.spawn()?;
@@ -765,13 +764,13 @@ pub(crate) fn execute_script_with_timeout(
         // 报出来的是"超时", 会把"我已经 cancel 了"误报成"我不知道你在跑"。
         if cancel.is_some_and(|token| token.is_cancelled()) {
             interrupted = Some(ShellInterruption::Cancelled);
-            break reap_after_terminate(&mut child, child_id);
+            break Some(reap_after_terminate(&mut child, child_id)?);
         }
         if let Some(deadline) = deadline.filter(|deadline| Instant::now() >= *deadline) {
             interrupted = Some(ShellInterruption::Timeout(
                 deadline.duration_since(started_at),
             ));
-            break reap_after_terminate(&mut child, child_id);
+            break Some(reap_after_terminate(&mut child, child_id)?);
         }
         thread::sleep(SHELL_WAIT_POLL_INTERVAL);
     };
@@ -838,36 +837,47 @@ fn join_spilled_stream(handle: Option<thread::JoinHandle<Vec<u8>>>) -> Vec<u8> {
 }
 
 /// 先温和终止、再升级强杀地收掉整棵进程树, 顺带 reap 组长。
-fn reap_after_terminate(child: &mut Child, child_id: u32) -> Option<ExitStatus> {
-    terminate_process_tree(child, child_id, TerminationSignal::Terminate);
+fn reap_after_terminate(child: &mut Child, child_id: u32) -> io::Result<ExitStatus> {
+    if let Err(err) = terminate_process_tree(child, child_id, TerminationSignal::Terminate) {
+        if let Some(status) = child.try_wait()? {
+            return Ok(status);
+        }
+        return Err(err);
+    }
     let grace_deadline = Instant::now() + TERMINATION_GRACE;
     while Instant::now() < grace_deadline {
-        if let Ok(Some(status)) = child.try_wait() {
-            return Some(status);
+        if let Some(status) = child.try_wait()? {
+            return Ok(status);
         }
         thread::sleep(SHELL_WAIT_POLL_INTERVAL);
     }
-    terminate_process_tree(child, child_id, TerminationSignal::Kill);
-    child.wait().ok()
+    if let Err(err) = terminate_process_tree(child, child_id, TerminationSignal::Kill) {
+        if let Some(status) = child.try_wait()? {
+            return Ok(status);
+        }
+        return Err(err);
+    }
+    child.wait()
 }
 
-enum TerminationSignal {
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum TerminationSignal {
     Terminate,
     Kill,
 }
 
 /// 让子进程自成进程组: 终止时才能一次信号覆盖整棵树, 而不误伤 daemon 自己。
 #[cfg(unix)]
-fn isolate_process_group(command: &mut Command) {
+pub(crate) fn isolate_process_group(command: &mut Command) {
     use std::os::unix::process::CommandExt as _;
 
     command.process_group(0);
 }
 
 #[cfg(not(unix))]
-fn isolate_process_group(_command: &mut Command) {}
+pub(crate) fn isolate_process_group(_command: &mut Command) {}
 
-/// Windows: @cmd 的 shell 是无人看窗的命令执行桥 — 不加 CREATE_NO_WINDOW 的话,
+/// Windows: 非交互 shell 不应弹控制台 — 不加 CREATE_NO_WINDOW 的话,
 /// Win11 默认终端 (Windows Terminal) 会为每个 spawn 开一个可见窗, 长会话下
 /// 被控桌面窗堆积成灾 (2026-10-07 真机实证)。可与 process_group 旗标共存。
 #[cfg(windows)]
@@ -881,67 +891,69 @@ fn suppress_shell_window(command: &mut Command) {
 #[cfg(not(windows))]
 fn suppress_shell_window(_command: &mut Command) {}
 
-/// Windows: 让 powershell/cmd 的输出走 UTF-8 — 控制台默认代码页 (简中 936/GBK)
-/// 下的中文经 from_utf8_lossy 全变乱码 (2026-10-07 真机实证, 回执里中文全不可读)。
-/// powershell 用 [Console]::OutputEncoding 重定向写端编码; cmd 用 chcp 65001。
-/// 仅 Windows 注入 (unix 侧本就是 UTF-8, 注入反而污染命令)。
-#[cfg(windows)]
-fn prepend_output_encoding_init(shell: &str, command_text: &str) -> String {
-    match shell_program_name(shell).as_deref() {
-        Some("powershell") | Some("powershell.exe") | Some("pwsh") | Some("pwsh.exe") => {
-            format!("[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; {command_text}")
-        }
-        Some("cmd") | Some("cmd.exe") => format!("chcp 65001 >nul & {command_text}"),
-        _ => command_text.to_string(),
-    }
-}
-
-#[cfg(not(windows))]
-fn prepend_output_encoding_init(_shell: &str, command_text: &str) -> String {
-    command_text.to_string()
-}
-
 /// 终止整棵进程树。
 ///
-/// unix: 负 pid 的进程组信号 (先 SIGTERM 后 SIGKILL)。
+/// Unix: 向独立进程组发送 SIGTERM 或 SIGKILL, 错误由调用方处理。
 /// 2026-08-28 CI 实测 (strace) 的坑: 外部 `/usr/bin/kill` 在 GNU coreutils 上会把
 /// `["-TERM", "-<pid>"]` 解析成 `kill(-2, SIGTERM)` —— 信号发往进程组 2 而非目标组,
-/// ESRCH 静默失败, 孤儿子孙继续持有 stdout 写端把收割拖死。所以走进程内 `libc::kill(2)`。
+/// 因此这里用进程内 `libc::kill(2)`, 并把信号发送错误返回给调用方。
 #[cfg(unix)]
-fn terminate_process_tree(child: &mut Child, child_id: u32, signal: TerminationSignal) {
+pub(crate) fn terminate_process_tree(
+    child: &mut Child,
+    child_id: u32,
+    signal: TerminationSignal,
+) -> io::Result<()> {
     let signum = match signal {
         TerminationSignal::Terminate => libc::SIGTERM,
         TerminationSignal::Kill => libc::SIGKILL,
     };
     // SAFETY: kill(2) 只投递信号, 不触碰本进程内存; 负 pid 即进程组信号。
-    unsafe {
-        libc::kill(-(child_id as libc::pid_t), signum);
+    if unsafe { libc::kill(-(child_id as libc::pid_t), signum) } == 0 {
+        return Ok(());
     }
-    // 兜底: 进程组已空时组信号会 ESRCH, 单进程 kill 确保组长必定终结
-    let _ = child.kill();
+    let err = io::Error::last_os_error();
+    // ESRCH 表示组已消失; 仅当组长也已自然退出时将其作为竞态收口。
+    if err.raw_os_error() == Some(libc::ESRCH) && child.try_wait()?.is_some() {
+        return Ok(());
+    }
+    Err(err)
 }
 
 /// Windows 没有 POSIX 式可投递信号的进程组, 用 `taskkill /T` 递归杀子树。
 ///
 /// 只 `child.kill()` 不够: `Start-Process` 起的孙进程不受父进程 kill 影响, 会
-/// 继续跑 —— 正是 2026-10-05 真机排查安装器时踩到的残留形态。
+/// 继续跑 —— 正是 2026-10-05 真机排查安装器时踩到的残留形态。没有 Job Object,
+/// 父 shell 自然退出后已脱离进程树的子进程不在后续取消的保证范围内。
 #[cfg(windows)]
-fn terminate_process_tree(child: &mut Child, child_id: u32, _signal: TerminationSignal) {
-    let kill_result = Command::new("taskkill")
+pub(crate) fn terminate_process_tree(
+    _child: &mut Child,
+    child_id: u32,
+    _signal: TerminationSignal,
+) -> io::Result<()> {
+    let mut command = Command::new("taskkill");
+    command
         .args(["/F", "/T", "/PID", &child_id.to_string()])
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
-    if !matches!(kill_result, Ok(exit) if exit.success()) {
-        log::warn!("taskkill /F /T /PID {child_id} 未成功: {kill_result:?}");
+        .stderr(Stdio::null());
+    suppress_shell_window(&mut command);
+    let status = command.status()?;
+    if !status.success() {
+        return Err(io::Error::other(format!(
+            "taskkill /F /T /PID {child_id} 失败: exit_code={:?}",
+            status.code()
+        )));
     }
-    let _ = child.kill();
+    Ok(())
 }
 
 /// 既非 unix 也非 windows 的平台没有进程树概念, 只能尽力杀组长。
 #[cfg(not(any(unix, windows)))]
-fn terminate_process_tree(child: &mut Child, _child_id: u32, _signal: TerminationSignal) {
-    let _ = child.kill();
+pub(crate) fn terminate_process_tree(
+    child: &mut Child,
+    _child_id: u32,
+    _signal: TerminationSignal,
+) -> io::Result<()> {
+    child.kill()
 }
 
 /// `@cmd` 超时的 E2 错误 envelope (走 `error_envelope`, 不手写 error_code / retry)。
@@ -988,7 +1000,7 @@ fn build_shell_cancelled_response_json(shell: &str, stderr: &[u8]) -> String {
     envelope.to_string()
 }
 
-/// `@cmd` 非零退出的响应体。
+/// `@cmd` 非零退出或 stderr 非空时的响应体。
 ///
 /// 形状对齐 `control_core::render_control_response_payload` 的失败对象
 /// (`exit_code` / `stdout` / `stderr` 原样保留, 老消费方不受影响), 只补
@@ -1001,7 +1013,7 @@ fn build_shell_failure_response_json(
 ) -> String {
     serde_json::json!({
         "ok": false,
-        "error_code": "shell_exit_nonzero",
+        "error_code": if exit_code == 0 { "shell_stderr" } else { "shell_exit_nonzero" },
         "exit_code": exit_code,
         "stdout": String::from_utf8_lossy(stdout),
         "stderr": String::from_utf8_lossy(stderr),
@@ -1026,11 +1038,14 @@ pub(crate) fn build_ping_response_json(shell: &str) -> String {
         "pong": true,
         "uptime_ms": duration_ms(crate::daemon::uptime()),
         "bind_state": crate::daemon::bind_state(),
+        "control": crate::control_diagnostics::snapshot(),
         "shell": shell,
     })
     .to_string()
 }
 
+/// 所有非交互 shell lane 共用初始化, 避免 @cmd 与 task/flow 的输出契约分叉.
+/// Windows 使用 UTF-8, 避免默认代码页下的中文被 from_utf8_lossy 解成乱码.
 pub(crate) fn build_shell_command(shell: &str, command_text: &str) -> Command {
     let mut command = Command::new(shell);
 
@@ -1047,11 +1062,19 @@ pub(crate) fn build_shell_command(shell: &str, command_text: &str) -> Command {
             command.args(["-c"]).arg(command_text);
         }
         Some("pwsh") | Some("pwsh.exe") | Some("powershell") | Some("powershell.exe") => {
+            // 在源头关闭 progress, 防止 CLIXML 混入 stderr; 真实错误流仍保留.
+            #[cfg(windows)]
+            let command_text =
+                format!("[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; {command_text}");
             command
                 .args(["-NoLogo", "-NoProfile", "-NonInteractive", "-Command"])
-                .arg(command_text);
+                .arg(format!(
+                    "$ProgressPreference='SilentlyContinue'; {command_text}"
+                ));
         }
         Some("cmd") | Some("cmd.exe") => {
+            #[cfg(windows)]
+            let command_text = format!("chcp 65001 >nul & {command_text}");
             command.args(["/Q", "/D", "/C"]).arg(command_text);
         }
         _ => {
@@ -1059,6 +1082,7 @@ pub(crate) fn build_shell_command(shell: &str, command_text: &str) -> Command {
         }
     }
 
+    suppress_shell_window(&mut command);
     command
 }
 
@@ -2151,6 +2175,8 @@ mod shell_lane_tests {
         let json = build_ping_response_json("/usr/bin/powershell.exe");
         let value: serde_json::Value = serde_json::from_str(&json).expect("ping 响应应是合法 JSON");
         assert_eq!(value["pong"], true);
+        assert!(value["control"]["active_requests"].is_u64());
+        assert!(value["control"]["queued_requests"].is_u64());
         assert_eq!(value["shell"], "/usr/bin/powershell.exe");
         assert!(
             value["uptime_ms"].is_u64(),
@@ -2352,7 +2378,7 @@ pub(crate) fn execute_run(req: &RunRequest) -> io::Result<ActionExecutionResult>
         }
         if Instant::now() >= deadline {
             let pid = child.id();
-            let _ = reap_after_terminate(&mut child, pid);
+            reap_after_terminate(&mut child, pid)?;
             let duration = started_at.elapsed();
             return Ok(ActionExecutionResult {
                 exit_code: SHELL_TIMEOUT_EXIT_CODE,

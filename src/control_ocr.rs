@@ -564,7 +564,9 @@ mod tests {
         // 该测试锁定: 关 feature 后 include_ocr 必须显式失败而非静默缺层。
         #[cfg(not(feature = "ocr-oar"))]
         {
-            let err = recognize_regions(&image::RgbaImage::new(4, 4)).unwrap_err();
+            let err = recognize_regions(&image::RgbaImage::new(4, 4))
+                .err()
+                .expect("feature-off 必须返回引擎不可用错误");
             assert_eq!(err.reason_code(), "OCR_ENGINE_UNAVAILABLE");
         }
     }
