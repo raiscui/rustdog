@@ -80,3 +80,22 @@ Native runbb1f881f-6ccf-4064-8cbc-b0b2ece11a56: 39 passed / 1 failed. 已通过:
 ## [2026-10-23 23:27:17] [Session ID: 01a168b3-33af-7c53-9c6b-0fb808d7e9dc] 最终守卫及issue回执
 
 载体断言、记账、git diff --check最终均通过. 证据manifest断言确认Native40/40、Windows12/12、远端清理、共享daemon保护jd和161源码指纹一致. OCR延期issue已成功创建并回读确认: https://github.com/raiscui/rustdog/issues/127 (OPEN); 已确认origin与PUBLIC仓库raiscui/rustdog一致,发布正文不含内部主机/路径或凭据. 不因开票标为修复.
+
+## 正式安装与部署
+
+- 提交: 254a275e3c6d535b201801552761edbb7f7413cc
+- 用户授权本机/Windows正式daemon更新及最后清理target. 本机旧二进制、配置和签名备份: /var/folders/58/3f9_69ts3bx4slnb8tgl572m0000gn/T/rdog-deploy-254a275.
+- 本机原安装脚本未指定--locked, 开始解析新依赖. 已仅终止该安装cargo PID70648(exit143), 未完成安装; 改为cargo +1.95.0 install --path . --locked --force --jobs 1. Cargo.lock未变更.
+- Windows旧daemon无后代、无Established连接, 5555仅Listen. @task-list旧版本不支持, 返回无效指令(code64), 未据此声称任务表为空; 改以进程树/连接/日志检查排空. 切换前再次检查.
+- Windows默认功能构建确认静态onnxruntime仍需DirectML.dll. 正式目录原本没有该文件, 已按无覆盖复制安装; SHA256 9c9e6d822561c6c41b90e6994b3e8857cf1d66dbfb1e0c4c799c7c89b4e92da1, 同时保留target外副本. 旧daemon未停.
+- Windows部署脚本审阅与实机只读预检修正空集合、SID/默认LeastPrivilege和枚举ToString. PS5.1对无BOM UTF8中文注释按ANSI解码会吞换行, AST直接证实if成为注释; 加UTF8 BOM后同脚本预检Healthy(PID9996, Session1). 未修改原计划任务.
+
+## [2026-10-24 00:44:01] [Session ID: 01a168b3-33af-7c53-9c6b-0fb808d7e9dc] 正式更新与空间清理验收
+
+- 本机: cargo +1.95.0 install --path . --locked --force --jobs 1 exit0, 默认功能release, 51m43s. codesign完整性与稳定DR `designated => identifier rdog`均通过. SHA256 199f322e0d7be1260a7fc9230b95d710defd81728bf4a17f9ea31e194d79716c. 唯一告警为既有AppliedPointSpace::Physical未构造. 保留原用户配置, 原本无daemon, 以安装路径启动mac.lab/PID79189, unixpipe+UDP7447实际ready. 未新增登录自启动设置.
+- Windows: cargo +1.95.0 xwin build --release --locked --target x86_64-pc-windows-msvc --target-dir target/windows-dist --jobs 1 exit0, 默认OCR功能, 48m31s. PE 43,374,080B, SHA256 5e60d08199635ecf414f377a4202eec6f450be1c15e3a8460c124a3d340464b4. 45条unused/dead-code告警逐项检查, 属既有平台代码, 不扩展自动cargo fix. 静态onnxruntime依赖DirectML.dll已随包部署, PE import检查与真机--version loader通过.
+- Windows精确替换: 旧PID9996已确认无子树/Established连接后停止, 原exe/config/任务XML备份并校验, 同目录File.Replace后由原RdogDaemon任务启动. 新PID63640/Session1/5555, 新SSH连接仍存活; 配置哈希与任务XML前后相同. 备份 C:/Users/vdcoo/yino-test/deploy-backups/254a275-20261023T163918Z. 未停止其他应用或修改任务动作/主体/触发器.
+- 正式冒烟: 两端@ping带control字段且busy=false/active=0/queued=0; Windows @cmd GetConsoleWindow=0. 正式@spawn t-b8533cfe创建子进程67036, cancel返回canceled且新SSH确认子进程消失, daemon仍监听. Native capabilities报告available不替代实际GUI/TCC操作验收.
+- target清理: lsof +D无打开文件, 无cargo/rustc进程, 安装/回退二进制和运行库均已移出target. cargo clean --target-dir精确本仓库路径成功, Removed21316files/9.9GiB. du清理前10454208KiB, 清理后target不存在; 当前可用约24.87GiB(其他任务同时活动, 不用系统空间差值代替回收量). 清理后两端fresh ping再次通过.
+- 证据及回退材料: /var/folders/58/3f9_69ts3bx4slnb8tgl572m0000gn/T/rdog-deploy-254a275, mode0700, 包含deployment.json、两端完整构建日志、签名/依赖、原二进制和正式候选、Windows备份manifest及冒烟日志. 之前Native40/40及Windows12/12原日志仍保留在rdog-control-verify-gf1jl80g, 未随target清除. 源码提交254a275, 尚未推送.
+- 限制: 未重跑全仓测试/真实GUI与PTY/完整OCR推理. 本机签名首次改为稳定DR, 系统权限如需授权仍须用户在系统设置完成; 本轮没有重置或自动更改TCC. Windows父shell退出后已脱离的后代仍不在取消保证内.

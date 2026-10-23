@@ -64,3 +64,12 @@ nextest run 2cb5af31-a25d-4fcb-aa2f-e203e3947bf6: 35 passed, 0 failed, 1037 未�
 - [ ] 11. 保存回退材料和验收记录, 核查target占用并清理, 记录回收空间.
 
 当前本机未发现rdog进程/launchd条目, 需继续核实默认注册状态. 旧installed binary的DR仍钉cdhash, 使用稳定签名首次切换可能需要重新授予TCC, 不能声称旧授权必定保留. target约6.1G, 当前卷剩余14GiB, 清理按用户要求置于更新验收之后.
+
+## [2026-10-24 00:44:01] [Session ID: 01a168b3-33af-7c53-9c6b-0fb808d7e9dc] 正式更新与空间清理验收
+
+- [x] 8. 已提交已验收源码254a275, 子模块空/归属和敏感检查通过.
+- [x] 9. 本机默认功能cargo install、稳定签名与正式mac.lab启动/健康通过.
+- [x] 10. Windows默认功能release、DirectML、精确切换/备份与正式隐窗/子树取消通过.
+- [x] 11. 回退与验收材料保存在target外, lsof/进程检查后cargo clean回收9.9GiB, 清理后两端健康通过.
+
+本次新增授权交付已完成. 不推送、不新增自动登录启动配置、不把完整OCR/GUI矩阵或历史延期票扩展为本轮前置. 剩余限制见WORKLOG/LATER_PLANS. 追加账本后运行载体与提交记账守卫并提交账本, 不再执行会重新生成target的构建.

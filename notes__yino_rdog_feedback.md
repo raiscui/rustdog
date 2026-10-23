@@ -87,3 +87,7 @@
 - `archive/branch_contexts/cat_native_size_fix/task_plan__cat_native_size_fix.md:648`: Windows已登记IP22恢复可达,SSHhostname实际RAIS-RAZER/成功. freshPS只读显示没有Yino进程/9347与5555无listener,不再沿用旧PID10432. 初次PS输出CP936使Python UTF8解码失败,已改显式UTF8stdout/兼容stderr采集后exit0,未忽略该error也无写入. 接下来核交互session及自有启动脚本/已知包profile,不操作用户日常应用或原AAA. 03仍未通过/04未开始.
 - `archive/branch_contexts/cat_native_size_fix/ERRORFIX__cat_native_size_fix.md:123`: SSH PowerShell stdout按UTF8 strict解码遇CP936字符18000处UnicodeDecodeError,未写文件;root随后错误启动依赖读取触ENOENT,两exit1均不算保存通过. 改远端ReadAllText后的UTF8字节Base64纯ASCII运输,本地base64解码UTF8后JSON.parse,不errors=replace损坏文档. 重取物理project成功,后续whole deep compare再决定通过.
 - `archive/branch_contexts/cdp_download_probe/task_plan__cdp_download_probe.md:11`: SSH ConnectTimeout=8 退出255. 直接socket探测22/5555/9222/9230均3s超时. HTTP首次探测含代理502, 不作目标应用证据, 已用直接socket独立核对. 当前未获取version/targets/main身份, 未挂观察器, 未触发下载. 历史WORKLOG__win_native_closeout记单Windows管理者, 不能据此直接接管. 已向用户询问地址是否变化. 待地址/可达性和现控制权确认后续跑, 未完成项保持未勾选.
+
+## [2026-10-24 00:44:01] [Session ID: 01a168b3-33af-7c53-9c6b-0fb808d7e9dc] 正式更新与空间清理验收
+
+正式源码与安装产物来源: 254a275e3c6d535b201801552761edbb7f7413cc, 构建期间源码未改, 仅追加账本. 部署证据目录: /var/folders/58/3f9_69ts3bx4slnb8tgl572m0000gn/T/rdog-deploy-254a275. Windows新exe需要DirectML.dll, 已通过llvm-readobj导入表和真机loader双侧核实. 备份在target外; 原配置与任务XML未变. 本机沿原用户Zenoh配置启动, 未引入launchd条目.
