@@ -293,3 +293,11 @@ cmd.exe 在 verbatim cwd 下的告警原文 (中文 Windows 版), 并用普通 c
   strict `exit=1` (报 9 条) / report-only `exit=0` (同样报 9 条 + 9 条注解)。
 - 约定正文 (`docs/agents/knowledge-carriers.md`) 与 AGENTS.md 同步写清两种模式的分工。
 - 提交: a39be21
+
+## 2026-10-24 yino反馈优化及正式daemon更新
+
+队列诊断、Windows默认隐窗与后台任务树取消已完成并通过Native40/40、Windows12/12定向验证. 源码提交:
+- 提交: 254a275e3c6d535b201801552761edbb7f7413cc
+
+用户授权下已cargo install默认功能+稳定签名并启动mac.lab, Windows默认功能release+DirectML经原任务切换到PID63640/Session1/5555. 正式隐窗和子树取消通过, 配置/任务未变. target无占用后cargo clean回收9.9GiB, 清理后双端fresh ping通过. 详细验收与回退材料索引见WORKLOG__yino_rdog_feedback.md, 全仓/完整OCR/GUI/PTY等边界保留. 部署账本提交:
+- 提交: a80d0bebedf6675816bf23f3cd7465f082124aaf
