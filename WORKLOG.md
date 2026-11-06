@@ -1,5 +1,10 @@
 # WORKLOG: rustdog
 
+## [2026-11-06] Persistent coding sessions
+
+- Added authenticated coding sessions, their RPC dependency, and protocol documentation.
+- 提交: 295b942
+
 > 本文件由前档 `archive/default_history/WORKLOG_2026-09-02_ocr_content_layer_rollover.md` (1125 行) 续档而来。前档含 Wayfinder #95 全程、
 > OCR 引擎横评、live e2e 调试链、#102/#103 票据记录。续档原因: 超 1000 行。
 > 交接文档: /tmp/rdog-ocr-handoff-2026-09-02.md
