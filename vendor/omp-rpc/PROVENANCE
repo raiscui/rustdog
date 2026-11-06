@@ -1,0 +1,6 @@
+Source: https://github.com/can1357/oh-my-pi
+Commit: 3fedf8d53267e32a6d7521ce725fdcc4a36fdc67
+Path: sdk/rust/omp-rpc
+Version: 0.1.0
+License: MIT, see LICENSE copied from repository root.
+Local changes: src/client.rs is the phase-one tested transport source with bounded event queue, correlated calls and close-aware backpressure, including its formatting changes. Additional changes add Client::disconnect, cfg(unix) on KILL_SETTLE_TIMEOUT, opt-in reader-ordered response barriers, and CorrelatedOutcome retaining allocated request IDs on errors. src/lib.rs re-exports CorrelatedOutcome. tests/transport.rs covers capacity, barrier behavior, and correlation after an acknowledgement timeout. README.md documents the local correlation API. Other SDK sources are from the pinned upstream commit.

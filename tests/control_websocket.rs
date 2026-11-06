@@ -258,7 +258,13 @@ fn control_cli_should_drive_websocket_daemon_end_to_end() {
     control_reader
         .read_line(&mut line)
         .expect("should read line-control pong");
-    assert_eq!(line.trim_end_matches(['\r', '\n']), "@response \"pong\"");
+    let response: serde_json::Value = serde_json::from_str(
+        line.trim_end_matches(['\r', '\n'])
+            .strip_prefix("@response ")
+            .expect("ping should return a protocol response"),
+    )
+    .expect("ping response should be JSON");
+    assert_eq!(response["pong"], true, "ping should report liveness");
 
     line.clear();
     writeln!(

@@ -3207,6 +3207,7 @@ enabled = true
 
 #[test]
 fn tls_enabled_daemon_should_serve_ca_client_and_reject_wrong_ca() {
+    ensure_test_home_credentials();
     // 前置: 隔离 HOME 内的 TLS 材料 (幂等; 测试目录自持)
     let user_dir = dirs_home_rdkg();
     assert!(
@@ -3268,8 +3269,19 @@ fn tls_enabled_daemon_should_serve_ca_client_and_reject_wrong_ca() {
         Duration::from_secs(20),
     );
     assert!(
-        status.success() && stdout.contains(r#""value":"pong""#),
+        status.success(),
         "CA client 应经 tls 连通\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    let response = stdout
+        .lines()
+        .find_map(|line| line.strip_prefix("@response "))
+        .expect("TLS ping should return a protocol response");
+    let response: serde_json::Value =
+        serde_json::from_str(response).expect("TLS ping response should be JSON");
+    assert_eq!(response["id"], 901, "TLS ping should retain the request id");
+    assert_eq!(
+        response["value"]["pong"], true,
+        "TLS ping should report liveness"
     );
 
     // 场景 2: 错 CA (HOME 指向独立材料目录) — TLS 握手层拒绝 (BadSignature)
@@ -3285,34 +3297,180 @@ fn tls_enabled_daemon_should_serve_ca_client_and_reject_wrong_ca() {
             .success(),
         "fake HOME 的独立 CA 应生成"
     );
-    let wrong = Command::new(rdog_binary_path())
-        .env("HOME", &fake_home)
-        .args([
-            "control",
-            "--transport",
-            "zenoh",
-            "--target-name",
-            &daemon_name,
-            "--entry-point",
-            &entrypoint,
-            "--namespace",
-            "lab",
-            "@ping#902",
-        ])
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .expect("wrong-CA control should run");
+    fs::copy(
+        test_isolated_home().join(".rdog/auth.toml"),
+        fake_home.join(".rdog/auth.toml"),
+    )
+    .expect("both clients should use the same test credentials");
+    let run_fake_client = || {
+        let child = Command::new(rdog_binary_path())
+            .env("HOME", &fake_home)
+            .args([
+                "control",
+                "--transport",
+                "zenoh",
+                "--target-name",
+                &daemon_name,
+                "--entry-point",
+                &entrypoint,
+                "--namespace",
+                "lab",
+                "@ping#902",
+            ])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("fake-home control should start");
+        wait_with_output_timeout(child, Duration::from_secs(30), "fake-home TLS client")
+    };
+    let wrong = run_fake_client();
     let wrong_stdout = String::from_utf8_lossy(&wrong.stdout);
+    let wrong_stderr = String::from_utf8_lossy(&wrong.stderr);
     assert!(
-        !wrong_stdout.contains("pong"),
-        "错 CA 不应收到 pong\nstdout:\n{wrong_stdout}"
+        !wrong.status.success() && !wrong_stdout.contains(r#""pong":true"#),
+        "错 CA 不应连通\nstdout:\n{wrong_stdout}\nstderr:\n{wrong_stderr}"
+    );
+
+    fs::copy(
+        test_isolated_home().join(".rdog/tls/ca.pem"),
+        fake_home.join(".rdog/tls/ca.pem"),
+    )
+    .expect("correct CA should replace the wrong CA");
+    let corrected = run_fake_client();
+    let corrected_stdout = String::from_utf8_lossy(&corrected.stdout);
+    let corrected_stderr = String::from_utf8_lossy(&corrected.stderr);
+    assert!(
+        corrected.status.success() && corrected_stdout.contains(r#""pong":true"#),
+        "相同客户端换成正确 CA 后应连通\nstdout:\n{corrected_stdout}\nstderr:\n{corrected_stderr}"
     );
 
     stop_child(&mut daemon);
     let _ = std::fs::remove_file(&config_path);
     let _ = std::fs::remove_dir_all(&fake_home);
+}
+
+#[test]
+fn mtls_daemon_should_require_client_certificate_and_accept_configured_client() {
+    ensure_test_home_credentials();
+    let home = test_isolated_home();
+    assert!(
+        Command::new(rdog_binary_path())
+            .env("HOME", &home)
+            .args(["auth", "tls-init"])
+            .status()
+            .expect("tls-init should run")
+            .success(),
+        "隔离 HOME 的证书应生成"
+    );
+
+    let workdir = PathBuf::from(format!(
+        "/tmp/rdog-mtls-{}-{}",
+        std::process::id(),
+        next_port()
+    ));
+    fs::create_dir_all(&workdir).expect("mTLS workdir should create");
+    let daemon_tmp = workdir.join("daemon-tmp");
+    let client_tmp = workdir.join("client-tmp");
+    let ca_only_home = workdir.join("ca-only");
+    fs::create_dir_all(&daemon_tmp).expect("daemon tmp should create");
+    fs::create_dir_all(&client_tmp).expect("client tmp should create");
+    fs::create_dir_all(ca_only_home.join(".rdog/tls")).expect("CA-only home should create");
+    fs::copy(
+        home.join(".rdog/auth.toml"),
+        ca_only_home.join(".rdog/auth.toml"),
+    )
+    .expect("CA-only client should use the same credentials");
+    fs::copy(
+        home.join(".rdog/tls/ca.pem"),
+        ca_only_home.join(".rdog/tls/ca.pem"),
+    )
+    .expect("CA-only client should trust the server");
+
+    let daemon_name = unique_name("mtls-e2e");
+    let port = next_port();
+    let config_path = write_temp_zenoh_tls_config(&daemon_name, port);
+    fs::OpenOptions::new()
+        .append(true)
+        .open(&config_path)
+        .expect("TLS config should open")
+        .write_all(b"enable_mtls = true\n")
+        .expect("mTLS setting should write");
+    let entrypoint = format!("tls/127.0.0.1:{port}");
+    let mut daemon = Command::new(rdog_binary_path())
+        .env("HOME", &home)
+        .env("TMPDIR", &daemon_tmp)
+        .args(["daemon", "-c", config_path.to_str().expect("config path")])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("mTLS daemon should start");
+    let buffer = Arc::new(Mutex::new(String::new()));
+    let _ = spawn_output_collector_to(
+        daemon.stdout.take().expect("daemon stdout"),
+        Arc::clone(&buffer),
+    );
+    let _ = spawn_output_collector_to(
+        daemon.stderr.take().expect("daemon stderr"),
+        Arc::clone(&buffer),
+    );
+    let ready = wait_until_output_contains(
+        &mut daemon,
+        &buffer,
+        "zenoh router daemon ready",
+        Duration::from_secs(8),
+    );
+    let run_client = |client_home: &std::path::Path| {
+        let child = Command::new(rdog_binary_path())
+            .env("HOME", client_home)
+            .env("TMPDIR", &client_tmp)
+            .args([
+                "control",
+                "--transport",
+                "zenoh",
+                "--target-name",
+                &daemon_name,
+                "--entry-point",
+                &entrypoint,
+                "--namespace",
+                "lab",
+                "@ping",
+            ])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("mTLS client should start");
+        wait_with_output_timeout_or_kill(child, Duration::from_secs(30))
+    };
+    let (accepted, rejected) = if ready.is_ok() {
+        (Some(run_client(&home)), Some(run_client(&ca_only_home)))
+    } else {
+        (None, None)
+    };
+    stop_child(&mut daemon);
+    fs::remove_file(&config_path).expect("mTLS config should be removed");
+    fs::remove_dir_all(&workdir).expect("mTLS workdir should be removed");
+
+    ready.expect("mTLS daemon should become ready");
+    let accepted = accepted
+        .expect("client should run")
+        .expect("client should finish");
+    assert!(
+        accepted.status.success()
+            && String::from_utf8_lossy(&accepted.stdout).contains(r#""pong":true"#),
+        "持有客户端证书时应连接成功: {}",
+        String::from_utf8_lossy(&accepted.stderr)
+    );
+    let rejected = rejected
+        .expect("CA-only client should run")
+        .expect("client should finish");
+    assert!(
+        !rejected.status.success()
+            && !String::from_utf8_lossy(&rejected.stdout).contains(r#""pong":true"#),
+        "仅持有 CA 证书时不应连接到 mTLS 服务"
+    );
 }
 
 /// 测试辅助: home 目录 (仅用于 tls-init 前置的存在性说明)。

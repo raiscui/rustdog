@@ -20,6 +20,7 @@ mod ax_diff;
 mod ax_input;
 mod ax_query;
 mod cancellation;
+mod coding;
 mod config;
 mod control_actions;
 mod control_ax;
@@ -214,6 +215,13 @@ fn tracing_level_filter(level: log::LevelFilter) -> TracingLevelFilter {
 
 fn run(opts: input::Opts) -> Result<(), String> {
     match opts.command {
+        Command::Coding { options } => coding::cli::run(options)?,
+        Command::CodingHost {
+            session_dir,
+            instance_id,
+        } => {
+            coding::host::run(session_dir, instance_id).map_err(|err| err.to_string())?;
+        }
         Command::Record {
             subcommand,
             url,

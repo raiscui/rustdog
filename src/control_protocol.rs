@@ -66,6 +66,7 @@ pub enum ControlParseResult {
 #[derive(Debug, Clone, PartialEq)]
 pub enum ControlCommand {
     Ping,
+    Coding(crate::coding::model::CodingRequest),
     Key(KeyRequest),
     Paste(PasteRequest),
     Script(String),
@@ -602,6 +603,20 @@ pub fn parse_control_line(line: &str) -> io::Result<ControlParseResult> {
     let raw_payload = payload;
     let payload = raw_payload.trim();
     let control = match kind.trim().to_ascii_lowercase().as_str() {
+        "coding" => {
+            if payload.len() > 256 * 1024 {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "coding request exceeds wire limit",
+                ));
+            }
+            let request: crate::coding::model::CodingRequest = serde_json::from_str(payload)
+                .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
+            request
+                .validate()
+                .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
+            ControlCommand::Coding(request)
+        }
         "key" => ControlCommand::Key(parse_key_payload(payload)?),
         "paste" => {
             let payload = parse_quoted_payload(payload)?;

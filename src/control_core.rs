@@ -5,7 +5,7 @@ use crate::control_recording::session::ConnectionId;
 use crate::{
     control_actions::{build_ping_response_json, build_shell_command, ControlActionExecutor},
     control_bootstrap::build_bootstrap_outcome,
-    control_capabilities::current_capabilities_report_json,
+    control_capabilities::capabilities_for_coding,
     control_flow::execute_flow_request,
     control_frames::ControlExecutionOutcome,
     control_observation::{
@@ -33,6 +33,28 @@ pub fn execute_explicit_control_request<E: ControlActionExecutor>(
     let _execution = (!matches!(request.command, ControlCommand::Ping))
         .then(crate::control_diagnostics::executing);
     match &request.command {
+        ControlCommand::Coding(coding_request) => {
+            let reply = match executor.coding_service() {
+                Some(service) => service.execute(coding_request.clone()),
+                None => crate::coding::model::CodingReply::failure(
+                    crate::coding::model::CodingError::new(
+                        crate::coding::model::ErrorCode::AuthenticationRequired,
+                        "coding requires an authenticated router".to_owned(),
+                    ),
+                ),
+            };
+            match serde_json::to_string(&reply) {
+                Ok(json) => ControlExecutionOutcome::from_response_line(
+                    render_structured_success_response(request.request_id, &json),
+                ),
+                Err(err) => ControlExecutionOutcome::from_response_line(
+                    render_control_action_error_response(
+                        request.request_id,
+                        &io::Error::other(err),
+                    ),
+                ),
+            }
+        }
         // @ping 即答, 不进 cancel registry (它没有任何可中止的在途动作)。
         // 响应体复用 executor 分支的同一个构造函数, 保证两条路径的
         // ping 形状永远一致 —— 响应体是 `build_ping_response_json` 的
@@ -263,14 +285,18 @@ pub fn execute_explicit_control_request<E: ControlActionExecutor>(
         ControlCommand::FileRead(payload) => file_transfer_outcome(request.request_id, || {
             crate::control_file_transfer::execute_file_read(&payload)
         }),
-        ControlCommand::Capabilities => match current_capabilities_report_json() {
-            Ok(report_json) => ControlExecutionOutcome::from_response_line(
-                render_structured_success_response(request.request_id, &report_json),
-            ),
-            Err(err) => ControlExecutionOutcome::from_response_line(
-                render_control_action_error_response(request.request_id, &err),
-            ),
-        },
+        ControlCommand::Capabilities => {
+            match capabilities_for_coding(executor.coding_service().is_some())
+                .map(|value| value.to_string())
+            {
+                Ok(report_json) => ControlExecutionOutcome::from_response_line(
+                    render_structured_success_response(request.request_id, &report_json),
+                ),
+                Err(err) => ControlExecutionOutcome::from_response_line(
+                    render_control_action_error_response(request.request_id, &err),
+                ),
+            }
+        }
         ControlCommand::Observe(observe_request) => {
             match build_observe_outcome(request.request_id, observe_request) {
                 Ok(outcome) => outcome,
@@ -280,7 +306,11 @@ pub fn execute_explicit_control_request<E: ControlActionExecutor>(
             }
         }
         ControlCommand::Bootstrap(bootstrap_request) => {
-            match build_bootstrap_outcome(request.request_id, bootstrap_request) {
+            match build_bootstrap_outcome(
+                request.request_id,
+                bootstrap_request,
+                executor.coding_service().is_some(),
+            ) {
                 Ok(outcome) => outcome,
                 Err(err) => ControlExecutionOutcome::from_response_line(
                     render_control_action_error_response(request.request_id, &err),
@@ -698,6 +728,74 @@ mod tests {
         sync::{Arc, Mutex},
         time::{SystemTime, UNIX_EPOCH},
     };
+
+    #[test]
+    fn coding_requires_executor_capability() {
+        let registry = crate::cancellation::CancelRegistry::new();
+        let response = parse_and_execute_control_line(
+            r#"@coding:{"op":"session.list"}"#,
+            "/bin/sh",
+            &SystemControlActionExecutor::default(),
+            &registry,
+        )
+        .into_single_response_line();
+        let value: Value =
+            serde_json::from_str(response.strip_prefix("@response ").unwrap()).unwrap();
+        assert_eq!(value["schema"], "rdog.coding.v1");
+        assert_eq!(value["ok"], false);
+        assert_eq!(value["error"]["code"], "authentication_required");
+    }
+
+    #[test]
+    fn coding_parser_rejects_unknown_fields_and_invalid_ids() {
+        assert!(parse_control_line(r#"@coding:{"op":"session.list","trusted":true}"#).is_err());
+        assert!(
+            parse_control_line(r#"@coding:{"op":"session.status","session_id":"../x"}"#).is_err()
+        );
+    }
+
+    #[test]
+    fn nested_flow_cannot_gain_coding_capability() {
+        let registry = crate::cancellation::CancelRegistry::new();
+        let flow = serde_json::json!({
+            "schema": "rdog.flow.v1",
+            "steps": [
+                {"ControlLine": "@coding:{\"op\":\"session.list\"}"},
+                {"Expect": {"kind": "response_contains", "contains": "authentication_required"}}
+            ]
+        });
+        let response = parse_and_execute_control_line(
+            &format!("@flow:{flow}"),
+            "/bin/sh",
+            &SystemControlActionExecutor::default(),
+            &registry,
+        )
+        .into_single_response_line();
+        let value: Value =
+            serde_json::from_str(response.strip_prefix("@response ").unwrap()).unwrap();
+        assert_eq!(value["value"]["status"], "ok");
+    }
+
+    #[test]
+    fn capabilities_and_bootstrap_do_not_advertise_coding_on_default_executor() {
+        let registry = crate::cancellation::CancelRegistry::new();
+        let executor = SystemControlActionExecutor::default();
+        for line in ["@capabilities", "@bootstrap"] {
+            let response = parse_and_execute_control_line(line, "/bin/sh", &executor, &registry)
+                .into_single_response_line();
+            let value: Value =
+                serde_json::from_str(response.strip_prefix("@response ").unwrap()).unwrap();
+            let capabilities = if line == "@bootstrap" {
+                &value["capabilities"]
+            } else {
+                &value
+            };
+            assert_eq!(
+                capabilities["capabilities"]["coding"]["status"],
+                "permission_denied"
+            );
+        }
+    }
 
     #[derive(Clone, Default)]
     struct FakeExecutor {

@@ -18,13 +18,13 @@ pub fn current_capabilities_report_value() -> io::Result<Value> {
     serde_json::to_value(report).map_err(|err| io::Error::other(err.to_string()))
 }
 
-/// 生成当前 daemon 可直接返回给 control peer 的能力报告 JSON。
-///
-/// JSON 字符串只是 line-control 兼容边界。内部组合方应该优先使用
-/// `current_capabilities_report_value`,避免后续再把字符串解析回结构化值。
-pub fn current_capabilities_report_json() -> io::Result<String> {
-    let value = current_capabilities_report_value()?;
-    serde_json::to_string(&value).map_err(|err| io::Error::other(err.to_string()))
+pub(crate) fn capabilities_for_coding(available: bool) -> io::Result<Value> {
+    let mut report = current_capabilities_report_value()?;
+    report["capabilities"]["coding"] = serde_json::json!({
+        "status": if available { "available" } else { "permission_denied" },
+        "backend": "authenticated_zenoh_router",
+    });
+    Ok(report)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]

@@ -781,15 +781,15 @@ AX control 成功时也不是 `0`,而是结构化 AX value。
 
 ```text
 @response "READY"
-@response "pong"
 ```
 
 适用场景:
 
-- `@ping`
 - `@script`
 - `@cmd`
 - 裸 shell 行
+
+`@ping` 返回结构化对象, 其中 `pong` 为 `true`. 其他字段见上方 `@ping` 语义.
 
 #### 成功但包含复杂 shell 结果
 
@@ -830,8 +830,9 @@ wire protocol 仍然是上面的 `@response ...`。
 ```text
 @response {"id":42,"value":"READY"}
 @response {"id":7,"value":0}
-@response {"id":1,"value":"pong"}
 ```
+
+对于 `@ping#1`, `value` 是包含 `pong: true` 的结构化对象, 不再是字符串.
 
 #### 错误
 

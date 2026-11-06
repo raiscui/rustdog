@@ -248,6 +248,12 @@ impl ControlActionExecutor for FakeExecutor {
                 format!("SELECTOR_REFIND:{}\n", request.selector_id).into_bytes()
             }
             ControlCommand::Record(_) => b"RECORD_CONTROL\n".to_vec(),
+            ControlCommand::Coding(_) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "coding requires its dedicated service",
+                ));
+            }
         };
 
         Ok(ActionExecutionResult {

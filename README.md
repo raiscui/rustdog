@@ -19,8 +19,17 @@ It still supports the original port listener and reverse shell workflows, but th
 - structured responses that are easy for a code agent to parse
 - background task primitives (`@spawn` / `@task-status` / `@task-output` / `@task-cancel`) so long commands never block a control session
 - companion agent messaging (per-agent inbox with at-least-once mailbox, capability cards, `rdog agent` hosting)
+- persistent OMP coding sessions through `rdog coding`, with independent Windows Hosts and authenticated Zenoh control
 - transport security: usrpwd session auth (default-on, zero-config on localhost) and optional TLS encryption (`rdog auth tls-init`)
 
+
+## Persistent coding sessions
+
+`rdog coding` submits work to a Windows-owned OMP Host and returns without holding the controller connection. Later calls query the same session, tasks, pending interactions, and cursor-paged output. Restarting the daemon does not restart an independent Host.
+
+The Host uses the pinned OMP Rust RPC SDK over local stdio. It does not embed Herdr or adopt an existing interactive OMP process. Host creation is disabled by default and requires an authenticated Zenoh router and a Windows launch context that permits an independent child.
+
+See [coding session setup, commands, and failure boundaries](specs/rdog-coding-sessions.md). Current contracts are defined by `src/coding/model.rs`, `store.rs`, `host.rs`, and `cli.rs`.
 
 ## Rename and compatibility
 

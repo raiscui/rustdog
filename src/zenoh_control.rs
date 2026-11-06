@@ -78,6 +78,7 @@ pub struct ZenohDaemonRuntimeConfig {
     pub startup_guard_window_ms: u64,
     pub key_input_events: KeyInputEventsConfig,
     pub observation: ObservationConfig,
+    pub coding: crate::coding::model::CodingConfig,
     /// `@key` 的送达后端 (2026-08-03 wayfinder #37)。
     pub key_delivery_backend: crate::config::KeyDeliveryBackend,
     /// 认证开关 (issue #81): 凭证生命周期挂接用。
@@ -89,6 +90,16 @@ pub struct ZenohDaemonRuntimeConfig {
 }
 
 pub fn run_router_daemon(config: ZenohDaemonRuntimeConfig, shell: &str) -> io::Result<()> {
+    config
+        .coding
+        .validate()
+        .map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err))?;
+    if config.coding.enabled && !config.auth.enabled {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "coding requires authentication",
+        ));
+    }
     let alive_key = build_alive_key(&config.namespace, &config.daemon_name);
     let control_key = build_control_key(&config.namespace, &config.daemon_name);
     let legacy_alive_key =
@@ -248,8 +259,13 @@ pub fn run_router_daemon(config: ZenohDaemonRuntimeConfig, shell: &str) -> io::R
         .as_ref()
         .map(|publisher| publisher.keyexpr.clone())
         .unwrap_or_else(|| "<disabled>".to_owned());
-    let executor =
+    let mut executor =
         build_router_control_executor(key_input_event_publisher, config.key_delivery_backend);
+    if config.coding.enabled {
+        let service = crate::coding::manager::CodingService::new(config.coding.clone())
+            .map_err(io::Error::other)?;
+        executor = executor.with_coding_service(Arc::new(service));
+    }
     let active_session_bridges = Arc::new(Mutex::new(HashSet::new()));
 
     let queryable = session
@@ -867,9 +883,7 @@ pub fn send_control_lines_collect_frames(
                 }
             },
             Err(err) => {
-                log::warn!(
-                    "zenoh control multi-line request failed at line index {idx} (line={line}): {err}"
-                );
+                log::warn!("zenoh control multi-line request failed at line index {idx}: {err}");
                 result = Err(err);
                 break;
             }

@@ -129,6 +129,9 @@ fn insert_tls_connect_material(config: &mut Config) -> io::Result<()> {
                 &json5_string(&client_key.display().to_string())?,
             )
             .map_err(to_io_error)?;
+        config
+            .insert_json5("transport/link/tls/enable_mtls", "true")
+            .map_err(to_io_error)?;
     }
     Ok(())
 }

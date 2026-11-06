@@ -74,6 +74,9 @@ pub trait ControlActionExecutor {
         shell: &str,
         cancel: Option<&CancellationToken>,
     ) -> io::Result<ActionExecutionResult>;
+    fn coding_service(&self) -> Option<&crate::coding::manager::CodingService> {
+        None
+    }
 }
 
 /// `@key` 成功执行后,可选地向外部系统发布一条键盘事件。
@@ -88,6 +91,7 @@ pub trait KeyInputEventSink: Send + Sync {
 pub struct SystemControlActionExecutor {
     key_input_event_sink: Option<Arc<dyn KeyInputEventSink>>,
     savefile_base_dir: Option<PathBuf>,
+    coding_service: Option<Arc<crate::coding::manager::CodingService>>,
     cancel_registry: Arc<crate::cancellation::CancelRegistry>,
     /// `@key` 的送达后端 (2026-08-03 wayfinder #37)。
     ///
@@ -101,6 +105,7 @@ impl Default for SystemControlActionExecutor {
         Self {
             key_input_event_sink: None,
             savefile_base_dir: None,
+            coding_service: None,
             cancel_registry: Arc::new(crate::cancellation::CancelRegistry::new()),
             key_delivery_backend: crate::config::KeyDeliveryBackend::default_for_platform(),
         }
@@ -108,11 +113,20 @@ impl Default for SystemControlActionExecutor {
 }
 
 impl SystemControlActionExecutor {
+    pub fn with_coding_service(
+        mut self,
+        service: Arc<crate::coding::manager::CodingService>,
+    ) -> Self {
+        self.coding_service = Some(service);
+        self
+    }
+
     /// 创建一个会在 `@key` 成功后同步发布键盘事件的执行器。
     pub fn with_key_input_event_sink(key_input_event_sink: Arc<dyn KeyInputEventSink>) -> Self {
         Self {
             key_input_event_sink: Some(key_input_event_sink),
             savefile_base_dir: None,
+            coding_service: None,
             cancel_registry: Arc::new(crate::cancellation::CancelRegistry::new()),
             key_delivery_backend: crate::config::KeyDeliveryBackend::default_for_platform(),
         }
@@ -126,6 +140,7 @@ impl SystemControlActionExecutor {
         Self {
             key_input_event_sink: None,
             savefile_base_dir: Some(savefile_base_dir),
+            coding_service: None,
             cancel_registry: Arc::new(crate::cancellation::CancelRegistry::new()),
             key_delivery_backend: crate::config::KeyDeliveryBackend::default_for_platform(),
         }
@@ -157,6 +172,7 @@ impl Clone for SystemControlActionExecutor {
             cancel_registry: self.cancel_registry.clone(),
             key_input_event_sink: self.key_input_event_sink.as_ref().map(Arc::clone),
             savefile_base_dir: self.savefile_base_dir.clone(),
+            coding_service: self.coding_service.clone(),
             key_delivery_backend: self.key_delivery_backend,
         }
     }
@@ -253,6 +269,10 @@ fn execute_ref_mutation(
 }
 
 impl ControlActionExecutor for SystemControlActionExecutor {
+    fn coding_service(&self) -> Option<&crate::coding::manager::CodingService> {
+        self.coding_service.as_deref()
+    }
+
     fn execute(
         &self,
         command: &ControlCommand,
@@ -281,6 +301,10 @@ impl ControlActionExecutor for SystemControlActionExecutor {
                 execute_script_cancellable(shell, script_text, cancel)
             }
             ControlCommand::Run(request) => execute_run(request),
+            ControlCommand::Coding(_) => Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "@coding requires control dispatch",
+            )),
             ControlCommand::Screenshot(_) => Err(io::Error::new(
                 io::ErrorKind::Unsupported,
                 "@screenshot 由 control_core 直接走 screenshot producer,不应进入默认 executor 分支",

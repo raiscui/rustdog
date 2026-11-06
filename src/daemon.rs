@@ -204,6 +204,7 @@ pub fn run_zenoh_router(
             startup_guard_window_ms: config.zenoh.startup_guard_window_ms,
             key_input_events: config.zenoh.key_input_events,
             observation: config.observation,
+            coding: config.coding,
             key_delivery_backend: config.key.delivery_backend,
             auth: config.auth,
             tls: config.tls,

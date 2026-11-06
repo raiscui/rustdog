@@ -44,6 +44,7 @@ pub struct DaemonConfig {
     pub tls: TlsConfig,
     pub cdp: CdpConfig,
     pub observation: ObservationConfig,
+    pub coding: crate::coding::model::CodingConfig,
     pub hidden: HiddenResidentConfig,
     pub outbound: OutboundConfig,
     pub inbound: InboundConfig,
@@ -537,6 +538,7 @@ fn write_example_configs(force: bool) -> io::Result<Vec<PathBuf>> {
 #[cfg_attr(not(any(test, windows)), allow(dead_code))]
 fn validate_daemon_config(config: &DaemonConfig) -> io::Result<()> {
     validate_key_config(&config.key)?;
+    validate_coding_config(config)?;
 
     if !config.outbound.enabled && !config.inbound.enabled && !config.zenoh.enabled {
         return Err(io::Error::new(
@@ -588,6 +590,7 @@ fn validate_key_config(config: &KeyConfig) -> io::Result<()> {
 
 /// 供 Zenoh router daemon CLI 路径复用的配置校验入口。
 pub fn validate_zenoh_daemon_profile(config: &DaemonConfig) -> io::Result<()> {
+    validate_coding_config(config)?;
     validate_zenoh_config(
         &config.zenoh,
         config.outbound.enabled || config.inbound.enabled,
@@ -600,6 +603,7 @@ pub fn validate_zenoh_daemon_profile(config: &DaemonConfig) -> io::Result<()> {
 /// 当最终 transport 解析为 TCP 时,不能因为 `[zenoh] enabled=true`
 /// 就绕过“至少一个 TCP endpoint 启用”的基本约束。
 pub fn validate_tcp_daemon_profile(config: &DaemonConfig) -> io::Result<()> {
+    validate_coding_config(config)?;
     if !config.outbound.enabled && !config.inbound.enabled {
         return Err(io::Error::new(
             ErrorKind::InvalidInput,
@@ -623,6 +627,20 @@ pub fn validate_tcp_daemon_profile(config: &DaemonConfig) -> io::Result<()> {
     )?;
     validate_observation_config(&config.observation)?;
 
+    Ok(())
+}
+
+fn validate_coding_config(config: &DaemonConfig) -> io::Result<()> {
+    config
+        .coding
+        .validate()
+        .map_err(|err| io::Error::new(ErrorKind::InvalidInput, err))?;
+    if config.coding.enabled && !config.auth.enabled {
+        return Err(io::Error::new(
+            ErrorKind::InvalidInput,
+            "coding requires authentication",
+        ));
+    }
     Ok(())
 }
 
@@ -901,6 +919,15 @@ fn validate_endpoint(
 mod tests {
     use super::*;
     use figment::Jail;
+
+    #[test]
+    fn coding_requires_authentication() {
+        let mut config = DaemonConfig::default();
+        assert!(!config.coding.enabled);
+        config.coding.enabled = true;
+        config.auth.enabled = false;
+        assert!(validate_coding_config(&config).is_err());
+    }
 
     fn to_figment_error(err: io::Error) -> figment::Error {
         figment::Error::from(err.to_string())

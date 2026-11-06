@@ -28,6 +28,19 @@ pub enum AuthCommand {
 
 #[derive(Subcommand, Debug)]
 pub enum Command {
+    Coding {
+        #[command(flatten)]
+        options: crate::coding::cli::CodingCli,
+    },
+
+    #[command(hide = true)]
+    CodingHost {
+        #[arg(long)]
+        session_dir: PathBuf,
+        #[arg(long)]
+        instance_id: String,
+    },
+
     /// 可视化反馈子进程 (由 daemon 自动 spawn 绘制识别框/点击标记, 不要手动调用)
     Overlay,
 
