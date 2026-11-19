@@ -836,8 +836,9 @@ mod tests {
         ).unwrap();
         let request = serde_json::json!({"schema":"rdog.flow.v1","bindings":{"p":"secret-canary"},"steps":[{"TextParameter":{"parameter":"p","pid":987654,"root_hwnd":2,"target":{"kind":"native_control","hwnd":3},"observation_id":header.observation_id,"window_ref":"@e1"}}]});
         let request = format!("@flow:{request}");
-        let response = parse_and_execute_control_line_with_owner(
-            &request, "/bin/sh", &SystemControlActionExecutor::default(), &registry, ConnectionId(1),
+        let owner = crate::control_recording::owner::RecordingOwner::new();
+        let response = parse_and_execute_control_line_with_recording_owner(
+            &request, "/bin/sh", &SystemControlActionExecutor::default(), &registry, &owner,
         ).into_single_response_line();
         let after = crate::control_resource_lane::capture_resource_epochs().snapshot("pid:987654");
         assert_eq!(after.epoch, snapshot.epoch + 2);
