@@ -19,8 +19,17 @@ It still supports the original port listener and reverse shell workflows, but th
 - structured responses that are easy for a code agent to parse
 - background task primitives (`@spawn` / `@task-status` / `@task-output` / `@task-cancel`) so long commands never block a control session
 - companion agent messaging (per-agent inbox with at-least-once mailbox, capability cards, `rdog agent` hosting)
+- persistent OMP coding sessions through `rdog coding`, with independent Windows Hosts and authenticated Zenoh control
 - transport security: usrpwd session auth (default-on, zero-config on localhost) and optional TLS encryption (`rdog auth tls-init`)
 
+
+## Persistent coding sessions
+
+`rdog coding` submits work to a Windows-owned OMP Host and returns without holding the controller connection. Later calls query the same session, tasks, pending interactions, and cursor-paged output. Restarting the daemon does not restart an independent Host.
+
+The Host uses the pinned official OMP Rust RPC SDK over local stdio. It does not embed Herdr or adopt an existing interactive OMP process. Host creation is disabled by default and requires an authenticated Zenoh router and a Windows launch context that permits an independent child.
+
+See [coding session setup, commands, and failure boundaries](specs/rdog-coding-sessions.md). Current contracts are defined by `src/coding/model.rs`, `store.rs`, `host.rs`, and `cli.rs`.
 
 ## Rename and compatibility
 
@@ -60,11 +69,55 @@ From AUR on Arch-based systems:
 yay -S rustdog
 ```
 
-Portable release binaries will be published under:
+### OSS 预编译下载
 
-```text
-https://github.com/raiscui/rustdog/releases
+Agent 下载入口: [channels/latest.json](https://rdog-releases-1230108486848793.oss-cn-beijing.aliyuncs.com/channels/latest.json).
+索引包含发布编号, 源码 commit, 平台包 URL, SHA-256 和验证范围. 下载不需要阿里云凭据.
+需要可重复部署时, 固定 `releases/<release-id>/manifest.json`, 不依赖会变化的 `latest.json`.
+
+首批发布基线为 `3.0.0-8123e219`, 二进制自身版本是 `3.0.0`.
+仅包含已提交的 `8123e219` 源码, 不含工作区尚未提交的 coding 集成.
+目前提供 macOS Apple Silicon 和 Windows x64 包; Linux 与 Intel Mac 尚未发布预编译包.
+
+macOS Apple Silicon 下载, 校验并解包:
+
+```bash
+mkdir rdog-3.0.0-8123e219 && cd rdog-3.0.0-8123e219
+base='https://rdog-releases-1230108486848793.oss-cn-beijing.aliyuncs.com/releases/3.0.0-8123e219'
+file='rdog-3.0.0-8123e219-aarch64-apple-darwin.tar.gz'
+curl --fail --location --proto '=https' "$base/$file" -o "$file" &&
+curl --fail --location --proto '=https' "$base/$file.sha256" -o "$file.sha256" &&
+shasum -a 256 -c "$file.sha256" &&
+tar -xzf "$file" &&
+./rdog --version
 ```
+
+Windows x64 在 PowerShell 中下载, 校验并解包:
+
+```powershell
+New-Item -ItemType Directory 'rdog-3.0.0-8123e219' -ErrorAction Stop | Out-Null
+Set-Location 'rdog-3.0.0-8123e219'
+$base = 'https://rdog-releases-1230108486848793.oss-cn-beijing.aliyuncs.com/releases/3.0.0-8123e219'
+$file = 'rdog-3.0.0-8123e219-x86_64-pc-windows-msvc.zip'
+Invoke-WebRequest "$base/$file" -OutFile $file
+Invoke-WebRequest "$base/$file.sha256" -OutFile "$file.sha256"
+$expected = ((Get-Content "$file.sha256" -Raw).Trim() -split '\s+')[0]
+if ((Get-FileHash $file -Algorithm SHA256).Hash.ToLowerInvariant() -ne $expected) {
+    throw 'SHA-256 校验失败'
+}
+Expand-Archive $file -DestinationPath '.'
+.\rdog.exe --version
+```
+
+Windows 包中的 `DirectML.dll` 必须与 `rdog.exe` 保持在同一目录.
+Windows 包在 macOS 交叉编译, 本轮不代表已在 Windows 真机执行.
+macOS 包为固定 `rdog` 身份的 adhoc 签名, 未做 Developer ID 公证.
+GUI/录屏权限仍需在目标 Mac 由用户授权, 不自动绕过系统安全检查.
+解包不会修改 PATH, 配置或自启动, 也不会替换正在运行的 daemon.
+已有部署的进程切换须另行核对归属并安排, 不应直接覆盖运行中的程序.
+每个版本目录同时提供 `SHA256SUMS`, `manifest.json` 和对应源码包.
+
+GitHub Release 页面仍保留在 <https://github.com/raiscui/rustdog/releases>.
 
 Cross-compiling for Windows from macOS/Linux must go through `cargo xwin`, not
 `cargo build --target x86_64-pc-windows-msvc` (the host `cc` fails to find MSVC
@@ -557,6 +610,26 @@ Useful specs:
 - [`specs/zenoh-peer-peer-lan-profile.md`](./specs/zenoh-peer-peer-lan-profile.md): historical peer/peer profile, kept for migration reference
 - [`specs/zenoh-sdk-integration-playbook.md`](./specs/zenoh-sdk-integration-playbook.md): direct Zenoh SDK integration guide
 - [`specs/zenoh-sdk-agent-prompts.md`](./specs/zenoh-sdk-agent-prompts.md): prompt templates for programming agents
+
+## Windows recording
+
+Windows Recorder 采用 recording-only JSONL, 不承诺自动回放. 当前候选实现尚未完成 Windows 真机验收, 验证范围和剩余条件见 [Windows 录制方案](./specs/rdog-windows-recording-plan.md).
+
+通过独占的持久连接开始录制, 不要把多个 one-shot 命令拼成同一个会话.
+
+```text
+rdog record --transport tcp --artifacts-dir ./artifacts 127.0.0.1 5555
+record> start --target <PID>:<根窗口HWND> --duration 5m
+record> status
+record> mark parameter_boundary
+record> stop
+```
+
+先从 fresh 窗口列表取得并授权 PID/HWND. 本机 TCP/WS 仅授予实际 loopback peer 录制 owner, 不提供本机多用户身份隔离. 跨机使用 `--transport zenoh --target-name ... --entry-point tls/...`; daemon 必须启用现有认证和 TLS, 只监听 TLS, 并关闭 unixpipe. 录制专用链路关闭自动发现和隐式链路, 不降级到明文连接.
+
+记录包含鼠标原生坐标, 窗口/显示上下文, 自动脱敏输入区间和只读 UIA 候选. 不读取剪贴板、UIA Name/Value 或逐键文本. unknown 区间不是已识别的普通文本或快捷键. `stop` 先冻结并排空, 写入 terminal 后封存; 客户端核对 id、文件帧、长度与 SHA-256 后才报告 `local_verified`. 原子提交不覆盖旧文件, 不支持硬链接的文件系统会明确失败.
+
+非交互 stdin 不输出 REPL prompt, 可供 agent 消费 JSON 状态. EOF/Ctrl-C 取消未封存录制. macOS/Linux 的 capture 明确返回 unavailable, 不再返回空录制成功.
 
 ## Security notes
 

@@ -781,15 +781,15 @@ AX control 成功时也不是 `0`,而是结构化 AX value。
 
 ```text
 @response "READY"
-@response "pong"
 ```
 
 适用场景:
 
-- `@ping`
 - `@script`
 - `@cmd`
 - 裸 shell 行
+
+`@ping` 返回结构化对象, 其中 `pong` 为 `true`. 其他字段见上方 `@ping` 语义.
 
 #### 成功但包含复杂 shell 结果
 
@@ -830,8 +830,9 @@ wire protocol 仍然是上面的 `@response ...`。
 ```text
 @response {"id":42,"value":"READY"}
 @response {"id":7,"value":0}
-@response {"id":1,"value":"pong"}
 ```
+
+对于 `@ping#1`, `value` 是包含 `pong: true` 的结构化对象, 不再是字符串.
 
 #### 错误
 
@@ -1034,6 +1035,29 @@ pwd
 ```
 
 ---
+
+## Recording v2
+
+当前 Windows Recorder 使用 `rdog.record-control.v2`, 产物是 `rdog.recording.v2` JSONL. 它不返回 Replay Script 或 Bundle. 使用同一持久连接, 不能用相同 request id 认领另一连接的录制.
+
+```text
+@record-start#101:{"profile":"semantic","duration_ms":1000,"targets":[{"pid":1234,"hwnd":5678}]}
+@record-status#102:{"recording_id":"<start 返回的 id>"}
+@record-mark#103:{"recording_id":"<start 返回的 id>","mark":"parameter_boundary"}
+@record-stop#104:{"recording_id":"<start 返回的 id>"}
+```
+
+`profile` 为 `semantic` 或 `physical`. start 必须给出明确根窗口的 PID/HWND. duration 与预算以 `src/control_recording/session.rs::RecordingPolicy` 为准, start response 返回实际会话 policy. mark 只接受 `checkpoint` 或 `parameter_boundary`, 不接收任意 label. cancel 与 stop 都必须携带 recording id. 未知字段明确拒绝, 不接受 evidence/raw text 等隐式扩展.
+
+owner 来自服务端可信 ingress. TCP/WS 仅实际 loopback peer 获授录制 owner, 非 loopback mutation 拒绝. 这是本机信任, 不是用户身份或浏览器 origin 认证. canonical Zenoh 必须经现有认证与 TLS-only 专用 bridge, 显式 endpoint 且无 unixpipe/隐式发现链路. generation/proof 在 bridge ingress 校验, 不属于 recording JSON. `owner_nonce` 不是可接受的 status 字段.
+
+无 owner 的 `@record-status:{}` 只给无内容摘要. owner 的 status 带正确 recording id 才续租. 服务端到时独立封存, 不依赖 status polling; 自动封存后由同 owner 发一次显式 stop 获取文件. 未交付结果占用有界 slot, 不会被新 start 静默替换.
+
+stop 成功先返回一个 SaveFile 帧, 再返回带相同 request id 的 `record-stop` metadata. metadata 含 recording id, 文件名, 字节数, SHA-256, `phase=recorded`, `delivery_status=sent_unconfirmed` 与 `replay_status=not_compiled`. 重复 stop 只返回 `record-stop-summary`, 不重复发文件. recorded 不是 delivered; 客户端核对完整 exchange 并原子无覆盖保存后才报告 `local_verified`.
+
+v2 Journal 由 `src/control_recording/journal.rs` 定义 envelope. 安全 payload 以 `src/control_recording/model.rs` 为准. pointer 为 physical, window/display 为 context, 输入区间为 redaction, UIA 候选/缺失为 semantic. writer 的 canonical `monotonic_ns` 与 source 的 `captured_monotonic_ns` 分开, 不假定它们具有相同 origin. 不保存 raw key/text, UIA Name/Value 或剪贴板.
+
+已知采集/队列/序列/写入/停止错误会阻止成功导出. cleanup 未确认结束时拒绝新 start. 私有暂存清理失败仅向 owner 返回明确残留信息; 已提交文件不因断线或 staging unlink 失败而被撤销. 实际实现和 Windows 真机验收边界见 `specs/rdog-windows-recording-plan.md`.
 
 ## 修改协议前必须先确认的事情
 

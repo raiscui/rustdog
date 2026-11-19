@@ -8,8 +8,8 @@ use std::{
 };
 use tracing_subscriber::{filter::LevelFilter as TracingLevelFilter, fmt::writer::BoxMakeWriter};
 
-use crate::control_recording::cli::{self as record_cli, RecordCommand};
-use crate::input::{Command, ConfigCommand, RecordCommandShared, RecordSubcommand, Transport};
+use crate::control_recording::cli as record_cli;
+use crate::input::{Command, ConfigCommand, RecordCommandShared, Transport};
 use crate::listener::{listen, Mode, Opts};
 
 mod agent_messaging;
@@ -20,6 +20,7 @@ mod ax_diff;
 mod ax_input;
 mod ax_query;
 mod cancellation;
+mod coding;
 mod config;
 mod control_actions;
 mod control_ax;
@@ -78,6 +79,28 @@ fn main() {
     // DPI awareness 必须在任何窗口创建之前设置 (Windows 只接受第一次,
     // 首窗后锁定) — 因此放在绝对最前, 覆盖所有子命令含 hidden-daemon --child。
     win_dpi::enable_dpi_awareness();
+
+    #[cfg(windows)]
+    if std::env::args_os().nth(1).as_deref()
+        == Some(std::ffi::OsStr::new("__recording-helper"))
+    {
+        // 私有 stdout 只承载录制帧, 不能混入 CLI 或 logger 输出.
+        if let Err(err) = control_recording::windows::run_helper() {
+            eprintln!("recording helper: {err}");
+            exit(1);
+        }
+        return;
+    }
+
+    #[cfg(windows)]
+    if std::env::args_os().nth(1).as_deref()
+        == Some(std::ffi::OsStr::new("__flow-text-helper"))
+    {
+        if control_ax::run_flow_text_helper().is_err() {
+            exit(1);
+        }
+        return;
+    }
 
     let opts = input::Opts::parse();
 
@@ -214,31 +237,22 @@ fn tracing_level_filter(level: log::LevelFilter) -> TracingLevelFilter {
 
 fn run(opts: input::Opts) -> Result<(), String> {
     match opts.command {
+        Command::Coding { options } => coding::cli::run(options)?,
+        Command::CodingHost {
+            session_dir,
+            instance_id,
+        } => {
+            coding::host::run(session_dir, instance_id).map_err(|err| err.to_string())?;
+        }
         Command::Record {
-            subcommand,
             url,
             transport,
             namespace,
             target_name,
             entry_point,
             host,
+            artifacts_dir,
         } => {
-            let record_subcommand = match subcommand {
-                RecordSubcommand::Start { profile, duration } => RecordCommand::Start {
-                    profile,
-                    duration_ms: duration,
-                },
-                RecordSubcommand::Status => RecordCommand::Status,
-                RecordSubcommand::Mark {
-                    label,
-                    redaction_active,
-                } => RecordCommand::Mark {
-                    label,
-                    redaction_active,
-                },
-                RecordSubcommand::Stop => RecordCommand::Stop,
-                RecordSubcommand::Cancel => RecordCommand::Cancel,
-            };
             let shared = RecordCommandShared {
                 url,
                 transport,
@@ -247,11 +261,13 @@ fn run(opts: input::Opts) -> Result<(), String> {
                 entry_point,
                 host,
             };
-            record_cli::run(
-                record_subcommand,
-                &shared,
-                &record_cli::default_artifacts_dir(),
-            )?;
+            let artifacts_dir = artifacts_dir.unwrap_or_else(record_cli::default_artifacts_dir);
+            record_cli::run(&shared, &artifacts_dir)?;
+        }
+        Command::Replay { inspect, plan, namespace, target_name, entry_point, journals } => {
+            control_recording::replay::run(control_recording::replay::ReplayOptions {
+                inspect, plan_path: plan, namespace, target_name, entry_point, paths: journals,
+            })?;
         }
         Command::Listen {
             interactive,

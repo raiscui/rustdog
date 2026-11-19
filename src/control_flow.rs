@@ -28,9 +28,6 @@ pub(crate) const MAX_FLOW_OUTPUT_BYTES: usize = 8 * 1024 * 1024;
 pub(crate) const MAX_GUI_TRANSACTION_ACTIONS: usize = 20;
 
 /// daemon-side `@flow` 的第一层结构。
-///
-/// 这里只定义协议 schema 和 parser 可验证的不变量。真正执行 step 的 runtime
-/// 会在后续 story 接入,避免 parser 层提前承担副作用。
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct FlowRequest {
@@ -39,7 +36,93 @@ pub(crate) struct FlowRequest {
     pub(crate) policy: FlowPolicy,
     pub(crate) steps: Vec<FlowStep>,
     #[serde(default)]
+    pub(crate) bindings: BTreeMap<String, FlowSecret>,
+    #[serde(default)]
     pub(crate) options: FlowOptions,
+}
+
+#[derive(Clone, PartialEq, Eq, Deserialize)]
+#[serde(transparent)]
+pub(crate) struct FlowSecret(String);
+
+impl std::fmt::Debug for FlowSecret {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("<已隐藏>")
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct FlowTextParameterStep {
+    pub(crate) parameter: String,
+    pub(crate) pid: u32,
+    pub(crate) root_hwnd: u64,
+    pub(crate) target: FlowTextTarget,
+    pub(crate) observation_id: String,
+    pub(crate) window_ref: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub(crate) enum FlowTextTarget {
+    NativeControl { hwnd: u64 },
+    FocusedControl { control_type: i32 },
+}
+
+impl FlowTextTarget {
+    pub(crate) fn valid(&self) -> bool {
+        match self {
+            Self::NativeControl { hwnd } => *hwnd != 0,
+            Self::FocusedControl { control_type } => *control_type > 0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct FlowGuardedMouseStep {
+    pub(crate) pid: u32,
+    pub(crate) root_hwnd: u64,
+    pub(crate) observation_id: String,
+    pub(crate) window_ref: String,
+    pub(crate) rect: FlowWindowRect,
+    pub(crate) action: FlowMouseAction,
+    pub(crate) verify: FlowMouseVerification,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct FlowWindowRect {
+    pub(crate) x: i32,
+    pub(crate) y: i32,
+    pub(crate) width: u32,
+    pub(crate) height: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct FlowMousePoint {
+    pub(crate) x: i32,
+    pub(crate) y: i32,
+    pub(crate) offset_ns: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub(crate) enum FlowMouseAction {
+    Move { point: FlowMousePoint },
+    Click { point: FlowMousePoint, button: u8, hold_ns: u64 },
+    Drag { points: Vec<FlowMousePoint>, button: u8 },
+    Wheel { point: FlowMousePoint, delta_x: i32, delta_y: i32 },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub(crate) enum FlowMouseVerification {
+    Position { control_hwnd: u64 },
+    Focus { control_hwnd: u64 },
+    Scroll { control_hwnd: u64, vertical: bool, increase: bool },
+    Selection { control_hwnd: u64, start: u16, end: u16 },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -135,6 +218,8 @@ pub(crate) enum FlowStep {
     Script(FlowScriptStep),
     ControlLine(String),
     GuiTransaction(FlowGuiTransactionStep),
+    TextParameter(FlowTextParameterStep),
+    GuardedMouse(FlowGuardedMouseStep),
     SleepMs(u64),
     Expect(FlowExpectStep),
     SaveArtifact(FlowSaveArtifactStep),
@@ -327,11 +412,8 @@ pub(crate) struct FlowCommandResult {
 }
 
 pub(crate) fn parse_flow_payload(input: &str) -> io::Result<FlowRequest> {
-    let value = serde_json::from_str::<serde_json::Value>(input).map_err(|err| {
-        invalid_data(format!(
-            "@flow payload 必须是严格 JSON object,无法解析: {err}"
-        ))
-    })?;
+    let value = serde_json::from_str::<serde_json::Value>(input)
+        .map_err(|_| invalid_data("@flow JSON 无效"))?;
 
     let object = value
         .as_object()
@@ -344,7 +426,7 @@ pub(crate) fn parse_flow_payload(input: &str) -> io::Result<FlowRequest> {
     }
 
     let request = serde_json::from_value::<FlowRequest>(value)
-        .map_err(|err| invalid_data(format!("@flow payload 结构无效: {err}")))?;
+        .map_err(|_| invalid_data("@flow 结构无效"))?;
 
     validate_flow_request(request)
 }
@@ -434,6 +516,61 @@ fn execute_flow_runtime(
                         .to_owned(),
                 ),
             },
+            FlowStep::TextParameter(step) => {
+                let value = request.bindings.get(&step.parameter)
+                    .ok_or_else(|| "参数未绑定".to_owned());
+                match value {
+                    Ok(value) => {
+                        let resolved = crate::control_observation::resolve_observation_ref(
+                            &step.observation_id, &step.window_ref,
+                        );
+                        let expected = format!("pid:{}/hwnd:0x{:X}", step.pid, step.root_hwnd);
+                        let snapshot = crate::control_observation::resolve_observation_resource_epoch(
+                            &step.observation_id, &step.window_ref,
+                        );
+                        match (resolved, snapshot) {
+                            (Ok(entry), Ok(Some(snapshot))) if entry.kind == "window"
+                                && entry.backend_id == expected
+                                && snapshot.resource_key == format!("pid:{}", step.pid) => {
+                                match crate::control_resource_lane::with_resource_write(&snapshot, || {
+                                    crate::control_ax::execute_flow_text_parameter(step, &value.0, remaining_duration(flow_deadline))
+                                }) {
+                                    Err(_) => Err("rejected_before_dispatch".to_owned()),
+                                    Ok(Err(error)) if matches!(error.kind(), io::ErrorKind::PermissionDenied | io::ErrorKind::Unsupported) => Err("rejected_before_dispatch".to_owned()),
+                                    Ok(Err(_)) => Err("outcome_unknown".to_owned()),
+                                    Ok(Ok(())) => Ok(()),
+                                }
+                            }
+                            _ => Err("rejected_before_dispatch".to_owned()),
+                        }
+                    }
+                    Err(error) => Err(error),
+                }
+            },
+            FlowStep::GuardedMouse(step) => {
+                let resolved = crate::control_observation::resolve_observation_ref(
+                    &step.observation_id, &step.window_ref,
+                );
+                let expected = format!("pid:{}/hwnd:0x{:X}", step.pid, step.root_hwnd);
+                let snapshot = crate::control_observation::resolve_observation_resource_epoch(
+                    &step.observation_id, &step.window_ref,
+                );
+                match (resolved, snapshot) {
+                    (Ok(entry), Ok(Some(snapshot))) if entry.kind == "window"
+                        && entry.backend_id == expected
+                        && snapshot.resource_key == format!("pid:{}", step.pid) => {
+                        match crate::control_resource_lane::with_resource_write(&snapshot, || {
+                            crate::control_mouse::execute_guarded(step, remaining_duration(flow_deadline))
+                        }) {
+                            Err(_) => Err("rejected_before_dispatch".to_owned()),
+                            Ok(Err(error)) if matches!(error.kind(), io::ErrorKind::PermissionDenied | io::ErrorKind::Unsupported) => Err("rejected_before_dispatch".to_owned()),
+                            Ok(Err(_)) => Err("outcome_unknown".to_owned()),
+                            Ok(Ok(())) => Ok(()),
+                        }
+                    }
+                    _ => Err("rejected_before_dispatch".to_owned()),
+                }
+            },
             FlowStep::GuiTransaction(step) => match control_line_executor.as_deref_mut() {
                 Some(executor) => state.execute_gui_transaction(index, step, executor),
                 None => Err(
@@ -465,10 +602,7 @@ fn execute_flow_runtime(
 
 fn validate_flow_request(request: FlowRequest) -> io::Result<FlowRequest> {
     if request.schema != FLOW_SCHEMA_V1 {
-        return Err(invalid_data(format!(
-            "@flow.schema 必须是 \"{FLOW_SCHEMA_V1}\",实际是 \"{}\"",
-            request.schema
-        )));
+        return Err(invalid_data("@flow.schema 无效"));
     }
 
     validate_policy(&request.policy)?;
@@ -481,6 +615,17 @@ fn validate_flow_request(request: FlowRequest) -> io::Result<FlowRequest> {
             request.steps.len(),
             request.policy.max_steps
         )));
+    }
+    if !request.bindings.is_empty()
+        && (request.bindings.len() != 1
+            || request.steps.len() != 1
+            || !matches!(request.steps[0], FlowStep::TextParameter(_))
+            || request.options.trace != FlowTraceMode::Summary)
+    {
+        return Err(invalid_data("@flow 文本参数必须独立执行"));
+    }
+    if request.bindings.values().any(|value| value.0.contains('\0')) {
+        return Err(invalid_data("@flow 文本参数无效"));
     }
 
     let mut has_shell_step = false;
@@ -515,6 +660,21 @@ fn validate_flow_request(request: FlowRequest) -> io::Result<FlowRequest> {
                         })?;
                 }
                 has_computer_act_step = true;
+            }
+            FlowStep::TextParameter(step) => {
+                if step.parameter.is_empty() || step.pid == 0 || step.root_hwnd == 0
+                    || !step.target.valid()
+                    || step.observation_id.is_empty() || step.window_ref.is_empty()
+                    || !request.bindings.contains_key(&step.parameter)
+                {
+                    return Err(invalid_data("@flow 文本参数或目标无效"));
+                }
+            }
+            FlowStep::GuardedMouse(step) => {
+                if request.policy.execution.strict_background {
+                    return Err(invalid_data("@flow 严格后台不允许全局鼠标输入"));
+                }
+                crate::control_mouse::validate_guarded(step)?;
             }
             FlowStep::SleepMs(ms) => validate_step_timeout(index, "SleepMs", Some(*ms))?,
             FlowStep::Expect(step) => validate_expect_step(index, step)?,
@@ -1057,6 +1217,8 @@ impl FlowStep {
             Self::Script(_) => "Script",
             Self::ControlLine(_) => "ControlLine",
             Self::GuiTransaction(_) => "GuiTransaction",
+            Self::TextParameter(_) => "TextParameter",
+            Self::GuardedMouse(_) => "GuardedMouse",
             Self::SleepMs(_) => "SleepMs",
             Self::Expect(_) => "Expect",
             Self::SaveArtifact(_) => "SaveArtifact",

@@ -781,6 +781,7 @@ fn resolve_window_selector_candidates(
         limit,
         include_state: true,
         include_recipes: false,
+        identity_only: false,
     };
     let response = crate::control_window::execute_default_window_find(&request)?;
     let mut candidates = Vec::new();
@@ -1468,6 +1469,32 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("OBSERVATION_EXPIRED"));
+    }
+
+    #[test]
+    fn identity_projection_never_persists_window_title_or_class() {
+        use crate::control_window::{attach_window_observation, WindowAppDescriptor, WindowCandidate, WINDOW_COORDINATE_SPACE};
+        let _guard = durable_test_lock();
+        let dir = temp_dir("identity-projection");
+        initialize_durable_observation_state_for_tests(&dir, 16).unwrap();
+        let mut candidates = vec![WindowCandidate {
+            window_id: "pid:1/hwnd:0x2".into(), ref_id: None, locator_lifetime: "short_lived",
+            app: WindowAppDescriptor { name: "secret-canary-class".into(), pid: 1, bundle_id: None, hidden: false, frontmost: true },
+            title: Some("secret-canary-title".into()), focused_hwnd: None, rect: None, coordinate_space: WINDOW_COORDINATE_SPACE,
+            state: None, recipes: None,
+        }];
+        let capture = capture_resource_epochs();
+        let header = attach_window_observation(&mut candidates, "@window-find", "windows", &capture, true).unwrap();
+        assert!(candidates[0].title.is_none());
+        assert!(candidates[0].app.name.is_empty());
+        assert_eq!(resolve_observation_ref(&header.observation_id, "@e1").unwrap().backend_id, "pid:1/hwnd:0x2");
+        disable_durable_observation_state_for_tests().unwrap();
+        fn contains_secret(path: &Path) -> bool {
+            if path.is_dir() { return fs::read_dir(path).unwrap().any(|entry| contains_secret(&entry.unwrap().path())); }
+            fs::read(path).unwrap().windows(b"secret-canary".len()).any(|bytes| bytes == b"secret-canary")
+        }
+        assert!(!contains_secret(&dir));
+        let _ = fs::remove_dir_all(dir);
     }
 
     #[test]

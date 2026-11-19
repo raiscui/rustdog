@@ -37,6 +37,7 @@ pub struct WindowFindRequest {
     pub limit: u16,
     pub include_state: bool,
     pub include_recipes: bool,
+    pub identity_only: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -281,6 +282,8 @@ pub struct WindowCandidate {
     pub app: WindowAppDescriptor,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub focused_hwnd: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rect: Option<AxRect>,
     pub coordinate_space: &'static str,
@@ -716,6 +719,12 @@ pub struct SystemWindowBackend;
 
 impl WindowBackend for SystemWindowBackend {
     fn find(&self, request: &WindowFindRequest) -> io::Result<WindowFindResponse> {
+        if request.identity_only && (request.query.pid.is_none() || request.query.app.is_some()
+            || request.query.app_contains.is_some() || request.query.bundle_id.is_some()
+            || request.query.title.is_some() || request.query.title_contains.is_some() || request.display_scope.is_some())
+        { return Err(invalid_data("@window-find identity_only 仅接受 PID 查询")); }
+        #[cfg(not(windows))]
+        if request.identity_only { return Err(io::Error::new(io::ErrorKind::Unsupported, "窗口身份投影仅支持 Windows")); }
         platform_find(request)
     }
 
@@ -780,6 +789,7 @@ pub fn resolve_unique_app_window_id(app: &str) -> io::Result<String> {
         limit: 2,
         include_state: true,
         include_recipes: false,
+        identity_only: false,
     })?;
     select_unique_interactable_window_id(app, response.match_count, &response.matches)
 }
@@ -829,6 +839,7 @@ pub fn resolve_unique_app_pid(app: &str) -> io::Result<i32> {
         limit: u16::MAX,
         include_state: false,
         include_recipes: false,
+        identity_only: false,
     })?;
     select_unique_app_pid(app, response.match_count, &response.matches)
 }
@@ -903,6 +914,7 @@ pub fn parse_window_find_payload(input: &str) -> io::Result<WindowFindRequest> {
             limit: DEFAULT_WINDOW_FIND_LIMIT,
             include_state: true,
             include_recipes: true,
+            identity_only: false,
         });
     }
 
@@ -914,6 +926,7 @@ pub fn parse_window_find_payload(input: &str) -> io::Result<WindowFindRequest> {
     let mut limit = None::<u16>;
     let mut include_state = None::<bool>;
     let mut include_recipes = None::<bool>;
+    let mut identity_only = None::<bool>;
     let mut display_scope = None::<DisplayScope>;
     let mut query = WindowQuery::default();
 
@@ -935,6 +948,10 @@ pub fn parse_window_find_payload(input: &str) -> io::Result<WindowFindRequest> {
                 "include_recipes",
                 "@window-find",
                 parse_bool(raw_value, "@window-find", "include_recipes")?,
+            )?,
+            "identity_only" => assign_once(
+                &mut identity_only, "identity_only", "@window-find",
+                parse_bool(raw_value, "@window-find", "identity_only")?,
             )?,
             "scope" => assign_once(
                 &mut display_scope,
@@ -959,12 +976,17 @@ pub fn parse_window_find_payload(input: &str) -> io::Result<WindowFindRequest> {
     if query.is_empty() && display_scope.is_none() {
         query.validate_for_find()?;
     }
+    let identity_only = identity_only.unwrap_or(false);
+    if identity_only && (query.pid.is_none() || query.app.is_some() || query.app_contains.is_some() || query.bundle_id.is_some()
+        || query.title.is_some() || query.title_contains.is_some() || display_scope.is_some())
+    { return Err(invalid_data("@window-find identity_only 仅接受 PID 查询")); }
     Ok(WindowFindRequest {
         query,
         display_scope,
         limit: limit.unwrap_or(DEFAULT_WINDOW_FIND_LIMIT),
         include_state: include_state.unwrap_or(true),
         include_recipes: include_recipes.unwrap_or(true),
+        identity_only,
     })
 }
 
@@ -1275,6 +1297,7 @@ pub(crate) fn attach_window_observation(
     source_command: &str,
     platform: &str,
     resource_capture: &ResourceEpochCapture,
+    identity_only: bool,
 ) -> io::Result<ObservationHeader> {
     let mut refs = Vec::with_capacity(candidates.len());
     let mut selector_drafts = Vec::with_capacity(candidates.len());
@@ -1286,9 +1309,14 @@ pub(crate) fn attach_window_observation(
             backend_id: candidate.window_id.clone(),
             kind: "window".to_owned(),
         });
-        selector_drafts.push(window_candidate_selector_draft(
-            platform, candidate, &ref_id,
-        ));
+        if identity_only {
+            candidate.title = None;
+            candidate.app.name.clear();
+            candidate.app.bundle_id = None;
+            candidate.recipes = None;
+        } else {
+            selector_drafts.push(window_candidate_selector_draft(platform, candidate, &ref_id));
+        }
     }
 
     record_observation_with_selectors_from_capture(
@@ -1908,6 +1936,8 @@ mod macos;
 
 #[cfg(target_os = "windows")]
 mod windows;
+#[cfg(target_os = "windows")]
+pub(crate) use self::windows::current_logical_window_rect;
 
 #[cfg(target_os = "macos")]
 pub(crate) use self::macos::frontmost_pid;
@@ -1938,6 +1968,7 @@ mod tests {
                 frontmost: true,
             },
             title: Some("Calculator".to_owned()),
+            focused_hwnd: None,
             rect: None,
             coordinate_space: WINDOW_COORDINATE_SPACE,
             state: None,
@@ -2207,6 +2238,15 @@ mod tests {
     }
 
     #[test]
+    fn identity_projection_requires_pid_without_metadata_query() {
+        let request = parse_window_find_payload("{pid:42,identity_only:true}").unwrap();
+        assert!(request.identity_only);
+        assert!(parse_window_find_payload("{pid:42,title:\"secret\",identity_only:true}").is_err());
+        assert!(parse_window_find_payload("{app:\"Example\",identity_only:true}").is_err());
+        assert!(!parse_window_find_payload("{pid:42}").unwrap().identity_only);
+    }
+
+    #[test]
     fn ambiguous_and_stale_errors_should_encode_json_payload() {
         let candidate = WindowCandidate {
             window_id: "pid:1/window:0".to_owned(),
@@ -2220,6 +2260,7 @@ mod tests {
                 frontmost: false,
             },
             title: Some("rdog".to_owned()),
+            focused_hwnd: None,
             rect: None,
             coordinate_space: WINDOW_COORDINATE_SPACE,
             state: None,
@@ -2249,6 +2290,7 @@ mod tests {
                 frontmost: false,
             },
             title: Some("rdog".to_owned()),
+            focused_hwnd: None,
             rect: None,
             coordinate_space: WINDOW_COORDINATE_SPACE,
             state: None,
@@ -2256,7 +2298,7 @@ mod tests {
         }];
         let resource_capture = crate::control_resource_lane::capture_resource_epochs();
         let observation =
-            attach_window_observation(&mut matches, "@window-find", "macos", &resource_capture)
+            attach_window_observation(&mut matches, "@window-find", "macos", &resource_capture, false)
                 .unwrap();
         let response = WindowFindResponse {
             kind: "window-find",
@@ -2308,6 +2350,7 @@ mod tests {
                 frontmost: true,
             },
             title: Some("Test Window".to_owned()),
+            focused_hwnd: None,
             rect: None,
             coordinate_space: WINDOW_COORDINATE_SPACE,
             state: Some(WindowState {

@@ -2138,6 +2138,28 @@ pub(crate) fn platform_type_text_via_clipboard(
     Err(unsupported_type_text_path("clipboard"))
 }
 
+#[cfg(windows)]
+mod windows_sensitive;
+
+pub(crate) fn execute_flow_text_parameter(
+    step: &crate::control_flow::FlowTextParameterStep,
+    value: &str,
+    timeout: std::time::Duration,
+) -> io::Result<()> {
+    #[cfg(windows)]
+    { windows_sensitive::execute(step, value, timeout) }
+    #[cfg(not(windows))]
+    {
+        let _ = (step, value, timeout);
+        Err(io::Error::new(io::ErrorKind::Unsupported, "当前平台不支持文本参数"))
+    }
+}
+
+#[cfg(windows)]
+pub(crate) fn run_flow_text_helper() -> io::Result<()> {
+    windows_sensitive::run_helper()
+}
+
 #[cfg(target_os = "macos")]
 mod macos;
 

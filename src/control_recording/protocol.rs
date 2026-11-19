@@ -1,102 +1,120 @@
-//! `@record-start` / `@record-status` / `@record-mark` / `@record-stop` /
-//! `@record-cancel` 的协议层解析。
-//!
-//! 协议层只产出 `RecordRequest`,真正 lifecycle/delivery 由
-//! `control_handler::RecordingHandler` 负责。
-
+use super::{
+    control_handler::{MarkKind, RecordRequest},
+    model::CaptureTarget,
+    session::Profile,
+};
+use serde_json::Value;
 use std::io;
 
-use serde_json::Value;
-
-use crate::control_protocol::object_inner;
-use crate::control_recording::session::Profile;
-
-use super::control_handler::RecordRequest;
-
-fn invalid_data(msg: impl Into<String>) -> io::Error {
-    io::Error::new(io::ErrorKind::InvalidData, msg.into())
-}
-
-/// `@record-start:{...}` 或裸 `@record-start`。
-pub(crate) fn parse_record_start_payload(input: &str) -> io::Result<RecordRequest> {
-    if input.trim().is_empty() {
-        return Ok(RecordRequest::Start {
-            profile: Profile::Semantic,
-            duration_ms: None,
-        });
-    }
+fn object(input: &str) -> io::Result<Value> {
     let value: Value = serde_json::from_str(input.trim())
-        .map_err(|err| invalid_data(format!("@record-start payload 不是 JSON: {err}")))?;
-    let profile = match value
-        .get("profile")
-        .and_then(|v| v.as_str())
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid recording JSON"))?;
+    if !value.is_object() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "recording payload must be an object",
+        ));
+    }
+    Ok(value)
+}
+fn only_fields(value: &Value, allowed: &[&str]) -> io::Result<()> {
+    if value
+        .as_object()
+        .is_some_and(|map| map.keys().any(|key| !allowed.contains(&key.as_str())))
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "unknown recording field",
+        ));
+    }
+    Ok(())
+}
+fn optional_string(value: &Value, key: &str) -> io::Result<Option<String>> {
+    value
+        .get(key)
+        .map(|v| {
+            v.as_str()
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned)
+                .ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::InvalidData, "invalid recording field")
+                })
+        })
+        .transpose()
+}
+fn recording_id(value: &Value) -> io::Result<String> {
+    optional_string(value, "recording_id")?
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "recording_id required"))
+}
+pub(crate) fn parse_record_start_payload(input: &str) -> io::Result<RecordRequest> {
+    let v = object(input)?;
+    only_fields(&v, &["profile", "duration_ms", "targets"])?;
+    let profile = match optional_string(&v, "profile")?
+        .as_deref()
         .unwrap_or("semantic")
     {
         "semantic" => Profile::Semantic,
         "physical" => Profile::Physical,
-        other => {
-            return Err(invalid_data(format!(
-                "@record-start.profile 不支持: {other}"
-            )))
+        _ => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "invalid profile",
+            ))
         }
     };
-    let duration_ms = match value.get("duration_ms") {
-        Some(v) => Some(
+    let duration_ms = v
+        .get("duration_ms")
+        .map(|v| {
             v.as_u64()
-                .ok_or_else(|| invalid_data("@record-start.duration_ms 必须是正整数 (u64)"))?,
-        ),
-        None => None,
-    };
+                .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "invalid duration_ms"))
+        })
+        .transpose()?;
+    let targets: Vec<CaptureTarget> = serde_json::from_value(
+        v.get("targets")
+            .cloned()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "targets required"))?,
+    )
+    .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid targets"))?;
     Ok(RecordRequest::Start {
         profile,
         duration_ms,
+        targets,
     })
 }
-
-/// `@record-status` 不接受 payload。
 pub(crate) fn parse_record_status_payload(input: &str) -> io::Result<RecordRequest> {
-    if !input.trim().is_empty() {
-        return Err(invalid_data("@record-status 不接受 payload"));
-    }
-    Ok(RecordRequest::Status)
-}
-
-/// `@record-mark:{...}` 或裸 `@record-mark`。
-pub(crate) fn parse_record_mark_payload(input: &str) -> io::Result<RecordRequest> {
     if input.trim().is_empty() {
-        return Ok(RecordRequest::Mark {
-            label: None,
-            redaction_active: false,
-        });
+        return Ok(RecordRequest::Status { recording_id: None });
     }
-    let inner = object_inner(input, "@record-mark")?;
-    let value: Value = serde_json::from_str(&inner)
-        .map_err(|err| invalid_data(format!("@record-mark payload 不是 JSON: {err}")))?;
-    let label = value
-        .get("label")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_owned());
-    Ok(RecordRequest::Mark {
-        label,
-        redaction_active: value
-            .get("redaction_active")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false),
+    let v = object(input)?;
+    only_fields(&v, &["recording_id"])?;
+    Ok(RecordRequest::Status {
+        recording_id: optional_string(&v, "recording_id")?,
     })
 }
-
-/// `@record-stop:{...}` 或裸 `@record-stop`。
-pub(crate) fn parse_record_stop_payload(input: &str) -> io::Result<RecordRequest> {
-    if !input.trim().is_empty() {
-        let _ = object_inner(input, "@record-stop")?;
-    }
-    Ok(RecordRequest::Stop)
+pub(crate) fn parse_record_mark_payload(input: &str) -> io::Result<RecordRequest> {
+    let v = object(input)?;
+    only_fields(&v, &["recording_id", "mark"])?;
+    let mark = match optional_string(&v, "mark")?.as_deref() {
+        Some("checkpoint") => MarkKind::Checkpoint,
+        Some("parameter_boundary") => MarkKind::ParameterBoundary,
+        _ => return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid mark")),
+    };
+    Ok(RecordRequest::Mark {
+        recording_id: recording_id(&v)?,
+        mark,
+    })
 }
-
-/// `@record-cancel:{...}` 或裸 `@record-cancel`。
+pub(crate) fn parse_record_stop_payload(input: &str) -> io::Result<RecordRequest> {
+    let v = object(input)?;
+    only_fields(&v, &["recording_id"])?;
+    Ok(RecordRequest::Stop {
+        recording_id: recording_id(&v)?,
+    })
+}
 pub(crate) fn parse_record_cancel_payload(input: &str) -> io::Result<RecordRequest> {
-    if !input.trim().is_empty() {
-        let _ = object_inner(input, "@record-cancel")?;
-    }
-    Ok(RecordRequest::Cancel)
+    let v = object(input)?;
+    only_fields(&v, &["recording_id"])?;
+    Ok(RecordRequest::Cancel {
+        recording_id: recording_id(&v)?,
+    })
 }

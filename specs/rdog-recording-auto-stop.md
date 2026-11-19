@@ -2,6 +2,13 @@
 
 > Issue #23 — Recording: daemon-side auto-stop timer + lifecycle integration.
 
+## 当前状态
+
+本文保留 issue #23 的旧 v1 设计记录, 不代表现行 Windows Recorder.
+v2 由 `src/control_recording/control_handler.rs::Worker` 按单调 deadline 主动封存, 不等待下一条 handle/status 才执行. 时限和 lease 以 `src/control_recording/session.rs::RecordingPolicy` 为准, 不再保留零时限代表无限录制的旧入口.
+
+自动封存只生成 `recorded` JSONL, 同一活 owner 随后发一次显式 stop 交付; CLI 空闲时也会续租并观察该终态. 不生成空 Bundle, 不报告假 completed/delivered. 当前使用方式和真机验收见 [Windows 录制方案](rdog-windows-recording-plan.md), 下文的 one-shot CLI、flag timer 与 Bundle API 均是历史方案.
+
 ## Goal
 
 When an owner issues `rdog record start --duration <X>`, the daemon

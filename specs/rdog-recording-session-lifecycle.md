@@ -4,8 +4,8 @@
 
 本规格是 Wayfinder ticket [定义 Recording Session lifecycle control protocol](https://github.com/raiscui/rustdog/issues/5) 的 resolution asset。
 
-它定义 Recording Session 的控制面、状态机和失败边界,不实现 Recorder production code。
-当前 line-control parser 尚未支持这些 recording kind。本文件是实施输入,不是当前能力清单。
+本文保存 v1 Replay Bundle 路线的设计契约, 不是当前 Recorder 的能力清单.
+Windows recording-only 实现已切换到 `rdog.record-control.v2`, 只导出封存的 v2 JSONL, 不生成 Replay Script 或 Bundle. 当前 owner, stop/drain 和交付行为以 [Windows 录制方案](rdog-windows-recording-plan.md) 及 `src/control_recording/` 为准. 下文的 `completed` 和 Bundle retry 不适用于该入口.
 
 ## Scope
 

@@ -40,3 +40,57 @@ fn parse_locator_socket_addr_should_ignore_metadata_suffix() {
 
     assert_eq!(addr, SocketAddr::from_str("192.168.50.57:7447").unwrap());
 }
+
+#[test]
+fn recording_rejects_plaintext_empty_and_mixed_routes_before_connecting() {
+    for endpoints in [
+        vec![],
+        vec!["tcp/127.0.0.1:7447".to_owned()],
+        vec![
+            "tls/127.0.0.1:7447".to_owned(),
+            "tcp/127.0.0.1:7448".to_owned(),
+        ],
+    ] {
+        let error = open_recording_client_session(&endpoints)
+            .expect_err("录制不能经不受保护的链路认领owner");
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+    }
+}
+
+#[test]
+fn recording_routes_cannot_create_implicit_listeners_or_discovery_links() {
+    for mode in ["router", "client"] {
+        let mut config = Config::default();
+        config.insert_json5("mode", &format!("\"{mode}\"")).unwrap();
+        let endpoint = vec!["tls/127.0.0.1:7447".to_owned()];
+        let (connect, listen) = if mode == "router" {
+            (&[][..], endpoint.as_slice())
+        } else {
+            (endpoint.as_slice(), &[][..])
+        };
+        restrict_recording_links(&mut config, connect, listen).unwrap();
+        for key in ["connect/endpoints", "listen/endpoints"] {
+            let routes: Vec<String> = serde_json::from_str(&config.get_json(key).unwrap()).unwrap();
+            assert!(routes.iter().all(|route| route.starts_with("tls/")));
+            assert_eq!(
+                routes.is_empty(),
+                (mode == "router") == (key == "connect/endpoints")
+            );
+        }
+        for key in [
+            "scouting/multicast/enabled",
+            "scouting/multicast/listen",
+            "scouting/gossip/enabled",
+        ] {
+            assert_eq!(config.get_json(key).unwrap(), "false");
+        }
+        for key in [
+            "scouting/multicast/autoconnect",
+            "scouting/gossip/autoconnect",
+        ] {
+            let routes: serde_json::Value =
+                serde_json::from_str(&config.get_json(key).unwrap()).unwrap();
+            assert_eq!(routes, serde_json::json!([]));
+        }
+    }
+}

@@ -1,4 +1,5 @@
 mod backend;
+mod guarded;
 mod parser;
 mod plan;
 mod report;
@@ -7,6 +8,7 @@ mod screenshot_frame;
 mod target;
 
 #[allow(unused_imports)]
+pub(crate) use guarded::{execute_guarded, validate_action, validate_guarded, validate_points_in_rect};
 pub use backend::{perform_mouse_plan, MouseBackend};
 #[allow(unused_imports)]
 pub use screenshot_frame::{

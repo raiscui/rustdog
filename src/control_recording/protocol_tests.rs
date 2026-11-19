@@ -1,60 +1,78 @@
-//! line-control @record-* parser round-trip tests (TDD).
-
-use super::control_handler::RecordRequest;
-use super::protocol::parse_record_start_payload;
-use super::session::Profile;
+use super::{
+    control_handler::{MarkKind, RecordRequest},
+    protocol::{
+        parse_record_mark_payload, parse_record_start_payload, parse_record_status_payload,
+        parse_record_stop_payload,
+    },
+    session::Profile,
+};
 
 #[test]
-fn start_without_payload_uses_semantic_default_and_no_duration() {
-    let request = parse_record_start_payload("").expect("empty payload ok");
+fn start_requires_typed_targets() {
+    assert!(parse_record_start_payload("{}").is_err());
+    let request = parse_record_start_payload(
+        r#"{"profile":"physical","duration_ms":1000,"targets":[{"pid":7,"hwnd":9}]}"#,
+    )
+    .unwrap();
     match request {
         RecordRequest::Start {
             profile,
             duration_ms,
-        } => {
-            assert_eq!(profile, Profile::Semantic);
-            assert_eq!(duration_ms, None);
-        }
-        other => panic!("expected Start, got {other:?}"),
-    }
-}
-
-#[test]
-fn start_with_duration_ms_parses_some() {
-    let request = parse_record_start_payload(r#"{"profile":"physical","duration_ms":90000}"#)
-        .expect("parse ok");
-    match request {
-        RecordRequest::Start {
-            profile,
-            duration_ms,
+            targets,
         } => {
             assert_eq!(profile, Profile::Physical);
-            assert_eq!(duration_ms, Some(90_000));
+            assert_eq!(duration_ms, Some(1000));
+            assert_eq!(targets[0].hwnd, 9);
         }
-        other => panic!("expected Start, got {other:?}"),
+        _ => panic!("expected start"),
     }
 }
-
 #[test]
-fn start_with_duration_ms_zero_accepted() {
-    let request = parse_record_start_payload(r#"{"duration_ms":0}"#).expect("parse ok");
-    match request {
-        RecordRequest::Start { duration_ms, .. } => assert_eq!(duration_ms, Some(0)),
-        other => panic!("expected Start, got {other:?}"),
-    }
+fn mutation_requires_id_and_limited_mark() {
+    assert!(parse_record_stop_payload("{}").is_err());
+    assert!(parse_record_mark_payload(r#"{"recording_id":"r","mark":"private text"}"#).is_err());
+    assert!(matches!(
+        parse_record_mark_payload(r#"{"recording_id":"r","mark":"checkpoint"}"#).unwrap(),
+        RecordRequest::Mark {
+            mark: MarkKind::Checkpoint,
+            ..
+        }
+    ));
 }
-
 #[test]
-fn start_without_duration_ms_field_parses_none() {
-    let request = parse_record_start_payload(r#"{"profile":"semantic"}"#).expect("parse ok");
-    match request {
-        RecordRequest::Start { duration_ms, .. } => assert_eq!(duration_ms, None),
-        other => panic!("expected Start, got {other:?}"),
-    }
+fn status_renews_by_recording_id_and_rejects_payload_authentication() {
+    assert!(matches!(
+        parse_record_status_payload(r#"{"recording_id":"r"}"#).unwrap(),
+        RecordRequest::Status {
+            recording_id: Some(_),
+        }
+    ));
+    assert!(parse_record_status_payload(r#"{"recording_id":"r","owner_nonce":"secret"}"#).is_err());
 }
-
 #[test]
-fn start_with_negative_duration_ms_rejected() {
-    let result = parse_record_start_payload(r#"{"duration_ms":-1}"#);
-    assert!(result.is_err(), "negative u64 should be rejected");
+fn capture_deserialization_rejects_unknown_nested_fields() {
+    use super::model::{CaptureEvent, CaptureSpec, CaptureStop};
+    assert!(
+        parse_record_start_payload(r#"{"targets":[{"pid":7,"hwnd":9,"text":"secret"}]}"#).is_err()
+    );
+    assert!(serde_json::from_str::<CaptureSpec>(
+        r#"{"targets":[],"semantic":false,"raw":"secret"}"#
+    )
+    .is_err());
+    assert!(
+        serde_json::from_str::<CaptureStop>(r#"{"last_sequence":null,"raw":"secret"}"#).is_err()
+    );
+    let event = r#"{"sequence":0,"monotonic_ns":0,"input":{"type":"mouse_move","window":{"pid":1,"hwnd":2,"process_start":3,"generation":4},"x":1,"y":2,"injected":false}}"#;
+    assert!(serde_json::from_str::<CaptureEvent>(event).is_ok());
+    for (from, to) in [
+        (r#""sequence":0"#, r#""sequence":0,"raw":"secret""#),
+        (r#""x":1"#, r#""x":1,"text":"secret""#),
+        (r#""generation":4"#, r#""generation":4,"raw":"secret""#),
+    ] {
+        assert!(serde_json::from_str::<CaptureEvent>(&event.replace(from, to)).is_err());
+    }
+    let rect = r#"{"sequence":0,"monotonic_ns":0,"input":{"type":"window_context","window":{"pid":1,"hwnd":2,"process_start":3,"generation":4},"rect":{"x":0,"y":0,"width":1,"height":1,"raw":"secret"},"dpi":96,"focused":true}}"#;
+    assert!(serde_json::from_str::<CaptureEvent>(rect).is_err());
+    let display = r#"{"sequence":0,"monotonic_ns":0,"input":{"type":"display_context","generation":1,"displays":[{"id":1,"rect":{"x":0,"y":0,"width":1920,"height":1080},"primary":true,"name":"secret"}]}}"#;
+    assert!(serde_json::from_str::<CaptureEvent>(display).is_err());
 }

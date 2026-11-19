@@ -74,6 +74,70 @@ pub(super) fn build_client_session_bridge(
     })
 }
 
+pub(super) fn build_recording_session_bridge(
+    session: &zenoh::Session,
+    keyexpr_root: &str,
+    namespace: &str,
+    control_key: &str,
+    timeout: Duration,
+) -> io::Result<(ZenohClientSessionBridge, String)> {
+    let session_id = uuid::Uuid::new_v4().to_string();
+    let subscriber = session.declare_subscriber(
+        build_session_to_control_key_with_root(keyexpr_root, namespace, &session_id),
+    ).wait().map_err(to_io_error)?;
+    let to_daemon_key = build_session_to_daemon_key_with_root(keyexpr_root, namespace, &session_id);
+    let publisher = session.declare_publisher(to_daemon_key.clone()).wait().map_err(to_io_error)?;
+    let replies = session.get(control_key)
+        .payload(format!("__rdog_record_session_open__:{session_id}"))
+        .timeout(timeout).wait().map_err(to_io_error)?;
+    let reply = replies.recv().map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "recording bridge open timed out"))?;
+    let sample = reply.result().map_err(|_| io::Error::other("recording bridge open failed"))?;
+    let payload = sample.payload().try_to_string().map_err(to_io_error)?;
+    let credential = payload.strip_prefix("__rdog_record_owner__:")
+        .ok_or_else(|| io::Error::new(io::ErrorKind::PermissionDenied, "trusted recording bridge unavailable"))?;
+    let (generation, nonce) = credential.split_once(':')
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "invalid recording bridge response"))?;
+    uuid::Uuid::parse_str(generation).map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid recording bridge response"))?;
+    uuid::Uuid::parse_str(nonce).map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid recording bridge response"))?;
+    Ok((ZenohClientSessionBridge {
+        session_id, publisher, subscriber, session: session.clone(), to_daemon_key,
+    }, credential.to_owned()))
+}
+
+pub(super) fn recording_bridge_send(
+    bridge: &mut ZenohClientSessionBridge,
+    credential: &str,
+    line: &str,
+) -> io::Result<Vec<ControlFrame>> {
+    bridge.publisher.put(format!("__rdog_record_bridge__:{credential}\n{line}"))
+        .wait().map_err(|_| io::Error::other("recording bridge send failed"))?;
+    let deadline = Instant::now() + LINE_CONTROL_RESPONSE_TIMEOUT;
+    let mut frames = Vec::new();
+    loop {
+        let remaining = deadline.checked_duration_since(Instant::now())
+            .ok_or_else(|| io::Error::new(io::ErrorKind::TimedOut, "recording bridge response timed out"))?;
+        let sample = bridge.subscriber.recv_timeout(remaining).map_err(to_io_error)?
+            .ok_or_else(|| io::Error::new(io::ErrorKind::TimedOut, "recording bridge response timed out"))?;
+        if sample.payload().len() > crate::control_line_read::MAX_CONTROL_MESSAGE_BYTES {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "recording frame too large"));
+        }
+        let payload = sample.payload().try_to_string().map_err(to_io_error)?;
+        let frame = ControlFrame::parse_inbound_result_message(payload.as_ref())?;
+        let done = matches!(frame, ControlFrame::ResponseLine(_));
+        frames.push(frame);
+        if done { return Ok(frames); }
+    }
+}
+
+pub(super) fn close_recording_session_bridge(
+    bridge: &mut ZenohClientSessionBridge,
+    credential: &str,
+) -> io::Result<()> {
+    bridge.publisher.put(format!("__rdog_record_bridge__:{credential}\n{}",
+        render_session_close_payload(&bridge.session_id)))
+        .wait().map_err(|_| io::Error::other("recording bridge close failed"))
+}
+
 pub(super) fn close_client_session_bridge(
     session_bridge: &mut ZenohClientSessionBridge,
 ) -> io::Result<()> {

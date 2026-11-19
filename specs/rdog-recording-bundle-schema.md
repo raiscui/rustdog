@@ -6,6 +6,8 @@
 
 它定义 Recording Session `completed` 后必须原子提交的 Recording Bundle 的物理形态、内部文件、manifest schema、完整性模型、size 边界、evidence 门禁和远程交付协议,不实现 Bundle writer 生产代码。
 
+Windows recording-only 入口不生产本文定义的 Bundle. 当前仅导出 `<recording_id>.rdogrec.jsonl`, 封存和接收分别由 `src/control_recording/journal.rs` 与 `src/control_recording/delivery.rs` 实现. 旧 placeholder Bundle writer 已移除. 本文含真实 `flow.json` 的 v1 契约没有被降格为空脚本, 也不代表已有可用 Replay. 当前入口见 [Windows 录制方案](rdog-windows-recording-plan.md).
+
 ## Scope
 
 本规格只定义:

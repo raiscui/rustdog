@@ -7,6 +7,8 @@
 它是 Wayfinder ticket `定义 rdog.recording.v1 Recording Journal 模型` 的 resolution asset。
 本文只固定 canonical record、ordering、durability 和 reader contract,不实现 Recorder runtime。
 
+当前 Windows Recorder 写入的是 `rdog.recording.v2`, 不是本文的 v1. v2 安全事件和 envelope 真相源分别为 `src/control_recording/model.rs` 与 `src/control_recording/journal.rs`. canonical 追加时间与 capture 原始时间分开, recording-only 成功终态为 `recorded`. 当前行为见 [Windows 录制方案](rdog-windows-recording-plan.md); 本文保留为 v1 Replay 设计资料, 不提供 v1/v2 兼容出口.
+
 ## Scope
 
 本文定义:

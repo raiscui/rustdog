@@ -1,565 +1,488 @@
-//! line-control `@record-*` 到 RecordingHandler 的端到端测试。
-//!
-//! 策略: 直接调用 `RecordingHandler` 而不通过 `control_core`,因为
-//! `control_core` 强依赖 `with_recording_handler` 全局 slot,而 slot
-//! 一旦 install 就会被同进程所有测试共享,会污染并发。handler-level
-//! 测试保留真实 lifecycle / delivery 状态机,够用。
-
-use std::{fs, path::PathBuf};
-
-use serde_json::Value;
-
 use super::{
-    control_handler::{RecordRequest, RecordingHandler},
-    session::ConnectionId,
+    control_handler::{MarkKind, RecordRequest, RecordingHandler},
+    session::{ConnectionId, Profile},
+    BoundedQueue, CaptureEvent, CaptureSpec, CaptureStop, CaptureTarget, CapturedInput,
+    RecorderCapture, RecorderError,
+};
+use crate::control_frames::{ControlExecutionOutcome, ControlFrame};
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+use serde_json::Value;
+use sha2::{Digest, Sha256};
+use std::{
+    path::PathBuf,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
+    time::Duration,
 };
 
-fn temp_dirs() -> (PathBuf, PathBuf) {
-    let base = std::env::temp_dir().join(format!(
-        "rdog-rec-handler-{}-{:?}-{}",
-        std::process::id(),
-        std::thread::current().id(),
-        crate::control_recording::journal::now_unix_ms()
-    ));
-    let journal = base.join("journal");
-    let bundle = base.join("bundle");
-    fs::create_dir_all(&journal).unwrap();
-    fs::create_dir_all(&bundle).unwrap();
-    (journal, bundle)
+struct Fake {
+    queue: Arc<BoundedQueue>,
+    healthy: Arc<AtomicBool>,
+    tail: bool,
 }
-
-fn first_response_value(outcome: &super::super::control_frames::ControlExecutionOutcome) -> Value {
-    let frame = outcome.outbound_frames.first().expect("at least one frame");
-    let text = match frame {
-        super::super::control_frames::ControlFrame::ResponseLine(s) => s.clone(),
-        other => panic!("expected response line, got {other:?}"),
-    };
-    let body = text.strip_prefix("@response ").expect("response shape");
-    let envelope: Value = serde_json::from_str(body).expect("response envelope json");
-    if let Some(value) = envelope.get("value") {
-        return value.clone();
+impl RecorderCapture for Fake {
+    fn start(&mut self, _: &CaptureSpec) -> Result<(), RecorderError> {
+        Ok(())
     }
-    if let Some(err) = envelope.get("error").and_then(|v| v.as_str()) {
-        if let Ok(parsed) = serde_json::from_str::<Value>(err) {
-            return parsed;
+    fn stop(
+        &mut self,
+        drain: &mut dyn FnMut(&BoundedQueue) -> std::io::Result<()>,
+    ) -> Result<CaptureStop, RecorderError> {
+        drain(&self.queue).map_err(|error| RecorderError::Backend(error.to_string()))?;
+        if self.tail {
+            self.queue.push(event(1));
+            drain(&self.queue).map_err(|error| RecorderError::Backend(error.to_string()))?;
+            Ok(CaptureStop {
+                last_sequence: Some(1),
+            })
+        } else {
+            Ok(CaptureStop {
+                last_sequence: None,
+            })
         }
+    }
+    fn parameter_boundary(&mut self) -> Result<(), RecorderError> {
+        Ok(())
+    }
+    fn queue(&self) -> &BoundedQueue {
+        &self.queue
+    }
+    fn wall_clock_anchor_ms(&self) -> u64 {
+        1
+    }
+    fn cleanup_pending(&mut self) -> bool {
+        false
+    }
+    fn is_healthy(&self) -> bool {
+        self.healthy.load(Ordering::Relaxed)
+    }
+}
+struct PendingCapture {
+    queue: BoundedQueue,
+    pending: Arc<AtomicBool>,
+}
+impl RecorderCapture for PendingCapture {
+    fn start(&mut self, _: &CaptureSpec) -> Result<(), RecorderError> {
+        Ok(())
+    }
+    fn stop(
+        &mut self,
+        _: &mut dyn FnMut(&BoundedQueue) -> std::io::Result<()>,
+    ) -> Result<CaptureStop, RecorderError> {
+        Err(RecorderError::Backend("not reaped".into()))
+    }
+    fn parameter_boundary(&mut self) -> Result<(), RecorderError> {
+        Ok(())
+    }
+    fn queue(&self) -> &BoundedQueue {
+        &self.queue
+    }
+    fn wall_clock_anchor_ms(&self) -> u64 {
+        1
+    }
+    fn is_healthy(&self) -> bool {
+        true
+    }
+    fn cleanup_pending(&mut self) -> bool {
+        self.pending.load(Ordering::SeqCst)
+    }
+}
+fn event(sequence: u64) -> CaptureEvent {
+    CaptureEvent {
+        sequence,
+        monotonic_ns: sequence,
+        input: CapturedInput::SemanticMissing { for_sequence: 0 },
+    }
+}
+fn dir() -> PathBuf {
+    static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    std::env::temp_dir().join(format!(
+        "rdog-rec-test-{}-{}",
+        std::process::id(),
+        N.fetch_add(1, Ordering::Relaxed)
+    ))
+}
+fn fixture(tail: bool, capacity: usize) -> (RecordingHandler, Arc<BoundedQueue>, PathBuf) {
+    let path = dir();
+    let queue = Arc::new(BoundedQueue::with_capacity(capacity));
+    let healthy = Arc::new(AtomicBool::new(true));
+    let q = queue.clone();
+    let handler = RecordingHandler::with_test_factory(
+        path.clone(),
+        Box::new(move || {
+            Box::new(Fake {
+                queue: q.clone(),
+                healthy: healthy.clone(),
+                tail,
+            })
+        }),
+    );
+    (handler, queue, path)
+}
+fn value(outcome: &ControlExecutionOutcome) -> Value {
+    let line = outcome
+        .outbound_frames
+        .iter()
+        .find_map(|frame| {
+            if let ControlFrame::ResponseLine(s) = frame {
+                Some(s)
+            } else {
+                None
+            }
+        })
+        .unwrap();
+    let envelope: Value = serde_json::from_str(line.strip_prefix("@response ").unwrap()).unwrap();
+    if let Some(v) = envelope.get("value") {
+        return v.clone();
     }
     envelope
+        .get("error")
+        .and_then(Value::as_str)
+        .and_then(|s| serde_json::from_str(s).ok())
+        .unwrap_or(envelope)
 }
-
-#[test]
-fn start_then_status_then_stop_emits_savefile_and_response() {
-    let (journal, bundle) = temp_dirs();
-    let mut handler = RecordingHandler::new(journal, bundle.clone());
-    let owner = ConnectionId(1);
-
-    let start = handler.handle(
+fn start(handler: &mut RecordingHandler, duration_ms: u64) -> String {
+    let out = handler.handle(
         Some(1),
-        owner,
-        RecordRequest::Start {
-            profile: super::session::Profile::Semantic,
-            duration_ms: None,
-        },
-    );
-    let start_value = first_response_value(&start);
-    assert_eq!(start_value["kind"], "record-start");
-    assert_eq!(start_value["status"], "recording");
-    let recording_id = start_value["recording_id"].as_str().unwrap().to_owned();
-
-    let status = handler.handle(Some(2), owner, RecordRequest::Status);
-    let status_value = first_response_value(&status);
-    assert_eq!(status_value["status"], "recording");
-    assert_eq!(status_value["recording_id"].as_str().unwrap(), recording_id);
-
-    let stop = handler.handle(Some(3), owner, RecordRequest::Stop);
-    assert_eq!(stop.outbound_frames.len(), 2);
-    match &stop.outbound_frames[0] {
-        super::super::control_frames::ControlFrame::SaveFile(frame) => {
-            assert_eq!(frame.mime, "application/vnd.rdog.recording-bundle");
-            assert!(frame.filename.ends_with(".rdogrec.tar"));
-            assert!(!frame.data.is_empty());
-        }
-        other => panic!("expected savefile, got {other:?}"),
-    }
-    let final_text = match &stop.outbound_frames[1] {
-        super::super::control_frames::ControlFrame::ResponseLine(s) => s.clone(),
-        other => panic!("expected response, got {other:?}"),
-    };
-    let envelope: Value =
-        serde_json::from_str(final_text.strip_prefix("@response ").unwrap()).unwrap();
-    let final_value = envelope.get("value").cloned().unwrap_or(Value::Null);
-    assert_eq!(final_value["kind"], "record-stop");
-    assert_eq!(final_value["recording_id"].as_str().unwrap(), recording_id);
-    assert_eq!(final_value["delivery_status"], "delivered");
-    let bundle_filename = final_value["bundle_filename"].as_str().unwrap();
-    assert!(bundle.join(bundle_filename).is_file());
-    assert!(handler.completed().contains_key(&recording_id));
-}
-
-#[test]
-fn non_owner_stop_is_rejected_with_not_owner_code() {
-    let (journal, bundle) = temp_dirs();
-    let mut handler = RecordingHandler::new(journal, bundle);
-    let _ = handler.handle(
-        Some(10),
         ConnectionId(1),
-        RecordRequest::Start {
-            profile: super::session::Profile::Semantic,
-            duration_ms: None,
-        },
-    );
-    let stop = handler.handle(Some(11), ConnectionId(2), RecordRequest::Stop);
-    let value = first_response_value(&stop);
-    assert_eq!(value["error_code"], "RECORD_NOT_OWNER");
-}
-
-#[test]
-fn stop_without_active_session_returns_no_active() {
-    let (journal, bundle) = temp_dirs();
-    let mut handler = RecordingHandler::new(journal, bundle);
-    let stop = handler.handle(Some(20), ConnectionId(1), RecordRequest::Stop);
-    let value = first_response_value(&stop);
-    assert_eq!(value["error_code"], "RECORD_NO_ACTIVE_SESSION");
-}
-
-#[test]
-fn cancel_after_start_returns_cancelled_status() {
-    let (journal, bundle) = temp_dirs();
-    let mut handler = RecordingHandler::new(journal, bundle);
-    let owner = ConnectionId(1);
-    let _ = handler.handle(
-        Some(30),
-        owner,
-        RecordRequest::Start {
-            profile: super::session::Profile::Semantic,
-            duration_ms: None,
-        },
-    );
-    let cancel = handler.handle(Some(31), owner, RecordRequest::Cancel);
-    let value = first_response_value(&cancel);
-    assert_eq!(value["kind"], "record-cancel");
-    let phase = value
-        .get("phase")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_owned();
-    assert_eq!(phase, "cancelled");
-    assert!(handler.completed().is_empty());
-}
-
-#[test]
-fn mark_after_start_writes_label_and_bumps_count() {
-    let (journal, bundle) = temp_dirs();
-    let mut handler = RecordingHandler::new(journal, bundle);
-    let owner = ConnectionId(1);
-    let _ = handler.handle(
-        Some(40),
-        owner,
-        RecordRequest::Start {
-            profile: super::session::Profile::Semantic,
-            duration_ms: None,
-        },
-    );
-    let mark = handler.handle(
-        Some(41),
-        owner,
-        RecordRequest::Mark {
-            label: Some("step-ready".to_owned()),
-            redaction_active: false,
-        },
-    );
-    let value = first_response_value(&mark);
-    let label = value
-        .get("label")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_owned();
-    assert_eq!(label, "step-ready");
-    let redaction_active = value
-        .get("redaction_active")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(true);
-    assert!(!redaction_active);
-    let mark_count = value
-        .get("mark_count")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(0);
-    assert_eq!(mark_count, 1);
-    let second = handler.handle(
-        Some(42),
-        owner,
-        RecordRequest::Mark {
-            label: None,
-            redaction_active: true,
-        },
-    );
-    let second_value = first_response_value(&second);
-    let label2 = second_value
-        .get("label")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_owned();
-    assert_eq!(label2, "mark");
-    let redaction_active2 = second_value
-        .get("redaction_active")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
-    assert!(redaction_active2);
-    let mark_count2 = second_value
-        .get("mark_count")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(0);
-    assert_eq!(mark_count2, 2);
-}
-
-#[test]
-fn mark_by_non_owner_returns_record_not_owner() {
-    let (journal, bundle) = temp_dirs();
-    let mut handler = RecordingHandler::new(journal, bundle);
-    let _ = handler.handle(
-        Some(50),
-        ConnectionId(1),
-        RecordRequest::Start {
-            profile: super::session::Profile::Semantic,
-            duration_ms: None,
-        },
-    );
-    let mark = handler.handle(
-        Some(51),
-        ConnectionId(2),
-        RecordRequest::Mark {
-            label: Some("x".to_owned()),
-            redaction_active: false,
-        },
-    );
-    let value = first_response_value(&mark);
-    assert_eq!(value["error_code"], "RECORD_NOT_OWNER");
-}
-
-#[test]
-fn mark_without_active_session_returns_no_active() {
-    let (journal, bundle) = temp_dirs();
-    let mut handler = RecordingHandler::new(journal, bundle);
-    let mark = handler.handle(
-        Some(60),
-        ConnectionId(1),
-        RecordRequest::Mark {
-            label: Some("x".to_owned()),
-            redaction_active: false,
-        },
-    );
-    let value = first_response_value(&mark);
-    assert_eq!(value["error_code"], "RECORD_NO_ACTIVE_SESSION");
-}
-
-// ----------------------------------------------------------------------------
-// Issue #23 auto-stop integration tests
-// ----------------------------------------------------------------------------
-
-use super::session::{Profile, SessionPhase, StopTrigger};
-use std::time::Duration;
-
-#[test]
-fn auto_stop_fires_after_duration() {
-    let (journal, bundle) = temp_dirs();
-    let mut handler = RecordingHandler::new(journal, bundle.clone());
-    let owner = ConnectionId(1);
-
-    let start = handler.handle(
-        Some(1),
-        owner,
         RecordRequest::Start {
             profile: Profile::Semantic,
-            duration_ms: Some(200),
+            duration_ms: Some(duration_ms),
+            targets: vec![CaptureTarget { pid: 1, hwnd: 1 }],
         },
     );
-    let start_value = first_response_value(&start);
-    let recording_id = start_value["recording_id"].as_str().unwrap().to_owned();
-
-    // 轮询等待 auto-stop (原固定 sleep 250ms 在负载 CI 上间歇性早于置位):
-    // Status 观测到 FIRED flag 时会 inline 执行 auto-stop, 轮询是幂等的。
-    let status_value = poll_until_auto_stopped(&mut handler, Some(2), owner);
+    value(&out)["recording_id"].as_str().unwrap().to_owned()
+}
+fn status(handler: &mut RecordingHandler, id: &str) -> Value {
+    value(&handler.handle(
+        Some(2),
+        ConnectionId(1),
+        RecordRequest::Status {
+            recording_id: Some(id.into()),
+        },
+    ))
+}
+#[test]
+fn stop_drains_tail_and_exports_exact_sealed_bytes_once() {
+    let (mut handler, queue, _) = fixture(true, 8);
+    let id = start(&mut handler, 10_000);
+    assert!(queue.push(event(0)));
+    let out = handler.handle(
+        Some(3),
+        ConnectionId(1),
+        RecordRequest::Stop {
+            recording_id: id.clone(),
+        },
+    );
+    let ControlFrame::SaveFile(file) = &out.outbound_frames[0] else {
+        panic!("missing artifact")
+    };
+    let bytes = BASE64.decode(&file.data).unwrap();
+    let meta = value(&out);
     assert_eq!(
-        status_value["status"], "idle",
-        "session should be auto-stopped"
+        meta["artifact_size_bytes"].as_u64().unwrap(),
+        bytes.len() as u64
     );
-    let last_session = &status_value["last_session"];
-    assert_eq!(last_session["phase"], "completed");
-    assert_eq!(last_session["stop_trigger"], "auto_duration");
-
-    let summary = handler.last_session().expect("last_session present");
-    assert_eq!(summary.phase, SessionPhase::Completed);
-    assert_eq!(summary.stop_trigger, Some(StopTrigger::AutoDuration));
-    assert!(
-        handler.completed().contains_key(&recording_id),
-        "bundle persisted"
+    assert_eq!(
+        meta["artifact_sha256"],
+        format!("{:x}", Sha256::digest(&bytes))
     );
+    let lines: Vec<Value> = std::str::from_utf8(&bytes)
+        .unwrap()
+        .lines()
+        .map(|s| serde_json::from_str(s).unwrap())
+        .collect();
+    assert_eq!(
+        lines
+            .iter()
+            .filter_map(|v| v["capture_seq"].as_u64())
+            .collect::<Vec<_>>(),
+        vec![0, 1]
+    );
+    assert_eq!(lines.last().unwrap()["payload"]["type"], "recorded");
+    let again = handler.handle(
+        Some(4),
+        ConnectionId(1),
+        RecordRequest::Stop { recording_id: id },
+    );
+    assert_eq!(again.outbound_frames.len(), 1);
 }
-
 #[test]
-fn auto_stop_cancelled_by_manual_stop() {
-    let (journal, bundle) = temp_dirs();
-    let mut handler = RecordingHandler::new(journal, bundle.clone());
-    let owner = ConnectionId(1);
-
-    let _ = handler.handle(
-        Some(10),
-        owner,
-        RecordRequest::Start {
-            profile: Profile::Semantic,
-            duration_ms: Some(200),
-        },
-    );
-    // Sleep 50ms then issue a manual stop; the timer should observe
-    // the CANCELLED flag and exit cleanly.
-    std::thread::sleep(Duration::from_millis(50));
-
-    let stop = handler.handle(Some(11), owner, RecordRequest::Stop);
-    assert_eq!(stop.outbound_frames.len(), 2);
-    let final_text = match &stop.outbound_frames[1] {
-        super::super::control_frames::ControlFrame::ResponseLine(s) => s.clone(),
-        other => panic!("expected response, got {other:?}"),
-    };
-    let envelope: Value =
-        serde_json::from_str(final_text.strip_prefix("@response ").unwrap()).unwrap();
-    let final_value = envelope.get("value").cloned().unwrap_or(Value::Null);
-    assert_eq!(final_value["trigger"], "manual");
-
-    let summary = handler.last_session().expect("last_session present");
-    assert_eq!(summary.phase, SessionPhase::Completed);
-    assert_eq!(summary.stop_trigger, Some(StopTrigger::Manual));
-
-    // Sleep past the original deadline to confirm the timer thread
-    // exited without firing.
-    std::thread::sleep(Duration::from_millis(250));
-    let summary_after = handler.last_session().expect("last_session still present");
-    assert_eq!(summary_after.stop_trigger, Some(StopTrigger::Manual));
-}
-
-#[test]
-fn auto_stop_cancelled_by_cancel() {
-    let (journal, bundle) = temp_dirs();
-    let mut handler = RecordingHandler::new(journal, bundle);
-    let owner = ConnectionId(1);
-
-    let _ = handler.handle(
-        Some(20),
-        owner,
-        RecordRequest::Start {
-            profile: Profile::Semantic,
-            duration_ms: Some(200),
-        },
-    );
-    std::thread::sleep(Duration::from_millis(50));
-
-    let cancel = handler.handle(Some(21), owner, RecordRequest::Cancel);
-    let value = first_response_value(&cancel);
-    assert_eq!(value["phase"], "cancelled");
-    assert_eq!(value["stop_trigger"], "manual");
-
-    let summary = handler.last_session().expect("last_session present");
-    assert_eq!(summary.phase, SessionPhase::Cancelled);
-    assert_eq!(summary.stop_trigger, Some(StopTrigger::Manual));
-    assert!(
-        handler.completed().is_empty(),
-        "no bundle for cancelled session"
-    );
-
-    // Wait past the deadline to confirm the timer thread has exited
-    // without surprising side effects.
-    std::thread::sleep(Duration::from_millis(250));
-    assert!(handler.completed().is_empty());
-}
-
-#[test]
-fn auto_stop_continues_when_owner_disconnects() {
-    // The handler keeps running even after the original owner is
-    // "disconnected" because the auto-stop is observed by the next
-    // handler call regardless of the connection argument. Per issue
-    // #23, the bundle is still committed to disk.
-    let (journal, bundle) = temp_dirs();
-    let mut handler = RecordingHandler::new(journal.clone(), bundle.clone());
-    let owner = ConnectionId(1);
-
-    let start = handler.handle(
-        Some(30),
-        owner,
-        RecordRequest::Start {
-            profile: Profile::Semantic,
-            duration_ms: Some(200),
-        },
-    );
-    let start_value = first_response_value(&start);
-    let recording_id = start_value["recording_id"].as_str().unwrap().to_owned();
-
-    // "Owner disconnects" — 不由 owner 发起任何调用, 由新连接轮询 Status
-    // 直到 auto-stop 被捡起并提交 bundle (原固定 sleep 改轮询防调度抖动)。
-    let status_value = poll_until_auto_stopped(&mut handler, Some(31), ConnectionId(99));
-    assert_eq!(status_value["status"], "idle");
-    let last_session = &status_value["last_session"];
-    assert_eq!(last_session["phase"], "completed");
-    assert_eq!(last_session["stop_trigger"], "auto_duration");
-
-    assert!(handler.completed().contains_key(&recording_id));
-    // Bundle file is on disk.
-    let bundle_path = bundle.join(format!("{recording_id}.rdogrec.tar"));
-    assert!(bundle_path.is_file(), "bundle file should exist on disk");
-    let _ = journal;
-}
-
-#[test]
-fn duration_too_large_rejected() {
-    let (journal, bundle) = temp_dirs();
-    let mut handler = RecordingHandler::new(journal, bundle);
-    let owner = ConnectionId(1);
-
-    let start = handler.handle(
-        Some(40),
-        owner,
-        RecordRequest::Start {
-            profile: Profile::Semantic,
-            duration_ms: Some(4_000_000),
-        },
-    );
-    let value = first_response_value(&start);
-    assert_eq!(value["error_code"], "DURATION_TOO_LARGE");
-    // No session should be active after the rejection.
-    let status = handler.handle(Some(41), owner, RecordRequest::Status);
-    let status_value = first_response_value(&status);
-    assert_eq!(status_value["status"], "idle");
-    assert!(handler.completed().is_empty());
-}
-
-#[test]
-fn duration_too_small_rejected() {
-    let (journal, bundle) = temp_dirs();
-    let mut handler = RecordingHandler::new(journal, bundle);
-    let owner = ConnectionId(1);
-
-    let start = handler.handle(
-        Some(50),
-        owner,
-        RecordRequest::Start {
-            profile: Profile::Semantic,
-            duration_ms: Some(50),
-        },
-    );
-    let value = first_response_value(&start);
-    assert_eq!(value["error_code"], "DURATION_TOO_SMALL");
-    let status = handler.handle(Some(51), owner, RecordRequest::Status);
-    let status_value = first_response_value(&status);
-    assert_eq!(status_value["status"], "idle");
-    assert!(handler.completed().is_empty());
-}
-
-#[test]
-fn stop_trigger_serializes_to_snake_case_strings() {
-    // Per issue #23 acceptance: cover all 4 variants.
-    let cases = [
-        (StopTrigger::Manual, "\"manual\""),
-        (StopTrigger::AutoDuration, "\"auto_duration\""),
-        (StopTrigger::OwnerDisconnected, "\"owner_disconnected\""),
-        (StopTrigger::AutoFailed, "\"auto_failed\""),
-    ];
-    for (trigger, expected) in cases {
-        let actual = serde_json::to_string(&trigger).expect("serialize");
-        assert_eq!(actual, expected, "trigger {trigger:?} serialization");
-    }
-}
-
-#[test]
-fn status_reports_duration_and_remaining_ms_when_auto_stop_active() {
-    let (journal, bundle) = temp_dirs();
-    let mut handler = RecordingHandler::new(journal, bundle);
-    let owner = ConnectionId(1);
-
-    let _ = handler.handle(
-        Some(70),
-        owner,
-        RecordRequest::Start {
-            profile: Profile::Semantic,
-            duration_ms: Some(2_000),
-        },
-    );
-
-    let status = handler.handle(Some(71), owner, RecordRequest::Status);
-    let status_value = first_response_value(&status);
-    assert_eq!(status_value["status"], "recording");
-    let duration_ms = status_value["duration_ms"]
-        .as_u64()
-        .expect("duration_ms is u64");
-    assert_eq!(duration_ms, 2_000);
-    let remaining_ms = status_value["remaining_ms"]
-        .as_u64()
-        .expect("remaining_ms is u64");
-    // `remaining_ms` should be ≤ duration_ms and reasonably close to it.
-    assert!(
-        remaining_ms <= duration_ms,
-        "remaining_ms {remaining_ms} > duration_ms {duration_ms}"
-    );
-    assert!(
-        remaining_ms >= duration_ms - 250,
-        "remaining_ms {remaining_ms} should be near duration_ms {duration_ms} immediately after start"
-    );
-
-    // No auto-stop: duration_ms and remaining_ms are null.
-    let (journal2, bundle2) = temp_dirs();
-    let mut handler2 = RecordingHandler::new(journal2, bundle2);
-    let _ = handler2.handle(
-        Some(72),
-        owner,
-        RecordRequest::Start {
-            profile: Profile::Semantic,
-            duration_ms: None,
-        },
-    );
-    let status2 = handler2.handle(Some(73), owner, RecordRequest::Status);
-    let status_value2 = first_response_value(&status2);
-    assert!(status_value2["duration_ms"].is_null());
-    assert!(status_value2["remaining_ms"].is_null());
-}
-
-/// 轮询 Status 直到 auto-stop 生效 (status == "idle") 或超时。
-/// timer 线程的 FIRED 置位在负载 CI 上可能晚于任何固定 sleep,
-/// 一次性断言会间歇性失败 (2026-08-28 macOS runner 多轮实证)。
-fn poll_until_auto_stopped(
-    handler: &mut RecordingHandler,
-    request_id: Option<u64>,
-    caller: ConnectionId,
-) -> serde_json::Value {
-    let deadline = std::time::Instant::now() + Duration::from_secs(5);
-    loop {
-        let status = handler.handle(request_id, caller, RecordRequest::Status);
-        let value = first_response_value(&status);
-        if value["status"] == "idle" || std::time::Instant::now() > deadline {
-            return value;
+fn nonowner_and_anonymous_cannot_mark_stop_or_cancel() {
+    let (mut handler, _, _) = fixture(false, 8);
+    let id = start(&mut handler, 10_000);
+    for owner in [ConnectionId(0), ConnectionId(2)] {
+        for request in [
+            RecordRequest::Mark {
+                recording_id: id.clone(),
+                mark: MarkKind::Checkpoint,
+            },
+            RecordRequest::Stop {
+                recording_id: id.clone(),
+            },
+            RecordRequest::Cancel {
+                recording_id: id.clone(),
+            },
+        ] {
+            assert_eq!(
+                value(&handler.handle(Some(1), owner, request))["error_code"],
+                "RECORD_NOT_OWNER"
+            );
         }
-        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert_eq!(status(&mut handler, &id)["phase"], "recording");
+}
+#[test]
+fn cancel_removes_staging_and_does_not_export() {
+    let (mut handler, _, path) = fixture(false, 8);
+    let id = start(&mut handler, 10_000);
+    let out = handler.handle(
+        Some(2),
+        ConnectionId(1),
+        RecordRequest::Cancel {
+            recording_id: id.clone(),
+        },
+    );
+    assert_eq!(value(&out)["phase"], "cancelled");
+    assert_eq!(std::fs::read_dir(path).unwrap().count(), 0);
+    assert_eq!(status(&mut handler, &id)["phase"], "cancelled");
+}
+#[test]
+fn timer_seals_without_polling_and_then_delivers() {
+    let (mut handler, _, path) = fixture(false, 8);
+    let id = start(&mut handler, 40);
+    std::thread::sleep(Duration::from_millis(200));
+    assert!(path.join(format!("{id}.rdogrec.jsonl")).exists());
+    assert_eq!(status(&mut handler, &id)["phase"], "recorded");
+    assert_eq!(
+        handler
+            .handle(
+                Some(3),
+                ConnectionId(1),
+                RecordRequest::Stop { recording_id: id }
+            )
+            .outbound_frames
+            .len(),
+        2
+    );
+}
+#[test]
+fn overflow_fails_instead_of_sealing() {
+    let (mut handler, queue, _) = fixture(false, 0);
+    let id = start(&mut handler, 10_000);
+    assert!(!queue.push(event(0)));
+    std::thread::sleep(Duration::from_millis(100));
+    assert_eq!(status(&mut handler, &id)["phase"], "failed");
+}
+#[test]
+fn queue_overflow_remains_sticky_after_drain() {
+    let queue = BoundedQueue::with_capacity(1);
+    assert!(queue.push(event(0)));
+    assert!(!queue.push(event(1)));
+    assert_eq!(queue.drain_all(|_| {}), 1);
+    assert!(queue.overflowed());
+}
+#[test]
+fn sequence_gap_fails_the_recording() {
+    let (mut handler, queue, path) = fixture(false, 8);
+    let id = start(&mut handler, 10_000);
+    assert!(queue.push(event(1)));
+    std::thread::sleep(Duration::from_millis(100));
+    assert_eq!(status(&mut handler, &id)["phase"], "failed");
+    assert!(!path.join(format!("{id}.rdogrec.jsonl")).exists());
+}
+#[test]
+fn anonymous_status_does_not_reveal_recording_identity() {
+    let (mut handler, _, _) = fixture(false, 8);
+    let id = start(&mut handler, 10_000);
+    let out = handler.handle(
+        Some(2),
+        ConnectionId(0),
+        RecordRequest::Status {
+            recording_id: Some(id),
+        },
+    );
+    let response = value(&out);
+    assert_eq!(response["phase"], "recording");
+    assert!(response.get("recording_id").is_none());
+}
+#[test]
+fn missing_staging_file_during_seal_is_failure() {
+    let (mut handler, _, path) = fixture(false, 8);
+    let id = start(&mut handler, 10_000);
+    std::fs::remove_file(path.join(format!(".{id}.staging"))).unwrap();
+    let out = handler.handle(
+        Some(2),
+        ConnectionId(1),
+        RecordRequest::Stop {
+            recording_id: id.clone(),
+        },
+    );
+    assert_eq!(value(&out)["error_code"], "RECORD_FAILED");
+    assert!(!path.join(format!("{id}.rdogrec.jsonl")).exists());
+}
+#[cfg(unix)]
+#[test]
+fn cancel_reports_staging_cleanup_failure_to_owner() {
+    let (mut handler, _, path) = fixture(false, 8);
+    let id = start(&mut handler, 10_000);
+    let staging = path.join(format!(".{id}.staging"));
+    let moved = path.join("held-open");
+    std::fs::rename(&staging, &moved).unwrap();
+    std::fs::create_dir(&staging).unwrap();
+    let out = handler.handle(
+        Some(2),
+        ConnectionId(1),
+        RecordRequest::Cancel {
+            recording_id: id.clone(),
+        },
+    );
+    let response = value(&out);
+    assert_eq!(response["error_code"], "RECORD_STAGING_CLEANUP_FAILED");
+    assert_eq!(response["cleanup_residual_path"], staging.to_str().unwrap());
+    assert!(staging.is_dir());
+    assert_eq!(status(&mut handler, &id)["phase"], "failed");
+    let anonymous = handler.handle(
+        Some(3),
+        ConnectionId(0),
+        RecordRequest::Status { recording_id: None },
+    );
+    assert!(value(&anonymous).get("cleanup_residual_path").is_none());
+}
+#[test]
+fn owner_close_discards_unsealed_capture() {
+    let (mut handler, _, path) = fixture(false, 8);
+    let id = start(&mut handler, 10_000);
+    handler.close_owner_for_test(ConnectionId(1));
+    assert_eq!(status(&mut handler, &id)["phase"], "idle");
+    assert_eq!(std::fs::read_dir(path).unwrap().count(), 0);
+}
+#[test]
+fn failed_stop_blocks_new_start_until_capture_is_reaped() {
+    let pending = Arc::new(AtomicBool::new(true));
+    let shared = pending.clone();
+    let mut handler = RecordingHandler::with_test_factory(
+        dir(),
+        Box::new(move || {
+            Box::new(PendingCapture {
+                queue: BoundedQueue::new(),
+                pending: shared.clone(),
+            })
+        }),
+    );
+    let id = start(&mut handler, 10_000);
+    let stop = handler.handle(
+        Some(2),
+        ConnectionId(1),
+        RecordRequest::Stop { recording_id: id.clone() },
+    );
+    assert_eq!(value(&stop)["error_code"], "RECORD_FAILED");
+    assert_eq!(status(&mut handler, &id)["cleanup_status"], "pending");
+    let request = RecordRequest::Start {
+        profile: Profile::Physical,
+        duration_ms: None,
+        targets: vec![CaptureTarget { pid: 1, hwnd: 1 }],
+    };
+    assert_eq!(
+        value(&handler.handle(Some(3), ConnectionId(1), request.clone()))["error_code"],
+        "RECORD_CLEANUP_PENDING"
+    );
+    pending.store(false, Ordering::SeqCst);
+    assert_eq!(
+        value(&handler.handle(Some(4), ConnectionId(1), request))["phase"],
+        "recording"
+    );
+}
+#[cfg(not(windows))]
+#[test]
+fn unsupported_platform_does_not_start() {
+    let mut handler = RecordingHandler::new(dir());
+    let out = handler.handle(
+        Some(1),
+        ConnectionId(1),
+        RecordRequest::Start {
+            profile: Profile::Physical,
+            duration_ms: None,
+            targets: vec![CaptureTarget { pid: 1, hwnd: 1 }],
+        },
+    );
+    assert_eq!(value(&out)["error_code"], "RECORD_UNAVAILABLE");
+}
+
+struct StopBurst {
+    queue: BoundedQueue,
+}
+impl RecorderCapture for StopBurst {
+    fn start(&mut self, _: &CaptureSpec) -> Result<(), RecorderError> {
+        Ok(())
+    }
+    fn stop(
+        &mut self,
+        drain: &mut dyn FnMut(&BoundedQueue) -> std::io::Result<()>,
+    ) -> Result<CaptureStop, RecorderError> {
+        for sequence in 0..64 {
+            drain(&self.queue).map_err(|error| RecorderError::Backend(error.to_string()))?;
+            if !self.queue.push(event(sequence)) {
+                return Err(RecorderError::Backend("tail overflow".into()));
+            }
+        }
+        drain(&self.queue).map_err(|error| RecorderError::Backend(error.to_string()))?;
+        Ok(CaptureStop {
+            last_sequence: Some(63),
+        })
+    }
+    fn parameter_boundary(&mut self) -> Result<(), RecorderError> {
+        Ok(())
+    }
+    fn queue(&self) -> &BoundedQueue {
+        &self.queue
+    }
+    fn wall_clock_anchor_ms(&self) -> u64 {
+        1
+    }
+    fn cleanup_pending(&mut self) -> bool {
+        false
+    }
+    fn is_healthy(&self) -> bool {
+        true
     }
 }
 
 #[test]
-fn status_remaining_ms_clamped_to_zero_after_deadline() {
-    let (journal, bundle) = temp_dirs();
-    let mut handler = RecordingHandler::new(journal, bundle);
-    let owner = ConnectionId(1);
-
-    let _ = handler.handle(
-        Some(80),
-        owner,
-        RecordRequest::Start {
-            profile: Profile::Semantic,
-            duration_ms: Some(100),
-        },
+fn stop_consumes_more_inflight_events_than_queue_capacity() {
+    let path = dir();
+    let mut handler = RecordingHandler::with_test_factory(
+        path.clone(),
+        Box::new(|| {
+            Box::new(StopBurst {
+                queue: BoundedQueue::with_capacity(1),
+            })
+        }),
     );
-
-    let status_value = poll_until_auto_stopped(&mut handler, Some(81), owner);
-    assert_eq!(status_value["status"], "idle");
-    let remaining_ms = status_value["remaining_ms"].as_u64();
-    // After auto-stop completes, the timer is cleared, so remaining_ms
-    // is null on the last_session branch.
-    assert!(remaining_ms.is_none());
-    let last_session = &status_value["last_session"];
-    assert_eq!(last_session["phase"], "completed");
-    assert_eq!(last_session["stop_trigger"], "auto_duration");
+    let id = start(&mut handler, 10_000);
+    let out = handler.handle(
+        Some(2),
+        ConnectionId(1),
+        RecordRequest::Stop { recording_id: id },
+    );
+    let ControlFrame::SaveFile(file) = &out.outbound_frames[0] else {
+        panic!("停止期间没有完整排空");
+    };
+    let bytes = BASE64.decode(&file.data).unwrap();
+    let lines: Vec<Value> = std::str::from_utf8(&bytes)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(
+        lines
+            .iter()
+            .filter_map(|line| line["capture_seq"].as_u64())
+            .collect::<Vec<_>>(),
+        (0..64).collect::<Vec<_>>()
+    );
+    assert_eq!(lines.last().unwrap()["payload"]["type"], "recorded");
+    std::fs::remove_dir_all(path).unwrap();
 }

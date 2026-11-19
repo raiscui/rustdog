@@ -2,7 +2,7 @@ use std::io;
 
 use crate::{
     control_ax::parse_bool_literal,
-    control_capabilities::current_capabilities_report_value,
+    control_capabilities::capabilities_for_coding,
     control_frames::{ControlExecutionOutcome, ControlFrame},
     control_observation::{observe::build_observe_bundle, parse_observe_payload, ObserveRequest},
     control_protocol::{
@@ -177,8 +177,9 @@ pub(crate) fn parse_bootstrap_payload(input: &str) -> io::Result<BootstrapReques
 pub(crate) fn build_bootstrap_outcome(
     request_id: Option<u64>,
     request: &BootstrapRequest,
+    coding_available: bool,
 ) -> io::Result<ControlExecutionOutcome> {
-    let capabilities = current_capabilities_report_value()?;
+    let capabilities = capabilities_for_coding(coding_available)?;
     let observe_bundle = match request.mode {
         BootstrapMode::Basic => None,
         BootstrapMode::Gui => {

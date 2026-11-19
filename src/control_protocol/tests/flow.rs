@@ -110,6 +110,7 @@ fn parse_should_default_flow_policy_and_options_for_control_only_flow() {
                     execution: FlowExecutionPolicy::default(),
                 },
                 steps: vec![FlowStep::ControlLine("@ping".to_owned())],
+                bindings: Default::default(),
                 options: FlowOptions {
                     trace: FlowTraceMode::Summary,
                 },
@@ -122,7 +123,7 @@ fn parse_should_default_flow_policy_and_options_for_control_only_flow() {
 fn parse_should_reject_flow_invalid_json_and_missing_required_fields() {
     assert_error_contains(
         r#"@flow:{schema:"rdog.flow.v1","steps":[]}"#,
-        "严格 JSON object",
+        "@flow JSON 无效",
     );
     assert_error_contains(
         r#"@flow:{"steps":[{"ControlLine":"@ping"}]}"#,
@@ -159,15 +160,15 @@ fn parse_should_reject_flow_save_artifact_without_policy_allow_file_read() {
 fn parse_should_reject_flow_unknown_fields_and_unknown_steps() {
     assert_error_contains(
         r#"@flow:{"schema":"rdog.flow.v1","steps":[{"Bogus":{}}]}"#,
-        "Bogus",
+        "@flow 结构无效",
     );
     assert_error_contains(
         r#"@flow:{"schema":"rdog.flow.v1","unknown":true,"steps":[{"ControlLine":"@ping"}]}"#,
-        "unknown field",
+        "@flow 结构无效",
     );
     assert_error_contains(
         r#"@flow:{"schema":"rdog.flow.v1","policy":{"allow_shell":true},"steps":[{"Cmd":{"run":"echo hi","unknown":true}}]}"#,
-        "unknown field",
+        "@flow 结构无效",
     );
 }
 
@@ -197,6 +198,32 @@ fn parse_should_reject_flow_nested_flow_pty_and_shell_control_line_bypass() {
         r#"@flow:{"schema":"rdog.flow.v1","steps":[{"ControlLine":"@cmd:\"echo hi\""}]}"#,
         "请使用 Cmd/Script step",
     );
+}
+
+#[test]
+fn secret_binding_errors_and_debug_do_not_disclose_value() {
+    let malformed = r#"@flow:{"schema":"rdog.flow.v1","bindings":{"p":"secret-canary"},"steps":[{"secret-canary":{}}]}"#;
+    let error = parse_control_line(malformed).expect_err("必须拒绝未知步骤");
+    assert!(!error.to_string().contains("secret-canary"));
+    let valid = r#"@flow:{"schema":"rdog.flow.v1","bindings":{"p":"secret-canary"},"steps":[{"TextParameter":{"parameter":"p","pid":1,"root_hwnd":2,"target":{"kind":"native_control","hwnd":3},"observation_id":"obs-1","window_ref":"@e1"}}]}"#;
+    let parsed = parse_control_line(valid).expect("应解析文本参数");
+    assert!(!format!("{parsed:?}").contains("secret-canary"));
+}
+
+#[test]
+fn secret_binding_with_nul_is_rejected_without_disclosure() {
+    let line = r#"@flow:{"schema":"rdog.flow.v1","bindings":{"p":"secret\u0000canary"},"steps":[{"TextParameter":{"parameter":"p","pid":1,"root_hwnd":2,"target":{"kind":"native_control","hwnd":3},"observation_id":"obs-1","window_ref":"@e1"}}]}"#;
+    let error = parse_control_line(line).expect_err("NUL 不得到达文本动作");
+    assert!(!error.to_string().contains("secret"));
+    assert!(!error.to_string().contains("canary"));
+}
+
+#[test]
+fn text_target_requires_one_explicit_selector() {
+    let focused = r#"@flow:{"schema":"rdog.flow.v1","bindings":{"p":"x"},"steps":[{"TextParameter":{"parameter":"p","pid":1,"root_hwnd":2,"target":{"kind":"focused_control","control_type":50030},"observation_id":"obs","window_ref":"@e1"}}]}"#;
+    assert!(parse_control_line(focused).is_ok());
+    let ambiguous = r#"@flow:{"schema":"rdog.flow.v1","bindings":{"p":"x"},"steps":[{"TextParameter":{"parameter":"p","pid":1,"root_hwnd":2,"target":{"kind":"focused_control","control_type":50030,"hwnd":3},"observation_id":"obs","window_ref":"@e1"}}]}"#;
+    assert!(parse_control_line(ambiguous).is_err());
 }
 
 fn assert_error_contains(line: &str, expected: &str) {

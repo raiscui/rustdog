@@ -58,9 +58,9 @@ use windows_sys::Win32::{
     Foundation::{HWND, LPARAM, RECT, TRUE},
     UI::HiDpi::GetDpiForWindow,
     UI::WindowsAndMessaging::{
-        EnumWindows, GetClassNameW, GetForegroundWindow, GetWindowRect, GetWindowTextLengthW,
+        EnumWindows, GetAncestor, GetClassNameW, GetForegroundWindow, GetGUIThreadInfo, GetWindowRect, GetWindowTextLengthW,
         GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindow, IsWindowVisible,
-        PostMessageW, SetForegroundWindow, ShowWindow, SW_RESTORE, SW_SHOW, WM_CLOSE,
+        PostMessageW, SetForegroundWindow, ShowWindow, GA_ROOT, GUITHREADINFO, SW_RESTORE, SW_SHOW, WM_CLOSE,
     },
 };
 
@@ -166,7 +166,7 @@ fn enumerate_top_level_handles() -> io::Result<Vec<HWND>> {
     Ok(sink.handles)
 }
 
-fn enumerate_windows() -> io::Result<Vec<WinWindow>> {
+fn enumerate_windows(identity_pid: Option<u32>) -> io::Result<Vec<WinWindow>> {
     let handles = enumerate_top_level_handles()?;
     if handles.is_empty() {
         // 交互式桌面至少存在一个窗口 (shell / Progman / WorkerW)。枚举全空
@@ -180,13 +180,20 @@ fn enumerate_windows() -> io::Result<Vec<WinWindow>> {
     }
 
     let foreground = unsafe { GetForegroundWindow() };
-    Ok(handles
-        .into_iter()
-        .map(|hwnd| unsafe { read_window(hwnd, foreground) })
-        .collect())
+    Ok(handles.into_iter().filter_map(|hwnd| {
+        if let Some(expected) = identity_pid {
+            let mut pid = 0;
+            // SAFETY: 仅读取枚举出的窗口所属 PID.
+            if unsafe { GetWindowThreadProcessId(hwnd, &mut pid) } == 0 || pid != expected { return None; }
+        }
+        // SAFETY: 句柄来自当前枚举, 每项只读取系统窗口属性.
+        let window = unsafe { read_window(hwnd, foreground, identity_pid.is_some()) };
+        if identity_pid.is_some_and(|expected| window.pid != expected as i32) { return None; }
+        Some(window)
+    }).collect())
 }
 
-unsafe fn read_window(hwnd: HWND, foreground: HWND) -> WinWindow {
+unsafe fn read_window(hwnd: HWND, foreground: HWND, identity_only: bool) -> WinWindow {
     let mut process_id: u32 = 0;
     // SAFETY: 枚举出来的 HWND 在本次调用内存活, 全部是只读属性查询。
     unsafe { GetWindowThreadProcessId(hwnd, &mut process_id) };
@@ -195,8 +202,8 @@ unsafe fn read_window(hwnd: HWND, foreground: HWND) -> WinWindow {
     WinWindow {
         hwnd,
         pid: process_id as i32,
-        class_name: read_class_name(hwnd),
-        title: read_window_title(hwnd),
+        class_name: if identity_only { String::new() } else { read_class_name(hwnd) },
+        title: if identity_only { None } else { read_window_title(hwnd) },
         // AxRect 不是 Copy, 所以走引用而不是把 native_rect 移走。
         rect: native_rect.as_ref().map(|rect| to_os_logical(rect, scale)),
         native_rect,
@@ -251,6 +258,13 @@ fn read_window_rect(hwnd: HWND) -> Option<AxRect> {
         width: u32::try_from(rect.right - rect.left).ok()?,
         height: u32::try_from(rect.bottom - rect.top).ok()?,
     })
+}
+
+pub(crate) fn current_logical_window_rect(hwnd: HWND) -> Option<AxRect> {
+    // SAFETY: 只读当前窗口 DPI, 无有效值时不推测几何.
+    let dpi = unsafe { GetDpiForWindow(hwnd) };
+    if dpi == 0 { return None; }
+    read_window_rect(hwnd).map(|rect| to_os_logical(&rect, f64::from(dpi) / BASELINE_DPI))
 }
 
 fn read_class_name(hwnd: HWND) -> String {
@@ -324,7 +338,7 @@ fn resolve_window_id_direct(id: &str) -> io::Result<WinWindow> {
     }
     // SAFETY: 已确认存活; 两处都只读属性。
     let foreground = unsafe { GetForegroundWindow() };
-    let window = unsafe { read_window(parsed.hwnd, foreground) };
+    let window = unsafe { read_window(parsed.hwnd, foreground, false) };
     // HWND 会被 Windows 回收复用: 同一个句柄可能已经属于别的进程。
     // pid 与 hwnd 必须自洽, 否则 id 已失效 —— 不能拿别的窗口顶替执行动作。
     if window.pid != parsed.pid {
@@ -334,9 +348,14 @@ fn resolve_window_id_direct(id: &str) -> io::Result<WinWindow> {
 }
 
 pub(super) fn find(request: &WindowFindRequest) -> io::Result<WindowFindResponse> {
+    let identity_pid = if request.identity_only {
+        let pid = request.query.pid.filter(|pid| *pid > 0).ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "窗口身份投影需要 PID"))? as u32;
+        crate::control_recording::desktop::check_interactive_desktop(pid)?;
+        Some(pid)
+    } else { None };
     let resource_capture = capture_resource_epochs();
     let meta = WindowSnapshotMeta::now();
-    let all_windows = enumerate_windows()?;
+    let all_windows = enumerate_windows(identity_pid)?;
     let mut matched = all_windows
         .iter()
         .filter(|window| {
@@ -357,11 +376,37 @@ pub(super) fn find(request: &WindowFindRequest) -> io::Result<WindowFindResponse
         .iter()
         .map(|window| to_candidate(window, request.include_state, request.include_recipes))
         .collect::<Vec<_>>();
+    if let Some(identity_pid) = identity_pid {
+        for (candidate, window) in candidates.iter_mut().zip(&matched) {
+            // SAFETY: 获取当前前台窗口用于该次身份投影.
+            candidate.app.frontmost = unsafe { GetForegroundWindow() } == window.hwnd;
+            if !candidate.app.frontmost { continue; }
+            let mut pid = 0;
+            // SAFETY: 句柄来自当前窗口枚举, PID 和 GUI 状态指针有效.
+            let thread = unsafe { GetWindowThreadProcessId(window.hwnd, &mut pid) };
+            let mut info = GUITHREADINFO::default();
+            info.cbSize = std::mem::size_of::<GUITHREADINFO>() as u32;
+            if thread != 0 && pid == window.pid as u32
+                && unsafe { GetGUIThreadInfo(thread, &mut info) } != 0
+                && !info.hwndFocus.is_null()
+                && unsafe { GetAncestor(info.hwndFocus, GA_ROOT) } == window.hwnd
+            {
+                let mut focused_pid = 0;
+                // SAFETY: 焦点句柄由系统返回, PID 指针有效.
+                if unsafe { GetWindowThreadProcessId(info.hwndFocus, &mut focused_pid) } != 0
+                    && focused_pid == pid && unsafe { GetForegroundWindow() } == window.hwnd {
+                    candidate.focused_hwnd = Some(info.hwndFocus as usize as u64);
+                }
+            }
+        }
+        crate::control_recording::desktop::check_interactive_desktop(identity_pid)?;
+    }
     let observation = Some(attach_window_observation(
         &mut candidates,
         "@window-find",
         "windows",
         &resource_capture,
+        request.identity_only,
     )?);
 
     Ok(WindowFindResponse {
@@ -394,6 +439,7 @@ fn to_candidate(window: &WinWindow, include_state: bool, include_recipes: bool) 
             frontmost: window.focused,
         },
         title: window.title.clone(),
+        focused_hwnd: None,
         rect: window.rect.clone(),
         coordinate_space: WINDOW_COORDINATE_SPACE,
         state: include_state.then(|| WindowState {
@@ -771,6 +817,7 @@ pub(super) fn close(request: &WindowCloseRequest) -> io::Result<WindowActionRepo
         limit: DEFAULT_WINDOW_FIND_LIMIT,
         include_state: true,
         include_recipes: true,
+        identity_only: false,
     })?;
     let strategy = request.strategy;
     let (window, snapshot_id, observed_at_unix_ms) = resolve_single_window(
@@ -882,6 +929,7 @@ pub(super) fn resize(request: &WindowResizeRequest) -> io::Result<WindowActionRe
         limit: DEFAULT_WINDOW_FIND_LIMIT,
         include_state: true,
         include_recipes: true,
+        identity_only: false,
     })?;
     // `WindowResizeRequest` 契约里没有 `allow_ambiguous` / `select`
     // (歧义消解只属于 activate/close 两个字), 所以 resize 的目标解析
@@ -918,6 +966,7 @@ pub(super) fn resolve_target_rect(
         limit: DEFAULT_WINDOW_FIND_LIMIT,
         include_state: false,
         include_recipes: false,
+        identity_only: false,
     })?;
     let (resolved, _, _) =
         resolve_single_window(&find_response, target, false, None, None, "window-target")?;
@@ -962,6 +1011,7 @@ fn resolve_window_for_activate(
         limit: DEFAULT_WINDOW_FIND_LIMIT,
         include_state: true,
         include_recipes: true,
+        identity_only: false,
     })?;
     let guard_candidates = resolve_guard_candidates(&find_response);
     let (window, snapshot_id, observed_at_unix_ms) = resolve_single_window(

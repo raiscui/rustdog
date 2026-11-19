@@ -204,6 +204,7 @@ pub(super) fn find(request: &WindowFindRequest) -> io::Result<WindowFindResponse
         "@window-find",
         "macos",
         &resource_capture,
+        false,
     )?);
 
     Ok(WindowFindResponse {
@@ -428,6 +429,7 @@ pub(super) fn close(request: &WindowCloseRequest) -> io::Result<WindowActionRepo
         limit: DEFAULT_WINDOW_FIND_LIMIT,
         include_state: true,
         include_recipes: true,
+        identity_only: false,
     })?;
     let strategy = request.strategy;
     let (window, snapshot_id, observed_at_unix_ms) = resolve_single_window(
@@ -563,6 +565,7 @@ pub(super) fn resize(request: &WindowResizeRequest) -> io::Result<WindowActionRe
         limit: DEFAULT_WINDOW_FIND_LIMIT,
         include_state: true,
         include_recipes: true,
+        identity_only: false,
     })?;
     let (window, snapshot_id, observed_at_unix_ms) = resolve_single_window_for_action(
         &find_response,
@@ -766,6 +769,7 @@ pub(super) fn resolve_target_rect(
         limit: DEFAULT_WINDOW_FIND_LIMIT,
         include_state: false,
         include_recipes: false,
+        identity_only: false,
     })?;
     let (resolved, _, _) = resolve_single_window(&find_response, target, false, None, None)?;
     Ok(WindowResolvedTargetRect {
@@ -855,6 +859,7 @@ fn resolve_window_for_activate_with_resolvers(
         limit: DEFAULT_WINDOW_FIND_LIMIT,
         include_state: true,
         include_recipes: true,
+        identity_only: false,
     })?;
     let guard_candidates = find_response.matches.clone();
     let (window, snapshot_id, observed_at_unix_ms) = resolve_single_window_with_resolver(
@@ -1398,6 +1403,7 @@ fn to_candidate(
             frontmost: window.app.frontmost,
         },
         title: window.title,
+        focused_hwnd: None,
         rect: window.rect,
         coordinate_space: WINDOW_COORDINATE_SPACE,
         state,
@@ -2345,6 +2351,7 @@ mod tests {
                     frontmost: true,
                 },
                 title: Some("Background".to_owned()),
+                focused_hwnd: None,
                 rect: None,
                 coordinate_space: WINDOW_COORDINATE_SPACE,
                 state: None,
@@ -2362,6 +2369,7 @@ mod tests {
                     frontmost: true,
                 },
                 title: Some("Focused".to_owned()),
+                focused_hwnd: None,
                 rect: None,
                 coordinate_space: WINDOW_COORDINATE_SPACE,
                 state: None,
@@ -2471,6 +2479,7 @@ mod tests {
                 frontmost: false,
             },
             title: Some("Ref Target".to_owned()),
+            focused_hwnd: None,
             rect: None,
             coordinate_space: WINDOW_COORDINATE_SPACE,
             state: None,
@@ -2478,7 +2487,7 @@ mod tests {
         }];
         let resource_capture = capture_resource_epochs();
         let observation =
-            attach_window_observation(&mut matches, "@window-find", "macos", &resource_capture)
+            attach_window_observation(&mut matches, "@window-find", "macos", &resource_capture, false)
                 .unwrap();
         let target_ref = matches[0].ref_id.clone().unwrap();
         let find_response = WindowFindResponse {

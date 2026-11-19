@@ -204,6 +204,7 @@ pub fn run_zenoh_router(
             startup_guard_window_ms: config.zenoh.startup_guard_window_ms,
             key_input_events: config.zenoh.key_input_events,
             observation: config.observation,
+            coding: config.coding,
             key_delivery_backend: config.key.delivery_backend,
             auth: config.auth,
             tls: config.tls,
@@ -855,15 +856,9 @@ mod health_state {
     }
 }
 
-/// Install the global `RecordingHandler` so the daemon can accept
-/// `@record-*` line-control commands. Idempotent: only the first call
-/// takes effect; subsequent calls are no-ops. Per issue #23 E2E smoke.
+/// 安装录制单写者. 目录创建及权限错误由实际 start 返回, 不在初始化时静默忽略.
 fn install_recording_stack() {
-    let journal = default_recording_dir("journal");
-    let bundle = default_recording_dir("bundle");
-    let _ = std::fs::create_dir_all(&journal);
-    let _ = std::fs::create_dir_all(&bundle);
-    let handler = RecordingHandler::new(journal, bundle);
+    let handler = RecordingHandler::new(default_recording_dir("journal"));
     let _ = install_recording_handler(handler);
 }
 

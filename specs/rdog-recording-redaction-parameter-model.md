@@ -13,6 +13,8 @@
 - `rdog.flow.v1` 保持 schema 名称不变,新增 `parameters`、`bindings` 和 typed `TypeText` step。
 - 参数化 Flow 由 `flow_parameters` capability 显式门禁。当前 daemon 未声明该 capability 时,必须视为不支持。
 
+Windows recording-only 实现使用 v2 Journal, 自动记录目标绑定的 unknown 输入区间及有限标记, 不收集 raw text/key, 不生成本文的 Replay Parameter descriptor 或 typed TypeText. 当前安全边界见 [Windows 录制方案](rdog-windows-recording-plan.md), 实际可入队字段以 `src/control_recording/model.rs` 为准. 本文的 committed-text adapter 和参数化 Replay 仍是后续设计, 不得当作当前能力.
+
 ## Scope
 
 本文定义:

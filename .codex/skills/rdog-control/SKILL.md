@@ -1,13 +1,13 @@
 ---
 name: rdog-control
 version: "2.30-task-agent"
-description: "Use for rdog control on a local or named machine: health, shell, GUI, browser, window, AX, PTY, flow, background tasks, companion agents, verification, and safety."
+description: "Use for rdog control on a local or named machine: recording, playback or replay, health, shell, GUI, browser, window, AX, PTY, flow, background tasks, companion agents, verification, and safety."
 ---
 
 # Rdog Control
 
-`rdog control` sends ordered frames to a trusted `rdog daemon`. Every bash call
-must begin with `rdog control`. Read the literal `@response ` from full stdout.
+`rdog control` sends ordered frames to a trusted `rdog daemon`. For control
+calls, begin with `rdog control` and read the literal `@response ` from full stdout.
 
 ## Tight Loop
 
@@ -26,6 +26,19 @@ rdog control @ping @capabilities#1 @observe#2
 
 Put `TARGET` after `control` only for a named or remote daemon. Permission and
 capability errors are final results.
+
+## Recording and replay
+
+For an authorized recording session, use the persistent `rdog record` CLI,
+not separate `rdog control` calls. Do not wait for `record> ` on piped or
+wrapped streams; use `status` in the same process to establish communication.
+Read `references/recording-replay.md` for the session, privacy, export and
+replay recipe, including the separate capture-start readiness check.
+先用 `rdog replay --help` 确认当前客户端提供该入口, 再按目标 daemon 的实际
+响应确认兼容. 可用时用 `rdog replay --inspect JOURNAL...` 读取 v2 录制事实,
+由 agent 根据用户确认的目标编排唯一磁盘计划, 按参考文件运行离线检查器并在每次
+修改后重新校验, 再以 `rdog replay --plan` 执行. 名称检查不等于 runtime 或
+live 验证. 不能从脱敏区间推测输入. 客户端或远端缺少能力时停止, 不自动升级或重启.
 
 ## Native App Lane
 
@@ -302,6 +315,11 @@ rdog control <target> 5555 '@run:{"path":"...","args":[...],"wait":false}'
    `$ProgressPreference='SilentlyContinue'`. 不整体丢弃 stderr/CLIXML.
    `shell_stderr` 表示退出码为 0 但仍有 stderr, `shell_exit_nonzero` 才表示
    非零退出; 两者都保留诊断, 不能直接代替 fresh 业务状态核验.
+   Windows PowerShell 5.1 的 `Get-Content` 行带 `PSDrive` 等扩展属性,
+   不要直接把这些行放入深层 `ConvertTo-Json`: 序列化会展开附加对象并大量占用内存.
+   先复制为普通字符串, 例如
+   `@(Get-Content -LiteralPath $path -Tail 30 | ForEach-Object { [string]::new($_.ToCharArray()) })`,
+   再放入待序列化对象. 对每个日志数组分别处理, 保留原有错误处理.
 4. 截图必须匹配 fresh PID/window、display 与实际项目/profile. 全桌面图可能
    拍到别的工作区或遮挡窗口; 不把图片存在当成目标页面验收.
 5. Windows 的非交互 shell 经 `build_shell_command` 启动时使用

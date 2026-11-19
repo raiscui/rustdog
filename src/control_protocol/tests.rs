@@ -720,6 +720,7 @@ fn parse_should_support_window_commands() {
                 limit: 5,
                 include_state: true,
                 include_recipes: true,
+                identity_only: false,
             }),
         })
     );
@@ -810,6 +811,7 @@ fn parse_should_support_single_positional_window_find_app() {
                 limit: 20,
                 include_state: true,
                 include_recipes: true,
+                identity_only: false,
             }),
         })
     );
@@ -1456,15 +1458,14 @@ fn parse_should_reject_unknown_or_empty_or_multiline_payloads_or_bad_request_ids
 
 #[test]
 fn record_status_without_payload_is_accepted() {
-    // Issue #23 E2E smoke: the CLI sends `@record-status` (no colon) and
-    // the parser must accept it. Previously the parser rejected it with
-    // "无效控制指令".
     let result = parse_control_line("@record-status").expect("parse should succeed");
     match result {
         ControlParseResult::Control(req) => {
             assert!(matches!(
                 req.command,
-                ControlCommand::Record(RecordRequest::Status)
+                ControlCommand::Record(RecordRequest::Status {
+                    recording_id: None,
+                })
             ));
         }
         other => panic!("expected Control, got {other:?}"),
@@ -1495,24 +1496,25 @@ fn parse_should_handle_single_char_operator_keys() {
 }
 
 #[test]
-fn record_stop_and_cancel_without_payload_are_accepted() {
-    // Symmetric handling for `@record-stop` and `@record-cancel` so the
-    // CLI can drop the `{}` suffix without breaking.
-    let stop = parse_control_line("@record-stop").expect("parse should succeed");
+fn recording_mutations_require_session_identity() {
+    for line in [
+        "@record-stop",
+        "@record-cancel",
+        "@record-stop:{}",
+        r#"@record-cancel:{"recording_id":""}"#,
+    ] {
+        assert!(parse_control_line(line).is_err(), "缺少录制身份必须拒绝: {line}");
+    }
+    let parsed = parse_control_line(r#"@record-stop#14:{"recording_id":"rec-example"}"#)
+        .expect("合法的停止请求应可解析");
+    let ControlParseResult::Control(request) = parsed else {
+        panic!("应解析为控制请求");
+    };
+    assert_eq!(request.request_id, Some(14));
     assert!(matches!(
-        stop,
-        ControlParseResult::Control(ControlRequest {
-            command: ControlCommand::Record(RecordRequest::Stop),
-            ..
-        })
-    ));
-    let cancel = parse_control_line("@record-cancel").expect("parse should succeed");
-    assert!(matches!(
-        cancel,
-        ControlParseResult::Control(ControlRequest {
-            command: ControlCommand::Record(RecordRequest::Cancel),
-            ..
-        })
+        request.command,
+        ControlCommand::Record(RecordRequest::Stop { recording_id })
+            if recording_id == "rec-example"
     ));
 }
 

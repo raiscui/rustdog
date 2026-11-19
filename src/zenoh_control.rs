@@ -78,6 +78,7 @@ pub struct ZenohDaemonRuntimeConfig {
     pub startup_guard_window_ms: u64,
     pub key_input_events: KeyInputEventsConfig,
     pub observation: ObservationConfig,
+    pub coding: crate::coding::model::CodingConfig,
     /// `@key` 的送达后端 (2026-08-03 wayfinder #37)。
     pub key_delivery_backend: crate::config::KeyDeliveryBackend,
     /// 认证开关 (issue #81): 凭证生命周期挂接用。
@@ -89,6 +90,16 @@ pub struct ZenohDaemonRuntimeConfig {
 }
 
 pub fn run_router_daemon(config: ZenohDaemonRuntimeConfig, shell: &str) -> io::Result<()> {
+    config
+        .coding
+        .validate()
+        .map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err))?;
+    if config.coding.enabled && !config.auth.enabled {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "coding requires authentication",
+        ));
+    }
     let alive_key = build_alive_key(&config.namespace, &config.daemon_name);
     let control_key = build_control_key(&config.namespace, &config.daemon_name);
     let legacy_alive_key =
@@ -221,11 +232,32 @@ pub fn run_router_daemon(config: ZenohDaemonRuntimeConfig, shell: &str) -> io::R
         (config.listen_endpoints.clone(), None)
     };
 
-    let session = zenoh_runtime::open_router_session_tls(
-        &listen_endpoints,
-        auth_users_file.as_deref(),
-        tls_listen.as_ref(),
-    )?;
+    #[cfg(unix)]
+    let no_unixpipe = config.unixpipe_startup.is_none();
+    #[cfg(not(unix))]
+    let no_unixpipe = true;
+    let recording_trusted = no_unixpipe
+        && config.auth.enabled
+        && config.tls.enabled
+        && !listen_endpoints.is_empty()
+        && listen_endpoints
+            .iter()
+            .all(|endpoint| endpoint.starts_with("tls/"));
+    let session = if recording_trusted {
+        zenoh_runtime::open_recording_router_session_tls(
+            &listen_endpoints,
+            auth_users_file
+                .as_deref()
+                .expect("trusted router requires credentials"),
+            tls_listen.as_ref().expect("trusted router requires TLS"),
+        )?
+    } else {
+        zenoh_runtime::open_router_session_tls(
+            &listen_endpoints,
+            auth_users_file.as_deref(),
+            tls_listen.as_ref(),
+        )?
+    };
     ensure_unique_daemon_name(
         &session,
         &config.namespace,
@@ -248,8 +280,13 @@ pub fn run_router_daemon(config: ZenohDaemonRuntimeConfig, shell: &str) -> io::R
         .as_ref()
         .map(|publisher| publisher.keyexpr.clone())
         .unwrap_or_else(|| "<disabled>".to_owned());
-    let executor =
+    let mut executor =
         build_router_control_executor(key_input_event_publisher, config.key_delivery_backend);
+    if config.coding.enabled {
+        let service = crate::coding::manager::CodingService::new(config.coding.clone())
+            .map_err(io::Error::other)?;
+        executor = executor.with_coding_service(Arc::new(service));
+    }
     let active_session_bridges = Arc::new(Mutex::new(HashSet::new()));
 
     let queryable = session
@@ -257,12 +294,15 @@ pub fn run_router_daemon(config: ZenohDaemonRuntimeConfig, shell: &str) -> io::R
         .complete(true)
         .with(control_query_handler(
             &session,
-            KEYEXPR_ROOT,
-            &config.namespace,
+            ControlQueryRoute {
+                keyexpr_root: KEYEXPR_ROOT,
+                namespace: &config.namespace,
+                control_key: &control_key,
+            },
             shell,
-            &control_key,
             &executor,
             &active_session_bridges,
+            recording_trusted,
         ))
         .wait()
         .map_err(to_io_error)?;
@@ -271,12 +311,15 @@ pub fn run_router_daemon(config: ZenohDaemonRuntimeConfig, shell: &str) -> io::R
         .complete(true)
         .with(control_query_handler(
             &session,
-            LEGACY_KEYEXPR_ROOT,
-            &config.namespace,
+            ControlQueryRoute {
+                keyexpr_root: LEGACY_KEYEXPR_ROOT,
+                namespace: &config.namespace,
+                control_key: &legacy_control_key,
+            },
             shell,
-            &legacy_control_key,
             &executor,
             &active_session_bridges,
+            recording_trusted,
         ))
         .wait()
         .map_err(to_io_error)?;
@@ -365,12 +408,15 @@ pub fn run_router_daemon(config: ZenohDaemonRuntimeConfig, shell: &str) -> io::R
         while let Ok(query) = legacy_queryable.recv() {
             if let Err(err) = handle_daemon_control_query(
                 &legacy_session,
-                LEGACY_KEYEXPR_ROOT,
-                &legacy_namespace,
+                ControlQueryRoute {
+                    keyexpr_root: LEGACY_KEYEXPR_ROOT,
+                    namespace: &legacy_namespace,
+                    control_key: &legacy_control_key_for_reply,
+                },
                 &legacy_shell,
-                &legacy_control_key_for_reply,
                 &legacy_executor,
                 &legacy_active_session_bridges,
+                recording_trusted,
                 query.dequeue(),
             ) {
                 log::warn!("legacy Zenoh control query failed: {err}");
@@ -381,12 +427,15 @@ pub fn run_router_daemon(config: ZenohDaemonRuntimeConfig, shell: &str) -> io::R
     while let Ok(query) = queryable.recv() {
         handle_daemon_control_query(
             &session,
-            KEYEXPR_ROOT,
-            &config.namespace,
+            ControlQueryRoute {
+                keyexpr_root: KEYEXPR_ROOT,
+                namespace: &config.namespace,
+                control_key: &control_key,
+            },
             shell,
-            &control_key,
             &executor,
             &active_session_bridges,
+            recording_trusted,
             query.dequeue(),
         )?;
     }
@@ -394,29 +443,38 @@ pub fn run_router_daemon(config: ZenohDaemonRuntimeConfig, shell: &str) -> io::R
     Err(io::Error::other("Zenoh control queryable channel closed"))
 }
 
+struct ControlQueryRoute<'a> {
+    keyexpr_root: &'static str,
+    namespace: &'a str,
+    control_key: &'a str,
+}
+
 /// 独立探活和新观察连接不排在长命令后面; 业务请求仍走原来的串行 FIFO.
 fn control_query_handler(
     session: &zenoh::Session,
-    keyexpr_root: &'static str,
-    namespace: &str,
+    route: ControlQueryRoute<'_>,
     shell: &str,
-    control_key: &str,
     executor: &SystemControlActionExecutor,
     active_session_bridges: &Arc<Mutex<HashSet<String>>>,
+    recording_trusted: bool,
 ) -> (
     zenoh::handlers::Callback<zenoh::query::Query>,
     crate::control_diagnostics::ChannelReceiver<zenoh::query::Query>,
 ) {
     let (send, receive) = crate::control_diagnostics::channel(|_| true);
     let session = session.clone();
-    let namespace = namespace.to_owned();
+    let keyexpr_root = route.keyexpr_root;
+    let namespace = route.namespace.to_owned();
     let shell = shell.to_owned();
-    let control_key = control_key.to_owned();
+    let control_key = route.control_key.to_owned();
     let executor = executor.clone();
     let bridges = Arc::clone(active_session_bridges);
     let callback = zenoh::handlers::Callback::from(move |query: zenoh::query::Query| {
         let probe = query.payload().and_then(|payload| payload.try_to_string().ok()).is_some_and(|payload| {
             if matches!(parse_session_open_payload(&payload), Ok(Some(_))) {
+                return true;
+            }
+            if payload.starts_with("__rdog_record_session_open__:") {
                 return true;
             }
             parse_session_bridge_request(&payload).ok().is_some_and(|request| {
@@ -426,12 +484,15 @@ fn control_query_handler(
         if probe {
             if let Err(err) = handle_daemon_control_query(
                 &session,
-                keyexpr_root,
-                &namespace,
+                ControlQueryRoute {
+                    keyexpr_root,
+                    namespace: &namespace,
+                    control_key: &control_key,
+                },
                 &shell,
-                &control_key,
                 &executor,
                 &bridges,
+                recording_trusted,
                 query,
             ) {
                 log::warn!("Zenoh control probe failed: {err}");
@@ -445,14 +506,18 @@ fn control_query_handler(
 
 fn handle_daemon_control_query(
     session: &zenoh::Session,
-    keyexpr_root: &str,
-    namespace: &str,
+    route: ControlQueryRoute<'_>,
     shell: &str,
-    control_key: &str,
     executor: &SystemControlActionExecutor,
     active_session_bridges: &Arc<Mutex<HashSet<String>>>,
+    recording_trusted: bool,
     query: zenoh::query::Query,
 ) -> io::Result<()> {
+    let ControlQueryRoute {
+        keyexpr_root,
+        namespace,
+        control_key,
+    } = route;
     let payload = query.payload().ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -460,6 +525,68 @@ fn handle_daemon_control_query(
         )
     })?;
     let payload = payload.try_to_string().map_err(to_io_error)?;
+    if let Some(session_id) = payload.strip_prefix("__rdog_record_session_open__:") {
+        let parsed = format!("__rdog_session_open__:{session_id}");
+        let session_id = parse_session_open_payload(&parsed)?.ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidData, "invalid recording bridge")
+        })?;
+        if uuid::Uuid::parse_str(&session_id).is_err() {
+            query
+                .reply(
+                    control_key.to_owned(),
+                    "@response {\"code\":400,\"message\":\"invalid recording bridge id\"}",
+                )
+                .wait()
+                .map_err(to_io_error)?;
+            return Ok(());
+        }
+        if !recording_trusted {
+            query
+                .reply(
+                    control_key.to_owned(),
+                    "@response {\"code\":403,\"message\":\"recording requires a trusted bridge\"}",
+                )
+                .wait()
+                .map_err(to_io_error)?;
+            return Ok(());
+        }
+        let mut bridges = active_session_bridges
+            .lock()
+            .expect("active_session_bridges lock should work");
+        if !bridges.insert(session_id.clone()) {
+            query
+                .reply(
+                    control_key.to_owned(),
+                    "@response {\"code\":409,\"message\":\"bridge already exists\"}",
+                )
+                .wait()
+                .map_err(to_io_error)?;
+            return Ok(());
+        }
+        let credential = crate::control_recording::owner::BridgeCredential::new();
+        let wire = credential.wire();
+        if let Err(err) = open_daemon_session_bridge(
+            session,
+            &route,
+            &session_id,
+            shell,
+            executor.clone(),
+            Arc::clone(active_session_bridges),
+            Some(credential),
+        ) {
+            bridges.remove(&session_id);
+            return Err(err);
+        }
+        drop(bridges);
+        query
+            .reply(
+                control_key.to_owned(),
+                format!("__rdog_record_owner__:{wire}"),
+            )
+            .wait()
+            .map_err(|_| io::Error::other("recording bridge open reply failed"))?;
+        return Ok(());
+    }
     if let Some(session_id) = parse_session_open_payload(payload.as_ref())? {
         // 建立订阅期间同 ID 的 open 必须等待, 不能在 bridge 尚未 ready 时先 ACK.
         let mut bridges = active_session_bridges
@@ -468,12 +595,12 @@ fn handle_daemon_control_query(
         if bridges.insert(session_id.clone()) {
             if let Err(err) = open_daemon_session_bridge(
                 session,
-                keyexpr_root,
-                namespace,
+                &route,
                 &session_id,
                 shell,
                 executor.clone(),
                 Arc::clone(active_session_bridges),
+                None,
             ) {
                 bridges.remove(&session_id);
                 return Err(err);
@@ -662,6 +789,49 @@ fn escape_json_string(input: &str) -> String {
     }
 
     escaped
+}
+
+pub(crate) struct RecordingZenohBridge {
+    bridge: ZenohClientSessionBridge,
+    credential: String,
+}
+
+impl RecordingZenohBridge {
+    pub(crate) fn open(
+        namespace: Option<String>,
+        target_name: Option<String>,
+        entry_point: Vec<String>,
+    ) -> io::Result<Self> {
+        let timeout = Duration::from_secs(3);
+        let namespace =
+            crate::zenoh_identity::resolve_namespace(namespace.as_deref(), target_name.as_deref())?;
+        let endpoints = zenoh_runtime::resolve_client_connect_endpoints(
+            &entry_point,
+            timeout,
+            zenoh_runtime::UnixpipeClientProbe::new(Some(&namespace), target_name.as_deref()),
+        )?;
+        let session = zenoh_runtime::open_recording_client_session(&endpoints)?;
+        let target = resolve_target(&session, &namespace, target_name.as_deref(), timeout)?;
+        let (bridge, credential) = self::client_pty::build_recording_session_bridge(
+            &session,
+            &target.keyexpr_root,
+            &namespace,
+            &target.control_key,
+            timeout,
+        )?;
+        Ok(Self { bridge, credential })
+    }
+
+    pub(crate) fn send_recording_line(&mut self, line: &str) -> io::Result<Vec<ControlFrame>> {
+        self::client_pty::recording_bridge_send(&mut self.bridge, &self.credential, line)
+    }
+}
+
+impl Drop for RecordingZenohBridge {
+    fn drop(&mut self) {
+        let _ =
+            self::client_pty::close_recording_session_bridge(&mut self.bridge, &self.credential);
+    }
 }
 
 pub fn run_client_control(
@@ -867,9 +1037,7 @@ pub fn send_control_lines_collect_frames(
                 }
             },
             Err(err) => {
-                log::warn!(
-                    "zenoh control multi-line request failed at line index {idx} (line={line}): {err}"
-                );
+                log::warn!("zenoh control multi-line request failed at line index {idx}: {err}");
                 result = Err(err);
                 break;
             }
@@ -1026,6 +1194,20 @@ fn execute_remote_request_with_retry_on_timeout(
     ) {
         Ok(response) => handle_reply_payload(response.as_str(), save_dir, display),
         Err(err) if err.kind() == io::ErrorKind::TimedOut => {
+            if matches!(
+                parse_control_line(line),
+                Ok(ControlParseResult::Control(crate::control_protocol::ControlRequest {
+                    command: ControlCommand::Record(
+                        crate::control_recording::control_handler::RecordRequest::Stop { .. }
+                    ),
+                    ..
+                }))
+            ) {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    format!("record-stop timed out; outcome unknown: {err}"),
+                ));
+            }
             log::warn!(
                 "zenoh control request timed out for service_name(daemon_name)={}, retrying after re-resolve",
                 current_target.daemon_name
@@ -1219,12 +1401,15 @@ mod tests {
             .complete(true)
             .with(control_query_handler(
                 &session,
-                KEYEXPR_ROOT,
-                "isolated-test",
+                ControlQueryRoute {
+                    keyexpr_root: KEYEXPR_ROOT,
+                    namespace: "isolated-test",
+                    control_key: &key,
+                },
                 shell,
-                &key,
                 &executor,
                 &bridges,
+                false,
             ))
             .wait()
             .unwrap();
@@ -1247,12 +1432,15 @@ mod tests {
         let worker = thread::spawn(move || {
             handle_daemon_control_query(
                 &worker_session,
-                KEYEXPR_ROOT,
-                "isolated-test",
+                ControlQueryRoute {
+                    keyexpr_root: KEYEXPR_ROOT,
+                    namespace: "isolated-test",
+                    control_key: &worker_key,
+                },
                 &worker_shell,
-                &worker_key,
                 &worker_executor,
                 &worker_bridges,
+                false,
                 request.dequeue(),
             )
             .unwrap()
@@ -1329,12 +1517,15 @@ mod tests {
             .unwrap();
         handle_daemon_control_query(
             &session,
-            KEYEXPR_ROOT,
-            "isolated-test",
+            ControlQueryRoute {
+                keyexpr_root: KEYEXPR_ROOT,
+                namespace: "isolated-test",
+                control_key: &key,
+            },
             "unused",
-            &key,
             &executor,
             &bridges,
+            false,
             queued.dequeue(),
         )
         .unwrap();

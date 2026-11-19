@@ -13,6 +13,24 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+#[test]
+fn recording_owner_is_scoped_to_trusted_loopback_peer() {
+    let first = recording_owner_for_peer(Ok("127.0.0.1:10001".parse().unwrap())).unwrap();
+    let second = recording_owner_for_peer(Ok("[::1]:10002".parse().unwrap())).unwrap();
+    assert_ne!(first.id(), second.id());
+    assert!(recording_owner_for_peer(Ok("192.0.2.1:10003".parse().unwrap())).is_none());
+    assert!(recording_owner_for_peer(Err(io::Error::other("peer unavailable"))).is_none());
+
+    let remote = crate::control_core::parse_and_execute_control_line_with_owner(
+        r#"@record-stop#7:{"recording_id":"example"}"#,
+        "/bin/sh",
+        &FakeExecutor::default(),
+        &crate::cancellation::CancelRegistry::new(),
+        crate::control_recording::session::ConnectionId(0),
+    ).into_single_response_line();
+    assert!(remote.contains("authenticated persistent connection"), "{remote}");
+}
+
 #[derive(Clone, Default)]
 struct FakeExecutor {
     commands: Arc<Mutex<Vec<ControlCommand>>>,
@@ -248,6 +266,12 @@ impl ControlActionExecutor for FakeExecutor {
                 format!("SELECTOR_REFIND:{}\n", request.selector_id).into_bytes()
             }
             ControlCommand::Record(_) => b"RECORD_CONTROL\n".to_vec(),
+            ControlCommand::Coding(_) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "coding requires its dedicated service",
+                ));
+            }
         };
 
         Ok(ActionExecutionResult {

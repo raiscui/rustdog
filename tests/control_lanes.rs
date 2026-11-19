@@ -960,9 +960,16 @@ fn control_one_shot_should_send_ping_with_request_id() {
         "control one-shot should exit 0; stderr={}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(
-        stdout.contains(r#"@response {"id":7,"value":"pong"}"#),
-        "stdout did not contain id=7 pong response: {stdout}"
+    let response = stdout
+        .lines()
+        .find_map(|line| line.strip_prefix("@response "))
+        .expect("ping should return a protocol response");
+    let response: serde_json::Value =
+        serde_json::from_str(response).expect("ping response should be JSON");
+    assert_eq!(response["id"], 7, "response should retain the request id");
+    assert_eq!(
+        response["value"]["pong"], true,
+        "ping should report liveness"
     );
 
     daemon

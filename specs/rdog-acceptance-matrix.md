@@ -8,6 +8,8 @@
 
 本规格是验收 policy,不是实施 ticket。
 
+本文的 macOS record→compile→replay 门槛不用于声明 Windows recording-only 通过. Windows 当前验收矩阵及未验证项见 [Windows 录制方案](rdog-windows-recording-plan.md) 与 `task_plan__windows_recording_impl.md`. `tests/recording_e2e.rs` 在非 Windows 平台只验证真实进程的 unavailable/owner/CLI 契约, 不再把空 macOS backend 或 Bundle 存在当录制成功.
+
 ## Scope
 
 本规格只定义:

@@ -12,7 +12,7 @@ use zenoh::Wait;
 use super::session_payload::parse_session_close_payload;
 use crate::{
     control_actions::SystemControlActionExecutor,
-    control_core::{parse_and_execute_control_line, render_protocol_error_response},
+    control_core::render_protocol_error_response,
     control_frames::ControlFrame,
     control_session::ControlPeerSession,
     zenoh_identity::{
@@ -26,13 +26,18 @@ use crate::{
 /// 并把结果统一发回 `to-control`。
 pub(super) fn open_daemon_session_bridge(
     session: &zenoh::Session,
-    keyexpr_root: &str,
-    namespace: &str,
+    route: &super::ControlQueryRoute<'_>,
     session_id: &str,
     shell: &str,
     executor: SystemControlActionExecutor,
     active_session_bridges: Arc<Mutex<HashSet<String>>>,
+    credential: Option<crate::control_recording::owner::BridgeCredential>,
 ) -> io::Result<()> {
+    let super::ControlQueryRoute {
+        keyexpr_root,
+        namespace,
+        ..
+    } = *route;
     let to_daemon_key = build_session_to_daemon_key_with_root(keyexpr_root, namespace, session_id);
     let to_control_key =
         build_session_to_control_key_with_root(keyexpr_root, namespace, session_id);
@@ -59,6 +64,9 @@ pub(super) fn open_daemon_session_bridge(
     let shell = shell.to_owned();
     let session_id = session_id.to_owned();
 
+    let owner = credential
+        .as_ref()
+        .map(|_| crate::control_recording::owner::RecordingOwner::new());
     thread::spawn(move || {
         let session_idle_timeout = Duration::from_secs(60);
         let session_active_poll = Duration::from_millis(25);
@@ -134,16 +142,39 @@ pub(super) fn open_daemon_session_bridge(
                     let Ok(line) = sample.payload().try_to_string().map_err(to_io_error) else {
                         continue;
                     };
-                    log::debug!(
-                        "Zenoh session bridge received inbound line: bridge_session_id={}, active_pty={}, bytes={}",
-                        session_id,
-                        active_pty_session
-                            .as_ref()
-                            .map(|session| session.session_id())
-                            .unwrap_or("<none>"),
-                        line.len()
-                    );
-                    if let Ok(Some(close_session_id)) = parse_session_close_payload(line.as_ref()) {
+                    let line = if let Some(credential) = credential.as_ref() {
+                        let Some(line) = credential.unwrap(line.as_ref()) else {
+                            let _ = publish_zenoh_text(
+                                &publisher,
+                                &render_protocol_error_response(
+                                    None,
+                                    403,
+                                    "invalid recording bridge credential",
+                                ),
+                            );
+                            continue;
+                        };
+                        line
+                    } else {
+                        line.as_ref()
+                    };
+                    if is_flow_line(line) {
+                        log::debug!(
+                            "Zenoh session bridge received flow: bridge_session_id={}",
+                            session_id
+                        );
+                    } else {
+                        log::debug!(
+                            "Zenoh session bridge received inbound line: bridge_session_id={}, active_pty={}, bytes={}",
+                            session_id,
+                            active_pty_session
+                                .as_ref()
+                                .map(|session| session.session_id())
+                                .unwrap_or("<none>"),
+                            line.len()
+                        );
+                    }
+                    if let Ok(Some(close_session_id)) = parse_session_close_payload(line) {
                         if close_session_id == session_id {
                             if let Ok(mut bridges) = active_session_bridges.lock() {
                                 bridges.remove(&session_id);
@@ -152,13 +183,11 @@ pub(super) fn open_daemon_session_bridge(
                             return;
                         }
                     }
-                    if matches!(parse_session_close_payload(line.as_ref()), Ok(Some(_))) {
+                    if matches!(parse_session_close_payload(line), Ok(Some(_))) {
                         break;
                     }
                     if let Some(session) = active_pty_session.as_ref() {
-                        match crate::control_frames::PtyStdinFrame::parse_wire_message(
-                            line.as_ref(),
-                        ) {
+                        match crate::control_frames::PtyStdinFrame::parse_wire_message(line) {
                             Ok(Some(frame)) => {
                                 if frame.session_id == session.session_id() {
                                     match BASE64_STANDARD.decode(frame.data.as_bytes()) {
@@ -200,9 +229,7 @@ pub(super) fn open_daemon_session_bridge(
                             }
                         }
 
-                        match crate::control_frames::PtyResizeFrame::parse_wire_message(
-                            line.as_ref(),
-                        ) {
+                        match crate::control_frames::PtyResizeFrame::parse_wire_message(line) {
                             Ok(Some(frame)) => {
                                 if frame.session_id == session.session_id() {
                                     log::debug!(
@@ -234,7 +261,7 @@ pub(super) fn open_daemon_session_bridge(
                         }
 
                         match crate::pty_control::should_close_pty_session(
-                            line.as_ref(),
+                            line,
                             session.session_id(),
                         ) {
                             Ok(true) => {
@@ -250,7 +277,7 @@ pub(super) fn open_daemon_session_bridge(
                             }
                         }
                         if matches!(
-                            crate::control_protocol::parse_control_line(line.as_ref()),
+                            crate::control_protocol::parse_control_line(line),
                             Ok(crate::control_protocol::ControlParseResult::Control(
                                 crate::control_protocol::ControlRequest {
                                     command: crate::control_protocol::ControlCommand::PtyDetach(_),
@@ -267,7 +294,7 @@ pub(super) fn open_daemon_session_bridge(
                         let _ = session.send_stdin_bytes(bytes);
                         continue;
                     }
-                    match crate::pty_control::parse_pty_open_request(line.as_ref()) {
+                    match crate::pty_control::parse_pty_open_request(line) {
                         Ok(Some(request)) => {
                             log::info!(
                                 "Zenoh PTY open received on session bridge: bridge_session_id={}",
@@ -304,7 +331,7 @@ pub(super) fn open_daemon_session_bridge(
                         }
                     }
 
-                    match crate::pty_control::parse_pty_attach_request(line.as_ref()) {
+                    match crate::pty_control::parse_pty_attach_request(line) {
                         Ok(Some(request)) => {
                             match crate::pty_control::attach_active_pty_session(request) {
                                 Ok(Some(session)) => active_pty_session = Some(session),
@@ -336,12 +363,14 @@ pub(super) fn open_daemon_session_bridge(
                     // Phase F-3 (ticket 03 fix): session bridge dispatcher 必须跟 executor 共享
                     // 同一 CancelRegistry, 否则 `@cancel#seq` signal 找不到 in-flight seq。
                     // 跟 zenoh_control.rs:240 一样的修法, 这是 ticket 03 跨实例 bug 的第二个 instance。
-                    let outcome = parse_and_execute_control_line(
-                        line.as_ref(),
-                        &shell,
-                        &executor,
-                        executor.cancel_registry(),
-                    );
+                    let outcome = match owner.as_ref() {
+                        Some(owner) => crate::control_core::parse_and_execute_control_line_with_recording_owner(
+                            line, &shell, &executor, executor.cancel_registry(), owner,
+                        ),
+                        None => crate::control_core::parse_and_execute_control_line(
+                            line, &shell, &executor, executor.cancel_registry(),
+                        ),
+                    };
                     let session_core = ControlPeerSession::new(session_id.as_str());
                     let dispatch_result = publisher
                         .lock()
@@ -415,6 +444,103 @@ fn describe_pty_bridge_frame(frame: &ControlFrame) -> (&'static str, usize) {
     }
 }
 
+fn is_flow_line(line: &str) -> bool {
+    line.trim_start().strip_prefix('@').is_some_and(|s| {
+        s.trim_start().get(..4).is_some_and(|prefix| prefix.eq_ignore_ascii_case("flow"))
+    })
+}
+
 fn to_io_error(err: impl std::fmt::Display) -> io::Error {
     io::Error::other(err.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn flow_logging_never_counts_payload_for_supported_prefixes() {
+        assert!(is_flow_line("@flow:{}"));
+        assert!(is_flow_line("  @FLOW:{}"));
+        assert!(is_flow_line("@ flow:{}"));
+        assert!(!is_flow_line("@ping"));
+    }
+
+    #[test]
+    fn recording_bridge_rejects_wrong_generation_and_nonce_before_dispatch() {
+        let mut config = zenoh::Config::default();
+        config.insert_json5("mode", "\"peer\"").unwrap();
+        config
+            .insert_json5("scouting/multicast/enabled", "false")
+            .unwrap();
+        config.insert_json5("listen/endpoints", "[]").unwrap();
+        let session = zenoh::open(config).wait().unwrap();
+        let id = uuid::Uuid::new_v4().to_string();
+        let namespace = format!("record-test-{}", uuid::Uuid::new_v4());
+        let inbound = build_session_to_daemon_key_with_root("rdog", &namespace, &id);
+        let outbound = build_session_to_control_key_with_root("rdog", &namespace, &id);
+        let replies = session.declare_subscriber(outbound).wait().unwrap();
+        let credential = crate::control_recording::owner::BridgeCredential::new();
+        let wire = credential.wire();
+        let other = crate::control_recording::owner::BridgeCredential::new().wire();
+        let (generation, nonce) = wire.split_once(':').unwrap();
+        let (other_generation, other_nonce) = other.split_once(':').unwrap();
+        let bridges = Arc::new(Mutex::new(HashSet::from([id.clone()])));
+        let route = super::super::ControlQueryRoute {
+            keyexpr_root: "rdog",
+            namespace: &namespace,
+            control_key: "rdog/test/control",
+        };
+        open_daemon_session_bridge(
+            &session,
+            &route,
+            &id,
+            "/bin/sh",
+            SystemControlActionExecutor::default(),
+            bridges,
+            Some(credential),
+        )
+        .unwrap();
+
+        for wrong in [
+            format!("{generation}:{other_nonce}"),
+            format!("{other_generation}:{nonce}"),
+        ] {
+            session
+                .put(
+                    inbound.clone(),
+                    format!(
+                        "__rdog_record_bridge__:{wrong}\n@record-stop#7:{{\"recording_id\":\"x\"}}"
+                    ),
+                )
+                .wait()
+                .unwrap();
+            let sample = replies
+                .recv_timeout(Duration::from_secs(2))
+                .unwrap()
+                .unwrap();
+            let response = sample.payload().try_to_string().unwrap();
+            assert!(response.contains("invalid recording bridge credential"));
+        }
+        session
+            .put(
+                inbound.clone(),
+                format!("__rdog_record_bridge__:{wire}\n@ping#7"),
+            )
+            .wait()
+            .unwrap();
+        let sample = replies
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap()
+            .unwrap();
+        let response = sample.payload().try_to_string().unwrap();
+        assert!(response.contains("\"id\":7"));
+        session
+            .put(
+                inbound,
+                format!("__rdog_record_bridge__:{wire}\n__rdog_session_close__:{id}"),
+            )
+            .wait()
+            .unwrap();
+    }
 }

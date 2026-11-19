@@ -28,6 +28,19 @@ pub enum AuthCommand {
 
 #[derive(Subcommand, Debug)]
 pub enum Command {
+    Coding {
+        #[command(flatten)]
+        options: crate::coding::cli::CodingCli,
+    },
+
+    #[command(hide = true)]
+    CodingHost {
+        #[arg(long)]
+        session_dir: PathBuf,
+        #[arg(long)]
+        instance_id: String,
+    },
+
     /// 可视化反馈子进程 (由 daemon 自动 spawn 绘制识别框/点击标记, 不要手动调用)
     Overlay,
 
@@ -249,11 +262,11 @@ pub enum Command {
         command: ConfigCommand,
     },
 
-    /// Recording control-plane CLI dispatcher
-    /// (转译 5 个子命令到 line-control `@record-*` 文本行)
+    /// 在同一 owner 连接内交互录制并校验导出文件.
     Record {
-        #[clap(subcommand)]
-        subcommand: RecordSubcommand,
+        #[clap(long)]
+        artifacts_dir: Option<PathBuf>,
+        #[clap(long)]
         url: Option<String>,
         #[clap(long, value_enum)]
         transport: Option<Transport>,
@@ -265,6 +278,22 @@ pub enum Command {
         entry_point: Vec<String>,
         #[clap(value_name = "TARGET_OR_HOST", num_args = 0..=2)]
         host: Vec<String>,
+    },
+
+    /// 读取录制事实或执行经授权的来源关联计划.
+    Replay {
+        #[clap(long)]
+        inspect: bool,
+        #[clap(long)]
+        plan: Option<PathBuf>,
+        #[clap(long)]
+        namespace: Option<String>,
+        #[clap(long = "target-name")]
+        target_name: Option<String>,
+        #[clap(long = "entry-point")]
+        entry_point: Vec<String>,
+        #[clap(value_name = "JOURNAL", required = true, num_args = 1..)]
+        journals: Vec<PathBuf>,
     },
 
     /// Structured diff of two AxSnapshot JSON files
@@ -353,35 +382,6 @@ pub enum UiScriptCommand {
     },
 }
 
-/// `rdog record <subcommand>` 的 5 个 line-control subcommand。
-#[derive(Subcommand, Debug)]
-pub enum RecordSubcommand {
-    /// `@record-start` - 打开一个新 recording session
-    Start {
-        /// semantic (默认) 或 physical profile
-        #[clap(long, default_value = "semantic")]
-        profile: String,
-        /// 自动停止时长, humantime 三件套 (s/m/h). 不传表示手动 stop.
-        /// 例: `--duration 30s` / `--duration 1.5m` / `--duration 1h`.
-        /// Rust 字段名直接是 `duration` (不是 `duration_ms`), 让 clap 自动产生
-        /// `--duration` flag; 类型 `Option<u64>` 表示毫秒。
-        #[clap(long, value_parser = crate::control_recording::humantime::parse_humantime)]
-        duration: Option<u64>,
-    },
-    /// `@record-status` - 查询当前 session 状态
-    Status,
-    /// `@record-mark` - 在 journal 写一个 mark barrier
-    Mark {
-        #[clap(long)]
-        label: Option<String>,
-        #[clap(long)]
-        redaction_active: bool,
-    },
-    /// `@record-stop` - 收尾 + 提交 + 单帧 base64 `@savefile` delivery
-    Stop,
-    /// `@record-cancel` - 立即停止, 不提交 Bundle
-    Cancel,
-}
 
 #[derive(Subcommand, Debug)]
 pub enum ConfigCommand {

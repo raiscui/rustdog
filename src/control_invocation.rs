@@ -511,6 +511,41 @@ fn collect_control_exchange_from_frames(
     frames: Vec<control_frames::ControlFrame>,
     artifacts_dir: &Path,
 ) -> std::io::Result<ControlLineExchange> {
+    let (header, payload) = line.split_once(':').unwrap_or((line, ""));
+    if header.split('#').next() == Some("@record-stop") {
+        let request: serde_json::Value = serde_json::from_str(payload)
+            .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "无效录制停止请求"))?;
+        let recording_id = request.get("recording_id").and_then(|v| v.as_str())
+            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "停止请求缺少 recording_id"))?;
+        let expected_id = header.split_once('#').map(|(_, id)| id.parse::<u64>())
+            .transpose().map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "无效请求编号"))?;
+        if let Some(control_frames::ControlFrame::SaveFile(file)) = frames.first() {
+            if file.request_id != expected_id {
+                return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "录制文件请求编号不匹配"));
+            }
+        }
+        let path = crate::control_recording::delivery::save_recording(&frames, recording_id, artifacts_dir)?;
+        let response_line = frames.iter().find_map(|frame| match frame {
+            control_frames::ControlFrame::ResponseLine(line) => Some(line.clone()),
+            _ => None,
+        });
+        return Ok(ControlLineExchange {
+            line: line.to_owned(),
+            task_events: Vec::new(),
+            frames,
+            response_line,
+            artifacts: vec![ControlArtifactRecord {
+                filename: path.file_name().unwrap_or_default().to_string_lossy().into_owned(),
+                mime: "application/x-ndjson".to_owned(),
+                path,
+                width: None,
+                height: None,
+            }],
+        });
+    }
+    if line.starts_with("@record-") && frames.iter().any(|frame| matches!(frame, control_frames::ControlFrame::SaveFile(_))) {
+        return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "非 stop 录制响应不能包含文件"));
+    }
     let mut task_events = Vec::new();
 
     let mut response_line = None::<String>;

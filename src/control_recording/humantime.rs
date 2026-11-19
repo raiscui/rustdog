@@ -1,10 +1,10 @@
-//! humantime three-piece parser for `rdog record start --duration`.
+//! 录制交互入口的 duration 解析.
 //!
-//! 语法: `<integer>[.<fraction>]? <unit>?` where unit ∈ {`s`, `m`, `h`}.
+//! 语法: `<integer>[.<fraction>]? <unit>`, unit 为 `s`, `m` 或 `h`.
 //! - 整数部分必填, 小数部分可选 (允许在 s/m/h 之前).
 //! - 数字和单位之间的空白可选 (`30s` / `30 s` / `1.5m` 全部接受).
 //! - 单位大小写敏感 (只接受小写).
-//! - 上下界校验独立于 parser, 见 `validate_duration_ms`.
+//! - 范围由 `session::RecordingPolicy::new` 统一校验.
 
 use std::fmt;
 
@@ -53,11 +53,11 @@ pub fn parse_humantime(input: &str) -> Result<u64, HumantimeError> {
         "h" => 3_600_000_u64,
         other => return Err(HumantimeError::UnknownUnit(other.to_owned())),
     };
-    let scaled = scale_number(&number_part, unit_ms)?;
+    let scaled = scale_number(number_part, unit_ms)?;
     Ok(scaled)
 }
 
-fn split_number_and_unit(input: &str) -> Result<(String, &str), HumantimeError> {
+fn split_number_and_unit(input: &str) -> Result<(&str, &str), HumantimeError> {
     // 找最后一个 ASCII 字母字符, 数字 + 字母分界。
     let bytes = input.as_bytes();
     let mut last_digit_idx = None;
@@ -72,7 +72,7 @@ fn split_number_and_unit(input: &str) -> Result<(String, &str), HumantimeError> 
     if split_at >= bytes.len() {
         return Err(HumantimeError::MissingUnit);
     }
-    let number = input[..split_at].to_owned();
+    let number = &input[..split_at];
     let unit = &input[split_at..];
     let unit = unit.trim();
     if unit.is_empty() {
@@ -131,40 +131,3 @@ fn scale_integer(whole: &str, unit_ms: u64) -> Result<u64, HumantimeError> {
     let n: u64 = whole.parse().map_err(|_| HumantimeError::Overflow)?;
     n.checked_mul(unit_ms).ok_or(HumantimeError::Overflow)
 }
-
-/// 上下界校验, 跟 ticket #22 协议一致。
-///
-/// - `0` 合法
-/// - `100 ms` 合法
-/// - `1 hour` 合法
-/// - 其它返 `DurationTooSmall` / `DurationTooLarge`
-pub fn validate_duration_ms(value: u64) -> Result<(), DurationLimitError> {
-    // 0 视为不传 duration 的同义词 (protocol layer 才会发 0, controller 直接当 manual).
-    if value == 0 {
-        return Ok(());
-    }
-    if value < 100 {
-        return Err(DurationLimitError::TooSmall);
-    }
-    if value > 3_600_000 {
-        return Err(DurationLimitError::TooLarge);
-    }
-    Ok(())
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DurationLimitError {
-    TooSmall,
-    TooLarge,
-}
-
-impl fmt::Display for DurationLimitError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::TooSmall => f.write_str("DURATION_TOO_SMALL"),
-            Self::TooLarge => f.write_str("DURATION_TOO_LARGE"),
-        }
-    }
-}
-
-impl std::error::Error for DurationLimitError {}

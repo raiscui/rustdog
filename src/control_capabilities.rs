@@ -6,6 +6,7 @@ use std::{
 };
 
 pub const CAPABILITIES_SCHEMA: &str = "rdog.capabilities.v1";
+pub(crate) const REPLAY_FLOW_CONTRACT: &str = "rdog.protected-replay-flow.v1";
 
 /// 生成当前 daemon 可直接返回给 control peer 的能力报告。
 ///
@@ -18,13 +19,13 @@ pub fn current_capabilities_report_value() -> io::Result<Value> {
     serde_json::to_value(report).map_err(|err| io::Error::other(err.to_string()))
 }
 
-/// 生成当前 daemon 可直接返回给 control peer 的能力报告 JSON。
-///
-/// JSON 字符串只是 line-control 兼容边界。内部组合方应该优先使用
-/// `current_capabilities_report_value`,避免后续再把字符串解析回结构化值。
-pub fn current_capabilities_report_json() -> io::Result<String> {
-    let value = current_capabilities_report_value()?;
-    serde_json::to_string(&value).map_err(|err| io::Error::other(err.to_string()))
+pub(crate) fn capabilities_for_coding(available: bool) -> io::Result<Value> {
+    let mut report = current_capabilities_report_value()?;
+    report["capabilities"]["coding"] = serde_json::json!({
+        "status": if available { "available" } else { "permission_denied" },
+        "backend": "authenticated_zenoh_router",
+    });
+    Ok(report)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -61,6 +62,8 @@ struct CapabilitySet {
     /// CDP lane (specs/cdp-remote-lane-spec.md): 配置驱动的开关态,
     /// 非 platform probe — disabled 是安全默认而非"平台不支持"。
     cdp: CapabilityEntry,
+    recording: RecordingCapability,
+    replay: ReplayCapability,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -84,6 +87,52 @@ enum CapabilityStatus {
     PermissionDenied,
     Unsupported,
     Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct RecordingCapability {
+    status: CapabilityStatus,
+    backend: &'static str,
+    control_schema: &'static str,
+    journal_schema: &'static str,
+    coverage: &'static str,
+    text_mode: &'static str,
+    shortcut_mode: &'static str,
+    replay_status: &'static str,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct ReplayCapability {
+    status: CapabilityStatus,
+    flow_contract: &'static str,
+    protected_parameter: bool,
+    identity_projection: bool,
+    guarded_pointer: bool,
+}
+
+fn replay_capability(snapshot: &CapabilityProbeSnapshot) -> ReplayCapability {
+    let windows = snapshot.os_kind == CapabilityOs::Windows;
+    ReplayCapability {
+        status: if windows { CapabilityStatus::Available } else { CapabilityStatus::Unsupported },
+        flow_contract: REPLAY_FLOW_CONTRACT,
+        protected_parameter: windows,
+        identity_projection: windows,
+        guarded_pointer: windows,
+    }
+}
+
+fn recording_capability(snapshot: &CapabilityProbeSnapshot) -> RecordingCapability {
+    let windows = snapshot.os_kind == CapabilityOs::Windows;
+    RecordingCapability {
+        status: if windows { CapabilityStatus::Unknown } else { CapabilityStatus::Unsupported },
+        backend: if windows { "windows-owned-helper" } else { "unavailable" },
+        control_schema: crate::control_recording::control_handler::RECORD_CONTROL_SCHEMA,
+        journal_schema: crate::control_recording::journal::JOURNAL_SCHEMA,
+        coverage: "best_effort",
+        text_mode: crate::control_recording::TEXT_MODE,
+        shortcut_mode: "unsupported_without_evidence",
+        replay_status: "not_compiled",
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -166,6 +215,8 @@ fn build_capabilities_report(snapshot: CapabilityProbeSnapshot) -> CapabilitiesR
         window_control: window_control_capability(&snapshot),
         type_text: type_text_capability(&snapshot),
         cdp: cdp_capability(),
+        recording: recording_capability(&snapshot),
+        replay: replay_capability(&snapshot),
     };
 
     let status = if report_has_permission_denied(&capabilities) {
@@ -651,5 +702,21 @@ mod tests {
             report.capabilities.screenshot.status,
             CapabilityStatus::Available
         );
+    }
+
+    #[test]
+    fn replay_contract_is_available_only_on_windows() {
+        let snapshot = |os_kind| CapabilityProbeSnapshot {
+            os_kind,
+            platform: PlatformDescriptor { os: "test".into(), family: "test".into(), arch: "test".into() },
+            macos_accessibility: PermissionProbe::NotApplicable,
+            macos_screen_recording: PermissionProbe::NotApplicable,
+        };
+        let windows = replay_capability(&snapshot(CapabilityOs::Windows));
+        assert_eq!(windows.status, CapabilityStatus::Available);
+        assert!(windows.protected_parameter && windows.identity_projection && windows.guarded_pointer);
+        let linux = replay_capability(&snapshot(CapabilityOs::Linux));
+        assert_eq!(linux.status, CapabilityStatus::Unsupported);
+        assert!(!linux.protected_parameter && !linux.identity_projection && !linux.guarded_pointer);
     }
 }

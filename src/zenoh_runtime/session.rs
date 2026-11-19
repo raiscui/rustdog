@@ -55,6 +55,73 @@ pub fn open_router_session_tls(
     )
 }
 
+/// 录制 owner 只通过无自动连接的认证 TLS router 返回.
+pub fn open_recording_router_session_tls(
+    listen_endpoints: &[String],
+    users_file: &std::path::Path,
+    tls_listen: &TlsListenConfig,
+) -> io::Result<Session> {
+    require_tls_endpoints(listen_endpoints)?;
+    let mut config = session_config_auth(
+        "router",
+        &[],
+        listen_endpoints,
+        None,
+        Some(users_file),
+        Some(tls_listen),
+    )?;
+    restrict_recording_links(&mut config, &[], listen_endpoints)?;
+    zenoh::open(config).wait().map_err(to_io_error)
+}
+
+/// 显式 TLS endpoint 与已有凭据构成录制客户端的信任边界.
+pub fn open_recording_client_session(connect_endpoints: &[String]) -> io::Result<Session> {
+    require_tls_endpoints(connect_endpoints)?;
+    let credentials = client_credentials_cached().ok_or_else(|| {
+        io::Error::new(io::ErrorKind::PermissionDenied, "recording requires authentication")
+    })?;
+    let mut config = session_config_auth(
+        "client",
+        connect_endpoints,
+        &[],
+        Some(&credentials),
+        None,
+        None,
+    )?;
+    restrict_recording_links(&mut config, connect_endpoints, &[])?;
+    zenoh::open(config).wait().map_err(to_io_error)
+}
+
+fn require_tls_endpoints(endpoints: &[String]) -> io::Result<()> {
+    if endpoints.is_empty() || endpoints.iter().any(|endpoint| !endpoint.starts_with("tls/")) {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "recording requires explicit TLS-only endpoints",
+        ));
+    }
+    Ok(())
+}
+
+fn restrict_recording_links(
+    config: &mut Config,
+    connect_endpoints: &[String],
+    listen_endpoints: &[String],
+) -> io::Result<()> {
+    // 空列表也必须写入, 否则 Config::default 会保留默认 listener.
+    for (key, value) in [
+        ("connect/endpoints", json_string_list(connect_endpoints)),
+        ("listen/endpoints", json_string_list(listen_endpoints)),
+        ("scouting/multicast/enabled", "false".to_owned()),
+        ("scouting/multicast/listen", "false".to_owned()),
+        ("scouting/multicast/autoconnect", "[]".to_owned()),
+        ("scouting/gossip/enabled", "false".to_owned()),
+        ("scouting/gossip/autoconnect", "[]".to_owned()),
+    ] {
+        config.insert_json5(key, &value).map_err(to_io_error)?;
+    }
+    Ok(())
+}
+
 /// daemon 侧 TLS listen 注入 (键路径以 zenoh 1.8 DEFAULT_CONFIG 为准)。
 fn insert_tls_listen_config(config: &mut Config, tls: &TlsListenConfig) -> io::Result<()> {
     let insert = |config: &mut Config, key: &str, value: &str| -> io::Result<()> {
@@ -221,6 +288,27 @@ fn open_session_auth(
     users_file: Option<&std::path::Path>,
     tls_listen: Option<&TlsListenConfig>,
 ) -> io::Result<Session> {
+    let config = session_config_auth(
+        mode,
+        connect_endpoints,
+        listen_endpoints,
+        client_credentials,
+        users_file,
+        tls_listen,
+    )?;
+    zenoh::open(config)
+        .wait()
+        .map_err(|err| to_open_session_error(err, listen_endpoints))
+}
+
+fn session_config_auth(
+    mode: &str,
+    connect_endpoints: &[String],
+    listen_endpoints: &[String],
+    client_credentials: Option<&crate::auth_credentials::AuthCredentials>,
+    users_file: Option<&std::path::Path>,
+    tls_listen: Option<&TlsListenConfig>,
+) -> io::Result<Config> {
     let mut config = Config::default();
     config
         .insert_json5("mode", &json5_string(mode)?)
@@ -273,9 +361,7 @@ fn open_session_auth(
             .map_err(to_io_error)?;
     }
 
-    zenoh::open(config)
-        .wait()
-        .map_err(|err| to_open_session_error(err, listen_endpoints))
+    Ok(config)
 }
 
 fn autodiscover_router_endpoints(discovery_timeout: Duration) -> io::Result<Vec<String>> {

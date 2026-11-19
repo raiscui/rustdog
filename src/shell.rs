@@ -14,7 +14,6 @@ use crate::{
         build_shell_command, shell_program_name, ControlActionExecutor, SystemControlActionExecutor,
     },
     control_client_input::ControlStdinAction,
-    control_core::parse_and_execute_control_line,
     control_display::ControlResponseDisplay,
     control_frames::ControlExecutionOutcome,
     control_session::{
@@ -327,14 +326,20 @@ fn run_agent_shell_over_stream(stream: TcpStream, shell: &str) -> io::Result<()>
     run_agent_shell_over_transport(transport, shell, first_message)
 }
 
+fn recording_owner_for_peer(peer: io::Result<std::net::SocketAddr>) -> Option<crate::control_recording::owner::RecordingOwner> {
+    peer.ok().filter(|addr| addr.ip().is_loopback())
+        .map(|_| crate::control_recording::owner::RecordingOwner::new())
+}
+
 pub fn run_control_receiver_over_stream(stream: TcpStream, shell: &str) -> io::Result<()> {
+    let owner = recording_owner_for_peer(stream.peer_addr());
     match detect_control_session_mode(&stream)? {
         ControlSessionMode::Disconnected => Ok(()),
         ControlSessionMode::JsonAgent => run_agent_shell_over_stream(stream, shell),
         ControlSessionMode::LineControl => {
             let executor = SystemControlActionExecutor::default();
             let transport = ControlTransport::from_tcp_stream(stream)?;
-            run_control_receiver_with_transport(transport, shell, &executor)
+            run_control_receiver_with_transport(transport, shell, &executor, owner)
         }
     }
 }
@@ -343,15 +348,17 @@ pub fn run_control_receiver_over_websocket_stream(
     stream: TcpStream,
     shell: &str,
 ) -> io::Result<()> {
+    let owner = recording_owner_for_peer(stream.peer_addr());
     let transport = accept_websocket_stream(stream)?;
     let executor = SystemControlActionExecutor::default();
-    run_control_receiver_with_transport(transport, shell, &executor)
+    run_control_receiver_with_transport(transport, shell, &executor, owner)
 }
 
 fn run_control_receiver_with_transport<E: ControlActionExecutor>(
     mut transport: ControlTransport,
     shell: &str,
     executor: &E,
+    owner: Option<crate::control_recording::owner::RecordingOwner>,
 ) -> io::Result<()> {
     let Some(first_message): Option<String> = transport.read_message()? else {
         return Ok(());
@@ -364,9 +371,9 @@ fn run_control_receiver_with_transport<E: ControlActionExecutor>(
         ControlSessionMode::LineControl => {
             if let Some(request) = crate::pty_control::parse_pty_open_request(&first_message)? {
                 run_pty_receiver_with_transport(&mut transport, request)?;
-                return run_control_receiver_messages(transport, shell, executor, None);
+                return run_control_receiver_messages(transport, shell, executor, None, owner);
             }
-            run_control_receiver_messages(transport, shell, executor, Some(first_message))
+            run_control_receiver_messages(transport, shell, executor, Some(first_message), owner)
         }
         ControlSessionMode::Disconnected => Ok(()),
     }
@@ -383,7 +390,7 @@ fn run_control_receiver_with_executor<E: ControlActionExecutor>(
     let mut writer = stream;
 
     while let Some(line) = read_control_request_line(&mut reader)? {
-        let outcome = parse_and_execute_control_line(
+        let outcome = crate::control_core::parse_and_execute_control_line(
             &line,
             shell,
             executor,
@@ -437,6 +444,7 @@ fn run_control_receiver_messages<E: ControlActionExecutor>(
     shell: &str,
     executor: &E,
     first_message: Option<String>,
+    owner: Option<crate::control_recording::owner::RecordingOwner>,
 ) -> io::Result<()> {
     let mut pending = first_message;
 
@@ -459,12 +467,15 @@ fn run_control_receiver_messages<E: ControlActionExecutor>(
             continue;
         }
 
-        let outcome = parse_and_execute_control_line(
-            &line,
-            shell,
-            executor,
-            &crate::cancellation::CancelRegistry::new(),
-        );
+        let registry = crate::cancellation::CancelRegistry::new();
+        let outcome = match owner.as_ref() {
+            Some(owner) => crate::control_core::parse_and_execute_control_line_with_recording_owner(
+                &line, shell, executor, &registry, owner,
+            ),
+            None => crate::control_core::parse_and_execute_control_line(
+                &line, shell, executor, &registry,
+            ),
+        };
         if outcome.outbound_frames.is_empty() {
             continue;
         }

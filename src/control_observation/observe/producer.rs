@@ -128,6 +128,7 @@ fn collect_window_section(
         limit: request.limit,
         include_state: true,
         include_recipes: false,
+        identity_only: false,
     })?;
     let observation = response.observation.clone();
     let value = json!({
