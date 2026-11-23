@@ -1,5 +1,12 @@
 # WORKLOG: rustdog
 
+## [2026-11-23] RAI-128: iroh 原型本地构建基线
+
+- 从 `5588fcb75bdb77735e4e43af19234a82b822735d` 在隔离分支导入公开原型 `eaaf5a677021f1d737d58597b4696e37532c42b2`。保留两侧历史, 无冲突; 导入时原型子树与上游完全一致。
+- 提交: b2768fd31020c342a3d8b39cf44ebd61d0ab7ace
+- 原型 `Cargo.toml` 精确 pin `iroh` 和 `iroh-relay` 到 `=1.4.1`, 原型 `Cargo.lock` 未变。Linux x86_64 干净 `cargo +1.91.0 build --release --locked` 通过。主线根目录同命令在默认特性下被锁定的 `oar-ocr` 0.9.2 依赖族的 Rust 1.95 要求拦截。主线清单和锁文件未变, 尚无合并依赖图, 未取得原工作树的修复。
+- 提交: be1a9b9e80960cf97dd230f7239f7bc9ffb11e97
+
 ## [2026-11-06] Persistent coding sessions
 
 - Added authenticated coding sessions, their RPC dependency, and protocol documentation.
