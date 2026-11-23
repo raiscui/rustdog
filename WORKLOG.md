@@ -1,5 +1,11 @@
 # WORKLOG: rustdog
 
+## [2026-11-24] RAI-168: 正式 CLI iroh 只读闭环（仅本地）
+
+- 同一个默认 OCR release 二进制启动只允许回环的 rendezvous（内嵌 HTTPS relay 和 QAD）、daemon 和 control。按名探活经 iroh 直连或 relay 均返回 `id:42/pong:true`; 另一临时身份在两条路径完成握手后被 daemon 明确拒绝, ping handler 均未进入。
+- 复用既有 parser、ping handler、`ControlPeerSession` 和扩展后的 `ControlTransport`。旧 TCP、WebSocket、Zenoh 的针对性集成测试、Linux unixpipe 单元和 CLI 冒烟通过。临时契约见 [rdog-crossnet-p1-readonly](specs/rdog-crossnet-p1-readonly.md); 未接入 bulk、其他业务命令或生产授权。
+- 提交: 15f3ce1f032a65be4638b328fe83ad789a77e648
+
 ## [2026-11-23] RAI-137: iroh 回环准入探针（仅本地）
 
 - 用 RAI-131 实编的 iroh 1.4.1 在仅回环的网络命名空间验证三个连接。两次获准连接都收到 `@ping#42` 的结构化 pong; 不在测试 allowlist 的临时身份完成 QUIC 握手后被明确关闭, ping handler 未进入。
