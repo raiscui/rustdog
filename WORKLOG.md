@@ -1,5 +1,12 @@
 # WORKLOG: rustdog
 
+## [2026-11-24] RAI-178: P2-A ACL 与租约可否定实验（仅本地）
+
+- 显式注入单调时钟, 验证租约截止边界、可续租、云不可达不可续租、目标绑定、查询 ACL 和旧实例 fence；5/5 通过。
+- 提交: c4fea5f44912a1c0b1fb6cdb9ef3c63229d701b8
+- 用 18 个实际 iroh 回环进程验证可注册/续租/查询、同名竞争、旧实例注销拒绝、握手后准入拒绝、现实短租约与云失联回收。保持正式 CLI/config/协议/锁不变；既有回归通过。临时契约见 [rdog-crossnet-p2-a-probe](specs/rdog-crossnet-p2-a-probe.md)，生产凭证、政策和撤销顺序维持 HOLD。
+- 提交: a81553f32c2ee0341154240b64747c04dd4f1bce
+
 ## [2026-11-24] RAI-168: 正式 CLI iroh 只读闭环（仅本地）
 
 - 同一个默认 OCR release 二进制启动只允许回环的 rendezvous（内嵌 HTTPS relay 和 QAD）、daemon 和 control。按名探活经 iroh 直连或 relay 均返回 `id:42/pong:true`; 另一临时身份在两条路径完成握手后被 daemon 明确拒绝, ping handler 均未进入。
