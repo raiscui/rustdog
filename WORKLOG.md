@@ -1,5 +1,11 @@
 # WORKLOG: rustdog
 
+## [2026-11-23] RAI-137: iroh 回环准入探针（仅本地）
+
+- 用 RAI-131 实编的 iroh 1.4.1 在仅回环的网络命名空间验证三个连接。两次获准连接都收到 `@ping#42` 的结构化 pong; 不在测试 allowlist 的临时身份完成 QUIC 握手后被明确关闭, ping handler 未进入。
+- 只添加手工测试探针, 没有改动根锁、默认特性、生产命令或授权策略。探针没有调用生产 ping handler, 不代表官方 CLI 已接入 iroh。
+- 提交: 34909253345e4af4841efd4866df55dbb7418b68
+
 ## [2026-11-23] RAI-131: Rust 1.95 根包默认构建（仅本地）
 
 - 从 RAI-128 私有基线建立候选, 根包保留默认 OCR, 精确 pin `iroh` 与 `iroh-relay` 为 `=1.4.1`, 后者启用 `server`。Linux x86_64 在空目标目录用 Rust 1.95.0 进行 `cargo build --release --locked --bin rdog` 成功, 编译事件确认 OCR 和两条 iroh 依赖均参与实际构建。
