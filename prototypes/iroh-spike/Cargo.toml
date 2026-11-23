@@ -9,8 +9,8 @@ edition = "2021"
 publish = false
 
 [dependencies]
-iroh = "1.4"
-iroh-relay = { version = "1.4", features = ["server"] }
+iroh = "=1.4.1"
+iroh-relay = { version = "=1.4.1", features = ["server"] }
 tokio = { version = "1", features = ["full"] }
 anyhow = "1"
 serde = { version = "1", features = ["derive"] }
