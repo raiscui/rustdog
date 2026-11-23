@@ -1,5 +1,11 @@
 # WORKLOG: rustdog
 
+## [2026-11-23] RAI-131: Rust 1.95 根包默认构建（仅本地）
+
+- 从 RAI-128 私有基线建立候选, 根包保留默认 OCR, 精确 pin `iroh` 与 `iroh-relay` 为 `=1.4.1`, 后者启用 `server`。Linux x86_64 在空目标目录用 Rust 1.95.0 进行 `cargo build --release --locked --bin rdog` 成功, 编译事件确认 OCR 和两条 iroh 依赖均参与实际构建。
+- 同一 release 二进制在仅 loopback 的网络命名空间完成既有、带认证的 Zenoh `@ping#42`, 返回原 request ID 和 `pong: true`。没有执行 shell 指令或改动控制行为, 未验证 OCR 推理或跨网 P2P。
+- 提交: 77215d8cd21fdb38b5117eadd8823257c5e4c84f
+
 ## [2026-11-23] RAI-128: fixed-echo 原型恢复（仅本地）
 
 - 从 Mac 仓库仍可读取的 Git 快照 `50d55eba98fecef92f08354464aeb55a14b8a5d7` 恢复四个原型源码/测试文件。逐文件核对模式、大小、Git blob 和 SHA-256。原临时工作树已不存在, 不将快照视为对其他未提交文件的完整保全。
