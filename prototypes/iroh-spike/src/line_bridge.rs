@@ -1,15 +1,10 @@
-//! **async ↔ sync 桥** —— 这就是 rdog 引入 iroh 的"侵入面"的实体。
+//! 独立固定 echo 原型使用的 async 和 sync 行桥。
 //!
-//! rdog 现有的 `ControlTransport`(`src/control_transport.rs:42`)是**同步 trait**:
-//! `read_message()` / `write_message()` / `set_read_timeout()`,daemon 是线程式的,
-//! `src/` 里没有 async runtime。
-//!
-//! iroh 是 tokio-based 的 async QUIC。所以要接上,必须有这样一层胶水。
-//! 本文件刻意**写成生产可用的样子**(而不是 toy),因为它的行数就是选型成本。
+//! 本桥尚未接入 rdog 的控制通道, 不能据此推断正式集成成本。
 //!
 //! 设计要点:
 //! - 读侧:一个 async 任务把 QUIC 字节流切成行,经 `mpsc` 交给同步侧;
-//! - 写侧:同步侧把整行塞进 `mpsc`,一个 async 任务负责 `write_all` + `flush`;
+//! - 写侧:同步侧发送整行并等待 async 任务的 `write_all` + `flush` 结果;
 //! - 同步侧用 `blocking_recv()` —— 它在 async 上下文里会 panic,所以同步角色
 //!   必须跑在**独立线程**上(rdog 的 daemon 本来就是线程式的,天然满足)。
 
@@ -17,7 +12,7 @@ use std::io;
 
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
-    sync::mpsc,
+    sync::{mpsc, oneshot},
 };
 
 use crate::protocol::MAX_CONTROL_MESSAGE_BYTES;
@@ -25,7 +20,7 @@ use crate::protocol::MAX_CONTROL_MESSAGE_BYTES;
 /// 行桥。同步侧使用。
 pub struct LineBridge {
     /// 写侧:同步 → async。
-    tx: mpsc::UnboundedSender<Vec<u8>>,
+    tx: mpsc::UnboundedSender<(Vec<u8>, oneshot::Sender<io::Result<()>>)>,
     /// 读侧:async → 同步。`blocking_recv` 只能在非 async 上下文用。
     rx: mpsc::UnboundedReceiver<Option<String>>,
 }
@@ -43,7 +38,7 @@ impl LineBridge {
         let (line_tx, line_rx) = mpsc::unbounded_channel::<Option<String>>();
         tokio::spawn(reader_task(recv, line_tx));
 
-        let (byte_tx, byte_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+        let (byte_tx, byte_rx) = mpsc::unbounded_channel();
         tokio::spawn(writer_task(send, byte_rx));
 
         Self {
@@ -66,9 +61,13 @@ impl LineBridge {
         let mut buf = Vec::with_capacity(line.len() + 1);
         buf.extend_from_slice(line.as_bytes());
         buf.push(b'\n');
+        let (done_tx, done_rx) = oneshot::channel();
         self.tx
-            .send(buf)
-            .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "对端已关闭"))
+            .send((buf, done_tx))
+            .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "写入任务已退出"))?;
+        done_rx
+            .blocking_recv()
+            .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "写入结果未返回"))?
     }
 
     /// 读一行。语义对齐 `ControlTransport::read_message`。
@@ -120,16 +119,77 @@ where
 }
 
 /// 写侧任务:行字节 → 字节流。
-async fn writer_task<W>(mut send: W, mut rx: mpsc::UnboundedReceiver<Vec<u8>>)
+async fn writer_task<W>(
+    mut send: W,
+    mut rx: mpsc::UnboundedReceiver<(Vec<u8>, oneshot::Sender<io::Result<()>>)>,
+)
 where
     W: AsyncWrite + Unpin,
 {
-    while let Some(bytes) = rx.recv().await {
-        if send.write_all(&bytes).await.is_err() {
+    while let Some((bytes, done)) = rx.recv().await {
+        let result = match send.write_all(&bytes).await {
+            Ok(()) => send.flush().await,
+            Err(err) => Err(err),
+        };
+        let failed = result.is_err();
+        let _ = done.send(result);
+        if failed {
             break;
         }
-        if send.flush().await.is_err() {
-            break;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::{
+        pin::Pin,
+        task::{Context, Poll},
+    };
+
+    struct FailingWriter {
+        fail_flush: bool,
+    }
+
+    impl AsyncWrite for FailingWriter {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            _: &mut Context<'_>,
+            data: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            if self.fail_flush {
+                Poll::Ready(Ok(data.len()))
+            } else {
+                Poll::Ready(Err(io::Error::new(io::ErrorKind::BrokenPipe, "注入写入失败")))
+            }
         }
+        fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Err(io::Error::new(io::ErrorKind::ConnectionReset, "注入刷新失败")))
+        }
+        fn poll_shutdown(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn reports_write_failure_on_the_same_call() {
+        let mut bridge = LineBridge::new(tokio::io::empty(), FailingWriter { fail_flush: false });
+        let result = tokio::task::spawn_blocking(move || bridge.write_message("echo"))
+            .await
+            .unwrap();
+        let error = result.unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::BrokenPipe);
+        assert_eq!(error.to_string(), "注入写入失败");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn reports_flush_failure_on_the_same_call() {
+        let mut bridge = LineBridge::new(tokio::io::empty(), FailingWriter { fail_flush: true });
+        let result = tokio::task::spawn_blocking(move || bridge.write_message("echo"))
+            .await
+            .unwrap();
+        let error = result.unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::ConnectionReset);
+        assert_eq!(error.to_string(), "注入刷新失败");
     }
 }

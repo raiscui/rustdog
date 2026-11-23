@@ -202,7 +202,7 @@ async fn run_relay(opts: &Opts) -> Result<()> {
     Ok(())
 }
 
-/// **daemon 角色**:绑定 endpoint,接受连接,用 rdog 的行协议应答。
+/// 接受连接并回显固定数据。
 async fn run_node(opts: &Opts) -> Result<()> {
     let relay_url = parse_relay(&opts.relay)?;
     let endpoint = build_endpoint(relay_url.clone(), opts.quic_port, false, &opts.bind_addr).await?;
@@ -231,22 +231,34 @@ async fn run_node(opts: &Opts) -> Result<()> {
     // → rdog 的 daemon 必须能**并发**服务多个控制会话,这里如实记下来。
     loop {
         let incoming = endpoint.accept().await.context("accept 失败")?;
-        let conn = incoming.await.context("握手失败")?;
-        tracing::info!(remote = %conn.remote_id(), "已建立连接");
-        let (send, recv) = conn.accept_bi().await.context("accept_bi 失败")?;
-        let bridge = LineBridge::new(recv, send);
-        thread::spawn(move || {
-            let mut bridge = bridge;
-            if let Err(err) = serve_lines(&mut bridge) {
+        tokio::spawn(async move {
+            let result = async {
+                let conn = incoming.await.context("握手失败")?;
+                tracing::info!(remote = %conn.remote_id(), "已建立连接");
+                let (send, recv) = conn.accept_bi().await.context("accept_bi 失败")?;
+                let bridge = LineBridge::new(recv, send);
+                thread::spawn(move || {
+                    let _conn = conn;
+                    let mut bridge = bridge;
+                    if let Err(err) = serve_lines(&mut bridge) {
+                        tracing::warn!(%err, "连接处理结束");
+                    }
+                });
+                Ok::<(), anyhow::Error>(())
+            }.await;
+            if let Err(err) = result {
                 tracing::warn!(%err, "连接处理结束");
             }
         });
     }
-    Ok(())
 }
 
-/// **控制端角色**:连过去,发一行,读一行。
+/// 发送固定数据并检查两次完整回显。
 async fn run_client(opts: &Opts) -> Result<()> {
+    anyhow::ensure!(
+        (1..=MAX_CONTROL_MESSAGE_BYTES).contains(&opts.bytes),
+        "--bytes 超出范围"
+    );
     let relay_url = parse_relay(&opts.relay)?;
     let target: EndpointAddr =
         serde_json::from_str(&opts.target).context("解析 --target(EndpointAddr JSON)")?;
@@ -272,51 +284,28 @@ async fn run_client(opts: &Opts) -> Result<()> {
     let (send, recv) = conn.open_bi().await.context("open_bi 失败")?;
     let mut bridge = LineBridge::new(recv, send);
 
-    // 同步侧必须在非 async 上下文用 blocking_recv —— 丢到独立线程。
-    let (tx, rx) = std_mpsc::channel::<Option<String>>();
+    let (tx, rx) = std_mpsc::channel();
     let req_bytes = opts.bytes;
+    let linger = opts.linger;
     thread::spawn(move || {
-        let req = protocol::big_line(req_bytes);
-        let t0 = std::time::Instant::now();
-        let send_res = bridge.write_message(&req);
-        let resp = bridge.read_message();
-        let elapsed = t0.elapsed();
-        let resp_len = resp
-            .as_ref()
-            .ok()
-            .and_then(|o| o.as_ref())
-            .map(|s| s.len())
-            .unwrap_or(0);
-        let resp_head = resp
-            .as_ref()
-            .ok()
-            .and_then(|o| o.as_ref())
-            .map(|s| s.chars().take(48).collect::<String>())
-            .unwrap_or_default();
-        let _ = tx.send(Some(format!(
-            "elapsed_ms={} req_len={} send={:?} resp_len={} resp_head={:?}",
-            elapsed.as_millis(),
-            req.len(),
-            send_res.is_ok(),
-            resp_len,
-            resp_head,
-        )));
+        let result = (|| -> Result<()> {
+            let req = protocol::big_line(req_bytes);
+            for exchange in 0..2 {
+                if exchange == 1 {
+                    std::thread::sleep(std::time::Duration::from_secs(linger));
+                }
+                bridge.write_message(&req)?;
+                let resp = bridge.read_message()?.context("回显前连接关闭")?;
+                anyhow::ensure!(resp == req, "回显内容不一致");
+            }
+            Ok(())
+        })();
+        let _ = tx.send(result);
     });
-
-    match rx.recv() {
-        Ok(Some(line)) => println!("{line}"),
-        _ => eprintln!("客户端未拿到响应"),
-    }
-
-    // --linger: 拿到响应后不立刻退出,给 iroh 的路径升级(打洞成功 → Direct)留窗口。
-    // relay 路径是"先建立连接",直连是"后续升级"(UPGRADE_INTERVAL=60s)。
-    if opts.linger > 0 {
-        tracing::info!(secs = opts.linger, "保持连接,等待路径升级");
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(opts.linger);
-        while std::time::Instant::now() < deadline {
-            std::thread::sleep(std::time::Duration::from_secs(1));
-        }
-    }
+    let result = rx.recv().context("回显线程退出")?;
+    endpoint.close().await;
+    result?;
+    println!("exchanges=2 exact=true");
     Ok(())
 }
 
@@ -341,6 +330,7 @@ async fn build_endpoint(
     let relay_cfg = iroh_relay::RelayConfig::new(relay_url, Some(quic));
     let relay_map = RelayMap::from_iter([relay_cfg]);
     let mut builder = Endpoint::builder(presets::Minimal)
+        .portmapper_config(iroh::endpoint::PortmapperConfig::Disabled)
         .relay_mode(RelayMode::Custom(relay_map))
         // ALPN 必须两端都注册:connect 侧传 ALPN,accept 侧要声明支持它,
         // 否则握手报 "peer doesn't support any known protocol"。
@@ -357,16 +347,10 @@ async fn build_endpoint(
     Ok(endpoint)
 }
 
-/// **rdog 行协议的服务端循环**:读一行,回一行(等长)。
+/// 原样回显每一行。
 fn serve_lines(bridge: &mut LineBridge) -> Result<()> {
     while let Some(line) = bridge.read_message()? {
-        let len = line.len();
-        // 回一个等长的 `@response {ok} len=<n>` 行 —— 顺带测大响应方向。
-        let head = format!("@response {{ok}} len={len} ");
-        let mut resp = String::with_capacity(len);
-        resp.push_str(&head);
-        resp.extend(std::iter::repeat_n('y', len.saturating_sub(head.len())));
-        bridge.write_message(&resp)?;
+        bridge.write_message(&line)?;
     }
     Ok(())
 }
