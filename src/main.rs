@@ -38,6 +38,7 @@ mod control_flow;
 mod control_frames;
 mod control_gui_bench;
 mod control_invocation;
+mod control_iroh;
 mod control_line_read;
 mod control_mouse;
 mod control_observation;
@@ -302,6 +303,7 @@ fn run(opts: input::Opts) -> Result<(), String> {
         Command::Control {
             url,
             transport,
+            iroh_config,
             namespace,
             target_name,
             entry_point,
@@ -324,6 +326,23 @@ fn run(opts: input::Opts) -> Result<(), String> {
             // 共享同一条 transport(TCP / WebSocket / Zenoh session bridge)。
             // ------------------------------------------------------------
             let (host, one_shot_lines) = control_invocation::extract_one_shot_lines(host);
+            if transport == Some(Transport::Iroh) {
+                let ([name], [line]) = (host.as_slice(), one_shot_lines.as_slice()) else {
+                    return Err("iroh control requires NAMESPACE/NAME and one @ping request".into());
+                };
+                if url.is_some() || namespace.is_some() || target_name.is_some()
+                    || !entry_point.is_empty() || pty || pty_close.is_some()
+                    || pty_detach.is_some() || pty_attach.is_some() || ui_script.is_some()
+                    || !pty_command.is_empty()
+                {
+                    return Err("iroh control only supports the ping one-shot profile".into());
+                }
+                let path = iroh_config.as_deref().ok_or("iroh control requires --iroh-config")?;
+                return control_iroh::run_control(path, name, line).map_err(|err| err.to_string());
+            }
+            if iroh_config.is_some() {
+                return Err("--iroh-config requires --transport iroh".into());
+            }
             if !one_shot_lines.is_empty() {
                 if one_shot_lines.iter().any(|line| line.is_empty()) {
                     return Err("one-shot line 不能为空".to_string());
@@ -638,6 +657,9 @@ fn run(opts: input::Opts) -> Result<(), String> {
             println!("agent starting: name={name}, namespace={namespace}, daemon={daemon_name}");
             agent_runtime::run_agent(&session, &config).map_err(|err| err.to_string())?;
         }
+        Command::Rendezvous { config } => {
+            control_iroh::run_rendezvous(&config).map_err(|err| err.to_string())?;
+        }
         Command::Daemon {
             config,
             transport,
@@ -645,6 +667,13 @@ fn run(opts: input::Opts) -> Result<(), String> {
             daemon_name,
             entry_point,
         } => {
+            if transport == Some(Transport::Iroh) {
+                if namespace.is_some() || daemon_name.is_some() || !entry_point.is_empty() {
+                    return Err("iroh daemon identity and target name come from its profile".into());
+                }
+                let path = config.as_deref().ok_or("iroh daemon requires --config")?;
+                return control_iroh::run_daemon(path).map_err(|err| err.to_string());
+            }
             let daemon_config = config::load_daemon_config_unvalidated(config.as_deref())
                 .map_err(|err| err.to_string())?;
             // CDP lane 开关随配置初始化 (默认 false; spec 安全模型: 默认关闭)
@@ -700,6 +729,7 @@ fn run(opts: input::Opts) -> Result<(), String> {
                 Transport::ZenohPeerLegacy => {
                     return Err(control_invocation::LEGACY_ZENOH_PEER_TRANSPORT_ERROR.to_string())
                 }
+                Transport::Iroh => unreachable!("iroh daemon is dispatched before legacy config"),
             }
         }
         Command::HiddenDaemon {

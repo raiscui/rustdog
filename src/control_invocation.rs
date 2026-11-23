@@ -101,6 +101,7 @@ pub(crate) fn resolve_control_invocation(
             resolve_zenoh_control(url, namespace, target_name, entry_point, positional)
         }
         Some(Transport::ZenohPeerLegacy) => Err(LEGACY_ZENOH_PEER_TRANSPORT_ERROR.to_string()),
+        Some(Transport::Iroh) => Err("iroh is only supported by the ping one-shot CLI".into()),
         None => resolve_inferred_control(url, namespace, target_name, entry_point, positional),
     }
 }

@@ -15,6 +15,7 @@ pub struct Opts {
 pub enum Transport {
     Tcp,
     Zenoh,
+    Iroh,
     #[value(name = "zenoh-peer", hide = true)]
     ZenohPeerLegacy,
 }
@@ -107,6 +108,10 @@ pub enum Command {
         /// 避免 clap 默认值吞掉“用户没有显式选择”的语义。
         #[clap(long, value_enum)]
         transport: Option<Transport>,
+
+        /// Loopback-only iroh control profile (JSON).
+        #[clap(long)]
+        iroh_config: Option<PathBuf>,
 
         /// Namespace used by the Zenoh router/client control profile.
         #[clap(long)]
@@ -215,6 +220,12 @@ pub enum Command {
         /// Explicit Zenoh entry point(s) of the daemon router
         #[clap(long = "entry-point")]
         entry_point: Vec<String>,
+    },
+
+    /// Start the provisional loopback iroh directory and relay.
+    Rendezvous {
+        #[clap(short, long)]
+        config: PathBuf,
     },
 
     Daemon {

@@ -49,6 +49,7 @@ pub enum ControlTransportKind {
 pub(crate) enum ControlTransport {
     Tcp(TcpLineTransport),
     WebSocket(WebSocketTextTransport),
+    Iroh(crate::control_iroh::IrohLineTransport),
 }
 
 pub(crate) enum ControlTransportWriter {
@@ -108,6 +109,7 @@ impl ControlTransport {
         match self {
             Self::Tcp(transport) => transport.read_message(),
             Self::WebSocket(transport) => transport.read_message(),
+            Self::Iroh(transport) => transport.read_message(),
         }
     }
 
@@ -115,6 +117,7 @@ impl ControlTransport {
         match self {
             Self::Tcp(transport) => transport.write_message(message),
             Self::WebSocket(transport) => transport.write_message(message),
+            Self::Iroh(transport) => transport.write_message(message),
         }
     }
 
@@ -126,6 +129,7 @@ impl ControlTransport {
             Self::WebSocket(transport) => transport
                 .try_clone_writer()
                 .map(ControlTransportWriter::WebSocket),
+            Self::Iroh(_) => Err(io::Error::new(ErrorKind::Unsupported, "iroh ping is one-shot")),
         }
     }
 
@@ -133,6 +137,10 @@ impl ControlTransport {
         match self {
             Self::Tcp(transport) => transport.set_read_timeout(timeout),
             Self::WebSocket(transport) => transport.set_read_timeout(timeout),
+            Self::Iroh(transport) => {
+                transport.set_read_timeout(timeout);
+                Ok(())
+            }
         }
     }
 
@@ -140,6 +148,7 @@ impl ControlTransport {
         match self {
             Self::Tcp(transport) => transport.close(),
             Self::WebSocket(transport) => transport.close(),
+            Self::Iroh(transport) => transport.close(),
         }
     }
 }

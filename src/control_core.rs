@@ -59,12 +59,7 @@ pub fn execute_explicit_control_request<E: ControlActionExecutor>(
         // 响应体复用 executor 分支的同一个构造函数, 保证两条路径的
         // ping 形状永远一致 —— 响应体是 `build_ping_response_json` 的
         // 单一真相源, 这里不再拼裸串。
-        ControlCommand::Ping => ControlExecutionOutcome::from_response_line(
-            render_structured_success_response(
-                request.request_id,
-                &build_ping_response_json(shell),
-            ),
-        ),
+        ControlCommand::Ping => execute_ping(request.request_id, shell),
         ControlCommand::Record(record_request) => {
             handle_record_command(record_request, request.request_id)
         }
@@ -581,6 +576,13 @@ fn cdp_denied_or_error_response(
             render_control_action_error_response(request_id, &io::Error::other(err.to_string())),
         )
     }
+}
+
+pub(crate) fn execute_ping(request_id: Option<u64>, shell: &str) -> ControlExecutionOutcome {
+    ControlExecutionOutcome::from_response_line(render_structured_success_response(
+        request_id,
+        &build_ping_response_json(shell),
+    ))
 }
 
 pub fn render_structured_success_response(request_id: Option<u64>, value_json: &str) -> String {
