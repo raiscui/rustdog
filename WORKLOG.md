@@ -344,3 +344,9 @@ cmd.exe 在 verbatim cwd 下的告警原文 (中文 Windows 版), 并用普通 c
 
 用户授权下已cargo install默认功能+稳定签名并启动mac.lab, Windows默认功能release+DirectML经原任务切换到PID63640/Session1/5555. 正式隐窗和子树取消通过, 配置/任务未变. target无占用后cargo clean回收9.9GiB, 清理后双端fresh ping通过. 详细验收与回退材料索引见WORKLOG__yino_rdog_feedback.md, 全仓/完整OCR/GUI/PTY等边界保留. 部署账本提交:
 - 提交: a80d0bebedf6675816bf23f3cd7465f082124aaf
+
+## 2026-11-25 RAI-183: PTY 桥接错误后回收当前会话
+
+共享 PTY 桥接在不可恢复的传输读写错误后请求回收; runtime 只处理仍归该控制端的会话。正常退出、显式 detach 和重附语义保持, Iroh 正式入口未开放 PTY。
+隔离 Linux 定向用例 7/7, Rust 1.95 默认特性 release 构建通过。既有 PTY 套件 5/8, 三条红项均在等价基线复现; 未将全套标为通过。
+- 提交: 15aadeb34fac8f5ba9bb6512798900332cb70f98
