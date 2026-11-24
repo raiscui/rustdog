@@ -34,6 +34,9 @@ pub enum PtyRuntimeCommand {
     Close {
         reason: String,
     },
+    Disconnect {
+        control_session_id: String,
+    },
     Detach {
         reason: String,
     },
@@ -48,6 +51,7 @@ pub enum PtyRuntimeCommand {
 
 pub struct AttachedPtySession {
     session_id: String,
+    control_session_id: String,
     input_tx: mpsc::Sender<PtyRuntimeCommand>,
     output_rx: mpsc::Receiver<ControlFrame>,
 }
@@ -79,6 +83,12 @@ impl AttachedPtySession {
                 reason: reason.to_owned(),
             })
             .map_err(|_| io::Error::other("PTY runtime command channel closed"))
+    }
+
+    pub(crate) fn disconnect(&self) {
+        let _ = self.input_tx.send(PtyRuntimeCommand::Disconnect {
+            control_session_id: self.control_session_id.clone(),
+        });
     }
 
     pub fn detach(&self, reason: &str) -> io::Result<()> {
@@ -277,7 +287,7 @@ pub fn attach_active_pty_session(
     session
         .input_tx
         .send(PtyRuntimeCommand::Attach {
-            control_session_id,
+            control_session_id: control_session_id.clone(),
             cols: request.cols,
             rows: request.rows,
             sender: frame_tx,
@@ -290,6 +300,7 @@ pub fn attach_active_pty_session(
 
     Ok(Some(AttachedPtySession {
         session_id: request.session_id,
+        control_session_id,
         input_tx: session.input_tx,
         output_rx: frame_rx,
     }))
@@ -653,6 +664,19 @@ pub fn open_attached_pty_session(request: PtyOpenRequest) -> io::Result<Attached
                     terminal_outcome = Some(PtyTerminalOutcome::Closed { reason });
                     let _ = kill_pty_child(&close_handle);
                 }
+                Ok(PtyRuntimeCommand::Disconnect { control_session_id }) => {
+                    if terminal_outcome.is_none()
+                        && terminal_reason.lock().is_ok_and(|reason| reason.is_none())
+                        && attached_control_session_id.lock().is_ok_and(|owner| {
+                            owner.as_deref() == Some(control_session_id.as_str())
+                        })
+                    {
+                        terminal_outcome = Some(PtyTerminalOutcome::Closed {
+                            reason: "control_disconnect".to_owned(),
+                        });
+                        let _ = kill_pty_child(&close_handle);
+                    }
+                }
                 Ok(PtyRuntimeCommand::Detach { reason }) => {
                     if let Ok(mut attached) = attached_control_session_id.lock() {
                         *attached = None;
@@ -727,6 +751,7 @@ pub fn open_attached_pty_session(request: PtyOpenRequest) -> io::Result<Attached
     });
 
     Ok(AttachedPtySession {
+        control_session_id: session_id.clone(),
         session_id,
         input_tx,
         output_rx: frame_rx,

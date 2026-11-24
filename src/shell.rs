@@ -508,13 +508,31 @@ fn bridge_attached_pty_session(
     }
 }
 
+trait PtyBridgeIo {
+    fn read_message(&mut self) -> io::Result<Option<String>>;
+    fn write_message(&mut self, message: &str) -> io::Result<()>;
+}
+
+impl PtyBridgeIo for ControlTransport {
+    fn read_message(&mut self) -> io::Result<Option<String>> {
+        self.read_message()
+    }
+
+    fn write_message(&mut self, message: &str) -> io::Result<()> {
+        self.write_message(message)
+    }
+}
+
 fn bridge_attached_pty_session_inner(
-    transport: &mut ControlTransport,
+    transport: &mut impl PtyBridgeIo,
     session: &mut crate::pty_control::AttachedPtySession,
 ) -> io::Result<()> {
     loop {
         while let Ok(frame) = session.try_recv_frame() {
-            transport.write_message(frame.to_wire_message().as_str())?;
+            if let Err(err) = transport.write_message(frame.to_wire_message().as_str()) {
+                session.disconnect();
+                return Err(err);
+            }
             if matches!(
                 ControlPeerSession::lifecycle_decision_for_frame(&frame),
                 ControlPeerLifecycleDecision::TerminalComplete { .. }
@@ -586,7 +604,10 @@ fn bridge_attached_pty_session_inner(
                     err.kind(),
                     io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock
                 ) => {}
-            Err(err) => return Err(err),
+            Err(err) => {
+                session.disconnect();
+                return Err(err);
+            }
         }
     }
 }
@@ -979,3 +1000,6 @@ fn parse_json_string(bytes: &[u8], index: &mut usize) -> io::Result<String> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(all(test, target_os = "linux"))]
+mod pty_bridge_tests;
