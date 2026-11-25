@@ -350,3 +350,8 @@ cmd.exe 在 verbatim cwd 下的告警原文 (中文 Windows 版), 并用普通 c
 共享 PTY 桥接在不可恢复的传输读写错误后请求回收; runtime 只处理仍归该控制端的会话。正常退出、显式 detach 和重附语义保持, Iroh 正式入口未开放 PTY。
 隔离 Linux 定向用例 7/7, Rust 1.95 默认特性 release 构建通过。既有 PTY 套件 5/8, 三条红项均在等价基线复现; 未将全套标为通过。
 - 提交: 15aadeb34fac8f5ba9bb6512798900332cb70f98
+
+## 2026-11-25 RAI-179 U1: Iroh 会话准入契约
+
+冻结 H1=B、H2=A、H3=C 及角色、拒绝和终态边界。默认入口保持 ping-only；隔离入口验证与运行证据留给后续单元。
+- 提交: 1d1d5c65ab980c24cacf1b7a5080bf32ebcb4907
