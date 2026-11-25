@@ -402,3 +402,12 @@ U3 行为基线: 同一矩阵里 `direct` 在直连被阻断时失败、`auto` �
 发现的真实缺陷与修法: 同一 endpoint 先试 direct 后, 远端状态会持续重试已知路径, relay 候选拿不到新的 QAD 应答; 改为 `candidate_endpoint` 按候选建 endpoint, 并给 relay 候选独立的 `RELAY_CONNECT` 预算。
 环境红: `control_pty`/`control_tty` 的 3 个用例在 `b5205ba` 与候选顶点红集完全相同(util-linux `script` BrokenPipe), 与候选无关。
 - 提交: bc2eb93
+
+## 2026-11-25 RAI-305 复核处置: 续租与终止
+
+非作者只读复核给出 2 条 high, 均经代码核对成立并已修:
+- 续租帧被桥写进远端 PTY 的 stdin, `Admission::renew` 在会话期间永不执行, 会话到 TTL 被 sweep 杀掉。红基线: 2s 租约下终端出现三份 `{"op":"renew",...}`、客户端报 `remote PTY closed before natural exit: lease_expired`(`receipts/u7/baseline-red.log`, sha256 a1ae1e37…)。修法: lane 侧 `LaneIo` 在桥接层截获 `Handshake::Renew` 并处理, 同处拒绝指向异主体会话的 close。绿: `receipts/u7/green-loopback.log`(sha256 4844d3f4…)、三主机 `receipts/u7/routable.log` 12/12 含 `renewal: a session outlived its lease deadline`。
+- 回收只杀直接子进程, 无进程组信号、无 SIGKILL 升级。修法: `signal_pty_group` 按 `setsid` 会话首进程发组信号 + `escalate_pty_group_kill` 在 `PTY_KILL_GRACE` 后升级。绿: `revocation: grandchild 93065 died with the session`(回环)、`grandchild 93337`(三主机)。
+另修: 一条租约只持有一个 PTY(`Admission::session_of`, 否则 detach 后同租约再开会让第一条永久无回收路径)、grant 容忍 `CLOCK_SKEW`、`MIN_SESSION_TTL` 下限(夹具租约 300ms 同步改为 1000ms, 断言未削弱)。规格已同步并指回 `LaneIo` / `signal_pty_group` / `escalate_pty_group_kill` / `CLOCK_SKEW` / `MIN_SESSION_TTL` / `PTY_KILL_GRACE`。
+未修(记录在报告): 3s 写超时按断链处理、租约表不裁剪、attach 的 200ms 到期窗口、`iroh is only supported by the ping one-shot CLI` 的陈旧注释。
+- 提交: 8b99436
