@@ -17,6 +17,9 @@ use std::{
 const MAX_SESSION_TTL: Duration = Duration::from_secs(15 * 60);
 const EXPIRED: (u32, &str) = (45, "lease_expired");
 
+#[path = "lifecycle_tests.rs"]
+mod lifecycle_tests;
+
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Claims {
