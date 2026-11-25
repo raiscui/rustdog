@@ -13,6 +13,7 @@ use std::{
     path::{Path, PathBuf},
     time::Duration,
 };
+use uuid::Uuid;
 
 const MAX_SESSION_TTL: Duration = Duration::from_secs(15 * 60);
 const EXPIRED: (u32, &str) = (45, "lease_expired");
@@ -97,10 +98,24 @@ struct Policy {
     revoked: BTreeSet<EndpointId>,
 }
 
-fn save_policy(path: &Path, policy: &Policy) -> io::Result<()> {
+#[derive(Debug)]
+enum PersistenceError {
+    NotWritten(io::Error),
+    DurabilityUnconfirmed(io::Error),
+}
+
+fn save_policy(path: &Path, policy: &Policy) -> Result<(), PersistenceError> {
+    save_policy_with(path, policy, |parent| File::open(parent)?.sync_all())
+}
+
+fn save_policy_with(
+    path: &Path,
+    policy: &Policy,
+    sync_parent: impl FnOnce(&Path) -> io::Result<()>,
+) -> Result<(), PersistenceError> {
     let parent = path.parent().expect("private policy has a parent");
     let staging = parent.join(format!("policy-{}.tmp", uuid::Uuid::new_v4()));
-    let result = (|| {
+    let replaced = (|| {
         let mut file = OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -108,19 +123,27 @@ fn save_policy(path: &Path, policy: &Policy) -> io::Result<()> {
             .open(&staging)?;
         file.write_all(&serde_json::to_vec(policy)?)?;
         file.sync_all()?;
-        fs::rename(&staging, path)?;
-        File::open(parent)?.sync_all()
+        fs::rename(&staging, path)
     })();
-    if result.is_err() {
+    if let Err(err) = replaced {
         let _ = fs::remove_file(&staging);
+        return Err(PersistenceError::NotWritten(err));
     }
-    result
+    sync_parent(parent).map_err(PersistenceError::DurabilityUnconfirmed)
+}
+
+#[derive(Clone, Copy)]
+enum LeaseState {
+    Granted,
+    Live(u32),
+    TerminationPending,
+    Finished,
 }
 
 struct Lease {
     peer: EndpointId,
     expires_ms: u64,
-    revoked: bool,
+    state: LeaseState,
 }
 
 #[derive(Clone, Copy)]
@@ -129,10 +152,17 @@ enum Revocation {
     Emergency,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum RevocationProgress {
+    Persisted,
+    TerminationPending(Vec<Uuid>),
+}
+
 struct Admission {
     path: PathBuf,
     target: EndpointId,
-    leases: HashMap<String, Lease>,
+    leases: HashMap<Uuid, Lease>,
+    durability_unconfirmed: bool,
 }
 
 impl Admission {
@@ -141,6 +171,7 @@ impl Admission {
             path,
             target,
             leases: HashMap::new(),
+            durability_unconfirmed: false,
         }
     }
 
@@ -155,7 +186,8 @@ impl Admission {
             .expires_ms
             .checked_sub(claims.issued_ms)
             .ok_or(Rejection::Denied)?;
-        if peer != claims.issuer
+        if self.durability_unconfirmed
+            || peer != claims.issuer
             || self.target != claims.target
             || !policy.allow.contains(&peer)
             || policy.revoked.contains(&peer)
@@ -173,28 +205,32 @@ impl Admission {
 
     fn admit(&mut self, peer: EndpointId, grant: &SignedGrant, now_ms: u64) -> AdmissionResult<()> {
         self.validate(peer, grant, now_ms)?;
-        let id = &grant.claims.session;
-        if self.leases.contains_key(id) {
+        let id = Uuid::parse_str(&grant.claims.session).map_err(|_| Rejection::Denied)?;
+        if self.leases.contains_key(&id) {
             return Err(Rejection::Denied);
         }
         self.leases.insert(
-            id.clone(),
+            id,
             Lease {
                 peer,
                 expires_ms: grant.claims.expires_ms,
-                revoked: false,
+                state: LeaseState::Granted,
             },
         );
         Ok(())
     }
 
     fn active(&self, peer: EndpointId, id: &str, now_ms: u64) -> AdmissionResult<&Lease> {
-        let lease = self.leases.get(id).ok_or(Rejection::Denied)?;
-        if lease.peer != peer || lease.revoked {
+        let id = Uuid::parse_str(id).map_err(|_| Rejection::Denied)?;
+        let lease = self.leases.get(&id).ok_or(Rejection::Denied)?;
+        if lease.peer != peer || matches!(lease.state, LeaseState::TerminationPending) {
             return Err(Rejection::Denied);
         }
         if lease.expires_ms <= now_ms {
             return Err(Rejection::Expired);
+        }
+        if matches!(lease.state, LeaseState::Finished) {
+            return Err(Rejection::Denied);
         }
         Ok(lease)
     }
@@ -206,25 +242,89 @@ impl Admission {
             return Err(Rejection::Denied);
         }
         self.validate(peer, grant, now_ms)?;
-        self.leases.get_mut(id).expect("validated lease").expires_ms = grant.claims.expires_ms;
+        self.leases
+            .get_mut(&Uuid::parse_str(id).unwrap())
+            .expect("validated lease")
+            .expires_ms = grant.claims.expires_ms;
         Ok(())
     }
 
-    fn revoke(&mut self, peer: EndpointId, mode: Revocation) -> io::Result<Vec<String>> {
-        let mut policy = self.policy()?;
+    fn record_fixture(&mut self, id: &str, pid: u32) {
+        self.leases
+            .get_mut(&Uuid::parse_str(id).unwrap())
+            .expect("fixture has a lease")
+            .state = LeaseState::Live(pid);
+    }
+
+    fn confirm_terminal(&mut self, id: &str) {
+        self.leases
+            .get_mut(&Uuid::parse_str(id).unwrap())
+            .expect("fixture has a lease")
+            .state = LeaseState::Finished;
+    }
+
+    fn revoke(
+        &mut self,
+        peer: EndpointId,
+        mode: Revocation,
+        now_ms: u64,
+    ) -> Result<RevocationProgress, PersistenceError> {
+        self.revoke_with(peer, mode, now_ms, save_policy)
+    }
+
+    fn revoke_with(
+        &mut self,
+        peer: EndpointId,
+        mode: Revocation,
+        now_ms: u64,
+        save: impl FnOnce(&Path, &Policy) -> Result<(), PersistenceError>,
+    ) -> Result<RevocationProgress, PersistenceError> {
+        let mut policy = self.policy().map_err(PersistenceError::NotWritten)?;
         policy.revoked.insert(peer);
-        save_policy(&self.path, &policy)?;
-        let mut ended = Vec::new();
+        match save(&self.path, &policy) {
+            Ok(()) => self.durability_unconfirmed = false,
+            Err(err) => {
+                self.durability_unconfirmed |=
+                    matches!(err, PersistenceError::DurabilityUnconfirmed(_));
+                return Err(err);
+            }
+        }
+        let mut pending = Vec::new();
         if matches!(mode, Revocation::Emergency) {
             for (id, lease) in &mut self.leases {
-                if lease.peer == peer && !lease.revoked {
-                    lease.revoked = true;
-                    ended.push(id.clone());
+                if lease.peer != peer {
+                    continue;
+                }
+                match lease.state {
+                    LeaseState::Live(pid) if lease.expires_ms > now_ms && pid_running(pid) => {
+                        lease.state = LeaseState::TerminationPending;
+                        pending.push(*id);
+                    }
+                    LeaseState::TerminationPending => pending.push(*id),
+                    _ => {}
                 }
             }
         }
-        Ok(ended)
+        Ok(if pending.is_empty() {
+            RevocationProgress::Persisted
+        } else {
+            RevocationProgress::TerminationPending(pending)
+        })
     }
+}
+
+fn pid_exists(pid: u32) -> bool {
+    Path::new("/proc").join(pid.to_string()).exists()
+}
+
+fn pid_running(pid: u32) -> bool {
+    fs::read_to_string(Path::new("/proc").join(pid.to_string()).join("stat"))
+        .ok()
+        .and_then(|stat| {
+            stat.rsplit_once(") ")
+                .and_then(|(_, tail)| tail.chars().next())
+        })
+        .is_some_and(|state| !matches!(state, 'Z' | 'X' | 'x'))
 }
 
 struct TempRoot(PathBuf);
@@ -397,10 +497,11 @@ fn revocation_is_durable_and_modes_differ() {
     admission
         .admit(peer, &grant(&client, target.public(), &id, 0), 0)
         .unwrap();
-    assert!(admission
-        .revoke(peer, Revocation::Graceful)
-        .unwrap()
-        .is_empty());
+    admission.record_fixture(&id, std::process::id());
+    assert_eq!(
+        admission.revoke(peer, Revocation::Graceful, 0).unwrap(),
+        RevocationProgress::Persisted
+    );
     assert!(admission.active(peer, &id, 999).is_ok());
     let other = grant(&client, target.public(), &other_id, 1);
     assert_eq!(admission.admit(peer, &other, 1), Err(Rejection::Denied));
@@ -411,8 +512,8 @@ fn revocation_is_durable_and_modes_differ() {
     let mut restarted = Admission::new(admission.path.clone(), target.public());
     assert_eq!(restarted.admit(peer, &other, 1), Err(Rejection::Denied));
     assert_eq!(
-        admission.revoke(peer, Revocation::Emergency).unwrap(),
-        [id.clone()]
+        admission.revoke(peer, Revocation::Emergency, 1).unwrap(),
+        RevocationProgress::TerminationPending(vec![Uuid::parse_str(&id).unwrap()])
     );
     assert_eq!(
         admission.active(peer, &id, 1).err(),
@@ -450,4 +551,117 @@ fn accepted_admission_can_open_only_the_fixed_fixture() {
         std::thread::sleep(Duration::from_millis(5));
     }
     println!("pre-admission no fixture; accepted fixture pid={pid} reaped");
+}
+
+#[test]
+fn retry_keeps_emergency_termination_pending_until_confirmed() {
+    let (_root, target, client, mut admission) = setup();
+    let peer = client.public();
+    let id = Uuid::new_v4();
+    admission
+        .admit(
+            peer,
+            &grant(&client, target.public(), &id.to_string(), 0),
+            0,
+        )
+        .unwrap();
+    admission.record_fixture(&id.to_string(), std::process::id());
+    assert_eq!(
+        admission.revoke(peer, Revocation::Emergency, 0).unwrap(),
+        RevocationProgress::TerminationPending(vec![id])
+    );
+    assert_eq!(
+        admission.revoke(peer, Revocation::Emergency, 1).unwrap(),
+        RevocationProgress::TerminationPending(vec![id]),
+        "retry must keep an unconfirmed termination pending"
+    );
+    admission.confirm_terminal(&id.to_string());
+    assert_eq!(
+        admission.revoke(peer, Revocation::Emergency, 2).unwrap(),
+        RevocationProgress::Persisted
+    );
+}
+
+#[test]
+fn only_live_unexpired_fixtures_enter_emergency_pending() {
+    let (_root, target, client, mut admission) = setup();
+    let peer = client.public();
+    let mut add = |start, live| {
+        let id = Uuid::new_v4();
+        let key = id.to_string();
+        admission
+            .admit(peer, &grant(&client, target.public(), &key, start), start)
+            .unwrap();
+        if live {
+            admission.record_fixture(&key, std::process::id());
+        }
+        id
+    };
+    add(0, true);
+    add(500, false);
+    let closed = add(500, true);
+    let live = add(500, true);
+    admission.confirm_terminal(&closed.to_string());
+    assert_eq!(
+        admission.revoke(peer, Revocation::Emergency, 1000).unwrap(),
+        RevocationProgress::TerminationPending(vec![live])
+    );
+}
+
+#[test]
+fn policy_write_reports_pre_replace_and_unconfirmed_durability() {
+    let (_root, target, client, mut admission) = setup();
+    let peer = client.public();
+    let id = Uuid::new_v4();
+    let proof = grant(&client, target.public(), &id.to_string(), 0);
+    admission.admit(peer, &proof, 0).unwrap();
+    admission.record_fixture(&id.to_string(), std::process::id());
+    let before = admission.revoke_with(peer, Revocation::Emergency, 1, |path, policy| {
+        let missing_dir = path.with_file_name("does-not-exist").join("policy.json");
+        save_policy(&missing_dir, policy)
+    });
+    assert!(
+        matches!(before, Err(PersistenceError::NotWritten(err)) if err.kind() == io::ErrorKind::NotFound)
+    );
+    assert!(!admission.policy().unwrap().revoked.contains(&peer));
+
+    let uncertain = admission.revoke_with(peer, Revocation::Emergency, 2, |path, policy| {
+        save_policy_with(path, policy, |_| {
+            Err(io::Error::other("test directory sync failure"))
+        })
+    });
+    assert!(
+        matches!(uncertain, Err(PersistenceError::DurabilityUnconfirmed(err)) if err.kind() == io::ErrorKind::Other)
+    );
+    assert!(admission.policy().unwrap().revoked.contains(&peer));
+    assert!(admission.active(peer, &id.to_string(), 2).is_ok());
+    let fresh = grant(&client, target.public(), &Uuid::new_v4().to_string(), 2);
+    assert_eq!(admission.admit(peer, &fresh, 2), Err(Rejection::Denied));
+    assert_eq!(
+        admission.revoke(peer, Revocation::Emergency, 3).unwrap(),
+        RevocationProgress::TerminationPending(vec![id])
+    );
+}
+
+#[test]
+fn admitted_id_has_one_identity_within_an_instance() {
+    let (_root, target, client, mut admission) = setup();
+    let peer = client.public();
+    let id = uuid::Uuid::new_v4();
+    admission
+        .admit(
+            peer,
+            &grant(&client, target.public(), &id.to_string(), 0),
+            0,
+        )
+        .unwrap();
+    assert_eq!(
+        admission.admit(
+            peer,
+            &grant(&client, target.public(), &id.simple().to_string(), 1),
+            1
+        ),
+        Err(Rejection::Denied),
+        "one session ID must not open a second lease in this instance"
+    );
 }

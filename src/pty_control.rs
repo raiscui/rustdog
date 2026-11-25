@@ -196,6 +196,11 @@ pub fn close_active_pty_session(session_id: &str) -> io::Result<bool> {
     close_active_pty_session_with_reason(session_id, "force_close")
 }
 
+#[cfg(all(test, target_os = "linux"))]
+pub(crate) fn close_test_pty_fixture(session_id: &str, reason: &str) -> io::Result<bool> {
+    close_active_pty_session_with_reason(session_id, reason)
+}
+
 #[cfg(unix)]
 fn close_active_pty_session_with_reason(session_id: &str, reason: &str) -> io::Result<bool> {
     let session = {
