@@ -441,3 +441,14 @@ U3 行为基线: 同一矩阵里 `direct` 在直连被阻断时失败、`auto` �
 - 验收(回环 13/13 `receipts/u8/loopback.log`, 三主机 15/15 `receipts/u8/routable.log`): `policy list` 显示指纹与备注; `policy revoke` 返回 0 后新会话 `iroh_target_denied`、现存会话仍活; `policy emergency` 现存会话被终止且终帧 `lease_revoked`; 重启 daemon 后仍拒新。
 - 规格新增"操作者路径"一节(命令、落盘语义、两种失败、重启语义)。
 - 提交: 9f30ce3
+
+## 2026-11-25 RAI-305 第三轮复核处置(U7/U8)
+
+复核给 6 条, 全部处置:
+- 作废检查在写锁之外(并发写者可绕): `FrameGuard::ensure_intact`, 拿到流锁后再查一次。
+- `abort_broken_frame` 对第一次失败不可达(会话其实以 `control_disconnect` 收尾): lane 写失败改带哨兵, 会话真的以 `iroh_frame_broken` 关闭。**正向实测**: 1s 预算 + 20s 冻结读端 + 16MB 积压 → `stall: ... frame_broken=True`, daemon 记录 `iroh lane aborted reason=iroh_frame_broken session=…`(`receipts/u7/u7-stall-budget1s.log`)。
+- `policy admit` 对已撤销主体谎报成功: 现在明确报"仍被撤销, 先解封"。
+- `run_policy` 读-改-写无锁(并发可覆盖刚落盘的 revoked): 加 `<policy>.lock` 上的 `flock` 排他锁。
+- `frame_timeout_ms` 只覆盖 lane: 写进规格(目录跳仍 3s); `@pty-detach` 按本 lane 会话收紧。
+- 重启用例使 `path=direct` 断言失效: 改读第一个 daemon 的日志。
+复跑: 回环 13/13(`receipts/u8/loopback-final.log`)、三主机 15/15(`receipts/u8/routable-final.log`)、iroh 单测 23/23、shell 单测 46/46。
