@@ -150,6 +150,11 @@ with tempfile.TemporaryDirectory(prefix="iroh-pty-", dir=scratch) as dirname:
         print(f"{name}: ready", flush=True)
         return logfile
 
+    def policy_cli(action, *extra, profile_path=None):
+        return subprocess.run([binary, "policy", "--config", profile_path or daemon, action,
+                               *extra], cwd=home, env=env, capture_output=True, text=True,
+                              timeout=30)
+
     def control(profile, *extra, timeout=30, stdin=subprocess.DEVNULL):
         return subprocess.run([binary, "control", "--transport", "iroh", "--iroh-config", profile,
                                target, *extra], cwd=home, env=env, capture_output=True, text=True,
@@ -389,12 +394,22 @@ with tempfile.TemporaryDirectory(prefix="iroh-pty-", dir=scratch) as dirname:
             raise AssertionError("detached session was not reclaimed by its lease deadline")
         print(f"expiry: detached session={detached} reclaimed without a later request", flush=True)
 
+        case("the operator lists the admitted parties with their fingerprint")
+        listed = policy_cli("list")
+        assert listed.returncode == 0, listed.stdout + listed.stderr
+        assert owner_id in listed.stdout and "fingerprint=" in listed.stdout, listed.stdout
+        print(f"policy: list -> {listed.stdout.strip().splitlines()[0]}", flush=True)
+
         case("graceful revocation refuses new sessions and keeps the live one")
         write_policy([owner_id])
         keeper, keeper_master = pty_client(owner_key, "import time\nprint('ready', flush=True)\n"
                                                   "time.sleep(30)\n")
         assert "ready" in read_until(keeper_master, "ready"), "keeper never became ready"
-        write_policy([owner_id], revoked=[owner_id])
+        revoked_with_cli = policy_cli("revoke", "--subject", owner_id, "--note", "rai-305 closeout")
+        assert revoked_with_cli.returncode == 0, revoked_with_cli.stdout + revoked_with_cli.stderr
+        listed = policy_cli("list")
+        assert "revoked" in listed.stdout and "rai-305 closeout" in listed.stdout, listed.stdout
+        print(f"policy: revoke -> {revoked_with_cli.stdout.strip()}", flush=True)
         result = control(owner, "@ping#9")
         combined = result.stdout + result.stderr
         assert result.returncode != 0 and "iroh_target_denied" in combined, combined
@@ -402,7 +417,9 @@ with tempfile.TemporaryDirectory(prefix="iroh-pty-", dir=scratch) as dirname:
         print("revocation: graceful refused a new session; live session kept", flush=True)
 
         case("emergency revocation terminates the live session")
-        write_policy([owner_id], revoked=[owner_id], terminate=[owner_id])
+        emergency = policy_cli("emergency", "--subject", owner_id)
+        assert emergency.returncode == 0, emergency.stdout + emergency.stderr
+        print(f"policy: emergency -> {emergency.stdout.strip()}", flush=True)
         until = time.monotonic() + 15
         while time.monotonic() < until and pty_alive(keeper):
             time.sleep(0.05)
@@ -411,6 +428,18 @@ with tempfile.TemporaryDirectory(prefix="iroh-pty-", dir=scratch) as dirname:
         os.close(keeper_master)
         assert "reason=lease_revoked" in daemon_log.read_text(), daemon_log.read_text()
         print("revocation: emergency terminated the live session", flush=True)
+
+        case("a restarted daemon still refuses the revoked party")
+        daemon_process = next(process for process in processes if "daemon" in process.args)
+        processes.remove(daemon_process)
+        daemon_process.terminate()
+        daemon_process.wait(timeout=20)
+        daemon_log = start("daemon", ["daemon", "--transport", "iroh", "-c", daemon],
+                           "iroh daemon registered pty=admitted")
+        after_restart = control(owner, "--pty", "--", "/bin/sh", "-c", "sleep 5")
+        combined = after_restart.stdout + after_restart.stderr
+        assert after_restart.returncode != 0 and "iroh_target_denied" in combined, combined
+        print("policy: a restarted daemon still refuses the revoked party", flush=True)
 
         write_policy([owner_id])
         assert "path=direct" in daemon_log.read_text(), "the daemon never recorded the path"

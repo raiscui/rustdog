@@ -697,6 +697,9 @@ fn run(opts: input::Opts) -> Result<(), String> {
             println!("agent starting: name={name}, namespace={namespace}, daemon={daemon_name}");
             agent_runtime::run_agent(&session, &config).map_err(|err| err.to_string())?;
         }
+        Command::Policy { action, config } => {
+            control_iroh::run_policy(action, &config).map_err(|err| err.to_string())?;
+        }
         Command::Rendezvous { config } => {
             control_iroh::run_rendezvous(&config).map_err(|err| err.to_string())?;
         }

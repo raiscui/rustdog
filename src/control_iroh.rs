@@ -529,6 +529,135 @@ fn route(conn: &Connection, routable: bool) -> Result<Route> {
     }
 }
 
+/// Operator commands for the local admission policy: who may attach, and how to
+/// take that away again. Everything is written through the same durable save the
+/// daemon uses, so a command that returns has the marker on disk.
+pub(crate) fn run_policy(action: crate::input::PolicyAction, path: &Path) -> Result<()> {
+    use crate::input::PolicyAction;
+
+    let cfg: DaemonConfig = profile(path)?;
+    let policy_path = cfg
+        .policy_file
+        .ok_or("iroh daemon profile names no policy_file")?;
+    let now = utc_ms();
+    let mut policy: admission::Policy = match File::open(&policy_path) {
+        Ok(file) => serde_json::from_reader(file)?,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => admission::Policy::default(),
+        Err(err) => return Err(err.into()),
+    };
+
+    let subject = |subject: Option<String>, key: Option<PathBuf>| -> Result<EndpointId> {
+        match (subject, key) {
+            (Some(hex), None) => hex.parse().map_err(|_| "subject is not an endpoint id".into()),
+            (None, Some(key)) => Ok(identity(&key)?.public()),
+            _ => Err("give exactly one of --subject or --subject-key".into()),
+        }
+    };
+
+    match action {
+        PolicyAction::List => {
+            println!(
+                "policy {} (allow={} revoked={} terminate={})",
+                policy_path.display(),
+                policy.allow.len(),
+                policy.revoked.len(),
+                policy.terminate.len()
+            );
+            for id in &policy.allow {
+                let party = policy.parties.iter().find(|party| party.id == *id);
+                let note = party.map(|party| party.note.as_str()).unwrap_or("");
+                let registered = party
+                    .map(|party| party.registered_ms)
+                    .filter(|ms| *ms > 0)
+                    .map(|ms| iso_ms(ms))
+                    .unwrap_or_else(|| "未核".to_owned());
+                println!(
+                    "allow {id} fingerprint={} registered={registered} note={note}{}{}",
+                    fingerprint(id),
+                    if policy.revoked.contains(id) { " revoked" } else { "" },
+                    if policy.terminate.contains(id) { " terminate" } else { "" }
+                );
+            }
+            for id in &policy.revoked {
+                if !policy.allow.contains(id) {
+                    println!("revoked {id} fingerprint={}", fingerprint(id));
+                }
+            }
+        }
+        PolicyAction::Admit { subject: hex, subject_key, note } => {
+            let id = subject(hex, subject_key)?;
+            policy.allow.insert(id);
+            policy.note(id, &note, now);
+            save(&policy_path, &policy)?;
+            println!("admitted {id} fingerprint={}", fingerprint(&id));
+        }
+        PolicyAction::Revoke { subject: hex, subject_key, note } => {
+            let id = subject(hex, subject_key)?;
+            policy.allow.insert(id);
+            policy.revoked.insert(id);
+            policy.note(id, &note, now);
+            save(&policy_path, &policy)?;
+            println!(
+                "revoked {id}: new sessions and renewals are refused; live sessions run to their lease end"
+            );
+        }
+        PolicyAction::Emergency { subject: hex, subject_key, note } => {
+            let id = subject(hex, subject_key)?;
+            policy.allow.insert(id);
+            policy.revoked.insert(id);
+            policy.terminate.insert(id);
+            policy.note(id, &note, now);
+            save(&policy_path, &policy)?;
+            println!("emergency {id}: revoked on disk, live sessions are terminated");
+        }
+    }
+    Ok(())
+}
+
+fn save(path: &Path, policy: &admission::Policy) -> Result<()> {
+    admission::save_policy(path, policy).map_err(|err| -> Box<dyn std::error::Error + Send + Sync> {
+        match err {
+            admission::PersistenceError::NotWritten(err) => {
+                format!("the policy was not written: {err}").into()
+            }
+            admission::PersistenceError::DurabilityUnconfirmed(err) => {
+                format!("the policy was replaced but its durability is unconfirmed: {err}").into()
+            }
+        }
+    })
+}
+
+fn fingerprint(id: &EndpointId) -> String {
+    let digest = <sha2::Sha256 as sha2::Digest>::digest(id.as_bytes());
+    hex_prefix(&digest, 16)
+}
+
+fn hex_prefix(bytes: &[u8], take: usize) -> String {
+    bytes
+        .iter()
+        .take(take)
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+fn iso_ms(ms: u64) -> String {
+    let seconds = ms / 1000;
+    let (days, rem) = (seconds / 86_400, seconds % 86_400);
+    let (hour, minute, second) = (rem / 3600, (rem % 3600) / 60, rem % 60);
+    // Days since the epoch, civil from day number (Howard Hinnant's algorithm).
+    let z = days as i64 + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = if month <= 2 { y + 1 } else { y };
+    format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}Z")
+}
+
 pub(crate) fn run_daemon(path: &Path) -> Result<()> {
     let cfg: DaemonConfig = profile(path)?;
     cfg.check_frame_budget()?;

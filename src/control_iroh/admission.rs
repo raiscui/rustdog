@@ -109,6 +109,40 @@ pub(crate) struct Policy {
     pub(crate) revoked: BTreeSet<EndpointId>,
     #[serde(default)]
     pub(crate) terminate: BTreeSet<EndpointId>,
+    /// Who each admitted party is: a note and when it was registered. The
+    /// admission decision itself only reads the three sets above.
+    #[serde(default)]
+    pub(crate) parties: Vec<Party>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct Party {
+    pub(crate) id: EndpointId,
+    #[serde(default)]
+    pub(crate) note: String,
+    #[serde(default)]
+    pub(crate) registered_ms: u64,
+}
+
+impl Policy {
+    pub(crate) fn party(&mut self, id: EndpointId) -> &mut Party {
+        if let Some(index) = self.parties.iter().position(|party| party.id == id) {
+            return &mut self.parties[index];
+        }
+        self.parties.push(Party { id, note: String::new(), registered_ms: 0 });
+        self.parties.last_mut().expect("party just pushed")
+    }
+
+    pub(crate) fn note(&mut self, id: EndpointId, note: &str, now_ms: u64) {
+        let party = self.party(id);
+        if party.registered_ms == 0 {
+            party.registered_ms = now_ms;
+        }
+        if !note.is_empty() {
+            party.note = note.to_owned();
+        }
+    }
 }
 
 #[derive(Debug)]

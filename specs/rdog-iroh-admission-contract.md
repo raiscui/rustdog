@@ -38,6 +38,17 @@
 - 本地管理员管理 allowlist 与撤销；申请者只能用已登记身份请求自己的授权；目标 daemon 校验授权并跟踪租约。目录、传输和本地管理员角色不能被普通会话继承。
 - PTY 会话 ID 仅标识子进程，不等于控制权。准入 lane 每次 close / detach / attach 都按主体判定（[`authorize_pty_subject`](../src/pty_control.rs)），同主体跨连接可以操作自己的会话，异主体拒绝。旧通道仍按 id 关闭（[`close_active_pty_session`](../src/pty_control.rs)），其语义是"可达即全权"，在本契约里不作为 owner 授权使用。Detach 不终结进程，也不延长租约。
 
+## 操作者路径
+
+本地管理员用 `rdog policy --config <daemon profile> <list|admit|revoke|emergency>` 管理准入方（profile 的 `policy_file` 指到哪个文件就改哪个文件），不再需要手改 JSON：
+
+- `list` 打印每个准入方的 endpoint id、SHA-256 指纹前缀、登记时间与备注，以及是否已 `revoked` / `terminate`。
+- `admit` 写入 `allow` 并记录备注与登记时间（幂等）。
+- `revoke`（graceful）先把主体写进 `revoked` 并落盘，返回即代表标记已持久化；此后新会话与续租被拒，现存会话跑到自身租约截止。
+- `emergency` 在 `revoked` 之外再写 `terminate`，同样先落盘再返回；服务侧在下一个 sweep 见到 `terminate` 后终止现存会话（按进程组，见下）。
+
+落盘用 [`save_policy`](../src/control_iroh/admission.rs)：写临时文件、替换、同步父目录。写失败报"未写入"，替换后持久性无法确认报"已替换但持久性未确认"，两种情况命令都非零退出，不会假装成功。撤销标记只在文件里，所以 daemon 重启后仍然拒新（验收用例覆盖）。命令的实现入口是 [`run_policy`](../src/control_iroh.rs)。
+
 ## 撤销排序和错误语义
 
 **H3 = C：** 默认 graceful，持久写入撤销标记后拒绝新会话及续租，旧会话只运行到当前租约截止。仅显式 emergency 在完成同样两步后通知现存活会话终止。策略文件用 `revoked` 表达第一步、`terminate` 表达第二步，两步都落盘后才生效。存储与撤销状态区分写入前失败、替换后持久性未确认及标记持久但终止待确认；未确认持久性时拒绝新的准入，不声称写入成功。待终止记录在同一实例的重试中保留，只有观察到终帧并回收进程后才确认结束。
