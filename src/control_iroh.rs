@@ -4,7 +4,10 @@ use std::{
     io::{self, BufReader, Read},
     net::SocketAddr,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
+    },
     time::{Duration, Instant},
 };
 
@@ -37,6 +40,9 @@ mod lifecycle_tests;
 
 #[cfg(test)]
 mod profile_tests;
+
+#[cfg(test)]
+mod frame_tests;
 
 #[cfg(test)]
 mod readonly_tests {
@@ -110,6 +116,8 @@ struct DaemonConfig {
     bind: Option<SocketAddr>,
     #[serde(default)]
     policy_file: Option<PathBuf>,
+    #[serde(default)]
+    frame_timeout_ms: Option<u64>,
 }
 
 #[derive(Deserialize)]
@@ -125,6 +133,28 @@ struct ClientConfig {
     bind: Option<SocketAddr>,
     #[serde(default)]
     lease_ttl_ms: Option<u64>,
+    #[serde(default)]
+    frame_timeout_ms: Option<u64>,
+}
+
+impl DaemonConfig {
+    fn frame_timeout(&self) -> Duration {
+        self.frame_timeout_ms.map_or(IO, Duration::from_millis)
+    }
+
+    fn check_frame_budget(&self) -> Result<()> {
+        frame_budget(self.frame_timeout_ms).map(|_| ())
+    }
+}
+
+impl ClientConfig {
+    fn frame_timeout(&self) -> Duration {
+        self.frame_timeout_ms.map_or(IO, Duration::from_millis)
+    }
+
+    fn check_frame_budget(&self) -> Result<()> {
+        frame_budget(self.frame_timeout_ms).map(|_| ())
+    }
 }
 
 #[derive(Deserialize, Clone, Copy, PartialEq, Eq)]
@@ -501,6 +531,8 @@ fn route(conn: &Connection, routable: bool) -> Result<Route> {
 
 pub(crate) fn run_daemon(path: &Path) -> Result<()> {
     let cfg: DaemonConfig = profile(path)?;
+    cfg.check_frame_budget()?;
+    let frame_timeout = cfg.frame_timeout();
     if !name_valid(&cfg.name) || cfg.allow.is_empty() {
         return Err("iroh daemon requires a name and an explicit ping allowlist".into());
     }
@@ -564,7 +596,11 @@ pub(crate) fn run_daemon(path: &Path) -> Result<()> {
                                 conn.close(DENIED_CODE.into(), DENIED.as_bytes());
                                 return Ok(());
                             }
-                            let transport = ControlTransport::Iroh(IrohLineTransport::new(send, read));
+                            let transport = ControlTransport::Iroh(IrohLineTransport::new(
+                                send,
+                                read,
+                                frame_timeout,
+                            ));
                             let peer = conn.remote_id();
                             let served = match admission {
                                 Some(state) => {
@@ -626,6 +662,7 @@ pub(crate) fn run_control(path: &Path, name: &str, line: &str) -> Result<()> {
         return Err("iroh target must be NAMESPACE/NAME".into());
     }
     let cfg: ClientConfig = profile(path)?;
+    cfg.check_frame_budget()?;
     let key = identity(&cfg.key_file)?;
     let bind = bind_addr(cfg.bind, cfg.routable)?;
     runtime()?.block_on(async {
@@ -647,7 +684,11 @@ pub(crate) fn run_control(path: &Path, name: &str, line: &str) -> Result<()> {
         let streams = timeout(IO, conn.open_bi()).await;
         let reply = match streams {
             Ok(Ok((send, read))) => {
-                let mut transport = ControlTransport::Iroh(IrohLineTransport::new(send, read));
+                let mut transport = ControlTransport::Iroh(IrohLineTransport::new(
+                    send,
+                    read,
+                    cfg.frame_timeout(),
+                ));
                 let line = line.to_owned();
                 tokio::task::spawn_blocking(move || {
                     transport.write_message(&line)?;
@@ -896,6 +937,17 @@ impl crate::shell::PtyBridgeTransport for LaneIo<'_> {
     }
 }
 
+/// A frame stream that lost part of a frame cannot carry anything else, so the
+/// session ends with that reason instead of being left half open.
+fn abort_broken_frame(session: &str, err: &io::Error) -> io::Result<()> {
+    if !err.to_string().contains(FRAME_BROKEN) {
+        return Ok(());
+    }
+    log::info!("iroh lane aborted reason={FRAME_BROKEN} session={session}");
+    crate::pty_control::close_pty_session_with_reason(session, FRAME_BROKEN)?;
+    Ok(())
+}
+
 fn close_target(message: &str) -> Option<String> {
     // Anything that is not a close, a resize frame included, has to fall through
     // to the bridge untouched.
@@ -983,7 +1035,10 @@ fn serve_lane(
                 subject: &subject,
                 session: &pty,
             };
-            crate::shell::bridge_attached_pty_session(&mut lane, &mut session)?;
+            if let Err(err) = crate::shell::bridge_attached_pty_session(&mut lane, &mut session) {
+                abort_broken_frame(&pty, &err)?;
+                return Err(err);
+            }
             continue;
         }
 
@@ -1012,7 +1067,10 @@ fn serve_lane(
                 subject: &subject,
                 session: &attached,
             };
-            crate::shell::bridge_attached_pty_session(&mut lane, &mut session)?;
+            if let Err(err) = crate::shell::bridge_attached_pty_session(&mut lane, &mut session) {
+                abort_broken_frame(&attached, &err)?;
+                return Err(err);
+            }
             continue;
         }
 
@@ -1355,6 +1413,7 @@ pub(crate) fn run_pty_control(path: &Path, name: &str, request: IrohPtyRequest) 
         return Err("iroh target must be NAMESPACE/NAME".into());
     }
     let cfg: ClientConfig = profile(path)?;
+    cfg.check_frame_budget()?;
     let key = identity(&cfg.key_file)?;
     let ttl = Duration::from_millis(cfg.lease_ttl_ms.unwrap_or(DEFAULT_LEASE_TTL_MS));
     if ttl < admission::MIN_SESSION_TTL || ttl > admission::MAX_SESSION_TTL {
@@ -1390,7 +1449,11 @@ pub(crate) fn run_pty_control(path: &Path, name: &str, request: IrohPtyRequest) 
         .await?;
         log::info!("iroh_path={}", actual.label());
         let (send, read) = timeout(IO, conn.open_bi()).await??;
-        let transport = ControlTransport::Iroh(IrohLineTransport::new(send, read));
+        let transport = ControlTransport::Iroh(IrohLineTransport::new(
+            send,
+            read,
+            cfg.frame_timeout(),
+        ));
         let result =
             tokio::task::spawn_blocking(move || client_lane(transport, key, target, ttl, request))
                 .await?;
@@ -1402,6 +1465,7 @@ pub(crate) fn run_pty_control(path: &Path, name: &str, request: IrohPtyRequest) 
 pub(crate) struct IrohLineTransport {
     handle: Handle,
     send: Arc<Mutex<SendStream>>,
+    guard: Arc<FrameGuard>,
     read: RecvStream,
     read_timeout: Option<Duration>,
     buffered: Vec<u8>,
@@ -1411,13 +1475,15 @@ pub(crate) struct IrohLineTransport {
 pub(crate) struct IrohLineWriter {
     handle: Handle,
     send: Arc<Mutex<SendStream>>,
+    guard: Arc<FrameGuard>,
 }
 
 impl IrohLineTransport {
-    fn new(send: SendStream, read: RecvStream) -> Self {
+    fn new(send: SendStream, read: RecvStream, frame_timeout: Duration) -> Self {
         Self {
             handle: Handle::current(),
             send: Arc::new(Mutex::new(send)),
+            guard: Arc::new(FrameGuard::new(frame_timeout)),
             read,
             read_timeout: Some(IO),
             buffered: Vec::new(),
@@ -1463,13 +1529,14 @@ impl IrohLineTransport {
     }
 
     pub(crate) fn write_message(&mut self, message: &str) -> io::Result<()> {
-        write_line(&self.handle, &self.send, message)
+        write_line(&self.handle, &self.send, &self.guard, message)
     }
 
     pub(crate) fn try_clone_writer(&self) -> IrohLineWriter {
         IrohLineWriter {
             handle: self.handle.clone(),
             send: self.send.clone(),
+            guard: self.guard.clone(),
         }
     }
 
@@ -1498,11 +1565,66 @@ impl IrohLineTransport {
 
 impl IrohLineWriter {
     pub(crate) fn write_message(&mut self, message: &str) -> io::Result<()> {
-        write_line(&self.handle, &self.send, message)
+        write_line(&self.handle, &self.send, &self.guard, message)
     }
 }
 
-fn write_line(handle: &Handle, send: &Arc<Mutex<SendStream>>, message: &str) -> io::Result<()> {
+pub(crate) const FRAME_BROKEN: &str = "iroh_frame_broken";
+/// A frame write may not be cut shorter than this; below it a healthy relay hop
+/// already looks like a dead link.
+const MIN_FRAME_TIMEOUT: Duration = Duration::from_secs(1);
+const MAX_FRAME_TIMEOUT: Duration = Duration::from_secs(120);
+
+fn frame_budget(raw: Option<u64>) -> Result<Duration> {
+    let timeout = raw.map_or(IO, Duration::from_millis);
+    if timeout < MIN_FRAME_TIMEOUT || timeout > MAX_FRAME_TIMEOUT {
+        return Err(format!(
+            "iroh frame_timeout_ms must be between {} and {} ms",
+            MIN_FRAME_TIMEOUT.as_millis(),
+            MAX_FRAME_TIMEOUT.as_millis()
+        )
+        .into());
+    }
+    Ok(timeout)
+}
+
+pub(crate) struct FrameGuard {
+    broken: AtomicBool,
+    timeout: Duration,
+}
+
+impl FrameGuard {
+    fn new(timeout: Duration) -> Self {
+        Self {
+            broken: AtomicBool::new(false),
+            timeout,
+        }
+    }
+
+    /// Hands the framed bytes to `write`, which must either store the whole frame
+    /// or report a failure.
+    fn write<F>(&self, message: &str, write: F) -> io::Result<()>
+    where
+        F: FnOnce(&[u8]) -> io::Result<()>,
+    {
+        if self.broken.load(Ordering::SeqCst) {
+            return Err(io::Error::other(FRAME_BROKEN));
+        }
+        let frame = frame_bytes(message)?;
+        match write(&frame) {
+            Ok(()) => Ok(()),
+            Err(err) => {
+                // A write that failed or ran out of time may have left part of this
+                // frame on the stream. Later frames would then be read misaligned,
+                // so this connection is done: abort it instead of writing more.
+                self.broken.store(true, Ordering::SeqCst);
+                Err(err)
+            }
+        }
+    }
+}
+
+fn frame_bytes(message: &str) -> io::Result<Vec<u8>> {
     if message.len() > crate::control_line_read::MAX_CONTROL_MESSAGE_BYTES
         || message.contains(['\n', '\r'])
     {
@@ -1514,13 +1636,24 @@ fn write_line(handle: &Handle, send: &Arc<Mutex<SendStream>>, message: &str) -> 
     let mut frame = Vec::with_capacity(message.len() + 1);
     frame.extend_from_slice(message.as_bytes());
     frame.push(b'\n');
+    Ok(frame)
+}
+
+fn write_line(
+    handle: &Handle,
+    send: &Arc<Mutex<SendStream>>,
+    guard: &FrameGuard,
+    message: &str,
+) -> io::Result<()> {
     let send = send.clone();
-    handle.block_on(async move {
-        let mut stream = send.lock().expect("iroh send stream");
-        timeout(IO, stream.write_all(&frame))
-            .await
-            .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "iroh line write timed out"))?
-            .map_err(io::Error::other)
+    guard.write(message, |frame| {
+        handle.block_on(async move {
+            let mut stream = send.lock().expect("iroh send stream");
+            timeout(guard.timeout, stream.write_all(frame))
+                .await
+                .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "iroh line write timed out"))?
+                .map_err(io::Error::other)
+        })
     })
 }
 

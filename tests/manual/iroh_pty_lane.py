@@ -115,15 +115,17 @@ with tempfile.TemporaryDirectory(prefix="iroh-pty-", dir=scratch) as dirname:
                         qad=addr(advertise, qad), relay_cert=str(cert), relay_key=str(key),
                         registrations={target: daemon_id}, lookups=[owner_id, stranger_id],
                         **({"routable": True} if from_lan else {}))
+    frame_budget = os.environ.get("RAI305_FRAME_MS")
+    budget = {"frame_timeout_ms": int(frame_budget)} if frame_budget else {}
     daemon = config("daemon", key_file=daemon_key, directory=dict(id=rendezvous_id,
                                                                  addr=directory_addr),
                     relay=relay, name=target, allow=[owner_id, stranger_id],
-                    policy_file=str(policy),
+                    policy_file=str(policy), **budget,
                     **({"routable": True, "bind": addr(routable["daemon"], 0)} if from_lan else {}))
 
     def client_profile(label, key_path, path="direct", lease_ttl_ms=None):
         values = dict(key_file=key_path, directory=dict(id=rendezvous_id, addr=directory_addr),
-                      relay=relay, path=path)
+                      relay=relay, path=path, **budget)
         if from_lan:
             values.update(routable=True, bind=addr(routable["client"], 0))
         if lease_ttl_ms is not None:
@@ -413,11 +415,56 @@ with tempfile.TemporaryDirectory(prefix="iroh-pty-", dir=scratch) as dirname:
         write_policy([owner_id])
         assert "path=direct" in daemon_log.read_text(), "the daemon never recorded the path"
         if from_lan:
+            if os.environ.get("RAI305_STALL"):
+                outage = int(os.environ["RAI305_STALL"])
+                burst = int(os.environ.get("RAI305_BURST", "0"))
+                case(f"a {outage}s stall either keeps the session or ends it for real")
+                program = "import sys\nprint('ready', flush=True)\n"
+                if burst:
+                    # A frozen reader only stalls the peer once the window is full.
+                    program += (f"for line in sys.stdin:\n"
+                                f"    sys.stdout.write('x' * {burst * 1000000})\n"
+                                f"    sys.stdout.flush()\n"
+                                f"    print('burst-done', flush=True)\n")
+                else:
+                    program += ("for line in sys.stdin:\n"
+                                "    print('echo:' + line.strip(), flush=True)\n")
+                echo, echo_master = pty_client(owner_key, program)
+                assert "ready" in read_until(echo_master, "ready"), "stall session never became ready"
+                stalled = re.findall(r"iroh pty opened session=(\S+)", daemon_log.read_text())[-1]
+                if burst:
+                    os.kill(echo, signal.SIGSTOP)
+                else:
+                    subprocess.run(["ip", "link", "set", "ca", "down"], check=True)
+                try:
+                    os.write(echo_master, b"during-stall\n")
+                    time.sleep(outage)
+                finally:
+                    if burst:
+                        os.kill(echo, signal.SIGCONT)
+                    else:
+                        subprocess.run(["ip", "link", "set", "ca", "up"], check=True)
+                needle = "burst-done" if burst else "echo:during-stall"
+                text = read_until(echo_master, needle, budget=40)
+                frame_broken = "iroh_frame_broken" in daemon_log.read_text()
+                control(owner, "--pty-close", stalled)
+                try:
+                    code = pty_wait(echo, budget=25)
+                except AssertionError:
+                    os.write(echo_master, b"\x04")
+                    code = pty_wait(echo, budget=25)
+                os.close(echo_master)
+                survived = needle in text and code == 0
+                print(f"stall: session={stalled} outage={outage}s burst={burst}MB "
+                      f"survived={survived} frame_broken={frame_broken} exit={code}", flush=True)
+                assert survived or frame_broken, \
+                    f"the session ended without a frame reason or did not survive: {code}"
             case("a relay-only profile also reaches the daemon")
             relay_only = client_profile("relay-only", owner_key, path="relay")
             started = time.monotonic()
             relayed = control(relay_only, "@ping#10")
-            print(f"relay: dedicated relay profile took {time.monotonic() - started:.1f}s", flush=True)
+            print(f"relay: dedicated relay profile took {time.monotonic() - started:.1f}s",
+                  flush=True)
             combined = relayed.stdout + relayed.stderr
             assert relayed.returncode == 0, combined
             assert "iroh_path=relay" in combined, combined
@@ -432,7 +479,8 @@ with tempfile.TemporaryDirectory(prefix="iroh-pty-", dir=scratch) as dirname:
                 started = time.monotonic()
                 blocked_relay = control(relay_only, "@ping#15", timeout=120)
                 print(f"fallback: relay-only with the direct path blocked took "
-                      f"{time.monotonic() - started:.1f}s exit={blocked_relay.returncode}", flush=True)
+                      f"{time.monotonic() - started:.1f}s exit={blocked_relay.returncode}",
+                      flush=True)
                 refused = control(direct_only, "@ping#11")
                 assert refused.returncode != 0, \
                     "a direct-only profile must fail while the direct path is blocked"
@@ -447,7 +495,8 @@ with tempfile.TemporaryDirectory(prefix="iroh-pty-", dir=scratch) as dirname:
                 print("fallback: direct blocked -> relay carried the session; iroh_path=relay",
                       flush=True)
             finally:
-                subprocess.run(["ip", "route", "del", f"{routable['daemon']}/32"], capture_output=True)
+                subprocess.run(["ip", "route", "del", f"{routable['daemon']}/32"],
+                               capture_output=True)
             assert "path=direct" in daemon_log.read_text(), "the daemon never recorded the path"
         assert "iroh_path=direct" in dialled, "the client never reported the path it used"
         alive = [pid for pid in fork_pids if pty_alive(pid)]

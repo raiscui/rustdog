@@ -16,6 +16,10 @@
 
 跨网地址放开用 profile 的 `routable` 字段（缺省 `false`）。地址的唯一策略是 [`network`](../src/control_iroh.rs) 与 [`relay_allowed`](../src/control_iroh.rs)：目录、endpoint、relay-QAD、advertise 与注册校验都走它们。缺省时仍是 P1 的 IPv4 回环门禁与原错误文案；`routable` 下拒绝未指定、组播和广播地址。
 
+写帧失败即作废该流：[`FrameGuard`](../src/control_iroh.rs) 在帧被完整写入之前不放行下一帧，任何一次写失败或写超时都把这条流标记成不可用，之后的所有写直接返回 [`FRAME_BROKEN`](../src/control_iroh.rs)，lane 随之结束并用同一 reason 关闭会话（[`abort_broken_frame`](../src/control_iroh.rs)）。理由是残留半帧会让后续帧错位解析，宁可断开也不继续发。
+
+单帧写预算由 profile 的 `frame_timeout_ms` 给出，两侧都校验：低于 [`MIN_FRAME_TIMEOUT`](../src/control_iroh.rs) 或高于 [`MAX_FRAME_TIMEOUT`](../src/control_iroh.rs) 直接按字段名报错，缺省 3s。实测边界（三主机拓扑，`tests/manual/iroh_pty_routable.sh`）：链路整段消失 2s / 6s、以及 6s 配 12s 预算三种情形，会话都以连接层的 `connection lost`（无可用路径）结束 —— 路径消失属于连接活性，写预算不改变结果；20s 冻结读端 + 64MB 积压同样先被连接层收掉。因此写预算的作用范围是"路径仍在但对端停止读取、窗口写满"这种写挂起，该规则的确定性证据是传输层单测（注入部分帧写超时），真实网络上让写预算单独成为约束条件的场景尚未构造出来。
+
 交互路径回退是 [`Route::Auto`](../src/control_iroh.rs)：先试直连地址，直连不可得再走显式 relay。每个候选由 [`candidate_endpoint`](../src/control_iroh.rs) 建立与它自己那份固定 profile 相同的 endpoint（`direct` = 绑定 IP、无 relay；`relay` = 不绑定、仅 relay），因为一条已经卡死的远端路径会被复用重试，同 endpoint 换候选拿不到新的 QAD 应答。候选预算按性质分开：`direct` 用 `CONNECT`，`relay` 用 `RELAY_CONNECT`（relay 候选要先建 home）。最终实际路径由 [`connect_with_path`](../src/control_iroh.rs) 记录并打印 `iroh_path=`，且实际路径与预期候选不一致时按串路拒绝。`direct` / `relay` 两个固定取值仍按 profile 强制，不允许串路。
 
 ## 身份、签发和租约

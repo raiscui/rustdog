@@ -196,3 +196,55 @@ fn auto_path_is_available_for_interactive_fallback() {
     );
     println!("auto path profile parses for interactive relay fallback");
 }
+
+#[test]
+fn frame_timeout_profile_sets_the_write_budget() {
+    let scratch = Scratch::new();
+    let daemon = scratch.write(
+        "daemon.json",
+        &daemon_profile(
+            r#", "routable": true"#,
+            r#", "bind": "10.21.0.2:0", "frame_timeout_ms": 9000"#,
+            "10.21.0.1:7000",
+            "https://10.21.0.1:7001",
+        ),
+    );
+    let parsed: DaemonConfig = profile(&daemon).expect("a daemon profile with a frame budget parses");
+    parsed.check_frame_budget().expect("a supported budget is accepted");
+    assert_eq!(parsed.frame_timeout(), Duration::from_millis(9000));
+
+    let client = scratch.write(
+        "client.json",
+        &client_profile(
+            r#", "routable": true"#,
+            r#", "bind": "10.22.0.2:0", "frame_timeout_ms": 4500"#,
+            "10.21.0.1:7000",
+            "https://10.21.0.1:7001",
+        ),
+    );
+    let parsed: ClientConfig = profile(&client).expect("a client profile with a frame budget parses");
+    parsed.check_frame_budget().expect("a supported budget is accepted");
+    assert_eq!(parsed.frame_timeout(), Duration::from_millis(4500));
+}
+
+#[test]
+fn frame_timeout_profile_refuses_a_budget_below_the_floor() {
+    let scratch = Scratch::new();
+    let quick = scratch.write(
+        "quick.json",
+        &daemon_profile(
+            r#", "routable": true"#,
+            r#", "bind": "10.21.0.2:0", "frame_timeout_ms": 50"#,
+            "10.21.0.1:7000",
+            "https://10.21.0.1:7001",
+        ),
+    );
+    let parsed: DaemonConfig = profile(&quick).expect("the profile itself still parses");
+    let err = parsed
+        .check_frame_budget()
+        .expect_err("a sub-second frame budget must be refused");
+    assert!(
+        err.to_string().contains("frame_timeout_ms"),
+        "the refusal has to name the field: {err}"
+    );
+}
