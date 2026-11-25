@@ -27,6 +27,21 @@ use crate::{
     control_transport::ControlTransport,
 };
 
+#[cfg(all(test, target_os = "linux"))]
+mod admission_tests;
+
+#[cfg(test)]
+mod readonly_tests {
+    #[test]
+    fn default_iroh_gate_rejects_pty() {
+        assert!(super::ping_only("@ping").is_ok());
+        let open = crate::pty_control::render_pty_open_line(&["python3".into()], 80, 24).unwrap();
+        let err = super::ping_only(&open).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
+        assert_eq!(err.to_string(), "iroh_readonly_ping_required");
+    }
+}
+
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
 const DIRECTORY_ALPN: &[u8] = b"rdog/iroh-directory/1";
 const CONTROL_ALPN: &[u8] = b"rdog/iroh-readonly/1";
