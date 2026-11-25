@@ -166,6 +166,16 @@ with tempfile.TemporaryDirectory(prefix="iroh-pty-", dir=scratch) as dirname:
         fork_pids.append(pid)
         return pid, master
 
+    def pty_attach(owner_key_path, session_id):
+        """Attach a real local TTY to an existing session; returns (pid, master fd)."""
+        profile_path = client_profile(f"attach-{len(fork_pids)}", owner_key_path)
+        pid, master = pty.fork()
+        if pid == 0:
+            os.execve(binary, [binary, "control", "--transport", "iroh", "--iroh-config",
+                               profile_path, target, "--pty-attach", session_id], env)
+        fork_pids.append(pid)
+        return pid, master
+
     def read_until(master, needle, budget=20.0):
         deadline = time.monotonic() + budget
         text = ""
@@ -265,6 +275,35 @@ with tempfile.TemporaryDirectory(prefix="iroh-pty-", dir=scratch) as dirname:
         assert "iroh lease renewed" in daemon_log.read_text(), \
             "the daemon never accepted a renewal"
         print("renewal: a session outlived its lease deadline", flush=True)
+
+        case("a detached session can be attached again from another connection")
+        loner, loner_master = pty_client(owner_key, "import sys\nprint('ready', flush=True)\n"
+                                        "for line in sys.stdin:\n"
+                                        "    print('echo:' + line.strip(), flush=True)\n")
+        assert "ready" in read_until(loner_master, "ready"), "attach target never became ready"
+        attachable = re.findall(r"iroh pty opened session=(\S+)", daemon_log.read_text())[-1]
+        closed = control(owner, "--pty-detach", attachable)
+        assert closed.returncode == 0, closed.stdout + closed.stderr
+        pty_wait(loner)
+        os.close(loner_master)
+        assert f"iroh pty reattached session={attachable}" not in daemon_log.read_text()
+        attacher, attacher_master = pty_attach(owner_key, attachable)
+        until = time.monotonic() + 10
+        while time.monotonic() < until:
+            if f"iroh pty reattached session={attachable}" in daemon_log.read_text():
+                break
+            time.sleep(0.05)
+        else:
+            raise AssertionError("the detached session was never attached again")
+        os.write(attacher_master, b"again\n")
+        text = read_until(attacher_master, "echo:again")
+        assert "echo:again" in text, repr(text)
+        result = control(owner, "--pty-close", attachable)
+        assert result.returncode == 0, result.stdout + result.stderr
+        pty_wait(attacher)
+        os.close(attacher_master)
+        print(f"attach: session={attachable} attached again and closed from a third connection",
+              flush=True)
 
         case("a revoked session takes its grandchildren with it")
         doomed, doomed_master = pty_client(owner_key, "import subprocess, time\n"
