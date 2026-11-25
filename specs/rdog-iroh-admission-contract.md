@@ -40,7 +40,7 @@
 
 回收选择与终帧收尾都在 [`Admission::sweep`](../src/control_iroh/admission.rs) 里，同一把锁、同一次时钟读取；重启后的待终止恢复与中心分发仍未保证。
 
-终止按进程组执行（[`signal_pty_group`](../src/pty_control.rs)）：portable-pty 把命令启动成会话首进程，因此负 pid 的组信号覆盖该命令派生的一切，而不是只杀直接子进程；挂断后仍存活的组由 [`escalate_pty_group_kill`](../src/pty_control.rs) 在 [`PTY_KILL_GRACE`](../src/pty_control.rs) 之后升级为 SIGKILL，所以忽略挂断的子进程不会让 sweep 永久停在待终止。
+终止按进程组执行（[`signal_pty_group`](../src/pty_control.rs)）：portable-pty 把命令启动成会话首进程，因此负 pid 的组信号覆盖该命令派生的一切，而不是只杀直接子进程；[`escalate_pty_group_kill`](../src/pty_control.rs) 走满 [`PTY_KILL_GRACE`](../src/pty_control.rs) 之后才探测组并升级为 SIGKILL。宽限期按组是否还在判断、不依赖会话注册表，因此 sweep、`@pty-close` 和断链三条关闭路径是同一套升级语义，忽略挂断的子进程不会让 sweep 永久停在待终止。
 
 | 情形 | 拒绝阶段与真相源 |
 |---|---|
@@ -49,6 +49,7 @@
 | 身份、授权或绑定校验失败 | 在处理器前拒绝，不执行操作。拒绝码与原因取自 [`DENIED_CODE` / `DENIED`](../src/control_iroh.rs)；准入通道上的拒绝以握手回复或连接关闭码两种形式送达。 |
 | 活动会话租约到期 | 关闭授权并回收该会话；拒绝取自 [`Rejection::Expired` 的 `code_reason`](../src/control_iroh/admission.rs)，终帧 reason 取自 [`EXPIRED`](../src/control_iroh/admission.rs)。 |
 | Graceful / emergency 撤销 | 新会话和续租归目标拒绝；emergency 的已建会话终止须显式可观测，终帧 reason 取自 [`REVOKED_REASON`](../src/control_iroh/admission.rs)。 |
+| 同一租约再开一个 PTY | 拒绝，reason 取自 [`LEASE_BUSY`](../src/control_iroh.rs)，与 lane 能力拒绝区分。 |
 | 过期/异主的操作 | 证据须显示原会话未受影响；不能把"没有收到响应"当作命令执行或回收成功。 |
 
 ## 验收证据

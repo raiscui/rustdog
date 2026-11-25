@@ -703,6 +703,8 @@ const RENEW_STEP: u32 = 3;
 const RENEW_POLL: Duration = Duration::from_millis(100);
 const LANE_REFUSED_CODE: i32 = 66;
 const LANE_REFUSED: &str = "iroh_admitted_lane_supports_ping_and_pty_only";
+/// A lease holds one PTY session, so a second open has to say so plainly.
+const LEASE_BUSY: (i32, &str) = (66, "iroh_lease_session_conflict");
 const SUBJECT_REFUSED_CODE: i32 = 43;
 const SUBJECT_REFUSED: &str = "iroh_subject_denied";
 
@@ -829,6 +831,7 @@ struct LaneIo<'a> {
     admission: &'a Arc<Mutex<admission::Admission>>,
     peer: EndpointId,
     subject: &'a str,
+    session: &'a str,
 }
 
 impl crate::shell::PtyBridgeIo for LaneIo<'_> {
@@ -864,6 +867,12 @@ impl crate::shell::PtyBridgeIo for LaneIo<'_> {
                 }
             }
             if let Some(session_id) = close_target(&message) {
+                if session_id != self.session {
+                    // A close for any other session is not this session's input,
+                    // and the bridge matches only its own id.
+                    log::info!("iroh close refused: session={session_id} is not this lane's");
+                    continue;
+                }
                 if !matches!(
                     crate::pty_control::authorize_pty_subject(&session_id, self.subject)?,
                     crate::pty_control::SubjectAccess::Allowed
@@ -949,7 +958,8 @@ fn serve_lane(
                 .session_of(lease);
             if let Some(held) = held.filter(|held| crate::pty_control::pty_session_registered(held)) {
                 log::info!("iroh pty refused: lease already holds session={held}");
-                refuse_frame(transport, None, LANE_REFUSED_CODE, LANE_REFUSED)?;
+                let (code, reason) = LEASE_BUSY;
+                refuse_frame(transport, None, code, reason)?;
                 continue;
             }
             let mut session = match crate::pty_control::open_attached_pty_session(request) {
@@ -966,7 +976,13 @@ fn serve_lane(
                 .map_err(|_| io::Error::other("admission lock poisoned"))?
                 .record_session(lease, pty.clone());
             log::info!("iroh pty opened session={pty} lease={lease}");
-            let mut lane = LaneIo { transport, admission, peer, subject: &subject };
+            let mut lane = LaneIo {
+                transport,
+                admission,
+                peer,
+                subject: &subject,
+                session: &pty,
+            };
             crate::shell::bridge_attached_pty_session(&mut lane, &mut session)?;
             continue;
         }
@@ -987,8 +1003,15 @@ fn serve_lane(
                 refuse_frame(transport, None, 64, "PTY session not found")?;
                 continue;
             };
-            log::info!("iroh pty reattached session={}", session.session_id());
-            let mut lane = LaneIo { transport, admission, peer, subject: &subject };
+            let attached = session.session_id().to_owned();
+            log::info!("iroh pty reattached session={attached}");
+            let mut lane = LaneIo {
+                transport,
+                admission,
+                peer,
+                subject: &subject,
+                session: &attached,
+            };
             crate::shell::bridge_attached_pty_session(&mut lane, &mut session)?;
             continue;
         }

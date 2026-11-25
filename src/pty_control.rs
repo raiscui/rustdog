@@ -321,7 +321,7 @@ fn close_active_pty_session_with_reason(session_id: &str, reason: &str) -> io::R
             // ignores the hangup is escalated to a kill once the session has had
             // its grace period, so a reclaimed lease cannot outlive its daemon.
             signal_pty_group(pid, libc::SIGHUP)?;
-            escalate_pty_group_kill(session_id.to_owned(), pid);
+            escalate_pty_group_kill(Some(session_id.to_owned()), pid);
         }
         None => {
             let mut killer = session
@@ -348,11 +348,13 @@ fn signal_pty_group(pid: u32, signal: i32) -> io::Result<()> {
 }
 
 #[cfg(unix)]
-fn escalate_pty_group_kill(session_id: String, pid: u32) {
+fn escalate_pty_group_kill(session_id: Option<String>, pid: u32) {
     thread::spawn(move || {
         let deadline = Instant::now() + PTY_KILL_GRACE;
         while Instant::now() < deadline {
-            if !pty_session_registered(&session_id) {
+            // A session that left the registry early needs no further waiting; a
+            // caller without one waits the whole grace period.
+            if session_id.as_deref().is_some_and(|id| !pty_session_registered(id)) {
                 break;
             }
             thread::sleep(Duration::from_millis(25));
@@ -1484,7 +1486,7 @@ fn unregister_active_pty_session(session_id: &str) {
 fn kill_pty_child(handle: &PtyCloseHandle, pid: Option<u32>) -> io::Result<()> {
     if let Some(pid) = pid {
         if signal_pty_group(pid, libc::SIGHUP).is_ok() {
-            escalate_pty_group_kill(String::new(), pid);
+            escalate_pty_group_kill(None, pid);
             return Ok(());
         }
     }
