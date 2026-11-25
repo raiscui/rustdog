@@ -14,7 +14,11 @@
 - 其余 control 行一律拒绝，错误码与文案取自 [`LANE_REFUSED`](../src/control_iroh.rs)。
 - bulk 传输不在这条通道上，P4 保持关闭。
 
-跨网地址放开用 profile 的 `routable` 字段（缺省 `false`）。地址的唯一策略是 [`network`](../src/control_iroh.rs) 与 [`relay_allowed`](../src/control_iroh.rs)：目录、endpoint、relay-QAD、advertise 与注册校验都走它们。缺省时仍是 P1 的 IPv4 回环门禁与原错误文案；`routable` 下拒绝未指定、组播和广播地址。
+跨网地址放开用 profile 的 `routable` 字段（缺省 `false`）。地址的策略是 [`network`](../src/control_iroh.rs) 与 [`relay_allowed`](../src/control_iroh.rs)：目录、endpoint、relay/relay-QAD 的**绑定**地址与注册校验都走它们。缺省时仍是 P1 的 IPv4 回环门禁与原错误文案；`routable` 下拒绝未指定、组播和广播地址。
+
+relay 侧另有一个 `advertise` 字段（缺省空），只改写给对端的 relay URL，不改绑定位：1:1 NAT 机型的公网地址（EIP）只存在于 NAT 设备上，本机网卡根本绑不住（`EADDRNOTAVAIL`），而 registry 原本用绑定地址拼 relay URL，于是对端拿到一个它到不了的地址、注册被 `iroh_registration_denied` 拒。所以 `bind`/`relay_*`/`qad` 绑网卡上的私有地址，`advertise` 填公网地址。**`advertise` 有意不过 [`network`](../src/control_iroh.rs)**：它不是本机地址，按绑定地址的规则校验它只会把唯一可用的配置方式判死；它进 URL 后仍要过 `RelayUrl` 解析与对端的 `relay_allowed`（https + 显式端口）。
+
+实测（模拟 1:1 NAT 的三个网络栈，`tests/manual/iroh_pty_advertise.sh` → `iroh_pty_lane.py --advertise`，回执 `receipts/u10/advertise.log`）：绑私网通告公网时 daemon 的 relay home 是通告值、注册被接受、ping 通过；不写 `advertise` 时注册被拒；通告一个没人持有的地址时 daemon 非零退出且从未注册。公网真机由 RAI-302 侧另判。
 
 写帧失败即作废该流：[`FrameGuard`](../src/control_iroh.rs) 在帧被完整写入之前不放行下一帧，任何一次写失败或写超时都把这条流标记成不可用，之后的所有写直接返回 [`FRAME_BROKEN`](../src/control_iroh.rs)，lane 随之结束并用同一 reason 关闭会话（[`abort_broken_frame`](../src/control_iroh.rs)）。理由是残留半帧会让后续帧错位解析，宁可断开也不继续发。
 

@@ -6,6 +6,7 @@ process existence. Run under an isolated HOME/TMPDIR; the caller owns the
 network namespace.
 
     python3 tests/manual/iroh_pty_lane.py <rdog-binary> <scratch-dir> [--routable A B]
+    python3 tests/manual/iroh_pty_lane.py <rdog-binary> <scratch-dir> --advertise
 """
 
 import errno
@@ -61,6 +62,191 @@ def ready(process, logfile, marker, budget=20):
 def pid_exists(pid):
     return Path(f"/proc/{pid}").exists()
 
+
+def advertise_lane() -> None:
+    """A relay address that only the NAT device holds still has to reach peers.
+
+    Emulates 1:1 NAT with three network stacks: the relay binds a private
+    address, a NAT stack owns the public one and forwards, and the peers only
+    know the public address. The relay URL handed to peers is what tells them
+    where to dial, so the positive case proves registration and a ping survive
+    when the advertised address is not the bound one; the negative cases prove
+    the two ways it can be wrong fail visibly instead of half-working.
+    """
+    target = "lab/pty"
+    relay_ip = os.environ["RAI305_ADV_RELAY_IP"]
+    public_ip = os.environ["RAI305_ADV_PUBLIC_IP"]
+    peer_ip = os.environ["RAI305_ADV_PEER_IP"]
+    directory_port, http_port, https_port, qad_port = [
+        int(port) for port in os.environ["RAI305_ADV_PORTS"].split(",")]
+    relay_ns = os.environ.get("RAI305_ADV_RELAY_NS")
+    relay_prefix = ["nsenter", "-t", relay_ns, "-n", "--"] if relay_ns else []
+
+    def case(label):
+        print(f"case: {label}", flush=True)
+
+    with tempfile.TemporaryDirectory(prefix="iroh-advertise-", dir=scratch) as dirname:
+        home = Path(dirname)
+        env = dict(PATH="/usr/bin:/bin", HOME=dirname, TMPDIR=dirname, LANG="C.UTF-8",
+                   RUST_LOG=os.environ.get("RAI305_LOG", "info"))
+        rendezvous_key, rendezvous_id = identity(home, "rendezvous")
+        daemon_key, daemon_id = identity(home, "daemon")
+        owner_key, owner_id = identity(home, "owner")
+        cert, key = home / "relay.pem", home / "relay-key.pem"
+        subprocess.run(
+            ["openssl", "req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:P-256",
+             "-nodes", "-subj", "/CN=localhost",
+             "-addext", f"subjectAltName=IP:{public_ip}",
+             "-addext", "basicConstraints=critical,CA:FALSE",
+             "-days", "1", "-keyout", key, "-out", cert],
+            env=env, capture_output=True, check=True, timeout=5,
+        )
+        policy_file = home / "policy.json"
+        policy_file.write_text(json.dumps(dict(allow=[owner_id], revoked=[], terminate=[])))
+        started = []
+
+        def profiles(label, advertise):
+            """Peers only ever know the public address; the relay binds private."""
+            relay = dict(url=f"https://{public_ip}:{https_port}", qad_port=qad_port,
+                         root_cert=str(cert))
+            directory = dict(id=rendezvous_id, addr=f"{public_ip}:{directory_port}")
+            rendezvous = home / f"{label}-rendezvous.json"
+            values = dict(
+                key_file=rendezvous_key, bind=f"{relay_ip}:{directory_port}",
+                relay_http=f"{relay_ip}:{http_port}", relay_https=f"{relay_ip}:{https_port}",
+                qad=f"{relay_ip}:{qad_port}", relay_cert=str(cert), relay_key=str(key),
+                registrations={target: daemon_id}, lookups=[owner_id], routable=True)
+            if advertise is not None:
+                values["advertise"] = advertise
+            rendezvous.write_text(json.dumps(values))
+            daemon = home / f"{label}-daemon.json"
+            daemon.write_text(json.dumps(dict(
+                key_file=daemon_key, directory=directory, relay=relay, name=target,
+                allow=[owner_id], policy_file=str(policy_file), routable=True,
+                bind=f"{peer_ip}:0")))
+            client = home / f"{label}-client.json"
+            client.write_text(json.dumps(dict(
+                key_file=owner_key, directory=directory, relay=relay,
+                path="auto", routable=True, bind=f"{peer_ip}:0")))
+            return rendezvous, daemon, client
+
+        def spawn(argv, logfile, marker, budget=60, netns=False, may_exit=False):
+            """The relay lives on the far side of the NAT stack, so it runs there.
+
+            `may_exit` is for a case whose whole point is that the process ends:
+            the marker is still required, but the exit is the expected outcome
+            rather than a startup failure.
+            """
+            log = open(logfile, "wb")
+            child = subprocess.Popen((relay_prefix if netns else []) + argv, cwd=home, env=env,
+                                     stdin=subprocess.DEVNULL,
+                                     stdout=log, stderr=log, start_new_session=True)
+            started.append(child)
+            if not may_exit:
+                return child, ready(child, logfile, marker, budget=budget)
+            until = time.monotonic() + budget
+            while time.monotonic() < until:
+                text = logfile.read_text(errors="replace")
+                if marker in text:
+                    return child, text
+                if child.poll() is not None:
+                    raise RuntimeError(f"{marker}: process exited {child.returncode}: "
+                                       f"{text[-2000:]}")
+                time.sleep(0.05)
+            raise RuntimeError(f"{marker}: timed out: "
+                               f"{logfile.read_text(errors='replace')[-2000:]}")
+
+        def reap(child):
+            if child.poll() is None:
+                os.killpg(child.pid, signal.SIGTERM)
+                try:
+                    child.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    os.killpg(child.pid, signal.SIGKILL)
+                    child.wait(timeout=5)
+
+        try:
+            case("a relay behind 1:1 NAT serves peers on its advertised address")
+            rendezvous, daemon, client = profiles("nat", public_ip)
+            directory_process, directory_log = spawn(
+                [binary, "rendezvous", "-c", str(rendezvous)],
+                home / "nat-rendezvous.log",
+                f"advertised={public_ip}:{https_port}", netns=True)
+            assert f"relay_https={relay_ip}:{https_port}" in directory_log, directory_log
+            daemon_process, _ = spawn(
+                [binary, "daemon", "--transport", "iroh", "-c", str(daemon)],
+                home / "nat-daemon.log", "iroh daemon registered")
+            text = (home / "nat-daemon.log").read_text(errors="replace")
+            assert f"relay https://{public_ip}:{https_port}/" in text, text[-2000:]
+            assert f"relay https://{relay_ip}:{https_port}/" not in text, \
+                "the daemon took the bound address instead of the advertised one"
+            result = subprocess.run(
+                [binary, "control", "--transport", "iroh", "--iroh-config", str(client),
+                 target, "@ping#7"], cwd=home, env=env, capture_output=True, text=True,
+                timeout=90, stdin=subprocess.DEVNULL)
+            combined = result.stdout + result.stderr
+            assert result.returncode == 0, combined
+            response = json.loads(result.stdout.strip().removeprefix("@response "))
+            assert response["id"] == 7 and response["value"]["pong"] is True, result.stdout
+            print(f"advertise: bound {relay_ip}:{https_port}, advertised "
+                  f"{public_ip}:{https_port}; registration and ping passed", flush=True)
+            reap(daemon_process)
+            reap(directory_process)
+
+            case("without an advertised address the peers cannot be registered")
+            rendezvous, daemon, _ = profiles("bound", None)
+            directory_process, directory_log = spawn(
+                [binary, "rendezvous", "-c", str(rendezvous)],
+                home / "bound-rendezvous.log", "iroh rendezvous ready", netns=True)
+            assert f"advertised={relay_ip}:{https_port}" in directory_log, directory_log
+            blind, _ = spawn(
+                [binary, "daemon", "--transport", "iroh", "-c", str(daemon)],
+                home / "bound-daemon.log", "iroh_registration_denied", may_exit=True)
+            deadline = time.monotonic() + 30
+            while time.monotonic() < deadline and blind.poll() is None:
+                time.sleep(0.05)
+            code = blind.poll()
+            assert code is not None and code != 0, f"daemon exit={code} after a denial"
+            text = (home / "bound-daemon.log").read_text(errors="replace")
+            assert "iroh daemon registered" not in text, "the bound address was accepted"
+            assert "iroh_registration_denied" in text, f"no reason given: {text[-1500:]}"
+            print(f"advertise: a relay that only names its bound address refuses the "
+                  f"registration (exit={code})", flush=True)
+            reap(blind)
+            reap(directory_process)
+
+            case("an advertised address nothing holds is refused, not half-accepted")
+            rendezvous, daemon, _ = profiles("dead", f"{public_ip.rsplit('.', 1)[0]}.250")
+            directory_process, directory_log = spawn(
+                [binary, "rendezvous", "-c", str(rendezvous)],
+                home / "dead-rendezvous.log", "advertised=", netns=True)
+            dead = subprocess.Popen(
+                [binary, "daemon", "--transport", "iroh", "-c", str(daemon)],
+                cwd=home, env=env, stdin=subprocess.DEVNULL,
+                stdout=open(home / "dead-daemon.log", "wb"),
+                stderr=subprocess.STDOUT, start_new_session=True)
+            started.append(dead)
+            deadline = time.monotonic() + 90
+            while time.monotonic() < deadline and dead.poll() is None:
+                time.sleep(0.1)
+            assert dead.poll() is not None, "the daemon kept running against a dead relay"
+            code = dead.poll()
+            text = (home / "dead-daemon.log").read_text(errors="replace")
+            assert code != 0, f"daemon exit={code} {text[-1500:]}"
+            assert "iroh daemon registered" not in text, "a relay nobody serves registered it"
+            print(f"advertise: advertised {public_ip.rsplit('.', 1)[0]}.250 is unreachable; "
+                  f"daemon exit={code}, never registered", flush=True)
+            reap(directory_process)
+            print("advertise: all three directions hold", flush=True)
+        finally:
+            for child in reversed(started):
+                reap(child)
+            assert not any(child.poll() is None for child in started), "leftovers survived"
+
+if "--advertise" in args:
+    advertise_lane()
+    print("cleanup: advertised relay lane reaped")
+    raise SystemExit(0)
 
 with tempfile.TemporaryDirectory(prefix="iroh-pty-", dir=scratch) as dirname:
     home = Path(dirname)

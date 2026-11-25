@@ -85,6 +85,11 @@ struct RendezvousConfig {
     lookups: Vec<EndpointId>,
     #[serde(default)]
     routable: bool,
+    /// Address handed to peers in the relay URL when it differs from the bound
+    /// one, which is the case whenever the public address sits on a NAT device
+    /// (a 1:1 NAT EIP cannot be bound locally at all).
+    #[serde(default)]
+    advertise: Option<std::net::IpAddr>,
 }
 
 #[derive(Deserialize)]
@@ -448,11 +453,15 @@ pub(crate) fn run_rendezvous(path: &Path) -> Result<()> {
         let relay = server::Server::spawn(config).await?;
         let tls_addr = relay.https_addr().ok_or("missing P1 HTTPS relay")?;
         let qad = relay.quic_addr().ok_or("missing P1 QAD listener")?;
+        let advertised = match cfg.advertise {
+            Some(ip) => SocketAddr::new(ip, tls_addr.port()),
+            None => tls_addr,
+        };
         let registry = Arc::new(Mutex::new(Registry {
             owners: cfg.registrations, readers: cfg.lookups, leases: HashMap::new(),
-            relay: format!("https://{tls_addr}").parse()?, routable: cfg.routable,
+            relay: format!("https://{advertised}").parse()?, routable: cfg.routable,
         }));
-        log::info!("iroh rendezvous ready relay_https={tls_addr} qad={qad}");
+        log::info!("iroh rendezvous ready relay_https={tls_addr} advertised={advertised} qad={qad}");
         let mut tasks = JoinSet::new();
         loop {
             tokio::select! {
