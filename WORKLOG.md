@@ -365,3 +365,8 @@ cmd.exe 在 verbatim cwd 下的告警原文 (中文 Windows 版), 并用普通 c
 
 真实回环 Iroh 测试入口只运行固定无害 PTY 夹具，验证身份拒绝、重附与 stale owner、租约到期、graceful/emergency 终态及回收；本地真实 TTY 另验恢复。默认生产入口仍拒非 ping。
 - 提交: a2bd9b3b23bfd6de846a52bc0bb923191f3c9bb9
+
+## 2026-11-25 RAI-179: 隔离验收评审补修
+
+测试入口定时回收已 detach 夹具，确认终态后清理 live 状态，持久写入不等同于现存终止，实例内按 UUID 去重。四条定向红绿均复核；默认 release 仍拒非 ping。
+- 提交: ee9b2fc603dd559c7c85ebb6c5229dcb83109683
