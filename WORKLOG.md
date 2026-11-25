@@ -370,3 +370,8 @@ cmd.exe 在 verbatim cwd 下的告警原文 (中文 Windows 版), 并用普通 c
 
 测试入口定时回收已 detach 夹具，确认终态后清理 live 状态，持久写入不等同于现存终止，实例内按 UUID 去重。四条定向红绿均复核；默认 release 仍拒非 ping。
 - 提交: ee9b2fc603dd559c7c85ebb6c5229dcb83109683
+
+## 2026-11-25 RAI-179: 隔离终态授权与撤销时钟
+
+终态重复 Close 仍按已认证 peer 和最后 attachment 授权；emergency 在持久化成功后读时钟。两项定向红绿和隔离生命周期通过。
+- 提交: 1df17acd868e92da01f0da05e216919ae103fef8
