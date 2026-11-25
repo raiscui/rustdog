@@ -375,3 +375,8 @@ cmd.exe 在 verbatim cwd 下的告警原文 (中文 Windows 版), 并用普通 c
 
 终态重复 Close 仍按已认证 peer 和最后 attachment 授权；emergency 在持久化成功后读时钟。两项定向红绿和隔离生命周期通过。
 - 提交: 1df17acd868e92da01f0da05e216919ae103fef8
+
+## 2026-11-25 RAI-305 U1: Iroh 跨网 profile 地址放开
+
+profile 新增 `routable`(缺省 false)与 `bind`; `network`/`relay_allowed` 是唯一地址策略, 目录、endpoint、relay-QAD、advertise 与注册校验都走它。缺省 profile 仍是 P1 的 IPv4 回环门禁与原错误文案; routable 下拒绝未指定/组播/广播地址。4 项定向用例从红转绿(基线红是 `routable daemon profile parses: invalid iroh JSON profile`), 16 项 control_iroh 既有用例保持绿。
+- 提交: b5205ba
