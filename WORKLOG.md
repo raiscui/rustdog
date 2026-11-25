@@ -453,3 +453,28 @@ U3 行为基线: 同一矩阵里 `direct` 在直连被阻断时失败、`auto` �
 - 重启用例使 `path=direct` 断言失效: 改读第一个 daemon 的日志。
 复跑: 回环 13/13(`receipts/u8/loopback-final.log`)、三主机 15/15(`receipts/u8/routable-final.log`)、iroh 单测 23/23、shell 单测 46/46。
 - 提交: 132c66b
+
+## 2026-11-25 RAI-305 公网 1:1 NAT 的 relay 通告地址(RUST-3 真机反馈)
+
+真机跨网实测暴露的缺口: 1:1 NAT 机型上公网地址(EIP)只存在于 NAT 设备, 本机网卡绑不住
+(`[Errno 99] Cannot assign requested address`); 而 registry 用绑定地址拼 relay URL, 对端
+因此拿到一个到不了的地址, 注册被 `iroh_registration_denied` 拒 —— 候选在真机起不来。
+
+处理:
+- `RendezvousConfig` 新增 `advertise`(缺省空), 只改写给对端的 relay URL, 不改绑定地址;
+  `bind` / `relay_http` / `relay_https` / `qad` 仍绑网卡地址。就绪日志同时打印绑定与通告值。
+- 规格 `specs/rdog-iroh-admission-contract.md` 写明 `advertise` 有意不过 `network()`:
+  它不是本机地址, 按绑定地址规则校验会把唯一可用的配置方式判死; 进 URL 后仍受 `RelayUrl`
+  解析与对端 `relay_allowed` 约束。
+- 新增隔离证据 `tests/manual/iroh_pty_advertise.sh` → `iroh_pty_lane.py --advertise`:
+  三网络栈模拟 1:1 NAT(peer 10.60.0.2 / nat 10.60.0.1+10.50.0.254 / relay 10.50.0.2, 四个端口
+  DNAT + SNAT), 三段: 绑私网通告公网 → daemon relay home 为通告值且注册+ping 通过; 不写
+  `advertise` → `iroh_registration_denied` 且非零退出; 通告一个没人持有的地址 → 从未注册。
+
+复跑(同一二进制):
+- `advertise` 三段全过 `receipts/u10/advertise.log`
+- 回环 13/13 `receipts/u10/loopback.log`
+- 三主机合成 15/15 `receipts/u10/routable.log`
+- iroh 单测 23/23, shell 单测 46/46
+- 载体守卫 `check-carrier-assertions.py` OK
+- 提交: b57d780
