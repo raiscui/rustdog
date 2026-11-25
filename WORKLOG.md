@@ -360,3 +360,8 @@ cmd.exe 在 verbatim cwd 下的告警原文 (中文 Windows 版), 并用普通 c
 
 测试编译内的签发、续租、本地策略、撤销及固定 PTY 夹具通过 4 项定向验证；正常 Iroh 入口仍只接受 ping。此单元未证明 Iroh 传输上的 PTY 生命周期。
 - 提交: 0df1f9de885a38778076da0f6242376944cb442f
+
+## 2026-11-25 RAI-179 U3: 固定夹具的隔离生命周期
+
+真实回环 Iroh 测试入口只运行固定无害 PTY 夹具，验证身份拒绝、重附与 stale owner、租约到期、graceful/emergency 终态及回收；本地真实 TTY 另验恢复。默认生产入口仍拒非 ping。
+- 提交: a2bd9b3b23bfd6de846a52bc0bb923191f3c9bb9
