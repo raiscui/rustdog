@@ -386,3 +386,11 @@ profile 新增 `routable`(缺省 false)与 `bind`; `network`/`relay_allowed` 是
 `Admission`/`SignedGrant`/`Policy`/撤销语义从 `#[cfg(test)]` 的 `admission_tests.rs` 搬进生产模块 `src/control_iroh/admission.rs`, 生产与测试共用同一份实现; 夹具与 Lane 驱动留在测试侧 (`fixtures.rs`/`lifecycle_tests.rs`)。新增 `sweep`: 同一锁与同一时钟下处理到期、已落盘的 emergency 标记与未确认终帧的重发。
 搬移后 RAI-179 隔离证据重跑通过: 18 项单测/驱动用例全绿; 隔离 Iroh 生命周期矩阵 graceful 3006/3000ms 报 `lease_expired`、emergency 256/12000ms 报 `lease_revoked`, 授权前零进程、重附与跨主体不误关均保持; 真实本地 TTY 全部标志恢复。
 - 提交: 52ab6a1
+
+## 2026-11-25 RAI-305 U2/U3/U4: iroh 承载附着式 PTY 会话
+
+生产接线: daemon profile 给出 `policy_file` 时启用准入 PTY 通道(`serve_admitted`), 缺省仍 ping-only + 回环; 通道只服务 ping 与 PTY 帧, 其余 control 行按 `LANE_REFUSED` 拒绝, bulk 保持关闭。`route`/`network`/`relay_allowed` 是地址唯一策略, `Route::Auto` 提供直连不可得时经 relay 的交互回退并记录实际路径。
+租约: 客户端按 TTL/3 续租, 服务侧 `lease_sweeper` + `Admission::sweep` 在同一锁与同一时钟下处理到期、已落盘 emergency 标记与未确认终帧; detach 后无后续请求也会到期回收。
+关闭授权(Rai-298 契约重实现): 按主体判定, 同主体跨连接可关自己的会话, 异主体 `iroh_subject_denied` 且目标继续运行; 旧通道维持按 id 关闭并已在规格写明"可达即全权"。
+证据: 隔离回环矩阵 8/8(`tests/manual/iroh_pty_lane.py`, 含准入前零进程、stdin 回显、跨连接关闭、异主拒绝、detach 到期回收、graceful/emergency、真 TTY); 19 项 iroh 单测; 搬迁后 RAI-179 隔离夹具矩阵重跑通过。`control_pty` 2 项与 `control_tty` 1 项为 util-linux `script` 2.39.3 的 BrokenPipe 环境红, 与候选无关(基线复核见回执)。
+- 提交: 187c2e5
