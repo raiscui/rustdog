@@ -220,9 +220,12 @@ impl Admission {
         Ok(())
     }
 
+    fn lease(&self, id: &str) -> Option<&Lease> {
+        self.leases.get(&Uuid::parse_str(id).ok()?)
+    }
+
     fn active(&self, peer: EndpointId, id: &str, now_ms: u64) -> AdmissionResult<&Lease> {
-        let id = Uuid::parse_str(id).map_err(|_| Rejection::Denied)?;
-        let lease = self.leases.get(&id).ok_or(Rejection::Denied)?;
+        let lease = self.lease(id).ok_or(Rejection::Denied)?;
         if lease.peer != peer || matches!(lease.state, LeaseState::TerminationPending) {
             return Err(Rejection::Denied);
         }
@@ -267,7 +270,7 @@ impl Admission {
         &mut self,
         peer: EndpointId,
         mode: Revocation,
-        now_ms: u64,
+        now_ms: impl FnOnce() -> u64,
     ) -> Result<RevocationProgress, PersistenceError> {
         self.revoke_with(peer, mode, now_ms, save_policy)
     }
@@ -276,7 +279,7 @@ impl Admission {
         &mut self,
         peer: EndpointId,
         mode: Revocation,
-        now_ms: u64,
+        now_ms: impl FnOnce() -> u64,
         save: impl FnOnce(&Path, &Policy) -> Result<(), PersistenceError>,
     ) -> Result<RevocationProgress, PersistenceError> {
         let mut policy = self.policy().map_err(PersistenceError::NotWritten)?;
@@ -291,6 +294,7 @@ impl Admission {
         }
         let mut pending = Vec::new();
         if matches!(mode, Revocation::Emergency) {
+            let now_ms = now_ms();
             for (id, lease) in &mut self.leases {
                 if lease.peer != peer {
                     continue;
@@ -499,7 +503,7 @@ fn revocation_is_durable_and_modes_differ() {
         .unwrap();
     admission.record_fixture(&id, std::process::id());
     assert_eq!(
-        admission.revoke(peer, Revocation::Graceful, 0).unwrap(),
+        admission.revoke(peer, Revocation::Graceful, || 0).unwrap(),
         RevocationProgress::Persisted
     );
     assert!(admission.active(peer, &id, 999).is_ok());
@@ -512,7 +516,7 @@ fn revocation_is_durable_and_modes_differ() {
     let mut restarted = Admission::new(admission.path.clone(), target.public());
     assert_eq!(restarted.admit(peer, &other, 1), Err(Rejection::Denied));
     assert_eq!(
-        admission.revoke(peer, Revocation::Emergency, 1).unwrap(),
+        admission.revoke(peer, Revocation::Emergency, || 1).unwrap(),
         RevocationProgress::TerminationPending(vec![Uuid::parse_str(&id).unwrap()])
     );
     assert_eq!(
@@ -567,17 +571,17 @@ fn retry_keeps_emergency_termination_pending_until_confirmed() {
         .unwrap();
     admission.record_fixture(&id.to_string(), std::process::id());
     assert_eq!(
-        admission.revoke(peer, Revocation::Emergency, 0).unwrap(),
+        admission.revoke(peer, Revocation::Emergency, || 0).unwrap(),
         RevocationProgress::TerminationPending(vec![id])
     );
     assert_eq!(
-        admission.revoke(peer, Revocation::Emergency, 1).unwrap(),
+        admission.revoke(peer, Revocation::Emergency, || 1).unwrap(),
         RevocationProgress::TerminationPending(vec![id]),
         "retry must keep an unconfirmed termination pending"
     );
     admission.confirm_terminal(&id.to_string());
     assert_eq!(
-        admission.revoke(peer, Revocation::Emergency, 2).unwrap(),
+        admission.revoke(peer, Revocation::Emergency, || 2).unwrap(),
         RevocationProgress::Persisted
     );
 }
@@ -603,7 +607,9 @@ fn only_live_unexpired_fixtures_enter_emergency_pending() {
     let live = add(500, true);
     admission.confirm_terminal(&closed.to_string());
     assert_eq!(
-        admission.revoke(peer, Revocation::Emergency, 1000).unwrap(),
+        admission
+            .revoke(peer, Revocation::Emergency, || 1000)
+            .unwrap(),
         RevocationProgress::TerminationPending(vec![live])
     );
 }
@@ -616,20 +622,30 @@ fn policy_write_reports_pre_replace_and_unconfirmed_durability() {
     let proof = grant(&client, target.public(), &id.to_string(), 0);
     admission.admit(peer, &proof, 0).unwrap();
     admission.record_fixture(&id.to_string(), std::process::id());
-    let before = admission.revoke_with(peer, Revocation::Emergency, 1, |path, policy| {
-        let missing_dir = path.with_file_name("does-not-exist").join("policy.json");
-        save_policy(&missing_dir, policy)
-    });
+    let before = admission.revoke_with(
+        peer,
+        Revocation::Emergency,
+        || 1,
+        |path, policy| {
+            let missing_dir = path.with_file_name("does-not-exist").join("policy.json");
+            save_policy(&missing_dir, policy)
+        },
+    );
     assert!(
         matches!(before, Err(PersistenceError::NotWritten(err)) if err.kind() == io::ErrorKind::NotFound)
     );
     assert!(!admission.policy().unwrap().revoked.contains(&peer));
 
-    let uncertain = admission.revoke_with(peer, Revocation::Emergency, 2, |path, policy| {
-        save_policy_with(path, policy, |_| {
-            Err(io::Error::other("test directory sync failure"))
-        })
-    });
+    let uncertain = admission.revoke_with(
+        peer,
+        Revocation::Emergency,
+        || 2,
+        |path, policy| {
+            save_policy_with(path, policy, |_| {
+                Err(io::Error::other("test directory sync failure"))
+            })
+        },
+    );
     assert!(
         matches!(uncertain, Err(PersistenceError::DurabilityUnconfirmed(err)) if err.kind() == io::ErrorKind::Other)
     );
@@ -638,8 +654,40 @@ fn policy_write_reports_pre_replace_and_unconfirmed_durability() {
     let fresh = grant(&client, target.public(), &Uuid::new_v4().to_string(), 2);
     assert_eq!(admission.admit(peer, &fresh, 2), Err(Rejection::Denied));
     assert_eq!(
-        admission.revoke(peer, Revocation::Emergency, 3).unwrap(),
+        admission.revoke(peer, Revocation::Emergency, || 3).unwrap(),
         RevocationProgress::TerminationPending(vec![id])
+    );
+}
+
+#[test]
+fn emergency_does_not_select_a_fixture_that_expires_during_persistence() {
+    let (_root, target, client, mut admission) = setup();
+    let peer = client.public();
+    let id = Uuid::new_v4().to_string();
+    admission
+        .admit(peer, &grant(&client, target.public(), &id, 0), 0)
+        .unwrap();
+    admission.record_fixture(&id, std::process::id());
+    let clock = std::cell::Cell::new(999);
+    let result = admission.revoke_with(
+        peer,
+        Revocation::Emergency,
+        || clock.get(),
+        |path, policy| {
+            save_policy(path, policy)?;
+            clock.set(1000);
+            Ok(())
+        },
+    );
+    assert_eq!(clock.get(), 1000);
+    assert_eq!(
+        result.unwrap(),
+        RevocationProgress::Persisted,
+        "a fixture whose lease reached its deadline during the write must remain with the expiry path"
+    );
+    assert_eq!(
+        admission.active(peer, &id, clock.get()).err(),
+        Some(Rejection::Expired)
     );
 }
 

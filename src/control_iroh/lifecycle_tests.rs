@@ -116,6 +116,11 @@ fn try_wait_frame(
     }
 }
 
+struct TerminalReceipt {
+    attachment: Option<String>,
+    frame: String,
+}
+
 struct Lane {
     epoch: Instant,
     admission: Admission,
@@ -127,7 +132,7 @@ struct Lane {
     pid: Option<u32>,
     termination_sent: bool,
     observed_terminal: Option<String>,
-    terminal: Option<String>,
+    terminal: Option<TerminalReceipt>,
 }
 
 impl Lane {
@@ -170,8 +175,17 @@ impl Lane {
                 Err(err) => Reply::denied(err),
             };
         }
-        if self.terminal.is_some() && matches!(operation, Op::Close(_)) {
-            return Reply::Noop;
+        if let (Some(receipt), Op::Close(attachment)) = (&self.terminal, &operation) {
+            let authorized = self
+                .admission
+                .lease(&self.lease_id)
+                .is_some_and(|lease| lease.peer == peer)
+                && receipt.attachment.as_ref() == Some(attachment);
+            return if authorized {
+                Reply::Noop
+            } else {
+                Reply::denied(Rejection::Denied)
+            };
         }
         if let Err(err) = self.admission.active(peer, &self.lease_id, now) {
             return Reply::denied(err);
@@ -235,8 +249,8 @@ impl Lane {
     }
 
     fn finish(&mut self, reason: &'static str) -> io::Result<String> {
-        if let Some(frame) = &self.terminal {
-            return Ok(frame.clone());
+        if let Some(receipt) = &self.terminal {
+            return Ok(receipt.frame.clone());
         }
         let pty = self.pty.as_mut().unwrap();
         if !self.termination_sent {
@@ -261,12 +275,15 @@ impl Lane {
         }
         let result = self.observed_terminal.take().expect("observed terminal");
         self.admission.confirm_terminal(&self.lease_id);
-        self.owner = None;
+        let attachment = self.owner.take();
         self.pty = None;
         self.first_attachment = None;
         self.pid = None;
         self.fixture.pty_id = None;
-        self.terminal = Some(result.clone());
+        self.terminal = Some(TerminalReceipt {
+            attachment,
+            frame: result.clone(),
+        });
         Ok(result)
     }
 
@@ -275,7 +292,10 @@ impl Lane {
         peer: EndpointId,
         mode: Revocation,
     ) -> Result<RevocationProgress, PersistenceError> {
-        let progress = self.admission.revoke(peer, mode, self.clock())?;
+        let epoch = self.epoch;
+        let progress = self
+            .admission
+            .revoke(peer, mode, || epoch.elapsed().as_millis() as u64)?;
         if let RevocationProgress::TerminationPending(ids) = &progress {
             if ids.contains(&uuid::Uuid::parse_str(&self.lease_id).unwrap())
                 && self.finish("lease_revoked").is_ok()
@@ -437,7 +457,7 @@ fn fixed_fixture_lifecycle_and_revocation_over_isolated_iroh() {
                 };
                 {
                     let state = lane.state();
-                    let terminal = state.terminal.as_ref().unwrap();
+                    let terminal = &state.terminal.as_ref().unwrap().frame;
                     assert!(matches!(
                         ControlFrame::parse_inbound_result_message(terminal).unwrap(),
                         ControlFrame::PtyClosed(frame) if frame.reason == expected_reason
@@ -503,7 +523,7 @@ fn detached_fixture_expires_without_further_requests() {
         timeout(FRAME_BUDGET, lane.wait_for_deadline()).await.expect("detached fixture still live after lease deadline");
         assert!(!pid_exists(pid));
         assert!(matches!(
-            ControlFrame::parse_inbound_result_message(lane.state().terminal.as_ref().unwrap()).unwrap(),
+            ControlFrame::parse_inbound_result_message(&lane.state().terminal.as_ref().unwrap().frame).unwrap(),
             ControlFrame::PtyClosed(frame) if frame.reason == EXPIRED.1
         ));
         println!("detached fixture pid={pid} reaped by service timer without a later request");
@@ -539,4 +559,41 @@ fn confirmed_close_clears_live_state_and_emergency_selection() {
         lane.revoke(peer, Revocation::Emergency).unwrap(),
         RevocationProgress::Persisted
     );
+}
+
+#[test]
+fn completed_close_only_acknowledges_the_authorized_attachment() {
+    let (_root, target, client, admission) = setup();
+    let foreign = iroh::SecretKey::generate().public();
+    let peer = client.public();
+    let mut lane = Lane::new(admission);
+    let proof = SignedGrant::issue(
+        &client,
+        target.public(),
+        &lane.lease_id,
+        lane.clock(),
+        Duration::from_secs(5),
+    )
+    .unwrap();
+    let owner = lane.run(peer, Op::Open(proof)).owner();
+    assert!(matches!(
+        lane.run(peer, Op::Close(owner.clone())),
+        Reply::Frame(_)
+    ));
+    assert!(
+        lane.pty.is_none(),
+        "second Close runs without a terminal receiver"
+    );
+    assert!(
+        matches!(
+            lane.run(foreign, Op::Close(owner.clone())),
+            Reply::Denied(..)
+        ),
+        "foreign peer must not obtain the completed Close acknowledgement"
+    );
+    assert!(matches!(
+        lane.run(peer, Op::Close("old-owner".into())),
+        Reply::Denied(..)
+    ));
+    assert!(matches!(lane.run(peer, Op::Close(owner)), Reply::Noop));
 }

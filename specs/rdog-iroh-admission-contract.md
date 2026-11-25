@@ -19,7 +19,7 @@ PTY 生命周期验证只走独立的测试编译入口。生产构建没有启�
 
 - **H2 = A：** 隔离准入唯一使用 [`Admission::policy`](../src/control_iroh/admission_tests.rs) 读取本地 allowlist，没有中心或环境回退。生产 `rdog` 本地策略管理子命令属未来范围，本票不提供或改动该入口。隔离策略不可读或损坏时拒绝新请求。
 - 本地管理员管理 allowlist 与撤销；申请者只能用已登记身份请求自己的授权；目标 daemon 校验授权并跟踪租约。目录、传输和本地管理员角色不能被普通会话继承。
-- PTY 会话 ID 仅标识子进程，不等于控制权。每次 attach 更新 `control_session_id`；[`Lane::run`](../src/control_iroh/lifecycle_tests.rs) 为隔离入口校验 Close 的当前 owner，[`PtyRuntimeCommand::Disconnect`](../src/pty_control.rs) 在运行时检查当前 attachment。两者不证明旧生产 Close 或 force-close 带同样的 owner 校验，后者归 RAI-298；本票不改。Detach 不终结进程，也不延长租约。
+- PTY 会话 ID 仅标识子进程，不等于控制权。每次 attach 更新 `control_session_id`；[`Lane::run`](../src/control_iroh/lifecycle_tests.rs) 为隔离入口校验 Close 的 peer 与当前 owner；只有终态收据对应的 peer/attachment 可以重复 Close 而不等第二个终帧。[`PtyRuntimeCommand::Disconnect`](../src/pty_control.rs) 在运行时检查当前 attachment。两者不证明旧生产 Close 或 force-close 带同样的 owner 校验，后者归 RAI-298；本票不改。Detach 不终结进程，也不延长租约。
 
 ## 撤销排序和错误语义
 
