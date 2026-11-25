@@ -31,6 +31,9 @@ use crate::{
 mod admission_tests;
 
 #[cfg(test)]
+mod profile_tests;
+
+#[cfg(test)]
 mod readonly_tests {
     #[test]
     fn default_iroh_gate_rejects_pty() {
@@ -67,6 +70,8 @@ struct RendezvousConfig {
     relay_key: PathBuf,
     registrations: HashMap<String, EndpointId>,
     lookups: Vec<EndpointId>,
+    #[serde(default)]
+    routable: bool,
 }
 
 #[derive(Deserialize)]
@@ -92,6 +97,10 @@ struct DaemonConfig {
     relay: Relay,
     name: String,
     allow: Vec<EndpointId>,
+    #[serde(default)]
+    routable: bool,
+    #[serde(default)]
+    bind: Option<SocketAddr>,
 }
 
 #[derive(Deserialize)]
@@ -101,6 +110,10 @@ struct ClientConfig {
     directory: Directory,
     relay: Relay,
     path: Route,
+    #[serde(default)]
+    routable: bool,
+    #[serde(default)]
+    bind: Option<SocketAddr>,
 }
 
 #[derive(Deserialize, Clone, Copy, PartialEq, Eq)]
@@ -159,6 +172,38 @@ fn loopback(addr: SocketAddr) -> Result<SocketAddr> {
     Ok(addr)
 }
 
+fn network(addr: SocketAddr, routable: bool) -> Result<SocketAddr> {
+    if !routable {
+        return loopback(addr);
+    }
+    let unusable = match addr.ip() {
+        std::net::IpAddr::V4(ip) => ip.is_unspecified() || ip.is_multicast() || ip.is_broadcast(),
+        std::net::IpAddr::V6(ip) => ip.is_unspecified() || ip.is_multicast(),
+    };
+    if unusable {
+        return Err("iroh routable profile requires an explicit address".into());
+    }
+    Ok(addr)
+}
+
+fn relay_allowed(url: &RelayUrl, qad_port: u16, routable: bool) -> Result<()> {
+    let https = url.scheme() == "https" && url.port().is_some() && qad_port != 0;
+    if !routable {
+        if !https || url.host_str() != Some("127.0.0.1") {
+            return Err("P1 iroh requires an explicit HTTPS loopback relay and QAD port".into());
+        }
+        return Ok(());
+    }
+    if !https || url.host_str().is_none() {
+        return Err("iroh routable profile requires an explicit HTTPS relay and QAD port".into());
+    }
+    Ok(())
+}
+
+fn bind_addr(bind: Option<SocketAddr>, routable: bool) -> Result<SocketAddr> {
+    network(bind.unwrap_or_else(|| "127.0.0.1:0".parse().unwrap()), routable)
+}
+
 fn name_valid(name: &str) -> bool {
     let Some((namespace, daemon)) = name.split_once('/') else {
         return false;
@@ -200,6 +245,16 @@ async fn endpoint(
     alpn: &[u8],
     relay: Option<&Relay>,
 ) -> Result<Endpoint> {
+    endpoint_with_network(key, bind, alpn, relay, false).await
+}
+
+async fn endpoint_with_network(
+    key: SecretKey,
+    bind: Option<SocketAddr>,
+    alpn: &[u8],
+    relay: Option<&Relay>,
+    routable: bool,
+) -> Result<Endpoint> {
     let mut builder = Endpoint::builder(presets::Minimal)
         .secret_key(key)
         .alpns(vec![alpn.to_vec()])
@@ -208,16 +263,10 @@ async fn endpoint(
         .portmapper_config(PortmapperConfig::Disabled)
         .relay_mode(RelayMode::Disabled);
     if let Some(bind) = bind {
-        builder = builder.bind_addr(loopback(bind)?)?;
+        builder = builder.bind_addr(network(bind, routable)?)?;
     }
     if let Some(r) = relay {
-        if r.url.scheme() != "https"
-            || r.url.host_str() != Some("127.0.0.1")
-            || r.url.port().is_none()
-            || r.qad_port == 0
-        {
-            return Err("P1 iroh requires an explicit HTTPS loopback relay and QAD port".into());
-        }
+        relay_allowed(&r.url, r.qad_port, routable)?;
         builder = builder
             .ca_tls_config(CaTlsConfig::custom_roots(certificates(&r.root_cert)?))
             .relay_mode(RelayMode::Custom(RelayMap::from_iter([RelayConfig::new(
@@ -247,9 +296,12 @@ async fn directory_call(
     ep: &Endpoint,
     directory: &Directory,
     request: DirectoryRequest,
+    routable: bool,
 ) -> Result<DirectoryReply> {
-    let addr =
-        EndpointAddr::from_parts(directory.id, [TransportAddr::Ip(loopback(directory.addr)?)]);
+    let addr = EndpointAddr::from_parts(
+        directory.id,
+        [TransportAddr::Ip(network(directory.addr, routable)?)],
+    );
     let conn = timeout(CONNECT, ep.connect(addr, DIRECTORY_ALPN)).await??;
     let (mut send, mut read) = timeout(IO, conn.open_bi()).await??;
     frame_put(&mut send, &request).await?;
@@ -264,6 +316,7 @@ struct Registry {
     readers: Vec<EndpointId>,
     leases: HashMap<String, (EndpointAddr, Instant)>,
     relay: RelayUrl,
+    routable: bool,
 }
 
 impl Registry {
@@ -279,7 +332,7 @@ impl Registry {
                     || addr.ip_addrs().count() != 1
                     || addr
                         .ip_addrs()
-                        .any(|a| loopback(*a).is_err() || a.port() == 0)
+                        .any(|a| network(*a, self.routable).is_err() || a.port() == 0)
                     || addr.relay_urls().collect::<Vec<_>>() != [&self.relay]
                 {
                     return reject("iroh_registration_denied");
@@ -329,7 +382,7 @@ pub(crate) fn run_rendezvous(path: &Path) -> Result<()> {
     .with_safe_default_protocol_versions()?
     .with_no_client_auth()
     .with_single_cert(certificates(&cfg.relay_cert)?, relay_key)?;
-    let mut relay_config = server::RelayConfig::new(loopback(cfg.relay_http)?);
+    let mut relay_config = server::RelayConfig::new(network(cfg.relay_http, cfg.routable)?);
     relay_config.access = Arc::new(RelayAccess(
         cfg.lookups
             .iter()
@@ -338,20 +391,21 @@ pub(crate) fn run_rendezvous(path: &Path) -> Result<()> {
             .collect(),
     ));
     relay_config.tls = Some(server::TlsConfig::new(
-        loopback(cfg.relay_https)?,
+        network(cfg.relay_https, cfg.routable)?,
         server::CertConfig::Manual { server_config: tls },
     ));
     let mut config = server::ServerConfig::default();
     config.relay = Some(relay_config);
-    config.quic = Some(server::QuicConfig::new(loopback(cfg.qad)?));
+    config.quic = Some(server::QuicConfig::new(network(cfg.qad, cfg.routable)?));
     runtime()?.block_on(async {
-        let directory = endpoint(key, Some(cfg.bind), DIRECTORY_ALPN, None).await?;
+        let directory =
+            endpoint_with_network(key, Some(cfg.bind), DIRECTORY_ALPN, None, cfg.routable).await?;
         let relay = server::Server::spawn(config).await?;
         let tls_addr = relay.https_addr().ok_or("missing P1 HTTPS relay")?;
         let qad = relay.quic_addr().ok_or("missing P1 QAD listener")?;
         let registry = Arc::new(Mutex::new(Registry {
             owners: cfg.registrations, readers: cfg.lookups, leases: HashMap::new(),
-            relay: format!("https://{tls_addr}").parse()?,
+            relay: format!("https://{tls_addr}").parse()?, routable: cfg.routable,
         }));
         log::info!("iroh rendezvous ready relay_https={tls_addr} qad={qad}");
         let mut tasks = JoinSet::new();
@@ -399,6 +453,7 @@ async fn register(ep: &Endpoint, cfg: &DaemonConfig, data: &Endpoint) -> Result<
             name: cfg.name.clone(),
             addr,
         },
+        cfg.routable,
     )
     .await?
     {
@@ -407,13 +462,14 @@ async fn register(ep: &Endpoint, cfg: &DaemonConfig, data: &Endpoint) -> Result<
     }
 }
 
-fn route(conn: &Connection) -> Result<Route> {
+fn route(conn: &Connection, routable: bool) -> Result<Route> {
     let paths = conn.paths();
     let observed = paths.iter().find(|path| path.is_selected());
     let observed = observed.as_ref().map(|path| path.remote_addr());
     match observed {
         Some(TransportAddr::Relay(_)) => Ok(Route::Relay),
-        Some(TransportAddr::Ip(ip)) if loopback(*ip).is_ok() => Ok(Route::Direct),
+        Some(TransportAddr::Ip(ip)) if network(*ip, routable).is_ok() => Ok(Route::Direct),
+        Some(TransportAddr::Ip(_)) if routable => Err("iroh has no usable path".into()),
         _ => Err("iroh has no usable loopback path".into()),
     }
 }
@@ -424,13 +480,18 @@ pub(crate) fn run_daemon(path: &Path) -> Result<()> {
         return Err("iroh daemon requires a name and an explicit ping allowlist".into());
     }
     let key = identity(&cfg.key_file)?;
+    let bind = bind_addr(cfg.bind, cfg.routable)?;
     runtime()?.block_on(async {
-        let bind = "127.0.0.1:0".parse()?;
-        let directory = endpoint(key.clone(), Some(bind), DIRECTORY_ALPN, None).await?;
-        let data = endpoint(key, Some(bind), CONTROL_ALPN, Some(&cfg.relay)).await?;
+        let directory =
+            endpoint_with_network(key.clone(), Some(bind), DIRECTORY_ALPN, None, cfg.routable)
+                .await?;
+        let data =
+            endpoint_with_network(key, Some(bind), CONTROL_ALPN, Some(&cfg.relay), cfg.routable)
+                .await?;
         timeout(CONNECT, data.online()).await?;
         let deadline = register(&directory, &cfg, &data).await?;
         let allow = Arc::new(cfg.allow.clone());
+        let routable = cfg.routable;
         let expires = Arc::new(Mutex::new(deadline));
         let renewal_expires = expires.clone();
         let renewal_data = data.clone();
@@ -455,7 +516,7 @@ pub(crate) fn run_daemon(path: &Path) -> Result<()> {
                         let outcome = async {
                             let conn = timeout(IO, incoming).await??;
                             let (send, read) = timeout(IO, conn.accept_bi()).await??;
-                            let route = route(&conn)?;
+                            let route = route(&conn, routable)?;
                             let live = expires.lock().ok().is_some_and(|at| *at > Instant::now());
                             if !live || !allow.contains(&conn.remote_id()) {
                                 log::info!("iroh admission deny path={} handler_entries=0", route.label());
@@ -494,23 +555,38 @@ pub(crate) fn run_control(path: &Path, name: &str, line: &str) -> Result<()> {
     }
     let cfg: ClientConfig = profile(path)?;
     let key = identity(&cfg.key_file)?;
+    let bind = bind_addr(cfg.bind, cfg.routable)?;
     runtime()?.block_on(async {
-        let bind = "127.0.0.1:0".parse()?;
-        let directory = endpoint(key.clone(), Some(bind), DIRECTORY_ALPN, None).await?;
-        let lookup = directory_call(&directory, &cfg.directory, DirectoryRequest::Lookup { name: name.to_owned() }).await;
+        let directory =
+            endpoint_with_network(key.clone(), Some(bind), DIRECTORY_ALPN, None, cfg.routable)
+                .await?;
+        let lookup = directory_call(
+            &directory,
+            &cfg.directory,
+            DirectoryRequest::Lookup { name: name.to_owned() },
+            cfg.routable,
+        )
+        .await;
         directory.close().await;
         let DirectoryReply::Found { addr } = lookup? else { return Err("unexpected iroh directory lookup response".into()); };
         let data = match cfg.path {
-            Route::Direct => endpoint(key, Some(bind), CONTROL_ALPN, None).await?,
-            Route::Relay => endpoint(key, None, CONTROL_ALPN, Some(&cfg.relay)).await?,
+            Route::Direct => {
+                endpoint_with_network(key, Some(bind), CONTROL_ALPN, None, cfg.routable).await?
+            }
+            Route::Relay => {
+                endpoint_with_network(key, None, CONTROL_ALPN, Some(&cfg.relay), cfg.routable).await?
+            }
         };
         let addrs = match cfg.path {
-            Route::Direct => vec![TransportAddr::Ip(loopback(*addr.ip_addrs().next().ok_or("no iroh direct candidate")?)?)],
+            Route::Direct => vec![TransportAddr::Ip(network(
+                *addr.ip_addrs().next().ok_or("no iroh direct candidate")?,
+                cfg.routable,
+            )?)],
             Route::Relay if addr.relay_urls().any(|url| *url == cfg.relay.url) => vec![TransportAddr::Relay(cfg.relay.url)],
             Route::Relay => return Err("iroh directory has no configured relay candidate".into()),
         };
         let conn = timeout(CONNECT, data.connect(EndpointAddr::from_parts(addr.id, addrs), CONTROL_ALPN)).await??;
-        let actual = route(&conn)?;
+        let actual = route(&conn, cfg.routable)?;
         if actual != cfg.path { return Err("iroh connection selected a prohibited route".into()); }
         log::info!("iroh_path={}", actual.label());
         let streams = timeout(IO, conn.open_bi()).await;
