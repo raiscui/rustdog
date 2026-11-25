@@ -425,3 +425,4 @@ U3 行为基线: 同一矩阵里 `direct` 在直连被阻断时失败、`auto` �
 - 租约冲突复用 lane 能力拒绝的 reason: 改为独立 `LEASE_BUSY`(`iroh_lease_session_conflict`), 规格错误表加一行。
 未修(确认为这批之前就存在): 3s 写超时超时不 reset 的半帧风险, 以及慢链上可能被误判断链。
 回执: 回环 11/11(`receipts/u7/loopback-final.log`)、三主机 13/13(`receipts/u7/routable-final.log`)、iroh 单测 19/19。
+- 提交: 77f7b42
