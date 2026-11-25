@@ -426,3 +426,9 @@ U3 行为基线: 同一矩阵里 `direct` 在直连被阻断时失败、`auto` �
 未修(确认为这批之前就存在): 3s 写超时超时不 reset 的半帧风险, 以及慢链上可能被误判断链。
 回执: 回环 11/11(`receipts/u7/loopback-final.log`)、三主机 13/13(`receipts/u7/routable-final.log`)、iroh 单测 19/19。
 - 提交: 77f7b42
+
+## 2026-11-25 RAI-305 U7: 半帧安全与写预算
+
+- 半帧: 新增 `FrameGuard`(归一化写帧路径)与 `FRAME_BROKEN`。任何一次写失败/超时都把该流标记不可用, 之后写直接被拒, lane 结束并用同一 reason 关闭会话(`abort_broken_frame`)。红基线 `receipts/u7/u7-half-frame-red.log`(旧行为下第二次写确实进了残留半帧的流, 断言 `a frame written onto a stream that holds a partial frame must be refused` 失败); 绿: `cargo test --bin rdog control_iroh` 23/23。
+- 写预算: profile 新增 `frame_timeout_ms`, 两侧校验, `MIN_FRAME_TIMEOUT` 1s / `MAX_FRAME_TIMEOUT` 120s / 缺省 3s。红基线 `receipts/u7/u7-frame-budget-red.log`(字段与校验都不存在); 绿: 两条 profile 用例。
+- 三主机实测(如实记录, 与预期相反): 链路消失 2s(`u7-outage-2s.log`)、6s(`u7-outage-6s.log`)、6s+12s 预算(`u7-outage-6s-budget12s.log`)、20s 冻结读端+64MB(`u7-stall-reader.log`) 全部以连接层 `connection lost` / `LastOpenPath` 结束, 均未出现 `iroh_frame_broken`。结论: 路径消失由连接活性决定, 写预算不改变结果; 写预算只管"路径在、对端不读"的写挂起, 该规则的真实网络证据尚未构造出来, 确定性证据是传输层单测。
