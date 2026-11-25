@@ -440,3 +440,4 @@ U3 行为基线: 同一矩阵里 `direct` 在直连被阻断时失败、`auto` �
 - 策略文件新增 `parties`(备注 + 登记时间), 准入判定仍只读 allow/revoked/terminate 三个集合。
 - 验收(回环 13/13 `receipts/u8/loopback.log`, 三主机 15/15 `receipts/u8/routable.log`): `policy list` 显示指纹与备注; `policy revoke` 返回 0 后新会话 `iroh_target_denied`、现存会话仍活; `policy emergency` 现存会话被终止且终帧 `lease_revoked`; 重启 daemon 后仍拒新。
 - 规格新增"操作者路径"一节(命令、落盘语义、两种失败、重启语义)。
+- 提交: 9f30ce3
