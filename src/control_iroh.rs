@@ -539,6 +539,7 @@ pub(crate) fn run_policy(action: crate::input::PolicyAction, path: &Path) -> Res
     let policy_path = cfg
         .policy_file
         .ok_or("iroh daemon profile names no policy_file")?;
+    let _locked = PolicyLock::acquire(&policy_path)?;
     let now = utc_ms();
     let mut policy: admission::Policy = match File::open(&policy_path) {
         Ok(file) => serde_json::from_reader(file)?,
@@ -586,6 +587,12 @@ pub(crate) fn run_policy(action: crate::input::PolicyAction, path: &Path) -> Res
         }
         PolicyAction::Admit { subject: hex, subject_key, note } => {
             let id = subject(hex, subject_key)?;
+            if policy.revoked.contains(&id) || policy.terminate.contains(&id) {
+                return Err(format!(
+                    "{id} is still revoked on disk; clear its revocation before admitting it again"
+                )
+                .into());
+            }
             policy.allow.insert(id);
             policy.note(id, &note, now);
             save(&policy_path, &policy)?;
@@ -612,6 +619,36 @@ pub(crate) fn run_policy(action: crate::input::PolicyAction, path: &Path) -> Res
         }
     }
     Ok(())
+}
+
+/// Holds the policy file's lock for the whole read, change and save, so two
+/// operators cannot overwrite each other's markers with a stale snapshot.
+struct PolicyLock(#[allow(dead_code)] File);
+
+#[cfg(unix)]
+impl PolicyLock {
+    fn acquire(policy_path: &Path) -> io::Result<Self> {
+        let mut lock = policy_path.as_os_str().to_owned();
+        lock.push(".lock");
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(Path::new(&lock))?;
+        // SAFETY: flock(2) on a descriptor this process owns; the lock is released
+        // when the file closes.
+        if unsafe { libc::flock(std::os::fd::AsRawFd::as_raw_fd(&file), libc::LOCK_EX) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(Self(file))
+    }
+}
+
+#[cfg(not(unix))]
+impl PolicyLock {
+    fn acquire(_policy_path: &Path) -> io::Result<Self> {
+        Ok(Self(std::fs::File::open("/dev/null")?))
+    }
 }
 
 fn save(path: &Path, policy: &admission::Policy) -> Result<()> {
@@ -1036,11 +1073,11 @@ impl crate::shell::PtyBridgeIo for LaneIo<'_> {
                     Err(_) => {}
                 }
             }
-            if let Some(session_id) = close_target(&message) {
+            if let Some(session_id) = lane_target(&message) {
                 if session_id != self.session {
                     // A close for any other session is not this session's input,
                     // and the bridge matches only its own id.
-                    log::info!("iroh close refused: session={session_id} is not this lane's");
+                    log::info!("iroh lifecycle frame refused: session={session_id} is not this lane's");
                     continue;
                 }
                 if !matches!(
@@ -1056,7 +1093,14 @@ impl crate::shell::PtyBridgeIo for LaneIo<'_> {
     }
 
     fn write_message(&mut self, message: &str) -> io::Result<()> {
-        self.transport.write_message(message)
+        self.transport.write_message(message).map_err(|err| {
+            // Any write failure leaves a possibly partial frame behind, which the
+            // guard has already made permanent for this stream.
+            match err.kind() {
+                io::ErrorKind::InvalidData => err,
+                _ => io::Error::other(format!("{FRAME_BROKEN}: {err}")),
+            }
+        })
     }
 }
 
@@ -1077,12 +1121,16 @@ fn abort_broken_frame(session: &str, err: &io::Error) -> io::Result<()> {
     Ok(())
 }
 
-fn close_target(message: &str) -> Option<String> {
-    // Anything that is not a close, a resize frame included, has to fall through
-    // to the bridge untouched.
+fn lane_target(message: &str) -> Option<String> {
+    // Anything that is not a lifecycle command for one session, a resize frame
+    // included, has to fall through to the bridge untouched.
     match parse_control_line(message) {
         Ok(ControlParseResult::Control(ControlRequest {
             command: ControlCommand::PtyClose(request),
+            ..
+        })) => Some(request.session_id),
+        Ok(ControlParseResult::Control(ControlRequest {
+            command: ControlCommand::PtyDetach(request),
             ..
         })) => Some(request.session_id),
         _ => None,
@@ -1732,13 +1780,18 @@ impl FrameGuard {
 
     /// Hands the framed bytes to `write`, which must either store the whole frame
     /// or report a failure.
+    fn ensure_intact(&self) -> io::Result<()> {
+        if self.broken.load(Ordering::SeqCst) {
+            return Err(io::Error::other(FRAME_BROKEN));
+        }
+        Ok(())
+    }
+
     fn write<F>(&self, message: &str, write: F) -> io::Result<()>
     where
         F: FnOnce(&[u8]) -> io::Result<()>,
     {
-        if self.broken.load(Ordering::SeqCst) {
-            return Err(io::Error::other(FRAME_BROKEN));
-        }
+        self.ensure_intact()?;
         let frame = frame_bytes(message)?;
         match write(&frame) {
             Ok(()) => Ok(()),
@@ -1778,6 +1831,9 @@ fn write_line(
     guard.write(message, |frame| {
         handle.block_on(async move {
             let mut stream = send.lock().expect("iroh send stream");
+            // A writer that failed while this one waited for the lock has already
+            // truncated the stream, so ask again now that the lock is held.
+            guard.ensure_intact()?;
             timeout(guard.timeout, stream.write_all(frame))
                 .await
                 .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "iroh line write timed out"))?

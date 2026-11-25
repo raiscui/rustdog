@@ -430,6 +430,7 @@ with tempfile.TemporaryDirectory(prefix="iroh-pty-", dir=scratch) as dirname:
         print("revocation: emergency terminated the live session", flush=True)
 
         case("a restarted daemon still refuses the revoked party")
+        first_daemon_log = daemon_log
         daemon_process = next(process for process in processes if "daemon" in process.args)
         processes.remove(daemon_process)
         daemon_process.terminate()
@@ -442,7 +443,8 @@ with tempfile.TemporaryDirectory(prefix="iroh-pty-", dir=scratch) as dirname:
         print("policy: a restarted daemon still refuses the revoked party", flush=True)
 
         write_policy([owner_id])
-        assert "path=direct" in daemon_log.read_text(), "the daemon never recorded the path"
+        assert "path=direct" in first_daemon_log.read_text(), \
+            "the first daemon never recorded a direct session"
         if from_lan:
             if os.environ.get("RAI305_STALL"):
                 outage = int(os.environ["RAI305_STALL"])
@@ -486,6 +488,11 @@ with tempfile.TemporaryDirectory(prefix="iroh-pty-", dir=scratch) as dirname:
                 survived = needle in text and code == 0
                 print(f"stall: session={stalled} outage={outage}s burst={burst}MB "
                       f"survived={survived} frame_broken={frame_broken} exit={code}", flush=True)
+                if frame_broken:
+                    reason_line = next(
+                        (line for line in daemon_log.read_text().splitlines()
+                         if "iroh_frame_broken" in line), "")
+                    print(f"stall: daemon recorded {reason_line.strip()[:160]}", flush=True)
                 assert survived or frame_broken, \
                     f"the session ended without a frame reason or did not survive: {code}"
             case("a relay-only profile also reaches the daemon")

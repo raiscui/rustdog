@@ -18,7 +18,14 @@
 
 写帧失败即作废该流：[`FrameGuard`](../src/control_iroh.rs) 在帧被完整写入之前不放行下一帧，任何一次写失败或写超时都把这条流标记成不可用，之后的所有写直接返回 [`FRAME_BROKEN`](../src/control_iroh.rs)，lane 随之结束并用同一 reason 关闭会话（[`abort_broken_frame`](../src/control_iroh.rs)）。理由是残留半帧会让后续帧错位解析，宁可断开也不继续发。
 
-单帧写预算由 profile 的 `frame_timeout_ms` 给出，两侧都校验：低于 [`MIN_FRAME_TIMEOUT`](../src/control_iroh.rs) 或高于 [`MAX_FRAME_TIMEOUT`](../src/control_iroh.rs) 直接按字段名报错，缺省 3s。实测边界（三主机拓扑，`tests/manual/iroh_pty_routable.sh`）：链路整段消失 2s / 6s、以及 6s 配 12s 预算三种情形，会话都以连接层的 `connection lost`（无可用路径）结束 —— 路径消失属于连接活性，写预算不改变结果；20s 冻结读端 + 64MB 积压同样先被连接层收掉。因此写预算的作用范围是"路径仍在但对端停止读取、窗口写满"这种写挂起，该规则的确定性证据是传输层单测（注入部分帧写超时），真实网络上让写预算单独成为约束条件的场景尚未构造出来。
+单帧写预算由 profile 的 `frame_timeout_ms` 给出，覆盖 lane 上的帧写（目录那一跳仍用固定 3s），两侧都校验：低于 [`MIN_FRAME_TIMEOUT`](../src/control_iroh.rs) 或高于 [`MAX_FRAME_TIMEOUT`](../src/control_iroh.rs) 直接按字段名报错，缺省 3s。
+
+实测边界（三主机拓扑，`tests/manual/iroh_pty_routable.sh`，`RAI305_STALL` / `RAI305_BURST` / `RAI305_FRAME_MS` 驱动）：
+
+- 链路整段消失 2s、6s、以及 6s 配 12s 预算：会话都以连接层的 `connection lost`（无可用路径）结束，写预算不改变结果 —— 路径消失归连接活性管。
+- 冻结读端 20s + 16MB 积压，配 **1s** 预算（短于连接活性）：写挂起在 1s 到点，daemon 记录 `iroh lane aborted reason=iroh_frame_broken`，会话以该 reason 关闭。回执 `receipts/u7/u7-stall-budget1s.log`。
+
+所以写预算的实际作用范围是"路径仍在但对端停止读取、窗口写满"的写挂起，且只有当它短于连接的 idle 判定时才会成为约束条件；预算长于连接活性时，连接层先收掉会话。
 
 交互路径回退是 [`Route::Auto`](../src/control_iroh.rs)：先试直连地址，直连不可得再走显式 relay。每个候选由 [`candidate_endpoint`](../src/control_iroh.rs) 建立与它自己那份固定 profile 相同的 endpoint（`direct` = 绑定 IP、无 relay；`relay` = 不绑定、仅 relay），因为一条已经卡死的远端路径会被复用重试，同 endpoint 换候选拿不到新的 QAD 应答。候选预算按性质分开：`direct` 用 `CONNECT`，`relay` 用 `RELAY_CONNECT`（relay 候选要先建 home）。最终实际路径由 [`connect_with_path`](../src/control_iroh.rs) 记录并打印 `iroh_path=`，且实际路径与预期候选不一致时按串路拒绝。`direct` / `relay` 两个固定取值仍按 profile 强制，不允许串路。
 
@@ -43,8 +50,9 @@
 本地管理员用 `rdog policy --config <daemon profile> <list|admit|revoke|emergency>` 管理准入方（profile 的 `policy_file` 指到哪个文件就改哪个文件），不再需要手改 JSON：
 
 - `list` 打印每个准入方的 endpoint id、SHA-256 指纹前缀、登记时间与备注，以及是否已 `revoked` / `terminate`。
-- `admit` 写入 `allow` 并记录备注与登记时间（幂等）。
-- `revoke`（graceful）先把主体写进 `revoked` 并落盘，返回即代表标记已持久化；此后新会话与续租被拒，现存会话跑到自身租约截止。
+- `admit` 写入 `allow` 并记录备注与登记时间（幂等）。对仍处于 `revoked` 的主体拒绝并明说"仍被撤销，先解封"，不会在撤销状态下谎报成功。
+- 读-改-写全程持有策略文件的排他锁（`<policy>.lock` 上的 `flock`），两个操作者并发不会用旧快照覆盖掉别人刚落盘的撤销标记。
+- `revoke`（graceful）先把主体写进 `revoked` 并落盘，返回即代表标记已持久化；此后新会话与续租被拒，现存会话跑到自身租约截止。revoke 同时把主体留在 `allow` 里作为"已登记但已撤销"的记录，准入判定仍以 `revoked` 一票否决，不靠从 allow 里删条目表达撤销。
 - `emergency` 在 `revoked` 之外再写 `terminate`，同样先落盘再返回；服务侧在下一个 sweep 见到 `terminate` 后终止现存会话（按进程组，见下）。
 
 落盘用 [`save_policy`](../src/control_iroh/admission.rs)：写临时文件、替换、同步父目录。写失败报"未写入"，替换后持久性无法确认报"已替换但持久性未确认"，两种情况命令都非零退出，不会假装成功。撤销标记只在文件里，所以 daemon 重启后仍然拒新（验收用例覆盖）。命令的实现入口是 [`run_policy`](../src/control_iroh.rs)。
