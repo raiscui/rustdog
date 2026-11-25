@@ -27,8 +27,13 @@ use crate::{
     control_transport::ControlTransport,
 };
 
+pub(crate) mod admission;
+
 #[cfg(all(test, target_os = "linux"))]
-mod admission_tests;
+mod fixtures;
+
+#[cfg(all(test, target_os = "linux"))]
+mod lifecycle_tests;
 
 #[cfg(test)]
 mod profile_tests;

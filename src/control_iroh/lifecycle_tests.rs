@@ -1,6 +1,9 @@
 use super::{
-    pid_exists, setup, Admission, FixedFixture, PersistenceError, Rejection, Revocation,
-    RevocationProgress, SignedGrant, EXPIRED,
+    admission::{
+        Admission, PersistenceError, Rejection, Revocation, RevocationProgress, SignedGrant,
+        EXPIRED,
+    },
+    fixtures::{pid_exists, pid_running, setup, FixedFixture},
 };
 use crate::{
     control_frames::ControlFrame,
@@ -38,18 +41,18 @@ async fn exchange<T: Serialize + DeserializeOwned, U: Serialize + DeserializeOwn
         let conn = client.connect(addr, TEST_ALPN).await.unwrap();
         assert_eq!(conn.remote_id(), target.id());
         let (mut send, mut recv) = conn.open_bi().await.unwrap();
-        super::super::frame_put(&mut send, request).await.unwrap();
-        super::super::frame_get(&mut recv).await.unwrap()
+        super::frame_put(&mut send, request).await.unwrap();
+        super::frame_get(&mut recv).await.unwrap()
     };
     let inbound = async {
         let conn = target.accept().await.unwrap().await.unwrap();
         let (mut send, mut recv) = conn.accept_bi().await.unwrap();
-        let request = super::super::frame_get(&mut recv).await.unwrap();
+        let request = super::frame_get(&mut recv).await.unwrap();
         let response = accept(conn.remote_id(), request);
-        super::super::frame_put(&mut send, &response).await.unwrap();
+        super::frame_put(&mut send, &response).await.unwrap();
         send.stopped().await.unwrap();
     };
-    timeout(super::super::CONNECT, async {
+    timeout(super::CONNECT, async {
         tokio::join!(outbound, inbound).0
     })
     .await
@@ -166,7 +169,6 @@ impl Lane {
                 Ok(pty) => {
                     let owner = pty.session_id().to_owned();
                     let pid = self.fixture.wait_pid();
-                    self.admission.record_fixture(&self.lease_id, pid);
                     self.pid = Some(pid);
                     self.owner = Some(owner.clone());
                     self.pty = Some(pty);
@@ -178,8 +180,8 @@ impl Lane {
         if let (Some(receipt), Op::Close(attachment)) = (&self.terminal, &operation) {
             let authorized = self
                 .admission
-                .lease(&self.lease_id)
-                .is_some_and(|lease| lease.peer == peer)
+                .lease_peer(&self.lease_id)
+                .is_some_and(|owner| owner == peer)
                 && receipt.attachment.as_ref() == Some(attachment);
             return if authorized {
                 Reply::Noop
@@ -377,16 +379,16 @@ impl Drop for LaneDriver {
 #[ignore = "requires private loopback and PID namespaces"]
 fn fixed_fixture_lifecycle_and_revocation_over_isolated_iroh() {
     assert_eq!(std::process::id(), 1, "run in the isolated test namespace");
-    super::super::runtime().unwrap().block_on(async {
+    super::runtime().unwrap().block_on(async {
         timeout(CASE_BUDGET, async {
             for mode in [Revocation::Graceful, Revocation::Emergency] {
                 let (_root, server_key, client_key, admission) = setup();
                 let server_id = server_key.public();
                 let client_id = client_key.public();
                 let bind = Some("127.0.0.1:0".parse().unwrap());
-                let target = super::super::endpoint(server_key, bind, TEST_ALPN, None).await.unwrap();
-                let client = super::super::endpoint(client_key.clone(), bind, TEST_ALPN, None).await.unwrap();
-                let stranger = super::super::endpoint(iroh::SecretKey::generate(), bind, TEST_ALPN, None).await.unwrap();
+                let target = super::endpoint(server_key, bind, TEST_ALPN, None).await.unwrap();
+                let client = super::endpoint(client_key.clone(), bind, TEST_ALPN, None).await.unwrap();
+                let stranger = super::endpoint(iroh::SecretKey::generate(), bind, TEST_ALPN, None).await.unwrap();
                 let mut lane = LaneDriver::new(admission);
                 let ttl = match mode {
                     Revocation::Graceful => Duration::from_secs(3),
@@ -437,7 +439,7 @@ fn fixed_fixture_lifecycle_and_revocation_over_isolated_iroh() {
                         Err(err) => Reply::denied(err),
                     }
                 }).await;
-                assert!(matches!(fresh, Reply::Denied(code, ref reason) if (code, reason.as_str()) == (super::super::DENIED_CODE, super::super::DENIED)));
+                assert!(matches!(fresh, Reply::Denied(code, ref reason) if (code, reason.as_str()) == (super::DENIED_CODE, super::DENIED)));
                 let expected_reason = match mode {
                     Revocation::Graceful => {
                         assert!(pid_exists(pid));
@@ -510,7 +512,7 @@ fn local_tty_guard_restores_settings() {
 fn detached_fixture_expires_without_further_requests() {
     let (_root, target, client, admission) = setup();
     let peer = client.public();
-    super::super::runtime().unwrap().block_on(async {
+    super::runtime().unwrap().block_on(async {
         let mut lane = LaneDriver::new(admission);
         let proof = {
             let state = lane.state();
