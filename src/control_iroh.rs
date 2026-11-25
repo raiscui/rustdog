@@ -55,6 +55,9 @@ const DIRECTORY_ALPN: &[u8] = b"rdog/iroh-directory/1";
 const CONTROL_ALPN: &[u8] = b"rdog/iroh-readonly/1";
 const IO: Duration = Duration::from_secs(3);
 const CONNECT: Duration = Duration::from_secs(7);
+// A relay candidate brings its home connection up first, so it needs a budget
+// that covers that hop as well as the connection made through it.
+const RELAY_CONNECT: Duration = Duration::from_secs(20);
 const LEASE: Duration = Duration::from_secs(15);
 const RENEW: Duration = Duration::from_secs(5);
 const MAX_DIRECTORY: usize = 2048;
@@ -638,26 +641,8 @@ pub(crate) fn run_control(path: &Path, name: &str, line: &str) -> Result<()> {
         .await;
         directory.close().await;
         let DirectoryReply::Found { addr } = lookup? else { return Err("unexpected iroh directory lookup response".into()); };
-        let data = match cfg.path {
-            Route::Direct => {
-                endpoint_with_network(key, Some(bind), CONTROL_ALPN, None, cfg.routable).await?
-            }
-            Route::Relay => {
-                endpoint_with_network(key, None, CONTROL_ALPN, Some(&cfg.relay), cfg.routable).await?
-            }
-            Route::Auto => {
-                endpoint_with_network(
-                    key,
-                    Some(bind),
-                    CONTROL_ALPN,
-                    Some(&cfg.relay),
-                    cfg.routable,
-                )
-                .await?
-            }
-        };
-        let (conn, actual) =
-            connect_with_path(&data, &addr, cfg.path, &cfg.relay, cfg.routable).await?;
+        let (data, conn, actual) =
+            connect_with_path(&key, Some(bind), &addr, cfg.path, &cfg.relay, cfg.routable).await?;
         log::info!("iroh_path={}", actual.label());
         let streams = timeout(IO, conn.open_bi()).await;
         let reply = match streams {
@@ -1034,31 +1019,59 @@ async fn connect_once(
     routable: bool,
 ) -> Result<(Connection, Route)> {
     let target = connect_route(data, addr, candidate, relay, routable)?;
-    let conn = timeout(CONNECT, data.connect(target, CONTROL_ALPN)).await??;
+    let budget = match candidate {
+        Route::Relay => RELAY_CONNECT,
+        Route::Direct | Route::Auto => CONNECT,
+    };
+    let conn = timeout(budget, data.connect(target, CONTROL_ALPN)).await??;
     let actual = await_route(&conn, routable).await?;
     Ok((conn, actual))
 }
 
+async fn candidate_endpoint(
+    key: &SecretKey,
+    bind: Option<SocketAddr>,
+    candidate: Route,
+    relay: &Relay,
+    routable: bool,
+) -> Result<Endpoint> {
+    match candidate {
+        Route::Direct => {
+            endpoint_with_network(key.clone(), bind, CONTROL_ALPN, None, routable).await
+        }
+        Route::Relay | Route::Auto => {
+            endpoint_with_network(key.clone(), None, CONTROL_ALPN, Some(relay), routable).await
+        }
+    }
+}
+
 async fn connect_with_path(
-    data: &Endpoint,
+    key: &SecretKey,
+    bind: Option<SocketAddr>,
     addr: &EndpointAddr,
     path: Route,
     relay: &Relay,
     routable: bool,
-) -> Result<(Connection, Route)> {
-    if path != Route::Auto {
-        let (conn, actual) = connect_once(data, addr, path, relay, routable).await?;
-        if actual != path {
-            return Err("iroh connection selected a prohibited route".into());
-        }
-        return Ok((conn, actual));
-    }
+) -> Result<(Endpoint, Connection, Route)> {
+    let candidates = match path {
+        Route::Auto => vec![Route::Direct, Route::Relay],
+        single => vec![single],
+    };
     let mut last: Option<Box<dyn std::error::Error + Send + Sync>> = None;
-    for candidate in [Route::Direct, Route::Relay] {
-        match connect_once(data, addr, candidate, relay, routable).await {
-            Ok(connected) => return Ok(connected),
+    for candidate in candidates {
+        // Each candidate gets the endpoint its own profile would use: a remote
+        // that a stalled attempt already knows keeps retrying that path, so the
+        // relay retry has to start from a fresh relay-only endpoint.
+        let data = candidate_endpoint(key, bind, candidate, relay, routable).await?;
+        match connect_once(&data, addr, candidate, relay, routable).await {
+            Ok((conn, actual)) if actual == candidate => return Ok((data, conn, actual)),
+            Ok(_) => {
+                data.close().await;
+                return Err("iroh connection selected a prohibited route".into());
+            }
             Err(err) => {
                 log::info!("iroh_path={} unavailable: {err}", candidate.label());
+                data.close().await;
                 last = Some(err);
             }
         }
@@ -1247,34 +1260,15 @@ pub(crate) fn run_pty_control(path: &Path, name: &str, request: IrohPtyRequest) 
             return Err("unexpected iroh directory lookup response".into());
         };
         let target = addr.id;
-        let data = match cfg.path {
-            Route::Direct => {
-                endpoint_with_network(key.clone(), Some(bind), CONTROL_ALPN, None, cfg.routable)
-                    .await?
-            }
-            Route::Relay => {
-                endpoint_with_network(
-                    key.clone(),
-                    None,
-                    CONTROL_ALPN,
-                    Some(&cfg.relay),
-                    cfg.routable,
-                )
-                .await?
-            }
-            Route::Auto => {
-                endpoint_with_network(
-                    key.clone(),
-                    Some(bind),
-                    CONTROL_ALPN,
-                    Some(&cfg.relay),
-                    cfg.routable,
-                )
-                .await?
-            }
-        };
-        let (conn, actual) =
-            connect_with_path(&data, &addr, cfg.path, &cfg.relay, cfg.routable).await?;
+        let (data, conn, actual) = connect_with_path(
+            &key,
+            Some(bind),
+            &addr,
+            cfg.path,
+            &cfg.relay,
+            cfg.routable,
+        )
+        .await?;
         log::info!("iroh_path={}", actual.label());
         let (send, read) = timeout(IO, conn.open_bi()).await??;
         let transport = ControlTransport::Iroh(IrohLineTransport::new(send, read));

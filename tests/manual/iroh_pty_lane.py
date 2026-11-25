@@ -81,8 +81,11 @@ with tempfile.TemporaryDirectory(prefix="iroh-pty-", dir=scratch) as dirname:
     )
     sockets = [socket.socket(socket.AF_INET, kind) for kind in
                [socket.SOCK_DGRAM, socket.SOCK_STREAM, socket.SOCK_STREAM, socket.SOCK_DGRAM]]
+    # The relay runs on another host in the routable matrix, so the port probe
+    # here only needs ports that are free where the relay will bind.
+    probe = "0.0.0.0" if routable else bind
     for sock in sockets:
-        sock.bind((bind, 0))
+        sock.bind((probe, 0))
     directory, http, https, qad = [sock.getsockname()[1] for sock in sockets]
     for sock in sockets:
         sock.close()
@@ -127,10 +130,16 @@ with tempfile.TemporaryDirectory(prefix="iroh-pty-", dir=scratch) as dirname:
 
     processes = []
 
+    host_ns = {"daemon": os.environ.get("RAI305_DAEMON_NS"),
+               "rendezvous": os.environ.get("RAI305_RELAY_NS")}
+
     def start(name, flags, marker):
         logfile = home / f"{name}.log"
+        command = [binary, *flags]
+        if host_ns.get(name):
+            command = ["nsenter", "-t", host_ns[name], "-n", *command]
         with logfile.open("w") as output:
-            child = subprocess.Popen([binary, *flags], cwd=home, env=env, stdin=subprocess.DEVNULL,
+            child = subprocess.Popen(command, cwd=home, env=env, stdin=subprocess.DEVNULL,
                                      stdout=output, stderr=subprocess.STDOUT, start_new_session=True)
         processes.append(child)
         ready(child, logfile, marker)
@@ -312,6 +321,43 @@ with tempfile.TemporaryDirectory(prefix="iroh-pty-", dir=scratch) as dirname:
 
         write_policy([owner_id])
         assert "path=direct" in daemon_log.read_text(), "the daemon never recorded the path"
+        if from_lan:
+            case("a relay-only profile also reaches the daemon")
+            relay_only = client_profile("relay-only", owner_key, path="relay")
+            started = time.monotonic()
+            relayed = control(relay_only, "@ping#10")
+            print(f"relay: dedicated relay profile took {time.monotonic() - started:.1f}s", flush=True)
+            combined = relayed.stdout + relayed.stderr
+            assert relayed.returncode == 0, combined
+            assert "iroh_path=relay" in combined, combined
+            print("relay: a relay-only profile reached the daemon", flush=True)
+
+            case("an interactive session falls back to the relay and records that path")
+            direct_only = client_profile("fallback-direct", owner_key, path="direct")
+            blocked = subprocess.run(["ip", "route", "replace", "blackhole",
+                                      f"{routable['daemon']}/32"], capture_output=True)
+            assert blocked.returncode == 0, blocked.stderr
+            try:
+                started = time.monotonic()
+                blocked_relay = control(relay_only, "@ping#15", timeout=120)
+                print(f"fallback: relay-only with the direct path blocked took "
+                      f"{time.monotonic() - started:.1f}s exit={blocked_relay.returncode}", flush=True)
+                refused = control(direct_only, "@ping#11")
+                assert refused.returncode != 0, \
+                    "a direct-only profile must fail while the direct path is blocked"
+                auto = client_profile("fallback-auto", owner_key, path="auto")
+                started = time.monotonic()
+                result = control(auto, "@ping#12", timeout=120)
+                print(f"fallback: auto finished in {time.monotonic() - started:.1f}s", flush=True)
+                combined = result.stdout + result.stderr
+                assert result.returncode == 0, combined
+                assert "iroh_path=relay" in combined, combined
+                assert "iroh_path=direct unavailable" in combined, combined
+                print("fallback: direct blocked -> relay carried the session; iroh_path=relay",
+                      flush=True)
+            finally:
+                subprocess.run(["ip", "route", "del", f"{routable['daemon']}/32"], capture_output=True)
+            assert "path=direct" in daemon_log.read_text(), "the daemon never recorded the path"
         assert "iroh_path=direct" in dialled, "the client never reported the path it used"
         alive = [pid for pid in fork_pids if pty_alive(pid)]
         assert not alive, f"forks still alive: {alive}"

@@ -16,7 +16,7 @@
 
 跨网地址放开用 profile 的 `routable` 字段（缺省 `false`）。地址的唯一策略是 [`network`](../src/control_iroh.rs) 与 [`relay_allowed`](../src/control_iroh.rs)：目录、endpoint、relay-QAD、advertise 与注册校验都走它们。缺省时仍是 P1 的 IPv4 回环门禁与原错误文案；`routable` 下拒绝未指定、组播和广播地址。
 
-交互路径回退是 [`Route::Auto`](../src/control_iroh.rs)：先试直连地址，直连不可得再走显式 relay，最终实际路径由 [`connect_with_path`](../src/control_iroh.rs) 记录并打印 `iroh_path=`。`direct` / `relay` 两个固定取值仍按 profile 强制，不允许串路。
+交互路径回退是 [`Route::Auto`](../src/control_iroh.rs)：先试直连地址，直连不可得再走显式 relay。每个候选由 [`candidate_endpoint`](../src/control_iroh.rs) 建立与它自己那份固定 profile 相同的 endpoint（`direct` = 绑定 IP、无 relay；`relay` = 不绑定、仅 relay），因为一条已经卡死的远端路径会被复用重试，同 endpoint 换候选拿不到新的 QAD 应答。候选预算按性质分开：`direct` 用 `CONNECT`，`relay` 用 `RELAY_CONNECT`（relay 候选要先建 home）。最终实际路径由 [`connect_with_path`](../src/control_iroh.rs) 记录并打印 `iroh_path=`，且实际路径与预期候选不一致时按串路拒绝。`direct` / `relay` 两个固定取值仍按 profile 强制，不允许串路。
 
 ## 身份、签发和租约
 
@@ -52,7 +52,7 @@
 RAI-305 交付的回执分两层：
 
 - 隔离回环矩阵（[`tests/manual/iroh_pty_lane.py`](../tests/manual/iroh_pty_lane.py)）：准入前零进程、attach/stdin/退出码、同主体跨连接关闭、异主体拒绝且目标仍在、detach 后无后续请求的到期回收、graceful 拒绝新会话而保留现存、emergency 终止现存，以及真 TTY 恢复。
-- 非回环矩阵（同一脚本的 `--routable` 模式，两个可路由地址）：真实握手、长会话、自动回退到 relay 并记录实际路径，以及缺省路径仍 ping-only + 回环。
+- 非回环矩阵（`tests/manual/iroh_pty_routable.sh` 搭三主机拓扑：客户 / 中转（目录 + relay，开转发）/ daemon，再以 `--routable` 跑同一脚本）：真实握手、长会话、relay-only 可达、直连被黑洞时 `direct` 必失败而 `auto` 落到 `iroh_path=relay`，以及缺省路径仍 ping-only + 回环。
 
 RAI-179 的隔离夹具矩阵（[`fixed_fixture_lifecycle_and_revocation_over_isolated_iroh`](../src/control_iroh/lifecycle_tests.rs)）在搬迁后重跑仍通过，用于证明同一份准入语义没有被搬移改变。
 
