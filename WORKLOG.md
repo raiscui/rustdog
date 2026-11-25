@@ -394,3 +394,11 @@ profile 新增 `routable`(缺省 false)与 `bind`; `network`/`relay_allowed` 是
 关闭授权(Rai-298 契约重实现): 按主体判定, 同主体跨连接可关自己的会话, 异主体 `iroh_subject_denied` 且目标继续运行; 旧通道维持按 id 关闭并已在规格写明"可达即全权"。
 证据: 隔离回环矩阵 8/8(`tests/manual/iroh_pty_lane.py`, 含准入前零进程、stdin 回显、跨连接关闭、异主拒绝、detach 到期回收、graceful/emergency、真 TTY); 19 项 iroh 单测; 搬迁后 RAI-179 隔离夹具矩阵重跑通过。`control_pty` 2 项与 `control_tty` 1 项为 util-linux `script` 2.39.3 的 BrokenPipe 环境红, 与候选无关(基线复核见回执)。
 - 提交: 187c2e5
+
+## 2026-11-25 RAI-305 U6: 跨网验收与回退修正
+
+非回环验收改成三主机拓扑(`tests/manual/iroh_pty_routable.sh`): 客户 10.41.0.1 / 中转 10.41.0.2-10.42.0.1(目录 + relay, 开转发) / daemon 10.42.0.2, 客户能到 relay 与目录但直连 daemon 被黑洞。11 项全绿: 真实握手、长会话 stdin 回显与 exit、同主体跨连接关闭、异主拒绝且目标存活、detach 到期回收、graceful/emergency、relay-only 可达、直连被黑洞时 `direct` 必失败而 `auto` 落到 `iroh_path=relay`(实测 auto 11.1s)。回环 8 项、iroh 单测 19 项、profile 测试 5 项同步复跑通过。
+U3 行为基线: 同一矩阵里 `direct` 在直连被阻断时失败、`auto` 成功并记录 `iroh_path=relay`, 构成红/绿对照。
+发现的真实缺陷与修法: 同一 endpoint 先试 direct 后, 远端状态会持续重试已知路径, relay 候选拿不到新的 QAD 应答; 改为 `candidate_endpoint` 按候选建 endpoint, 并给 relay 候选独立的 `RELAY_CONNECT` 预算。
+环境红: `control_pty`/`control_tty` 的 3 个用例在 `b5205ba` 与候选顶点红集完全相同(util-linux `script` BrokenPipe), 与候选无关。
+- 提交: bc2eb93
