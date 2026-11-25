@@ -57,7 +57,6 @@ const IO: Duration = Duration::from_secs(3);
 const CONNECT: Duration = Duration::from_secs(7);
 const LEASE: Duration = Duration::from_secs(15);
 const RENEW: Duration = Duration::from_secs(5);
-const MAX_LINE: usize = 1024;
 const MAX_DIRECTORY: usize = 2048;
 const MAX_SESSIONS: usize = 16;
 const DENIED: &str = "iroh_target_denied";
@@ -106,6 +105,8 @@ struct DaemonConfig {
     routable: bool,
     #[serde(default)]
     bind: Option<SocketAddr>,
+    #[serde(default)]
+    policy_file: Option<PathBuf>,
 }
 
 #[derive(Deserialize)]
@@ -119,6 +120,8 @@ struct ClientConfig {
     routable: bool,
     #[serde(default)]
     bind: Option<SocketAddr>,
+    #[serde(default)]
+    lease_ttl_ms: Option<u64>,
 }
 
 #[derive(Deserialize, Clone, Copy, PartialEq, Eq)]
@@ -126,6 +129,9 @@ struct ClientConfig {
 enum Route {
     Direct,
     Relay,
+    /// Try a direct path first and fall back to the configured relay; the path
+    /// that actually carried the session is what the CLI reports.
+    Auto,
 }
 
 impl Route {
@@ -133,6 +139,7 @@ impl Route {
         match self {
             Self::Direct => "direct",
             Self::Relay => "relay",
+            Self::Auto => "auto",
         }
     }
 }
@@ -467,6 +474,16 @@ async fn register(ep: &Endpoint, cfg: &DaemonConfig, data: &Endpoint) -> Result<
     }
 }
 
+async fn await_route(conn: &Connection, routable: bool) -> Result<Route> {
+    for _ in 0..20 {
+        if let Ok(selected) = route(conn, routable) {
+            return Ok(selected);
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    route(conn, routable)
+}
+
 fn route(conn: &Connection, routable: bool) -> Result<Route> {
     let paths = conn.paths();
     let observed = paths.iter().find(|path| path.is_selected());
@@ -497,6 +514,16 @@ pub(crate) fn run_daemon(path: &Path) -> Result<()> {
         let deadline = register(&directory, &cfg, &data).await?;
         let allow = Arc::new(cfg.allow.clone());
         let routable = cfg.routable;
+        let admission = match &cfg.policy_file {
+            Some(path) => Some(Arc::new(Mutex::new(admission::Admission::new(
+                path.clone(),
+                data.id(),
+            )))),
+            None => None,
+        };
+        if let Some(state) = admission.clone() {
+            tokio::spawn(lease_sweeper(state));
+        }
         let expires = Arc::new(Mutex::new(deadline));
         let renewal_expires = expires.clone();
         let renewal_data = data.clone();
@@ -508,7 +535,10 @@ pub(crate) fn run_daemon(path: &Path) -> Result<()> {
                 }
             }
         });
-        log::info!("iroh daemon registered");
+        log::info!(
+            "iroh daemon registered pty={}",
+            if admission.is_some() { "admitted" } else { "ping-only" }
+        );
         let mut tasks = JoinSet::new();
         loop {
             tokio::select! {
@@ -517,22 +547,56 @@ pub(crate) fn run_daemon(path: &Path) -> Result<()> {
                     let incoming = incoming.ok_or("iroh daemon stopped")?;
                     let allow = allow.clone();
                     let expires = expires.clone();
+                    let admission = admission.clone();
                     tasks.spawn(async move {
                         let outcome = async {
                             let conn = timeout(IO, incoming).await??;
+                            log::info!("iroh connection accepted peer={}", conn.remote_id());
                             let (send, read) = timeout(IO, conn.accept_bi()).await??;
-                            let route = route(&conn, routable)?;
+                            let route = route(&conn, routable);
+                            let path = route.as_ref().map(|route| route.label()).unwrap_or("pending");
                             let live = expires.lock().ok().is_some_and(|at| *at > Instant::now());
                             if !live || !allow.contains(&conn.remote_id()) {
-                                log::info!("iroh admission deny path={} handler_entries=0", route.label());
+                                log::info!("iroh admission deny path={path} handler_entries=0");
                                 conn.close(DENIED_CODE.into(), DENIED.as_bytes());
                                 return Ok(());
                             }
                             let transport = ControlTransport::Iroh(IrohLineTransport::new(send, read));
-                            tokio::task::spawn_blocking(move || serve_ping(transport, route)).await??;
+                            let peer = conn.remote_id();
+                            let served = match admission {
+                                Some(state) => {
+                                    tokio::task::spawn_blocking(move || {
+                                        serve_admitted(transport, peer, path, state)
+                                    })
+                                    .await?
+                                }
+                                None => {
+                                    tokio::task::spawn_blocking(move || {
+                                        serve_ping(transport, path)
+                                    })
+                                    .await?
+                                }
+                            };
+                            match served {
+                                Err(err) if err.kind() == io::ErrorKind::PermissionDenied => {
+                                    log::info!("iroh admitted lane refused: {err}");
+                                    conn.close(DENIED_CODE.into(), DENIED.as_bytes());
+                                }
+                                Err(err) => {
+                                    log::info!("iroh control connection ended without a reply: {err}")
+                                }
+                                Ok(()) => {
+                                    // The peer reads the last frame before it closes
+                                    // the connection; closing from this side would
+                                    // discard a reply that is still in flight.
+                                    let _ = timeout(IO, conn.closed()).await;
+                                }
+                            }
                             Ok::<_, Box<dyn std::error::Error + Send + Sync>>(())
                         }.await;
-                        if outcome.is_err() { log::debug!("iroh control connection ended without a ping response"); }
+                        if let Err(err) = outcome {
+                            log::info!("iroh control connection failed: {err}");
+                        }
                     });
                 }
             }
@@ -540,14 +604,14 @@ pub(crate) fn run_daemon(path: &Path) -> Result<()> {
     })
 }
 
-fn serve_ping(mut transport: ControlTransport, route: Route) -> io::Result<()> {
+fn serve_ping(mut transport: ControlTransport, path: &'static str) -> io::Result<()> {
     let line = transport
         .read_message()?
         .ok_or(io::ErrorKind::UnexpectedEof)?;
     let request = ping_only(&line)?;
     let outcome = execute_ping(request.request_id, "");
     if let Some(id) = request.request_id {
-        log::info!("iroh ping dispatch path={} id={id}", route.label());
+        log::info!("iroh ping dispatch path={path} id={id}");
     }
     ControlPeerSession::new("iroh-readonly").dispatch_outcome(outcome, &mut transport)?;
     transport.close()
@@ -581,18 +645,19 @@ pub(crate) fn run_control(path: &Path, name: &str, line: &str) -> Result<()> {
             Route::Relay => {
                 endpoint_with_network(key, None, CONTROL_ALPN, Some(&cfg.relay), cfg.routable).await?
             }
+            Route::Auto => {
+                endpoint_with_network(
+                    key,
+                    Some(bind),
+                    CONTROL_ALPN,
+                    Some(&cfg.relay),
+                    cfg.routable,
+                )
+                .await?
+            }
         };
-        let addrs = match cfg.path {
-            Route::Direct => vec![TransportAddr::Ip(network(
-                *addr.ip_addrs().next().ok_or("no iroh direct candidate")?,
-                cfg.routable,
-            )?)],
-            Route::Relay if addr.relay_urls().any(|url| *url == cfg.relay.url) => vec![TransportAddr::Relay(cfg.relay.url)],
-            Route::Relay => return Err("iroh directory has no configured relay candidate".into()),
-        };
-        let conn = timeout(CONNECT, data.connect(EndpointAddr::from_parts(addr.id, addrs), CONTROL_ALPN)).await??;
-        let actual = route(&conn, cfg.routable)?;
-        if actual != cfg.path { return Err("iroh connection selected a prohibited route".into()); }
+        let (conn, actual) =
+            connect_with_path(&data, &addr, cfg.path, &cfg.relay, cfg.routable).await?;
         log::info!("iroh_path={}", actual.label());
         let streams = timeout(IO, conn.open_bi()).await;
         let reply = match streams {
@@ -607,9 +672,21 @@ pub(crate) fn run_control(path: &Path, name: &str, line: &str) -> Result<()> {
             Ok(Err(err)) => Err(io::Error::other(err)),
             Err(err) => Err(io::Error::other(err)),
         };
-        let denied = matches!(conn.close_reason(),
-            Some(ConnectionError::ApplicationClosed(close))
-            if close.error_code.into_inner() == u64::from(DENIED_CODE) && close.reason.as_ref() == DENIED.as_bytes());
+        // A refusal closes the connection, so the reason can land after the
+        // stream reports its end; wait for it briefly before treating the
+        // reply as a protocol failure.
+        let mut denied = false;
+        for _ in 0..20 {
+            match conn.close_reason() {
+                Some(ConnectionError::ApplicationClosed(close)) => {
+                    denied = close.error_code.into_inner() == u64::from(DENIED_CODE)
+                        && close.reason.as_ref() == DENIED.as_bytes();
+                    break;
+                }
+                Some(_) => break,
+                None => tokio::time::sleep(Duration::from_millis(50)).await,
+            }
+        }
         data.close().await;
         if denied { return Err(DENIED.into()); }
         let reply = reply?;
@@ -624,75 +701,731 @@ pub(crate) fn run_control(path: &Path, name: &str, line: &str) -> Result<()> {
     })
 }
 
+// ---------------------------------------------------------------------------
+// Admitted PTY lane
+//
+// The formal iroh entry stays ping-only unless the daemon profile names an
+// admission policy file. When it does, every connection presents a locally
+// signed grant, the daemon serves the request through the same PTY runtime the
+// other control lanes use, and one sweeper reclaims sessions whose lease ran out
+// or whose peer was revoked, with no further request needed.
+// ---------------------------------------------------------------------------
+
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(7);
+const LEASE_TICK: Duration = Duration::from_millis(200);
+const DEFAULT_LEASE_TTL_MS: u64 = 60_000;
+const RENEW_STEP: u32 = 3;
+const RENEW_POLL: Duration = Duration::from_millis(100);
+const LANE_REFUSED_CODE: i32 = 66;
+const LANE_REFUSED: &str = "iroh_admitted_lane_supports_ping_and_pty_only";
+const SUBJECT_REFUSED_CODE: i32 = 43;
+const SUBJECT_REFUSED: &str = "iroh_subject_denied";
+
+fn utc_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
+enum Handshake {
+    Admit { grant: admission::SignedGrant },
+    Renew { grant: admission::SignedGrant },
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
+enum HandshakeReply {
+    Admitted,
+    Renewed,
+    Refused { code: u32, reason: String },
+}
+
+fn handshake_reply(reply: &HandshakeReply) -> io::Result<String> {
+    serde_json::to_string(reply).map_err(io::Error::other)
+}
+
+fn refuse_frame(
+    transport: &mut ControlTransport,
+    request_id: Option<u64>,
+    code: i32,
+    reason: &str,
+) -> io::Result<()> {
+    let line = crate::control_core::render_protocol_error_response(request_id, code, reason);
+    transport.write_message(&line)
+}
+
+fn require_active(
+    admission: &Arc<Mutex<admission::Admission>>,
+    peer: EndpointId,
+    lease: &str,
+) -> admission::AdmissionResult<()> {
+    admission
+        .lock()
+        .map_err(|_| admission::Rejection::Denied)?
+        .active(peer, lease, utc_ms())
+}
+
+fn serve_admitted(
+    mut transport: ControlTransport,
+    peer: EndpointId,
+    path: &'static str,
+    admission: Arc<Mutex<admission::Admission>>,
+) -> io::Result<()> {
+    transport.set_read_timeout(Some(HANDSHAKE_TIMEOUT))?;
+    log::info!("iroh admitted lane reading the handshake");
+    let Some(first) = transport.read_message()? else {
+        log::info!("iroh admitted lane saw end of stream before a handshake");
+        return Ok(());
+    };
+    log::info!("iroh admitted lane handshake bytes={}", first.len());
+    let Ok(Handshake::Admit { grant }) = serde_json::from_str::<Handshake>(&first) else {
+        // The admitted lane keeps answering the P1 ping one-shot, so the formal
+        // CLI's diagnostic path needs no handshake; anything else is refused.
+        // The local policy stays the authority: a revoked peer gets no ping.
+        let admitted_ping = admission
+            .lock()
+            .map(|state| state.admits_ping(peer))
+            .unwrap_or(false);
+        if !admitted_ping {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                format!("iroh ping refused by the local policy: peer={peer}"),
+            ));
+        }
+        if let Ok(request) = ping_only(&first) {
+            let outcome = execute_ping(request.request_id, "");
+            ControlPeerSession::new("iroh-admitted").dispatch_outcome(outcome, &mut transport)?;
+            return transport.close();
+        }
+        let refusal = admission::Rejection::Denied.code_reason();
+        let reply = HandshakeReply::Refused {
+            code: refusal.0,
+            reason: refusal.1.to_owned(),
+        };
+        transport.write_message(&handshake_reply(&reply)?)?;
+        log::info!("iroh handshake requires admit or ping first");
+        return transport.close();
+    };
+    let lease = grant.claims.session.clone();
+    match admission
+        .lock()
+        .map_err(|_| io::Error::other("admission lock poisoned"))?
+        .admit(peer, &grant, utc_ms())
+    {
+        Ok(()) => transport.write_message(&handshake_reply(&HandshakeReply::Admitted)?)?,
+        Err(rejection) => {
+            let (code, reason) = rejection.code_reason();
+            let reply = HandshakeReply::Refused {
+                code,
+                reason: reason.to_owned(),
+            };
+            transport.write_message(&handshake_reply(&reply)?)?;
+            log::info!("iroh session refused peer={peer} path={path} reason={reason}");
+            return transport.close();
+        }
+    }
+    transport.set_read_timeout(None)?;
+    log::info!("iroh session admitted peer={peer} path={path}");
+    let result = serve_lane(&mut transport, peer, &lease, &admission);
+    result.and(transport.close())
+}
+
+fn serve_lane(
+    transport: &mut ControlTransport,
+    peer: EndpointId,
+    lease: &str,
+    admission: &Arc<Mutex<admission::Admission>>,
+) -> io::Result<()> {
+    let subject = peer.to_string();
+    loop {
+        let Some(line) = transport.read_message()? else {
+            return Ok(());
+        };
+        if line.starts_with('{') {
+            match serde_json::from_str::<Handshake>(&line) {
+                Ok(Handshake::Renew { grant }) => {
+                    // Renewal is one-way: the client keeps its session by
+                    // renewing, and a refused renewal shows up as the lease
+                    // running out rather than as a frame in the PTY stream.
+                    match admission
+                        .lock()
+                        .map_err(|_| io::Error::other("admission lock poisoned"))?
+                        .renew(peer, &grant, utc_ms())
+                    {
+                        Ok(()) => {}
+                        Err(rejection) => {
+                            let (code, reason) = rejection.code_reason();
+                            log::info!("iroh lease renewal refused code={code} reason={reason}");
+                        }
+                    }
+                }
+                _ => {
+                    refuse_frame(transport, None, LANE_REFUSED_CODE, LANE_REFUSED)?;
+                }
+            }
+            continue;
+        }
+
+        if let Some(request) = crate::pty_control::parse_pty_open_request(&line)? {
+            if let Err(rejection) = require_active(admission, peer, lease) {
+                let (code, reason) = rejection.code_reason();
+                refuse_frame(transport, None, code as i32, reason)?;
+                continue;
+            }
+            let mut session = match crate::pty_control::open_attached_pty_session(request) {
+                Ok(session) => session,
+                Err(err) => {
+                    refuse_frame(transport, None, 64, &err.to_string())?;
+                    continue;
+                }
+            };
+            let pty = session.session_id().to_owned();
+            crate::pty_control::bind_pty_session_subject(&pty, &subject)?;
+            admission
+                .lock()
+                .map_err(|_| io::Error::other("admission lock poisoned"))?
+                .record_session(lease, pty.clone());
+            log::info!("iroh pty opened session={pty} lease={lease}");
+            crate::shell::bridge_attached_pty_session(transport, &mut session)?;
+            continue;
+        }
+
+        if let Some(request) = crate::pty_control::parse_pty_attach_request(&line)? {
+            match crate::pty_control::authorize_pty_subject(&request.session_id, &subject)? {
+                crate::pty_control::SubjectAccess::Allowed => {}
+                crate::pty_control::SubjectAccess::Foreign => {
+                    refuse_frame(transport, None, SUBJECT_REFUSED_CODE, SUBJECT_REFUSED)?;
+                    continue;
+                }
+                crate::pty_control::SubjectAccess::Missing => {
+                    refuse_frame(transport, None, 64, "PTY session not found")?;
+                    continue;
+                }
+            }
+            let Some(mut session) = crate::pty_control::attach_active_pty_session(request)? else {
+                refuse_frame(transport, None, 64, "PTY session not found")?;
+                continue;
+            };
+            log::info!("iroh pty reattached session={}", session.session_id());
+            crate::shell::bridge_attached_pty_session(transport, &mut session)?;
+            continue;
+        }
+
+        let request = match parse_control_line(&line) {
+            Ok(ControlParseResult::Control(request)) => request,
+            _ => {
+                refuse_frame(transport, None, LANE_REFUSED_CODE, LANE_REFUSED)?;
+                continue;
+            }
+        };
+        match request.command {
+            ControlCommand::Ping => {
+                let outcome = execute_ping(request.request_id, "");
+                ControlPeerSession::new("iroh-admitted").dispatch_outcome(outcome, transport)?;
+            }
+            ControlCommand::PtyClose(close) => {
+                match crate::pty_control::authorize_pty_subject(&close.session_id, &subject)? {
+                    crate::pty_control::SubjectAccess::Allowed => {
+                        let closed =
+                            crate::pty_control::close_pty_session_with_reason(&close.session_id, "force_close")?;
+                        if closed {
+                            let line = crate::control_core::render_control_response_payload(
+                                request.request_id,
+                                0,
+                                b"",
+                                b"",
+                            );
+                            transport.write_message(&line)?;
+                        } else {
+                            refuse_frame(transport, None, 64, "PTY session not found")?;
+                        }
+                    }
+                    crate::pty_control::SubjectAccess::Foreign => {
+                        refuse_frame(transport, request.request_id, SUBJECT_REFUSED_CODE, SUBJECT_REFUSED)?;
+                    }
+                    crate::pty_control::SubjectAccess::Missing => {
+                        refuse_frame(transport, request.request_id, 64, "PTY session not found")?;
+                    }
+                }
+            }
+            ControlCommand::PtyDetach(detach) => {
+                match crate::pty_control::authorize_pty_subject(&detach.session_id, &subject)? {
+                    crate::pty_control::SubjectAccess::Allowed => {
+                        match crate::pty_control::detach_active_pty_session(&detach.session_id) {
+                            Ok(true) => {
+                                let line = crate::control_core::render_control_response_payload(
+                                    request.request_id,
+                                    0,
+                                    b"",
+                                    b"",
+                                );
+                                transport.write_message(&line)?;
+                            }
+                            Ok(false) => {
+                                refuse_frame(transport, request.request_id, 64, "PTY session not found")?
+                            }
+                            Err(err) => {
+                                refuse_frame(transport, request.request_id, 64, &err.to_string())?
+                            }
+                        }
+                    }
+                    crate::pty_control::SubjectAccess::Foreign => {
+                        refuse_frame(transport, request.request_id, SUBJECT_REFUSED_CODE, SUBJECT_REFUSED)?;
+                    }
+                    crate::pty_control::SubjectAccess::Missing => {
+                        refuse_frame(transport, request.request_id, 64, "PTY session not found")?;
+                    }
+                }
+            }
+            _ => refuse_frame(transport, None, LANE_REFUSED_CODE, LANE_REFUSED)?,
+        }
+    }
+}
+
+async fn lease_sweeper(admission: Arc<Mutex<admission::Admission>>) {
+    loop {
+        tokio::time::sleep(LEASE_TICK).await;
+        let work = match admission.lock() {
+            Ok(mut state) => state.sweep(utc_ms(), crate::pty_control::pty_session_registered),
+            Err(_) => return,
+        };
+        for termination in work {
+            log::info!(
+                "iroh lease reclaim session={} reason={}",
+                termination.pty,
+                termination.reason
+            );
+            let _ = crate::pty_control::close_pty_session_with_reason(
+                &termination.pty,
+                termination.reason,
+            );
+        }
+    }
+}
+
+fn connect_route(
+    data: &Endpoint,
+    addr: &EndpointAddr,
+    path: Route,
+    relay: &Relay,
+    routable: bool,
+) -> Result<EndpointAddr> {
+    let addrs = match path {
+        Route::Direct | Route::Auto => vec![TransportAddr::Ip(network(
+            *addr.ip_addrs().next().ok_or("no iroh direct candidate")?,
+            routable,
+        )?)],
+        Route::Relay if addr.relay_urls().any(|url| *url == relay.url) => {
+            vec![TransportAddr::Relay(relay.url.clone())]
+        }
+        Route::Relay => return Err("iroh directory has no configured relay candidate".into()),
+    };
+    Ok(EndpointAddr::from_parts(addr.id, addrs))
+}
+
+async fn connect_once(
+    data: &Endpoint,
+    addr: &EndpointAddr,
+    candidate: Route,
+    relay: &Relay,
+    routable: bool,
+) -> Result<(Connection, Route)> {
+    let target = connect_route(data, addr, candidate, relay, routable)?;
+    let conn = timeout(CONNECT, data.connect(target, CONTROL_ALPN)).await??;
+    let actual = await_route(&conn, routable).await?;
+    Ok((conn, actual))
+}
+
+async fn connect_with_path(
+    data: &Endpoint,
+    addr: &EndpointAddr,
+    path: Route,
+    relay: &Relay,
+    routable: bool,
+) -> Result<(Connection, Route)> {
+    if path != Route::Auto {
+        let (conn, actual) = connect_once(data, addr, path, relay, routable).await?;
+        if actual != path {
+            return Err("iroh connection selected a prohibited route".into());
+        }
+        return Ok((conn, actual));
+    }
+    let mut last: Option<Box<dyn std::error::Error + Send + Sync>> = None;
+    for candidate in [Route::Direct, Route::Relay] {
+        match connect_once(data, addr, candidate, relay, routable).await {
+            Ok(connected) => return Ok(connected),
+            Err(err) => {
+                log::info!("iroh_path={} unavailable: {err}", candidate.label());
+                last = Some(err);
+            }
+        }
+    }
+    Err(last.unwrap_or_else(|| "iroh has no reachable path".into()))
+}
+
+fn spawn_lease_renewer(
+    mut writer: crate::control_transport::ControlTransportWriter,
+    key: SecretKey,
+    target: EndpointId,
+    session: String,
+    ttl: Duration,
+    stop: Arc<std::sync::atomic::AtomicBool>,
+) -> std::thread::JoinHandle<()> {
+    std::thread::spawn(move || {
+        let wait = ttl / RENEW_STEP;
+        while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+            // Wake in short slices so a finished session never waits a whole
+            // renewal period to join this thread.
+            let mut elapsed = Duration::ZERO;
+            while elapsed < wait {
+                if stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    return;
+                }
+                let slice = RENEW_POLL.min(wait - elapsed);
+                std::thread::sleep(slice);
+                elapsed += slice;
+            }
+            if stop.load(std::sync::atomic::Ordering::Relaxed) {
+                return;
+            }
+            let Ok(grant) = admission::SignedGrant::issue(&key, target, &session, utc_ms(), ttl)
+            else {
+                return;
+            };
+            let Ok(frame) = serde_json::to_string(&Handshake::Renew { grant }) else {
+                return;
+            };
+            if writer.write_message(&frame).is_err() {
+                return;
+            }
+        }
+    })
+}
+
+fn one_shot_pty_line(transport: &mut ControlTransport, line: String) -> Result<()> {
+    transport.write_message(&line)?;
+    let Some(reply) = transport.read_message()? else {
+        return Err("iroh control connection closed before the reply".into());
+    };
+    match crate::control_frames::ControlFrame::parse_inbound_result_message(&reply) {
+        Ok(crate::control_frames::ControlFrame::ResponseLine(response)) => {
+            let value: serde_json::Value = serde_json::from_str(
+                response.strip_prefix("@response ").unwrap_or(&response),
+            )?;
+            if value.get("error").is_some() {
+                return Err(response.into());
+            }
+            println!("{response}");
+            Ok(())
+        }
+        _ => Err("unexpected iroh control reply".into()),
+    }
+}
+
+fn client_lane(
+    mut transport: ControlTransport,
+    key: SecretKey,
+    target: EndpointId,
+    ttl: Duration,
+    request: IrohPtyRequest,
+) -> Result<()> {
+    let session_id = uuid::Uuid::new_v4().to_string();
+    let grant = admission::SignedGrant::issue(&key, target, &session_id, utc_ms(), ttl)
+        .map_err(|_| "cannot issue an iroh session grant")?;
+    transport.write_message(&serde_json::to_string(&Handshake::Admit { grant })?)?;
+    log::info!("iroh handshake sent session={session_id}");
+    transport.set_read_timeout(Some(CONNECT))?;
+    let reply = transport
+        .read_message()?
+        .ok_or("iroh admission closed before a reply")?;
+    log::info!("iroh handshake reply received");
+    match serde_json::from_str::<HandshakeReply>(&reply)? {
+        HandshakeReply::Admitted => {}
+        HandshakeReply::Refused { code, reason } => return Err(format!("{reason} ({code})").into()),
+        HandshakeReply::Renewed => return Err("unexpected iroh admission reply".into()),
+    }
+    transport.set_read_timeout(None)?;
+    let one_shot = matches!(
+        request,
+        IrohPtyRequest::Detach { .. } | IrohPtyRequest::Close { .. }
+    );
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let renewer = if one_shot {
+        None
+    } else {
+        Some(spawn_lease_renewer(
+            transport.try_clone_writer()?,
+            key,
+            target,
+            session_id,
+            ttl,
+            stop.clone(),
+        ))
+    };
+    let result: Result<()> = match request {
+        IrohPtyRequest::Open { argv, cols, rows } => {
+            crate::pty_control::run_pty_client_transport(
+                &mut transport,
+                crate::pty_control::render_pty_open_line(&argv, cols, rows)?,
+                true,
+            )
+            .map_err(Into::into)
+        }
+        IrohPtyRequest::Attach {
+            session_id,
+            cols,
+            rows,
+        } => crate::pty_control::run_pty_attach_client_transport(
+            &mut transport,
+            crate::pty_control::render_pty_attach_line(&session_id, cols, rows)?,
+            true,
+        )
+        .map_err(Into::into),
+        IrohPtyRequest::Detach { session_id } => one_shot_pty_line(
+            &mut transport,
+            crate::pty_control::render_pty_detach_line(&session_id)?,
+        ),
+        IrohPtyRequest::Close { session_id } => one_shot_pty_line(
+            &mut transport,
+            crate::pty_control::render_pty_close_line(&session_id)?,
+        ),
+    };
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    if let Some(renewer) = renewer {
+        let _ = renewer.join();
+    }
+    result
+}
+
+/// A PTY request the formal CLI sends over iroh.
+pub(crate) enum IrohPtyRequest {
+    Open {
+        argv: Vec<String>,
+        cols: u16,
+        rows: u16,
+    },
+    Attach {
+        session_id: String,
+        cols: u16,
+        rows: u16,
+    },
+    Detach {
+        session_id: String,
+    },
+    Close {
+        session_id: String,
+    },
+}
+
+pub(crate) fn run_pty_control(path: &Path, name: &str, request: IrohPtyRequest) -> Result<()> {
+    if !name_valid(name) {
+        return Err("iroh target must be NAMESPACE/NAME".into());
+    }
+    let cfg: ClientConfig = profile(path)?;
+    let key = identity(&cfg.key_file)?;
+    let ttl = Duration::from_millis(cfg.lease_ttl_ms.unwrap_or(DEFAULT_LEASE_TTL_MS))
+        .min(admission::MAX_SESSION_TTL);
+    let bind = bind_addr(cfg.bind, cfg.routable)?;
+    runtime()?.block_on(async {
+        let directory =
+            endpoint_with_network(key.clone(), Some(bind), DIRECTORY_ALPN, None, cfg.routable)
+                .await?;
+        let lookup = directory_call(
+            &directory,
+            &cfg.directory,
+            DirectoryRequest::Lookup {
+                name: name.to_owned(),
+            },
+            cfg.routable,
+        )
+        .await;
+        directory.close().await;
+        let DirectoryReply::Found { addr } = lookup? else {
+            return Err("unexpected iroh directory lookup response".into());
+        };
+        let target = addr.id;
+        let data = match cfg.path {
+            Route::Direct => {
+                endpoint_with_network(key.clone(), Some(bind), CONTROL_ALPN, None, cfg.routable)
+                    .await?
+            }
+            Route::Relay => {
+                endpoint_with_network(
+                    key.clone(),
+                    None,
+                    CONTROL_ALPN,
+                    Some(&cfg.relay),
+                    cfg.routable,
+                )
+                .await?
+            }
+            Route::Auto => {
+                endpoint_with_network(
+                    key.clone(),
+                    Some(bind),
+                    CONTROL_ALPN,
+                    Some(&cfg.relay),
+                    cfg.routable,
+                )
+                .await?
+            }
+        };
+        let (conn, actual) =
+            connect_with_path(&data, &addr, cfg.path, &cfg.relay, cfg.routable).await?;
+        log::info!("iroh_path={}", actual.label());
+        let (send, read) = timeout(IO, conn.open_bi()).await??;
+        let transport = ControlTransport::Iroh(IrohLineTransport::new(send, read));
+        let result =
+            tokio::task::spawn_blocking(move || client_lane(transport, key, target, ttl, request))
+                .await?;
+        data.close().await;
+        result
+    })
+}
+
 pub(crate) struct IrohLineTransport {
     handle: Handle,
-    send: SendStream,
+    send: Arc<Mutex<SendStream>>,
     read: RecvStream,
-    read_timeout: Duration,
-    consumed: bool,
+    read_timeout: Option<Duration>,
+    buffered: Vec<u8>,
+    eof: bool,
+}
+
+pub(crate) struct IrohLineWriter {
+    handle: Handle,
+    send: Arc<Mutex<SendStream>>,
 }
 
 impl IrohLineTransport {
     fn new(send: SendStream, read: RecvStream) -> Self {
         Self {
             handle: Handle::current(),
-            send,
+            send: Arc::new(Mutex::new(send)),
             read,
-            read_timeout: IO,
-            consumed: false,
+            read_timeout: Some(IO),
+            buffered: Vec::new(),
+            eof: false,
         }
     }
 
     pub(crate) fn read_message(&mut self) -> io::Result<Option<String>> {
-        if std::mem::replace(&mut self.consumed, true) {
-            return Ok(None);
+        loop {
+            if let Some(line) = take_line(&mut self.buffered) {
+                return Ok(Some(line));
+            }
+            if self.eof {
+                return Ok(take_remainder(&mut self.buffered));
+            }
+            let handle = self.handle.clone();
+            let wait = self.read_timeout;
+            let read = &mut self.read;
+            let mut chunk = [0_u8; 16 * 1024];
+            let outcome = handle.block_on(async {
+                match wait {
+                    Some(wait) => timeout(wait, read.read(&mut chunk))
+                        .await
+                        .map_err(|_| {
+                            io::Error::new(io::ErrorKind::TimedOut, "iroh line read timed out")
+                        }),
+                    None => Ok(read.read(&mut chunk).await),
+                }
+            });
+            match outcome?.map_err(io::Error::other)? {
+                None => self.eof = true,
+                Some(bytes) => {
+                    self.buffered.extend_from_slice(&chunk[..bytes]);
+                    if self.buffered.len() > crate::control_line_read::MAX_CONTROL_MESSAGE_BYTES {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "iroh control message exceeds the line limit",
+                        ));
+                    }
+                }
+            }
         }
-        let bytes = self
-            .handle
-            .block_on(async { timeout(self.read_timeout, self.read.read_to_end(MAX_LINE)).await })
-            .map_err(io::Error::other)?
-            .map_err(io::Error::other)?;
-        let data = bytes
-            .strip_suffix(b"\n")
-            .filter(|line| !line.contains(&b'\n'))
-            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "invalid iroh line frame"))?;
-        Ok(Some(
-            String::from_utf8(data.to_vec()).map_err(io::Error::other)?,
-        ))
     }
 
     pub(crate) fn write_message(&mut self, message: &str) -> io::Result<()> {
-        if message.len() >= MAX_LINE || message.contains(['\n', '\r']) {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "invalid iroh line frame",
-            ));
+        write_line(&self.handle, &self.send, message)
+    }
+
+    pub(crate) fn try_clone_writer(&self) -> IrohLineWriter {
+        IrohLineWriter {
+            handle: self.handle.clone(),
+            send: self.send.clone(),
         }
-        self.handle
-            .block_on(async {
-                timeout(IO, self.send.write_all(format!("{message}\n").as_bytes())).await
-            })
-            .map_err(io::Error::other)?
-            .map_err(io::Error::other)?;
-        self.send.finish().map_err(io::Error::other)
     }
 
     pub(crate) fn set_read_timeout(&mut self, duration: Option<Duration>) {
-        self.read_timeout = duration.unwrap_or(IO).min(IO);
+        self.read_timeout = duration;
     }
 
     pub(crate) fn close(self) -> io::Result<()> {
-        let stopped = self
-            .handle
-            .block_on(async { timeout(IO, self.send.stopped()).await })
-            .map_err(io::Error::other)?
-            .map_err(io::Error::other)?;
-        if stopped.is_some() {
-            return Err(io::Error::new(
-                io::ErrorKind::BrokenPipe,
-                "iroh peer stopped the line stream",
-            ));
-        }
-        Ok(())
+        let send = self.send.clone();
+        self.handle.block_on(async move {
+            let mut stream = send.lock().expect("iroh send stream");
+            stream.finish().map_err(io::Error::other)?;
+            let stopped = timeout(IO, stream.stopped())
+                .await
+                .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "iroh close timed out"))?
+                .map_err(io::Error::other)?;
+            if stopped.is_some() {
+                // The peer read the last frame and closed its receive half first;
+                // finishing our send half is already complete.
+                log::debug!("iroh peer closed its receive half before ours");
+            }
+            Ok(())
+        })
     }
+}
+
+impl IrohLineWriter {
+    pub(crate) fn write_message(&mut self, message: &str) -> io::Result<()> {
+        write_line(&self.handle, &self.send, message)
+    }
+}
+
+fn write_line(handle: &Handle, send: &Arc<Mutex<SendStream>>, message: &str) -> io::Result<()> {
+    if message.len() > crate::control_line_read::MAX_CONTROL_MESSAGE_BYTES
+        || message.contains(['\n', '\r'])
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "invalid iroh line frame",
+        ));
+    }
+    let mut frame = Vec::with_capacity(message.len() + 1);
+    frame.extend_from_slice(message.as_bytes());
+    frame.push(b'\n');
+    let send = send.clone();
+    handle.block_on(async move {
+        let mut stream = send.lock().expect("iroh send stream");
+        timeout(IO, stream.write_all(&frame))
+            .await
+            .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "iroh line write timed out"))?
+            .map_err(io::Error::other)
+    })
+}
+
+fn take_line(buffered: &mut Vec<u8>) -> Option<String> {
+    let end = buffered.iter().position(|byte| *byte == b'\n')?;
+    let mut line: Vec<u8> = buffered.drain(..=end).collect();
+    line.pop();
+    if line.last() == Some(&b'\r') {
+        line.pop();
+    }
+    Some(String::from_utf8_lossy(&line).into_owned())
+}
+
+fn take_remainder(buffered: &mut Vec<u8>) -> Option<String> {
+    if buffered.is_empty() {
+        return None;
+    }
+    let line = String::from_utf8_lossy(buffered).into_owned();
+    buffered.clear();
+    Some(line)
 }

@@ -55,6 +55,7 @@ pub(crate) enum ControlTransport {
 pub(crate) enum ControlTransportWriter {
     Tcp(TcpLineWriter),
     WebSocket(WebSocketTextWriter),
+    Iroh(crate::control_iroh::IrohLineWriter),
 }
 
 impl ControlTransport {
@@ -129,7 +130,7 @@ impl ControlTransport {
             Self::WebSocket(transport) => transport
                 .try_clone_writer()
                 .map(ControlTransportWriter::WebSocket),
-            Self::Iroh(_) => Err(io::Error::new(ErrorKind::Unsupported, "iroh ping is one-shot")),
+            Self::Iroh(transport) => Ok(ControlTransportWriter::Iroh(transport.try_clone_writer())),
         }
     }
 
@@ -158,6 +159,7 @@ impl ControlTransportWriter {
         match self {
             Self::Tcp(writer) => writer.write_message(message),
             Self::WebSocket(writer) => writer.write_message(message),
+            Self::Iroh(writer) => writer.write_message(message),
         }
     }
 }

@@ -239,6 +239,19 @@ impl Admission {
             .map_err(|_| Rejection::Denied)
     }
 
+    /// The one-shot ping on the admitted lane follows the same local policy:
+    /// the policy file, not the transport allowlist, is its authority.
+    pub(crate) fn admits_ping(&self, peer: EndpointId) -> bool {
+        self.policy()
+            .map(|policy| {
+                !self.durability_unconfirmed
+                    && policy.allow.contains(&peer)
+                    && !policy.revoked.contains(&peer)
+                    && !policy.terminate.contains(&peer)
+            })
+            .unwrap_or(false)
+    }
+
     pub(crate) fn admit(
         &mut self,
         peer: EndpointId,

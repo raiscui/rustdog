@@ -136,6 +136,7 @@ struct ActivePtySession {
     terminal_reason: Arc<Mutex<Option<String>>>,
     input_tx: mpsc::Sender<PtyRuntimeCommand>,
     attached_control_session_id: Arc<Mutex<Option<String>>>,
+    subject: Arc<Mutex<Option<String>>>,
 }
 
 #[cfg(unix)]
@@ -188,12 +189,102 @@ pub fn parse_pty_attach_request(line: &str) -> io::Result<Option<PtyAttachReques
     }
 }
 
+/// 谁能关闭 / 解绑 / 重附一个 PTY 会话。
+///
+/// 准入 lane 按主体判定: 会话登记了主体时只有同一主体可以操作它。
+/// 旧 TCP / WebSocket / Zenoh lane 的会话没有主体, 对准入 lane 一律拒绝 ——
+/// 那些 lane 自己仍按 id 关闭, 属"可达即全权", 不是 owner 授权。
+#[derive(Debug, PartialEq, Eq)]
+pub enum SubjectAccess {
+    Allowed,
+    Foreign,
+    Missing,
+}
+
+/// 把准入主体登记到 PTY 会话上。
+#[cfg(unix)]
+pub fn bind_pty_session_subject(session_id: &str, subject: &str) -> io::Result<bool> {
+    let session = {
+        let sessions = active_pty_sessions()
+            .lock()
+            .map_err(|_| io::Error::other("PTY session registry lock poisoned"))?;
+        sessions.get(session_id).cloned()
+    };
+    let Some(session) = session else {
+        return Ok(false);
+    };
+    *session
+        .subject
+        .lock()
+        .map_err(|_| io::Error::other("PTY subject lock poisoned"))? = Some(subject.to_owned());
+    Ok(true)
+}
+
+#[cfg(not(unix))]
+pub fn bind_pty_session_subject(_session_id: &str, _subject: &str) -> io::Result<bool> {
+    Ok(false)
+}
+
+/// 准入 lane 操作前的主体判定。
+#[cfg(unix)]
+pub fn authorize_pty_subject(session_id: &str, subject: &str) -> io::Result<SubjectAccess> {
+    let session = {
+        let sessions = active_pty_sessions()
+            .lock()
+            .map_err(|_| io::Error::other("PTY session registry lock poisoned"))?;
+        sessions.get(session_id).cloned()
+    };
+    let Some(session) = session else {
+        return Ok(SubjectAccess::Missing);
+    };
+    let owner = session
+        .subject
+        .lock()
+        .map_err(|_| io::Error::other("PTY subject lock poisoned"))?
+        .clone();
+    Ok(if owner.as_deref() == Some(subject) {
+        SubjectAccess::Allowed
+    } else {
+        SubjectAccess::Foreign
+    })
+}
+
+#[cfg(not(unix))]
+pub fn authorize_pty_subject(_session_id: &str, _subject: &str) -> io::Result<SubjectAccess> {
+    Ok(SubjectAccess::Missing)
+}
+
+/// PTY 会话是否还在注册表里 —— daemon 用它确认终止已经收尾。
+#[cfg(unix)]
+pub fn pty_session_registered(session_id: &str) -> bool {
+    active_pty_sessions()
+        .lock()
+        .map(|sessions| sessions.contains_key(session_id))
+        .unwrap_or(false)
+}
+
+#[cfg(not(unix))]
+pub fn pty_session_registered(_session_id: &str) -> bool {
+    false
+}
+
 /// 尝试按 session id 关闭一个活动 PTY。
 ///
 /// 返回 `Ok(false)` 表示没有找到这个 session。
 #[cfg(unix)]
 pub fn close_active_pty_session(session_id: &str) -> io::Result<bool> {
     close_active_pty_session_with_reason(session_id, "force_close")
+}
+
+/// 按显式 reason 关闭一个活动 PTY（准入 lane 与测试共用）。
+#[cfg(unix)]
+pub fn close_pty_session_with_reason(session_id: &str, reason: &str) -> io::Result<bool> {
+    close_active_pty_session_with_reason(session_id, reason)
+}
+
+#[cfg(not(unix))]
+pub fn close_pty_session_with_reason(_session_id: &str, _reason: &str) -> io::Result<bool> {
+    Ok(false)
 }
 
 #[cfg(all(test, target_os = "linux"))]
@@ -544,6 +635,7 @@ pub fn open_attached_pty_session(request: PtyOpenRequest) -> io::Result<Attached
             terminal_reason: Arc::clone(&terminal_reason),
             input_tx: input_tx.clone(),
             attached_control_session_id: Arc::clone(&attached_control_session_id),
+            subject: Arc::new(Mutex::new(None)),
         },
     )?;
 
@@ -828,6 +920,13 @@ fn run_pty_client_threaded_stdin_loop(
                     frame.reason
                 )));
             }
+            // detach 只结束本地这一端的所有权, 远端进程继续存活等待重附。
+            ControlFrame::PtyDetached(frame) if frame.session_id == ready.session_id => {
+                if input_thread.is_finished() {
+                    let _ = input_thread.join();
+                }
+                return Ok(());
+            }
             _ => {}
         }
     }
@@ -902,6 +1001,10 @@ fn run_pty_client_tty_loop_inner(
                         "remote PTY closed before natural exit: {}",
                         frame.reason
                     )));
+                }
+                // detach 只结束本地这一端的所有权, 远端进程继续存活等待重附。
+                ControlFrame::PtyDetached(frame) if frame.session_id == ready.session_id => {
+                    return Ok(());
                 }
                 _ => {}
             },
@@ -1137,6 +1240,7 @@ where
             terminal_reason: Arc::clone(&terminal_reason),
             input_tx: placeholder_tx,
             attached_control_session_id: Arc::new(Mutex::new(Some(session_id.clone()))),
+            subject: Arc::new(Mutex::new(None)),
         },
     )?;
 

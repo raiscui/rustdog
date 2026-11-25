@@ -43,12 +43,22 @@ fn daemon_profile(routable_field: &str, bind_field: &str, directory: &str, relay
 }
 
 fn client_profile(routable_field: &str, bind_field: &str, directory: &str, relay_url: &str) -> String {
+    client_profile_with_path(routable_field, bind_field, directory, relay_url, "direct")
+}
+
+fn client_profile_with_path(
+    routable_field: &str,
+    bind_field: &str,
+    directory: &str,
+    relay_url: &str,
+    path: &str,
+) -> String {
     format!(
         r#"{{
   "key_file": "/tmp/client.key",
   "directory": {{"id": "{}", "addr": "{directory}"}},
   "relay": {{"url": "{relay_url}", "qad_port": 9002, "root_cert": "/tmp/relay.pem"}},
-  "path": "direct"{routable_field}{bind_field}
+  "path": "{path}"{routable_field}{bind_field}
 }}"#,
         endpoint_id(2)
     )
@@ -170,4 +180,19 @@ fn relay_policy_follows_the_profile() {
         );
     }
     println!("relay policy follows the profile without weakening the default");
+}
+
+#[test]
+fn auto_path_is_available_for_interactive_fallback() {
+    let scratch = Scratch::new();
+    let client = scratch.write(
+        "client.json",
+        &client_profile_with_path("", "", "127.0.0.1:7000", "https://127.0.0.1:7001", "auto"),
+    );
+    let parsed: ClientConfig = profile(&client).expect("auto path profile parses");
+    assert!(
+        matches!(parsed.path, Route::Auto),
+        "an interactive session must be able to fall back to the relay"
+    );
+    println!("auto path profile parses for interactive relay fallback");
 }

@@ -494,7 +494,7 @@ fn run_pty_attach_receiver_with_transport(
     bridge_attached_pty_session(transport, &mut session)
 }
 
-fn bridge_attached_pty_session(
+pub(crate) fn bridge_attached_pty_session(
     transport: &mut ControlTransport,
     session: &mut crate::pty_control::AttachedPtySession,
 ) -> io::Result<()> {
@@ -557,6 +557,7 @@ fn bridge_attached_pty_session_inner(
                                         format!("@pty-stdin base64 数据无法解码: {err}"),
                                     )
                                 })?;
+                        log::debug!("pty bridge stdin frame bytes={}", bytes.len());
                         session.send_stdin_bytes(bytes)?;
                         continue;
                     }
@@ -589,6 +590,7 @@ fn bridge_attached_pty_session_inner(
                     continue;
                 }
 
+                log::debug!("pty bridge forwards an unrecognized message to stdin bytes={}", message.len());
                 session.send_stdin_bytes({
                     let mut bytes = message.into_bytes();
                     bytes.push(b'\n');

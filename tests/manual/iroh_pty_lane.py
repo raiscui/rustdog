@@ -1,0 +1,349 @@
+"""RAI-305 acceptance harness: rdog control NAMESPACE/NAME --pty over iroh.
+
+Drives the formal CLI against a real daemon and embedded relay. Every case
+asserts on observable state: client exit codes, PTY output, daemon log lines and
+process existence. Run under an isolated HOME/TMPDIR; the caller owns the
+network namespace.
+
+    python3 tests/manual/iroh_pty_lane.py <rdog-binary> <scratch-dir> [--routable A B]
+"""
+
+import errno
+import json
+import pty
+import select as select_import
+import os
+import re
+import signal
+import socket
+import subprocess
+import sys
+import tempfile
+import time
+from pathlib import Path
+
+binary = str(Path(sys.argv[1]).resolve(strict=True))
+scratch = Path(sys.argv[2]).resolve(strict=True)
+os.umask(0o077)
+
+args = [item for item in sys.argv[3:]]
+routable = None
+if args and args[0] == "--routable":
+    routable = {"directory": args[1], "daemon": args[2], "client": args[3]}
+
+
+def identity(home, label):
+    seed = os.urandom(32)
+    private = home / (label + ".key")
+    private.write_bytes(seed)
+    private_prefix = bytes.fromhex("302e020100300506032b657004220420")
+    public_prefix = bytes.fromhex("302a300506032b6570032100")
+    result = subprocess.run(
+        ["openssl", "pkey", "-inform", "DER", "-pubout", "-outform", "DER"],
+        input=private_prefix + seed, capture_output=True, check=True, timeout=5,
+    ).stdout
+    assert result.startswith(public_prefix) and len(result) == len(public_prefix) + 32
+    return str(private), result.removeprefix(public_prefix).hex()
+
+
+def ready(process, logfile, marker, budget=20):
+    until = time.monotonic() + budget
+    while time.monotonic() < until:
+        text = logfile.read_text(errors="replace")
+        if process.poll() is not None:
+            raise RuntimeError(f"{marker}: process exited {process.returncode}: {text[-2000:]}")
+        if marker in text:
+            return text
+        time.sleep(0.04)
+    raise RuntimeError(f"{marker}: timed out: {logfile.read_text(errors='replace')[-2000:]}")
+
+
+def pid_exists(pid):
+    return Path(f"/proc/{pid}").exists()
+
+
+with tempfile.TemporaryDirectory(prefix="iroh-pty-", dir=scratch) as dirname:
+    home = Path(dirname)
+    env = dict(PATH="/usr/bin:/bin", HOME=dirname, TMPDIR=dirname, LANG="C.UTF-8")
+    rendezvous_key, rendezvous_id = identity(home, "rendezvous")
+    daemon_key, daemon_id = identity(home, "daemon")
+    owner_key, owner_id = identity(home, "owner")
+    stranger_key, stranger_id = identity(home, "stranger")
+    cert, key = home / "relay.pem", home / "relay-key.pem"
+    bind = routable["directory"] if routable else "127.0.0.1"
+    advertise = routable["directory"] if routable else "127.0.0.1"
+    subprocess.run(
+        ["openssl", "req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:P-256",
+         "-nodes", "-subj", "/CN=localhost", "-addext", f"subjectAltName=IP:{advertise}",
+         "-addext", "basicConstraints=critical,CA:FALSE",
+         "-days", "1", "-keyout", key, "-out", cert],
+        env=env, capture_output=True, check=True, timeout=5,
+    )
+    sockets = [socket.socket(socket.AF_INET, kind) for kind in
+               [socket.SOCK_DGRAM, socket.SOCK_STREAM, socket.SOCK_STREAM, socket.SOCK_DGRAM]]
+    for sock in sockets:
+        sock.bind((bind, 0))
+    directory, http, https, qad = [sock.getsockname()[1] for sock in sockets]
+    for sock in sockets:
+        sock.close()
+
+    target = "lab/pty"
+    addr = lambda ip, port: f"{ip}:{port}"
+    directory_addr = addr(bind, directory)
+    relay = dict(url=f"https://{addr(advertise, https)}", qad_port=qad, root_cert=str(cert))
+    from_lan = bool(routable)
+
+    def config(label, **values):
+        result = str(home / f"{label}.json")
+        Path(result).write_text(json.dumps(values))
+        return result
+
+    policy = home / "policy.json"
+
+    def write_policy(allow, revoked=(), terminate=()):
+        policy.write_text(json.dumps(dict(allow=list(allow), revoked=list(revoked),
+                                          terminate=list(terminate))))
+
+    write_policy([owner_id])
+    rendezvous = config("rendezvous", key_file=rendezvous_key, bind=directory_addr,
+                        relay_http=addr(bind, http), relay_https=addr(advertise, https),
+                        qad=addr(advertise, qad), relay_cert=str(cert), relay_key=str(key),
+                        registrations={target: daemon_id}, lookups=[owner_id, stranger_id],
+                        **({"routable": True} if from_lan else {}))
+    daemon = config("daemon", key_file=daemon_key, directory=dict(id=rendezvous_id,
+                                                                 addr=directory_addr),
+                    relay=relay, name=target, allow=[owner_id, stranger_id],
+                    policy_file=str(policy),
+                    **({"routable": True, "bind": addr(routable["daemon"], 0)} if from_lan else {}))
+
+    def client_profile(label, key_path, path="direct", lease_ttl_ms=None):
+        values = dict(key_file=key_path, directory=dict(id=rendezvous_id, addr=directory_addr),
+                      relay=relay, path=path)
+        if from_lan:
+            values.update(routable=True, bind=addr(routable["client"], 0))
+        if lease_ttl_ms is not None:
+            values["lease_ttl_ms"] = lease_ttl_ms
+        return config(label, **values)
+
+    processes = []
+
+    def start(name, flags, marker):
+        logfile = home / f"{name}.log"
+        with logfile.open("w") as output:
+            child = subprocess.Popen([binary, *flags], cwd=home, env=env, stdin=subprocess.DEVNULL,
+                                     stdout=output, stderr=subprocess.STDOUT, start_new_session=True)
+        processes.append(child)
+        ready(child, logfile, marker)
+        print(f"{name}: ready", flush=True)
+        return logfile
+
+    def control(profile, *extra, timeout=30, stdin=subprocess.DEVNULL):
+        return subprocess.run([binary, "control", "--transport", "iroh", "--iroh-config", profile,
+                               target, *extra], cwd=home, env=env, capture_output=True, text=True,
+                              timeout=timeout, stdin=stdin)
+
+    fork_pids = []
+
+    def pty_client(owner_key_path, program, ttl=None):
+        """Start a --pty client on a real local TTY; returns (pid, master fd)."""
+        profile_path = client_profile(f"pty-{len(fork_pids)}", owner_key_path, lease_ttl_ms=ttl)
+        pid, master = pty.fork()
+        if pid == 0:
+            os.execve(binary, [binary, "control", "--transport", "iroh", "--iroh-config",
+                               profile_path, target, "--pty", "--", "python3", "-c", program],
+                      env)
+        fork_pids.append(pid)
+        return pid, master
+
+    def read_until(master, needle, budget=20.0):
+        deadline = time.monotonic() + budget
+        text = ""
+        while time.monotonic() < deadline:
+            if needle in text:
+                return text
+            ready, _, _ = select_import.select([master], [], [], 0.05)
+            if ready:
+                try:
+                    text += os.read(master, 4096).decode(errors="replace")
+                except OSError:
+                    break
+        return text
+
+    def pty_wait(pid, budget=30.0):
+        deadline = time.monotonic() + budget
+        while time.monotonic() < deadline:
+            try:
+                done, status = os.waitpid(pid, os.WNOHANG)
+            except ChildProcessError:
+                return 0
+            if done == pid:
+                return os.waitstatus_to_exitcode(status)
+            time.sleep(0.05)
+        raise AssertionError(f"pty client {pid} did not exit")
+
+    def pty_alive(pid):
+        try:
+            done, _ = os.waitpid(pid, os.WNOHANG)
+        except ChildProcessError:
+            return False
+        return done != pid
+
+    def case(label):
+        print(f"case: {label}", flush=True)
+
+    try:
+        rendezvous_log = start("rendezvous", ["rendezvous", "-c", rendezvous],
+                              f"iroh rendezvous ready relay_https={addr(advertise, https)}")
+        daemon_log = start("daemon", ["daemon", "--transport", "iroh", "-c", daemon],
+                           "iroh daemon registered pty=admitted")
+        print("daemon: admitted PTY lane enabled", flush=True)
+
+        case("default ping still answers over the admitted lane")
+        owner = client_profile("owner", owner_key)
+        result = control(owner, "@ping#7")
+        dialled = result.stdout + result.stderr
+        assert result.returncode == 0, result.stdout + result.stderr
+        response = json.loads(result.stdout.strip().removeprefix("@response "))
+        assert response["id"] == 7 and response["value"]["pong"] is True, result.stdout
+        print(f"ping: id=7 pong=true exit=0", flush=True)
+
+        case("a stranger is refused before any process exists")
+        result = control(client_profile("stranger", stranger_key), "--pty", "--", "/bin/sh", "-c",
+                         "sleep 30")
+        combined = result.stdout + result.stderr
+        assert result.returncode != 0 and "iroh_target_denied" in combined, combined
+        assert "iroh pty opened" not in daemon_log.read_text(), "stranger opened a PTY"
+        print(f"stranger: refused ({result.returncode}); no pty opened", flush=True)
+
+        case("attached PTY carries stdin and reports the exit code")
+        program = ("import sys\nprint('ready', flush=True)\nfor line in sys.stdin:\n"
+                   "    print('echo:' + line.strip(), flush=True)\n")
+        client, master = pty_client(owner_key, program)
+        text = read_until(master, "ready")
+        assert "ready" in text, repr(text)
+        os.write(master, b"hello rai-305\n")
+        text += read_until(master, "echo:hello rai-305")
+        assert "echo:hello rai-305" in text, repr(text)
+        opened = re.search(r"iroh pty opened session=(\S+) lease=(\S+)", daemon_log.read_text())
+        assert opened, daemon_log.read_text()
+        session_id, lease_id = opened.group(1), opened.group(2)
+        os.write(master, b"\x04")
+        code = pty_wait(client)
+        os.close(master)
+        assert code == 0, (code, repr(text))
+        print(f"pty: session={session_id} lease={lease_id} stdin echoed; exit=0", flush=True)
+
+        case("a second connection of the same subject closes its own session")
+        holder, holder_master = pty_client(owner_key, "import time\nprint('ready', flush=True)\n"
+                                                   "time.sleep(60)\n")
+        assert "ready" in read_until(holder_master, "ready"), "holder never became ready"
+        sessions = re.findall(r"iroh pty opened session=(\S+)", daemon_log.read_text())
+        sleeping = sessions[-1]
+        result = control(owner, "--pty-close", sleeping)
+        assert result.returncode == 0, result.stdout + result.stderr
+        holder_code = pty_wait(holder)
+        os.close(holder_master)
+        print(f"close: same subject closed session={sleeping}; holder exit={holder_code}",
+              flush=True)
+
+        case("a foreign subject cannot close the session of another subject")
+        loner, loner_master = pty_client(owner_key, "import time\nprint('ready', flush=True)\n"
+                                                "time.sleep(60)\n")
+        assert "ready" in read_until(loner_master, "ready"), "loner never became ready"
+        target_session = re.findall(r"iroh pty opened session=(\S+)", daemon_log.read_text())[-1]
+        write_policy([owner_id, stranger_id])
+        result = control(client_profile("stranger", stranger_key), "--pty-close", target_session)
+        assert result.returncode != 0 and "iroh_subject_denied" in result.stdout + result.stderr, \
+            result.stdout + result.stderr
+        assert pty_alive(loner), "foreign subject terminated the session"
+        os.write(loner_master, b"still-here\n")
+        assert pty_alive(loner), "session stopped after the foreign close attempt"
+        print(f"close: foreign subject refused; session={target_session} still live", flush=True)
+        write_policy([owner_id])
+        result = control(owner, "--pty-close", target_session)
+        assert result.returncode == 0, result.stdout + result.stderr
+        pty_wait(loner)
+        os.close(loner_master)
+        print(f"close: owner closed session={target_session}", flush=True)
+
+        case("a detached session is reclaimed when its lease runs out")
+        detacher, detach_master = pty_client(owner_key, "import time\nprint('ready', flush=True)\n"
+                                                    "time.sleep(120)\n", ttl=1500)
+        assert "ready" in read_until(detach_master, "ready"), "detacher never became ready"
+        detached = re.findall(r"iroh pty opened session=(\S+)", daemon_log.read_text())[-1]
+        result = control(client_profile("owner-short", owner_key, lease_ttl_ms=1500),
+                         "--pty-detach", detached)
+        assert result.returncode == 0, result.stdout + result.stderr
+        pty_wait(detacher)
+        os.close(detach_master)
+        assert "lease_expired" not in daemon_log.read_text(), "reclaimed before the deadline"
+        until = time.monotonic() + 15
+        while time.monotonic() < until:
+            if f"lease reclaim session={detached} reason=lease_expired" in \
+                    daemon_log.read_text():
+                break
+            time.sleep(0.05)
+        else:
+            raise AssertionError("detached session was not reclaimed by its lease deadline")
+        print(f"expiry: detached session={detached} reclaimed without a later request", flush=True)
+
+        case("graceful revocation refuses new sessions and keeps the live one")
+        write_policy([owner_id])
+        keeper, keeper_master = pty_client(owner_key, "import time\nprint('ready', flush=True)\n"
+                                                  "time.sleep(30)\n")
+        assert "ready" in read_until(keeper_master, "ready"), "keeper never became ready"
+        write_policy([owner_id], revoked=[owner_id])
+        result = control(owner, "@ping#9")
+        combined = result.stdout + result.stderr
+        assert result.returncode != 0 and "iroh_target_denied" in combined, combined
+        assert pty_alive(keeper), "graceful revocation terminated the live session"
+        print("revocation: graceful refused a new session; live session kept", flush=True)
+
+        case("emergency revocation terminates the live session")
+        write_policy([owner_id], revoked=[owner_id], terminate=[owner_id])
+        until = time.monotonic() + 15
+        while time.monotonic() < until and pty_alive(keeper):
+            time.sleep(0.05)
+        assert not pty_alive(keeper), "emergency marker did not terminate the session"
+        pty_wait(keeper)
+        os.close(keeper_master)
+        assert "reason=lease_revoked" in daemon_log.read_text(), daemon_log.read_text()
+        print("revocation: emergency terminated the live session", flush=True)
+
+        write_policy([owner_id])
+        assert "path=direct" in daemon_log.read_text(), "the daemon never recorded the path"
+        assert "iroh_path=direct" in dialled, "the client never reported the path it used"
+        alive = [pid for pid in fork_pids if pty_alive(pid)]
+        assert not alive, f"forks still alive: {alive}"
+        print("harness: all cases passed", flush=True)
+    except BaseException:
+        if (home / "pty-client.log").exists():
+            print("--- pty-client.log ---", flush=True)
+            print((home / "pty-client.log").read_text(errors="replace")[-2000:], flush=True)
+        for name in ("daemon", "rendezvous"):
+            logfile = home / f"{name}.log"
+            if logfile.exists():
+                print(f"--- {name}.log ---", flush=True)
+                print(logfile.read_text(errors="replace")[-4000:], flush=True)
+        raise
+    finally:
+        for pid in fork_pids:
+            try:
+                os.kill(pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+            try:
+                pty_wait(pid, budget=5)
+            except (AssertionError, ChildProcessError):
+                os.kill(pid, signal.SIGKILL)
+        for child in reversed(processes):
+            if child.poll() is None:
+                os.killpg(child.pid, signal.SIGTERM)
+                try:
+                    child.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    os.killpg(child.pid, signal.SIGKILL)
+                    child.wait(timeout=5)
+        print("cleanup: owned subprocesses reaped", flush=True)
+assert not home.exists()
+print("cleanup: temporary HOME and identities removed")

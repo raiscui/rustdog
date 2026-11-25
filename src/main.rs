@@ -327,18 +327,58 @@ fn run(opts: input::Opts) -> Result<(), String> {
             // ------------------------------------------------------------
             let (host, one_shot_lines) = control_invocation::extract_one_shot_lines(host);
             if transport == Some(Transport::Iroh) {
-                let ([name], [line]) = (host.as_slice(), one_shot_lines.as_slice()) else {
-                    return Err("iroh control requires NAMESPACE/NAME and one @ping request".into());
+                let [name] = host.as_slice() else {
+                    return Err("iroh control requires one NAMESPACE/NAME target".into());
                 };
                 if url.is_some() || namespace.is_some() || target_name.is_some()
-                    || !entry_point.is_empty() || pty || pty_close.is_some()
-                    || pty_detach.is_some() || pty_attach.is_some() || ui_script.is_some()
-                    || !pty_command.is_empty()
+                    || !entry_point.is_empty() || ui_script.is_some()
                 {
-                    return Err("iroh control only supports the ping one-shot profile".into());
+                    return Err("iroh control only serves NAMESPACE/NAME targets".into());
                 }
                 let path = iroh_config.as_deref().ok_or("iroh control requires --iroh-config")?;
-                return control_iroh::run_control(path, name, line).map_err(|err| err.to_string());
+                let lifecycle = [pty_close.is_some(), pty_detach.is_some(), pty_attach.is_some()]
+                    .into_iter()
+                    .filter(|set| *set)
+                    .count();
+                if lifecycle > 1 {
+                    return Err("iroh PTY 生命周期请求之间互斥".to_string());
+                }
+                if (pty || !pty_command.is_empty()) && lifecycle > 0 {
+                    return Err("`--pty` 与 iroh PTY 生命周期请求互斥".to_string());
+                }
+                let request = if pty || !pty_command.is_empty() {
+                    if pty_command.is_empty() {
+                        return Err("`rdog control --pty` 需要在 `--` 后提供远端命令".to_string());
+                    }
+                    if !one_shot_lines.is_empty() {
+                        return Err("`--pty` 与 one-shot 请求互斥".to_string());
+                    }
+                    let (cols, rows) = pty_control::default_terminal_size();
+                    control_iroh::IrohPtyRequest::Open {
+                        argv: pty_command.clone(),
+                        cols,
+                        rows,
+                    }
+                } else if let Some(session_id) = pty_attach {
+                    let (cols, rows) = pty_control::default_terminal_size();
+                    control_iroh::IrohPtyRequest::Attach {
+                        session_id,
+                        cols,
+                        rows,
+                    }
+                } else if let Some(session_id) = pty_detach {
+                    control_iroh::IrohPtyRequest::Detach { session_id }
+                } else if let Some(session_id) = pty_close {
+                    control_iroh::IrohPtyRequest::Close { session_id }
+                } else {
+                    let [line] = one_shot_lines.as_slice() else {
+                        return Err("iroh control requires one @ping request".to_string());
+                    };
+                    return control_iroh::run_control(path, name, line)
+                        .map_err(|err| err.to_string());
+                };
+                return control_iroh::run_pty_control(path, name, request)
+                    .map_err(|err| err.to_string());
             }
             if iroh_config.is_some() {
                 return Err("--iroh-config requires --transport iroh".into());
