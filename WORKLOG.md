@@ -380,3 +380,9 @@ cmd.exe 在 verbatim cwd 下的告警原文 (中文 Windows 版), 并用普通 c
 
 profile 新增 `routable`(缺省 false)与 `bind`; `network`/`relay_allowed` 是唯一地址策略, 目录、endpoint、relay-QAD、advertise 与注册校验都走它。缺省 profile 仍是 P1 的 IPv4 回环门禁与原错误文案; routable 下拒绝未指定/组播/广播地址。4 项定向用例从红转绿(基线红是 `routable daemon profile parses: invalid iroh JSON profile`), 16 项 control_iroh 既有用例保持绿。
 - 提交: b5205ba
+
+## 2026-11-25 RAI-305 U2-a: 准入语义搬出测试构建
+
+`Admission`/`SignedGrant`/`Policy`/撤销语义从 `#[cfg(test)]` 的 `admission_tests.rs` 搬进生产模块 `src/control_iroh/admission.rs`, 生产与测试共用同一份实现; 夹具与 Lane 驱动留在测试侧 (`fixtures.rs`/`lifecycle_tests.rs`)。新增 `sweep`: 同一锁与同一时钟下处理到期、已落盘的 emergency 标记与未确认终帧的重发。
+搬移后 RAI-179 隔离证据重跑通过: 18 项单测/驱动用例全绿; 隔离 Iroh 生命周期矩阵 graceful 3006/3000ms 报 `lease_expired`、emergency 256/12000ms 报 `lease_revoked`, 授权前零进程、重附与跨主体不误关均保持; 真实本地 TTY 全部标志恢复。
+- 提交: 52ab6a1
