@@ -25,6 +25,10 @@ use uuid::Uuid;
 mod tests;
 
 pub(crate) const MAX_SESSION_TTL: Duration = Duration::from_secs(15 * 60);
+pub(crate) const MIN_SESSION_TTL: Duration = Duration::from_secs(1);
+/// Grants may be issued by a host whose clock runs ahead of this one, so a small
+/// future-dated issue is tolerated instead of failing closed on every request.
+pub(crate) const CLOCK_SKEW: Duration = Duration::from_secs(30);
 pub(crate) const EXPIRED: (u32, &str) = (45, "lease_expired");
 pub(crate) const REVOKED_REASON: &str = "lease_revoked";
 
@@ -61,7 +65,7 @@ impl SignedGrant {
         now_ms: u64,
         ttl: Duration,
     ) -> AdmissionResult<Self> {
-        if ttl.is_zero() || ttl > MAX_SESSION_TTL {
+        if ttl < MIN_SESSION_TTL || ttl > MAX_SESSION_TTL {
             return Err(Rejection::Denied);
         }
         let lifetime = ttl.as_millis() as u64;
@@ -228,10 +232,11 @@ impl Admission {
             || !policy.allow.contains(&peer)
             || policy.revoked.contains(&peer)
             || uuid::Uuid::parse_str(&claims.session).is_err()
-            || claims.issued_ms > now_ms
+            || claims.issued_ms > now_ms.saturating_add(CLOCK_SKEW.as_millis() as u64)
             || claims.expires_ms <= now_ms
             || length == 0
             || u128::from(length) > MAX_SESSION_TTL.as_millis()
+            || u128::from(length) < MIN_SESSION_TTL.as_millis()
         {
             return Err(Rejection::Denied);
         }
@@ -328,6 +333,12 @@ impl Admission {
             lease.state = LeaseState::Live;
             lease.pty = Some(pty);
         }
+    }
+
+    /// The PTY session this lease already holds, if it holds one.
+    pub(crate) fn session_of(&self, id: &str) -> Option<String> {
+        let id = Uuid::parse_str(id).ok()?;
+        self.leases.get(&id)?.pty.clone()
     }
 
     pub(crate) fn confirm_terminal(&mut self, id: &str) {

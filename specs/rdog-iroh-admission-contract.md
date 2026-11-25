@@ -21,7 +21,9 @@
 ## 身份、签发和租约
 
 - **H1 = B：** 每 daemon 登记一枚长期公钥。会话 token 由本地签发，接收端验证签名以及签发身份、握手身份、目标和会话绑定。地址、目录结果和另一个 daemon 的身份都不能代用。密钥私有部分不进仓库或回执。
-- 会话 token 有期限，可显式续租，不能发行无期限授权。单份 token 的运行时上限是 [`MAX_SESSION_TTL`](../src/control_iroh/admission.rs)。续租由客户端按 TTL/3 发起（[`spawn_lease_renewer`](../src/control_iroh.rs)），服务端重新校验许可（[`Admission::renew`](../src/control_iroh/admission.rs)）；失败不延长旧期限，已到期会话不能续活。全会话总时长和续租次数不设上限（H4 = B）。
+- 会话 token 有期限，可显式续租，不能发行无期限授权。单份 token 的运行时上限是 [`MAX_SESSION_TTL`](../src/control_iroh/admission.rs)，下限是 [`MIN_SESSION_TTL`](../src/control_iroh/admission.rs)（低于下限的 `lease_ttl_ms` 与签发都拒绝，避免续租线程空转）。续租由客户端按 TTL/3 发起（[`spawn_lease_renewer`](../src/control_iroh.rs)），服务端重新校验许可（[`Admission::renew`](../src/control_iroh/admission.rs)）；会话进行中续租帧由 lane 侧的 [`LaneIo`](../src/control_iroh.rs) 在桥接层截获并处理，绝不写进远端 PTY 的 stdin，否则续租会被当成输入、租约到点自动杀掉会话。失败不延长旧期限，已到期会话不能续活。全会话总时长和续租次数不设上限（H4 = B）。
+- 跨主机签发的 grant 允许接收侧时钟落后，容忍窗口是 [`CLOCK_SKEW`](../src/control_iroh/admission.rs)；超出窗口才拒绝。否则时钟快几毫秒的对端会被判成 `iroh_target_denied`，与策略拒绝无法区分。
+- 一条租约只持有一个 PTY 会话：`@pty` 打开前检查租约已持有的会话，仍存活就拒绝（[`Admission::session_of`](../src/control_iroh/admission.rs)）。detach 后进程按设计继续活着，若允许同租约再开一条，第一条就再无回收路径。
 - [`Admission`](../src/control_iroh/admission.rs) 以解析后的 UUID 保证实例内防重，确认终止后也保留已消费标识。跨重启的单次使用保证仍未验证。
 - 未准入不创建子进程：准入在 `@pty` 分派之前完成，`serve_lane` 先校验活动租约（[`require_active`](../src/control_iroh.rs)）再调用 PTY 打开。
 - 截止回收由生产定时器 [`lease_sweeper`](../src/control_iroh.rs) 驱动，无需后续请求，覆盖活动及已 detach 的会话。拒绝码与 PTY 终帧分别证明授权和生命周期，socket EOF 不等于终帧。
@@ -38,6 +40,8 @@
 
 回收选择与终帧收尾都在 [`Admission::sweep`](../src/control_iroh/admission.rs) 里，同一把锁、同一次时钟读取；重启后的待终止恢复与中心分发仍未保证。
 
+终止按进程组执行（[`signal_pty_group`](../src/pty_control.rs)）：portable-pty 把命令启动成会话首进程，因此负 pid 的组信号覆盖该命令派生的一切，而不是只杀直接子进程；挂断后仍存活的组由 [`escalate_pty_group_kill`](../src/pty_control.rs) 在 [`PTY_KILL_GRACE`](../src/pty_control.rs) 之后升级为 SIGKILL，所以忽略挂断的子进程不会让 sweep 永久停在待终止。
+
 | 情形 | 拒绝阶段与真相源 |
 |---|---|
 | 默认入口收到非 ping | 本地或服务端只读门禁拒绝；错误来自 [`ping_only`](../src/control_iroh.rs)，不能声称已建立可写会话。 |
@@ -51,7 +55,7 @@
 
 RAI-305 交付的回执分两层：
 
-- 隔离回环矩阵（[`tests/manual/iroh_pty_lane.py`](../tests/manual/iroh_pty_lane.py)）：准入前零进程、attach/stdin/退出码、同主体跨连接关闭、异主体拒绝且目标仍在、detach 后无后续请求的到期回收、graceful 拒绝新会话而保留现存、emergency 终止现存，以及真 TTY 恢复。
+- 隔离回环矩阵（[`tests/manual/iroh_pty_lane.py`](../tests/manual/iroh_pty_lane.py)）：准入前零进程、attach/stdin/退出码、会话活过 TTL/3 的续租且续租帧不进终端、撤销时孙进程随进程组消失、同主体跨连接关闭、异主体拒绝且目标仍在、detach 后无后续请求的到期回收、graceful 拒绝新会话而保留现存、emergency 终止现存，以及真 TTY 恢复。
 - 非回环矩阵（`tests/manual/iroh_pty_routable.sh` 搭三主机拓扑：客户 / 中转（目录 + relay，开转发）/ daemon，再以 `--routable` 跑同一脚本）：真实握手、长会话、relay-only 可达、直连被黑洞时 `direct` 必失败而 `auto` 落到 `iroh_path=relay`，以及缺省路径仍 ping-only + 回环。
 
 RAI-179 的隔离夹具矩阵（[`fixed_fixture_lifecycle_and_revocation_over_isolated_iroh`](../src/control_iroh/lifecycle_tests.rs)）在搬迁后重跑仍通过，用于证明同一份准入语义没有被搬移改变。

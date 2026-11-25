@@ -818,6 +818,87 @@ fn serve_admitted(
     result.and(transport.close())
 }
 
+/// The lane transport as the PTY bridge sees it.
+///
+/// The bridge owns the stream for the whole session, so the frames that are not
+/// PTY input have to be handled here: a renewal typed into the remote program
+/// never renews anything, and a close that names a foreign session must not end
+/// this one.
+struct LaneIo<'a> {
+    transport: &'a mut ControlTransport,
+    admission: &'a Arc<Mutex<admission::Admission>>,
+    peer: EndpointId,
+    subject: &'a str,
+}
+
+impl crate::shell::PtyBridgeIo for LaneIo<'_> {
+    fn read_message(&mut self) -> io::Result<Option<String>> {
+        loop {
+            let Some(message) = self.transport.read_message()? else {
+                return Ok(None);
+            };
+            if message.starts_with('{') {
+                match serde_json::from_str::<Handshake>(&message) {
+                    Ok(Handshake::Renew { grant }) => {
+                        let renewed = self
+                            .admission
+                            .lock()
+                            .map_err(|_| io::Error::other("admission lock poisoned"))?
+                            .renew(self.peer, &grant, utc_ms());
+                        match renewed {
+                            Ok(()) => log::info!("iroh lease renewed"),
+                            Err(rejection) => {
+                                let (code, reason) = rejection.code_reason();
+                                log::info!(
+                                    "iroh lease renewal refused code={code} reason={reason}"
+                                );
+                            }
+                        }
+                        continue;
+                    }
+                    Ok(_) => {
+                        log::info!("iroh admitted lane refused a handshake inside a session");
+                        continue;
+                    }
+                    Err(_) => {}
+                }
+            }
+            if let Some(session_id) = close_target(&message) {
+                if !matches!(
+                    crate::pty_control::authorize_pty_subject(&session_id, self.subject)?,
+                    crate::pty_control::SubjectAccess::Allowed
+                ) {
+                    log::info!("iroh close refused: foreign session={session_id}");
+                    continue;
+                }
+            }
+            return Ok(Some(message));
+        }
+    }
+
+    fn write_message(&mut self, message: &str) -> io::Result<()> {
+        self.transport.write_message(message)
+    }
+}
+
+impl crate::shell::PtyBridgeTransport for LaneIo<'_> {
+    fn set_bridge_read_timeout(&mut self, timeout: Option<Duration>) -> io::Result<()> {
+        self.transport.set_read_timeout(timeout)
+    }
+}
+
+fn close_target(message: &str) -> Option<String> {
+    // Anything that is not a close, a resize frame included, has to fall through
+    // to the bridge untouched.
+    match parse_control_line(message) {
+        Ok(ControlParseResult::Control(ControlRequest {
+            command: ControlCommand::PtyClose(request),
+            ..
+        })) => Some(request.session_id),
+        _ => None,
+    }
+}
+
 fn serve_lane(
     transport: &mut ControlTransport,
     peer: EndpointId,
@@ -860,6 +941,17 @@ fn serve_lane(
                 refuse_frame(transport, None, code as i32, reason)?;
                 continue;
             }
+            // A lease holds one session: a detached session stays alive, and a
+            // second open on the same lease would put it beyond every reclaim.
+            let held = admission
+                .lock()
+                .map_err(|_| io::Error::other("admission lock poisoned"))?
+                .session_of(lease);
+            if let Some(held) = held.filter(|held| crate::pty_control::pty_session_registered(held)) {
+                log::info!("iroh pty refused: lease already holds session={held}");
+                refuse_frame(transport, None, LANE_REFUSED_CODE, LANE_REFUSED)?;
+                continue;
+            }
             let mut session = match crate::pty_control::open_attached_pty_session(request) {
                 Ok(session) => session,
                 Err(err) => {
@@ -874,7 +966,8 @@ fn serve_lane(
                 .map_err(|_| io::Error::other("admission lock poisoned"))?
                 .record_session(lease, pty.clone());
             log::info!("iroh pty opened session={pty} lease={lease}");
-            crate::shell::bridge_attached_pty_session(transport, &mut session)?;
+            let mut lane = LaneIo { transport, admission, peer, subject: &subject };
+            crate::shell::bridge_attached_pty_session(&mut lane, &mut session)?;
             continue;
         }
 
@@ -895,7 +988,8 @@ fn serve_lane(
                 continue;
             };
             log::info!("iroh pty reattached session={}", session.session_id());
-            crate::shell::bridge_attached_pty_session(transport, &mut session)?;
+            let mut lane = LaneIo { transport, admission, peer, subject: &subject };
+            crate::shell::bridge_attached_pty_session(&mut lane, &mut session)?;
             continue;
         }
 
@@ -1239,8 +1333,10 @@ pub(crate) fn run_pty_control(path: &Path, name: &str, request: IrohPtyRequest) 
     }
     let cfg: ClientConfig = profile(path)?;
     let key = identity(&cfg.key_file)?;
-    let ttl = Duration::from_millis(cfg.lease_ttl_ms.unwrap_or(DEFAULT_LEASE_TTL_MS))
-        .min(admission::MAX_SESSION_TTL);
+    let ttl = Duration::from_millis(cfg.lease_ttl_ms.unwrap_or(DEFAULT_LEASE_TTL_MS));
+    if ttl < admission::MIN_SESSION_TTL || ttl > admission::MAX_SESSION_TTL {
+        return Err("iroh lease_ttl_ms is outside the supported range".into());
+    }
     let bind = bind_addr(cfg.bind, cfg.routable)?;
     runtime()?.block_on(async {
         let directory =

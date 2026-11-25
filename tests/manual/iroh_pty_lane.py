@@ -65,6 +65,8 @@ def pid_exists(pid):
 with tempfile.TemporaryDirectory(prefix="iroh-pty-", dir=scratch) as dirname:
     home = Path(dirname)
     env = dict(PATH="/usr/bin:/bin", HOME=dirname, TMPDIR=dirname, LANG="C.UTF-8")
+    if os.environ.get("RAI305_LOG"):
+        env["RUST_LOG"] = os.environ["RAI305_LOG"]
     rendezvous_key, rendezvous_id = identity(home, "rendezvous")
     daemon_key, daemon_id = identity(home, "daemon")
     owner_key, owner_id = identity(home, "owner")
@@ -241,6 +243,56 @@ with tempfile.TemporaryDirectory(prefix="iroh-pty-", dir=scratch) as dirname:
         os.close(master)
         assert code == 0, (code, repr(text))
         print(f"pty: session={session_id} lease={lease_id} stdin echoed; exit=0", flush=True)
+
+        case("a session outlives its own lease renewal")
+        renewed = pty_client(owner_key, "import time\nprint('ready', flush=True)\n"
+                            "time.sleep(6)\nprint('alive', flush=True)\n", ttl=2000)
+        renewed_pid, renewed_master = renewed
+        renewed_text = read_until(renewed_master, "ready")
+        if "ready" not in renewed_text:
+            raised = pty_wait(renewed_pid, budget=10)
+            raise AssertionError(
+                f"renewal session never became ready: exit={raised} {renewed_text!r}")
+        renewed_code = pty_wait(renewed_pid, budget=40)
+        try:
+            renewed_text += os.read(renewed_master, 65536).decode(errors="replace")
+        except OSError:
+            pass
+        os.close(renewed_master)
+        assert renewed_code == 0, f"session did not survive its renewal: {renewed_code} {renewed_text!r}"
+        assert '"op":"renew"' not in renewed_text and "\"op\": \"renew\"" not in renewed_text, \
+            f"renewal frame was typed at the remote program: {renewed_text!r}"
+        assert "iroh lease renewed" in daemon_log.read_text(), \
+            "the daemon never accepted a renewal"
+        print("renewal: a session outlived its lease deadline", flush=True)
+
+        case("a revoked session takes its grandchildren with it")
+        doomed, doomed_master = pty_client(owner_key, "import subprocess, time\n"
+                                          "kid = subprocess.Popen(['sleep', '61'])\n"
+                                          "print('grandchild', kid.pid, flush=True)\n"
+                                          "time.sleep(120)\n")
+        doomed_text = read_until(doomed_master, "grandchild")
+        assert "grandchild" in doomed_text, f"grandchild never started: {doomed_text!r}"
+        grandchild = int(re.search(r"grandchild (\d+)", doomed_text).group(1))
+        doomed_session = re.findall(r"iroh pty opened session=(\S+)", daemon_log.read_text())[-1]
+        write_policy([owner_id], revoked=[owner_id], terminate=[owner_id])
+        until = time.monotonic() + 20
+        while time.monotonic() < until:
+            if f"lease reclaim session={doomed_session} reason=lease_revoked" in \
+                    daemon_log.read_text():
+                break
+            time.sleep(0.05)
+        else:
+            raise AssertionError("the revoked session was never reclaimed")
+        pty_wait(doomed)
+        os.close(doomed_master)
+        until = time.monotonic() + 10
+        while time.monotonic() < until and pid_exists(grandchild):
+            time.sleep(0.05)
+        assert not pid_exists(grandchild), \
+            f"the grandchild {grandchild} survived revocation"
+        write_policy([owner_id])
+        print(f"revocation: grandchild {grandchild} died with the session", flush=True)
 
         case("a second connection of the same subject closes its own session")
         holder, holder_master = pty_client(owner_key, "import time\nprint('ready', flush=True)\n"

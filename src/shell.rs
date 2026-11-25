@@ -495,12 +495,12 @@ fn run_pty_attach_receiver_with_transport(
 }
 
 pub(crate) fn bridge_attached_pty_session(
-    transport: &mut ControlTransport,
+    transport: &mut impl PtyBridgeTransport,
     session: &mut crate::pty_control::AttachedPtySession,
 ) -> io::Result<()> {
-    transport.set_read_timeout(Some(std::time::Duration::from_millis(25)))?;
+    transport.set_bridge_read_timeout(Some(std::time::Duration::from_millis(25)))?;
     let result = bridge_attached_pty_session_inner(transport, session);
-    let restore_result = transport.set_read_timeout(None);
+    let restore_result = transport.set_bridge_read_timeout(None);
     match (result, restore_result) {
         (Ok(()), Ok(())) => Ok(()),
         (Err(err), _) => Err(err),
@@ -508,9 +508,14 @@ pub(crate) fn bridge_attached_pty_session(
     }
 }
 
-trait PtyBridgeIo {
+pub(crate) trait PtyBridgeIo {
     fn read_message(&mut self) -> io::Result<Option<String>>;
     fn write_message(&mut self, message: &str) -> io::Result<()>;
+}
+
+/// A bridge transport that also carries the read timeout the bridge polls on.
+pub(crate) trait PtyBridgeTransport: PtyBridgeIo {
+    fn set_bridge_read_timeout(&mut self, timeout: Option<std::time::Duration>) -> io::Result<()>;
 }
 
 impl PtyBridgeIo for ControlTransport {
@@ -520,6 +525,12 @@ impl PtyBridgeIo for ControlTransport {
 
     fn write_message(&mut self, message: &str) -> io::Result<()> {
         self.write_message(message)
+    }
+}
+
+impl PtyBridgeTransport for ControlTransport {
+    fn set_bridge_read_timeout(&mut self, timeout: Option<std::time::Duration>) -> io::Result<()> {
+        self.set_read_timeout(timeout)
     }
 }
 

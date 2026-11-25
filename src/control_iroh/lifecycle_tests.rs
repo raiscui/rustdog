@@ -516,7 +516,7 @@ fn detached_fixture_expires_without_further_requests() {
         let mut lane = LaneDriver::new(admission);
         let proof = {
             let state = lane.state();
-            SignedGrant::issue(&client, target.public(), &state.lease_id, state.clock(), Duration::from_millis(300)).unwrap()
+            SignedGrant::issue(&client, target.public(), &state.lease_id, state.clock(), Duration::from_millis(1000)).unwrap()
         };
         let owner = lane.run(peer, Op::Open(proof)).owner();
         let pid = lane.state().pid.unwrap();
