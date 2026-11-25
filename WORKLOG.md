@@ -411,3 +411,8 @@ U3 行为基线: 同一矩阵里 `direct` 在直连被阻断时失败、`auto` �
 另修: 一条租约只持有一个 PTY(`Admission::session_of`, 否则 detach 后同租约再开会让第一条永久无回收路径)、grant 容忍 `CLOCK_SKEW`、`MIN_SESSION_TTL` 下限(夹具租约 300ms 同步改为 1000ms, 断言未削弱)。规格已同步并指回 `LaneIo` / `signal_pty_group` / `escalate_pty_group_kill` / `CLOCK_SKEW` / `MIN_SESSION_TTL` / `PTY_KILL_GRACE`。
 未修(记录在报告): 3s 写超时按断链处理、租约表不裁剪、attach 的 200ms 到期窗口、`iroh is only supported by the ping one-shot CLI` 的陈旧注释。
 - 提交: 8b99436
+
+## 2026-11-25 RAI-305 验收补口
+
+按复核指出的缺口补 attach 用例: `--pty-detach` 之后由第三个连接 `--pty-attach` 重新附着、回显并关闭。回环 11/11(`receipts/u7/loopback-attach.log`)、三主机 13/13(`receipts/u7/routable.log`)含 `attach: ... attached again and closed from a third connection`。同时把 `control_invocation.rs` 里"iroh 只支持 ping 一次性 CLI"的陈旧提示改成实际语义(不是删除检查, 只改文案)。
+- 提交: c2d882f
