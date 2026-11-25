@@ -452,3 +452,4 @@ U3 行为基线: 同一矩阵里 `direct` 在直连被阻断时失败、`auto` �
 - `frame_timeout_ms` 只覆盖 lane: 写进规格(目录跳仍 3s); `@pty-detach` 按本 lane 会话收紧。
 - 重启用例使 `path=direct` 断言失效: 改读第一个 daemon 的日志。
 复跑: 回环 13/13(`receipts/u8/loopback-final.log`)、三主机 15/15(`receipts/u8/routable-final.log`)、iroh 单测 23/23、shell 单测 46/46。
+- 提交: 132c66b
