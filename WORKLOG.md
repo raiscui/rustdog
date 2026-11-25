@@ -433,3 +433,10 @@ U3 行为基线: 同一矩阵里 `direct` 在直连被阻断时失败、`auto` �
 - 写预算: profile 新增 `frame_timeout_ms`, 两侧校验, `MIN_FRAME_TIMEOUT` 1s / `MAX_FRAME_TIMEOUT` 120s / 缺省 3s。红基线 `receipts/u7/u7-frame-budget-red.log`(字段与校验都不存在); 绿: 两条 profile 用例。
 - 三主机实测(如实记录, 与预期相反): 链路消失 2s(`u7-outage-2s.log`)、6s(`u7-outage-6s.log`)、6s+12s 预算(`u7-outage-6s-budget12s.log`)、20s 冻结读端+64MB(`u7-stall-reader.log`) 全部以连接层 `connection lost` / `LastOpenPath` 结束, 均未出现 `iroh_frame_broken`。结论: 路径消失由连接活性决定, 写预算不改变结果; 写预算只管"路径在、对端不读"的写挂起, 该规则的真实网络证据尚未构造出来, 确定性证据是传输层单测。
 - 提交: d7c5dd2
+
+## 2026-11-25 RAI-305 U8: 操作者撤销路径
+
+- CLI: `rdog policy --config <daemon profile> <list|admit|revoke|emergency>`(`src/input.rs` + `control_iroh::run_policy`)。list 输出 id + SHA-256 指纹前缀 + 登记时间 + 备注 + revoked/terminate 标记; admit/revoke/emergency 都走 `save_policy`(临时文件 → 替换 → 父目录 fsync), 写失败与持久性未确认分别非零退出并报原因。
+- 策略文件新增 `parties`(备注 + 登记时间), 准入判定仍只读 allow/revoked/terminate 三个集合。
+- 验收(回环 13/13 `receipts/u8/loopback.log`, 三主机 15/15 `receipts/u8/routable.log`): `policy list` 显示指纹与备注; `policy revoke` 返回 0 后新会话 `iroh_target_denied`、现存会话仍活; `policy emergency` 现存会话被终止且终帧 `lease_revoked`; 重启 daemon 后仍拒新。
+- 规格新增"操作者路径"一节(命令、落盘语义、两种失败、重启语义)。
