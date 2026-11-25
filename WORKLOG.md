@@ -416,3 +416,12 @@ U3 行为基线: 同一矩阵里 `direct` 在直连被阻断时失败、`auto` �
 
 按复核指出的缺口补 attach 用例: `--pty-detach` 之后由第三个连接 `--pty-attach` 重新附着、回显并关闭。回环 11/11(`receipts/u7/loopback-attach.log`)、三主机 13/13(`receipts/u7/routable.log`)含 `attach: ... attached again and closed from a third connection`。同时把 `control_invocation.rs` 里"iroh 只支持 ping 一次性 CLI"的陈旧提示改成实际语义(不是删除检查, 只改文案)。
 - 提交: c2d882f
+
+## 2026-11-25 RAI-305 第二轮复核处置
+
+修后 diff 的第二轮只读复核判定三项修复(续租截获、进程组终止、一条租约一个 PTY + TTL 下限 + 时钟容忍)全部成立, 另给四条: 当场修三条 ——
+- 宽限期在一半路径上是 0: `kill_pty_child` 传空 session id 使 `pty_session_registered("")` 恒假, SIGHUP 后立刻 SIGKILL。改为 `Option<String>`, 没有会话 id 时走满 `PTY_KILL_GRACE` 再探测组, sweep / `@pty-close` / 断链三条路径同一套升级语义, 规格同步。
+- 同主体但指向另一会话的 `@pty-close` 被当字面量敲进当前 PTY 的 stdin: `LaneIo` 记住本 lane 的会话 id, 不匹配的一律丢弃。
+- 租约冲突复用 lane 能力拒绝的 reason: 改为独立 `LEASE_BUSY`(`iroh_lease_session_conflict`), 规格错误表加一行。
+未修(确认为这批之前就存在): 3s 写超时超时不 reset 的半帧风险, 以及慢链上可能被误判断链。
+回执: 回环 11/11(`receipts/u7/loopback-final.log`)、三主机 13/13(`receipts/u7/routable-final.log`)、iroh 单测 19/19。
