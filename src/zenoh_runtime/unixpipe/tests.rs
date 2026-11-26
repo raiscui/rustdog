@@ -1,8 +1,8 @@
-// 本模块的用例全部针对 unixpipe (AF_UNIX 命名管道) 语义: socket 路径推导、
-// stale 文件清理、probe 超时、compose 注入 unixpipe endpoint, 依赖外部 `mkfifo`
-// 与 /tmp 下的真实 FIFO 文件。被测对象 (unixpipe_socket_path /
-// cleanup_stale_unixpipe_socket / try_unixpipe_probe / compose_listen_endpoints
-// 的 unix 分支) 在 unixpipe.rs 里全部带 #[cfg(unix)], 因此整块只在 unix 目标编译。
+// 本模块的用例针对 unixpipe (FIFO) 语义: base 路径推导、probe 超时、compose
+// 注入 unixpipe endpoint, 依赖外部 `mkfifo` 与真实 FIFO 文件。被测对象
+// (unixpipe_socket_path / try_unixpipe_probe / compose_listen_endpoints 的 unix
+// 分支) 在 unixpipe.rs 里全部带 #[cfg(unix)], 因此整块只在 unix 目标编译。
+// 落盘布局与 lock/meta 生命周期由 `crate::local_run` 的用例覆盖。
 //
 // 为什么门加在这里而不是父模块的 `mod tests;` 上: 同 local_default/tests.rs ——
 // 本文件是该测试唯一的引入点, 门内聚在测试文件里, 父模块保持 `#[cfg(test)]`。
@@ -13,36 +13,35 @@ use crate::zenoh_runtime::test_support::{env_test_guard, unique_test_dir};
 use std::{env, time::Instant};
 
 #[test]
-fn unixpipe_socket_path_should_respect_tmpdir_env() {
-    let _guard = env_test_guard();
-    // 临时覆盖 TMPDIR,确认派生路径使用它。
-    let prev = env::var_os("TMPDIR");
-    // SAFETY: 在测试里改环境变量是常见模式,后续立即恢复。
-    unsafe { env::set_var("TMPDIR", "/tmp/rdog-tmpdir-test") };
-    let result = unixpipe_socket_path("lab", "mac.lab");
-    match prev {
-        Some(v) => unsafe { env::set_var("TMPDIR", v) },
-        None => unsafe { env::remove_var("TMPDIR") },
-    }
-    let path = result.expect("路径推导应该成功");
+fn unixpipe_socket_path_should_live_in_the_local_run_dir() {
+    let path = unixpipe_socket_path("lab", "mac.lab").expect("路径推导应该成功");
+    let run_dir = crate::local_run::run_dir().expect("运行目录应该能解析");
+
+    assert_eq!(path.parent(), Some(run_dir.as_path()));
     assert_eq!(
-        path,
-        PathBuf::from("/tmp/rdog-tmpdir-test/rdog-lab-mac.lab.pipe")
+        path.file_name().and_then(|name| name.to_str()),
+        Some("lab__mac.lab.pipe")
     );
 }
 
 #[test]
-fn unixpipe_socket_path_should_fallback_to_slash_tmp_when_tmpdir_unset() {
+fn unixpipe_socket_path_should_ignore_tmpdir() {
     let _guard = env_test_guard();
+    // 旧版本的落盘位置来自 $TMPDIR(per-session,重启即换);现在必须完全不看它。
     let prev = env::var_os("TMPDIR");
-    unsafe { env::remove_var("TMPDIR") };
+    unsafe { env::set_var("TMPDIR", "/tmp/rdog-tmpdir-should-be-ignored") };
     let result = unixpipe_socket_path("lab", "mac.lab");
     match prev {
         Some(v) => unsafe { env::set_var("TMPDIR", v) },
         None => unsafe { env::remove_var("TMPDIR") },
     }
-    let path = result.expect("fallback 应该成功");
-    assert_eq!(path, PathBuf::from("/tmp/rdog-lab-mac.lab.pipe"));
+
+    let path = result.expect("路径推导应该成功");
+    assert!(
+        !path.starts_with("/tmp/rdog-tmpdir-should-be-ignored"),
+        "本机 fast path 不能再跟随 $TMPDIR,实际 {}",
+        path.display()
+    );
 }
 
 #[test]
@@ -54,13 +53,27 @@ fn unixpipe_socket_path_should_reject_components_with_slash_or_whitespace() {
 }
 
 #[test]
-fn unixpipe_socket_path_should_reject_oversized_combination() {
-    let _guard = env_test_guard();
-    // 92 字节的 namespace + "mac.lab" 组合会让最终路径超过 95 字节上限。
+fn unixpipe_socket_path_should_compress_oversized_combination() {
+    // 92 字节的 namespace + "mac.lab" 组合会让可读名超出 95 字节上限,
+    // 现在必须压缩成 `<slug>-<8位哈希>` 而不是直接失败。
     let big_ns: String = std::iter::repeat('a').take(92).collect();
-    let err = unixpipe_socket_path(&big_ns, "mac.lab").unwrap_err();
-    assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
-    assert!(err.to_string().contains("unixpipe base 路径太长"));
+    let path = unixpipe_socket_path(&big_ns, "mac.lab").expect("超长名字应压缩成哈希名");
+
+    assert!(
+        path.as_os_str().as_encoded_bytes().len() <= crate::config::UNIXPIPE_SOCKET_PATH_MAX_BYTES,
+        "压缩后的 base 必须在上限内: {}",
+        path.display()
+    );
+    let stem = path
+        .file_stem()
+        .map(|stem| stem.to_string_lossy().to_string())
+        .expect("base 应有文件名主干");
+    assert!(stem.starts_with("aaaa"), "应保留可读前缀: {stem}");
+    assert_eq!(
+        stem.rsplit_once('-').map(|(_, hash)| hash.len()),
+        Some(8),
+        "应带 8 位哈希后缀: {stem}"
+    );
 }
 
 #[test]
@@ -70,51 +83,6 @@ fn unixpipe_locator_should_format_as_protocol_prefix_and_path() {
         unixpipe_locator(&path),
         "unixpipe//tmp/rdog-lab-mac.lab.pipe"
     );
-}
-
-#[test]
-fn cleanup_stale_unixpipe_socket_should_remove_existing_pipe_files() {
-    // 模拟 daemon 崩溃后残留的 3 个文件。
-    let base = PathBuf::from("/tmp/rdog-cleanup-test.pipe");
-    let _ = fs::remove_file(&base);
-    let _ = fs::remove_file(format!("{}_uplink", base.display()));
-    let _ = fs::remove_file(format!("{}_downlink", base.display()));
-
-    for suffix in ["", "_uplink", "_downlink"] {
-        let path = format!("/tmp/rdog-cleanup-test.pipe{suffix}");
-        let status = std::process::Command::new("mkfifo")
-            .arg(&path)
-            .status()
-            .expect("mkfifo 调用应该成功");
-        assert!(status.success(), "mkfifo 应该成功");
-    }
-
-    cleanup_stale_unixpipe_socket(&base).expect("清理应该成功");
-
-    for suffix in ["", "_uplink", "_downlink"] {
-        let path = format!("/tmp/rdog-cleanup-test.pipe{suffix}");
-        assert!(!Path::new(&path).exists(), "{path} 应该已被清理");
-    }
-}
-
-#[test]
-fn cleanup_stale_unixpipe_socket_should_succeed_when_files_missing() {
-    let base = PathBuf::from("/tmp/rdog-cleanup-missing.pipe");
-    let _ = fs::remove_file(&base);
-    cleanup_stale_unixpipe_socket(&base).expect("文件不存在时必须能直接通过");
-}
-
-#[test]
-fn cleanup_stale_unixpipe_socket_should_reject_when_path_is_directory() {
-    // 如果路径是目录而不是 FIFO 文件,必须报错避免误删用户目录。
-    let base = PathBuf::from("/tmp/rdog-cleanup-dir-test.pipe");
-    let _ = fs::remove_dir_all(&base);
-    fs::create_dir_all(&base).expect("create_dir_all 应该成功");
-
-    let err = cleanup_stale_unixpipe_socket(&base).unwrap_err();
-    assert_eq!(err.kind(), io::ErrorKind::AlreadyExists);
-
-    let _ = fs::remove_dir_all(&base);
 }
 
 // -----------------------------------------------------------------
@@ -201,12 +169,12 @@ fn compose_listen_endpoints_should_inject_unixpipe_when_enabled_and_not_present(
     let composed = compose_listen_endpoints(&cfg, "lab", "mac.lab").expect("ok");
     assert_eq!(composed.listen_endpoints.len(), 2);
     assert!(composed.listen_endpoints[0].starts_with("unixpipe/"));
-    assert!(composed.listen_endpoints[0].contains("rdog-lab-mac.lab.pipe"));
+    assert!(composed.listen_endpoints[0].contains("lab__mac.lab.pipe"));
     assert_eq!(composed.listen_endpoints[1], "udp/0.0.0.0:7447");
     assert!(composed
         .unixpipe_base_path
         .expect("unixpipe base should be resolved")
-        .ends_with("rdog-lab-mac.lab.pipe"));
+        .ends_with("lab__mac.lab.pipe"));
 }
 
 #[test]
@@ -299,28 +267,27 @@ fn compose_listen_endpoints_should_reject_multiple_explicit_unixpipe_endpoints()
 }
 
 #[test]
-fn prepare_unixpipe_listener_should_recover_stale_owner_guard_and_files() {
-    // `unique_test_dir`会读取进程级TMPDIR,必须与其他环境变量测试串行。
+fn prepare_unixpipe_listener_should_reclaim_stale_lock_and_fifo_files() {
+    // `unique_test_dir` 会读取进程级 TMPDIR,必须与其他环境变量测试串行。
     let _guard = env_test_guard();
     let dir = unique_test_dir("unixpipe-stale-owner");
     let base = dir.join("shared.pipe");
-    let owner_guard = PathBuf::from(format!("{}.rdog-owner.pid", base.display()));
+    let lock_path = dir.join("shared.lock");
+    let meta_path = dir.join("shared.meta");
 
-    // PID 0 永远不会被识别为活跃进程,用于模拟 daemon 崩溃后的 sidecar。
-    fs::write(&owner_guard, "0").expect("stale owner guard should be created");
+    // PID 0 永远不会被识别为活跃进程,用于模拟 daemon 被 kill -9 后的 lock。
+    fs::write(
+        &lock_path,
+        r#"{"schema":"rdog.unixpipe-lock.v1","pid":0,"started_at_unix_ms":1}"#,
+    )
+    .expect("stale lock should be created");
     for suffix in ["", "_uplink", "_downlink"] {
         fs::write(format!("{}{suffix}", base.display()), "stale")
             .expect("stale unixpipe artifact should be created");
     }
 
-    let guard = prepare_unixpipe_listener(&base)
-        .expect("stale owner and unixpipe files should be recoverable");
-    assert_eq!(
-        fs::read_to_string(&owner_guard)
-            .expect("new owner guard should exist")
-            .trim(),
-        std::process::id().to_string()
-    );
+    let guard = prepare_unixpipe_listener(&base, "lab", "stale.lab", true)
+        .expect("stale lock and unixpipe files should be recoverable");
     for suffix in ["", "_uplink", "_downlink"] {
         let path = PathBuf::from(format!("{}{suffix}", base.display()));
         assert!(
@@ -329,14 +296,21 @@ fn prepare_unixpipe_listener_should_recover_stale_owner_guard_and_files() {
             path.display()
         );
     }
+    let lock_contents = fs::read_to_string(&lock_path).expect("new lock should exist");
+    assert!(
+        lock_contents.contains(&std::process::id().to_string()),
+        "新 lock 必须记录当前 pid: {lock_contents}"
+    );
+    assert!(meta_path.exists(), "meta 应记录完整身份");
 
-    // 正常退出只释放lock,稳定inode必须保留并允许下一轮接管。
+    // 正常退出把 pipe/lock/meta 一起清掉,目录不留生命周期碎片。
     drop(guard);
-    assert!(owner_guard.exists(), "owner lease file应该永久保留");
-    let next_guard = prepare_unixpipe_listener(&base)
-        .expect("released managed lease不应因旧PID仍存活而拒绝接管");
+    assert!(!lock_path.exists(), "owner 退出后 lock 应被删除");
+    assert!(!meta_path.exists(), "owner 退出后 meta 应被删除");
+
+    let next_guard = prepare_unixpipe_listener(&base, "lab", "stale.lab", true)
+        .expect("released lock 不应阻止下一次接管");
     drop(next_guard);
-    assert!(owner_guard.exists(), "重复接管后lease file仍应保留");
     fs::remove_dir_all(dir).expect("test directory should be removed");
 }
 

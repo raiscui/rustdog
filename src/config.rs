@@ -257,7 +257,9 @@ pub struct UnixpipeConfig {
     ///
     /// 字段名沿用历史 `socket_path`,但 Zenoh 1.8.0 实际创建的是 FIFO:
     /// `<base>_uplink` / `<base>_downlink`。
-    /// None = 按 (namespace, daemon_name) 自动推导 `$TMPDIR/rdog-{ns}-{name}.pipe`。
+    /// None = 按 (namespace, daemon_name) 自动推导
+    /// `{run_dir}/{namespace}__{daemon_name}.pipe`(`run_dir` 为 `$XDG_RUNTIME_DIR/rdog`
+    /// 或 `~/.rdog/run`,超长名字压缩成 `<slug>-<8位哈希>.pipe`),规则见 `src/local_run.rs`。
     /// 显式给的路径在配置校验时必须满足 base 长度上限(<= 95 字节)。
     pub socket_path: Option<PathBuf>,
 }

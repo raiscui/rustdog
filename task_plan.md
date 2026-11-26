@@ -142,3 +142,84 @@ commit + 10-11 跨机 Electron 调试 + 10-20 跨网互联 wayfinder 建图 13 �
 ## [2026-10-23 20:27:06] [Session ID: 01a168b3-33af-7c53-9c6b-0fb808d7e9dc] 支线索引: yino 使用反馈优化
 
 启用 `yino_rdog_feedback` 支线, 检索 pireel 当前与 archive 上下文, 分析 rdog 需求/缺陷并实施已证实且可验证的调整. 过程见 task_plan__yino_rdog_feedback.md.
+
+## [2026-11-26 06:10:00] [Session ID: RAI-387] 本机 fast path 落盘与生命周期收口
+
+RAI-387: unixpipe 本机 fast path 从 `$TMPDIR` 迁到固定运行目录,补名字派生/死进程回收
+与 `rdog local list|clean`。
+
+### 已完成
+- [x] 落盘: `$XDG_RUNTIME_DIR/rdog` / `~/.rdog/run`(0700),名字 `<ns>__<name>.pipe`,
+      超 95 字节预算压缩成 `<slug>-<8位哈希>.pipe` + `<stem>.meta` 记完整身份;FIFO 0600
+- [x] 生命周期: `<stem>.lock`(flock + pid + 启动时刻),拿到 lock 即判定旧 owner 已死并回收;
+      正常退出与 SIGINT/SIGTERM 删 FIFO + lock + meta
+- [x] router daemon 补信号处理: 原先 SIGTERM 走默认处置打死进程,RAII 清理永不执行
+- [x] 命令: `rdog local list`(live / stale-pid-dead / stale-pid-reused / legacy-stale)
+      与 `rdog local clean`(默认 dry-run,`--force` 删死残留;活 daemon 一律不动)
+- [x] 旧 `$TMPDIR` 残留纳入 list/clean;local-default 未托管候选改读运行目录 + meta
+- [x] 验证: 20 轮启停目录回落 0 文件 / kill -9 回执 `pid_alive=no` + `previous_pid_alive=false` /
+      60+60 字符身份 base=95 字节且显示全名 / 权限 0700+0600 / `cargo test --bin rdog` 1098 passed
+- [x] 文档: spec §3.1 重写 + rdog-control skill 入册 (v2.31-local-run)
+- 提交: dce9397 (实现+单测), 98879fc (文档)
+
+### 未覆盖 / 留给后续
+- [ ] macOS 真机回执(本机 Linux 已跑真 daemon 验收;mac 由 Captain 代跑同一脚本)
+- [ ] Windows 命名管道 fast path 本身(Rai-385);本票只提供 `rdog local list` 观测面,
+      该分支仅做隔离类型检查,未在 Windows 上构建(本机 `cargo check --target` 被 ring 的
+      lib.exe 挡住,见 docs/solutions/runtime-errors/cross-compile-windows-rust-electron-tool.md)
+- [ ] `rdog local list --json` 机器可读形态(当前是 `key=value` 单行,够 agent grep)
+
+### [2026-11-26 06:20:00] 评审 8 条修复
+- [x] Windows 构建断裂 (CleanReport 引用 unix-only RunEntry + test 钩子 PathBuf)、
+      显式 base 父目录被 chmod、显式 base 被改写扩展名、跨版本互斥丢失、
+      legacy 去重丢活 owner 证据、clean TOCTOU、删 lock 允许双 owner、
+      macOS 测试夹具超预算 —— 全部修复并补 4 个回归用例
+- [x] CI 红点归因: ubuntu/macOS 的 `script_success_should_keep_legacy_bare_stdout_response_shape`
+      是既有 figment::Jail 删除 cwd 的并行竞态(8123e21 那次 main CI 同一个测试就红过);
+      windows 是 ort-sys 下载 onnxruntime 的 panic(网络,基础设施)
+- 提交: 7b4e728
+
+### [2026-11-26 06:25:00] 二轮评审 2 条修复
+- [x] (medium) 跨版本互斥单向 → 新 owner 也持 `<base>.rdog-owner.pid` flock + 写 pid(双向闭环)
+- [x] (low) legacy 分支 clean 的 TOCTOU → 两条分支都持锁删除
+- [x] 配套: 接管路径只清 FIFO(不再连带删自己刚拿到的守卫);锁顺序先新后旧,错误信息更准
+- [x] 新增 2 回归用例;`cargo test --bin rdog` 1104 passed
+- 提交: 8dbd209
+
+### [2026-11-26 06:30:00] 三轮评审 2 条 low 修复
+- [x] `clean` 与 `acquire` 的持锁顺序相反 → 统一"先 stem lock,后兼容守卫"
+- [x] Drop 持锁 unlink 兼容守卫留下孤儿 inode 窗口 → 兼容守卫收窄到共享显式 base
+      (派生路径不建),运行目录恢复"退出后为空";派生路径上若出现旧守卫只探测不接管
+- [x] 新增"派生路径不产生兼容守卫"用例;跨版本用例改用运行目录外的共享 base
+- [x] `cargo test --bin rdog` 1105 passed;真机脚本 20/20 干净
+- 提交: fcb4680
+
+### [2026-11-26 06:35:00] 四轮评审 + recording e2e / shell_lane 红点对账
+- [x] 四轮 low: 兼容守卫改按 base **来源**判定(`UnixpipeRunPaths.shared`),覆盖"显式路径落在运行目录里"
+- [x] recording e2e 红点归因(三向对照): cargo 1.100 换 build-dir 布局使 `rdog_binary_path()` 夹具失效;
+      main 11-06(rustc 1.99.1, deps 布局)绿、本 PR 与兄弟分支 capy/rai368-scout(同日 1.100.0)同款红;
+      base+head 等条件本地各 6 passed
+- [x] shell_lane 红点: base 5588fcb 本地 16 线程 5 轮中 4 轮复现 ⇒ 既有 flake(figment::Jail 删 cwd),
+      本 PR 只提高了并行压力;根治(共享锁)属另一票
+- [x] 回执: handoffs/rai387/regression-check/{README.md,recording-e2e-{base,head}.log,run_recording_e2e.sh}
+- 提交: 07a3bcf
+
+### [2026-11-26 06:40:00] 五轮评审 1 条 low 修复
+- [x] 上一轮(07a3bcf)漏洞: `paths_for_base` 硬编码 `shared: true`,生产入口
+      `prepare_unixpipe_listener` 只会用它 ⇒ **默认 daemon 也在运行目录建 `<stem>.rdog-owner.pid`**
+      (实测修前 4 文件),与 spec "派生路径不设这把锁/退出后为空" 矛盾;kill -9 后该文件
+      不被 `pipe_stem_from_file_name` 认,`local list` 看不到
+- [x] 新增 `is_derived_base(base, ns, name)`;生产入口与 `remove_stale_entry` 都按身份反推来源
+- [x] 实测修后: 默认 daemon 3 文件/退出为空;显式 `socket_path=/tmp/.../control.sock` 建兼容守卫、
+      base 原样保留、退出全清
+- [x] 补用例走生产入口(上一轮用例绕过了它);`cargo test --bin rdog` 1107 passed
+- 提交: 9c3fd43
+
+### [2026-11-26 06:45:00] 六轮评审 1 条 low 修复
+- [x] 上一轮用 `is_derived_base`(路径相等)推断来源 ⇒ "显式 socket_path 恰等于派生路径"会漏建兼容守卫
+- [x] 改为 config 层透传: `ComposedListenEndpoints.unixpipe_base_explicit` → `ZenohUnixpipeStartupConfig.shared`
+      → `prepare_unixpipe_listener(_, _, _, shared)`;删除路径值推断
+- [x] `remove_stale_entry` 简化为无条件持旧守卫再删(随删除一起消失,不留状态)
+- [x] 真机实测: 派生 3 文件 / 显式等于派生 4 文件(含守卫),两者退出后均为空;20 轮启停 20/20
+- [x] `cargo test --bin rdog` 1107 passed;补生产入口用例
+- 提交: 7bfb8ae

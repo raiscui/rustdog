@@ -315,15 +315,16 @@ fn unix_timestamp_ms() -> u128 {
 
 /// 为`self`/空target解析唯一的managed local-default daemon。
 ///
-/// active managed registry是owner身份的唯一真相源。registry不可用时仍扫描
-/// `$TMPDIR`(或`/tmp`fallback)下的FIFO,但只用于生成升级诊断,不再自动选择daemon。
+/// active managed registry是owner身份的唯一真相源。registry不可用时仍扫描本机
+/// fast path 运行目录(`~/.rdog/run/` 或 `$XDG_RUNTIME_DIR/rdog/`),但只用于生成
+/// 升级诊断,不再自动选择daemon。
 ///
 /// 关键实现细节:
 /// - Zenoh 1.8.0 `transport_unixpipe` listener 实际只创建 `<base>_uplink` 和 `<base>_downlink`
-///   两个 FIFO 文件,`<base>`(=`rdog-{ns}-{name}.pipe`)本身不一定存在。
-/// - 因此扫描对象是 `*.pipe_uplink`,不是 `*.pipe`。同名 daemon 的 `<base>_downlink`
-///   也存在,但只看 `_uplink` 就足够,避免双倍计数。
-/// - 候选 base 路径必须以 `rdog-` 开头,中间段 `{ns}-{name}` 用第一个 `-` 切分。
+///   两个 FIFO 文件,`<base>` 本身不一定存在,所以判据是"派生 FIFO 还在"。
+/// - 身份来自同目录 `<stem>.meta`(超长名字压缩后仍能还原完整 namespace/name)。
+/// - 旧版本留在 `$TMPDIR` 的 `rdog-{ns}-{name}.pipe` 也计入诊断,避免升级期
+///   "明明有 pipe 却报没 daemon"。
 /// - 任何FIFO候选都不能代替managed registry;显式target仍可用于升级排障。
 #[cfg(unix)]
 pub fn find_local_daemon_name(namespace_filter: Option<&str>) -> io::Result<String> {
@@ -351,68 +352,9 @@ pub fn find_local_daemon_name(namespace_filter: Option<&str>) -> io::Result<Stri
         }
     }
 
-    let tmpdir = std::env::var_os("TMPDIR")
-        .map(PathBuf::from)
-        .filter(|p| !p.as_os_str().is_empty())
-        .unwrap_or_else(|| PathBuf::from("/tmp"));
-
-    let prefix = "rdog-";
-    let uplink_suffix = ".pipe_uplink";
-
-    let entries = match fs::read_dir(&tmpdir) {
-        Ok(entries) => entries,
-        Err(err) if err.kind() == io::ErrorKind::NotFound => {
-            return Err(no_local_daemon_error(namespace_filter));
-        }
-        Err(err) => {
-            return Err(io::Error::new(
-                err.kind(),
-                format!("扫描 {tmpdir:?} 失败: {err}"),
-            ));
-        }
-    };
-
-    let mut candidates: Vec<String> = Vec::new();
-
-    for entry in entries {
-        let entry = match entry {
-            Ok(entry) => entry,
-            Err(_) => continue,
-        };
-        let file_name = match entry.file_name().to_str() {
-            Some(name) => name.to_string(),
-            None => continue,
-        };
-
-        // 只看 `<base>_uplink` 文件,base = `rdog-{ns}-{name}.pipe`
-        if !file_name.starts_with(prefix) || !file_name.ends_with(uplink_suffix) {
-            continue;
-        }
-
-        // 中间段 = "{ns}-{name}",找第一个 `-` 作为分隔
-        let middle = &file_name[prefix.len()..file_name.len() - uplink_suffix.len()];
-        let Some(dash_idx) = middle.find('-') else {
-            continue;
-        };
-        let ns = &middle[..dash_idx];
-        let name = &middle[dash_idx + 1..];
-        if ns.is_empty() || name.is_empty() {
-            continue;
-        }
-
-        // namespace 过滤
-        if let Some(filter) = namespace_filter {
-            if ns != filter {
-                continue;
-            }
-        }
-
-        candidates.push(name.to_string());
-    }
-
-    candidates.sort();
-    candidates.dedup();
-
+    // 没有 active managed registry 时,扫描本机 fast path 运行目录生成升级诊断。
+    // 候选只用于解释"为什么本机有 pipe 却选不出 daemon",不代表 owner 身份。
+    let candidates = crate::local_run::unmanaged_pipe_candidates(namespace_filter)?;
     match candidates.len() {
         0 => Err(no_local_daemon_error(namespace_filter)),
         _ => Err(io::Error::new(

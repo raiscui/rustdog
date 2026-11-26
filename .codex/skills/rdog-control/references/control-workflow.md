@@ -26,7 +26,8 @@ rdog control --url ws://127.0.0.1:5555/control
 
 当 agent 跟 daemon 在同一台机器上跑、且只需要连本机 daemon 时,
 可以省略 `TARGET`。客户端只接受active managed local-default registry作为owner;
-`$TMPDIR/rdog-{ns}-*.pipe_uplink`只提供升级诊断,不会被自动选择。
+本机运行目录(`~/.rdog/run`,Linux 有 `$XDG_RUNTIME_DIR` 时用 `$XDG_RUNTIME_DIR/rdog`)里的
+FIFO 只提供升级诊断,不会被自动选择。
 底层走 Zenoh `transport_unixpipe`(Zenoh 1.8.0 的 named pipe / FIFO transport),本机 link
 比 UDP loopback 快 2~5x,典型 `rdog control @ping` round-trip ≈ 20ms。
 
@@ -61,13 +62,33 @@ rdog control @ping @capabilities#1 @observe#3
 2. 有且只有一个active managed registry → 使用registry里的`daemon_name`。
 3. 多个active managed registry → 报`AlreadyExists`,要求加`--namespace`或显式target。
 4. 没有active managed registry → 扫描FIFO生成诊断:
-   - 路径模板 `{tmpdir}/rdog-{namespace}-{daemon_name}.pipe`
-   - 找所有匹配 `rdog-*.pipe_uplink`(Zenoh 实际只创建 `_uplink` 和 `_downlink` 两个 FIFO,<base> 本身不一定存在)
-   - 把中间段 `{ns}-{name}` 用第一个 `-` 切分
+   - 路径模板 `{run_dir}/{namespace}__{daemon_name}.pipe`(超长名字压缩成 `<slug>-<8位哈希>.pipe`)
+   - 判据是"派生 FIFO 还在"(Zenoh 实际只创建 `_uplink` 和 `_downlink`,<base> 本身不一定存在)
+   - 身份来自同目录 `<stem>.meta`;旧版本留在 `$TMPDIR/rdog-{ns}-{name}.pipe*` 的残留也计入
    - 如果传了 `--namespace`,只保留 `ns == filter` 的候选
 5. FIFO 候选排序 + dedup 后:
    - **0个** → `NotFound`,提示启用`local_default = true`并启动daemon,或显式指定target
    - **1个或多个** → `NotFound`,列出全部候选并说明FIFO自动选择已退役
+
+**落盘位置与残留回收**(`rdog local`):
+
+本机 fast path 的生命周期文件是用户可见的落盘状态,agent 排障时直接读它们:
+
+```bash
+# 谁在本机占着 pipe、pid 是多少、还活着吗
+rdog local list
+# run_dir=/home/u/.rdog/run exists=yes mode=0700 entries=1 live=1 stale=0
+# [1] pipe=/home/u/.rdog/run/lab__mac.lab.pipe namespace=lab daemon_name=mac.lab #     pid=4711 fifo=1 status=live pid_alive=yes age=42s
+
+# 只看会删什么(dry-run,默认)
+rdog local clean
+# 真的删死进程残留;活 daemon 的 pipe 一律不动
+rdog local clean --force
+```
+
+`status` 的三种取值:`live`(flock 仍被持有)、`stale-pid-dead`(lock 可拿且 pid 已不存在)、
+`stale-pid-reused`(lock 可拿但 pid 被别的进程复用)。判定真相源是 lock 上的 OS advisory lock,
+不是 PID;`pid_alive` 只是给人看的旁证。目录 0700、FIFO 0600。
 
 **错误样例**:
 

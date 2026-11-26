@@ -8,9 +8,6 @@ use std::{fs, path::Path, sync::mpsc, thread, time::Duration};
 #[cfg(unix)]
 use crate::config::UNIXPIPE_SOCKET_PATH_MAX_BYTES;
 
-#[cfg(unix)]
-use super::process_lease;
-
 // ============================================================================
 // unixpipe (named pipe / FIFO) 本机 fast path辅助函数
 //
@@ -36,53 +33,18 @@ pub(super) fn unixpipe_base_path_alive(base: &Path) -> bool {
 
 /// 根据 (namespace, daemon_name) 推导 base 路径,daemon 和 control 端用同一份规则。
 ///
-/// 路径模板: `{tmpdir}/rdog-{namespace}-{daemon_name}.pipe`
-/// - `tmpdir` 优先级: `$TMPDIR` > `/tmp`。
-/// - macOS 的 `$TMPDIR` 是 per-user(例如 `/var/folders/xx/yy/T/`),自然有权限隔离。
+/// 目录、文件名与超长名字压缩的规则收敛在 `crate::local_run`,这里只取 base 路径:
+/// - 目录: `$XDG_RUNTIME_DIR/rdog/` 否则 `~/.rdog/run/`(0700)
+/// - 文件名: `<namespace>__<daemon_name>.pipe`,超 95 字节预算时压缩成 `<slug>-<8位哈希>.pipe`
 /// - 扩展名 `.pipe` 表明这是 FIFO(named pipe),不是 Unix domain socket,避免后人误以为是 socket。
 #[cfg(unix)]
 pub(super) fn unixpipe_socket_path(namespace: &str, daemon_name: &str) -> io::Result<PathBuf> {
-    validate_unixpipe_component("namespace", namespace)?;
-    validate_unixpipe_component("daemon_name", daemon_name)?;
-
-    let tmpdir = std::env::var_os("TMPDIR")
-        .map(PathBuf::from)
-        .filter(|path| !path.as_os_str().is_empty())
-        .unwrap_or_else(|| PathBuf::from("/tmp"));
-
-    let candidate = tmpdir.join(format!("rdog-{namespace}-{daemon_name}.pipe"));
-    let path_str = candidate.as_os_str();
-
-    if path_str.len() > UNIXPIPE_SOCKET_PATH_MAX_BYTES {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!(
-                "推导出的 unixpipe base 路径太长: {} 字节,上限 {} 字节(macOS sun_path 限制 104 字节,Zenoh unixpipe 会派生 _uplink/_downlink FIFO,留 9 字节容差)",
-                path_str.len(),
-                UNIXPIPE_SOCKET_PATH_MAX_BYTES
-            ),
-        ));
-    }
-
-    Ok(candidate)
+    Ok(crate::local_run::unixpipe_run_paths(namespace, daemon_name)?.base)
 }
 
+/// 路径组件校验的唯一定义在 `crate::local_run`,local-default registry 沿用同一套口径。
 #[cfg(unix)]
-pub(super) fn validate_unixpipe_component(field: &str, value: &str) -> io::Result<()> {
-    if value.is_empty() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!("unixpipe 路径组件 `{field}` 不能为空"),
-        ));
-    }
-    if value.contains('/') || value.contains(char::is_whitespace) {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!("unixpipe 路径组件 `{field}` 不能包含 `/` 或空白字符(实际: {value:?})"),
-        ));
-    }
-    Ok(())
-}
+pub(super) use crate::local_run::validate_unixpipe_component;
 
 /// 把 base 路径格式化成 Zenoh 1.8.0 能识别的 locator 字符串。
 ///
@@ -92,122 +54,37 @@ pub(super) fn unixpipe_locator(path: &Path) -> String {
     format!("{UNIXPIPE_LOCATOR_PREFIX}/{}", path.display())
 }
 
-/// Zenoh 1.8.0 派生出的两条 FIFO 路径。
+/// Zenoh 1.8.0 派生出的两条 FIFO 路径(定义在 `crate::local_run`,与生命周期清理同源)。
 #[cfg(unix)]
 fn unixpipe_fifo_paths(base: &Path) -> [PathBuf; 2] {
-    let base_str = base.as_os_str().to_owned();
-    [
-        PathBuf::from(format!("{}_uplink", base_str.to_string_lossy())),
-        PathBuf::from(format!("{}_downlink", base_str.to_string_lossy())),
-    ]
+    crate::local_run::fifo_paths(base)
 }
 
 /// unixpipe base path 的跨进程 ownership guard。
 ///
-/// guard 与 base path 放在同一目录,确保不同 daemon identity 只要解析到同一 FIFO,
-/// 就会竞争同一把锁。进程退出后OS释放lock,新 daemon可接管并执行 stale cleanup。
+/// lock/meta/FIFO 的生命周期收敛在 `crate::local_run::UnixpipeRunGuard`:
+/// 启动时持 `<stem>.lock` 的 flock、写 `<stem>.meta`,正常退出删 FIFO 与 lock/meta。
 #[cfg(unix)]
-#[derive(Debug)]
-pub struct UnixpipePathGuard {
-    _lease: process_lease::ProcessLease,
-}
+pub type UnixpipePathGuard = crate::local_run::UnixpipeRunGuard;
 
 /// 获取 base path ownership,随后清理崩溃残留 FIFO。
 ///
-/// 返回的 guard 必须覆盖 Zenoh listener 生命周期。这样第二实例在 ownership 检查失败时,
-/// 不会执行任何 destructive cleanup。
+/// 返回的 guard 必须覆盖 Zenoh listener 生命周期。第二实例在 ownership 检查失败时
+/// 不会执行任何 destructive cleanup;拿不到 lock 说明 owner 已死(哪怕是被 kill -9),
+/// 才进入残留清理。
 #[cfg(unix)]
-pub fn prepare_unixpipe_listener(base: &Path) -> io::Result<UnixpipePathGuard> {
-    let guard = acquire_unixpipe_path_guard(base)?;
-    cleanup_stale_unixpipe_socket(base)?;
-    Ok(guard)
-}
-
-#[cfg(unix)]
-fn acquire_unixpipe_path_guard(base: &Path) -> io::Result<UnixpipePathGuard> {
-    let mut guard_name = base.as_os_str().to_os_string();
-    guard_name.push(".rdog-owner.pid");
-    let guard_path = PathBuf::from(guard_name);
-    let metadata_path = process_lease::metadata_path_for_lock(&guard_path);
-    let mut lease = process_lease::ProcessLease::acquire(
-        guard_path.clone(),
-        metadata_path,
-        "unixpipe-path",
-        &base.to_string_lossy(),
-    )
-    .map_err(|err| {
-        if err.kind() == io::ErrorKind::AlreadyExists {
-            io::Error::new(
-                io::ErrorKind::AlreadyExists,
-                format!(
-                    "unixpipe FIFO base 已被活跃 daemon 占用: base={}, owner_guard={}",
-                    base.display(),
-                    guard_path.display()
-                ),
-            )
-        } else {
-            err
-        }
-    })?;
-    lease.publish_metadata()?;
-    Ok(UnixpipePathGuard { _lease: lease })
-}
-
-/// 清理 stale FIFO 文件。
-///
-/// Zenoh 1.8.0 listener 在 `mkfifo` 失败 EEXIST 时会直接报错,不会自动清理。
-/// 因此 daemon 重启前必须 unlink 任何残留的 `<base>` / `<base>_uplink` / `<base>_downlink`。
-///
-/// 返回 Ok(()) 即视为"路径已干净(本来就干净 或 已被本调用清理)"。
-/// 文件存在但是是目录(不是 FIFO)才会返回错误,避免误删用户的目录。
-#[cfg(unix)]
-fn cleanup_stale_unixpipe_socket(base: &Path) -> io::Result<()> {
-    let candidates: [PathBuf; 3] = [
-        base.to_path_buf(),
-        unixpipe_fifo_paths(base)[0].clone(),
-        unixpipe_fifo_paths(base)[1].clone(),
-    ];
-
-    for candidate in &candidates {
-        match fs::metadata(candidate) {
-            Ok(metadata) if metadata.is_dir() => {
-                return Err(io::Error::new(
-                    io::ErrorKind::AlreadyExists,
-                    format!(
-                        "unixpipe 路径 {} 是目录而不是 FIFO 文件,拒绝清理",
-                        candidate.display()
-                    ),
-                ));
-            }
-            Ok(_) => {
-                if let Err(err) = fs::remove_file(candidate) {
-                    if err.kind() != io::ErrorKind::NotFound {
-                        return Err(io::Error::new(
-                            err.kind(),
-                            format!(
-                                "清理 stale unixpipe 文件 {} 失败: {err}",
-                                candidate.display()
-                            ),
-                        ));
-                    }
-                }
-            }
-            Err(err) if err.kind() == io::ErrorKind::NotFound => {
-                // 文件不存在,本来就是干净状态,跳过。
-            }
-            Err(err) => {
-                return Err(io::Error::new(
-                    err.kind(),
-                    format!(
-                        "检查 unixpipe 路径 {} 元数据失败: {err}",
-                        candidate.display()
-                    ),
-                ));
-            }
-        }
-    }
-
-    Ok(())
+pub fn prepare_unixpipe_listener(
+    base: &Path,
+    namespace: &str,
+    daemon_name: &str,
+    shared: bool,
+) -> io::Result<UnixpipePathGuard> {
+    let mut paths = crate::local_run::paths_for_base(base)?;
+    // 来源由 `compose_listen_endpoints` 判定后传进来: 只有显式配置的 base
+    // 才可能被旧二进制用同一路径撞上,因而需要旧格式兼容守卫。
+    // 不能按路径值判定 —— 用户可能把 `rdog local list` 打印的路径抄进 `socket_path`。
+    paths.shared = shared;
+    crate::local_run::UnixpipeRunGuard::acquire(paths, namespace, daemon_name)
 }
 
 /// 客户端探测:base 路径对应的 FIFO 是否有一个 reader 在监听。
@@ -266,6 +143,11 @@ fn try_unixpipe_probe(base: &Path, timeout: Duration) -> io::Result<()> {
 pub struct ComposedListenEndpoints {
     pub listen_endpoints: Vec<String>,
     pub unixpipe_base_path: Option<PathBuf>,
+    /// base 是否来自用户显式配置(`socket_path` 或显式 `unixpipe/` listen endpoint)。
+    ///
+    /// 来源只能在这里判定 —— 只看路径值无法区分"显式配的"与"按身份推导的",
+    /// 而用户完全可能把 `rdog local list` 打印的路径抄进 `socket_path`。
+    pub unixpipe_base_explicit: bool,
 }
 
 /// 把 unixpipe endpoint 自动注入到 listen_endpoints 列表里。
@@ -320,6 +202,7 @@ pub fn compose_listen_endpoints(
         return Ok(ComposedListenEndpoints {
             listen_endpoints: config.listen_endpoints.clone(),
             unixpipe_base_path: Some(explicit_base),
+            unixpipe_base_explicit: true,
         });
     }
 
@@ -327,12 +210,13 @@ pub fn compose_listen_endpoints(
         return Ok(ComposedListenEndpoints {
             listen_endpoints: config.listen_endpoints.clone(),
             unixpipe_base_path: None,
+            unixpipe_base_explicit: false,
         });
     }
 
-    let base_path = match config.unixpipe.socket_path.as_ref() {
-        Some(explicit) => explicit.clone(),
-        None => unixpipe_socket_path(namespace, daemon_name)?,
+    let (base_path, explicit) = match config.unixpipe.socket_path.as_ref() {
+        Some(explicit) => (explicit.clone(), true),
+        None => (unixpipe_socket_path(namespace, daemon_name)?, false),
     };
     validate_composed_unixpipe_base_path(&base_path, "unixpipe base path")?;
 
@@ -342,6 +226,7 @@ pub fn compose_listen_endpoints(
     Ok(ComposedListenEndpoints {
         listen_endpoints,
         unixpipe_base_path: Some(base_path),
+        unixpipe_base_explicit: explicit,
     })
 }
 
@@ -376,6 +261,7 @@ pub fn compose_listen_endpoints(
     Ok(ComposedListenEndpoints {
         listen_endpoints: config.listen_endpoints.clone(),
         unixpipe_base_path: None,
+        unixpipe_base_explicit: false,
     })
 }
 
