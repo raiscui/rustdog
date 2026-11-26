@@ -41,6 +41,13 @@ use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
+/// 暂存文件名的保留后缀。
+///
+/// 它同时是两个方向的护栏: 暂存名一律以它结尾, 而**目标**路径不允许以它结尾 —— 否则一个名叫
+/// `model.yino-partial` 的真实文件会被当成 "上传 model 的暂存区": 非续传重开会 remove_file 删掉
+/// 它, 续传重开会把长度当成已收字节并追加写, 最后按摘要不符再删一次. 那个文件与本次传输毫无关系.
+const PARTIAL_SUFFIX: &str = ".yino-partial";
+
 /// 单个 @file-chunk data 载荷的字节上限 (解码前 base64 文本的字符数上限)。
 /// 取帧上限 8MiB 的 80% — 决策 2 的落地: chunk 永远塞得进一行。
 const CHUNK_BASE64_LIMIT: usize = (MAX_CONTROL_MESSAGE_BYTES * 4) / 5;
@@ -126,6 +133,17 @@ fn validate_transfer_path(raw: &str, verb: &str) -> Result<PathBuf, std::io::Err
     if raw.trim().is_empty() {
         return Err(std::io::Error::other(format!("@{verb} 路径为空")));
     }
+    // 保留后缀归本 lane 所有: 允许把它当目标名, 就等于允许客户端把别人的暂存文件（或自己磁盘上
+    // 恰好叫这个名的真实文件）当成暂存区来删/追加写。
+    if path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.ends_with(PARTIAL_SUFFIX))
+    {
+        return Err(std::io::Error::other(format!(
+            "@{verb} 路径不得以保留后缀 {PARTIAL_SUFFIX} 结尾 (该后缀是暂存文件专用): {raw}"
+        )));
+    }
     Ok(path.to_path_buf())
 }
 
@@ -153,7 +171,7 @@ pub fn execute_put_file(payload: &str) -> std::io::Result<Value> {
         .file_name()
         .ok_or_else(|| std::io::Error::other("@put-file 路径缺少文件名"))?
         .to_os_string();
-    file_name.push(".yino-partial");
+    file_name.push(PARTIAL_SUFFIX);
     let temp_path = path.with_file_name(file_name);
 
     let mut sessions = transfers().lock().expect("transfer table poisoned");
@@ -1274,6 +1292,48 @@ mod tests {
 
         // 收尾: 把 fresh 也回收掉, 别把会话留在表里影响后续用例
         execute_file_cancel(&format!(r#"{{"transfer_id":"{fresh}"}}"#)).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn target_may_not_use_the_reserved_staging_suffix() {
+        // 暂存名是 "<目标名>.yino-partial". 若允许把这种名字当目标, 一个恰好在盘上的
+        // `model.yino-partial` 就会被当成"上传 model 的暂存区": 非续传重开删掉它, 续传重开把它的
+        // 长度当成已收字节再追加写. 那个文件与本次传输毫无关系.
+        let _guard = TRANSFER_TABLE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let dir = std::env::temp_dir().join(format!("rdog-ft-suffix-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let sid = unique_id("suffix");
+        let shadow = dir.join("model.yino-partial");
+        std::fs::write(&shadow, b"unrelated real file").unwrap();
+
+        let err = execute_put_file(&format!(
+            r#"{{"transfer_id":"{sid}","path":"{}","size":5}}"#,
+            escape_json(&shadow.display().to_string())
+        ))
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("保留后缀"),
+            "以保留后缀结尾的目标应被拒: {err}"
+        );
+        assert_eq!(
+            std::fs::read(&shadow).unwrap(),
+            b"unrelated real file",
+            "拒绝不得动那个真实文件"
+        );
+
+        // 上传 model 时, 指向的真实文件也不得被当成暂存区先行删除: 拒绝之后它仍在
+        let model = dir.join("model");
+        execute_put_file(&format!(
+            r#"{{"transfer_id":"{sid}","path":"{}","size":5}}"#,
+            escape_json(&model.display().to_string())
+        ))
+        .unwrap();
+        execute_file_cancel(&format!(r#"{{"transfer_id":"{sid}"}}"#)).unwrap();
+        // 已知边界: 那个残留文件名与暂存名同形, 取消时会按暂存文件处理 —— 这是保留后缀的代价,
+        // 已写进规格 (目标不得使用该后缀, 但盘上手工创建的同名文件无法与暂存文件区分).
         let _ = std::fs::remove_dir_all(&dir);
     }
 
