@@ -11,8 +11,9 @@
 准入通道的服务面是 ping、PTY 与 bulk：
 
 - `@ping` 与 `@pty` / `@pty-attach` / `@pty-close` / `@pty-detach`，以及桥接内的 `@pty-stdin` / `@pty-resize`。
-- bulk 七个动词（`@put-file` / `@get-file` / `@file-chunk` / `@file-end` / `@file-read` / `@file-cancel` / `@file-list`）：每条 chunk 是一条独立请求行，同一连接按顺序服务；执行走与其它传输同一份 [`execute_file_transfer_request`](../src/control_core.rs)。
-- bulk 在准入通道上先过租约（与 PTY 同一份 `require_active`），再过**路径钉住门禁**：open 与每个 chunk 边界读当前连接路径，只放行 `direct`；拒绝码取自 [`bulk_path::decide`](../src/bulk_path.rs)（`iroh_direct_path_unavailable` / `iroh_direct_path_lost` / `iroh_path_unknown`）。`@file-list` / `@file-cancel` 不搬字节，因此不过路径门禁。
+- bulk 七个动词（`@put-file` / `@get-file` / `@file-chunk` / `@file-end` / `@file-read` / `@file-cancel` / `@file-list`）：每条 chunk 是一条独立请求行，同一连接按顺序服务；执行走与其它传输同一份 [`execute_file_transfer_request`](../src/control_core.rs)。**bulk 只在这条准入 lane 上**：未给 `policy_file` 的默认入口仍以 `iroh_bulk_path_pin_unavailable` 拒绝（没有租约与主体判定的入口不放字节）。
+- bulk 在准入通道上先过租约（与 PTY 同一份 `require_active`），再过**逐 chunk 路径检查**：open 与每个 chunk 边界读当前连接路径，只放行 `direct`；拒绝码取自 [`bulk_path::decide`](../src/bulk_path.rs)（`iroh_direct_path_unavailable` / `iroh_direct_path_lost` / `iroh_path_unknown`）。`@file-list` / `@file-cancel` 不搬字节，因此不过路径门禁。
+- 这条 lane 的声明是 `path_aware=true` / `bulk_path_pin=false` / `bulk_path_checked_per_chunk=true`：**逐 chunk 检查不是传输层钉住**（边界之间的排队、重传与 QUIC 路径迁移未覆盖），所以它不主张"连接被钉在直连上"，也不构成 `iroh_bulk_path_pin_unavailable` 被解除的依据。
 - 其余 control 行一律拒绝，错误码与文案取自 [`LANE_REFUSED`](../src/control_iroh.rs)。
 
 跨网地址放开用 profile 的 `routable` 字段（缺省 `false`）。地址的策略是 [`network`](../src/control_iroh.rs) 与 [`relay_allowed`](../src/control_iroh.rs)：目录、endpoint、relay/relay-QAD 的**绑定**地址与注册校验都走它们。缺省时仍是 P1 的 IPv4 回环门禁与原错误文案；`routable` 下拒绝未指定、组播和广播地址。relay 的 URL 门禁按 profile 分档：**回环 profile 要求 https + 显式端口 + `qad_port != 0`**；**`routable` profile 只要求 https、主机名与 `qad_port != 0`**，端口可缺省 —— 标准公共 relay 只监听 443，而 `RelayUrl` 会把默认端口规范化掉，要求显式端口等于拒绝公共 relay 唯一合法的写法。显式端口这条规则服务的是自建 relay 的随机端口，不是安全属性；`http://` 在两个 profile 下一律拒绝。

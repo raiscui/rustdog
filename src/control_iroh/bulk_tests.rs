@@ -1,8 +1,9 @@
-//! bulk 数据面在 iroh lane 上的回环用例 (RAI-476 步骤 1 / 步骤 2)。
+//! bulk 数据面在 iroh **准入 lane** 上的回环用例 (RAI-476 步骤 1 / 步骤 2)。
 //!
 //! 步骤 1: 同一连接承载 `@put-file` → `@file-chunk` → `@file-end` 与 `@get-file` →
 //! `@file-read`, 以及 `@file-list` / `@file-cancel`。
-//! 步骤 2: open 与每个 chunk 边界读路径, 只放行 `direct`。
+//! 步骤 2: open 与每个 chunk 边界读路径, 只放行 `direct`。**这是逐 chunk 检查, 不是
+//! 传输层 pin** —— 边界之间的排队与重传它看不到 (`specs/rdog-bulk-direct-only-spec.md` §3.5)。
 //!
 //! 回环拓扑只会给出 `direct`, 所以 relay / 读不出 / 先 direct 后掉 relay 三种读数由
 //! `PathSampler::Script` 钉住喂进门禁 —— 判定表与拒绝码仍是生产那一份, 测试不另抄一份。
@@ -23,7 +24,7 @@ use iroh::{EndpointId, SecretKey};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-use super::{admission, BulkPathGate, PathSampler};
+use super::{admission, BulkPathGate, BulkStep, PathSampler};
 use crate::{
     bulk_path::{
         BulkDecision, PathClass, IROH_DIRECT_PATH_LOST, IROH_DIRECT_PATH_UNAVAILABLE,
@@ -94,32 +95,27 @@ impl Drop for Lane {
         let _ = self.stream.shutdown(std::net::Shutdown::Both);
         if let Some(server) = self.server.take() {
             let outcome = server.join().expect("lane server thread panicked");
-            assert!(outcome.is_ok(), "lane server failed: {outcome:?}");
+            // 客户端先断之后, 服务端收尾的 `shutdown` 在 macOS/Windows 上会回 ENOTCONN
+            // ("Socket is not connected")。这是 TCP 替身的收尾产物, 不是 lane 的结论 ——
+            // 真正的 iroh 流不会走到这条路径。除它以外的错误照旧算失败。
+            let teardown_only = matches!(&outcome, Err(err) if err.kind() == std::io::ErrorKind::NotConnected);
+            assert!(
+                outcome.is_ok() || teardown_only,
+                "lane server failed: {outcome:?}"
+            );
         }
     }
 }
 
 fn pair() -> (TcpStream, TcpStream) {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind lane fixture");
-    let client = TcpStream::connect(listener.local_addr().expect("lane addr"))
-        .expect("connect lane fixture");
+    let client =
+        TcpStream::connect(listener.local_addr().expect("lane addr")).expect("connect lane fixture");
     let (server, _) = listener.accept().expect("accept lane fixture");
     (server, client)
 }
 
-/// 默认入口 (daemon profile 未给 `policy_file`): 只有 ping 与 bulk。
-fn start_readonly(readings: Vec<PathClass>) -> Lane {
-    let (server, client) = pair();
-    let handle = thread::spawn(move || {
-        let transport = ControlTransport::from_tcp_stream(server)?;
-        let sampler = PathSampler::Script(Mutex::new(readings));
-        let mut gate = BulkPathGate::new();
-        super::serve_readonly(transport, "test", &sampler, &mut gate)
-    });
-    Lane::new(client, handle)
-}
-
-/// 已准入入口 (给了 `policy_file` 的生产形态): 先握手拿租约, 再走 lane。
+/// 生产形态: daemon profile 给了 `policy_file`, 走 `serve_admitted`。bulk 只在这条 lane 上。
 fn start_admitted(readings: Vec<PathClass>) -> Lane {
     let root = TempRoot::new("admitted");
     let target = SecretKey::generate();
@@ -134,9 +130,9 @@ fn start_admitted(readings: Vec<PathClass>) -> Lane {
     )
     .expect("write admission policy");
 
-    let mut state = admission::Admission::new(policy, target.public());
+    let state = admission::Admission::new(policy, target.public());
     let session = uuid::Uuid::new_v4().to_string();
-    // 客户端自签、daemon 校验: `validate` 要求 `peer == claims.issuer`。
+    // 客户端自签、daemon 校验: `Admission::validate` 要求 `peer == claims.issuer`。
     let grant = admission::SignedGrant::issue(
         &client,
         target.public(),
@@ -154,7 +150,7 @@ fn start_admitted(readings: Vec<PathClass>) -> Lane {
     let handle = thread::spawn(move || {
         let transport = ControlTransport::from_tcp_stream(server)?;
         let sampler = PathSampler::Script(Mutex::new(readings));
-        let mut gate = BulkPathGate::new();
+        let mut gate = BulkPathGate::new(super::ADMITTED_LANE_PATH_CAPABILITY);
         super::serve_admitted(transport, peer, "test", state, &sampler, &mut gate)
     });
     let mut lane = Lane::new(client_stream, handle);
@@ -212,7 +208,7 @@ fn upload_commits_over_one_lane_connection() {
     let payload: Vec<u8> = (0..=200u8).collect();
     let sha = sha256_hex(&payload);
     let id = transfer_id("up");
-    let mut lane = start_readonly(vec![PathClass::Direct]);
+    let mut lane = start_admitted(vec![PathClass::Direct]);
 
     put_file(&mut lane, &id, &target, payload.len(), &sha);
     put_chunk(&mut lane, &id, 0, &payload[..64]);
@@ -236,7 +232,7 @@ fn download_reads_the_same_bytes_back() {
     fs::write(&source, &payload).expect("write source file");
     let sha = sha256_hex(&payload);
     let id = transfer_id("down");
-    let mut lane = start_readonly(vec![PathClass::Direct]);
+    let mut lane = start_admitted(vec![PathClass::Direct]);
 
     lane.send(&format!(
         r#"@get-file:{{"transfer_id":"{id}","path":"{}"}}"#,
@@ -263,7 +259,7 @@ fn file_list_shows_the_open_transfer_and_cancel_is_idempotent() {
     let dir = TempRoot::new("list");
     let target = dir.0.join("pending.bin");
     let id = transfer_id("list");
-    let mut lane = start_readonly(vec![PathClass::Direct]);
+    let mut lane = start_admitted(vec![PathClass::Direct]);
 
     put_file(&mut lane, &id, &target, 16, &sha256_hex(&[0u8; 16]));
     put_chunk(&mut lane, &id, 0, &[7u8; 16]);
@@ -299,63 +295,103 @@ fn file_list_shows_the_open_transfer_and_cancel_is_idempotent() {
 }
 
 #[test]
-fn admitted_lane_carries_bulk_under_a_lease() {
-    // 生产形态 (给了 policy_file) 走 serve_admitted: 同一套 bulk 执行入口, 外加租约校验。
-    let dir = TempRoot::new("admitted-bulk");
-    let target = dir.0.join("leased.bin");
-    let payload = b"leased bulk lane";
-    let sha = sha256_hex(payload);
-    let id = transfer_id("leased");
-    let mut lane = start_admitted(vec![PathClass::Direct]);
-
-    put_file(&mut lane, &id, &target, payload.len(), &sha);
-    put_chunk(&mut lane, &id, 0, payload);
-    lane.send(&format!(
-        r#"@file-end:{{"transfer_id":"{id}","sha256":"{sha}"}}"#
-    ));
-    assert_eq!(lane.reply()["state"], "committed");
-    assert_eq!(fs::read(&target).expect("read committed file"), payload);
-}
-
-#[test]
-fn the_gate_reads_the_pinned_capability_table() {
+fn the_gate_reads_the_declared_capability_table() {
     use PathClass::{Direct, Relay, Unknown};
 
+    let gate = || BulkPathGate::new(super::ADMITTED_LANE_PATH_CAPABILITY);
     // direct 放行
     assert_eq!(
-        BulkPathGate::new().admit(Some("attempt"), Direct),
+        gate().admit(BulkStep::Open, Some("a"), Direct),
         BulkDecision::Allowed
     );
     // 从来没有直连: relay 拒, 码说"直连不可得"
     assert_eq!(
-        BulkPathGate::new().admit(Some("attempt"), Relay),
+        gate().admit(BulkStep::Open, Some("b"), Relay),
         BulkDecision::Refused(IROH_DIRECT_PATH_UNAVAILABLE)
     );
     // 读不出路径: fail-closed
     assert_eq!(
-        BulkPathGate::new().admit(Some("attempt"), Unknown),
+        gate().admit(BulkStep::Open, Some("c"), Unknown),
         BulkDecision::Refused(IROH_PATH_UNKNOWN)
     );
     // 先 direct 后掉 relay: "曾直连" 置位, 码说"直连丢了"
-    let mut gate = BulkPathGate::new();
-    assert_eq!(gate.admit(Some("attempt"), Direct), BulkDecision::Allowed);
+    let mut stepwise = gate();
     assert_eq!(
-        gate.admit(Some("attempt"), Relay),
+        stepwise.admit(BulkStep::Open, Some("d"), Direct),
+        BulkDecision::Allowed
+    );
+    assert_eq!(
+        stepwise.admit(BulkStep::Continue, Some("d"), Relay),
         BulkDecision::Refused(IROH_DIRECT_PATH_LOST)
     );
-    // 换一次尝试就是换一份"曾直连"记录: 上一次的直连不是这一次的证据
+}
+
+#[test]
+fn this_lane_checks_every_chunk_but_does_not_pin_the_transport() {
+    // 裁定 A 的核心: 逐 chunk 检查 ≠ 传输层 pin。把两者写成同一个值, 就等于用"每个边界
+    // 都直连"顶替"边界之间不会改路" —— §3.5 明说应用层采样不是充分条件。
+    let declared = super::ADMITTED_LANE_PATH_CAPABILITY;
+    assert!(declared.path_aware);
+    assert!(declared.bulk_path_checked_per_chunk);
+    assert!(!declared.bulk_path_pin, "采样不是 pin, 本版没做传输层 pin");
+    // 既不钉也不查的传输仍按能力拒绝, 而不是按路径类别放行
+    for class in [PathClass::Direct, PathClass::Relay, PathClass::Unknown] {
+        assert_eq!(
+            crate::bulk_path::decide(
+                crate::bulk_path::PathCapability::PATH_AWARE_UNPINNED,
+                class,
+                false
+            ),
+            BulkDecision::Refused(crate::bulk_path::IROH_BULK_PATH_PIN_UNAVAILABLE)
+        );
+    }
+}
+
+#[test]
+fn an_idempotent_open_starts_a_fresh_attempt() {
+    // C: open 无条件清零。同 id 的幂等重试是**新的一次尝试** —— 继承上一次的"曾直连"
+    // 会把 `unavailable` 误判成 `lost`, 而两个码对调用方的意思完全不同。
+    let mut gate = BulkPathGate::new(super::ADMITTED_LANE_PATH_CAPABILITY);
+    assert_eq!(gate.admit(BulkStep::Open, Some("t"), PathClass::Direct), BulkDecision::Allowed);
     assert_eq!(
-        gate.admit(Some("next"), Relay),
+        gate.admit(BulkStep::Continue, Some("t"), PathClass::Direct),
+        BulkDecision::Allowed
+    );
+    // 同 id 重开、这次一开始就是 relay: 必须是"直连不可得", 不是"直连丢了"
+    assert_eq!(
+        gate.admit(BulkStep::Open, Some("t"), PathClass::Relay),
         BulkDecision::Refused(IROH_DIRECT_PATH_UNAVAILABLE)
     );
 }
 
 #[test]
-fn a_relay_lane_refuses_bulk_before_any_byte() {
+fn interleaved_transfers_keep_their_own_direct_history() {
+    // D: 同一条连接上交错两条传输。单槽会把 A 的"曾直连"被 B 的 open 清掉, 于是 A 中途
+    // 掉 relay 会被误判成 `unavailable`; 按键记录才不会串。
+    let mut gate = BulkPathGate::new(super::ADMITTED_LANE_PATH_CAPABILITY);
+    assert_eq!(gate.admit(BulkStep::Open, Some("a"), PathClass::Direct), BulkDecision::Allowed);
+    assert_eq!(gate.admit(BulkStep::Open, Some("b"), PathClass::Direct), BulkDecision::Allowed);
+    assert_eq!(
+        gate.admit(BulkStep::Continue, Some("a"), PathClass::Relay),
+        BulkDecision::Refused(IROH_DIRECT_PATH_LOST),
+        "A 的历史属于 A"
+    );
+    assert_eq!(
+        gate.admit(BulkStep::Continue, Some("b"), PathClass::Direct),
+        BulkDecision::Allowed,
+        "A 的失败不得牵连 B"
+    );
+}
+
+#[test]
+fn a_relay_lane_refuses_bulk_before_any_disk_byte() {
+    // B: 名字刻意不写 "before any byte" —— 上传 chunk 的载荷内联在请求行里, daemon 读到
+    // `transfer_id` 之前那一 chunk 的字节已经过线。这里能证明的只是**盘上没有字节、也没有
+    // 会话**: 目标文件与半成品都不存在。
     let dir = TempRoot::new("gate-relay");
     let target = dir.0.join("never.bin");
     let id = transfer_id("relay");
-    let mut lane = start_readonly(vec![PathClass::Relay]);
+    let mut lane = start_admitted(vec![PathClass::Relay]);
 
     lane.send(&format!(
         r#"@put-file:{{"transfer_id":"{id}","path":"{}","size":4,"resume":false}}"#,
@@ -364,7 +400,17 @@ fn a_relay_lane_refuses_bulk_before_any_byte() {
     let refused = lane.reply();
     assert_eq!(refused["error"], IROH_DIRECT_PATH_UNAVAILABLE);
     assert_eq!(refused["code"], super::LANE_REFUSED_CODE);
-    assert!(!target.exists(), "被拒的 open 不得留下任何落盘痕迹");
+    assert!(!target.exists(), "被拒的 open 不得留下目标文件");
+
+    // 会话也没建: `@file-list` 里看不到这条 id。
+    lane.send("@file-list");
+    let list = lane.reply();
+    let listed = list["transfers"]
+        .as_array()
+        .expect("transfers array")
+        .iter()
+        .any(|entry| entry["transfer_id"] == id.as_str());
+    assert!(!listed, "被门禁拒掉的尝试不得建会话");
 }
 
 #[test]
@@ -372,7 +418,7 @@ fn an_unreadable_path_is_refused_not_treated_as_direct() {
     let dir = TempRoot::new("gate-unknown");
     let target = dir.0.join("never.bin");
     let id = transfer_id("unknown");
-    let mut lane = start_readonly(vec![PathClass::Unknown]);
+    let mut lane = start_admitted(vec![PathClass::Unknown]);
 
     lane.send(&format!(
         r#"@put-file:{{"transfer_id":"{id}","path":"{}","size":4,"resume":false}}"#,
@@ -389,7 +435,7 @@ fn losing_the_direct_path_mid_transfer_refuses_the_next_chunk() {
     let payload = b"half the bytes";
     let id = transfer_id("lost");
     // open 与第一个 chunk 边界都是 direct, 第二个 chunk 边界掉成 relay。
-    let mut lane = start_readonly(vec![PathClass::Direct, PathClass::Direct, PathClass::Relay]);
+    let mut lane = start_admitted(vec![PathClass::Direct, PathClass::Direct, PathClass::Relay]);
 
     put_file(&mut lane, &id, &target, payload.len(), &sha256_hex(payload));
     put_chunk(&mut lane, &id, 0, &payload[..4]);
@@ -412,7 +458,7 @@ fn cancel_and_list_stay_out_of_the_path_gate() {
     let dir = TempRoot::new("gate-list");
     let target = dir.0.join("pending.bin");
     let id = transfer_id("gate-list");
-    let mut lane = start_readonly(vec![PathClass::Direct, PathClass::Direct, PathClass::Relay]);
+    let mut lane = start_admitted(vec![PathClass::Direct, PathClass::Direct, PathClass::Relay]);
 
     put_file(&mut lane, &id, &target, 8, &sha256_hex(&[0u8; 8]));
     put_chunk(&mut lane, &id, 0, &[1u8; 8]);

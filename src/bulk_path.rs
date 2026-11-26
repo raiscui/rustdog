@@ -6,11 +6,15 @@
 //! | 字段 | 是谁的事实 | 读它的层 | 读到时的动作 |
 //! | --- | --- | --- | --- |
 //! | `path_aware` | **传输适配器**的拓扑属性: 这条链路上到底有没有 relay 跳 | 门禁 (`decide`) 与快照 | `false` ⇒ 路径判定不适用, bulk **允许**, 快照记 `not_applicable` |
-//! | `bulk_path_pin` | **传输适配器**能否把 bulk 连接钉在直连路径上 (禁止迁移、排队与重传不得改走 relay) | 门禁 | `true` 配 `path_aware=true` 时才 `false` 有意义: 有 relay 跳却钉不住 ⇒ **拒绝** |
+//! | `bulk_path_pin` | **传输层**能否把 bulk 连接钉在直连路径上 (禁止迁移、排队与重传不得改走 relay) | 门禁 | 与下面一格合起来才决定"该传输能不能承载 bulk" |
+//! | `bulk_path_checked_per_chunk` | **应用层**会不会在每次 chunk 边界采样路径, 读到非 `direct` 即拒 | 门禁 | **不等于** pin: 采样看不到排队与重传, 也禁不了迁移 (§3.5) |
 //! | `path_class` | **本次尝试此刻**观测到的路径 (`direct`/`relay`/`unknown`) | 门禁 (open 与每个 chunk 边界) | `direct` 放行; `relay` 拒 (`iroh_direct_path_unavailable`); 读不出 ⇒ `unknown` ⇒ **拒** (`iroh_path_unknown`, fail-closed) |
 //!
-//! 三格互相不能顶替: `path_aware=false` 说的是"拓扑里没有 relay 跳", `path_aware=true && bulk_path_pin=false`
-//! 说的是"有 relay 跳但钉不住"。把后者当前者, 就得到一条"看起来有门禁、其实没有"的路径。
+//! 四格互相不能顶替: `path_aware=false` 说的是"拓扑里没有 relay 跳"; `bulk_path_pin=false &&
+//! bulk_path_checked_per_chunk=false` 说的是"有 relay 跳, 既钉不住也不查"; 而只做了逐 chunk 检查
+//! (`checked_per_chunk=true` / `pin=false`) 说的是"每次边界都查, 但边界之间仍可能改走 relay"。
+//! 把最后一种当第一种, 就得到一条"看起来有门禁、其实只在边界上有"的路径; 当第二种, 则白扔了它
+//! 确实做到的那一半。
 //!
 //! `not_applicable` 是**声明出来的能力缺失**, 不是"没读到"; 后者一律归 `unknown` 并 fail-closed。
 
@@ -20,7 +24,12 @@ use serde_json::{json, Value};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct PathCapability {
     pub(crate) path_aware: bool,
+    /// 传输层钉住: 禁止迁移, 排队与重传的字节不得改走 relay (§3.5)。
     pub(crate) bulk_path_pin: bool,
+    /// 应用层逐 chunk 检查: 每次 chunk 边界采样, 读到非 `direct` 即拒。
+    ///
+    /// **这不是 pin 的替代品**, 是独立的一格: 边界之间的排队与重传它看不到 (§3.5)。
+    pub(crate) bulk_path_checked_per_chunk: bool,
 }
 
 impl PathCapability {
@@ -28,23 +37,39 @@ impl PathCapability {
     pub(crate) const NOT_PATH_AWARE: Self = Self {
         path_aware: false,
         bulk_path_pin: false,
+        bulk_path_checked_per_chunk: false,
     };
 
-    /// 有 relay 跳但**钉不住** bulk 连接: 该传输不得承载 bulk (该拒绝, 而不是"大致直连")。
+    /// 有 relay 跳, 但**既钉不住也不逐 chunk 检查**: 该传输不得承载 bulk (该拒绝, 而不是
+    /// "大致直连")。
     ///
-    /// 今天**没有任何适配器处于这个状态** —— iroh lane 补上路径采样之后已翻到 `PATH_AWARE_PINNED`
-    /// (RAI-476 步骤 2), 其余传输没有 relay 跳。它只作为判定表的一格留在测试里。
-    #[cfg(test)]
+    /// 今天**没有任何适配器处于这个状态**: 未开准入策略的 iroh lane 用它来表达"这条入口
+    /// 不承载 bulk 数据面"(RAI-476 裁定 F), 其余传输没有 relay 跳。
     pub(crate) const PATH_AWARE_UNPINNED: Self = Self {
         path_aware: true,
         bulk_path_pin: false,
+        bulk_path_checked_per_chunk: false,
     };
 
-    /// 有 relay 跳且能钉住 —— iroh lane 的形态 (RAI-476 步骤 2): open 与每个 chunk 边界
-    /// 读当前连接路径, 只放行 `direct`。
+    /// 有 relay 跳, 传输层**钉不住**, 但应用层在 open 与每个 chunk 边界都检查一次路径
+    /// (读到非 `direct` 即拒)。
+    ///
+    /// 这是 iroh 准入 lane 今天的形态 (RAI-476 裁定 A)。它守住的是"每个边界上路径是直连",
+    /// **不包括**"边界之间不会改走 relay": 传输层 pin 是另一件事, 本版没做
+    /// (`iroh_bulk_path_pin_unavailable` 留给真做 pin 的那天)。
+    pub(crate) const PATH_AWARE_CHECKED_PER_CHUNK: Self = Self {
+        path_aware: true,
+        bulk_path_pin: false,
+        bulk_path_checked_per_chunk: true,
+    };
+
+    /// 有 relay 跳且**传输层**能钉住 —— 今天没有任何适配器处于这个状态, 所以它只在测试里构造。
+    /// 适配器真补上 pin 的那天它会成为生产路径上的第四种能力。
+    #[cfg(test)]
     pub(crate) const PATH_AWARE_PINNED: Self = Self {
         path_aware: true,
         bulk_path_pin: true,
+        bulk_path_checked_per_chunk: true,
     };
 }
 
@@ -87,8 +112,9 @@ pub(crate) const IROH_BULK_PATH_PIN_UNPINNED_ALIAS: &str = IROH_BULK_PATH_PIN_UN
 
 /// 判定表 (§3.1 的穷举实现)。
 ///
-/// `bulk_path_pin` 那一行必须**先于**路径类别判: 钉不住的传输上, 采样到 `direct` 也不代表后续
-/// 排队/重传的字节不会改走 relay —— 那是应用层采样证明不了的部分 (§3.5)。
+/// 第一道判据必须**先于**路径类别判: 既钉不住、又不逐 chunk 检查的传输上, 采样到 `direct`
+/// 也不代表后续排队/重传的字节不会改走 relay —— 那是应用层采样证明不了的部分 (§3.5), 而且
+/// 它连边界都没查。
 pub(crate) fn decide(
     capability: PathCapability,
     path_class: PathClass,
@@ -97,7 +123,7 @@ pub(crate) fn decide(
     if !capability.path_aware {
         return BulkDecision::Allowed;
     }
-    if !capability.bulk_path_pin {
+    if !capability.bulk_path_pin && !capability.bulk_path_checked_per_chunk {
         return BulkDecision::Refused(IROH_BULK_PATH_PIN_UNAVAILABLE);
     }
     match path_class {
@@ -231,6 +257,7 @@ impl BulkPathSnapshot {
             "direction": self.direction,
             "path_aware": self.capability.path_aware,
             "bulk_path_pin": self.capability.bulk_path_pin,
+            "bulk_path_checked_per_chunk": self.capability.bulk_path_checked_per_chunk,
             "path_class": self.path_class.as_str(),
             "direct_addr": self.direct_addr,
             "bulk_bytes": self.bulk_bytes,
@@ -289,41 +316,55 @@ mod tests {
                 BulkDecision::Allowed
             );
         }
-        // 有 relay 跳但钉不住: 采样到 direct 也必须拒
+        // 有 relay 跳但既不钉也不查: 采样到 direct 也必须拒
         for class in [PathClass::Direct, PathClass::Relay, PathClass::Unknown] {
             assert_eq!(
                 decide(PathCapability::PATH_AWARE_UNPINNED, class, false),
                 BulkDecision::Refused(IROH_BULK_PATH_PIN_UNAVAILABLE)
             );
         }
-        // 钉得住: 只有 direct 放行
-        assert_eq!(
-            decide(PathCapability::PATH_AWARE_PINNED, PathClass::Direct, false),
-            BulkDecision::Allowed
-        );
-        assert_eq!(
-            decide(PathCapability::PATH_AWARE_PINNED, PathClass::Relay, false),
-            BulkDecision::Refused(IROH_DIRECT_PATH_UNAVAILABLE)
-        );
-        assert_eq!(
-            decide(PathCapability::PATH_AWARE_PINNED, PathClass::Relay, true),
-            BulkDecision::Refused(IROH_DIRECT_PATH_LOST)
-        );
-        // 读不出路径类别: fail-closed, 永远不许强转 direct
-        assert_eq!(
-            decide(PathCapability::PATH_AWARE_PINNED, PathClass::Unknown, false),
-            BulkDecision::Refused(IROH_PATH_UNKNOWN)
+        // 逐 chunk 检查 (钉不住) 与传输层钉住, 路径判定必须完全一致: 差别在那两条 pin 义务上
+        // (§3.5), 不在判定表里 —— 两个能力都按 direct/relay/unknown 分支。
+        for capability in [
+            PathCapability::PATH_AWARE_CHECKED_PER_CHUNK,
+            PathCapability::PATH_AWARE_PINNED,
+        ] {
+            assert_eq!(
+                decide(capability, PathClass::Direct, false),
+                BulkDecision::Allowed
+            );
+            assert_eq!(
+                decide(capability, PathClass::Relay, false),
+                BulkDecision::Refused(IROH_DIRECT_PATH_UNAVAILABLE)
+            );
+            assert_eq!(
+                decide(capability, PathClass::Relay, true),
+                BulkDecision::Refused(IROH_DIRECT_PATH_LOST)
+            );
+            // 读不出路径类别: fail-closed, 永远不许强转 direct
+            assert_eq!(
+                decide(capability, PathClass::Unknown, false),
+                BulkDecision::Refused(IROH_PATH_UNKNOWN)
+            );
+        }
+        // 逐 chunk 检查 ≠ 钉住: 能力声明本身必须把这两件事分开, 否则 §3.5 的两条义务
+        // 会被一句"我们检查过了"顶替。
+        assert!(
+            PathCapability::PATH_AWARE_CHECKED_PER_CHUNK.path_aware
+                && PathCapability::PATH_AWARE_CHECKED_PER_CHUNK.bulk_path_checked_per_chunk
+                && !PathCapability::PATH_AWARE_CHECKED_PER_CHUNK.bulk_path_pin
         );
         // `not_applicable` 是 `path_aware=false` 的**后果**, 在路径感知传输上不是合法输入:
         // 它只可能是"读不出被错标", 同样必须拒。这一格以前被漏在"穷举"之外。
-        assert_eq!(
-            decide(
-                PathCapability::PATH_AWARE_PINNED,
-                PathClass::NotApplicable,
-                false
-            ),
-            BulkDecision::Refused(IROH_PATH_UNKNOWN)
-        );
+        for capability in [
+            PathCapability::PATH_AWARE_CHECKED_PER_CHUNK,
+            PathCapability::PATH_AWARE_PINNED,
+        ] {
+            assert_eq!(
+                decide(capability, PathClass::NotApplicable, false),
+                BulkDecision::Refused(IROH_PATH_UNKNOWN)
+            );
+        }
         assert_eq!(
             decide(
                 PathCapability::PATH_AWARE_UNPINNED,
@@ -344,7 +385,7 @@ mod tests {
 
     #[test]
     fn relay_bytes_zero_requires_direct_and_both_counters_flat() {
-        let mut direct = snapshot(PathCapability::PATH_AWARE_PINNED, PathClass::Direct);
+        let mut direct = snapshot(PathCapability::PATH_AWARE_CHECKED_PER_CHUNK, PathClass::Direct);
         assert_eq!(direct.verdict(), "relay_bytes_zero");
 
         direct.relay_tx_after = Some(1);
@@ -356,11 +397,11 @@ mod tests {
         direct.relay_rx_after = Some(0);
 
         // 路径不是 direct 时, 计数器再干净也不构成结论
-        let relay = snapshot(PathCapability::PATH_AWARE_PINNED, PathClass::Relay);
+        let relay = snapshot(PathCapability::PATH_AWARE_CHECKED_PER_CHUNK, PathClass::Relay);
         assert_eq!(relay.verdict(), "relay_bytes_nonzero");
 
         let aborted = {
-            let mut value = snapshot(PathCapability::PATH_AWARE_PINNED, PathClass::Direct);
+            let mut value = snapshot(PathCapability::PATH_AWARE_CHECKED_PER_CHUNK, PathClass::Direct);
             value.aborted = true;
             value
         };
@@ -371,7 +412,7 @@ mod tests {
     fn unsampled_counters_never_read_as_zero() {
         // 计数器没接上时 relay_tx/rx 也是 0, 与"一字节没走 relay"数值上完全一样。
         // 这一格与"永远为假"的判定式一起, 保证那种零只能读成"不知道"。
-        let mut value = snapshot(PathCapability::PATH_AWARE_PINNED, PathClass::Direct);
+        let mut value = snapshot(PathCapability::PATH_AWARE_CHECKED_PER_CHUNK, PathClass::Direct);
         // 只有一端有计数 = 未采样: 类型上就是 None, 不是 0。
         value.relay_tx_after = None;
         assert_eq!(value.verdict(), "relay_sample_unavailable");
@@ -388,7 +429,7 @@ mod tests {
     fn a_transfer_that_moved_nothing_is_not_evidence() {
         // 一次"续传时半成品已经完整"的尝试一个字节都不用发 —— 它的 relay 计数当然是零, 而这
         // 与"bulk 没走 relay"在数值上完全一样。这条不依赖任何失败路径, 是最纯的空真。
-        let mut value = snapshot(PathCapability::PATH_AWARE_PINNED, PathClass::Direct);
+        let mut value = snapshot(PathCapability::PATH_AWARE_CHECKED_PER_CHUNK, PathClass::Direct);
         value.chunks = 0;
         value.bulk_bytes = 0;
         value.wire_bytes = 0;
@@ -405,25 +446,27 @@ mod tests {
     #[test]
     fn positive_control_uses_a_strict_inequality() {
         // 全零的探针不许通过 —— 那正是"计数器根本没接上"的读数。
-        let broken = snapshot(PathCapability::PATH_AWARE_PINNED, PathClass::Relay);
+        let broken = snapshot(PathCapability::PATH_AWARE_CHECKED_PER_CHUNK, PathClass::Relay);
         assert!(!BulkPathSnapshot::positive_control_holds(&broken));
 
-        let mut healthy = snapshot(PathCapability::PATH_AWARE_PINNED, PathClass::Relay);
+        let mut healthy = snapshot(PathCapability::PATH_AWARE_CHECKED_PER_CHUNK, PathClass::Relay);
         healthy.relay_tx_after = Some(42);
         assert!(BulkPathSnapshot::positive_control_holds(&healthy));
 
-        let mut healthy_rx = snapshot(PathCapability::PATH_AWARE_PINNED, PathClass::Relay);
+        let mut healthy_rx = snapshot(PathCapability::PATH_AWARE_CHECKED_PER_CHUNK, PathClass::Relay);
         healthy_rx.relay_rx_after = Some(7);
         assert!(BulkPathSnapshot::positive_control_holds(&healthy_rx));
     }
 
     #[test]
     fn snapshot_json_carries_the_schema_and_both_byte_units() {
-        let mut value = snapshot(PathCapability::PATH_AWARE_PINNED, PathClass::Direct);
+        let mut value = snapshot(PathCapability::PATH_AWARE_CHECKED_PER_CHUNK, PathClass::Direct);
         value.direct_addr = Some("10.0.0.2:4242".into());
         let json = value.to_json();
         assert_eq!(json["schema"], "rdog.bulk-path.v1");
         assert_eq!(json["path_class"], "direct");
+        assert_eq!(json["bulk_path_pin"], false);
+        assert_eq!(json["bulk_path_checked_per_chunk"], true);
         assert_eq!(json["bulk_bytes"], 10);
         assert_eq!(json["wire_bytes"], 16);
         assert_eq!(json["verdict"], "relay_bytes_zero");
