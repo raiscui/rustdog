@@ -58,7 +58,11 @@ pub fn read_line_limited<R: BufRead>(
     // 清掉它就是把对端「先发正文、后发换行」的分片消息丢掉 —— 25ms 读超时的
     // PTY 桥接最容易踩到 (RAI-415: @pty-stdin 帧被吞, 远端收不到 ^C)。
     let mut total = buf.len();
-    let mut over_limit = false;
+    // 跨调用保留的半行也可能已经超限: 每次进入都先判一次, 超了就立刻转入丢弃模式,
+    // 否则「分片到达 + 读超时」的对端能让这条半行绕过上限一直涨。
+    // 丢弃状态靠「buf 里留 limit+1 字节」跨调用传递 —— 不能清空, 清了下一轮就会
+    // 把状态忘掉, 把剩余数据当成一条新行收下。
+    let mut over_limit = buf.len() > limit;
 
     loop {
         // read_until 读到行尾或 EOF 为止 —— 这是"消费到换行"的唯一动作。
@@ -110,10 +114,10 @@ pub fn read_line_limited<R: BufRead>(
             break;
         }
 
-        // 行尚未读完：累积已超限就切换到丢弃模式
+        // 行尚未读完：累积已超限就切换到丢弃模式 (buf 截到 limit+1 当状态标记)
         if buf.len() > limit {
             over_limit = true;
-            buf.clear();
+            buf.truncate(limit + 1);
         }
     }
 
@@ -224,6 +228,45 @@ mod tests {
             "续读必须拼上后半截, 而不是只剩后半截"
         );
         assert!(buf.is_empty(), "整行交出后 buf 应被清空");
+    }
+
+    #[test]
+    fn retained_partial_line_cannot_grow_past_the_limit_across_timeouts() {
+        // 每块都不带换行, 且中间都被读超时打断: 半行跨调用保留后必须仍然受 limit 约束。
+        let limit = 1_024;
+        let mut steps = std::collections::VecDeque::new();
+        for _ in 0..8 {
+            steps.push_back(Ok(vec![b'a'; 512]));
+            steps.push_back(Err(io::ErrorKind::WouldBlock));
+        }
+        steps.push_back(Ok(b"\n".to_vec()));
+        let mut reader = std::io::BufReader::new(ChunkedReader { steps });
+        let mut buf = Vec::new();
+        let mut sink = Vec::new();
+
+        let mut outcome = None;
+        for _ in 0..24 {
+            match read_line_limited(&mut reader, &mut buf, &mut sink, limit) {
+                Ok(LineOutcome::TooLong { consumed_bytes }) => {
+                    outcome = Some(consumed_bytes);
+                    break;
+                }
+                Ok(other) => panic!("超限半行不应正常交出: {other:?}"),
+                Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
+                    assert!(
+                        buf.len() <= limit + 512,
+                        "保留的半行必须在 limit 附近被封顶, 实际 {} 字节",
+                        buf.len()
+                    );
+                }
+                Err(err) => panic!("非预期错误: {err}"),
+            }
+        }
+        let consumed = outcome.expect("累计超过 limit 的半行必须被判成 TooLong");
+        assert!(
+            consumed > limit,
+            "consumed_bytes 要覆盖整条坏行, 实际 {consumed}"
+        );
     }
 
     #[test]
