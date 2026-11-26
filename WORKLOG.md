@@ -1275,3 +1275,9 @@ job summary 单列、**不计入 ran 集合**, 真机 lane 的 5 条命令与权
 本地 linux 回执: 11 个 target 全部执行且 passed > 0 (control_lanes 15/1 ignored,
 zenoh_router_client 38/2 ignored)。
 - 提交: a329b49
+
+- 2026-11-26 放量首个真缺陷 (macOS): `zenoh_router_client` 的 3 条 `agent_*` 用例在
+  macos runner 上假失败 —— 隔离 HOME 建在 `$TMPDIR`(`/var/folders/q2/<32位>/T`) 下,
+  `.rdog/run` 的 unixpipe pipe 名超出 95 字节上限, daemon 拒启动。`test_isolated_home()`
+  改用 `short_temp_root()` (优先 `/tmp`)。本地 linux 复跑 38 passed / 2 ignored。
+- 提交: (本条随修复提交记入下一次账本)
