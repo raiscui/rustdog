@@ -292,12 +292,24 @@ pub fn execute_put_file(payload: &str) -> std::io::Result<Value> {
                 "stale_partial_discarded": false,
             }));
         }
-        return Err(std::io::Error::other(format!(
-            "file_transfer_id_in_use: transfer_id {transfer_id} 已有活跃会话 (已收 {} 字节, 目标 {}{}); 续传请用 resume:true, 换目标请先 @file-cancel",
-            existing.written,
-            existing.path.display(),
-            if same_target { "" } else { ", 与本次请求不同" }
-        )));
+        if !same_target {
+            // A3/C2: 同 id 换目标是合法的 id 复用. 旧会话移出注册表, 但**旧半成品按它自己的
+            // 路径留下** —— 那批字节仍然有效, 删掉等于拿"id 复用"当理由销毁另一个文件的有效
+            // 进度. 它转成孤儿, 由续传窗口 (C3) 决定什么时候回收.
+            if let Some(old_temp) = existing.temp_path.clone() {
+                orphan_partials()
+                    .lock()
+                    .expect("orphan table poisoned")
+                    .insert(old_temp, existing.last_activity_ms);
+            }
+            sessions.remove(&transfer_id);
+        } else {
+            return Err(std::io::Error::other(format!(
+                "file_transfer_id_in_use: transfer_id {transfer_id} 已有活跃会话 (已收 {} 字节, 目标 {}); 续传请用 resume:true, 换目标请先 @file-cancel",
+                existing.written,
+                existing.path.display()
+            )));
+        }
     }
     // 别的 id 已持有同一暂存路径: 拒绝. 暂存文件名从**目标路径**推导, 两个 id 指向同一目标
     // 就共用一个文件, 交错写会让先到的 @file-end 把混合字节的哈希算过、把损坏的文件 rename
@@ -331,6 +343,10 @@ pub fn execute_put_file(payload: &str) -> std::io::Result<Value> {
         let _ = std::fs::remove_file(&temp_path);
         0
     };
+    orphan_partials()
+        .lock()
+        .expect("orphan table poisoned")
+        .remove(&temp_path);
     sessions.insert(
         transfer_id.clone(),
         TransferSession {
@@ -752,7 +768,11 @@ pub fn execute_file_list() -> std::io::Result<Value> {
 /// 今天所有中止原因都是终态的 (显式取消、摘要不符、门禁在 open 拒绝), 所以删半成品一律成立。
 /// RAI-367 落地"中途路径丢失"这个**可续传**中止后, 这里必须按规格 §2.5 分开: 可续传的半成品
 /// 留到 `bulk.resume_window_ms`, 否则续传 offset (真相源就是半成品的文件长度) 会静默归零。
-pub(crate) fn reap_idle_transfers(now_ms: u64, idle_timeout_ms: u64) -> (usize, usize) {
+pub(crate) fn reap_idle_transfers(
+    now_ms: u64,
+    idle_timeout_ms: u64,
+    resume_window_ms: u64,
+) -> (usize, usize) {
     let mut reaped = 0;
     let mut partials = 0;
     {
@@ -778,6 +798,25 @@ pub(crate) fn reap_idle_transfers(now_ms: u64, idle_timeout_ms: u64) -> (usize, 
         if reaped > 0 {
             persist_index(&sessions);
         }
+    }
+    // 孤儿按**续传窗口**回收, 不是空闲阈值: 空闲只说明"没人来了", 那些字节仍有效, 要留到
+    // 客户端还能回来的最后一刻 (规格 C3).
+    let mut orphans = orphan_partials().lock().expect("orphan table poisoned");
+    let expired: Vec<PathBuf> = orphans
+        .iter()
+        .filter(|(_, last_activity)| now_ms.saturating_sub(**last_activity) >= resume_window_ms)
+        .map(|(path, _)| path.clone())
+        .collect();
+    for path in expired {
+        reap_file(&path);
+        orphans.remove(&path);
+        partials += 1;
+        reaped += 1;
+    }
+    if !orphans.is_empty() || partials > 0 {
+        drop(orphans);
+        let sessions = transfers().lock().expect("transfer table poisoned");
+        persist_index(&sessions);
     }
     (reaped, partials)
 }
@@ -838,6 +877,39 @@ fn partial_is_stale(path: &Path, window_ms: u64) -> bool {
         return false;
     };
     elapsed.as_millis() as u64 > window_ms
+}
+
+/// 无主的半成品: 会话已经不在注册表里, 但盘上的字节仍可能是有效进度。
+///
+/// 两种来源: 同 id 换了目标 (规格 A3/C2 —— 旧条目移出, 旧半成品**按自己的路径**留着), 以及
+/// daemon 重启后从索引恢复出来的条目。身份是**半成品路径**, 不是 transfer_id (规格 C1):
+/// id 由客户端自选且可复用, 盘上的文件才是路径唯一的。
+///
+/// 为什么要单独一张表: 注册表按 transfer_id 索引, 一条 id 只能挂一个会话; 而"旧 id 的旧文件"
+/// 必须继续被窗口回收盯着, 否则它就成了谁都不认领的残留 —— 那正是 RAI-424 要消灭的形态。
+static ORPHAN_PARTIALS: OnceLock<Mutex<HashMap<PathBuf, u64>>> = OnceLock::new();
+
+fn orphan_partials() -> &'static Mutex<HashMap<PathBuf, u64>> {
+    ORPHAN_PARTIALS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// 一条路径看起来是不是暂存文件 (父目录正是保留目录, 名字带暂存后缀)。
+///
+/// 孤儿回收会删文件、并顺手删空的暂存目录, 所以这个判定是它的**唯一**闸门: 索引是用户可写的,
+/// 不能因为里面写了某个路径就去动它。
+fn is_staging_file(path: &Path) -> bool {
+    let in_staging_dir = path
+        .parent()
+        .and_then(|parent| parent.file_name())
+        .and_then(|name| name.to_str())
+        .map(|name| name == STAGING_DIR)
+        .unwrap_or(false);
+    let has_suffix = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(|name| name.ends_with(STAGING_SUFFIX))
+        .unwrap_or(false);
+    in_staging_dir && has_suffix
 }
 
 /// bulk 门禁的运行时参数, 由 daemon 启动时从 `[file_transfer]` 注入。
@@ -1014,7 +1086,18 @@ fn persist_index(sessions: &HashMap<String, TransferSession>) {
             }))
         })
         .collect();
-    let document = json!({"version": 1, "transfers": entries});
+    // 孤儿也要落盘: 它们是"会话不在了但字节还该留着"的那批. 不写进去的话, 重启后没人认领、
+    // 也没人回收 —— 正是 RAI-424 要消灭的永久残留。
+    let orphan_entries: Vec<Value> = orphan_partials()
+        .lock()
+        .map(|orphans| {
+            orphans
+                .iter()
+                .map(|(path, _)| json!({"temp_path": path.to_string_lossy()}))
+                .collect()
+        })
+        .unwrap_or_default();
+    let document = json!({"version": 1, "transfers": entries, "orphans": orphan_entries});
 
     let write = || -> std::io::Result<()> {
         if let Some(dir) = path.parent() {
@@ -1065,6 +1148,34 @@ fn restore_index() -> usize {
     };
 
     let mut restored = 0;
+    if let Some(orphan_entries) = parsed.get("orphans").and_then(Value::as_array) {
+        let mut orphans = orphan_partials().lock().expect("orphan table poisoned");
+        for entry in orphan_entries {
+            let Some(temp_path) = entry.get("temp_path").and_then(Value::as_str) else {
+                continue;
+            };
+            let temp_path = PathBuf::from(temp_path);
+            // 孤儿回收会删文件再删空的暂存目录, 所以这里只认**暂存区里的**文件:
+            // 索引是用户可写的, 不能因为里面写了某个路径就让 daemon 去动它。
+            if !is_staging_file(&temp_path) {
+                log::warn!(
+                    "半成品索引里的孤儿路径不在暂存区, 丢弃该条: {}",
+                    temp_path.display()
+                );
+                continue;
+            }
+            let Ok(metadata) = std::fs::metadata(&temp_path) else {
+                continue;
+            };
+            let last_activity_ms = metadata
+                .modified()
+                .ok()
+                .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
+                .map(|elapsed| elapsed.as_millis() as u64)
+                .unwrap_or_else(now_ms);
+            orphans.insert(temp_path, last_activity_ms);
+        }
+    }
     let mut sessions = transfers().lock().expect("transfer table poisoned");
     for entry in entries {
         let (Some(temp_path), Some(target_path), Some(transfer_id)) = (
@@ -1139,11 +1250,12 @@ pub struct TransferMaintenance {
 }
 
 impl TransferMaintenance {
-    pub fn start(interval: Duration, idle_timeout_ms: u64) -> Self {
+    pub fn start(interval: Duration, idle_timeout_ms: u64, resume_window_ms: u64) -> Self {
         let stop = Arc::new((Mutex::new(false), Condvar::new()));
         let worker_stop = Arc::clone(&stop);
         let join = thread::spawn(move || loop {
-            let (reaped, partials) = reap_idle_transfers(now_ms(), idle_timeout_ms);
+            let (reaped, partials) =
+                reap_idle_transfers(now_ms(), idle_timeout_ms, resume_window_ms);
             if reaped > 0 {
                 log::info!(
                     "文件传输空闲过期: 回收会话={reaped}, 删除半成品={partials}"
@@ -1212,6 +1324,7 @@ pub fn initialize_file_transfer_maintenance(
     let maintenance = TransferMaintenance::start(
         Duration::from_millis(config.sweep_interval_ms),
         config.idle_timeout_ms,
+        config.resume_window_ms,
     );
     let slot = TRANSFER_MAINTENANCE.get_or_init(|| Mutex::new(None));
     let mut guard = slot
@@ -1756,7 +1869,7 @@ mod tests {
         stamp_last_activity_for_tests(&stale, 1_000);
         stamp_last_activity_for_tests(&fresh, 10_000);
 
-        let (reaped, partials) = reap_idle_transfers(10_500, 5_000);
+        let (reaped, partials) = reap_idle_transfers(10_500, 5_000, 5_000);
         assert_eq!(reaped, 1, "只应回收 stale 那条");
         assert_eq!(partials, 1, "stale 的半成品应被删掉");
         assert!(!staging_path(&dir.join("stale.bin")).unwrap().exists());
@@ -1844,7 +1957,7 @@ mod tests {
         // 用**小数值假时钟**触发过期, 不能用"真实时钟 + 偏移": 后者会把并行运行的其它用例的
         // 真实时间戳也判成过期 (saturating_sub 保不住), 从而串台。
         stamp_last_activity_for_tests(&tid, 1_000);
-        let (reaped, _) = reap_idle_transfers(10_500, 5_000);
+        let (reaped, _) = reap_idle_transfers(10_500, 5_000, 5_000);
         assert_eq!(reaped, 1, "重启后的遗留半成品必须能被 sweep 认领");
         assert!(!partial.exists(), "回收后盘上不得留残留");
 
@@ -2013,6 +2126,77 @@ mod tests {
         .unwrap();
         assert_eq!(resumed["resume_honored"], true);
         forget_sessions_for_tests(&[&tid]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn orphaned_partial_is_reclaimed_by_the_resume_window() {
+        // 孤儿按**续传窗口**回收 (规格 C3), 不是按空闲阈值: 空闲只说明"没人来了",
+        // 那些字节仍然有效, 要留到客户端还能回来的最后一刻。
+        let dir = std::env::temp_dir().join(format!("rdog-ft-orphan-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join(STAGING_DIR)).unwrap();
+        let partial = dir.join(STAGING_DIR).join("orphan.bin.0123456789abcdef.partial");
+        std::fs::write(&partial, b"keepme").unwrap();
+        // 时刻取**未来**而不是小假时钟: 并发用例的 sweep 也看这张全局孤儿表, 用小于真实时钟的
+        // 数值会被它们判成过期而先删掉 (saturating_sub 保不住), 断言就随跑法变化。未来时刻让
+        // 别的用例的 `now - last_activity` 恒为 0。
+        let anchor_ms = now_ms() + 1_000_000;
+        orphan_partials()
+            .lock()
+            .unwrap()
+            .insert(partial.clone(), anchor_ms);
+
+        // 空闲阈值早已过, 但续传窗口还没到 → 不许删
+        let (reaped, _) = reap_idle_transfers(anchor_ms, 1_000, 100_000);
+        assert_eq!(reaped, 0, "窗口没到就不该回收孤儿");
+        assert!(partial.exists(), "孤儿在窗口内必须留着可续");
+
+        // 窗口也过了 → 回收
+        let (reaped, _) = reap_idle_transfers(anchor_ms + 1_000, 1_000, 100);
+        assert_eq!(reaped, 1);
+        assert!(!partial.exists(), "窗口过了必须回收, 不留残留");
+        assert!(!orphan_partials().lock().unwrap().contains_key(&partial));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn orphan_survives_restart_through_the_index() {
+        // 孤儿不落盘的话, 重启后既没人认领也没人回收 —— 正是 RAI-424 要消灭的永久残留。
+        let _guard = TRANSFER_TABLE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let dir = std::env::temp_dir().join(format!("rdog-ft-orphan-restart-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join(STAGING_DIR)).unwrap();
+        let index = dir.join("partials.json");
+        set_index_path_for_tests(index.clone());
+        let partial = dir.join(STAGING_DIR).join("survivor.bin.0123456789abcdef.partial");
+        std::fs::write(&partial, b"keepme").unwrap();
+        orphan_partials()
+            .lock()
+            .unwrap()
+            .insert(partial.clone(), now_ms());
+        // 落一次盘 (用一张空会话表, 只让孤儿进索引)
+        {
+            let sessions = transfers().lock().unwrap();
+            persist_index(&sessions);
+        }
+
+        // 重启: 清掉内存里的孤儿, 再从索引恢复
+        orphan_partials().lock().unwrap().clear();
+        let restored = restore_index();
+        assert_eq!(restored, 0, "这一份索引里没有会话条目");
+        assert!(
+            orphan_partials().lock().unwrap().contains_key(&partial),
+            "孤儿必须跨重启活下来, 否则没人回收它"
+        );
+
+        // 恢复出来的孤儿按文件 mtime 定窗口, 用未来时钟触发回收
+        let future = now_ms() + 10_000;
+        let (reaped, _) = reap_idle_transfers(future, 5_000, 5_000);
+        assert!(reaped >= 1);
+        assert!(!partial.exists());
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -2469,22 +2653,41 @@ mod tests {
         assert_eq!(done["state"], "committed");
         assert_eq!(std::fs::read(&target).unwrap(), b"AAAAABBBBB");
 
-        // 活跃会话上换目标路径仍必须拒绝: 复用 id 去写另一个文件是错误, 不是续传
+        // 同 id 换目标是合法的 id 复用 (规格 A3/C2): 新会话开起来, 但**旧半成品按它自己的
+        // 路径留下** —— 那批字节仍然有效, 删掉等于拿"id 复用"当理由销毁另一个文件的有效进度。
         let other = dir.join("other.bin");
-        execute_put_file(&format!(
+        let new_tid_session = execute_put_file(&format!(
             r#"{{"transfer_id":"{tid}","path":"{target_json}","size":10,"resume":false}}"#
         ))
         .unwrap();
-        let err = execute_put_file(&format!(
-            r#"{{"transfer_id":"{tid}","path":"{}","size":10,"resume":true}}"#,
+        assert_eq!(new_tid_session["state"], "open");
+        execute_file_chunk(&format!(
+            r#"{{"transfer_id":"{tid}","offset":0,"data":"{first}"}}"#
+        ))
+        .unwrap();
+        let first_partial = staging_path(&target).unwrap();
+        assert!(first_partial.exists());
+
+        let switched = execute_put_file(&format!(
+            r#"{{"transfer_id":"{tid}","path":"{}","size":10,"resume":false}}"#,
             escape_json(&other.display().to_string())
         ))
-        .unwrap_err();
+        .unwrap();
+        assert_eq!(switched["state"], "open");
         assert!(
-            err.to_string().contains("file_transfer_id_in_use"),
-            "换目标不应被当成续传: {err}"
+            first_partial.exists(),
+            "换目标不得删掉上一个目标的有效半成品"
         );
+        assert!(
+            orphan_partials()
+                .lock()
+                .unwrap()
+                .contains_key(&first_partial),
+            "旧半成品必须转成孤儿, 由续传窗口回收"
+        );
+
         execute_file_cancel(&format!(r#"{{"transfer_id":"{tid}"}}"#)).unwrap();
+        let _ = orphan_partials().lock().unwrap().remove(&first_partial);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
