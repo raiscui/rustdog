@@ -503,6 +503,7 @@ chunk in flight**: 每个被拒的边界保证的是"这一 chunk 之后不再�
   "chunks": 3,
   "concurrency_suspected": true,
   "endpoint": "client | daemon",
+  "build": "<这一半的构建身份: 7 位 git sha, 或 unknown>",
   "relay_tx_before": 0, "relay_tx_after": 0,
   "relay_rx_before": 0, "relay_rx_after": 0,
   "relay_sample_available": true,
@@ -799,10 +800,31 @@ warn, **不删文件** (留给排障); 最坏只坏这一个键。文件名是�
 cancel 只认 `transfer_id`, 不认发起者)。本版只写清不解决: 规避方式是同一键不要并发; 根治要给
 daemon 侧的会话加 owner 租约 (**RAI-526**, Backlog/low)。
 
-**下载方向的结构上限 (写在这里, 免得被当成 bug)**: 下载每块 36096 B, 而每块是一次完整往返, 所以
-吞吐上限 ≈ `36096 / RTT`。100 ms RTT 约 **0.34 MB/s**, 1 GiB 约 **50 min**。这个数字来自结构
-(每块一往返 + 响应行预算), **不是实测** —— 它随 RTT 线性变化; 改大要靠"一条 `@file-read` 带多块"
-这类协议改动, 不在本票范围。
+**下载方向的结构上限 (写在这里, 免得被当成 bug)**: 每块是一次完整往返, 所以
+
+```
+吞吐上限 ≈ 单块载荷 / 每块周期
+```
+
+**三个 cap, 三个来源, 不要混用**:
+
+| 量 | 数值 | 来源 |
+| --- | --- | --- |
+| 协议通用块 `chunk_payload_bytes()` | 5,033,160 B | 帧上限 8 MiB × 80% 再按 base64 反推 |
+| 上传**有效** cap | **262,144 B** | `min(chunk_payload_bytes(), IROH_CHUNK_PAYLOAD_BYTES)` —— iroh lane 收窄后的真值 |
+| 下载有效 cap | **36,096 B** | `response_payload_bytes()` = (48 KiB − 1 KiB) × 3/4 |
+
+**模型值**: 下载每块周期取 0.42 s ⇒ 36096 / 0.42 = **85.94 kB/s**。这里 0.42 s 是**模型输入**
+(每块往返的观测周期), 不是独立测出的 RTT; 换成 RTT 说事时注意这一层。
+
+**实测均值**: 2026-11-26 真机 (云机 → 家宽 Windows, 经公共 relay 目录 + 直连打洞) 下载
+**20 MiB / 248 s** ⇒ **84.56 kB/s**。它与模型值同量级, 是两条独立说法, 不合并成一个数。
+
+**参考点**: 同城/低延迟拓扑 (每块周期 ≈ 100 ms) 的下载上限 = 36096 / 0.1 ≈ **0.344 MiB/s**,
+1 GiB ≈ 50 min —— 参考, 不是上限。
+
+把 84–86 kB/s 当 bug 的人会把正确结果读成错误 —— 所以这里写公式与来源, 不写"上限是 0.34 MB/s"。
+改大要靠"一条 `@file-read` 带多块"这类协议改动, 不在本票范围。
 
 **措辞上限 (与 §4.4 正对照一并读)。** 客户端能给出的结论只到"括号两点之间读到的 relay 累计量增
 量为 0"这一层: `stats().udp_tx/rx.bytes` 是这条 path 上的**全部** UDP 字节 (含 ACK、keepalive、
@@ -896,5 +918,26 @@ D2 的形状与票面字面不同, 这里要说明原因: **relay 上开头的 b
 
 ### 每条回执的固定字段
 
-所有类别的回执都带: 两个端点的二进制 sha256、拓扑描述 (哪些段跨网)、脱敏后的地址、
-判定式计算结果、`attempt_id`. 缺任一项按未验收处理.
+所有类别的回执都带: **两端各自的构建身份 `client_sha=` / `daemon_sha=`**、两个端点的二进制
+sha256、拓扑描述 (哪些段跨网)、脱敏后的地址、判定式计算结果、`attempt_id`. 缺任一项按未验收处理.
+
+**构建身份不是可选元数据, 是这条读数成立的前提**: 两个 sha 不相同即整条读数作废 —— 跨版本的
+"直连/relay" 差异可能只是两端行为不同造成的, 那种数不能进任何结论. 两个 sha 分别抄自两份快照的
+`build` 字段 (客户端那一半 `endpoint:"client"`, daemon 那一半 `endpoint:"daemon"`). 取值来自编译期
+注入的 git 提交号: CI 由 `GIT_SHA=${{ github.sha }}` 注入 (完整 sha), 本地构建退回本仓库的 7 位短 sha;
+探测**只认 `CARGO_MANIFEST_DIR` 自己的仓库** (顶层目录必须等于该目录), 没有可查时就写 `unknown` ——
+写 `unknown` 也要写, 不许留空.
+
+**已知限制 (本地构建)**: **共享 `CARGO_TARGET_DIR` 且跨 checkout 构建**时, Cargo 在包指纹相同时不会
+重跑 build script, 构建身份可能沿用上一次的值. **判据**: 同一 target 依次构建两份只差账本的 checkout,
+若第二次报 `Fresh` 且 ELF 沿用旧 sha, 那次读数不得用于跨版本对比. 处置: 用独立 target 或重编.
+
+**改构建命令上的 `GIT_SHA` 会自动重编**: `build.rs` 声明了 `rerun-if-env-changed=GIT_SHA`, Cargo 会报
+`the env variable GIT_SHA changed` 并重跑 build script (2026-11-26 实测: `GIT_SHA=aaaaaaa cargo build`
+→ ELF 里 `client aaaaaaa`/`daemon aaaaaaa`; 换 `bbbbbbb` 再建 → `bbbbbbb`; 去掉再建 → 当前 HEAD 短 sha).
+**仅改启动环境无效**: `GIT_SHA=aaa ./rdog` 不会重编, 仍读上次烘进二进制的值 (负对照: 用 `aaaaaaa`
+启动一个 `bbbbbbb` 的二进制, 输出仍是 `bbbbbbb`). 取值来自 `src/build_info.rs:10` 的 `env!("GIT_SHA")`
+—— build.rs 每次都以 `cargo:rustc-env` 注入, 取不到 git 时注入 `unknown`, 所以编译期 `env!` 是安全的.
+
+CI 不受这条影响: `.github/workflows/ci.yml` 在**全部六个 job** (三段 `build` + 三段 `test`, 后者也会在
+缓存未命中时编译) 注入了 `GIT_SHA=${{ github.sha }}`, 所以 CI 里同一份代码在任何 job 中身份一致.

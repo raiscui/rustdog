@@ -41,6 +41,14 @@ jobs:
   # 第一个 job 上而不是文件头。)
   build-ubuntu:
     name: build (ubuntu-latest)
+    # 构建身份显式注入: 读数要能回答"这是哪个提交量的", 而 `build.rs` 的探测会受缓存语义
+    # (共享 target、跨 checkout) 影响 —— CI 不依赖它, 直接用 GitHub 给的 sha。
+    #
+    # **放在 job 级而不是 Build 步骤级**: `test (os)` 三个 job 也会编译 (缓存未命中时),
+    # 只有 build 步骤注入的话, 那些二进制的身份就是 `unknown` —— 同一份代码在不同 job 里
+    # 身份必须一致, 否则读数一比就是假的 mismatch。
+    env:
+      GIT_SHA: ${{ github.sha }}
     runs-on: ubuntu-latest
     timeout-minutes: &job-timeout-minutes 60
 
@@ -77,6 +85,14 @@ jobs:
 
   build-macos:
     name: build (macos-latest)
+    # 构建身份显式注入: 读数要能回答"这是哪个提交量的", 而 `build.rs` 的探测会受缓存语义
+    # (共享 target、跨 checkout) 影响 —— CI 不依赖它, 直接用 GitHub 给的 sha。
+    #
+    # **放在 job 级而不是 Build 步骤级**: `test (os)` 三个 job 也会编译 (缓存未命中时),
+    # 只有 build 步骤注入的话, 那些二进制的身份就是 `unknown` —— 同一份代码在不同 job 里
+    # 身份必须一致, 否则读数一比就是假的 mismatch。
+    env:
+      GIT_SHA: ${{ github.sha }}
     runs-on: macos-latest
     timeout-minutes: *job-timeout-minutes
 
@@ -113,6 +129,14 @@ jobs:
 
   build-windows:
     name: build (windows-latest)
+    # 构建身份显式注入: 读数要能回答"这是哪个提交量的", 而 `build.rs` 的探测会受缓存语义
+    # (共享 target、跨 checkout) 影响 —— CI 不依赖它, 直接用 GitHub 给的 sha。
+    #
+    # **放在 job 级而不是 Build 步骤级**: `test (os)` 三个 job 也会编译 (缓存未命中时),
+    # 只有 build 步骤注入的话, 那些二进制的身份就是 `unknown` —— 同一份代码在不同 job 里
+    # 身份必须一致, 否则读数一比就是假的 mismatch。
+    env:
+      GIT_SHA: ${{ github.sha }}
     runs-on: windows-latest
     # Windows 要静态链接 341MB 的 onnxruntime.lib, 编译 + 链接 + 测试都比 unix 慢一截。
     timeout-minutes: *job-timeout-minutes
@@ -163,6 +187,14 @@ jobs:
   test-ubuntu:
     name: test (ubuntu-latest)
     needs: [build-ubuntu]
+    # 构建身份显式注入: 读数要能回答"这是哪个提交量的", 而 `build.rs` 的探测会受缓存语义
+    # (共享 target、跨 checkout) 影响 —— CI 不依赖它, 直接用 GitHub 给的 sha。
+    #
+    # **放在 job 级而不是 Build 步骤级**: `test (os)` 三个 job 也会编译 (缓存未命中时),
+    # 只有 build 步骤注入的话, 那些二进制的身份就是 `unknown` —— 同一份代码在不同 job 里
+    # 身份必须一致, 否则读数一比就是假的 mismatch。
+    env:
+      GIT_SHA: ${{ github.sha }}
     runs-on: ubuntu-latest
     timeout-minutes: *job-timeout-minutes
 
@@ -238,6 +270,14 @@ jobs:
   test-macos:
     name: test (macos-latest)
     needs: [build-macos]
+    # 构建身份显式注入: 读数要能回答"这是哪个提交量的", 而 `build.rs` 的探测会受缓存语义
+    # (共享 target、跨 checkout) 影响 —— CI 不依赖它, 直接用 GitHub 给的 sha。
+    #
+    # **放在 job 级而不是 Build 步骤级**: `test (os)` 三个 job 也会编译 (缓存未命中时),
+    # 只有 build 步骤注入的话, 那些二进制的身份就是 `unknown` —— 同一份代码在不同 job 里
+    # 身份必须一致, 否则读数一比就是假的 mismatch。
+    env:
+      GIT_SHA: ${{ github.sha }}
     runs-on: macos-latest
     timeout-minutes: *job-timeout-minutes
 
@@ -303,6 +343,14 @@ jobs:
   test-windows:
     name: test (windows-latest)
     needs: [build-windows]
+    # 构建身份显式注入: 读数要能回答"这是哪个提交量的", 而 `build.rs` 的探测会受缓存语义
+    # (共享 target、跨 checkout) 影响 —— CI 不依赖它, 直接用 GitHub 给的 sha。
+    #
+    # **放在 job 级而不是 Build 步骤级**: `test (os)` 三个 job 也会编译 (缓存未命中时),
+    # 只有 build 步骤注入的话, 那些二进制的身份就是 `unknown` —— 同一份代码在不同 job 里
+    # 身份必须一致, 否则读数一比就是假的 mismatch。
+    env:
+      GIT_SHA: ${{ github.sha }}
     runs-on: windows-latest
     timeout-minutes: *job-timeout-minutes
 

@@ -205,9 +205,15 @@ impl TransferReceipt {
             Some(false) => " resume=restarted",
             None => "",
         };
+        // 尾列不能被新字段打断: put 的最后一列仍是 `resume=…`, get 的最后一列仍是 `sha256=…`,
+        // 所以 `build=` 插在 `sha256=` **之前**。
         format!(
-            "{} ok bytes={} sha256={}{}",
-            self.direction, self.bytes, self.sha256, resume
+            "{} ok bytes={} {} sha256={}{}",
+            self.direction,
+            self.bytes,
+            crate::build_info::build_tag(),
+            self.sha256,
+            resume
         )
     }
 }
@@ -598,6 +604,7 @@ impl BulkPathRecorder {
             // 客户端没有并发检测能力: `null`, 不是 `false`。
             concurrency_suspected: None,
             endpoint: "client".to_owned(),
+            build: crate::build_info::BUILD_SHA.to_owned(),
             // 括号两端都读到了才有四个数; 读不到就是 `None` (未采样), 绝不写 0。
             relay_tx_before: bracket.tx_before,
             relay_tx_after: bracket.tx_after,
@@ -692,7 +699,10 @@ fn report_progress(direction: &str, offset: u64, size: u64) {
     } else {
         offset.saturating_mul(100) / size
     };
-    eprintln!("{direction} {offset}/{size} ({percent}%)");
+    eprintln!(
+        "{direction} {offset}/{size} ({percent}%) {}",
+        crate::build_info::build_tag()
+    );
 }
 
 fn refuse_message(code: &str) -> String {
@@ -2257,6 +2267,36 @@ mod tests {
         );
         assert!(broken.exists(), "坏文件不删, 留给排障");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_receipt_keeps_its_trailing_columns() {
+        // 成功回执是 stdout 的契约行, 尾列不能被新字段打断:
+        //   put 的最后一列是 `resume=…`, get 的最后一列是 `sha256=…`。
+        let put = TransferReceipt {
+            transfer_id: "t".into(),
+            direction: "put",
+            bytes: 10,
+            sha256: "abc".into(),
+            resume_honored: Some(true),
+        }
+        .render();
+        assert!(put.ends_with("resume=honored"), "put 尾列必须是 resume: {put}");
+        assert!(put.contains(" build="), "{put}");
+
+        let get = TransferReceipt {
+            transfer_id: "t".into(),
+            direction: "get",
+            bytes: 10,
+            sha256: "abc".into(),
+            resume_honored: None,
+        }
+        .render();
+        assert!(
+            get.ends_with("sha256=abc"),
+            "get 尾列必须是 sha256: {get}"
+        );
+        assert!(get.contains(" build="), "{get}");
     }
 
     #[test]

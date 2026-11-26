@@ -14,6 +14,7 @@ use crate::input::{
 };
 use crate::listener::{listen, Mode, Opts};
 
+mod build_info;
 mod agent_messaging;
 mod agent_runtime;
 mod auth_credentials;

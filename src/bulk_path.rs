@@ -123,6 +123,10 @@ pub(crate) const BULK_PATH_ENDPOINT_DUPLICATED: &str = "bulk_path_endpoint_dupli
 pub(crate) const BULK_PATH_ATTEMPT_MISMATCH: &str = "bulk_path_attempt_mismatch";
 /// §4.2: `concurrency_suspected:true` 的那一半**不得单独用于**"relay 字节为 0"的结论。
 pub(crate) const BULK_PATH_CONCURRENCY_SUSPECTED: &str = "bulk_path_concurrency_suspected";
+/// 两半的 `build` 都在, 但**不是同一个** —— 跨版本比对出来的直连/relay 差异可能只是两端行为不同。
+pub(crate) const BULK_PATH_BUILD_MISMATCH: &str = "bulk_path_build_mismatch";
+/// 两端都是 `unknown`: 无法证明同源。不给结论, 但也不说"不同源" —— 那是另一件事。
+pub(crate) const BULK_PATH_BUILD_UNVERIFIED: &str = "bulk_path_build_unverified";
 /// 两端配上了、但没有任何一端给出可用结论时的前缀 (后面接 `<verdict>[+<verdict>]`)。
 pub(crate) const BULK_PATH_INCONCLUSIVE: &str = "bulk_path_inconclusive";
 
@@ -182,6 +186,11 @@ pub(crate) struct BulkPathSnapshot {
     pub(crate) concurrency_suspected: Option<bool>,
     /// `client | daemon` —— 这一半是谁测的。join 靠它分左右, 不靠文件顺序。
     pub(crate) endpoint: String,
+    /// 产出这一半的**构建身份** (7 位 git sha, 或 `unknown`)。
+    ///
+    /// 两端的 `build` 不相同 ⇒ 它们不是同一次构建 ⇒ 这条读数作废: 跨版本比对出来的"直连/relay"
+    /// 结论可能只是两端行为不同造成的。
+    pub(crate) build: String,
     /// 四个计数都是 `Option`: `None` = **本端没有 relay 句柄可读**, `Some(0)` = 真的读到了 0。
     ///
     /// 这一层类型区分是刻意的。用 `u64` 加一个 `relay_sample_available: bool` 也"能表达",
@@ -289,6 +298,7 @@ impl BulkPathSnapshot {
             "chunks": self.chunks,
             "concurrency_suspected": self.concurrency_suspected,
             "endpoint": self.endpoint,
+            "build": self.build,
             "relay_tx_before": self.relay_tx_before,
             "relay_tx_after": self.relay_tx_after,
             "relay_rx_before": self.relay_rx_before,
@@ -342,6 +352,13 @@ impl BulkPathSnapshot {
             "not_applicable" => PathClass::NotApplicable,
             _ => return Err(BULK_PATH_SCHEMA_MISMATCH),
         };
+        // 老快照没有这一栏: 读回 `unknown` 而不是报错 —— join 由此判成 `build_unverified`
+        // (无法证明同源), **不是** "两端不同源": 缺字段与"确实是两个构建"是两件事。
+        let build = value
+            .get("build")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown")
+            .to_owned();
         let endpoint = text("endpoint")?;
         if !matches!(endpoint.as_str(), "client" | "daemon") {
             return Err(BULK_PATH_SCHEMA_MISMATCH);
@@ -379,6 +396,7 @@ impl BulkPathSnapshot {
                 Some(flag) => Some(flag.as_bool().ok_or(BULK_PATH_SCHEMA_MISMATCH)?),
             },
             endpoint,
+            build,
             relay_tx_before: optional_count("relay_tx_before")?,
             relay_tx_after: optional_count("relay_tx_after")?,
             relay_rx_before: optional_count("relay_rx_before")?,
@@ -413,12 +431,15 @@ pub(crate) struct HalfReport {
     pub(crate) path_class: &'static str,
     pub(crate) aborted: bool,
     pub(crate) concurrency_suspected: Option<bool>,
+    /// 这一半的构建身份 —— 账本里 `client_sha=` / `daemon_sha=` 抄的就是它。
+    pub(crate) build: String,
 }
 
 impl HalfReport {
     fn of(snapshot: &BulkPathSnapshot) -> Self {
         Self {
             endpoint: snapshot.endpoint.clone(),
+            build: snapshot.build.clone(),
             verdict: snapshot.verdict(),
             relay_bytes_zero_own_half: snapshot.relay_bytes_zero_own_half(),
             relay_sample_available: snapshot.relay_sample_available(),
@@ -431,6 +452,7 @@ impl HalfReport {
     fn to_json(&self) -> Value {
         json!({
             "endpoint": self.endpoint,
+            "build": self.build,
             "verdict": self.verdict,
             "relay_bytes_zero_own_half": self.relay_bytes_zero_own_half,
             "relay_sample_available": self.relay_sample_available,
@@ -631,9 +653,20 @@ fn join_group(transfer_id: String, halves: Vec<BulkPathSnapshot>) -> JoinReport 
         return report;
     }
 
+    // 构建身份先判: 两端不是同一次构建时, 后面所有路径判定都不成立 (§8 的固定字段)。
+    //
+    // 只有"两端都是能当身份用的值、且不相等"才说 mismatch; 缺一端、空串、`unknown`、不像 sha 的值
+    // 一律是 unverified —— 把"无法证明"说成"不同源"是另一种假话。
+    let build_reason = match (build_id(&client.build), build_id(&daemon.build)) {
+        (Some(left), Some(right)) if left == right => None,
+        (Some(_), Some(_)) => Some(BULK_PATH_BUILD_MISMATCH.to_owned()),
+        _ => Some(BULK_PATH_BUILD_UNVERIFIED.to_owned()),
+    };
     let suspect = client.concurrency_suspected == Some(true)
         || daemon.concurrency_suspected == Some(true);
-    let (relay_bytes_zero, reason) = if suspect {
+    let (relay_bytes_zero, reason) = if let Some(build_reason) = build_reason {
+        (None, Some(build_reason))
+    } else if suspect {
         // §4.2: 有并发嫌疑的那条证据不得单独用于结论。
         (None, Some(BULK_PATH_CONCURRENCY_SUSPECTED.to_owned()))
     } else if client.relay_bytes_zero_own_half() && daemon.relay_bytes_zero_own_half() {
@@ -654,6 +687,16 @@ fn join_group(transfer_id: String, halves: Vec<BulkPathSnapshot>) -> JoinReport 
         daemon: Some(HalfReport::of(&daemon)),
         relay_bytes_zero,
     }
+}
+
+/// `build` 值能不能当身份用: 7–40 位十六进制 (与 `build.rs` 写出的 7 位短 sha 一致)。
+///
+/// 空串、`unknown`、别的字符串都不算 —— 它们不能证明同源, 也不能证明不同源。
+fn build_id(build: &str) -> Option<&str> {
+    let trimmed = build.trim();
+    let plausible = (7..=40).contains(&trimmed.len())
+        && trimmed.bytes().all(|byte| byte.is_ascii_hexdigit());
+    plausible.then_some(trimmed)
 }
 
 /// "配上了但没有结论"的原因码: `bulk_path_inconclusive_<verdict>`, 两端都给时按本端 → 对端用
@@ -766,6 +809,7 @@ mod tests {
             chunks: 1,
             concurrency_suspected: None,
             endpoint: "client".into(),
+            build: "0123abc".into(),
             relay_tx_before: Some(0),
             relay_tx_after: Some(0),
             relay_rx_before: Some(0),
@@ -1252,6 +1296,80 @@ mod tests {
             Some(BULK_PATH_CONCURRENCY_SUSPECTED)
         );
         assert_eq!(reports[0].relay_bytes_zero, None);
+    }
+
+    #[test]
+    fn halves_from_different_builds_are_not_a_conclusion() {
+        // 两端 build 不同 ⇒ 那条读数不成立 (§8)。不明说的话, join 会把它当正常配对给出
+        // `relay_bytes_zero=true` —— 而两端可能根本不是同一份代码。
+        let mut client = half("client", Some(0));
+        let mut daemon = half("daemon", Some(0));
+        client["build"] = json!("aaaaaaa");
+        daemon["build"] = json!("bbbbbbb");
+        let reports = join_inputs(&[client, daemon]);
+        assert_eq!(reports.len(), 1);
+        assert_eq!(reports[0].status, "joined", "配上了, 只是不给结论");
+        assert_eq!(reports[0].relay_bytes_zero, None);
+        assert_eq!(reports[0].reason.as_deref(), Some(BULK_PATH_BUILD_MISMATCH));
+    }
+
+    #[test]
+    fn halves_without_a_usable_build_identity_cannot_prove_they_match() {
+        // 「无法证明同源」的四种形状, 每一种都必须落到 unverified 而不是 mismatch:
+        // 双 unknown / 双空串 / 双非法值 / 一端缺字段 (读回 unknown)。
+        for (label, left, right) in [
+            ("双 unknown", Some("unknown"), Some("unknown")),
+            ("双空串", Some(""), Some("")),
+            ("双非法值", Some("not-a-sha"), Some("not-a-sha")),
+            ("一端缺字段", Some("0123abc"), None),
+        ] {
+            let mut client = half("client", Some(0));
+            let mut daemon = half("daemon", Some(0));
+            match left {
+                Some(value) => client["build"] = json!(value),
+                None => {
+                    client.as_object_mut().unwrap().remove("build");
+                }
+            }
+            match right {
+                Some(value) => daemon["build"] = json!(value),
+                None => {
+                    daemon.as_object_mut().unwrap().remove("build");
+                }
+            }
+            let reports = join_inputs(&[client, daemon]);
+            assert_eq!(reports[0].relay_bytes_zero, None, "{label}");
+            assert_eq!(
+                reports[0].reason.as_deref(),
+                Some(BULK_PATH_BUILD_UNVERIFIED),
+                "{label}: 无法证明同源不能说成不同源"
+            );
+        }
+    }
+
+    #[test]
+    fn the_same_build_on_both_halves_still_reaches_a_conclusion() {
+        let mut client = half("client", Some(0));
+        let mut daemon = half("daemon", Some(0));
+        client["build"] = json!("dea4be7");
+        daemon["build"] = json!("dea4be7");
+        let reports = join_inputs(&[client, daemon]);
+        assert_eq!(reports[0].relay_bytes_zero, Some(true));
+        assert_eq!(reports[0].reason, None);
+    }
+
+    #[test]
+    fn the_snapshot_carries_its_build_identity() {
+        // 两端 build 不同即整条读数作废 (§8): 这一格必须在快照里, 且老快照读回 `unknown` 而不是报错。
+        let value = snapshot(PathCapability::NOT_PATH_AWARE, PathClass::NotApplicable).to_json();
+        assert_eq!(value["build"], "0123abc");
+        let read_back = BulkPathSnapshot::from_json(&value).unwrap();
+        assert_eq!(read_back.build, "0123abc");
+
+        let mut legacy = value;
+        legacy.as_object_mut().unwrap().remove("build");
+        let read_back = BulkPathSnapshot::from_json(&legacy).unwrap();
+        assert_eq!(read_back.build, "unknown", "没有这一栏的老快照读成 unknown");
     }
 
     #[test]
