@@ -679,7 +679,7 @@ panic 于 `dynamic_link.rs:45` (unix 分支, 同一循环); `mkdir -p target/deb
 重定基后复跑: `--bin rdog` 1145 passed / 0 failed / 4 ignored; `control_iroh` 31 passed / 2 ignored;
 回环 13/13; `control_pty` 8 passed / 1 failed(`ctrl_c`) vs 基线 7 passed / 2 failed(`ctrl_c`+`string_shorthand`);
 `control_tty` 本分支 2 passed / 0 failed, 与基线同(基线此前已转绿)。
-- 提交: 5c9a6c8
+- 提交: 78239c4
 
 ## [2026-11-26] 测试夹具的 daemon 在 panic 路径被收掉 (RAI-423)
 
