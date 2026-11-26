@@ -145,7 +145,8 @@ fn validate_transfer_path(raw: &str, verb: &str) -> Result<PathBuf, std::io::Err
     // (Win32 忽略它们)、Windows 上再剥掉从 `:` 开始的备用数据流部分、最后折叠大小写 ——
     // 一次覆盖五种别名面, 不需要逐个列。过拒无害 (没人会拿 .rdog-partial 当目标目录名),
     // 漏拒会毁数据。
-    // 已知残余: NTFS 上开启 8.3 短名生成时, `.rdog-partial` 还有一个短名别名 (形如
+    // 已知残余 (记在 specs/file-transfer-control-spec.md 的「已知边界」):
+    // NTFS 上开启 8.3 短名生成时, `.rdog-partial` 还有一个短名别名 (形如
     // `RDOG-P~1`), 客户端若**故意**按短名拼出目标路径就能落进暂存区. 堵它要解析路径真实身份
     // (GetFinalPathNameByHandle), 而暂存目录此刻可能还不存在; 且现代 Windows 卷默认不生成 8.3
     // 短名. 这一条写进规格的已知边界, 不假装已解决 —— 但也不装作不存在.
@@ -174,23 +175,47 @@ fn validate_transfer_path(raw: &str, verb: &str) -> Result<PathBuf, std::io::Err
     Ok(path.to_path_buf())
 }
 
+/// 暂存文件名里由目标名截断后保留的最大字节数。
+///
+/// 暂存名 = 截断后的目标名 + `.` + 8 位哈希 + `.partial`, 约 25 字节额外开销。加上它还要留出
+/// 余量给 `NAME_MAX` (常见 255 字节) —— 不截断的话, 原本能传的 239~247 字节长文件名会在第一次
+/// `@file-chunk` 上撞 `ENAMETOOLONG`, 而传输在 open 阶段看起来是成功的。
+const STAGING_BASENAME_MAX_BYTES: usize = 200;
+
 /// 目标路径 → 暂存文件路径。这是暂存名的**唯一定义**。
 ///
-/// 名字 = `<目标目录>/.rdog-partial/<目标文件名>.<目标串短哈希>.partial`。
+/// 名字 = `<目标目录>/.rdog-partial/<截断目标名>.<目标串短哈希>.partial`。
 ///
 /// 哈希不是装饰: 没有它, `Model.bin` 与 `model.bin` 在**大小写不敏感**的卷 (macOS 默认 APFS,
 /// Windows NTFS) 上会算出两个文本不同、却指向同一个 inode 的暂存名 —— 按文本比较的准入看不见
-/// 这种重合, 于是第二条 upload 的 `resume:false` 会把第一条**正在写**的半成品删掉。把精确目标串
-/// 的哈希放进名字, 两个不同目标串必然得到不同名字, 与卷的大小写策略无关。
+/// 这种重合, 于是第二条 upload 的 `resume:false` 会把第一条**正在写**的半成品删掉。
+///
+/// 但**哈希的输入必须先做词法归一**: 直接哈希原始拼写会让 `./a.bin` 与 `a.bin` 得到两个不同的
+/// 暂存名 —— 它们是同一个文件, 却会让续传找不到自己的半成品、也让占用检查看不见冲突。归一规则
+/// 与 [`temp_path_matches`] 一致: 去掉 `.` 组件, **不**折叠大小写 (折叠会把 `Model.bin` 与
+/// `model.bin` 又合回去, 而那两个必须保持不同)。
 fn staging_path(target: &Path) -> std::io::Result<PathBuf> {
-    let mut staging_name = target
-        .file_name()
-        .ok_or_else(|| std::io::Error::other("@put-file 路径缺少文件名"))?
-        .to_os_string();
-    let digest = format!("{:x}", Sha256::digest(target.to_string_lossy().as_bytes()));
-    staging_name.push(format!(".{}", &digest[..8]));
-    staging_name.push(STAGING_SUFFIX);
-    Ok(target
+    let normalized: PathBuf = target
+        .components()
+        .filter(|component| !matches!(component, std::path::Component::CurDir))
+        .collect();
+    let Some(file_name) = normalized.file_name() else {
+        return Err(std::io::Error::other("@put-file 路径缺少文件名"));
+    };
+
+    let mut base = String::new();
+    for ch in file_name.to_string_lossy().chars() {
+        if base.len() + ch.len_utf8() > STAGING_BASENAME_MAX_BYTES {
+            break;
+        }
+        base.push(ch);
+    }
+    let digest = format!(
+        "{:x}",
+        Sha256::digest(normalized.to_string_lossy().as_bytes())
+    );
+    let staging_name = format!("{base}.{}{STAGING_SUFFIX}", &digest[..8]);
+    Ok(normalized
         .parent()
         .unwrap_or_else(|| Path::new("."))
         .join(STAGING_DIR)
@@ -1390,6 +1415,34 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+
+    #[test]
+    fn alias_spellings_of_one_target_share_a_staging_path_so_resume_still_works() {
+        // 哈希输入必须词法归一: 否则 ./a.bin 与 a.bin 会得到两个暂存名 —— 同一个文件却互不相认,
+        // 续传找不到自己的半成品, 占用检查也看不见冲突.
+        let plain = staging_path(Path::new("/d/a.bin")).unwrap();
+        assert_eq!(staging_path(Path::new("/d/./a.bin")).unwrap(), plain);
+        assert_eq!(staging_path(Path::new("./d/a.bin")).unwrap(), staging_path(Path::new("d/a.bin")).unwrap());
+        // 大小写不能归一: Model.bin 与 model.bin 在大小写不敏感卷上是同一个 inode, 必须不同名
+        assert_ne!(staging_path(Path::new("/d/Model.bin")).unwrap(), plain);
+    }
+
+    #[test]
+    fn very_long_target_names_still_produce_a_staging_name_within_name_max() {
+        // 暂存名比目标名长 25 字节左右; 不截断的话 240 字节的长名会在第一次 @file-chunk 撞
+        // ENAMETOOLONG, 而 open 阶段看起来是成功的.
+        let long = format!("/d/{}.bin", "x".repeat(240));
+        let path = staging_path(Path::new(&long)).unwrap();
+        let name = path.file_name().unwrap().to_string_lossy().to_string();
+        assert!(
+            name.len() <= 255,
+            "暂存名不得越过 NAME_MAX: {} 字节",
+            name.len()
+        );
+        // 两个不同的长名仍然分得开 (哈希在)
+        let other = staging_path(Path::new(&format!("/d/{}.bin", "y".repeat(240)))).unwrap();
+        assert_ne!(other, path);
+    }
 
     #[test]
     fn case_variant_targets_get_staging_names_that_survive_case_folding() {
