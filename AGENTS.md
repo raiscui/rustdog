@@ -90,6 +90,11 @@ Issues 和 Wayfinder maps 使用 GitHub Issues。详见 `docs/agents/issue-track
   - 用途: 固定未指定地址 -> 回环的映射出口 (`connect_host`)、本机 daemon 控制 lane 登记表 (`src/local_daemon_registry.rs`) 与回环端口按登记认领协议的语义; unix 仍独占 unixpipe FIFO
   - 何时阅读: 改 `rdog control` 目标解析/端口简写、`rdog control self` 本机 fast path、`run_zenoh_router` 的 inbound 关闭语义、或排查 "TCP 连上但一帧没回就断开" 前
 
+- `docs/solutions/logic-errors/fragmented-control-line-dropped-on-read-timeout.md`
+  - 主题: 分片到达的控制行被读超时清空缓冲而静默丢弃 (`read_line_limited` 入口 `buf.clear()` + `write_message` 两次 `write_all`)
+  - 用途: 固定「读行状态必须跨调用存活」的三条契约 (半行保留 / 丢弃状态与计数跨调用 / 内容长度排除 CRLF 的 `\r`), 以及双侧 `strace` 对拍把「消息丢了」与「消息没发」分开的诊断法
+  - 何时阅读: 修改 `src/control_line_read.rs`、`src/control_transport.rs` 的读写路径、给 line-control 加新的可中断读, 或排查「指令发了没效果但日志无异常」前
+
 - `docs/solutions/tooling-decisions/upstream-pi-macos-ops-cli-contract.md`
   - 主题: upstream Pi v0.84.1 macOS ops 的 CLI 工具 allowlist、skill preload、agent 隔离和 models.json 边界
   - 用途: 固定 `--tools bash,read`、绝对 `--append-system-prompt`、`PI_CODING_AGENT_DIR` 与旧 Rust Pi profile 字段的迁移口径
