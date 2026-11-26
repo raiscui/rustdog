@@ -1,5 +1,13 @@
 # WORKLOG: rustdog
 
+## [2026-11-26] routable profile 可表达公共 relay 的默认端口 (RAI-475)
+
+- RAI-366 真机腿暴露:`relay_allowed` 要求 `url.port().is_some()`,而 `RelayUrl` 会把 https 的默认端口 443 规范化掉 —— **任何标准公共 relay 都配不通**,daemon 启动即报 `iroh routable profile requires an explicit HTTPS relay and QAD port`。
+- 门禁按 profile 分档:**回环 profile 维持 https + 显式端口 + QAD 非 0**(自建/测试的随机端口场景);**routable 只要求 https + 主机名 + QAD 非 0**,端口可缺省。`http://` 两边仍一律拒。
+- 用例 `a_public_relay_spelled_with_the_default_port_is_accepted_where_it_matters`:公共 relay 在 routable 下通过、在回环 profile 下仍拒(http 亦拒),并断言 `public.port() == None` 这条事实本身。
+- 回执:`control_iroh` 39 passed / 0 failed / 2 ignored;`check-carrier-assertions` OK。
+- 提交: 1eebc36
+
 ## [2026-11-26] rendezvous 注册契约可声明 registry_relay (RAI-462)
 
 - 真机拓扑暴露:`Registry` 期望的 relay 恒等于 `format!("https://{advertised}")`(rendezvous 自己 hosted 的那个),而 `advertised` 是 IP 类型、写不出公共 relay 的域名。于是「自建 rendezvous + 公共 relay 承载数据」这个合法配置被 `iroh_registration_denied` 拒 —— RAI-426 证明的是目录这一跳能经 relay 承载,但注册仍把 daemon 的数据 relay 钉在 rendezvous 自建 relay 上。
