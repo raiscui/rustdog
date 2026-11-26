@@ -83,16 +83,20 @@ fn probe_serial_device(device_path: &str) -> Result<(), String> {
 
     #[cfg(windows)]
     {
+        use std::os::windows::fs::OpenOptionsExt;
+
         let path = if device_path.starts_with(r"\\.\") {
             device_path.to_owned()
         } else {
             format!(r"\\.\{device_path}")
         };
-        // Zenoh 以 exclusive 方式打开串口 (zenoh-link-serial 默认 exclusive=true),
-        // 这里同样以读写方式试开一次, 打不开即视为不可用。
+        // 与 zenoh 底下的 serialport 保持同一打开语义: 读写 + share_mode 0。
+        // 通信设备不接受默认的 FILE_SHARE_READ|WRITE|DELETE, 用默认共享模式会把
+        // 一个本来可用的串口判成不可用 (serialport-4.9.0/src/windows/com.rs:62)。
         std::fs::OpenOptions::new()
             .read(true)
             .write(true)
+            .share_mode(0)
             .open(&path)
             .map(|_| ())
             .map_err(|err| format!("无法打开串口 {device_path}: {err}"))
