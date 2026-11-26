@@ -365,4 +365,5 @@ panic 于 `dynamic_link.rs:45` (unix 分支, 同一循环); `mkdir -p target/deb
 - 提交: 139becb
 - 提交: 360c000 (build 失败摘要 + 已知红到期日规则)
 - 提交: fb378c4 (按 OS 拆 needs / 测试目标编译进 build / 注解化退出 / 编码)
-- 提交: 088b876 (评审第二轮: 扁平化六个显式 job / lockfile 缺口归类)。reusable workflow 会把检查名改成 `<caller> / <callee>`, 与必需表冲突; 三个 OS 的步骤文本因此是复制的, 改一处要改三处。
+- 提交: 088b876 (评审第二轮: 扁平化六个显式 job / lockfile 缺口归类)
+- 提交: 85f7df7 (评审第三轮: 覆盖说法收敛到实际范围 + 缺口进已知红表)。reusable workflow 会把检查名改成 `<caller> / <callee>`, 与必需表冲突; 三个 OS 的步骤文本因此是复制的, 改一处要改三处。
