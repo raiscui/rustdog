@@ -90,21 +90,10 @@ PLATFORM_EXEMPTIONS: dict[str, dict[str, str]] = {
 #
 # 用它而不是逐条 `#[ignore]` 的条件是**根因已定位**: 跳过的是同一族已知缺陷的全部用例,
 # 不是「下一轮换个用例继续红」。
-TARGET_TEST_SKIPS: dict[str, dict[str, tuple[str, tuple[str, ...]]]] = {
-    "zenoh_router_client": {
-        "ubuntu-latest": (
-            "zenoh-link-tls 1.8.0 首帧竞态: TLS/mTLS 用例偶发丢首条请求 —— daemon 侧 "
-            "`TX task failed: handshake not complete` (链路已 New transport opened), client 侧 "
-            "`peer closed connection without sending TLS close_notify`; `--test-threads=1` 串行跑"
-            "同样复现, 与 runner 和测试并发无关。生产侧的 TLS 正确性缺陷按 high 票承接, "
-            "见 issue #163",
-            (
-                "tls_enabled_daemon_should_serve_ca_client_and_reject_wrong_ca",
-                "mtls_daemon_should_require_client_certificate_and_accept_configured_client",
-            ),
-        )
-    },
-}
+# 目前为空: RAI-524 修掉 zenoh-link-tls 的读写并发后, ubuntu 上 `zenoh_router_client` 的
+# 2 条 TLS/mTLS 用例已连续三轮通过, 具名跳过 2026-11-27 撤销。机制本身由 `tls_link` 这个
+# target 的三条回归测试长期盯着, 不再需要按名字放过这个 target 里的用例。
+TARGET_TEST_SKIPS: dict[str, dict[str, tuple[str, tuple[str, ...]]]] = {}
 
 OS_KIND = {"ubuntu-latest": "unix", "macos-latest": "macos", "windows-latest": "windows"}
 # macos 同时是 unix 平台, 所以它吃的 kind 集合是 {"all", "unix", "macos"}。
