@@ -52,6 +52,7 @@ CLASSIFICATION: dict[str, str] = {
     "daemon_inbound": "unix",
     "listen_suspend": "unix",
     "zenoh_router_client": "unix",
+    "tls_link": "all",
     "computer_use_density": "all",
     "control_websocket": "all",
     "zenoh_unixpipe_fast_path": "compile-only:macos",

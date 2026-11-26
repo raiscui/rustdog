@@ -61,6 +61,11 @@ zenoh = { version = "1.8.0", default-features = false, features = ["transport_se
 [dev-dependencies]
 # agent mailbox e2e: 测试进程直接 zenoh pub 投递 inbox 消息
 zenoh = { version = "1.8.0", default-features = false, features = ["transport_tcp", "auth_usrpwd"] }
+flume = { version = "0.11", default-features = false }
+tokio-rustls = { version = "0.26", default-features = false }
+zenoh-link-commons = "=1.8.0"
+zenoh-link-tls = "=1.8.0"
+zenoh-protocol = "=1.8.0"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 sck-rs = { git = "https://github.com/screenpipe/sck-rs" }
@@ -93,3 +98,7 @@ libc = "0.2"
 windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_Console", "Win32_System_Diagnostics_ToolHelp", "Win32_System_IO", "Win32_System_JobObjects", "Win32_System_Memory", "Win32_System_Pipes", "Win32_System_SystemInformation", "Win32_System_Threading", "Win32_UI_HiDpi", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_WindowsAndMessaging"] }
 zenoh-util = "=1.8.0"
 omp-rpc = { path = "vendor/omp-rpc" }
+
+# RAI-524 修法: 读路径短临界区 (锁内非阻塞 poll + 锁外 waker 等待)。
+[patch.crates-io]
+zenoh-link-tls = { path = "vendor/zenoh-link-tls" }
