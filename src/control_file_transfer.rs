@@ -166,12 +166,16 @@ pub fn execute_put_file(payload: &str) -> std::io::Result<Value> {
             existing.expected_sha256 = expected_sha256;
             existing.last_activity_ms = now_ms();
             let written = existing.written;
+            // 只有真的从非 0 接着写才算 resumed: 会话存在但一个字节都没收到时, 报 "resumed" 是
+            // 在撒谎 —— 客户端会以为续上了. resume_honored 就是这个事实的判定位.
+            let honored = written > 0;
             return Ok(json!({
                 "kind": "file-transfer",
-                "state": "resumed",
+                "state": if honored { "resumed" } else { "open" },
                 "transfer_id": transfer_id,
                 "written": written,
                 "next_offset": written,
+                "resume_honored": honored,
             }));
         }
         return Err(std::io::Error::other(format!(
@@ -215,9 +219,13 @@ pub fn execute_put_file(payload: &str) -> std::io::Result<Value> {
             last_activity_ms: now_ms(),
         },
     );
+    // resume:true 但半成品不存在 (从没上传过, 或已被 sweep 按窗口删掉) 时起始 offset 是 0.
+    // 这时报 "resumed" 会把"重来了"伪装成"续上了", 而后者正是本模块反复要防的静默重传.
+    let resume_honored = resume && written > 0;
     Ok(json!({
         "kind": "file-transfer",
-        "state": if resume { "resumed" } else { "open" },
+        "state": if resume_honored { "resumed" } else { "open" },
+        "resume_honored": resume_honored,
         "transfer_id": transfer_id,
         "written": written,
         "next_offset": written,
@@ -1258,6 +1266,31 @@ mod tests {
 
         // 收尾: 把 fresh 也回收掉, 别把会话留在表里影响后续用例
         execute_file_cancel(&format!(r#"{{"transfer_id":"{fresh}"}}"#)).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn resume_without_a_partial_reports_open_not_resumed() {
+        // resume:true 但盘上没有半成品 (从没传过, 或已被窗口 sweep 删掉) 时起始 offset 是 0.
+        // 报 "resumed" 会把"重来了"伪装成"续上了" —— 静默重传正是这条 lane 反复要防的东西.
+        let _guard = TRANSFER_TABLE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let dir = std::env::temp_dir().join(format!("rdog-ft-nopartial-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("nopartial.bin");
+        let tid = unique_id("nopartial");
+
+        let opened = execute_put_file(&format!(
+            r#"{{"transfer_id":"{tid}","path":"{}","size":10,"resume":true}}"#,
+            escape_json(&target.display().to_string())
+        ))
+        .unwrap();
+        assert_eq!(opened["state"], "open");
+        assert_eq!(opened["resume_honored"], false);
+        assert_eq!(opened["written"], 0);
+
+        execute_file_cancel(&format!(r#"{{"transfer_id":"{tid}"}}"#)).unwrap();
         let _ = std::fs::remove_dir_all(&dir);
     }
 
