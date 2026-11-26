@@ -16,6 +16,11 @@ use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 #[path = "support/tty_script.rs"]
 mod tty_script;
 
+#[path = "support/child_guard.rs"]
+mod child_guard;
+
+use child_guard::ChildGuard;
+
 fn next_free_port() -> u16 {
     let listener = TcpListener::bind(("127.0.0.1", 0)).expect("ephemeral listener should bind");
     let port = listener
@@ -225,7 +230,7 @@ fn read_until_pty_output_contains(
 #[test]
 fn control_pty_cli_should_spawn_remote_real_tty() {
     let port = next_free_port();
-    let mut daemon = spawn_control_daemon(port);
+    let mut daemon = ChildGuard::new(spawn_control_daemon(port));
     assert!(
         wait_until_port_is_busy(&mut daemon, port, Duration::from_secs(4)),
         "daemon control lane never started listening on port {port}",
@@ -268,7 +273,7 @@ fn control_pty_cli_should_spawn_remote_real_tty() {
 #[test]
 fn control_pty_string_shorthand_should_switch_cli_into_pty_mode() {
     let port = next_free_port();
-    let mut daemon = spawn_control_daemon(port);
+    let mut daemon = ChildGuard::new(spawn_control_daemon(port));
     assert!(
         wait_until_port_is_busy(&mut daemon, port, Duration::from_secs(4)),
         "daemon control lane never started listening on port {port}",
@@ -327,7 +332,7 @@ fn control_pty_string_shorthand_should_forward_enter_as_carriage_return_in_tty()
     fs::set_permissions(&helper_path, permissions).expect("raw byte helper should be executable");
 
     let port = next_free_port();
-    let mut daemon = spawn_control_daemon(port);
+    let mut daemon = ChildGuard::new(spawn_control_daemon(port));
     assert!(
         wait_until_port_is_busy(&mut daemon, port, Duration::from_secs(4)),
         "daemon control lane never started listening on port {port}",
@@ -401,7 +406,7 @@ fn control_pty_ctrl_c_should_exit_remote_program_and_return_to_control_prompt() 
     fs::set_permissions(&helper_path, permissions).expect("ctrl-c helper should be executable");
 
     let port = next_free_port();
-    let mut daemon = spawn_control_daemon(port);
+    let mut daemon = ChildGuard::new(spawn_control_daemon(port));
     assert!(
         wait_until_port_is_busy(&mut daemon, port, Duration::from_secs(4)),
         "daemon control lane never started listening on port {port}",
@@ -484,7 +489,7 @@ fn control_pty_ctrl_c_should_exit_remote_program_and_return_to_control_prompt() 
 #[test]
 fn control_pty_should_treat_control_words_as_remote_input() {
     let port = next_free_port();
-    let mut daemon = spawn_control_daemon(port);
+    let mut daemon = ChildGuard::new(spawn_control_daemon(port));
     assert!(
         wait_until_port_is_busy(&mut daemon, port, Duration::from_secs(4)),
         "daemon control lane never started listening on port {port}",
@@ -580,7 +585,7 @@ fn control_pty_should_treat_control_words_as_remote_input() {
 #[test]
 fn control_pty_resize_frame_should_update_remote_winsize() {
     let port = next_free_port();
-    let mut daemon = spawn_control_daemon(port);
+    let mut daemon = ChildGuard::new(spawn_control_daemon(port));
     assert!(
         wait_until_port_is_busy(&mut daemon, port, Duration::from_secs(4)),
         "daemon control lane never started listening on port {port}",
@@ -643,7 +648,7 @@ fn control_pty_resize_frame_should_update_remote_winsize() {
 #[test]
 fn control_pty_close_should_kill_active_session_by_id() {
     let port = next_free_port();
-    let mut daemon = spawn_control_daemon(port);
+    let mut daemon = ChildGuard::new(spawn_control_daemon(port));
     assert!(
         wait_until_port_is_busy(&mut daemon, port, Duration::from_secs(4)),
         "daemon control lane never started listening on port {port}",
@@ -719,7 +724,7 @@ fn control_pty_close_should_kill_active_session_by_id() {
 #[test]
 fn control_pty_detach_should_allow_later_attach() {
     let port = next_free_port();
-    let mut daemon = spawn_control_daemon_with_output(port);
+    let mut daemon = ChildGuard::new(spawn_control_daemon_with_output(port));
     let daemon_stdout = daemon.stdout.take().expect("daemon stdout should exist");
     let daemon_stderr = daemon.stderr.take().expect("daemon stderr should exist");
     let (daemon_stdout_buffer, _daemon_stdout_collector) = spawn_output_collector(daemon_stdout);

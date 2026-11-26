@@ -11,6 +11,11 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[path = "support/child_guard.rs"]
+mod child_guard;
+
+use child_guard::ChildGuard;
+
 fn next_free_port() -> u16 {
     let listener = TcpListener::bind(("127.0.0.1", 0)).expect("ephemeral listener should bind");
     let port = listener
@@ -157,21 +162,23 @@ fn temp_cat_shell(name: &str) -> PathBuf {
 fn daemon_control_lane_should_execute_script_via_rdog_control() {
     let port = next_free_port();
     let binary = rdog_binary_path();
-    let mut daemon = Command::new(&binary)
-        .arg("daemon")
-        .env("RDOG_ZENOH__ENABLED", "false")
-        .env("RDOG_OBSERVATION__DURABLE_ENABLED", "false")
-        .env("RDOG_OUTBOUND__ENABLED", "false")
-        .env("RDOG_INBOUND__ENABLED", "true")
-        .env("RDOG_INBOUND__HOST", "127.0.0.1")
-        .env("RDOG_INBOUND__PORT", port.to_string())
-        .env("RDOG_INBOUND__SHELL", "/bin/sh")
-        .env("RDOG_INBOUND__MODE", "control")
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("daemon should start");
+    let mut daemon = ChildGuard::new(
+        Command::new(&binary)
+            .arg("daemon")
+            .env("RDOG_ZENOH__ENABLED", "false")
+            .env("RDOG_OBSERVATION__DURABLE_ENABLED", "false")
+            .env("RDOG_OUTBOUND__ENABLED", "false")
+            .env("RDOG_INBOUND__ENABLED", "true")
+            .env("RDOG_INBOUND__HOST", "127.0.0.1")
+            .env("RDOG_INBOUND__PORT", port.to_string())
+            .env("RDOG_INBOUND__SHELL", "/bin/sh")
+            .env("RDOG_INBOUND__MODE", "control")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("daemon should start"),
+    );
 
     assert!(
         wait_until_port_is_busy(&mut daemon, port, Duration::from_secs(3)),
@@ -221,21 +228,23 @@ fn daemon_control_lane_should_execute_script_via_rdog_control() {
 fn daemon_control_lane_should_roundtrip_request_id_in_response() {
     let port = next_free_port();
     let binary = rdog_binary_path();
-    let mut daemon = Command::new(&binary)
-        .arg("daemon")
-        .env("RDOG_ZENOH__ENABLED", "false")
-        .env("RDOG_OBSERVATION__DURABLE_ENABLED", "false")
-        .env("RDOG_OUTBOUND__ENABLED", "false")
-        .env("RDOG_INBOUND__ENABLED", "true")
-        .env("RDOG_INBOUND__HOST", "127.0.0.1")
-        .env("RDOG_INBOUND__PORT", port.to_string())
-        .env("RDOG_INBOUND__SHELL", "/bin/sh")
-        .env("RDOG_INBOUND__MODE", "control")
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("daemon should start");
+    let mut daemon = ChildGuard::new(
+        Command::new(&binary)
+            .arg("daemon")
+            .env("RDOG_ZENOH__ENABLED", "false")
+            .env("RDOG_OBSERVATION__DURABLE_ENABLED", "false")
+            .env("RDOG_OUTBOUND__ENABLED", "false")
+            .env("RDOG_INBOUND__ENABLED", "true")
+            .env("RDOG_INBOUND__HOST", "127.0.0.1")
+            .env("RDOG_INBOUND__PORT", port.to_string())
+            .env("RDOG_INBOUND__SHELL", "/bin/sh")
+            .env("RDOG_INBOUND__MODE", "control")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("daemon should start"),
+    );
 
     assert!(
         wait_until_port_is_busy(&mut daemon, port, Duration::from_secs(3)),
@@ -285,21 +294,23 @@ fn daemon_control_lane_should_roundtrip_request_id_in_response() {
 fn daemon_control_lane_should_accept_key_object_payload_with_request_id() {
     let port = next_free_port();
     let binary = rdog_binary_path();
-    let mut daemon = Command::new(&binary)
-        .arg("daemon")
-        .env("RDOG_ZENOH__ENABLED", "false")
-        .env("RDOG_OBSERVATION__DURABLE_ENABLED", "false")
-        .env("RDOG_OUTBOUND__ENABLED", "false")
-        .env("RDOG_INBOUND__ENABLED", "true")
-        .env("RDOG_INBOUND__HOST", "127.0.0.1")
-        .env("RDOG_INBOUND__PORT", port.to_string())
-        .env("RDOG_INBOUND__SHELL", "/bin/sh")
-        .env("RDOG_INBOUND__MODE", "control")
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("daemon should start");
+    let mut daemon = ChildGuard::new(
+        Command::new(&binary)
+            .arg("daemon")
+            .env("RDOG_ZENOH__ENABLED", "false")
+            .env("RDOG_OBSERVATION__DURABLE_ENABLED", "false")
+            .env("RDOG_OUTBOUND__ENABLED", "false")
+            .env("RDOG_INBOUND__ENABLED", "true")
+            .env("RDOG_INBOUND__HOST", "127.0.0.1")
+            .env("RDOG_INBOUND__PORT", port.to_string())
+            .env("RDOG_INBOUND__SHELL", "/bin/sh")
+            .env("RDOG_INBOUND__MODE", "control")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("daemon should start"),
+    );
 
     assert!(
         wait_until_port_is_busy(&mut daemon, port, Duration::from_secs(3)),
@@ -351,22 +362,24 @@ fn daemon_control_lane_should_execute_screenshot_and_save_file_via_rdog_control(
     let port = next_free_port();
     let binary = rdog_binary_path();
     let workdir = temp_workdir("screenshot-smoke");
-    let mut daemon = Command::new(&binary)
-        .arg("daemon")
-        .env("RDOG_ZENOH__ENABLED", "false")
-        .env("RDOG_OBSERVATION__DURABLE_ENABLED", "false")
-        .env("RDOG_OUTBOUND__ENABLED", "false")
-        .env("RDOG_INBOUND__ENABLED", "true")
-        .env("RDOG_INBOUND__HOST", "127.0.0.1")
-        .env("RDOG_INBOUND__PORT", port.to_string())
-        .env("RDOG_INBOUND__SHELL", "/bin/sh")
-        .env("RDOG_INBOUND__MODE", "control")
-        .current_dir(&workdir)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("daemon should start");
+    let mut daemon = ChildGuard::new(
+        Command::new(&binary)
+            .arg("daemon")
+            .env("RDOG_ZENOH__ENABLED", "false")
+            .env("RDOG_OBSERVATION__DURABLE_ENABLED", "false")
+            .env("RDOG_OUTBOUND__ENABLED", "false")
+            .env("RDOG_INBOUND__ENABLED", "true")
+            .env("RDOG_INBOUND__HOST", "127.0.0.1")
+            .env("RDOG_INBOUND__PORT", port.to_string())
+            .env("RDOG_INBOUND__SHELL", "/bin/sh")
+            .env("RDOG_INBOUND__MODE", "control")
+            .current_dir(&workdir)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("daemon should start"),
+    );
 
     assert!(
         wait_until_port_is_busy(&mut daemon, port, Duration::from_secs(3)),
@@ -468,21 +481,23 @@ fn daemon_control_lane_should_execute_screenshot_and_save_file_via_rdog_control(
 fn daemon_control_lane_should_report_invalid_key_name_to_client() {
     let port = next_free_port();
     let binary = rdog_binary_path();
-    let mut daemon = Command::new(&binary)
-        .arg("daemon")
-        .env("RDOG_ZENOH__ENABLED", "false")
-        .env("RDOG_OBSERVATION__DURABLE_ENABLED", "false")
-        .env("RDOG_OUTBOUND__ENABLED", "false")
-        .env("RDOG_INBOUND__ENABLED", "true")
-        .env("RDOG_INBOUND__HOST", "127.0.0.1")
-        .env("RDOG_INBOUND__PORT", port.to_string())
-        .env("RDOG_INBOUND__SHELL", "/bin/sh")
-        .env("RDOG_INBOUND__MODE", "control")
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("daemon should start");
+    let mut daemon = ChildGuard::new(
+        Command::new(&binary)
+            .arg("daemon")
+            .env("RDOG_ZENOH__ENABLED", "false")
+            .env("RDOG_OBSERVATION__DURABLE_ENABLED", "false")
+            .env("RDOG_OUTBOUND__ENABLED", "false")
+            .env("RDOG_INBOUND__ENABLED", "true")
+            .env("RDOG_INBOUND__HOST", "127.0.0.1")
+            .env("RDOG_INBOUND__PORT", port.to_string())
+            .env("RDOG_INBOUND__SHELL", "/bin/sh")
+            .env("RDOG_INBOUND__MODE", "control")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("daemon should start"),
+    );
 
     assert!(
         wait_until_port_is_busy(&mut daemon, port, Duration::from_secs(3)),
@@ -542,21 +557,23 @@ fn daemon_outbound_control_lane_should_execute_remote_script() {
     let binary = rdog_binary_path();
     let listener = TcpListener::bind(("127.0.0.1", port)).expect("control server should bind");
 
-    let mut daemon = Command::new(&binary)
-        .arg("daemon")
-        .env("RDOG_ZENOH__ENABLED", "false")
-        .env("RDOG_OBSERVATION__DURABLE_ENABLED", "false")
-        .env("RDOG_OUTBOUND__ENABLED", "true")
-        .env("RDOG_OUTBOUND__HOST", "127.0.0.1")
-        .env("RDOG_OUTBOUND__PORT", port.to_string())
-        .env("RDOG_OUTBOUND__SHELL", "/bin/sh")
-        .env("RDOG_OUTBOUND__MODE", "control")
-        .env("RDOG_INBOUND__ENABLED", "false")
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("daemon outbound control lane should start");
+    let mut daemon = ChildGuard::new(
+        Command::new(&binary)
+            .arg("daemon")
+            .env("RDOG_ZENOH__ENABLED", "false")
+            .env("RDOG_OBSERVATION__DURABLE_ENABLED", "false")
+            .env("RDOG_OUTBOUND__ENABLED", "true")
+            .env("RDOG_OUTBOUND__HOST", "127.0.0.1")
+            .env("RDOG_OUTBOUND__PORT", port.to_string())
+            .env("RDOG_OUTBOUND__SHELL", "/bin/sh")
+            .env("RDOG_OUTBOUND__MODE", "control")
+            .env("RDOG_INBOUND__ENABLED", "false")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("daemon outbound control lane should start"),
+    );
 
     let (mut server_stream, _) = listener
         .accept()
@@ -857,21 +874,23 @@ fn listen_local_interactive_should_reach_connect_control_lane() {
 fn control_one_shot_should_send_ping_and_exit_for_tcp_lane() {
     let port = next_free_port();
     let binary = rdog_binary_path();
-    let mut daemon = Command::new(&binary)
-        .arg("daemon")
-        .env("RDOG_ZENOH__ENABLED", "false")
-        .env("RDOG_OBSERVATION__DURABLE_ENABLED", "false")
-        .env("RDOG_OUTBOUND__ENABLED", "false")
-        .env("RDOG_INBOUND__ENABLED", "true")
-        .env("RDOG_INBOUND__HOST", "127.0.0.1")
-        .env("RDOG_INBOUND__PORT", port.to_string())
-        .env("RDOG_INBOUND__SHELL", "/bin/sh")
-        .env("RDOG_INBOUND__MODE", "control")
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("daemon should start");
+    let mut daemon = ChildGuard::new(
+        Command::new(&binary)
+            .arg("daemon")
+            .env("RDOG_ZENOH__ENABLED", "false")
+            .env("RDOG_OBSERVATION__DURABLE_ENABLED", "false")
+            .env("RDOG_OUTBOUND__ENABLED", "false")
+            .env("RDOG_INBOUND__ENABLED", "true")
+            .env("RDOG_INBOUND__HOST", "127.0.0.1")
+            .env("RDOG_INBOUND__PORT", port.to_string())
+            .env("RDOG_INBOUND__SHELL", "/bin/sh")
+            .env("RDOG_INBOUND__MODE", "control")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("daemon should start"),
+    );
 
     assert!(
         wait_until_port_is_busy(&mut daemon, port, Duration::from_secs(3)),
@@ -910,21 +929,23 @@ fn control_one_shot_should_send_ping_and_exit_for_tcp_lane() {
 fn control_one_shot_should_send_ping_with_request_id() {
     let port = next_free_port();
     let binary = rdog_binary_path();
-    let mut daemon = Command::new(&binary)
-        .arg("daemon")
-        .env("RDOG_ZENOH__ENABLED", "false")
-        .env("RDOG_OBSERVATION__DURABLE_ENABLED", "false")
-        .env("RDOG_OUTBOUND__ENABLED", "false")
-        .env("RDOG_INBOUND__ENABLED", "true")
-        .env("RDOG_INBOUND__HOST", "127.0.0.1")
-        .env("RDOG_INBOUND__PORT", port.to_string())
-        .env("RDOG_INBOUND__SHELL", "/bin/sh")
-        .env("RDOG_INBOUND__MODE", "control")
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("daemon should start");
+    let mut daemon = ChildGuard::new(
+        Command::new(&binary)
+            .arg("daemon")
+            .env("RDOG_ZENOH__ENABLED", "false")
+            .env("RDOG_OBSERVATION__DURABLE_ENABLED", "false")
+            .env("RDOG_OUTBOUND__ENABLED", "false")
+            .env("RDOG_INBOUND__ENABLED", "true")
+            .env("RDOG_INBOUND__HOST", "127.0.0.1")
+            .env("RDOG_INBOUND__PORT", port.to_string())
+            .env("RDOG_INBOUND__SHELL", "/bin/sh")
+            .env("RDOG_INBOUND__MODE", "control")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("daemon should start"),
+    );
 
     assert!(
         wait_until_port_is_busy(&mut daemon, port, Duration::from_secs(3)),
@@ -1003,21 +1024,23 @@ fn control_one_shot_should_accept_two_at_lines_and_run_in_order_for_tcp_lane() {
     // 走 `send_control_lines_*` 这条契约,不让 spec / test 再退回老设计。
     let port = next_free_port();
     let binary = rdog_binary_path();
-    let mut daemon = Command::new(&binary)
-        .arg("daemon")
-        .env("RDOG_ZENOH__ENABLED", "false")
-        .env("RDOG_OBSERVATION__DURABLE_ENABLED", "false")
-        .env("RDOG_OUTBOUND__ENABLED", "false")
-        .env("RDOG_INBOUND__ENABLED", "true")
-        .env("RDOG_INBOUND__HOST", "127.0.0.1")
-        .env("RDOG_INBOUND__PORT", port.to_string())
-        .env("RDOG_INBOUND__SHELL", "/bin/sh")
-        .env("RDOG_INBOUND__MODE", "control")
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("daemon should start");
+    let mut daemon = ChildGuard::new(
+        Command::new(&binary)
+            .arg("daemon")
+            .env("RDOG_ZENOH__ENABLED", "false")
+            .env("RDOG_OBSERVATION__DURABLE_ENABLED", "false")
+            .env("RDOG_OUTBOUND__ENABLED", "false")
+            .env("RDOG_INBOUND__ENABLED", "true")
+            .env("RDOG_INBOUND__HOST", "127.0.0.1")
+            .env("RDOG_INBOUND__PORT", port.to_string())
+            .env("RDOG_INBOUND__SHELL", "/bin/sh")
+            .env("RDOG_INBOUND__MODE", "control")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("daemon should start"),
+    );
 
     assert!(
         wait_until_port_is_busy(&mut daemon, port, Duration::from_secs(3)),
@@ -1047,9 +1070,7 @@ fn control_one_shot_should_accept_two_at_lines_and_run_in_order_for_tcp_lane() {
         String::from_utf8_lossy(&output.stderr)
     );
     // 两条响应都在,且顺序为 1) ping 2) capabilities#1
-    let pong_pos = stdout
-        .find(r#""pong":true"#)
-        .expect("pong should appear");
+    let pong_pos = stdout.find(r#""pong":true"#).expect("pong should appear");
     let caps_pos = stdout
         .find(r#"@response {"id":1,"value":{"capabilities""#)
         .expect("capabilities id=1 should appear");
@@ -1068,21 +1089,23 @@ fn control_one_shot_should_accept_two_at_lines_and_run_in_order_for_tcp_lane() {
 fn control_multi_one_shot_should_run_lines_in_order_for_tcp_lane() {
     let port = next_free_port();
     let binary = rdog_binary_path();
-    let mut daemon = Command::new(&binary)
-        .arg("daemon")
-        .env("RDOG_ZENOH__ENABLED", "false")
-        .env("RDOG_OBSERVATION__DURABLE_ENABLED", "false")
-        .env("RDOG_OUTBOUND__ENABLED", "false")
-        .env("RDOG_INBOUND__ENABLED", "true")
-        .env("RDOG_INBOUND__HOST", "127.0.0.1")
-        .env("RDOG_INBOUND__PORT", port.to_string())
-        .env("RDOG_INBOUND__SHELL", "/bin/sh")
-        .env("RDOG_INBOUND__MODE", "control")
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("daemon should start");
+    let mut daemon = ChildGuard::new(
+        Command::new(&binary)
+            .arg("daemon")
+            .env("RDOG_ZENOH__ENABLED", "false")
+            .env("RDOG_OBSERVATION__DURABLE_ENABLED", "false")
+            .env("RDOG_OUTBOUND__ENABLED", "false")
+            .env("RDOG_INBOUND__ENABLED", "true")
+            .env("RDOG_INBOUND__HOST", "127.0.0.1")
+            .env("RDOG_INBOUND__PORT", port.to_string())
+            .env("RDOG_INBOUND__SHELL", "/bin/sh")
+            .env("RDOG_INBOUND__MODE", "control")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("daemon should start"),
+    );
 
     assert!(
         wait_until_port_is_busy(&mut daemon, port, Duration::from_secs(3)),
@@ -1113,9 +1136,7 @@ fn control_multi_one_shot_should_run_lines_in_order_for_tcp_lane() {
         String::from_utf8_lossy(&output.stderr)
     );
     // 三条响应都在,且顺序为 1) ping 2) capabilities 3) cmd#7 READY
-    let pong_pos = stdout
-        .find(r#""pong":true"#)
-        .expect("pong should appear");
+    let pong_pos = stdout.find(r#""pong":true"#).expect("pong should appear");
     let caps_pos = stdout
         .find(r#"@response {"id":1,"value":{"capabilities""#)
         .expect("capabilities id=1 should appear");
@@ -1138,21 +1159,23 @@ fn control_multi_one_shot_should_run_with_one_line_for_tcp_lane() {
     // 1 line 的多 line 形式应该等价于单 line one-shot
     let port = next_free_port();
     let binary = rdog_binary_path();
-    let mut daemon = Command::new(&binary)
-        .arg("daemon")
-        .env("RDOG_ZENOH__ENABLED", "false")
-        .env("RDOG_OBSERVATION__DURABLE_ENABLED", "false")
-        .env("RDOG_OUTBOUND__ENABLED", "false")
-        .env("RDOG_INBOUND__ENABLED", "true")
-        .env("RDOG_INBOUND__HOST", "127.0.0.1")
-        .env("RDOG_INBOUND__PORT", port.to_string())
-        .env("RDOG_INBOUND__SHELL", "/bin/sh")
-        .env("RDOG_INBOUND__MODE", "control")
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("daemon should start");
+    let mut daemon = ChildGuard::new(
+        Command::new(&binary)
+            .arg("daemon")
+            .env("RDOG_ZENOH__ENABLED", "false")
+            .env("RDOG_OBSERVATION__DURABLE_ENABLED", "false")
+            .env("RDOG_OUTBOUND__ENABLED", "false")
+            .env("RDOG_INBOUND__ENABLED", "true")
+            .env("RDOG_INBOUND__HOST", "127.0.0.1")
+            .env("RDOG_INBOUND__PORT", port.to_string())
+            .env("RDOG_INBOUND__SHELL", "/bin/sh")
+            .env("RDOG_INBOUND__MODE", "control")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("daemon should start"),
+    );
 
     assert!(
         wait_until_port_is_busy(&mut daemon, port, Duration::from_secs(3)),

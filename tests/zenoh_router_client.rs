@@ -18,6 +18,11 @@ const SERIAL_ENDPOINT_EXAMPLE: &str = "serial//dev/ttyFAKE#baudrate=115200";
 #[path = "support/tty_script.rs"]
 mod tty_script;
 
+#[path = "support/child_guard.rs"]
+mod child_guard;
+
+use child_guard::ChildGuard;
+
 fn next_port() -> u16 {
     TcpListener::bind(("127.0.0.1", 0))
         .expect("ephemeral port probe should bind")
@@ -1871,15 +1876,17 @@ fn control_should_execute_screenshot_and_save_file_in_zenoh_profile() {
     let entrypoint = format!("tcp/127.0.0.1:{listen_port}");
     let config_path =
         write_temp_zenoh_router_config(&daemon_name, std::slice::from_ref(&entrypoint), "router");
-    let mut daemon = Command::new(rdog_binary_path())
-        .env("HOME", test_isolated_home())
-        .args(["daemon", "-c", &config_path.display().to_string()])
-        .current_dir(&workdir)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("zenoh daemon should start");
+    let mut daemon = ChildGuard::new(
+        Command::new(rdog_binary_path())
+            .env("HOME", test_isolated_home())
+            .args(["daemon", "-c", &config_path.display().to_string()])
+            .current_dir(&workdir)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("zenoh daemon should start"),
+    );
     let daemon_stdout = daemon.stdout.take().expect("daemon stdout should exist");
     let (buffer, _collector) = spawn_output_collector(daemon_stdout);
     wait_until_output_contains(
@@ -2060,12 +2067,8 @@ fn control_session_should_reresolve_after_daemon_restart() {
         .expect("control stdin should exist")
         .write_all(b"@ping\n")
         .expect("should send first ping");
-    wait_until_buffer_contains(
-        &control_buffer,
-        r#""pong":true"#,
-        Duration::from_secs(8),
-    )
-    .expect("first ping should succeed");
+    wait_until_buffer_contains(&control_buffer, r#""pong":true"#, Duration::from_secs(8))
+        .expect("first ping should succeed");
 
     stop_child(&mut first);
     let _ = fs::remove_file(&first_config);
@@ -2324,9 +2327,7 @@ fn control_multi_one_shot_should_run_three_lines_in_order_for_zenoh_profile() {
         status.success(),
         "3-line multi one-shot should succeed\nstdout:\n{stdout}\nstderr:\n{stderr}"
     );
-    let pong = stdout
-        .find(r#""pong":true"#)
-        .expect("pong should appear");
+    let pong = stdout.find(r#""pong":true"#).expect("pong should appear");
     let a = stdout
         .find(r#"@response {"id":1,"value":"A""#)
         .expect("cmd#1 A should appear");
@@ -3218,14 +3219,16 @@ fn tls_enabled_daemon_should_serve_ca_client_and_reject_wrong_ca() {
     let entrypoint = format!("tls/127.0.0.1:{listen_port}");
     let _ = user_dir;
 
-    let mut daemon = Command::new(rdog_binary_path())
-        .env("HOME", test_isolated_home())
-        .args(["daemon", "-c", config_path.to_str().unwrap()])
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("tls daemon should start");
+    let mut daemon = ChildGuard::new(
+        Command::new(rdog_binary_path())
+            .env("HOME", test_isolated_home())
+            .args(["daemon", "-c", config_path.to_str().unwrap()])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("tls daemon should start"),
+    );
     let daemon_out = daemon.stdout.take().expect("daemon stdout");
     let daemon_err = daemon.stderr.take().expect("daemon stderr");
     let buffer = Arc::new(Mutex::new(String::new()));
@@ -3385,15 +3388,17 @@ fn mtls_daemon_should_require_client_certificate_and_accept_configured_client() 
         .write_all(b"enable_mtls = true\n")
         .expect("mTLS setting should write");
     let entrypoint = format!("tls/127.0.0.1:{port}");
-    let mut daemon = Command::new(rdog_binary_path())
-        .env("HOME", &home)
-        .env("TMPDIR", &daemon_tmp)
-        .args(["daemon", "-c", config_path.to_str().expect("config path")])
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("mTLS daemon should start");
+    let mut daemon = ChildGuard::new(
+        Command::new(rdog_binary_path())
+            .env("HOME", &home)
+            .env("TMPDIR", &daemon_tmp)
+            .args(["daemon", "-c", config_path.to_str().expect("config path")])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("mTLS daemon should start"),
+    );
     let buffer = Arc::new(Mutex::new(String::new()));
     let _ = spawn_output_collector_to(
         daemon.stdout.take().expect("daemon stdout"),
