@@ -8,6 +8,11 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[path = "support/child_guard.rs"]
+mod child_guard;
+
+use child_guard::ChildGuard;
+
 fn next_free_port() -> u16 {
     let listener = TcpListener::bind(("127.0.0.1", 0)).expect("ephemeral listener should bind");
     let port = listener
@@ -22,22 +27,24 @@ fn next_free_port() -> u16 {
 mod rdog_binary;
 
 use rdog_binary::rdog_binary_path;
-fn spawn_connect(mode: &str, port: u16) -> Child {
-    Command::new(rdog_binary_path())
-        .args([
-            "connect",
-            "--mode",
-            mode,
-            "-s",
-            "/bin/sh",
-            "127.0.0.1",
-            &port.to_string(),
-        ])
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("connect should start")
+fn spawn_connect(mode: &str, port: u16) -> ChildGuard {
+    ChildGuard::new(
+        Command::new(rdog_binary_path())
+            .args([
+                "connect",
+                "--mode",
+                mode,
+                "-s",
+                "/bin/sh",
+                "127.0.0.1",
+                &port.to_string(),
+            ])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("connect should start"),
+    )
 }
 
 fn accept_with_timeout(listener: &TcpListener, child: &mut Child, timeout: Duration) -> TcpStream {
@@ -157,6 +164,8 @@ fn connect_stdio_mode_should_forward_clean_noninteractive_output() {
     drop(stream);
 
     let output = child
+        .take()
+        .expect("guard should still own the connect child")
         .wait_with_output()
         .expect("stdio child should exit after shell exit");
     assert!(
@@ -189,6 +198,8 @@ fn connect_agent_mode_should_return_stdout_stderr_and_exit_code_per_command() {
     drop(stream);
 
     let output = child
+        .take()
+        .expect("guard should still own the connect child")
         .wait_with_output()
         .expect("agent child should exit after controller disconnects");
     assert!(
