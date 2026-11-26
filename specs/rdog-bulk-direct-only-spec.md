@@ -418,6 +418,10 @@ daemon 都会把 178 MB 从 relay 推出去. 所以两端都要, 且两端都要
 - 把第三种当第一种, 就得到一条"看起来有门禁、其实只在边界上有"的路径; 把第二种当第三种, 则白扔了
   它确实做到的那一半。两种错都在这一格上发生过, 所以能力是**三格**而不是一个布尔。
 
+**"边界之间"到底有多宽**: 就是一个 chunk 的间隔 —— iroh lane 上上传 256 KiB、下载 36 KiB (§5.1)。
+一条 relay path 若只活在这个窗口里, §4.2 的并集对账也看不见它, 那次尝试仍会报 `relay_bytes_zero`。
+这条残余由 `bulk_path_pin=false` 这一格**如实声明**, 因此不是缺陷; 但它必须与 §4.2 的结论一起被引用。
+
 **当前落地形态 (2026-11-26 RAI-476 步骤 1+2, 按评审裁定回填).** iroh **准入 lane** 承载 bulk 数据面:
 七个 bulk 动词与 `@ping` 共用同一条连接, 每条 chunk 是一条独立请求行 (`serve_admitted`, 见
 `specs/rdog-iroh-admission-contract.md`); 未开准入策略的默认 lane 仍拒绝 bulk (`readonly_request` →
@@ -576,6 +580,12 @@ schema 完全一致 (`endpoint:"daemon"`). 三个终态各挂一处, 除此之�
 的 path 不保留). 本版不做, 因此这里能主张的只是"括号两端可见的 relay 字节增量为 0",
 不是"这条连接上从未有字节经过 relay".
 
+**第二条已知边界, 与门禁的采样窗口重合**: 一条 relay path 若整个生命周期都落在**两个 chunk 边界
+之间** (开了又关, 边界采样时都不在场), 并集里也不会出现它 —— 那次尝试仍会报 `relay_bytes_zero`.
+窗口就是一个块的间隔 (iroh lane 上上传 256 KiB / 下载 36 KiB), 且 `bulk_path_pin=false` 已经声明
+"边界之间的排队与重传看不见" (§3.5), 所以这条残余属于"已声明的能力边界"而不属于缺陷; 但它是本票
+唯一那个结论的**残余不确定度**, 验收读数里必须与结论一起引用, 不能只在评审对话里存在.
+
 #### join 工具与原因码
 
 `rdog bulk-path join <PATH>...` 读若干 `rdog.bulk-path.v1` 文件 (或目录里的 `*.json`), 先按
@@ -700,8 +710,8 @@ daemon 按 `<transfer_id>#<该 id 被 open 的序号>` 派生. 派生的那个�
 形状沿用 `rdog control` 现有的 flag 风格 (`--pty`、`--ui-script` 就是这么加的, 见 `src/input.rs:124-153`):
 
 ```
-rdog control <TARGET> --put <LOCAL_PATH> --remote-path <REMOTE_PATH> [--resume]
-rdog control <TARGET> --get <REMOTE_PATH> --local-path <LOCAL_PATH> [--resume]
+rdog control <TARGET> --put <LOCAL_PATH> --remote-path <REMOTE_PATH> [--restart]
+rdog control <TARGET> --get <REMOTE_PATH> --local-path <LOCAL_PATH>
 ```
 
 | 项 | 规定 |
@@ -727,7 +737,7 @@ rdog control <TARGET> --get <REMOTE_PATH> --local-path <LOCAL_PATH> [--resume]
 | --- | --- |
 | 连接与握手 | 与 PTY 客户端同一套: profile → identity → directory lookup → `connect_with_path` → `open_bi` → `Handshake::Admit` (共用 `admit_lane`)。租约按 `lease_ttl_ms` 续期, 传输期间不断租 |
 | 门禁时机 | open 前判一次, **上传与下载两个方向的每个 chunk 边界都再判一次**, 判定用边界上的即时采样 (§3.1) |
-| chunk 大小 | 这条 lane 上单块载荷 256 KiB (见下方算术), 两个方向共用同一个值: 上传按它切块, 下载按它填 `@file-read.length` |
+| chunk 大小 | **上传 256 KiB** (受帧写预算与 noq 单流窗口约束, 见下方算术); **下载 36096 B ≈ 35 KiB** (受响应行统一的 48 KiB 预算约束, `run_get_inner` 按 `response_payload_bytes()` 切)。两个方向撞的是两条不同的预算, 所以不共用同一个值 |
 | 单帧写预算 | `max(frame_timeout_ms, 帧长 / 96 KiB/s)`。`frame_timeout_ms` 是 profile 的上限语义, 不是"每条链路的实际吞吐"; 大帧的等待时间按最慢目标链路放量, 见下方算术 |
 | 括号端点 | `before` 在 open 请求发出**之前**取, `after` 在终态请求之后取; 两端都是本端这条连接上 relay path 的累计 UDP 字节, 换算与 daemon 侧共用 `relay_bracket` (§4.2) |
 | 括号对账 | 终态对账用的是**本次尝试见过的 relay path 并集** (`before` + 每个边界采样 + 终态采样), 不是 `before` 那一刻的集合。并集里任何一条在 `after` 不在场 → 四个 `null`。`before` 集合为空不构成豁免: 两个计数仍必须都在 |
@@ -750,6 +760,11 @@ rdog control <TARGET> --get <REMOTE_PATH> --local-path <LOCAL_PATH> [--resume]
 
 两者都不需要使用者改配置 —— 抬 `frame_timeout_ms` 只能救一条已知慢的链路, 救不了"帧本身就比
 窗口大一个量级"这件事。
+
+**下载方向的结构上限 (写在这里, 免得被当成 bug)**: 下载每块 36096 B, 而每块是一次完整往返, 所以
+吞吐上限 ≈ `36096 / RTT`。100 ms RTT 约 **0.34 MB/s**, 1 GiB 约 **50 min**。这个数字来自结构
+(每块一往返 + 响应行预算), **不是实测** —— 它随 RTT 线性变化; 改大要靠"一条 `@file-read` 带多块"
+这类协议改动, 不在本票范围。
 
 **措辞上限 (与 §4.4 正对照一并读)。** 客户端能给出的结论只到"括号两点之间读到的 relay 累计量增
 量为 0"这一层: `stats().udp_tx/rx.bytes` 是这条 path 上的**全部** UDP 字节 (含 ACK、keepalive、

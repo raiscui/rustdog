@@ -547,6 +547,7 @@ fn run(opts: input::Opts) -> Result<(), String> {
                             &peer,
                             &mut recorder,
                             &transfer_cli::TransferIdStore::user_default(),
+                            &transfer_cli::target_label(&invocation),
                             &local,
                             &remote,
                             restart,

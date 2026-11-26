@@ -68,6 +68,28 @@ pub(crate) trait LineExchange {
     }
 }
 
+/// 一条控制出口的稳定身份, 用来给 `--put` 的 transfer_id 分桶 (见 `TransferIdStore`)。
+///
+/// 同一个本地文件发往两台不同主机是两次传输: 只按路径分桶会让第二次撞上"同 id 换目标"。
+pub(crate) fn target_label(invocation: &ControlInvocation) -> String {
+    match invocation {
+        ControlInvocation::Tcp { host, port } => format!("tcp:{host}:{port}"),
+        ControlInvocation::WebSocket { url } => format!("ws:{url}"),
+        ControlInvocation::Zenoh {
+            namespace,
+            target_name,
+            ..
+        } => format!(
+            "zenoh:{}/{}",
+            namespace.as_deref().unwrap_or(""),
+            target_name.as_deref().unwrap_or("")
+        ),
+        ControlInvocation::ZenohLocal { namespace } => {
+            format!("zenoh-local:{}", namespace.as_deref().unwrap_or(""))
+        }
+    }
+}
+
 /// 一次失败的交换。
 ///
 /// `evidence` 是这条**错误回执**上挂的 daemon 半快照 —— 门禁拒绝与中止的终态同样带证据
@@ -233,8 +255,10 @@ impl TransferIdStore {
         Self { path: Some(path) }
     }
 
-    fn key(local: &Path, remote: &str) -> String {
-        format!("{}\0{remote}", local.display())
+    /// 键是 (目标, 本地路径, 远端路径): 同一个本地文件发往两台不同主机是两次传输, 吃同一个
+    /// transfer_id 会让第二次的 `@put-file` 在 daemon 侧撞上"同 id 换目标"那条分支。
+    fn key(target: &str, local: &Path, remote: &str) -> String {
+        format!("{target}\0{}\0{remote}", local.display())
     }
 
     fn load(&self) -> std::collections::BTreeMap<String, String> {
@@ -258,6 +282,8 @@ impl TransferIdStore {
         }
     }
 
+    /// 写临时文件再 rename: 读者永远看不到半张表 (截断写能让并发读者读回空表, 于是所有 id
+    /// 一起丢, 退回的正是这个 store 要消灭的 `path_in_use`)。临时名带 pid, 两个进程不会撞。
     fn save(&self, ids: &std::collections::BTreeMap<String, String>) {
         let Some(path) = self.path.as_ref() else {
             return;
@@ -268,29 +294,44 @@ impl TransferIdStore {
                 return;
             }
         }
-        match serde_json::to_vec(ids) {
-            Ok(bytes) => {
-                if let Err(err) = std::fs::write(path, bytes) {
-                    eprintln!("warning: 写不进 {}: {err}", path.display());
-                }
+        let bytes = match serde_json::to_vec(ids) {
+            Ok(bytes) => bytes,
+            Err(err) => {
+                eprintln!("warning: 序列化 transfer_id 表失败: {err}");
+                return;
             }
-            Err(err) => eprintln!("warning: 序列化 transfer_id 表失败: {err}"),
+        };
+        let staging = path.with_file_name(format!(
+            "{}.{}.tmp",
+            path.file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "bulk-transfer-ids".to_string()),
+            std::process::id()
+        ));
+        if let Err(err) = std::fs::write(&staging, bytes) {
+            eprintln!("warning: 写不进 {staging:?}: {err}");
+            return;
+        }
+        if let Err(err) = std::fs::rename(&staging, path) {
+            eprintln!("warning: 换不上 {path:?}: {err}");
+            let _ = std::fs::remove_file(&staging);
         }
     }
 
-    fn get(&self, local: &Path, remote: &str) -> Option<String> {
-        self.load().remove(&Self::key(local, remote))
+    fn get(&self, target: &str, local: &Path, remote: &str) -> Option<String> {
+        self.load().remove(&Self::key(target, local, remote))
     }
 
-    fn put(&self, local: &Path, remote: &str, transfer_id: &str) {
+    /// 写前重读: 并发跑的两条传输各自只改自己那一条, 不能拿自己这份快照把别人的整表覆盖掉。
+    fn put(&self, target: &str, local: &Path, remote: &str, transfer_id: &str) {
         let mut ids = self.load();
-        ids.insert(Self::key(local, remote), transfer_id.to_string());
+        ids.insert(Self::key(target, local, remote), transfer_id.to_string());
         self.save(&ids);
     }
 
-    fn remove(&self, local: &Path, remote: &str) {
+    fn remove(&self, target: &str, local: &Path, remote: &str) {
         let mut ids = self.load();
-        if ids.remove(&Self::key(local, remote)).is_some() {
+        if ids.remove(&Self::key(target, local, remote)).is_some() {
             self.save(&ids);
         }
     }
@@ -540,12 +581,21 @@ impl BulkPathRecorder {
 ///
 /// 门禁拒绝与被中止的终态同样挂着 `evidence` (§4.3): 在错误路径上丢掉它, 跨端 join 就只能落到
 /// `bulk_path_endpoint_missing` —— 而"为什么这次没成"正是最该留证据的时刻。
-fn note_error(recorder: &mut BulkPathRecorder, error: ExchangeError, transfer_id: &str) -> String {
+fn note_error(
+    recorder: &mut BulkPathRecorder,
+    error: ExchangeError,
+    transfer_id: &str,
+    resumable: bool,
+) -> String {
     recorder.note_daemon_half(error.evidence);
-    format!(
-        "{} (transfer_id={transfer_id}; 同路径重跑会用它续传)",
-        error.message
-    )
+    if resumable {
+        format!(
+            "{} (transfer_id={transfer_id}; 同路径重跑会用它续传)",
+            error.message
+        )
+    } else {
+        format!("{} (transfer_id={transfer_id})", error.message)
+    }
 }
 
 fn refuse_message(code: &str) -> String {
@@ -588,7 +638,11 @@ struct IrohExchange<'lane> {
 ///
 /// 256 KiB 的依据: 帧 ≈ 341 KiB ≈ 1.25 MB 窗口的 27%, 一帧最多挡一两次窗口更新; 按 96 KiB/s
 /// 的最慢目标链路 (见 `MIN_FRAME_BYTES_PER_SEC`) 也是 ~3.6 s, 与默认预算同量级。
-/// `--get` 也一样: 请求里的 `length` 用的是同一个值, 所以下行帧同样有界。
+///
+/// **只约束上传方向**。下载方向受的是另一条预算: `@file-read` 的回执是**响应行**, 而响应行
+/// 有统一的 model-visible 上限 (`CONTROL_RESPONSE_MAX_BYTES` = 48 KiB), 超了会被包成
+/// `output_budget_exceeded`。所以 `run_get_inner` 每块自己按 `response_payload_bytes()` 切到
+/// 36096 B (≈35 KiB) —— 与这里的 256 KiB 不是同一个值, 也不该是: 上传的帧是请求行, 没有这条上限。
 const IROH_CHUNK_PAYLOAD_BYTES: usize = 256 * 1024;
 
 impl<'lane> IrohExchange<'lane> {
@@ -621,7 +675,9 @@ impl LineExchange for IrohExchange<'_> {
         Some(self.lane.borrow().observe())
     }
 
-    /// 这条 lane 上用更小的块: 单帧必须远小于流窗口 (见 `IROH_CHUNK_PAYLOAD_BYTES`)。
+    /// 上传方向的块大小: 单帧必须远小于流窗口 (见 `IROH_CHUNK_PAYLOAD_BYTES`)。
+    ///
+    /// 下载方向不吃这个值 —— `run_get_inner` 自己按响应预算切 (36 KiB)。
     fn chunk_bytes(&self) -> usize {
         chunk_payload_bytes().min(IROH_CHUNK_PAYLOAD_BYTES)
     }
@@ -653,6 +709,7 @@ pub(crate) fn run_iroh_bulk(
 ) -> Result<TransferReceipt, String> {
     let chunk_ack_timeout_ms = chunk_ack_timeout_ms_from_config();
     let ids = TransferIdStore::user_default();
+    let target = name.to_owned();
     crate::control_iroh::with_bulk_lane(path, name, move |lane| {
         let exchange_peer = IrohExchange::new(lane, chunk_ack_timeout_ms);
         let mut recorder = BulkPathRecorder::new(
@@ -669,6 +726,7 @@ pub(crate) fn run_iroh_bulk(
                 &exchange_peer,
                 &mut recorder,
                 &ids,
+                &target,
                 &local,
                 &remote,
                 restart,
@@ -802,6 +860,7 @@ pub(crate) fn run_put(
     exchange_peer: &dyn LineExchange,
     recorder: &mut BulkPathRecorder,
     ids: &TransferIdStore,
+    target: &str,
     local: &Path,
     remote: &str,
     restart: bool,
@@ -809,7 +868,7 @@ pub(crate) fn run_put(
     // 任何一条失败路径都必须留下快照: 门禁拒绝、open 失败、分块失败、`@file-end` 失败。
     // 只在两条路上写会让"这次尝试到底发生了什么"在证据里缺一块 —— 而缺的那块最可能是
     // 失败原因本身。成功路径只在括号右端取完之后写一次。
-    let outcome = run_put_inner(exchange_peer, recorder, ids, local, remote, restart);
+    let outcome = run_put_inner(exchange_peer, recorder, ids, target, local, remote, restart);
     recorder.close_bracket(exchange_peer);
     match outcome {
         Ok(receipt) => {
@@ -828,6 +887,7 @@ fn run_put_inner(
     exchange_peer: &dyn LineExchange,
     recorder: &mut BulkPathRecorder,
     ids: &TransferIdStore,
+    target: &str,
     local: &Path,
     remote: &str,
     restart: bool,
@@ -840,15 +900,22 @@ fn run_put_inner(
     }
     let size = metadata.len();
     let sha256 = sha256_of_file(local)?;
-    // 同一条 (本地, 目标, 远端) 上一次没走完就复用它的 id: daemon 的会话还在, 新 id 会被
-    // `file_transfer_path_in_use` 挡到续传窗口过期。`--restart` 明确要求从 0 重来, 那就换新 id。
+    // 同一条 (目标, 本地, 远端) 上一次没走完就复用它的 id: daemon 的会话还在, 新 id 会撞
+    // `file_transfer_path_in_use` (那条检查先于 `resume:false` 的清理), 一直挡到续传窗口过期。
+    let previous = ids.get(target, local, remote);
     let transfer_id = if restart {
+        // `--restart` 要换新 id, 那就必须先把旧会话收掉 —— 否则"别的 id 持有同一暂存路径"
+        // 会把它挡在门外, 而错误文本还会说"同路径重跑会用它续传"(那个 id 我们已经不用了)。
+        if let Some(stale) = previous.as_ref() {
+            let _ = exchange_peer.request(&format!(
+                "@file-cancel:{{\"transfer_id\":\"{stale}\"}}"
+            ));
+            ids.remove(target, local, remote);
+        }
         new_transfer_id("put")
     } else {
-        ids.get(local, remote)
-            .unwrap_or_else(|| new_transfer_id("put"))
+        previous.unwrap_or_else(|| new_transfer_id("put"))
     };
-    ids.put(local, remote, &transfer_id);
     recorder.remember_transfer(&transfer_id);
     // 门禁在 transfer_id 之后就判: 被拒的尝试也要在证据里带自己的 id, 否则按 id join 时
     // 多次被拒会并成一条。括号左端也在这里取 —— 它必须早于 open 执行 (§4.2)。
@@ -866,7 +933,10 @@ fn run_put_inner(
     });
     let opened = exchange_peer
         .request(&format!("@put-file:{}", open_line))
-        .map_err(|err| note_error(recorder, err, &transfer_id))?;
+        // open 没被接受就还没有可续的会话: 这时不写 store, 错误文本里也就不该许诺"会用它续传"。
+        .map_err(|err| note_error(recorder, err, &transfer_id, false))?;
+    // daemon 接受了这一次 open, 会话才算真的存在: 从这一刻起这个 id 才有"续传"的含义。
+    ids.put(target, local, remote, &transfer_id);
     let written = opened.get("written").and_then(Value::as_u64).unwrap_or(0);
     let resume_honored = opened
         .get("resume_honored")
@@ -904,7 +974,7 @@ fn run_put_inner(
         let accepted = match exchange_peer.request(&format!("@file-chunk:{chunk_line}")) {
             Ok(value) => value,
             Err(err) => {
-                let reason = note_error(recorder, err, &transfer_id);
+                let reason = note_error(recorder, err, &transfer_id, true);
                 // 失败路径必须显式取消 —— 但 lane 已经 poison 时取消也发不出去, 那时留着会话
                 // 反而是对的: 下次同路径的 `--put` 复用同一个 id 接着传 (见 `TransferIdStore`)。
                 let _ = exchange_peer.request(&format!(
@@ -936,7 +1006,7 @@ fn run_put_inner(
     });
     let committed = exchange_peer
         .request(&format!("@file-end:{end_line}"))
-        .map_err(|err| note_error(recorder, err, &transfer_id))?;
+        .map_err(|err| note_error(recorder, err, &transfer_id, true))?;
     // 上传的终态是 `@file-end`: daemon 那一半随这条响应到达 (§4.3)。
     recorder.note_daemon_half(committed.evidence.clone());
     match committed.get("state").and_then(Value::as_str) {
@@ -948,8 +1018,8 @@ fn run_put_inner(
             ))
         }
     }
-    // 提交成功: 这条 (本地, 目标, 远端) 不再有未完成尝试, 下一次从新 id 开始。
-    ids.remove(local, remote);
+    // 提交成功: 这条 (目标, 本地, 远端) 不再有未完成尝试, 下一次从新 id 开始。
+    ids.remove(target, local, remote);
     Ok(TransferReceipt {
         transfer_id: transfer_id.clone(),
         direction: "put",
@@ -1001,7 +1071,7 @@ fn run_get_inner(
     });
     let opened = exchange_peer
         .request(&format!("@get-file:{open_line}"))
-        .map_err(|err| note_error(recorder, err, &transfer_id))?;
+        .map_err(|err| note_error(recorder, err, &transfer_id, false))?;
     let size = opened.get("size").and_then(Value::as_u64).unwrap_or(0);
     let declared_sha256 = opened
         .get("sha256")
@@ -1026,7 +1096,12 @@ fn run_get_inner(
         let mut file = std::fs::File::create(&staging)
             .map_err(|err| format!("创建 {staging:?} 失败: {err}"))?;
         // 下载方向的上限不是行长度而是**响应预算**: 一个 `@file-read` 的回执超预算时会被包成
-        // `output_budget_exceeded` 而拿不到数据。所以每块按响应预算切, 比上传块小一个量级。
+        // `output_budget_exceeded` 而拿不到数据。所以每块按 `response_payload_bytes()` 切到 36096 B
+        // (≈35 KiB) —— 比上传块 (iroh lane 上是 256 KiB) 小一个量级, 因为两个方向撞的是两条
+        // 不同的预算: 上传受帧写预算与流窗口约束, 下载受响应行预算约束。
+        //
+        // 代价是结构性的: 每块一次完整往返, 36 KiB/块在 100 ms RTT 下约 0.34 MB/s (1 GiB ≈ 50 min)。
+        // 这是"每块一往返"这个设计的上限, 不是实测值。
         let chunk_bytes = (exchange_peer.chunk_bytes() as u64).min(response_payload_bytes());
         let mut offset = 0u64;
         loop {
@@ -1040,7 +1115,7 @@ fn run_get_inner(
             recorder.recheck(exchange_peer)?;
             let read = exchange_peer
                 .request(&format!("@file-read:{read_line}"))
-                .map_err(|err| note_error(recorder, err, &transfer_id))?;
+                .map_err(|err| note_error(recorder, err, &transfer_id, false))?;
             let data = read.get("data").and_then(Value::as_str).unwrap_or_default();
             let bytes = BASE64_STANDARD
                 .decode(data)
@@ -1119,8 +1194,11 @@ mod tests {
         /// 从第 N 个 chunk 起, **所有**后续请求都失败 —— 用来复现"lane 已 poison, 连 cancel 都发不
         /// 出去"的那种失败, 而不是"某一块失败但通道还活着"。
         poison_after_chunk: Option<usize>,
-        /// poison 时错误回执上挂的 daemon 半快照 (门禁拒绝/中止的终态会带 `evidence`)。
-        poison_evidence: Option<Value>,
+        /// `@file-end` 这一步失败时挂的 daemon 半快照 —— **终态**才是 daemon 会带 `evidence`
+        /// 的地方 (§4.3): chunk 失败是非终态, daemon 不在那条错误上挂证据。
+        end_failure_evidence: Option<Value>,
+        /// `@put-file` 直接失败 (open 没被接受)。
+        fail_open: bool,
     }
 
     impl LoopbackPeer {
@@ -1134,7 +1212,8 @@ mod tests {
                 observations: std::sync::Mutex::new(std::collections::VecDeque::new()),
                 attach_evidence: None,
                 poison_after_chunk: None,
-                poison_evidence: None,
+                end_failure_evidence: None,
+                fail_open: false,
             }
         }
 
@@ -1193,9 +1272,21 @@ mod tests {
                     .count();
                 // 第 `index+1` 块之后整条流不可用: 后续每一条 (含 `@file-cancel`) 都失败。
                 if sent > index && (!line.starts_with("@file-chunk:") || sent > index + 1) {
+                    return Err(ExchangeError::without_evidence(
+                        "模拟的 lane 已 poison".to_string(),
+                    ));
+                }
+            }
+            if self.fail_open && line.starts_with("@put-file:") {
+                return Err(ExchangeError::without_evidence(
+                    "模拟的 open 被拒".to_string(),
+                ));
+            }
+            if line.starts_with("@file-end:") {
+                if let Some(evidence) = self.end_failure_evidence.as_ref() {
                     return Err(ExchangeError {
-                        message: "模拟的 lane 已 poison".to_string(),
-                        evidence: self.poison_evidence.as_ref().map(Value::to_string),
+                        message: "模拟的终态失败".to_string(),
+                        evidence: Some(evidence.to_string()),
                     });
                 }
             }
@@ -1273,7 +1364,7 @@ mod tests {
         restart: bool,
     ) -> Result<TransferReceipt, String> {
         let ids = ids_for(&recorder.attempt_id.clone());
-        run_put(peer, recorder, &ids, local, remote, restart)
+        run_put(peer, recorder, &ids, "test-target", local, remote, restart)
     }
 
     fn scratch_dir(tag: &str) -> std::path::PathBuf {
@@ -1955,6 +2046,7 @@ mod tests {
             &peer,
             &mut recorder,
             &ids,
+            "test-target",
             &local,
             &remote.to_string_lossy(),
             false,
@@ -1974,6 +2066,7 @@ mod tests {
             &peer2,
             &mut recorder2,
             &ids,
+            "test-target",
             &local,
             &remote.to_string_lossy(),
             false,
@@ -1995,9 +2088,10 @@ mod tests {
     }
 
     #[test]
-    fn an_error_receipt_still_lands_its_daemon_half() {
-        // 评审 #4: 门禁拒绝/中止的终态同样带 `evidence`, 在错误路径上丢掉它就等于让 join
-        // 永远拿到 endpoint_missing —— 而"为什么没成"正是最该留证据的时刻。
+    fn a_terminal_failure_still_lands_its_daemon_half() {
+        // 评审 #4 的边界: daemon 只在**终态**错误的回执上挂 `evidence` (§4.3), 非终态的 chunk
+        // 失败不带。所以这条用例失败在 `@file-end` (终态), 替身也只在这一条错误上挂证据 ——
+        // 读成"daemon 在 chunk 失败时也给 evidence"会是错的。
         let dir = scratch_dir("error-evidence");
         let local = dir.join("source.bin");
         std::fs::write(&local, vec![4u8; 20]).unwrap();
@@ -2014,8 +2108,7 @@ mod tests {
         });
 
         let mut peer = LoopbackPeer::new(7).with_observations(vec![direct()]);
-        peer.poison_after_chunk = Some(0);
-        peer.poison_evidence = Some(evidence.clone());
+        peer.end_failure_evidence = Some(evidence.clone());
         let mut recorder = iroh_recorder(Some(out.clone()));
         let err = run_put_default_ids(
             &peer,
@@ -2025,12 +2118,132 @@ mod tests {
             false,
         )
         .unwrap_err();
-        assert!(err.contains("poison"), "{err}");
+        assert!(err.contains("终态失败"), "{err}");
 
         let raw = std::fs::read_to_string(dir.join(DAEMON_HALF_FILE))
-            .expect("错误回执上的 daemon 半快照也要落盘");
+            .expect("终态错误回执上的 daemon 半快照也要落盘");
         let written: Value = serde_json::from_str(&raw).unwrap();
         assert_eq!(written, evidence);
+        let id = transfer_id_of(&peer);
+        crate::control_file_transfer::forget_sessions_for_tests(&[&id]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn restart_cancels_the_stale_session_so_the_next_open_is_not_blocked() {
+        // 评审 D2: `--restart` 换新 id, 但 daemon 的"别的 id 持有同一暂存路径"检查先于
+        // `resume:false` 的清理 —— 不先把旧会话 cancel 掉, 下一次 open 会被 `path_in_use` 挡到
+        // 续传窗口过期, 而错误文本还在说"同路径重跑会用它续传"(那个 id 已经不用了)。
+        let dir = scratch_dir("restart-cancel");
+        let local = dir.join("source.bin");
+        let payload: Vec<u8> = (0..40u8).collect();
+        std::fs::write(&local, &payload).unwrap();
+        let remote = dir.join("landed.bin");
+        let ids = ids_for("restart-cancel-shared");
+
+        // 第一次: 第一块之后整条流不可用, 会话留在 daemon 表里。
+        let mut peer = LoopbackPeer::new(7).with_observations(vec![direct()]);
+        peer.poison_after_chunk = Some(0);
+        let mut recorder = iroh_recorder(None);
+        let id_at_failure = {
+            let err = run_put(
+                &peer,
+                &mut recorder,
+                &ids,
+                "test-target",
+                &local,
+                &remote.to_string_lossy(),
+                false,
+            )
+            .unwrap_err();
+            assert!(err.contains("poison"), "{err}");
+            transfer_id_of(&peer)
+        };
+
+        // 第二次带 --restart: 必须先 cancel 掉旧会话, 再用新 id 从 0 开始。
+        let peer2 = LoopbackPeer::new(7).with_observations(vec![direct()]);
+        let mut recorder2 = iroh_recorder(None);
+        let receipt = run_put(
+            &peer2,
+            &mut recorder2,
+            &ids,
+            "test-target",
+            &local,
+            &remote.to_string_lossy(),
+            true,
+        )
+        .unwrap();
+        assert!(
+            peer2
+                .seen()
+                .iter()
+                .any(|line| line.starts_with("@file-cancel:")),
+            "--restart 必须先把旧会话收掉: {:?}",
+            peer2.seen()
+        );
+        assert!(
+            peer2
+                .seen()
+                .iter()
+                .any(|line| line.contains(&format!("\"transfer_id\":\"{id_at_failure}\""))
+                    && line.starts_with("@file-cancel:")),
+            "cancel 的必须是 store 里那个旧 id"
+        );
+        assert_ne!(
+            transfer_id_of(&peer2),
+            id_at_failure,
+            "--restart 要换新 id"
+        );
+        assert_eq!(receipt.resume_honored, Some(false), "restart 是从 0 开始");
+
+        // 第三次不带 --restart: 不该再撞 `path_in_use` —— 旧会话已经收干净了。
+        let peer3 = LoopbackPeer::new(7).with_observations(vec![direct()]);
+        let mut recorder3 = iroh_recorder(None);
+        let again = run_put(
+            &peer3,
+            &mut recorder3,
+            &ids,
+            "test-target",
+            &local,
+            &remote.to_string_lossy(),
+            false,
+        );
+        assert!(
+            again.is_ok(),
+            "旧会话收掉之后同路径重跑不该再撞 `path_in_use`: {:?}",
+            again.err()
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_open_that_never_happened_promises_no_resume() {
+        // open 没被接受时 daemon 侧还没有会话: store 不能写, 错误文本也不能说"会用它续传"。
+        let dir = scratch_dir("open-refused");
+        let local = dir.join("source.bin");
+        std::fs::write(&local, vec![4u8; 8]).unwrap();
+        let remote = dir.join("landed.bin");
+        let ids = ids_for("open-refused-shared");
+
+        let mut peer = LoopbackPeer::new(7).with_observations(vec![direct()]);
+        peer.fail_open = true;
+        let mut recorder = iroh_recorder(None);
+        let err = run_put(
+            &peer,
+            &mut recorder,
+            &ids,
+            "test-target",
+            &local,
+            &remote.to_string_lossy(),
+            false,
+        )
+        .unwrap_err();
+        assert!(err.contains("模拟的 open 被拒"), "{err}");
+        assert!(
+            !err.contains("会用它续传"),
+            "没有可续的会话就不许许诺: {err}"
+        );
+        assert_eq!(ids.get("test-target", &local, &remote.to_string_lossy()), None);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
