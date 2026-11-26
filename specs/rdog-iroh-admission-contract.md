@@ -18,6 +18,11 @@
 
 relay 侧另有一个 `advertise` 字段（缺省空），只改写给对端的 relay URL，不改绑定位：1:1 NAT 机型的公网地址（EIP）只存在于 NAT 设备上，本机网卡根本绑不住（`EADDRNOTAVAIL`），而 registry 原本用绑定地址拼 relay URL，于是对端拿到一个它到不了的地址、注册被 `iroh_registration_denied` 拒。所以 `bind`/`relay_*`/`qad` 绑网卡上的私有地址，`advertise` 填公网地址。**`advertise` 有意不过 [`network`](../src/control_iroh.rs)**：它不是本机地址，按绑定地址的规则校验它只会把唯一可用的配置方式判死；它进 URL 后仍要过 `RelayUrl` 解析与对端的 `relay_allowed`（https + 显式端口）。
 
+运维事实（真机跨网两轮后补，别当 bug 查）：
+
+- **客户端 `bind` 必须跟本机当前地址走。** [`bind_addr`](../src/control_iroh.rs) 把 `bind` 交给 [`network`](../src/control_iroh.rs) 直接绑，所以换网（家宽 → 手机热点）后**已在跑的会话不受影响**（走已建立的连接），但**新建**连接仍用旧地址会 `EADDRNOTAVAIL`，CLI 表面是 `Failed to bind sockets`，看起来像链路故障。实测家宽 `192.168.50.143` 切热点 `172.20.10.2`：沿用旧值报该错，改成新值立刻 `iroh_path=relay` + `pong:true`。排障顺序是先重填 `bind`，不是先怀疑 relay 或 daemon。
+- **relay 主机的运行库**：本地 glibc 2.39 构建在 glibc 2.38 的宿主上 `GLIBC_2.39 not found`，用 `rust:1-slim-bookworm` 容器构建可解。用 `LD_LIBRARY_PATH` 外带依赖库时只能带 GUI 那几个（`libgbm`/`wayland`/`xcb`/`drm`/`expat`/`Xau`/`Xdmcp`/`bsd`/`md`/`ffi`/`stdc++`），把 `ld-linux`/`libc`/`libm`/`libpthread`/`libgcc_s` 混进去会让进程直接 `Floating point exception (core dumped)`。
+
 实测（模拟 1:1 NAT 的三个网络栈，`tests/manual/iroh_pty_advertise.sh` → `iroh_pty_lane.py --advertise`，回执 `receipts/u10/advertise.log`）：绑私网通告公网时 daemon 的 relay home 是通告值、注册被接受、ping 通过；不写 `advertise` 时注册被拒；通告一个没人持有的地址时 daemon 非零退出且从未注册。公网真机由 RAI-302 侧另判。
 
 写帧失败即作废该流：[`FrameGuard`](../src/control_iroh.rs) 在帧被完整写入之前不放行下一帧，任何一次写失败或写超时都把这条流标记成不可用，之后的所有写直接返回 [`FRAME_BROKEN`](../src/control_iroh.rs)，lane 随之结束并用同一 reason 关闭会话（[`abort_broken_frame`](../src/control_iroh.rs)）。理由是残留半帧会让后续帧错位解析，宁可断开也不继续发。
