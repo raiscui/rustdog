@@ -48,7 +48,9 @@ relay 侧另有一个 `advertise` 字段（缺省空），只改写给对端的 
 
 `data.online()` 的语义要读准：它只表示「relay map 里**至少一条** home 连接已建立」，当 endpoint 同时挂着 lane relay 与目录 relay 时，先通的可能是后者。**注册成功证明的是「目录这一跳可达」**；lane relay 是否承载这个 daemon 要另看该 relay 自己的连接状态 —— Registry 的 `Register` 只做形状校验（id、IP 候选、恰好 1 个等于配置值的 relay），不做任何可达性探测，而注册本身走的是目录 relay。
 
-注册契约的形状（[`Registry::request`](../src/control_iroh.rs) 的 `Register` 分支）：
+注册契约的形状（[`Registry::request`](../src/control_iroh.rs) 的 `Register` 分支）。**registry 期望的那个 relay 默认是 rendezvous 自己广告的 relay**；当 daemon 的数据路径使用别的 relay（典型是两端都在 NAT 后、lane 走公共 relay）时，rendezvous 必须用 `registry_relay` 显式声明它 —— 否则合法配置会被 `iroh_registration_denied` 拒掉。这条只改「期望值是哪个」，校验本身不变：注册带的 relay 仍须**恰好等于**期望值。`registry_relay` 是**这个 rendezvous 的单一期望值** —— 在它这里注册的所有 daemon 必须共用同一条 lane relay；两个 daemon 各用一条不同的公共 relay 时，只有与期望值一致的那个能注册。该值启动时按目录 relay 同一套 URL 门禁校验，并在 ready 行以 `registry_relay=<url>` 露出；任何注册拒绝都会落 `expected_relay=… carried_relay=…`，让跨 profile 的配对错位可归因。
+
+形状细节：
 - **至少 1 个 IP 候选 + 恰好 1 个 relay，且该 relay 等于配置值**；每个 IP 候选单独过 [`candidate_ok`](../src/control_iroh.rs)（`network` + 端口非 0）且端口非 0。通配绑定朝多网卡展开，所以候选数不设上限——这是"多候选"的唯一合法来源。
 - **`routable` 下回环地址不是候选**：对端拨 `127.0.0.1` 只会打到它自己，既浪费一次拨号又会让日志出现误导性的前半段失败。daemon 通告前用同一个 `candidate_ok` 过滤，registry 收到回环候选同样拒（与未指定地址同类，仍是 `iroh_registration_denied`）；非 `routable`（回环 profile）不变。
 - **去重不需要单独代码**：`EndpointAddr.addrs` 是 `BTreeSet<TransportAddr>`，重复地址在容器层就不存在。

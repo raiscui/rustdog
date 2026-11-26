@@ -7,9 +7,9 @@
   之后的表现是注册超时、非零退出 —— 而**同机回环有时看不出来**,因为 evict 需要两条 home 都存在。
 - 需要同一身份同时做两件事(被拨 + 主动查目录)时,正确做法是**一个 endpoint 带多个 ALPN + 一个 relay map 装下所有 relay**,
   不是每件事一个 endpoint。
-- 推论:一个 endpoint 只有一份 TLS 根配置,所以「pinned CA 的私建 relay」和「WebPKI 的公共 relay」要共处时只能合并信任域
-  (`embedded().with_extra_roots(...)`);这是宽化,必须绑在**操作者显式给出的信任锚**(如 `root_cert`)上,不能绑在功能开关上,
-  否则只想开功能的人会顺带放大 TLS 信任面而配置里看不出来。
+- 推论:一个 endpoint 只有一份 TLS 根配置,所以「pinned CA 的私建 relay」和「公共 relay」要共处时只能把两份链合进同一份根集合
+  (`custom_roots(链A).with_extra_roots(链B)`,见 `RelayRoots`);这是宽化,必须绑在**操作者显式给出的信任锚**(`root_cert`,当前为必填)上,
+  不能绑在功能开关上,否则只想开功能的人会顺带放大 TLS 信任面而配置里看不出来。整条 lane **不**使用任何内嵌公共根。
 
 ## [2026-04-02 12:16:33] line-control 协议的长期经验
 
