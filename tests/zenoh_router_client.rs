@@ -15,6 +15,9 @@ use zenoh::Wait;
 
 const SERIAL_ENDPOINT_EXAMPLE: &str = "serial//dev/ttyFAKE#baudrate=115200";
 
+#[path = "support/tty_script.rs"]
+mod tty_script;
+
 fn next_port() -> u16 {
     TcpListener::bind(("127.0.0.1", 0))
         .expect("ephemeral port probe should bind")
@@ -1499,12 +1502,9 @@ fn control_should_forward_tty_input_after_zenoh_pty_output_goes_idle() {
     )
     .expect("daemon should report ready");
 
-    let mut child = Command::new("script")
-        .env("HOME", test_isolated_home())
-        .args([
-            "-q",
-            "/dev/null",
-            &rdog_binary_path().to_string_lossy(),
+    let mut child = tty_script::scripted(
+        &rdog_binary_path(),
+        &[
             "control",
             "--transport",
             "zenoh",
@@ -1512,12 +1512,14 @@ fn control_should_forward_tty_input_after_zenoh_pty_output_goes_idle() {
             &daemon_name,
             "--entry-point",
             &entrypoint,
-        ])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("script-wrapped zenoh control cli should start");
+        ],
+    )
+    .env("HOME", test_isolated_home())
+    .stdin(Stdio::piped())
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped())
+    .spawn()
+    .expect("script-wrapped zenoh control cli should start");
 
     let mut child_stdin = child
         .stdin
@@ -1591,12 +1593,9 @@ fn control_should_repaint_tui_input_while_zenoh_pty_output_is_busy() {
     )
     .expect("daemon should report ready");
 
-    let mut child = Command::new("script")
-        .env("HOME", test_isolated_home())
-        .args([
-            "-q",
-            "/dev/null",
-            &rdog_binary_path().to_string_lossy(),
+    let mut child = tty_script::scripted(
+        &rdog_binary_path(),
+        &[
             "control",
             "--transport",
             "zenoh",
@@ -1604,12 +1603,14 @@ fn control_should_repaint_tui_input_while_zenoh_pty_output_is_busy() {
             &daemon_name,
             "--entry-point",
             &entrypoint,
-        ])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("script-wrapped zenoh control cli should start");
+        ],
+    )
+    .env("HOME", test_isolated_home())
+    .stdin(Stdio::piped())
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped())
+    .spawn()
+    .expect("script-wrapped zenoh control cli should start");
 
     let child_stdout = child.stdout.take().expect("control stdout should exist");
     let (control_buffer, _control_collector) = spawn_output_collector(child_stdout);

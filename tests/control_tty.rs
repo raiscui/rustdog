@@ -3,13 +3,16 @@
 use std::{
     io::{BufRead, BufReader, Write},
     net::TcpListener,
-    process::{Command, Stdio},
+    process::Stdio,
     thread,
     time::Duration,
 };
 
 #[path = "support/rdog_binary.rs"]
 mod rdog_binary;
+
+#[path = "support/tty_script.rs"]
+mod tty_script;
 
 use rdog_binary::rdog_binary_path;
 #[test]
@@ -43,15 +46,7 @@ fn control_cli_should_treat_arrow_keys_as_local_cursor_motion_in_tty() {
     });
 
     let binary = rdog_binary_path();
-    let mut child = Command::new("script")
-        .args([
-            "-q",
-            "/dev/null",
-            &binary.to_string_lossy(),
-            "control",
-            "127.0.0.1",
-            &port.to_string(),
-        ])
+    let mut child = tty_script::scripted(&binary, &["control", "127.0.0.1", &port.to_string()])
         // 本测试模拟的是"支持方向键的交互终端"。rustyline 对 dumb TERM 会降级为
         // 无 raw mode 的整行读取 (方向键序列原样透传) -- 那是正确的生产行为,
         // 但会让测试在 TERM=dumb 的非交互 harness (agent shell / CI) 里稳定失败。

@@ -13,6 +13,9 @@ use std::{
 
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 
+#[path = "support/tty_script.rs"]
+mod tty_script;
+
 fn next_free_port() -> u16 {
     let listener = TcpListener::bind(("127.0.0.1", 0)).expect("ephemeral listener should bind");
     let port = listener
@@ -331,15 +334,7 @@ fn control_pty_string_shorthand_should_forward_enter_as_carriage_return_in_tty()
     );
 
     let binary = rdog_binary_path();
-    let mut child = Command::new("script")
-        .args([
-            "-q",
-            "/dev/null",
-            &binary.to_string_lossy(),
-            "control",
-            "127.0.0.1",
-            &port.to_string(),
-        ])
+    let mut child = tty_script::scripted(&binary, &["control", "127.0.0.1", &port.to_string()])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -413,15 +408,7 @@ fn control_pty_ctrl_c_should_exit_remote_program_and_return_to_control_prompt() 
     );
 
     let binary = rdog_binary_path();
-    let mut child = Command::new("script")
-        .args([
-            "-q",
-            "/dev/null",
-            &binary.to_string_lossy(),
-            "control",
-            "127.0.0.1",
-            &port.to_string(),
-        ])
+    let mut child = tty_script::scripted(&binary, &["control", "127.0.0.1", &port.to_string()])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -503,8 +490,9 @@ fn control_pty_should_treat_control_words_as_remote_input() {
         "daemon control lane never started listening on port {port}",
     );
 
-    let mut child = Command::new(rdog_binary_path())
-        .args([
+    let mut child = tty_script::scripted(
+        &rdog_binary_path(),
+        &[
             "control",
             "127.0.0.1",
             &port.to_string(),
@@ -513,25 +501,72 @@ fn control_pty_should_treat_control_words_as_remote_input() {
             "/bin/sh",
             "-c",
             r#"IFS= read -r line; printf 'GOT:%s' "$line""#,
-        ])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("pty control cli should start");
+        ],
+    )
+    .stdin(Stdio::piped())
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped())
+    .spawn()
+    .expect("pty control cli should start");
 
-    child
+    let child_stdout = child
+        .stderr
+        .take()
+        .expect("script-wrapped control stderr should be piped");
+    let (stderr_buffer, stderr_collector) = spawn_output_collector(child_stdout);
+    let child_stdout = child
+        .stdout
+        .take()
+        .expect("script-wrapped control stdout should be piped");
+    let (stdout_buffer, stdout_collector) = spawn_output_collector(child_stdout);
+
+    let mut child_stdin = child
         .stdin
-        .as_mut()
-        .expect("stdin should exist")
+        .take()
+        .expect("script-wrapped control stdin should be piped");
+    child_stdin
         .write_all(b"@script:\"printf BAD\"\n")
         .expect("should send control-looking text into pty");
-    drop(child.stdin.take());
+    child_stdin
+        .flush()
+        .expect("control-looking line should flush");
+    // 写端必须先留着: script 一见到 stdin EOF 就可能提前收掉这层伪终端,
+    // 于是那行还没转给远端 CLI 就被掐断 (control_tty 那边有同类记录的时序坑)。
+    // 先等远端 shell 打印 GOT:, 再关写端收尾。
+    let saw_remote_echo =
+        wait_until_buffer_contains(&stdout_buffer, "GOT:", Duration::from_secs(6));
+    drop(child_stdin);
 
     let output = wait_with_output_timeout(child, Duration::from_secs(8), "pty transparent input");
+    // 子进程退出只保证管道写端关闭, 收集线程未必已把最后一段读进 buffer;
+    // join 之后快照才是完整内容, 否则断言可能漏掉尾部而假红。
+    stdout_collector
+        .join()
+        .expect("stdout collector thread should finish");
+    stderr_collector
+        .join()
+        .expect("stderr collector thread should finish");
     stop_child(&mut daemon);
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        saw_remote_echo,
+        "remote pty helper should print the echoed control line before stdin closes"
+    );
+    let stdout = {
+        let mut stdout = stdout_buffer
+            .lock()
+            .expect("collector buffer lock should work")
+            .clone();
+        stdout.push_str(&String::from_utf8_lossy(&output.stdout));
+        stdout
+    };
+    let stderr = {
+        let mut stderr = stderr_buffer
+            .lock()
+            .expect("collector buffer lock should work")
+            .clone();
+        stderr.push_str(&String::from_utf8_lossy(&output.stderr));
+        stderr
+    };
     assert!(
         output.status.success(),
         "pty transparent input command should exit successfully\nstdout:\n{stdout}\nstderr:\n{stderr}"

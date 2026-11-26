@@ -1,5 +1,25 @@
 # WORKLOG: rustdog
 
+## [2026-11-26] tests/ TTY 夹具改按能力探测选择 script 调用形式 (RAI-410)
+
+- 4 处夹具写 `script -q /dev/null <rdog> control ...`(BSD/macOS 尾随命令形式), util-linux 2.39.3 只认
+  `script -q -c "<CMD>" /dev/null`, 直接报 `unexpected number of arguments` 退出 -> 子进程 stdin BrokenPipe,
+  这 4 个 TTY 用例在 Linux 上从未跑起来。
+- 新增 `tests/support/tty_script.rs`: 探一次 `script -c` 能力并缓存, util-linux 走 `-c`(命令行 POSIX 单引号引用),
+  BSD/macOS 走尾随命令; 探测失败不静默跳过。
+- 顺带修 `control_pty_should_treat_control_words_as_remote_input`: 直接给 `rdog control --pty` 喂管道 stdin
+  (`--pty` 需要真终端) 会永久挂到超时(实测 rc=124), 包一层伪终端后拿到 `GOT:@script:...`。
+- 回执: 本机(ubuntu 24.04 / util-linux 2.39.3 / cargo 1.100) `control_pty` 8 passed/1 failed、
+  `control_tty` 2 passed、`zenoh_router_client` 38 passed/0 failed/2 ignored。
+- 剩余 1 个失败 (`control_pty_ctrl_c_...`) 与夹具无关: python 真 pty(不经 script)复现同一行为; 远端 pty 实测
+  `isig icanon`、helper 即该 pty 的 foreground pgrp、0x03 也确实作为字节送到远端(raw 读端收到 `61 03 62`),
+  只是不产生 SIGINT — 属 pty lane 产品侧缺口, 本票范围外。
+- 评审修复: `control_pty_should_treat_control_words_as_remote_input` 原先写完就关 stdin,
+  而 BSD/macOS 的 script 见到 stdin EOF 可能提前收掉伪终端 (control_tty 里有同类记录); 改成等远端打印
+  `GOT:` 后再关写端, stdout/stderr 走收集器。
+  收集线程在子进程退出后 join 再快照, 否则最后一段输出可能还没落 buffer 就断言 (评审第二轮)。
+- 提交: 370317f (评审修复 6c187d7 / ee8474c)
+
 ## [2026-11-26] tests/ 下 17 处 rdog 二进制路径反推收成一处 (RAI-405)
 
 - `tests/` 下 17 个集成测试各自复制「测试可执行文件上两级 + `/rdog`」; cargo 1.100 把测试可执行文件放到
