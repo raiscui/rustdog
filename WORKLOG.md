@@ -790,3 +790,20 @@ handoffs/rai385/receipts/, reports/RAI-385.md); Windows 真机回执由总控代
 recording_e2e), 属既有测试资产缺陷, 冻结基线同款红; `tests/zenoh_unixpipe_fast_path`
 是 `cfg(target_os = "macos")`, Linux 上 0 用例不是回归。
 - 提交: 268e50f
+
+## 2026-11-26 RAI-385 评审回合:四条发现全部为真并修复
+
+Capy review 给出的 4 条(2 high / 2 medium)复核后全部成立,均属会伤到目标平台的缺陷:
+
+- **bind/connect 语义混用**: `host_from_opts` 被 `Command::Listen` 共用, 我的回环映射会让
+  `rdog listen 5555` 只绑 127.0.0.1。拆成 `host_from_opts`(bind, 保持 0.0.0.0) 与
+  `connect_hosts_from_opts`(connect, 未指定地址 -> 回环)。
+- **Windows 强制范围锁**: `File::try_lock` 在 Windows 是 LockFileEx, 客户端读被锁范围会失败,
+  活着的 daemon 会被判残留并删登记 —— 直接废掉本票能力。liveness 改为只看锁争用。
+- **残留撤销竞态**: 改为在独占锁下重读比对后才删; guard drop 不再删 lock 路径。
+- **端口匹配丢弃方案**: 只认 `tcp/` + 回环 host, 避免 udp lane 抢走同端口号的 TCP 请求。
+
+复验: `cargo test --bin rdog` 三轮 1117 passed / 0 failed / 2 ignored; Linux 三条本机路径
+重新跑过仍全部 `@response`。`tests/control_lanes` 的 15 红在干净基线上逐字同款(回执
+`handoffs/rai385/receipts/04-baseline-control-lanes-red.txt`), 属既有夹具缺陷。
+- 提交: bb94451
