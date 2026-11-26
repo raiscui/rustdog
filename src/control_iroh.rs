@@ -806,7 +806,6 @@ pub(crate) fn run_daemon(path: &Path) -> Result<()> {
             "iroh daemon registered pty={}",
             if admission.is_some() { "admitted" } else { "ping-only" }
         );
-        let admitted = admission.is_some();
         let mut tasks = JoinSet::new();
         loop {
             tokio::select! {
@@ -827,9 +826,12 @@ pub(crate) fn run_daemon(path: &Path) -> Result<()> {
                             // The admitted lane answers to the policy file: a party the
                             // operator admitted there may not be in the static ping
                             // allowlist, and refusing it here would make `rdog policy
-                            // admit` useless until the next daemon restart.
-                            let permitted = admitted || allow.contains(&conn.remote_id());
-                            if !live || !permitted {
+                            // admit` useless until the next daemon restart. Ask the
+                            // policy before a task slot is taken, otherwise every
+                            // dialling peer would hold one through the handshake.
+                            let known = allow.contains(&conn.remote_id())
+                                || identity_admitted(&admission, conn.remote_id());
+                            if !live || !known {
                                 log::info!("iroh admission deny path={path} handler_entries=0");
                                 conn.close(DENIED_CODE.into(), DENIED.as_bytes());
                                 return Ok(());
@@ -1021,6 +1023,20 @@ fn refuse_frame(
 ) -> io::Result<()> {
     let line = crate::control_core::render_protocol_error_response(request_id, code, reason);
     transport.write_message(&line)
+}
+
+/// Whether the local policy file names this party, asked without a session.
+fn identity_admitted(
+    admission: &Option<Arc<Mutex<admission::Admission>>>,
+    peer: EndpointId,
+) -> bool {
+    let Some(state) = admission else {
+        return false;
+    };
+    match state.lock() {
+        Ok(state) => state.party_permitted(peer),
+        Err(_) => false,
+    }
 }
 
 fn require_active(
@@ -1316,7 +1332,7 @@ fn serve_lane(
             if let Err(rejection) = admission
                 .lock()
                 .map_err(|_| io::Error::other("admission lock poisoned"))?
-                .attach_session(lease, &attached)
+                .attach_session(lease, &attached, crate::pty_control::pty_session_registered)
             {
                 let (code, reason) = rejection.code_reason();
                 refuse_frame(transport, None, code as i32, reason)?;

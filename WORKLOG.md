@@ -594,6 +594,18 @@ shell 46 passed、两个载体守卫 OK。
 的重附跨原截止用例); `control_pty` 5 passed / 3 failed 与基线逐项相同; `control_tty` 0/1 与基线相同。
 - 提交: beb64d8
 
+## 2026-11-26 RAI-413 #141 第二轮评审两条处置
+
+- **附上第二个会话会孤立第一个**: 一个租约若已持有一个仍然存在的会话, 再附上另一个会话会让前者失去唯一回收者
+  (sweep 只走租约指向的会话)。`attach_session` 增加 `held_alive` 判据: 租约已持有别的活会话即拒(映射 LEASE_BUSY);
+  持有的会话已不存在则不阻塞。新增单测 `a_lease_cannot_take_a_second_session_and_orphan_the_first`。
+- **未登记对端会白占 task slot**: 上一轮把连接门放宽成"有 policy 就放行", 结果任何能拨通的对端都会拿到
+  `MAX_SESSIONS` 名额并在 `serve_admitted` 里等满 `HANDSHAKE_TIMEOUT`。改为**在分配 task 之前**问 policy
+  (`Admission::party_permitted` + `identity_admitted`), 未知对端立即拒。
+
+复跑: `--bin rdog` 1145 passed / 0 failed / 4 ignored; `control_iroh` 31 passed / 2 ignored; 回环 13/13; 两个守卫 OK。
+- 提交: 700a1be
+
 ## [2026-11-26] tests/ TTY 夹具改按能力探测选择 script 调用形式 (RAI-410)
 
 - 4 处夹具写 `script -q /dev/null <rdog> control ...`(BSD/macOS 尾随命令形式), util-linux 2.39.3 只认

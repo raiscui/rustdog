@@ -329,6 +329,15 @@ impl Admission {
             .map(|lease| lease.peer)
     }
 
+    /// Whether the policy file knows this party at all. Used before a connection
+    /// is given a session slot, so an unknown peer is refused at once instead of
+    /// holding a slot through the handshake timeout.
+    pub(crate) fn party_permitted(&self, peer: EndpointId) -> bool {
+        self.policy()
+            .map(|policy| policy.allow.contains(&peer))
+            .unwrap_or(false)
+    }
+
     pub(crate) fn active(&self, peer: EndpointId, id: &str, now_ms: u64) -> AdmissionResult<()> {
         let lease = Uuid::parse_str(id)
             .ok()
@@ -381,9 +390,23 @@ impl Admission {
     /// Hand a live PTY to the lease that just attached. Without this the lease
     /// that detached keeps sole ownership, so the sweeper reclaims the session on
     /// that lease's deadline even while the new client renews on time.
-    pub(crate) fn attach_session(&mut self, id: &str, pty: &str) -> AdmissionResult<()> {
+    ///
+    /// A lease holds one session: the sweeper only walks sessions a lease points
+    /// at, so taking a second one would leave the first alive with no owner to
+    /// reclaim it. `held_alive` lets the caller decide whether the session this
+    /// lease already holds still exists, since only the session registry knows.
+    pub(crate) fn attach_session(
+        &mut self,
+        id: &str,
+        pty: &str,
+        held_alive: impl Fn(&str) -> bool,
+    ) -> AdmissionResult<()> {
         let target = Uuid::parse_str(id).map_err(|_| Rejection::Denied)?;
-        if !self.leases.contains_key(&target) {
+        let Some(current) = self.leases.get(&target).map(|lease| lease.pty.clone()) else {
+            return Err(Rejection::Denied);
+        };
+        if let Some(current) = current.filter(|current| current != pty && held_alive(current)) {
+            log::info!("iroh attach refused: lease already holds session={current}");
             return Err(Rejection::Denied);
         }
         for (lease_id, lease) in self.leases.iter_mut() {

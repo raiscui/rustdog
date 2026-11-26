@@ -353,7 +353,9 @@ fn an_attached_session_survives_the_lease_that_detached_it() {
     admission
         .admit(peer, &grant(&client, target.public(), &second, 900), 900)
         .unwrap();
-    admission.attach_session(&second, "reattached-session").unwrap();
+    admission
+        .attach_session(&second, "reattached-session", |_| true)
+        .unwrap();
     assert_eq!(admission.session_of(&first), None, "the detached lease lets go");
     assert_eq!(
         admission.session_of(&second),
@@ -364,5 +366,31 @@ fn an_attached_session_survives_the_lease_that_detached_it() {
         admission.sweep(1_500, |_| true),
         Vec::new(),
         "the original deadline no longer reclaims a session that was reattached"
+    );
+}
+
+#[test]
+fn a_lease_cannot_take_a_second_session_and_orphan_the_first() {
+    let (_root, target, client, mut admission) = setup();
+    let peer = client.public();
+    let id = Uuid::new_v4().to_string();
+    admission
+        .admit(peer, &grant(&client, target.public(), &id, 0), 0)
+        .unwrap();
+    admission.record_session(&id, "held-session".into());
+    assert_eq!(
+        admission.attach_session(&id, "other-session", |_| true),
+        Err(Rejection::Denied),
+        "a second session on one lease would leave the first with no reclaimer"
+    );
+    assert_eq!(
+        admission.session_of(&id),
+        Some("held-session".into()),
+        "the refusal changes nothing"
+    );
+    assert_eq!(
+        admission.attach_session(&id, "other-session", |_| false),
+        Ok(()),
+        "a held session that no longer exists must not block the attach"
     );
 }
