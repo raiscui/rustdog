@@ -43,3 +43,204 @@ pub(crate) fn shell_spawn_guard() -> MutexGuard<'static, ()> {
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
+
+/// Windows「子进程有没有分配到控制台」探针: 脚本 + 读数口径 (RAI-563)。
+///
+/// 仓里三条 spawn 路径各验一次同一件事 —— builder 的建台标志 (`control_actions`)、
+/// flow step (`control_flow::process`)、后台 task (`task_control`)。三条**必须各自保留**
+/// (被测的是各自的 spawn 实现), 但探针脚本与读数只能有一份, 否则同一个仪器缺陷有三个副本。
+///
+/// 探针靠 `Add-Type -MemberDefinition` 在运行时编译 C#, 所以**它自己会失败**。仪器坏了与
+/// 被测性质破了曾经共用同一个退出码, 日志里只剩 `left: Some(1)` / `right: Some(0)`;
+/// 现在编译失败打 `PROBE_COMPILE_FAILED` 并以专用退出码退出, 读数先判仪器再判句柄。
+///
+/// 本模块不按平台门控: 脚本与读数都是纯数据与纯判断, 只有「谁来 spawn 它」是 windows 的事。
+/// 这样分类逻辑在三个平台的 Linux job 上都能被 `cargo test` 跑到, 不必等 windows runner。
+pub(crate) mod console_probe {
+    /// 探针自身编译失败时打到 stdout 的标记。
+    pub(crate) const COMPILE_FAILED_MARKER: &str = "PROBE_COMPILE_FAILED";
+
+    /// 探针自身编译失败时的专用退出码, 与被测性质的任何读数都不重叠。
+    pub(crate) const COMPILE_FAILED_EXIT: i32 = 73;
+
+    /// 探针脚本。仪器可用时 stdout 只有 `GetConsoleWindow()` 的十进制值。
+    ///
+    /// `try/catch` 只负责把编译器的原话留给日志; 真正判「仪器可用」的是
+    /// `'Rdog.ConsoleProbe' -as [type]` —— 只要探针类型没建起来 (编译失败, 或失败没有
+    /// 抛成终止错误), 都走同一个标记, 不再掉进「类型找不到」的 exit 1。
+    pub(crate) fn script() -> String {
+        format!(
+            "$compileError = $null; \
+             try {{ Add-Type -Namespace Rdog -Name ConsoleProbe -MemberDefinition \
+             '[DllImport(\"kernel32.dll\")] public static extern System.IntPtr GetConsoleWindow();' \
+             -ErrorAction Stop }} \
+             catch {{ $compileError = $_.Exception.Message }}; \
+             if (-not ('Rdog.ConsoleProbe' -as [type])) {{ \
+             Write-Output '{marker}'; \
+             if ($compileError) {{ Write-Error $compileError }}; \
+             exit {exit_code} }}; \
+             [Rdog.ConsoleProbe]::GetConsoleWindow().ToInt64()",
+            marker = COMPILE_FAILED_MARKER,
+            exit_code = COMPILE_FAILED_EXIT,
+        )
+    }
+
+    /// 一次探针运行的读数。
+    pub(crate) enum Reading {
+        /// 仪器可用, 子进程没有控制台 —— 期望值。
+        NoConsole,
+        /// 仪器可用, 但子进程拿到了控制台: 建台标志回退了。
+        Allocated(i64),
+        /// 读数不成立: 与「子进程是否分到控制台」无关, 不许被读成任一方向。
+        Unavailable(String),
+    }
+
+    /// `stdout` 传探针的 stdout (`task_control` 那条路径的 stdout 与 stderr 合流)。
+    pub(crate) fn read(exit_code: Option<i32>, stdout: &str, stderr: &str) -> Reading {
+        let stdout = stdout.trim();
+        let stderr = stderr.trim();
+        if stdout.contains(COMPILE_FAILED_MARKER) || exit_code == Some(COMPILE_FAILED_EXIT) {
+            return Reading::Unavailable(format!(
+                "Add-Type 没把探针类型编出来\n  stdout: {stdout}\n  stderr: {stderr}"
+            ));
+        }
+        if exit_code != Some(0) {
+            return Reading::Unavailable(format!(
+                "脚本没跑到读数那一步 (exit {exit_code:?})\n  stdout: {stdout}\n  stderr: {stderr}"
+            ));
+        }
+        match stdout.parse::<i64>() {
+            Ok(0) => Reading::NoConsole,
+            Ok(handle) => Reading::Allocated(handle),
+            Err(err) => Reading::Unavailable(format!(
+                "退出码 0 但 stdout 不是窗口句柄数值 ({err})\n  stdout: {stdout}\n  stderr: {stderr}"
+            )),
+        }
+    }
+
+    /// 断言子进程没有控制台。仪器坏时说「探针不可用」, 性质破时说拿到了句柄多少。
+    pub(crate) fn assert_no_console(exit_code: Option<i32>, stdout: &str, stderr: &str) {
+        match read(exit_code, stdout, stderr) {
+            Reading::NoConsole => {}
+            Reading::Allocated(handle) => {
+                panic!("子进程拿到了控制台 (GetConsoleWindow = {handle}), 建台标志回退了")
+            }
+            Reading::Unavailable(reason) => panic!("console 探针不可用: {reason}"),
+        }
+    }
+
+    /// Windows PowerShell 的重定向错误流可能是 UTF-16LE, 先认编码再解码。
+    pub(crate) fn decode_stderr(bytes: &[u8]) -> String {
+        let is_utf16 = bytes.len() > 1
+            && bytes.len() % 2 == 0
+            && bytes.chunks(2).take(8).all(|pair| pair[1] == 0);
+        if is_utf16 {
+            String::from_utf16_lossy(
+                &bytes
+                    .chunks(2)
+                    .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+                    .collect::<Vec<_>>(),
+            )
+        } else {
+            String::from_utf8_lossy(bytes).into_owned()
+        }
+    }
+}
+
+/// 探针读数口径的用例 —— 不 spawn 任何进程, 所以三个平台都跑。
+///
+/// 真正的 PowerShell 采样只在 windows 上做 (三条 spawn 路径各自的用例); 这里钉住的是
+/// 「一次采样的结果怎么读」: 仪器坏了必须与性质破了分开, 且不许互相冒充。
+#[cfg(test)]
+mod console_probe_tests {
+    use super::console_probe::{self, Reading};
+
+    fn unavailable(reading: Reading) -> String {
+        match reading {
+            Reading::Unavailable(reason) => reason,
+            Reading::NoConsole => panic!("应读到「仪器不可用」, 实际读到无控制台"),
+            Reading::Allocated(handle) => panic!("应读到「仪器不可用」, 实际读到句柄 {handle}"),
+        }
+    }
+
+    #[test]
+    fn compile_failure_marker_is_read_as_instrument_failure() {
+        let reason = unavailable(console_probe::read(
+            Some(1),
+            "PROBE_COMPILE_FAILED\nAdd-Type : 类型已存在",
+            "",
+        ));
+        assert!(reason.contains("没把探针类型编出来"), "{reason}");
+
+        // 标记丢了、只有专用退出码时, 也必须读成仪器不可用。
+        assert!(
+            unavailable(console_probe::read(Some(73), "", "")).contains("没把探针类型编出来"),
+            "专用退出码单独出现时也要认出仪器失败"
+        );
+    }
+
+    #[test]
+    fn console_allocation_is_read_as_property_break() {
+        assert!(matches!(
+            console_probe::read(Some(0), "1310742\n", ""),
+            Reading::Allocated(1_310_742)
+        ));
+        assert!(matches!(
+            console_probe::read(Some(0), "0", ""),
+            Reading::NoConsole
+        ));
+    }
+
+    #[test]
+    fn anything_else_is_instrument_failure_not_a_verdict() {
+        // 退出码非 0 又没有标记: 脚本没跑到读数那一步, 不许被读成「分了控制台」。
+        let reason = unavailable(console_probe::read(Some(1), "", "boom"));
+        assert!(reason.contains("没跑到读数那一步"), "{reason}");
+        // 退出码 0 但 stdout 不是句柄数值: 同样不构成任何一方的证据。
+        assert!(unavailable(console_probe::read(Some(0), "hello", "")).contains("不是窗口句柄数值"));
+    }
+
+    /// 断言文本是这张票的交付物之一: 仪器坏时读的人必须一眼看到「探针不可用」。
+    #[test]
+    fn assertion_names_the_instrument_when_the_probe_did_not_build() {
+        let outcome = std::panic::catch_unwind(|| {
+            console_probe::assert_no_console(Some(73), "PROBE_COMPILE_FAILED", "Add-Type : 编译失败")
+        })
+        .expect_err("仪器失败不应通过断言");
+        let message = outcome
+            .downcast_ref::<String>()
+            .cloned()
+            .unwrap_or_default();
+        assert!(message.starts_with("console 探针不可用"), "{message}");
+        assert!(message.contains(console_probe::COMPILE_FAILED_MARKER), "{message}");
+        assert!(!message.contains("拿到了控制台"), "{message}");
+    }
+
+    /// 脚本与读数常量必须同值 —— 否则改了一处就会把仪器失败读成别的。
+    #[test]
+    fn script_and_reading_agree_on_marker_and_exit_code() {
+        let script = console_probe::script();
+        assert!(
+            script.contains(&format!("'{}'", console_probe::COMPILE_FAILED_MARKER)),
+            "脚本必须打出标记: {script}"
+        );
+        assert!(
+            script.contains(&format!("exit {}", console_probe::COMPILE_FAILED_EXIT)),
+            "脚本必须用专用退出码: {script}"
+        );
+        assert!(
+            script.contains("-as [type]"),
+            "仪器可用性必须由类型是否存在来判: {script}"
+        );
+    }
+
+    #[test]
+    fn stderr_is_decoded_from_utf16_when_that_is_what_came_back() {
+        let utf16: Vec<u8> = "Internal Windows PowerShell error".encode_utf16().flat_map(u16::to_le_bytes).collect();
+        assert_eq!(
+            console_probe::decode_stderr(&utf16),
+            "Internal Windows PowerShell error"
+        );
+        assert_eq!(console_probe::decode_stderr(b"plain utf8"), "plain utf8");
+    }
+}
