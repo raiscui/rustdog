@@ -24,7 +24,8 @@
   先 `iroh_path=direct unavailable` 再 `iroh_path=relay` 应答。回执 `handoffs/rai426/receipts/directory-relay.log`。
 - Windows 编译期:`cargo check --no-default-features --target x86_64-pc-windows-gnu --bin rdog` exit=0。
 - 未验:真实公网 relay 的公共 CA 链、真实双 NAT、bulk;分别归 RAI-302 / RAI-366 / RAI-367。
-- 提交: d883b4f(实现)、534ac3e(信任锚裁定:宽化只挂在显式 `root_cert` 上,该字段因此改为必填)
+- 提交: d883b4f(实现)、534ac3e(信任锚裁定:宽化只挂在显式 `root_cert` 上,该字段因此改为必填)、9136455(公共 relay 需显式 CA 链,写进规格)
+- 评审 F1/F2 修复 (c21591e):F1 根集合改为「lane 链 + 目录链」两份**显式链**,不再打底 `embedded()` —— 全私有链路因此不含任何公共 CA(`RelayRoots::config` 只剩 `custom_roots` + `with_extra_roots`);F2 目录跳改用自己的 `DIRECTORY_CONNECT`(8s)并加关系型断言 `DIRECTORY_CONNECT < LEASE - RENEW`(原借用 `RELAY_CONNECT` 20s > 租约 15s,一次抖动就能让租约过期、把所有对端拒掉十几秒),租约期限改为注册被接受后才起算,续期失败从 `if let Ok` 静默吞掉改成 `iroh directory renewal failed: <err>`。README 新增「Iroh cross-network profile」小节收 `routable` / `bind` / `relay` / `directory.via_relay` 四字段,规范仍指回 spec。
 
 ## [2026-11-26] tests/ 下 17 处 rdog 二进制路径反推收成一处 (RAI-405)
 
