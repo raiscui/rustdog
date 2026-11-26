@@ -1807,6 +1807,9 @@ mod tests {
     /// 回收是**全局**动作: 一次 `reap_idle_transfers` 会扫遍所有会话与所有孤儿, 所以两个并行用例
     /// 即使各自只断言自己的文件, 也会互相把对方的条目回收掉 (CI 上实测: 一个用例的 `reaped`
     /// 从 1 变成 2, 另一个的孤儿先被删)。凡是调用回收或往孤儿表里塞条目的用例都必须先拿这把锁。
+    /// 这把锁只保证**串行**, 不保证**隔离**: 断言必须盯本用例自己的键与文件, `reaped` 这种
+    /// 全局聚合值不算断言对象 (它含别人的会话与孤儿), 以及 sweep 的时钟不能越过真实时刻 ——
+    /// 未来的假时钟会把并行用例按真实时刻登记的会话一并判成过期 (RAI-594)。
     static SWEEP_TEST_LOCK: Mutex<()> = Mutex::new(());
 
     /// 只在"我这条用例的 id"上做断言, 不断言整表条数 —— 同进程并行跑的其他用例
@@ -2339,32 +2342,35 @@ mod tests {
             .join(STAGING_DIR)
             .join("orphan.bin.0123456789abcdef.partial");
         std::fs::write(&partial, b"keepme").unwrap();
-        // 时刻取**未来**而不是小假时钟: 并发用例的 sweep 也看这张全局孤儿表, 用小于真实时钟的
-        // 数值会被它们判成过期而先删掉 (saturating_sub 保不住), 断言就随跑法变化。未来时刻让
-        // 别的用例的 `now - last_activity` 恒为 0。
-        let anchor_ms = now_ms() + 1_000_000;
-        // 全局孤儿表是进程级单例: 同进程其它用例会往里塞条目且不负责清理 (例如 `restore_index`
-        // 按索引里的旧时刻恢复孤儿)。回收锁只保证**串行**, 不保证**隔离** —— 于是「这一轮回收了
-        // 几条」在整表口径下天然 flaky (2026-11-26 macos CI 与本地并行实测: reaped 会变成 2/3/5)。
-        // 在锁内先快照再清空, 收尾还原: 计数只反映本用例自己的孤儿, 断言才承重。
-        let snapshot = std::mem::take(&mut *orphan_partials().lock().unwrap());
+        // 会话表与孤儿表都是进程级单例, 而 `reap_idle_transfers` 一轮会扫遍两者: 返回的 `reaped`
+        // 是「本轮全局一共回收了几条」, 里面既有本用例的孤儿, 也有并行用例按真实时刻登记的会话
+        // 与孤儿。所以两轮 sweep 的时钟都压在**真实时刻之前**: 别的条目 `now - last_activity`
+        // 恒为 0, 只有本用例自己的锚点落在窗口两侧; 反过来若用未来时刻扫, 别人的会话和孤儿会被
+        // 本用例的假时钟判成过期而一起删掉 (2026-11-26 macos CI 上 `reaped` 收到 2 就是这个形态)。
+        // 断言只盯本用例自己的对象 —— 文件是否还在、自己那条键是否还在; `reaped` 不参与断言。
+        const WINDOW_MS: u64 = 10_000;
+        let anchor_ms = now_ms().saturating_sub(20_000);
         orphan_partials()
             .lock()
             .unwrap()
             .insert(partial.clone(), anchor_ms);
 
         // 空闲阈值早已过, 但续传窗口还没到 → 不许删
-        let (reaped, _) = reap_idle_transfers(anchor_ms, 1_000, 100_000);
-        assert_eq!(reaped, 0, "窗口没到就不该回收孤儿");
-        assert!(partial.exists(), "孤儿在窗口内必须留着可续");
+        let (reaped, _) = reap_idle_transfers(anchor_ms + 1_000, 1_000, WINDOW_MS);
+        assert!(partial.exists(), "孤儿在窗口内必须留着可续 (reaped={reaped})");
+        assert!(
+            orphan_partials().lock().unwrap().contains_key(&partial),
+            "窗口没到, 孤儿条目必须留在表里 (reaped={reaped})"
+        );
 
         // 窗口也过了 → 回收
-        let (reaped, _) = reap_idle_transfers(anchor_ms + 1_000, 1_000, 100);
-        assert_eq!(reaped, 1);
-        assert!(!partial.exists(), "窗口过了必须回收, 不留残留");
-        assert!(!orphan_partials().lock().unwrap().contains_key(&partial));
+        let (reaped, _) = reap_idle_transfers(anchor_ms + WINDOW_MS + 1, 1_000, WINDOW_MS);
+        assert!(!partial.exists(), "窗口过了必须回收, 不留残留 (reaped={reaped})");
+        assert!(
+            !orphan_partials().lock().unwrap().contains_key(&partial),
+            "窗口过了, 孤儿条目必须从表里消失 (reaped={reaped})"
+        );
 
-        *orphan_partials().lock().unwrap() = snapshot;
         let _ = std::fs::remove_dir_all(&dir);
     }
 
