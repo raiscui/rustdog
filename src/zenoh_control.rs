@@ -336,18 +336,6 @@ pub fn run_router_daemon(config: ZenohDaemonRuntimeConfig, shell: &str) -> io::R
         .wait()
         .map_err(to_io_error)?;
 
-    log::info!(
-        "zenoh router daemon ready: namespace={}, service_name(daemon_name)={}, member_id={}, alive_key={}, control_key={}, key_input_event_key={}, listen_endpoints={:?}, request_timeout_ms={}",
-        config.namespace,
-        config.daemon_name,
-        member_id,
-        alive_key,
-        control_key,
-        key_input_event_key,
-        listen_endpoints,
-        config.request_timeout_ms
-    );
-
     // 本机 fast path 登记 (RAI-385): daemon 以 zenoh 模式运行时 TCP inbound 被强制关闭,
     // 本机客户端只剩 zenoh 这条路; 登记控制 lane 后 `rdog control self` / `rdog control <port>`
     // 才能在不写地址的前提下找到它,并知道该端口说 zenoh 而不是 line-control。
@@ -390,9 +378,10 @@ pub fn run_router_daemon(config: ZenohDaemonRuntimeConfig, shell: &str) -> io::R
             config.namespace
         );
         let card_subscriber = session
-            .declare_subscriber(card_wildcard)
+            .declare_subscriber(card_wildcard.clone())
             .wait()
             .map_err(|err| io::Error::other(format!("agent card 通配 sub 声明失败: {err}")))?;
+        log::info!("agent card 通配 sub 已声明: {card_wildcard}");
         thread::spawn(move || {
             while let Ok(sample) = card_subscriber.recv() {
                 let key = sample.key_expr().to_string();
@@ -418,9 +407,10 @@ pub fn run_router_daemon(config: ZenohDaemonRuntimeConfig, shell: &str) -> io::R
             config.namespace
         );
         let inbox_subscriber = session
-            .declare_subscriber(inbox_wildcard)
+            .declare_subscriber(inbox_wildcard.clone())
             .wait()
             .map_err(|err| io::Error::other(format!("agent inbox 通配 sub 声明失败: {err}")))?;
+        log::info!("agent inbox 通配 sub 已声明: {inbox_wildcard}");
         thread::spawn(move || {
             while let Ok(sample) = inbox_subscriber.recv() {
                 let Ok(payload) = sample.payload().try_to_string() else {
@@ -442,6 +432,21 @@ pub fn run_router_daemon(config: ZenohDaemonRuntimeConfig, shell: &str) -> io::R
             }
         });
     }
+
+    // 就绪 sentinel 放在 mailbox 订阅声明之后: e2e 都拿这一行判「可以投递」, 所以它必须
+    // 表示「订阅已声明」而不是「router 起来了」。它之前的那几步 (queryable/通配 sub) 少一步,
+    // 投递都会无匹配而被丢 (pub 无缓存, 补拉不回来)。
+    log::info!(
+        "zenoh router daemon ready: namespace={}, service_name(daemon_name)={}, member_id={}, alive_key={}, control_key={}, key_input_event_key={}, listen_endpoints={:?}, request_timeout_ms={}",
+        config.namespace,
+        config.daemon_name,
+        member_id,
+        alive_key,
+        control_key,
+        key_input_event_key,
+        listen_endpoints,
+        config.request_timeout_ms
+    );
 
     let legacy_session = session.clone();
     let legacy_namespace = config.namespace.clone();

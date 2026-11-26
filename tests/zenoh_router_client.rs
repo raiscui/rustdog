@@ -3000,7 +3000,11 @@ fn agent_message_delivered_before_agent_start_should_be_recovered_via_mailbox() 
             }
             thread::sleep(Duration::from_millis(200));
         }
-        assert!(cached, "投递后 mailbox 应缓存 pre-start 消息");
+        assert!(
+            cached,
+            "投递后 mailbox 应缓存 pre-start 消息 (pub 无缓存, 丢了补拉不回来); daemon_log:\n{}",
+            daemon_output(&buffer)
+        );
     }
 
     // 2. 先建 reply 订阅 (agent 首次补拉在启动后立即触发, 回复可能早于
@@ -3062,6 +3066,116 @@ fn agent_message_delivered_before_agent_start_should_be_recovered_via_mailbox() 
     let _ = fs::remove_file(&config_path);
 }
 
+/// RAI-576: ready sentinel 必须晚于 mailbox 通配 sub 的声明。
+///
+/// 这是这组改动**确定性**的负对照: 把 ready 那行挪回声明之前, 本用例必红; 而出事的
+/// 那两条 mailbox 用例只会「有时」红, 拿它们当回归证据等于靠运气 (本机 0/50 复现)。
+///
+/// 断言的是日志顺序, 不是实现细节: `ready` 是 e2e 与运维共用的「可以投递」契约,
+/// 它的定义就是「订阅已声明」—— 契约写在
+/// `docs/solutions/conventions/daemon-log-sentinel-e2e-contract.md`。
+#[test]
+fn daemon_ready_should_be_logged_after_mailbox_subscriptions() {
+    let daemon_name = unique_name("ready-order");
+    let listen_port = allocate_tcp_port();
+    let (mut daemon, config_path, _entrypoint, buffer) =
+        start_zenoh_daemon_with_combined_output(&daemon_name, listen_port);
+    wait_until_output_contains(
+        &mut daemon,
+        &buffer,
+        "zenoh router daemon ready",
+        Duration::from_secs(8),
+    )
+    .expect("daemon should report ready");
+
+    let log = daemon_output(&buffer);
+    let position = |needle: &str| {
+        log.find(needle)
+            .unwrap_or_else(|| panic!("daemon 日志缺少 `{needle}`; daemon_log:\n{log}"))
+    };
+    let card = position("agent card 通配 sub 已声明");
+    let inbox = position("agent inbox 通配 sub 已声明");
+    let ready = position("zenoh router daemon ready");
+    assert!(
+        card < ready && inbox < ready,
+        "ready 必须晚于两条通配 sub 声明 (card={card}, inbox={inbox}, ready={ready}); daemon_log:\n{log}"
+    );
+
+    stop_child(&mut daemon);
+    let _ = fs::remove_file(&config_path);
+}
+
+/// RAI-576: 「ready」必须意味着「现在投递不会丢」。
+///
+/// 这条用例只等 ready 日志, 之后既不 sleep 也不重试投递 —— 与出事的那两条同形
+/// (`flow`/`dedup` 都是声明完立刻 put)。pub 无缓存, 所以丢了就是丢了, 补拉只能
+/// 看到丢了的结果。
+#[test]
+fn mailbox_should_accept_a_publish_immediately_after_ready() {
+    let daemon_name = unique_name("agent-ready");
+    let listen_port = allocate_tcp_port();
+    let (mut daemon, config_path, entrypoint, buffer) =
+        start_zenoh_daemon_with_combined_output(&daemon_name, listen_port);
+    wait_until_output_contains(
+        &mut daemon,
+        &buffer,
+        "zenoh router daemon ready",
+        Duration::from_secs(8),
+    )
+    .expect("daemon should report ready");
+
+    let agent_name = format!("ready-{}.lab", std::process::id());
+    let message = format!(
+        "{{\"v\":1,\"id\":\"ready-e2e-1\",\"from\":\"ready-orch.lab\",\"to\":\"{agent_name}\",\"kind\":\"task\",\"payload\":\"READY_TASK\",\"sent_at\":{}}}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0)
+    );
+    {
+        let session = open_authenticated_test_session(&entrypoint);
+        let publisher = session
+            .declare_publisher(format!("rdog/lab/agent/{agent_name}/inbox"))
+            .wait()
+            .expect("publisher");
+        publisher
+            .put(message.as_str())
+            .wait()
+            .expect("delivery right after ready");
+    }
+
+    let mut cached = false;
+    for _ in 0..20 {
+        let (status, stdout, _) = run_control_multi_one_shot(
+            &[
+                "--transport",
+                "zenoh",
+                "--target-name",
+                &daemon_name,
+                "--entry-point",
+                &entrypoint,
+                "--namespace",
+                "lab",
+            ],
+            &[&format!("@agent-inbox:{agent_name}")],
+            Duration::from_secs(10),
+        );
+        if status.success() && stdout.contains("READY_TASK") {
+            cached = true;
+            break;
+        }
+        thread::sleep(Duration::from_millis(200));
+    }
+    assert!(
+        cached,
+        "ready 之后立刻投递的消息应进 mailbox (pub 无缓存, 丢了补拉不回来); daemon_log:\n{}",
+        daemon_output(&buffer)
+    );
+
+    stop_child(&mut daemon);
+    let _ = fs::remove_file(&config_path);
+}
+
 #[test]
 fn agent_mailbox_should_deduplicate_repeated_delivery_by_id() {
     let daemon_name = unique_name("agent-dedup");
@@ -3105,6 +3219,8 @@ fn agent_mailbox_should_deduplicate_repeated_delivery_by_id() {
     }
 
     let mut saw_single = false;
+    let mut last_occurrences = 0;
+    let mut last_duplicate = false;
     for _ in 0..20 {
         let (status, stdout, _) = run_control_multi_one_shot(
             &[
@@ -3123,12 +3239,19 @@ fn agent_mailbox_should_deduplicate_repeated_delivery_by_id() {
         if status.success() && stdout.contains("dd-e2e-fixed-id") {
             let occurrences = stdout.matches("dd-e2e-fixed-id").count();
             let duplicate_flag = stdout.contains("\"duplicate\":1");
+            last_occurrences = occurrences;
+            last_duplicate = duplicate_flag;
             saw_single = occurrences == 1 && duplicate_flag;
             break;
         }
         thread::sleep(Duration::from_millis(200));
     }
-    assert!(saw_single, "重复投递应只留 1 条且 duplicate 计数为 1");
+    assert!(
+        saw_single,
+        "重复投递应只留 1 条且 duplicate 计数为 1 (最后读数: id 出现 {last_occurrences} 次, \
+         duplicate 标记={last_duplicate}); daemon_log:\n{}",
+        daemon_output(&buffer)
+    );
 
     stop_child(&mut daemon);
     let _ = fs::remove_file(&config_path);

@@ -1,7 +1,7 @@
 ---
 title: "daemon log 输出行是 e2e 测试的隐性启动 sentinel"
 date: 2026-08-22
-last_updated: 2026-08-22
+last_updated: 2026-11-27
 module: tests
 component: e2e-tests
 problem_type: convention
@@ -16,6 +16,7 @@ tags:
 verified_by:
   - "rg -c 'wait_until_output_contains' tests/zenoh_router_client.rs -> 28; tests/zenoh_router_client_windows.rs -> 3 (2026-08-22)"
   - "rg -n 'fn start_zenoh_daemon_with_combined_output' tests/ -> tests/zenoh_router_client.rs:174 与 tests/zenoh_unixpipe_fast_path/support.rs:236"
+  - "ready 语义 (RAI-576, 2026-11-27): 修复前 10/10 轮 ready 先于 `agent inbox 通配 sub 已声明`, 修复后 8/8 轮声明先于 ready; `daemon_ready_should_be_logged_after_mailbox_subscriptions` 把 ready 挪回声明之前即红 (card=1917, inbox=1987, ready=1364)"
 ---
 
 # daemon log 输出行是 e2e 测试的隐性启动 sentinel
@@ -42,6 +43,23 @@ zenoh_router_client) 失败; 其中 zenoh_router_client 有 24+ 个测试只 pip
    - 一次性把所有依赖改掉, 或者用合流 buffer 兼容 (更省事)。
 2. **新 daemon 启动行为的 "ready" 日志变更, 同步改 e2e 等待串**; 日志文案是
    公开契约, 不是内部实现细节。
+2a. **"ready" 这一行的定义是「订阅已建立, 可以投递」, 不是「router 起来了」。**
+   2026-11-27 (RAI-576) 之前 `zenoh router daemon ready` 打在 agent inbox / card
+   通配 sub 声明**之前**, 于是按它投递的客户端可能撞进「订阅还没声明」的窗口 ——
+   pub 无缓存, 丢了补拉不回来, 表现是 mailbox e2e 在多条互不相关的 PR 上间歇红
+   (`agent_mailbox_should_deduplicate_repeated_delivery_by_id` /
+   `agent_message_delivered_before_agent_start_should_be_recovered_via_mailbox`)。
+   现在 ready 排在两条声明之后, 并有 `agent card|inbox 通配 sub 已声明` 两行供日志自证
+   顺序; 守卫用例是 `daemon_ready_should_be_logged_after_mailbox_subscriptions`。
+   **再往后挪动启动步骤时, 仍然是这条规矩: 凡是「ready 之后投递就该成功」的机制,
+   必须在 ready 之前就绪。**
+   **启动形态只有一个**: card / inbox 两个通配 sub 的声明块是无条件的 `{ ... }`
+   (没有配置开关, 也不按 profile 分叉), 且声明失败走 `?` 直接让 daemon 启动失败 ——
+   所以不存在「不订阅 mailbox 的形态」, ready 永远有对象可等, 不会卡在一个永不满足的条件
+   后面。以后若要给 mailbox 加开关, 那个开关必须同时决定 ready 的位置。
+2b. **zenoh 的声明是异步传播的, `.wait()` 只代表本地注册** —— 见
+   `zenoh-pub-sub-declaration-propagation.md`。所以「声明调用返回」与「对端 router
+   能据此路由」不是同一件事; 需要更强保证时要的是**一次往返读数**, 不是把日志再挪一步。
 3. **多测试共用的 daemon 启动应走合流 helper**
    (`start_zenoh_daemon_with_combined_output`): 调用方只看到一个合流的
    `Arc<Mutex<String>>`, 未来 init_logger 路径再变, 只改 helper 内部, 24+ 个
