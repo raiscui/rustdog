@@ -93,11 +93,31 @@ target 的 `passed` 必须 > 0**, 否则判红 —— 「退出码 0 但零执�
 
 `recording_e2e` 仍由它自己那一步执行 (unix)。
 
-**compile-only 是显式的, 不是静默 skip**: 这 5 个 target 需要真实桌面会话 (AX 权限 /
-屏幕捕获 / TCC), GitHub runner 没有这些条件; 它们在 build 阶段被编译 (编译回归照样能抓到),
-在 test 阶段的 job summary 里以 `compile-only` 行列出。真机 lane 用
-`cargo test --test <target>` 直接执行它们。**任何把 target 从清单里删掉、或让它的执行计数
-掉到 0 的改动, 都要先改这张表并说明理由**, 不能只改脚本。
+**compile-only 是显式的, 不是静默 skip —— 但它也不计入「ran」。** 这 5 个 target 需要
+真实桌面会话: 已登录的 GUI 用户 + Accessibility 与 Screen Recording 授权, GitHub runner
+没有这些条件。它们的处置是:
+
+| 位置 | 处置 |
+| --- | --- |
+| build 阶段 | `cargo test --no-run` 编译 (编译回归照样能抓到) |
+| test 阶段 | job summary 里单列一行 **`compiled, not executed`**, 与 `passed/failed/ignored` 的已执行行分开 |
+| ran 集合 | **不计入** —— `assert-tests-ran.py` 的口径与 §3 的零执行断言都不把它们当「跑过」 |
+
+真机 lane 的跑法与前置 (不写下来的话, 「compile-only」三个月后会变成「没人知道怎么跑」):
+
+```bash
+# 真机 (macOS) 仓库根, 且已登录 GUI 会话
+# 前置: 系统设置 → 隐私与安全性 → 辅助功能 / 屏幕录制, 给终端 (或 rdog 二进制) 授权
+cargo test --test control_ax_e2e
+cargo test --test control_display_aware_e2e
+cargo test --test control_mouse_e2e
+cargo test --test control_ocr_e2e
+cargo test --test control_window_e2e
+```
+
+**一个只能编译、没有任何可执行路径的测试等价于注释。** 上面这 5 条命令就是它们的可执行路径;
+改动其中任何一个 target 的名字或前置时, 同票更新本表与 `run-integration-targets.py` 的
+`COMPILE_ONLY`。
 
 ## 4. `ort-sys` / onnxruntime 的获取契约
 

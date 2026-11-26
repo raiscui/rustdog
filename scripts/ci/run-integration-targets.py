@@ -102,7 +102,7 @@ def main() -> int:
 
     for target in COMPILE_ONLY.get(args.os, []):
         code, log = run(["cargo", "test", "--no-run", "--test", target])
-        rows.append(f"| `{target}` | compile-only | — | — | {code} |")
+        rows.append(f"| `{target}` | compiled, not executed | — | — | {code} |")
         if code != 0:
             failures.append(f"{target}: compile failed (exit={code})")
 
@@ -116,8 +116,12 @@ def main() -> int:
     if COMPILE_ONLY.get(args.os):
         summary += [
             "",
-            "compile-only: 需要真实桌面会话 (AX / 屏幕捕获 / TCC), GitHub runner 没有; "
-            "真机 lane 用 `cargo test --test <target>` 执行。",
+            "**compiled, not executed** (5 个 macOS GUI 面): 需要真实桌面会话 —— 已登录的 GUI "
+            "用户、Accessibility 与 Screen Recording 授权。GitHub runner 没有这些条件, 所以这里只"
+            "证明它们能编译, **不计入 ran 集合**。真机 lane 的跑法: 在真机仓库根执行 "
+            "`cargo test --test control_ax_e2e`(或 control_display_aware_e2e / control_mouse_e2e / "
+            "control_ocr_e2e / control_window_e2e), 前置是系统设置 → 隐私与安全性 里给终端 "
+            "Accessibility + Screen Recording 权限。",
         ]
     body = "\n".join(summary)
     print(body)

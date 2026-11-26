@@ -1262,3 +1262,16 @@ CLI 重跑得到 `resume=honored`。教训: 之前 CLI 挂住不是 CLI 的 bug,
 - 提交: 9e9fbec (正对照判读)
 - 提交: 566b017 (评审 F5/F6)
 - 提交: 1c7064a (评审 F5 收口)
+### 2026-11-26 RAI-411: integration target 放量
+
+`tests/` 19 个 target 里此前只有 `recording_e2e` 在 CI 执行。新增
+`scripts/ci/run-integration-targets.py` 按平台清单执行 (ubuntu/macos 各 11 个, macos 多
+`zenoh_unixpipe_fast_path`, windows 跑 `zenoh_router_client_windows`), **passed == 0 即判红**;
+build 阶段改成 `cargo test --no-run` 全 target 编译。
+5 个 macOS GUI 面 (`control_ax_e2e` / `control_display_aware_e2e` / `control_mouse_e2e` /
+`control_ocr_e2e` / `control_window_e2e`) 需要真实桌面会话, 处置是 **compiled, not executed**:
+job summary 单列、**不计入 ran 集合**, 真机 lane 的 5 条命令与权限前置写在
+`ci-merge-gate.md` §3b。
+本地 linux 回执: 11 个 target 全部执行且 passed > 0 (control_lanes 15/1 ignored,
+zenoh_router_client 38/2 ignored)。
+- 提交: a329b49
