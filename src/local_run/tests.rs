@@ -17,10 +17,22 @@ struct TestDirs {
     legacy: PathBuf,
 }
 
+/// 8 位短随机后缀: 测试目录名要短,长 UUID 会吃掉 95 字节的 pipe 名预算。
+fn short_id() -> String {
+    uuid::Uuid::new_v4()
+        .simple()
+        .to_string()
+        .chars()
+        .take(8)
+        .collect()
+}
+
 impl TestDirs {
     fn new(prefix: &str) -> Self {
-        let root =
-            std::env::temp_dir().join(format!("rdog-local-run-{prefix}-{}", uuid::Uuid::new_v4()));
+        // macOS 的 `env::temp_dir()` 是 `/var/folders/xx/.../T/`(约 50 字节),再塞一段
+        // 测试目录名就把 95 字节预算吃光,`pipe_stem` 会直接报"预算不足"。这些用例要的
+        // 是**短**目录而不是"系统临时目录",所以固定在 `/tmp` 下建;每个用例仍靠随机后缀独占。
+        let root = PathBuf::from("/tmp").join(format!("rdog-lr-{prefix}-{}", short_id()));
         let run = root.join("run");
         let legacy = root.join("legacy");
         fs::create_dir_all(&run).expect("test run dir should be created");
@@ -429,6 +441,134 @@ fn legacy_tmpdir_artifacts_should_be_listed_and_cleanable() {
     for path in fifo_paths(&legacy_base) {
         assert!(!path.exists(), "旧位置残留应被删除: {}", path.display());
     }
+}
+
+// -----------------------------------------------------------------
+// 显式 base / 跨版本保护 / 竞态
+// -----------------------------------------------------------------
+
+#[test]
+fn explicit_base_should_be_preserved_with_sidecars_beside_it() {
+    let paths = paths_for_base(Path::new("/var/tmp/control.sock")).expect("paths");
+    assert_eq!(
+        paths.base,
+        PathBuf::from("/var/tmp/control.sock"),
+        "显式 base 必须原样保留: 改写扩展名会让清理落到另一批文件上"
+    );
+    assert_eq!(paths.lock, PathBuf::from("/var/tmp/control.lock"));
+    assert_eq!(paths.meta, PathBuf::from("/var/tmp/control.meta"));
+}
+
+#[test]
+fn explicit_base_should_not_tighten_shared_parent_permissions() {
+    let dirs = TestDirs::new("shared");
+    let shared = dirs.root.join("shared");
+    fs::create_dir_all(&shared).expect("shared dir should be created");
+    fs::set_permissions(&shared, Permissions::from_mode(0o755)).expect("chmod shared dir");
+
+    let base = shared.join("control.sock");
+    let guard =
+        UnixpipeRunGuard::acquire(paths_for_base(&base).expect("paths"), "lab", "explicit.lab")
+            .expect("explicit base should acquire");
+
+    let mode = fs::metadata(&shared)
+        .expect("shared dir metadata")
+        .permissions()
+        .mode()
+        & 0o777;
+    assert_eq!(
+        mode, 0o755,
+        "显式路径的父目录不是 rdog 运行目录,不能被收紧权限"
+    );
+    drop(guard);
+}
+
+#[test]
+fn live_legacy_owner_should_block_new_acquisition_and_clean() {
+    let dirs = TestDirs::new("legacy");
+    let base = dirs.run.join("lab__legacy.lab.pipe");
+    create_fake_fifos(&base);
+
+    // 旧二进制持有的路径守卫: 同一套 flock 语义,只是文件名不同。
+    let legacy_guard = legacy_guard_path(&base);
+    let legacy_lease = process_lease::ProcessLease::acquire(
+        legacy_guard.clone(),
+        process_lease::metadata_path_for_lock(&legacy_guard),
+        "unixpipe-path",
+        "legacy",
+    )
+    .expect("legacy guard should be held");
+
+    let entries = collect_entries().expect("entries");
+    let entry = entries
+        .iter()
+        .find(|entry| entry.pipe_base == base)
+        .expect("legacy-owned entry should be listed");
+    assert!(entry.owner_alive, "旧版本 owner 仍持锁时必须算活的");
+    // 条目本身在运行目录里(新命名),所以 verdict 是 `live`;关键在于它算活的,
+    // 不会被 `clean` 当残留删掉。
+    assert_eq!(entry.verdict(), "live");
+
+    let err = UnixpipeRunGuard::acquire(paths_for_base(&base).expect("paths"), "lab", "new.lab")
+        .expect_err("旧版本 owner 还在跑时,新二进制不能接管同一个 base");
+    assert_eq!(err.kind(), io::ErrorKind::AlreadyExists);
+    assert!(
+        err.to_string().contains("旧版本 daemon"),
+        "错误要指明跨版本占用: {err}"
+    );
+
+    let report = clean_stale_entries(false).expect("clean should run");
+    assert_eq!(report.removed_entries, 0, "活 owner 的残留不能删");
+    for path in fifo_paths(&base) {
+        assert!(
+            path.exists(),
+            "活 owner 的 FIFO 不能被删: {}",
+            path.display()
+        );
+    }
+
+    drop(legacy_lease);
+}
+
+#[test]
+fn removal_should_be_skipped_when_a_new_owner_takes_the_lock() {
+    let dirs = TestDirs::new("race");
+    let base = dirs.run.join("lab__race.lab.pipe");
+    create_fake_fifos(&base);
+    let paths = paths_for_base(&base).expect("paths");
+    write_stale_lock(&paths.lock, 0);
+
+    // 模拟"分类为残留之后、删除之前,新 daemon 抢到了锁"。
+    let owner = process_lease::ProcessLease::acquire(
+        paths.lock.clone(),
+        process_lease::metadata_path_for_lock(&paths.lock),
+        "unixpipe-run",
+        "race",
+    )
+    .expect("new owner should take the lock");
+
+    let stale_entry = RunEntry {
+        pipe_base: base.clone(),
+        namespace: Some("lab".to_string()),
+        daemon_name: Some("race.lab".to_string()),
+        pid: Some(0),
+        fifo_files: 2,
+        owner_alive: false,
+        pid_alive: Some(false),
+        legacy_location: false,
+        started_at_unix_ms: Some(1),
+    };
+
+    assert_eq!(
+        remove_stale_entry(&stale_entry).expect("removal should not error"),
+        None,
+        "抢不到锁就必须放弃删除"
+    );
+    for path in fifo_paths(&base) {
+        assert!(path.exists(), "新 owner 的 FIFO 不能删: {}", path.display());
+    }
+
+    drop(owner);
 }
 
 #[test]
