@@ -26,10 +26,25 @@ use child_guard::ChildGuard;
 #[path = "support/test_ports.rs"]
 mod test_ports;
 
+#[path = "support/propagation.rs"]
+mod propagation;
+
 use test_ports::allocate_tcp_port;
+
+/// 等到 `declaring` 上的订阅对 router 可见再继续 (RAI-580)。
+///
+/// 声明传播是异步的: `declare_subscriber().wait()` 只保证本地注册, 不等 router 确认。所以
+/// 「声明后立刻触发对端 pub」在跨进程 e2e 里只能靠猜时长 (sleep) 或干脆不猜。这里改成可观测条件:
+/// 另开一个 session 去 query 这条链路的 liveliness 探针, router 答得出就说明它已经处理过这份声明。
+fn await_subscriber_visible(declaring: &zenoh::Session, entrypoint: &str, keyexpr: &str) {
+    let witness = open_authenticated_test_session(entrypoint);
+    propagation::await_subscriber_visible(declaring, &witness, keyexpr)
+        .unwrap_or_else(|err| panic!("{err}"));
+}
 
 /// 认证的测试 zenoh session (issue #82): 读 ~/.rdog/auth.toml 注入 usrpwd
 /// 凭证 — daemon 默认开启认证, 裸 session 的 pub 会被拒。
+
 fn open_authenticated_test_session(entrypoint: &str) -> zenoh::Session {
     let mut config = zenoh::Config::default();
     config
@@ -919,6 +934,7 @@ fn control_should_publish_key_event_after_successful_key_request() {
         .declare_subscriber(keyexpr.clone())
         .wait()
         .expect("subscriber should declare");
+    await_subscriber_visible(&session, &entrypoint, &keyexpr);
 
     let (status, stdout, stderr) = run_control(
         &[
@@ -988,9 +1004,10 @@ fn external_peer_should_send_control_request_via_zenoh_to_daemon_channel() {
     let to_control_key = build_session_to_control_key("lab", &session_id);
     let to_daemon_key = build_session_to_daemon_key("lab", &session_id);
     let subscriber = session
-        .declare_subscriber(to_control_key)
+        .declare_subscriber(to_control_key.clone())
         .wait()
         .expect("subscriber should declare");
+    await_subscriber_visible(&session, &entrypoint, &to_control_key);
 
     let replies = session
         .get(control_key.clone())
@@ -1225,9 +1242,10 @@ fn control_should_reject_rich_frame_over_legacy_session_query_payload() {
     let control_key = build_control_key("lab", &daemon_name);
     let to_control_key = build_session_to_control_key("lab", &session_id);
     let subscriber = session
-        .declare_subscriber(to_control_key)
+        .declare_subscriber(to_control_key.clone())
         .wait()
         .expect("subscriber should declare");
+    await_subscriber_visible(&session, &entrypoint, &to_control_key);
 
     let replies = session
         .get(control_key.clone())
@@ -1468,9 +1486,10 @@ fn control_should_forward_pty_resize_frame_in_zenoh_profile() {
     let to_control_key = build_session_to_control_key("lab", &session_id);
     let to_daemon_key = build_session_to_daemon_key("lab", &session_id);
     let subscriber = session
-        .declare_subscriber(to_control_key)
+        .declare_subscriber(to_control_key.clone())
         .wait()
         .expect("subscriber should declare");
+    await_subscriber_visible(&session, &entrypoint, &to_control_key);
     let replies = session
         .get(control_key)
         .payload(render_session_open_payload(&session_id))
@@ -1832,9 +1851,10 @@ fn control_should_detach_and_attach_pty_in_zenoh_profile() {
     let open_to_control_key = build_session_to_control_key("lab", &open_session_id);
     let open_to_daemon_key = build_session_to_daemon_key("lab", &open_session_id);
     let open_subscriber = session
-        .declare_subscriber(open_to_control_key)
+        .declare_subscriber(open_to_control_key.clone())
         .wait()
         .expect("open subscriber should declare");
+    await_subscriber_visible(&session, &entrypoint, &open_to_control_key);
     let replies = session
         .get(control_key.clone())
         .payload(render_session_open_payload(&open_session_id))
@@ -1922,9 +1942,10 @@ fn control_should_detach_and_attach_pty_in_zenoh_profile() {
     let attach_to_control_key = build_session_to_control_key("lab", &attach_session_id);
     let attach_to_daemon_key = build_session_to_daemon_key("lab", &attach_session_id);
     let attach_subscriber = session
-        .declare_subscriber(attach_to_control_key)
+        .declare_subscriber(attach_to_control_key.clone())
         .wait()
         .expect("attach subscriber should declare");
+    await_subscriber_visible(&session, &entrypoint, &attach_to_control_key);
     let replies = session
         .get(control_key)
         .payload(render_session_open_payload(&attach_session_id))
@@ -3012,15 +3033,16 @@ fn agent_runtime_should_answer_task_message_via_echo_decision() {
         // 异步的, sub 未传播时 agent 的 reply pub 无匹配被丢), 再投 task。
         // session 必须活到等待结束 (drop 后 sub 失效)。
         let zenoh_session = open_authenticated_test_session(&entrypoint);
+        let reply_key = format!("rdog/lab/agent/{sender}/inbox");
         let reply_sub = zenoh_session
-            .declare_subscriber(format!("rdog/lab/agent/{sender}/inbox"))
+            .declare_subscriber(reply_key.clone())
             .wait()
             .expect("reply sub");
         let publisher = zenoh_session
             .declare_publisher(format!("rdog/lab/agent/{agent_name}/inbox"))
             .wait()
             .expect("task publisher");
-        thread::sleep(Duration::from_secs(1));
+        await_subscriber_visible(&zenoh_session, &entrypoint, &reply_key);
         publisher
             .put(task_message.as_str())
             .wait()
@@ -3246,10 +3268,12 @@ fn agent_message_delivered_before_agent_start_should_be_recovered_via_mailbox() 
     // 2. 先建 reply 订阅 (agent 首次补拉在启动后立即触发, 回复可能早于
     //    测试侧订阅声明 — pub 无订阅者即丢, 必须先 sub 后起 agent)
     let reply_session = open_authenticated_test_session(&entrypoint);
+    let reply_key = format!("rdog/lab/agent/{sender}/inbox");
     let reply_sub = reply_session
-        .declare_subscriber(format!("rdog/lab/agent/{sender}/inbox"))
+        .declare_subscriber(reply_key.clone())
         .wait()
         .expect("reply sub");
+    await_subscriber_visible(&reply_session, &entrypoint, &reply_key);
 
     // 3. 起 agent: 补拉路径应拿到 pre-start 消息并回复
     let mut agent = Command::new(rdog_binary_path())

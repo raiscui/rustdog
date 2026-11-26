@@ -94,8 +94,8 @@ target 的 `passed` 必须 > 0**, 否则判红 —— 「退出码 0 但零执�
 
 | 平台 | 执行的 target |
 | --- | --- |
-| ubuntu | `connect_modes`、`control_lanes`、`control_mode`、`control_pty`、`control_tty`、`shell_pty`、`daemon_inbound`、`listen_suspend`、`computer_use_density`、`control_websocket`、`zenoh_router_client`、`tls_link` |
-| macos | ubuntu 那 12 个 target 全部, 且无具名跳过 |
+| ubuntu | `connect_modes`、`control_lanes`、`control_mode`、`control_pty`、`control_tty`、`shell_pty`、`daemon_inbound`、`listen_suspend`、`computer_use_density`、`control_websocket`、`zenoh_router_client`、`tls_link`、`declaration_propagation` |
+| macos | ubuntu 那 13 个 target 全部, 且无具名跳过 |
 | windows | `computer_use_density`、`tls_link` (另有 2 个 target 在 windows 显式豁免, 见下) |
 | 全平台 (build 阶段) | `cargo test --no-run` 编译**全部** target, 含下面的 compile-only 面 |
 | compile-only (macos) | `zenoh_unixpipe_fast_path` (issue #164)、`control_ax_e2e`、`control_display_aware_e2e`、`control_mouse_e2e`、`control_ocr_e2e`、`control_window_e2e` |
@@ -104,8 +104,8 @@ target 的 `passed` 必须 > 0**, 否则判红 —— 「退出码 0 但零执�
 
 | 平台 | 实际执行的 integration target 数 | 具名跳过 / 豁免 / 只编译 |
 | --- | --- | --- |
-| ubuntu | **12** | 无具名跳过 (RAI-524 已撤, 见下); 20 处 `#[ignore]` 见 §6 |
-| macos | **12** | 6 个 compile-only (`zenoh_unixpipe_fast_path` 见 issue #164; 5 个 GUI 面需真实桌面会话) |
+| ubuntu | **13** | 无具名跳过 (RAI-524 已撤, 见下); 20 处 `#[ignore]` 见 §6 |
+| macos | **13** | 6 个 compile-only (`zenoh_unixpipe_fast_path` 见 issue #164; 5 个 GUI 面需真实桌面会话) |
 | windows | **2** (`computer_use_density`、`tls_link`) | `control_websocket`、`zenoh_router_client_windows` (issue #162) |
 
 **判读口径: 「三平台绿」在 windows 上只代表 2 个 integration target, 不能读成「windows 的 e2e 面

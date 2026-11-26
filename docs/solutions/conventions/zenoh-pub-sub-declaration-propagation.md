@@ -18,7 +18,7 @@ verified_by:
   - "对拍实验 (PR #92 排障): 同款 pub 在 sub 声明存在与否下行为不同, 排除声明顺序/pure pub 模式变量"
   - "mailbox e2e: publisher 声明后 sleep 200ms 的窗口让全链稳定 (1034/1034)"
 root_cause: "zenoh 的 declare_subscriber/declare_publisher 是异步传播到 router 的; pub 在订阅声明传播完成前发出时无匹配路由即被丢弃 (无缓存无重试)"
-resolution_type: "e2e/集成测试契约: sub 声明后留传播窗口 (200ms-1s) 再触发对端 pub; 同一 session 内先声明 sub 再 pub"
+resolution_type: "e2e/集成测试: 声明后用可观测自检等 router 可见 (`tests/support/propagation.rs`), 不用固定 sleep"
 ---
 
 # zenoh pub 的即时性幻觉 — 声明异步传播与无匹配订阅者即丢
@@ -35,8 +35,21 @@ resolution_type: "e2e/集成测试契约: sub 声明后留传播窗口 (200ms-1s
 
 ## Guidance
 
-1. **先声明, 留窗口, 再触发对端**: sub 声明后 sleep 200ms~1s (按流量
-   估算传播时间), 再触发对端的 pub;
+1. **用自检等可见, 不要猜时长** (RAI-580): 订阅声明后调用 `tests/support/propagation.rs` 的
+   `await_subscriber_visible(declaring, witness, keyexpr)` —— 它在声明之后于**同一 session**
+   声明一个 **queryable** 探针, 再用**另一个 session** 去 `get` 它。回复必须经 router 路由到声明方
+   再回来, 所以答得出 ⇒ router 已处理过该 session 之前的 Declare (同一 session 的 Declare 按序
+   到达)。拿到就返回 (实测 9ms 量级), 拿不到在预算内重试, **没有等传播的固定 sleep**。
+
+   **为什么不用 liveliness token**: 那一版本机两轮全绿, 但 runner 上两条测试同时红且方向相反 ——
+   一条 5s 内 2391 次 query 都答不出, 另一条在 daemon `SIGSTOP` 之后**反而报「可见」**: 客户端
+   session 会就**本地 liveliness 状态**直接作答, 于是这个"自检"读的是本地注册, 不是 router 可见性。
+   queryable 的回复只能由声明方经 router 交付, 从构造上没有这条路 (同 session 自问自答的情况实测
+   也是 queryable 版不作答)。
+
+   **探针的回复要带 per-call nonce 并校验 keyexpr**: 只判 `result().is_ok()` 的话, 任何一个第三方
+   在该 keyexpr 下挂的 queryable 都会被当成「可见」(实测 3.6ms 就 Ok) —— 断言还在, 但已经不证明
+   任何事了。`is_probe_reply` 就是这个谓词, 有独立用例盯着;
 2. **同一 session 内组合声明**: reply_sub 与 task publisher 放同一 session,
    session 必须活到等待结束 (drop 后 sub 失效);
 3. **daemon 侧证据链**: 关键投递路径加 INFO 日志
@@ -44,6 +57,23 @@ resolution_type: "e2e/集成测试契约: sub 声明后留传播窗口 (200ms-1s
    "pub 未达" vs "订阅者未收";
 4. **pub 无缓存**: 不要假设 zenoh 会为"稍后上线的订阅者"补投 —
    持久语义要用 queryable 补拉显式实现 (rdog mailbox 的 design)。
+
+### 自检的负对照 (它凭什么承重)
+
+把 8 处「声明后立刻触发对端」的 e2e 换成自检之后, 自检本身用一个**暂停 router** 的测试盯着
+(`tests/declaration_propagation.rs::self_check_should_fail_when_the_router_is_not_processing`):
+daemon 收到 `SIGSTOP` 后, 声明照旧成功 (本地注册 + 写进 socket), 但自检必须答不出来; `SIGCONT`
+之后同一 keyexpr 必须重新可见。**这条证明自检读的是 router 的可见性, 而不是本地注册状态。**
+
+### 边界: 本机 loopback 上「立刻 pub」并不丢 (实测)
+
+同一测试里的 naive 臂 (声明后立刻投递, 不自检) 在本机 loopback 上 **0 丢**: 二十轮、`Session::put`
+直发 400 次、声明前先灌 4/16 MB 占满发送队列、以及 2 核机器上 4 个 CPU burner 争用 200 次 ——
+合计 750+ 次投递无一丢失。原因是 `declare_subscriber().wait()` 返回时 Declare 已写进 socket, 而
+pub 要走「客户端→router→订阅者」两跳, 本机来回路程内声明总是先到。
+
+所以**不要把这条读成「自检修掉了本地可复现的丢失」**: 上游观测到的丢失发生在跨进程/慢链路上
+(见下面 Evidence), 自检的作用是让那类时序**可观测**, 而不是在本机造出一个可复现的丢包。
 
 ## Evidence
 
