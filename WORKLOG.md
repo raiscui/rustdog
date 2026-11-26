@@ -404,3 +404,40 @@ panic 于 `dynamic_link.rs:45` (unix 分支, 同一循环); `mkdir -p target/deb
 - 提交: 403fb9a (评审第四轮: 覆盖缺口 18 个 + 从已知红表移入 §3 披露)
 - 提交: 80ddfc3 (windows 首次跑到本组测试抓到的 ConnectionReset: 12 处读响应改成 EOF/reset 皆终止)
 - 提交: 00bb079 (windows 并行 spawn 偶发 ERROR_FILE_NOT_FOUND: 对 NotFound 有界重试)
+
+## 2026-11-26 serial listen endpoint 不再当可达 locator 通告 (RAI-383)
+
+Zenoh 对 serial 端点是惰性的 (`zenoh-link-serial::new_listener` 不打开串口, 只把
+endpoint 记进 locator 集合), 于是打不开的串口也会出现在 `Zenoh can be reached at:`
+里, 对端按它拨号必然失败且启动日志无提示。RAI-383 按 RUST-3 的真机实测重写后,
+落地两层:
+
+- 新增 `src/zenoh_runtime/listen_plan.rs`: 启动期分类 listen_endpoints —— 必选
+  (tcp/udp/tls/unixpipe) 原样交给 Zenoh (绑定失败仍致命, 形状非法直接报错),
+  可选 (serial) 先探测设备 (unix 看字符设备, windows 按 zenoh 的 exclusive 语义试开);
+  不可用的 serial 记入 dropped 并由 `run_router_daemon` 打一条含 endpoint/原因/
+  影响/改法的 warn, daemon 继续启动。ready 日志改为回读实际生效集合。
+- 模板收窄: `rdog_win.toml` / `rdog_linux.toml` 的 serial 端点改为注释 (与
+  `rdog_macos.toml` 一致), README 最小配置同步并写明该语义。
+- 实测 (Linux 云机, 隔离 HOME): 修前同配置下 `serial/NOSUCHPORT` 与
+  `serial//dev/rdog-rai383-no-such-port` 都出现在 `can be reached at`; 修后两者
+  都被剔除并各留一条 warn, `tcp` 入口 `@ping` 回执 `pong:true`; socat pty 冒充
+  可用串口时该 endpoint 正常进入通告集合。`cargo test --bin rdog` 1111 passed /
+  0 failed / 2 ignored (新增 4 条 listen_plan 单测)。
+- 未验: Windows 侧只落到代码与语义 (试开 `\\.\COMxx`), 本机无 Windows 环境实跑。
+- 提交: 564fc4a
+
+## 2026-11-26 RAI-383 评审修复与知识 Capture
+
+- 评审抓到 windows 探测缺陷: `std::fs::OpenOptions` 默认共享模式与 Windows 通信设备
+  不兼容 (`serialport-4.9.0/src/windows/com.rs:62` 用 `share_mode 0`), 会让可用串口在
+  探测阶段被判死并永久剔除。已改成读写 + `share_mode(0)`, 与 zenoh 底层同一打开语义。
+  本机无 windows 环境, 该修复的编译与 `COM255` 负例由 windows-latest job 给出证据;
+  Linux 侧重跑 `cargo test --bin rdog` 1111 passed / 0 failed / 2 ignored, 两份真机
+  回执 (不可用剔除 + socat pty 可用保留) 在新二进制上复跑一致。
+- 知识 Capture: `docs/solutions/conventions/zenoh-serial-listener-lazy-locator.md`,
+  根 `AGENTS.md` 粗索引与 capture 记录同提交更新。仓库里没有
+  `docs/solutions/AGENTS.md` 细索引, 也没有 `scripts/check-solutions-index.mjs`,
+  故只跑现存的两份守卫 (`check-carrier-assertions.py` / `check-bookkeeping.py`)。
+- 提交: ddf32fb
+- 提交: d226320

@@ -100,8 +100,10 @@ daemon_name = "dongfeng-unity.lab"
 listen_endpoints = [
     # TCP endpoint for control/client join.
     "udp/0.0.0.0:7447",
-    # Serial endpoint for ESP32/MCU access.
-    "serial/COM3#baudrate=115200",
+    # Serial endpoint for ESP32/MCU access. Off by default: an endpoint whose
+    # device does not exist is dropped from the advertised locator set at
+    # startup (RAI-383). Uncomment and point it at a real port to enable it.
+    # "serial/COM3#baudrate=115200",
 ]
 request_timeout_ms = 3000
 startup_guard_window_ms = 1000
