@@ -509,18 +509,56 @@ fn control_pty_should_treat_control_words_as_remote_input() {
     .spawn()
     .expect("pty control cli should start");
 
-    child
+    let child_stdout = child
+        .stderr
+        .take()
+        .expect("script-wrapped control stderr should be piped");
+    let (stderr_buffer, _stderr_collector) = spawn_output_collector(child_stdout);
+    let child_stdout = child
+        .stdout
+        .take()
+        .expect("script-wrapped control stdout should be piped");
+    let (stdout_buffer, _stdout_collector) = spawn_output_collector(child_stdout);
+
+    let mut child_stdin = child
         .stdin
-        .as_mut()
-        .expect("stdin should exist")
+        .take()
+        .expect("script-wrapped control stdin should be piped");
+    child_stdin
         .write_all(b"@script:\"printf BAD\"\n")
         .expect("should send control-looking text into pty");
-    drop(child.stdin.take());
+    child_stdin
+        .flush()
+        .expect("control-looking line should flush");
+    // 写端必须先留着: script 一见到 stdin EOF 就可能提前收掉这层伪终端,
+    // 于是那行还没转给远端 CLI 就被掐断 (control_tty 那边有同类记录的时序坑)。
+    // 先等远端 shell 打印 GOT:, 再关写端收尾。
+    let saw_remote_echo =
+        wait_until_buffer_contains(&stdout_buffer, "GOT:", Duration::from_secs(6));
+    drop(child_stdin);
 
     let output = wait_with_output_timeout(child, Duration::from_secs(8), "pty transparent input");
     stop_child(&mut daemon);
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        saw_remote_echo,
+        "remote pty helper should print the echoed control line before stdin closes"
+    );
+    let stdout = {
+        let mut stdout = stdout_buffer
+            .lock()
+            .expect("collector buffer lock should work")
+            .clone();
+        stdout.push_str(&String::from_utf8_lossy(&output.stdout));
+        stdout
+    };
+    let stderr = {
+        let mut stderr = stderr_buffer
+            .lock()
+            .expect("collector buffer lock should work")
+            .clone();
+        stderr.push_str(&String::from_utf8_lossy(&output.stderr));
+        stderr
+    };
     assert!(
         output.status.success(),
         "pty transparent input command should exit successfully\nstdout:\n{stdout}\nstderr:\n{stderr}"
