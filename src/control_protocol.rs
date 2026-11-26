@@ -9,7 +9,8 @@ pub(crate) use self::parsers::{
 
 use self::parsers::{
     parse_agent_ack_payload, parse_agent_name_payload, parse_cancel_payload, parse_cmd_payload,
-    parse_computer_act_payload, parse_control_header, parse_key_payload, parse_open_app_payload,
+    parse_computer_act_payload, parse_control_header, parse_file_cancel_payload,
+    parse_key_payload, parse_open_app_payload,
     parse_pty_attach_payload, parse_pty_close_payload, parse_pty_detach_payload, parse_pty_payload,
     parse_screenshot_payload, parse_spawn_payload, parse_task_id_payload,
     parse_task_output_payload, parse_wait_payload, require_non_empty_payload,
@@ -706,7 +707,7 @@ pub fn parse_control_line(line: &str) -> io::Result<ControlParseResult> {
         "file-chunk" => ControlCommand::FileChunk(payload.to_owned()),
         "file-end" => ControlCommand::FileEnd(payload.to_owned()),
         "file-read" => ControlCommand::FileRead(payload.to_owned()),
-        "file-cancel" => ControlCommand::FileCancel(payload.to_owned()),
+        "file-cancel" => ControlCommand::FileCancel(parse_file_cancel_payload(payload)?),
         "file-list" => ControlCommand::FileList,
         "cdp-targets" => {
             ControlCommand::CdpTargets(crate::control_cdp::parse_cdp_targets_request(payload)?)
