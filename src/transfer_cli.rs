@@ -368,38 +368,50 @@ pub(crate) fn run_get(
             .map(|name| name.to_string_lossy().into_owned())
             .unwrap_or_else(|| "download".to_string())
     ));
-    let mut file =
-        std::fs::File::create(&staging).map_err(|err| format!("创建 {staging:?} 失败: {err}"))?;
-    // 下载方向的上限不是行长度而是**响应预算**: 一个 `@file-read` 的回执超预算时会被包成
-    // `output_budget_exceeded` 而拿不到数据。所以每块按响应预算切, 比上传块小一个量级。
-    let chunk_bytes = (exchange_peer.chunk_bytes() as u64).min(response_payload_bytes());
-    let mut offset = 0u64;
-    loop {
-        let want = (size - offset).min(chunk_bytes).max(1);
-        let read_line = serde_json::json!({
-            "transfer_id": transfer_id,
-            "offset": offset,
-            "length": want,
-        });
-        let read = exchange_peer.request(&format!("@file-read:{read_line}"))?;
-        let data = read.get("data").and_then(Value::as_str).unwrap_or_default();
-        let bytes = BASE64_STANDARD
-            .decode(data)
-            .map_err(|err| format!("分块解码失败: {err}"))?;
-        file.write_all(&bytes)
-            .map_err(|err| format!("写入 {local:?} 失败: {err}"))?;
-        offset += bytes.len() as u64;
-        let eof = read.get("eof").and_then(Value::as_bool).unwrap_or(false);
-        if eof || offset >= size {
-            break;
+    // 整段落盘收在一个闭包里: **任何**一步失败 (读块超时、解码失败、写盘失败、空块、字节数
+    // 对不上) 都走同一个清理点删掉临时名。逐条 `?` 提前 return 会把 `<local>.rdog-partial-download`
+    // 留在目标目录里 —— 原文件是安全的, 但残片没人清。
+    let written = (|| -> Result<u64, String> {
+        let mut file = std::fs::File::create(&staging)
+            .map_err(|err| format!("创建 {staging:?} 失败: {err}"))?;
+        // 下载方向的上限不是行长度而是**响应预算**: 一个 `@file-read` 的回执超预算时会被包成
+        // `output_budget_exceeded` 而拿不到数据。所以每块按响应预算切, 比上传块小一个量级。
+        let chunk_bytes = (exchange_peer.chunk_bytes() as u64).min(response_payload_bytes());
+        let mut offset = 0u64;
+        loop {
+            let want = (size - offset).min(chunk_bytes).max(1);
+            let read_line = serde_json::json!({
+                "transfer_id": transfer_id,
+                "offset": offset,
+                "length": want,
+            });
+            let read = exchange_peer.request(&format!("@file-read:{read_line}"))?;
+            let data = read.get("data").and_then(Value::as_str).unwrap_or_default();
+            let bytes = BASE64_STANDARD
+                .decode(data)
+                .map_err(|err| format!("分块解码失败: {err}"))?;
+            file.write_all(&bytes)
+                .map_err(|err| format!("写入 {staging:?} 失败: {err}"))?;
+            offset += bytes.len() as u64;
+            let eof = read.get("eof").and_then(Value::as_bool).unwrap_or(false);
+            if eof || offset >= size {
+                break;
+            }
+            if bytes.is_empty() {
+                return Err(format!("@{offset} 处读到空块且未到 EOF (回执 {read})"));
+            }
         }
-        if bytes.is_empty() {
-            return Err(format!("@{offset} 处读到空块且未到 EOF (回执 {read})"));
+        file.flush()
+            .map_err(|err| format!("写入 {staging:?} 失败: {err}"))?;
+        Ok(offset)
+    })();
+    let offset = match written {
+        Ok(offset) => offset,
+        Err(err) => {
+            let _ = std::fs::remove_file(&staging);
+            return Err(err);
         }
-    }
-    file.flush()
-        .map_err(|err| format!("写入 {staging:?} 失败: {err}"))?;
-    drop(file);
+    };
 
     let actual = sha256_of_file(&staging)?;
     if !declared_sha256.is_empty() && !actual.eq_ignore_ascii_case(&declared_sha256) {
@@ -437,6 +449,8 @@ mod tests {
         fail_chunk_index: Option<usize>,
         seen_lines: std::sync::Mutex<Vec<String>>,
         download_sha_override: Option<String>,
+        /// 第 N 个 `@file-read` 之后的读取故障: `"empty"` 返回空块, `"error"` 直接失败。
+        download_fault: Option<(usize, &'static str)>,
     }
 
     impl LoopbackPeer {
@@ -446,6 +460,7 @@ mod tests {
                 fail_chunk_index: None,
                 seen_lines: std::sync::Mutex::new(Vec::new()),
                 download_sha_override: None,
+                download_fault: None,
             }
         }
 
@@ -468,6 +483,21 @@ mod tests {
                 if let Some(index) = self.fail_chunk_index {
                     if self.chunk_count() > index {
                         return Err("模拟的对端故障".to_string());
+                    }
+                }
+            }
+            if line.starts_with("@file-read:") {
+                if let Some((after, kind)) = self.download_fault {
+                    let reads = self
+                        .seen()
+                        .iter()
+                        .filter(|seen| seen.starts_with("@file-read:"))
+                        .count();
+                    if reads > after {
+                        return match kind {
+                            "empty" => Ok(serde_json::json!({"data": "", "eof": false})),
+                            _ => Err("模拟的读取故障".to_string()),
+                        };
                     }
                 }
             }
@@ -607,6 +637,30 @@ mod tests {
         assert_eq!(receipt.bytes, payload.len() as u64);
         assert_eq!(std::fs::read(&local).unwrap(), payload);
         assert_eq!(receipt.sha256, format!("{:x}", Sha256::digest(&payload)));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn get_failure_mid_stream_leaves_no_staging_residue() {
+        // 读块超时/解码失败/写盘失败/空块走的是同一个清理点; 这里用"空块"和"读取直接失败"
+        // 两种触发, 断言临时名一定被删掉 —— 残片没人清, 而它长得和正常下载的文件名只差后缀。
+        let dir = scratch_dir("get-residue");
+        let remote = dir.join("remote.bin");
+        std::fs::write(&remote, vec![3u8; 40]).unwrap();
+        let staging = dir.join("landed.bin.rdog-partial-download");
+
+        for kind in ["empty", "error"] {
+            let local = dir.join("landed.bin");
+            let mut peer = LoopbackPeer::new(8);
+            peer.download_fault = Some((1, kind));
+            let err = run_get(&peer, &remote.to_string_lossy(), &local).unwrap_err();
+            assert!(
+                err.contains("空块") || err.contains("模拟的读取故障"),
+                "{kind}: 错误要带上原因: {err}"
+            );
+            assert!(!staging.exists(), "{kind}: 失败后不得留下临时名残片");
+            assert!(!local.exists(), "{kind}: 也不得落下目标文件");
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 
