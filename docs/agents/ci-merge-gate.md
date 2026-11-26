@@ -120,14 +120,6 @@ target 的 `passed` 必须 > 0**, 否则判红 —— 「退出码 0 但零执�
 挂住的 target 会一路撑到 GitHub 的 job timeout 被 cancel, 日志只剩一句
 `The job has been cancelled` —— 既指不出是哪个 target, 也分不清「慢」与「死等」。
 
-**windows 侧 2 个 target 显式豁免** (`PLATFORM_EXEMPTIONS`): `control_websocket` (整 target 挂死,
-1500s 上限才终止) 与 `zenoh_router_client_windows` (daemon 因遗留 `service_name` 守卫拒启动) ——
-两者都没隔离 HOME, 在 runner 的真实 `C:\Users\runneradmin` 上与前序用例共用 `.rdog` 与
-`zenoh-guards`。它们照常在没有平台豁免的那一侧执行 (前者 ubuntu/macos), job summary 里单列
-**exempt on this platform** 一行、**不计入 ran 集合**; 收回条件是 issue #162 的隔离修复通过
-windows 连续 3 轮, 随后删掉这两条豁免。所以本 PR 之后 windows 的 integration 面只有
-`computer_use_density` 一个 —— 这是这一轮的真实覆盖, 不写成"windows 也跑了 e2e"。
-
 **ubuntu 侧 1 个 target 显式豁免** (`PLATFORM_EXEMPTIONS`): `zenoh_router_client`。连续三轮
 ubuntu 各挂一个**不同**的用例 (`control_lanes` 的 key 注入 / TLS 换 CA / mTLS client cert),
 全部停在「client 建不上到刚启动 daemon 的连接」这一段, 而同一份代码在 macos runner 上全绿、
@@ -140,19 +132,23 @@ macos 照常执行, job summary 单列 `exempt on this platform`、**不计入 r
 **windows 侧 2 个 target 显式豁免** (`PLATFORM_EXEMPTIONS`): `control_websocket` (整 target 挂死,
 1500s 上限才终止) 与 `zenoh_router_client_windows` (daemon 因遗留 `service_name` 守卫拒启动) ——
 两者都没隔离 HOME, 在 runner 的真实 `C:\Users\runneradmin` 上与前序用例共用 `.rdog` 与
-`zenoh-guards`。它们照常在没有平台豁免的那一侧执行 (前者 ubuntu/macos), job summary 里单列
+`zenoh-guards`。`control_websocket` 在 ubuntu / macos 照常执行; `zenoh_router_client_windows`
+是 windows-only, 所以**此刻在 CI 里只编译不执行**。两者在 job summary 里单列
 **exempt on this platform** 一行、**不计入 ran 集合**; 收回条件是 issue #162 的隔离修复通过
 windows 连续 3 轮, 随后删掉这两条豁免。所以本 PR 之后 windows 的 integration 面只有
 `computer_use_density` 一个 —— 这是这一轮的真实覆盖, 不写成"windows 也跑了 e2e"。
 
-**ubuntu 侧 3 条已知红** (`control_lanes` 1 条 + `zenoh_router_client` 2 条) 用
-`#[cfg_attr(target_os = "linux", ignore = …)]` 显式收窄: 它们仍然在 macos / windows
-上执行, 只在 ubuntu runner 上跳过, 登记与到期日见 §6 (`RAI-464`)。收窄的是**平台**, 不是
-断言 —— 同一 target 的其余用例照常跑, `passed` 计数仍然要求 > 0。
+逐条 `#[ignore]` 只在**单个用例**确有平台不兼容时用, 且必须挂理由与到期日 (见 §6)。今天只剩
+一处: `control_lanes::daemon_control_lane_should_accept_key_object_payload_with_request_id` 在
+ubuntu 上按 `#[cfg_attr(target_os = "linux", ignore = …)]` 跳过, 同 target 其余 14 条照常跑。
+**`zenoh_router_client` 里一条 `#[ignore]` 都没有** —— 那个 target 是整片在 ubuntu 豁免 (见上),
+不要在这里再写它, 否则 §3b 会和 §6 给出两份互相打架的口径 (`zenoh_router_client` 是 `unix`,
+本来也从不进 windows)。
 
-**compile-only 是显式的, 不是静默 skip —— 但它也不计入「ran」。** 这 5 个 target 需要
-真实桌面会话: 已登录的 GUI 用户 + Accessibility 与 Screen Recording 授权, GitHub runner
-没有这些条件。它们的处置是:
+**compile-only 是显式的, 不是静默 skip —— 但它也不计入「ran」。** 这 6 个 target 里, 5 个
+需要真实桌面会话 (已登录的 GUI 用户 + Accessibility 与 Screen Recording 授权, GitHub runner
+没有这些条件), 1 个是 `zenoh_unixpipe_fast_path` (issue #164, runner 上连接类用例接力红)。
+它们的处置是:
 
 | 位置 | 处置 |
 | --- | --- |
@@ -173,9 +169,9 @@ cargo test --test control_ocr_e2e
 cargo test --test control_window_e2e
 ```
 
-**一个只能编译、没有任何可执行路径的测试等价于注释。** 上面这 5 条命令就是它们的可执行路径;
+**一个只能编译、没有任何可执行路径的测试等价于注释。** 上面这 6 条命令就是它们的可执行路径;
 改动其中任何一个 target 的名字或前置时, 同票更新本表与 `run-integration-targets.py` 的
-`COMPILE_ONLY`。
+`CLASSIFICATION` (标成 `compile-only:macos`)。
 
 ## 4. `ort-sys` / onnxruntime 的获取契约
 

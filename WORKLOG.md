@@ -1292,6 +1292,18 @@ zenoh_router_client 38/2 ignored)。
 rebase 会重写分支上每个 commit 的 sha, 本票在合并前又被 rebase 了两次, 所以这里补一张对照表;
 按 `docs/agents/ci-merge-gate.md` §2 的口径, 这类 sha 漂移属于流程设计问题, 由 RAI-433 统一治 (合入后纯账本提交补记),
 不为它单独推提交刷 sha。
+### 2026-11-26 RAI-411 评审必修: 载体自相矛盾 + 空 executed 集合 = 绿
+
+- 提交: (本条随修复提交记入下一次账本)
+
+① `ci-merge-gate.md` §3b 里「ubuntu 侧 3 条已知红用逐条 `#[ignore]` 收窄」是上一轮处置的残留,
+与改成的 target 级豁免打架 (而且 `zenoh_router_client` 是 `unix`, 从不进 windows), 重写成
+「逐条 ignore 只剩 `control_lanes` 那 1 条, `zenoh_router_client` 一条都没有」; 顺手去重了
+windows 豁免段、`5 个 target`→`6`、指向不存在的 `COMPILE_ONLY` 符号改成 `CLASSIFICATION`,
+并把 windows-only 那个 target「此刻只编译不执行」写明。
+② 脚本加一条守卫: `if not executed_rows: return 1` —— 豁免把某平台的 executed 集合变成空时,
+空表格 + 退出码 0 仍然是绿, 与「一条测试都没跑」在分支保护上长得一样。今天不可达 (每平台至少
+1 个), 但正是 RAI-397 要消灭的形态。
 ### 2026-11-26 RAI-411 口径补充: macos 那条先按产品缺陷假设验, 脚本编码两端固定
 
 - 提交: 2469d33

@@ -251,6 +251,12 @@ def main() -> int:
             tail = "\n".join(log.strip().splitlines()[-25:])
             print(f"--- {target} compile log tail ---\n{tail}\n", file=sys.stderr)
 
+    # 一个 target 都没执行 = 绿, 和「一条测试都没跑」长得一模一样 (RAI-397 要消灭的形态)。
+    # 今天不可达 (每个平台至少 1 个), 但豁免可以让 executed 集合变空, 所以在这里判红。
+    if not executed_rows:
+        annotate("error", "integration target inventory", f"{args.os} 没有任何 target 被执行")
+        return 1
+
     summary = [
         f"### integration targets on `{args.os}`",
         "",
