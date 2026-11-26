@@ -426,7 +426,11 @@ fn only_a_named_directory_anchor_widens_the_roots() {
             PathBuf::from("/tmp/relay.pem"),
             PathBuf::from("/tmp/directory.pem")
         ),
-        "a shared endpoint adds the lane's chain to the named directory anchor"
+        "a shared endpoint pins the lane's chain and the named directory anchor together"
+    );
+    println!(
+        "directory: both root sets are explicit chains — {} and nothing else",
+        "no public CA is trusted on either"
     );
     println!("directory: the named anchor decides the root set, nothing else does");
 }
@@ -445,4 +449,14 @@ fn a_directory_relay_follows_the_profile_without_weakening_it() {
         .expect_err("a directory relay is never plaintext");
     assert!(err.to_string().contains("HTTPS"), "{err}");
     println!("directory: the relay URL follows the same profile gate as the lane relay");
+}
+
+#[test]
+fn the_directory_hop_fits_inside_the_lease_it_renews() {
+    assert!(
+        DIRECTORY_CONNECT < LEASE - RENEW,
+        "a directory call that outlives the lease it renews denies every peer while it is in flight"
+    );
+    assert!(DIRECTORY_CONNECT >= IO, "the hop still needs a usable budget");
+    println!("directory: the hop budget stays inside the lease it refreshes");
 }

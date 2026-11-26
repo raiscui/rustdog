@@ -69,6 +69,11 @@ const CONNECT: Duration = Duration::from_secs(7);
 // A relay candidate brings its home connection up first, so it needs a budget
 // that covers that hop as well as the connection made through it.
 const RELAY_CONNECT: Duration = Duration::from_secs(20);
+// The directory hop sits on the lease's critical path: a daemon registers and
+// then renews every `RENEW`, so a directory call that ran longer than
+// `LEASE - RENEW` would let the lease expire while it was still in flight and
+// deny every peer in the meantime. It is deliberately shorter than `RELAY_CONNECT`.
+const DIRECTORY_CONNECT: Duration = Duration::from_secs(8);
 const LEASE: Duration = Duration::from_secs(15);
 const RENEW: Duration = Duration::from_secs(5);
 const MAX_DIRECTORY: usize = 2048;
@@ -459,8 +464,10 @@ enum RelayRoots {
     /// Only this chain, for a directory endpoint that dials one relay and nothing
     /// else.
     Pinned(PathBuf),
-    /// The lane's pinned chain plus the directory relay's named chain, over the
-    /// embedded WebPKI roots.
+    /// The lane's pinned chain plus the directory relay's named chain. Still
+    /// pinned: no endpoint ever falls back to public WebPKI, so a public
+    /// directory relay needs the operator to hand in that root bundle as
+    /// `root_cert` instead of trusting every public CA.
     LaneAndDirectory(PathBuf, PathBuf),
 }
 
@@ -482,9 +489,10 @@ impl RelayRoots {
     fn config(&self) -> io::Result<CaTlsConfig> {
         Ok(match self {
             Self::Pinned(chain) => CaTlsConfig::custom_roots(certificates(chain)?),
-            Self::LaneAndDirectory(lane, directory) => CaTlsConfig::embedded()
-                .with_extra_roots(certificates(lane)?)
-                .with_extra_roots(certificates(directory)?),
+            Self::LaneAndDirectory(lane, directory) => {
+                CaTlsConfig::custom_roots(certificates(lane)?)
+                    .with_extra_roots(certificates(directory)?)
+            }
         })
     }
 }
@@ -569,10 +577,8 @@ async fn directory_call(
     dial: &DirectoryDial,
     request: DirectoryRequest,
 ) -> Result<DirectoryReply> {
-    // A relay hop brings its home connection up first, so it gets the same
-    // budget the lane's own relay dial uses.
     let budget = match dial.relay {
-        Some(_) => RELAY_CONNECT,
+        Some(_) => DIRECTORY_CONNECT,
         None => CONNECT,
     };
     let conn = timeout(budget, ep.connect(dial.addr.clone(), DIRECTORY_ALPN)).await??;
@@ -756,7 +762,6 @@ async fn register(
     }
     addrs.push(TransportAddr::Relay(cfg.relay.url.clone()));
     let addr = EndpointAddr::from_parts(data.id(), addrs);
-    let expires = Instant::now() + LEASE;
     match directory_call(
         ep,
         dial,
@@ -767,7 +772,7 @@ async fn register(
     )
     .await?
     {
-        DirectoryReply::Registered => Ok(expires),
+        DirectoryReply::Registered => Ok(Instant::now() + LEASE),
         _ => Err("unexpected iroh directory registration response".into()),
     }
 }
@@ -1031,8 +1036,11 @@ pub(crate) fn run_daemon(path: &Path) -> Result<()> {
         tokio::spawn(async move {
             loop {
                 tokio::time::sleep(RENEW).await;
-                if let Ok(deadline) = register(&directory, &dial, &cfg, &renewal_data).await {
-                    if let Ok(mut when) = renewal_expires.lock() { *when = deadline; }
+                match register(&directory, &dial, &cfg, &renewal_data).await {
+                    Ok(deadline) => {
+                        if let Ok(mut when) = renewal_expires.lock() { *when = deadline; }
+                    }
+                    Err(err) => log::info!("iroh directory renewal failed: {err}"),
                 }
             }
         });

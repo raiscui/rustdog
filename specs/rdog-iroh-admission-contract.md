@@ -32,7 +32,7 @@ relay 侧另有一个 `advertise` 字段（缺省空），只改写给对端的 
 - **daemon 侧不能有第二个端点**：一条对端身份在一个 relay 上只有一条连接，目录端点与服务端点同时挂同一个 relay 会互相顶掉（实测原文 `Relay server reports problem: Another endpoint connected with the same endpoint id`，随后注册超时、daemon 非零退出）。所以打开开关时 daemon 复用服务端点本身（ALPN 同时带 `CONTROL` 与 `DIRECTORY`，relay map 是 lane relay ∪ directory relay）；关掉开关时仍是"目录端点无 relay + 服务端点挂 lane relay"两个端点。
 - **宽化只挂在显式的信任锚上**：一个 endpoint 只有一份 TLS 配置，根集合由 [`relay_roots`](../src/control_iroh.rs) 一处决定：
   - 只拨目录的端点（rendezvous 的目录端点、client 的查找端点）用 `custom_roots(directory.relay.root_cert)`，**不引入公共根**；
-  - daemon 的共享端点（lane + 目录同一个 endpoint）用 `embedded().with_extra_roots(lane 链 + directory 链)`，也就是 WebPKI 加两份链，因为公共 hop 无法用私建锚验证。
+  - daemon 的共享端点（lane + 目录同一个 endpoint）用 `custom_roots(lane 链).with_extra_roots(directory 链)`，也就是两份**显式链**，**不**打底任何公共根：私有目录 relay 的场景根本不需要 WebPKI，无条件 `embedded()` 会让整条私有链路信任全量公共 CA。公共目录 relay 需要操作者把那份根包作为 `root_cert` 交进来。
 
   `root_cert` 因此是**必填字段**：打开 `via_relay` 却不给信任锚时 profile 直接解析失败，不存在"开关一开顺带放宽 TLS"的路径 —— 功能维度（开不开目录的 relay 承载）与安全维度（信任面）不共用一个布尔量；用公共 relay 就必须显式给出那份 CA 链，这是"操作者知道自己信什么"的价格。关掉开关时仍是 `custom_roots(lane 链)`。
 - **地址策略不放宽**：目录 relay 的 URL 必须 https，非 `routable` profile 还必须是回环主机。三种半配置一律 fail closed：有 `relay` 没 `via_relay`、有 `via_relay` 没 `relay`、两者都没有又不给 `addr`。
