@@ -120,7 +120,7 @@ target 的 `passed` 必须 > 0**, 否则判红 —— 「退出码 0 但零执�
 | 层 | 值 | 缺了会怎样 |
 | --- | --- | --- |
 | 单 target | `TARGET_TIMEOUT_SECONDS` = 1500s | 挂住的 target 撑到 job timeout 被 cancel, 日志只剩 `The job has been cancelled` |
-| 整步预算 | `JOB_BUDGET_SECONDS` = 3300s (env `RDOG_JOB_BUDGET_SECONDS` 可覆盖) | 两次 1500s 挂起就把 60 分钟的 job 撑爆, 「点不出是哪个」原样复现 |
+| 整 job 预算 | `JOB_TIMEOUT_MINUTES`(60) − 已用 − `JOB_RESERVE_SECONDS`(180s); 起点由 job 第一个 step 写 `$RUNNER_TEMP/job-started-at` | 两次 1500s 挂起就把 60 分钟的 job 撑爆, 「点不出是哪个」原样复现 |
 | 编译期 (`--no-run`, compile-only) | 同上两个 | `--no-run` 也会挂 (链接/依赖解析), 没有上限同样无名 |
 
 预算耗尽**不是跳过而是失败**: 未执行的 target 会被点名并判红 (`job 预算耗尽: …` 未执行),
@@ -130,10 +130,20 @@ target 的 `passed` 必须 > 0**, 否则判红 —— 「退出码 0 但零执�
 出去; 只 kill 直接子进程时它们变成孤儿留在 runner 上, 污染同一个 job 里后续 target (实测: 一个
 挂死的 target 让后面 target 的全局状态断言连带变红, 看起来像另一个用例的问题)。POSIX 用
 `start_new_session` + `killpg`, windows 用 `taskkill /F /T /PID` (按 PID 带 `/T`, 绝不按映像名)。
-回读判据是**超时后 runner 上不残留该 target 派生的进程**, 不是「代码里加了 kill」。
 
-附带产物: 失败详情里会写明终止方式 (`已整组终止 (killpg <pgid>)` / `(taskkill /T /PID <pid>)`),
-summary 同时给出每个 target 的 `elapsed`。
+**kill 之后要回读, 不是「代码里加了 kill」**:
+
+- POSIX: 按进程序号扫 `/proc`, 把该 pgid 下仍存活 (排除僵尸 `Z`) 的进程数写进日志
+  (`killpg <pgid>, 回读 0 存活` / `组内仍存活 N 个: …`); 
+- windows: **没有回读**, 只能看 `taskkill` 的返回码, 非 0 时把 stderr 写进日志并判该 target 失败;
+- **不能因直接子进程已退出就跳过整组回收**: 「中间进程退出、后代还活着」正是孤儿的定义
+  (2026-11-26 评审用本函数实测: 跳过形状下存活后代 1, 只有无条件 `killpg` 才是 0)。pgid 在
+  spawn 时就固定 (`start_new_session` 保证 pgid == pid), 不由 `getpgid` 现查。
+- **windows 上 daemon 会主动脱离进程树**: `rdog daemon` 默认把自己重开成 `hidden-daemon --child`
+  (`CREATE_NO_WINDOW | DETACHED_PROCESS`), `taskkill /T` 也够不着。所以跑 integration target 时
+  统一注入 `RDOG_DAEMON_FOREGROUND=1`, 把 daemon 留在 job 的进程树里。
+
+附带产物: 失败详情里写明终止方式与回读结果, summary 同时给出每个 target 的 `elapsed`。
 
 **ubuntu 侧 1 个 target 显式豁免** (`PLATFORM_EXEMPTIONS`): `zenoh_router_client`。连续三轮
 ubuntu 各挂一个**不同**的用例 (`control_lanes` 的 key 注入 / TLS 换 CA / mTLS client cert),

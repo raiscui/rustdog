@@ -173,6 +173,10 @@ jobs:
       # target 由下面的 Integration targets 步骤按平台执行 (清单与计数判据都在
       # scripts/ci/run-integration-targets.py)。
       # pipefail 必需: 没有它 tee 的退出码会盖掉 cargo 的失败。
+      - name: Record job start (integration budget baseline)
+        shell: bash
+        run: date +%s > "$RUNNER_TEMP/job-started-at"
+
       - name: Unit tests
         shell: bash
         run: |
@@ -192,6 +196,11 @@ jobs:
       # target 在该脚本里标为 compile-only 并写进 job summary, 不做静默 skip。
       - name: Integration targets
         shell: bash
+        env:
+          # 预算按**job 真实剩余时间**算: 起点写在 job 第一个 step, 时间上限由下面传入。
+          # 常数预算 + 前缀 (checkout/cargo-prep/unit tests) 会越过 job timeout 被 cancel。
+          RDOG_JOB_STARTED_AT_FILE: ${{ runner.temp }}/job-started-at
+          RDOG_JOB_TIMEOUT_MINUTES: "60"
         run: |
           PY=$(command -v python3 || command -v python)
           "$PY" scripts/ci/run-integration-targets.py --os ubuntu-latest
@@ -229,6 +238,10 @@ jobs:
       # target 由下面的 Integration targets 步骤按平台执行 (清单与计数判据都在
       # scripts/ci/run-integration-targets.py)。
       # pipefail 必需: 没有它 tee 的退出码会盖掉 cargo 的失败。
+      - name: Record job start (integration budget baseline)
+        shell: bash
+        run: date +%s > "$RUNNER_TEMP/job-started-at"
+
       - name: Unit tests
         shell: bash
         run: |
@@ -248,6 +261,11 @@ jobs:
       # target 在该脚本里标为 compile-only 并写进 job summary, 不做静默 skip。
       - name: Integration targets
         shell: bash
+        env:
+          # 预算按**job 真实剩余时间**算: 起点写在 job 第一个 step, 时间上限由下面传入。
+          # 常数预算 + 前缀 (checkout/cargo-prep/unit tests) 会越过 job timeout 被 cancel。
+          RDOG_JOB_STARTED_AT_FILE: ${{ runner.temp }}/job-started-at
+          RDOG_JOB_TIMEOUT_MINUTES: "60"
         run: |
           PY=$(command -v python3 || command -v python)
           "$PY" scripts/ci/run-integration-targets.py --os macos-latest
@@ -285,6 +303,10 @@ jobs:
       # target 由下面的 Integration targets 步骤按平台执行 (清单与计数判据都在
       # scripts/ci/run-integration-targets.py)。
       # pipefail 必需: 没有它 tee 的退出码会盖掉 cargo 的失败。
+      - name: Record job start (integration budget baseline)
+        shell: bash
+        run: date +%s > "$RUNNER_TEMP/job-started-at"
+
       - name: Unit tests
         shell: bash
         run: |
@@ -304,6 +326,11 @@ jobs:
       # target 在该脚本里标为 compile-only 并写进 job summary, 不做静默 skip。
       - name: Integration targets
         shell: bash
+        env:
+          # 预算按**job 真实剩余时间**算: 起点写在 job 第一个 step, 时间上限由下面传入。
+          # 常数预算 + 前缀 (checkout/cargo-prep/unit tests) 会越过 job timeout 被 cancel。
+          RDOG_JOB_STARTED_AT_FILE: ${{ runner.temp }}/job-started-at
+          RDOG_JOB_TIMEOUT_MINUTES: "60"
         run: |
           PY=$(command -v python3 || command -v python)
           "$PY" scripts/ci/run-integration-targets.py --os windows-latest
