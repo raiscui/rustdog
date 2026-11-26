@@ -11,8 +11,10 @@
 - **用例**: `bulk_path` 新增 join 与读回 10 条 (往返 / 四种 schema 不符 / 缺一端不填数 / attempt 不一致 / 两端各零才为真 / 一端未采样即否 / 任一端非零即否 / 分组不串 / 两端同 endpoint / 并发可疑作废结论); `control_iroh::bulk_tests` 新增 6 条走准入 lane 的 (上传在 `@file-end` 带 daemon 半快照 / 括号 delta 60-40 → `relay_bytes_nonzero` / 未采样 → 四个 null + `relay_sample_unavailable` / relay path 括号内关闭 → 作废 / 下载在 eof 帧 / 门禁拒绝也带 `aborted` 证据)。
 - **规格**: §4.3 新增「daemon 半快照落在哪条响应里」与「join 工具与原因码」两段, §4.4 实现状态改准 ("仪表接上了"≠"正对照跑过了"), §6 第 7 项指向 `rdog bulk-path join`。
 - **回执**: `cargo +1.95.0 test --bin rdog -- bulk_path` 17 passed / 0 failed / 0 ignored; `-- control_iroh` 59 passed / 0 failed / 2 ignored (两条既有 ignore: 私有 loopback+pid namespace / 真 TTY); `cargo +1.95.0 test --bin rdog` 1260 passed / 0 failed / 4 ignored; `check-carrier-assertions` OK (断言数 3 / 载体数 8)。
+- **空真补口**: 零字节块不计数 —— 一次空文件下载若把那一帧记成 `chunks=1`, §4.3 第 2 条 (本次确有字节移动) 就在没搬任何字节时成立。用例 `an_empty_transfer_is_not_evidence_of_a_clean_path` 钉住它给 `no_bulk_bytes`。
 - **未验**: 回环拓扑只有 direct, relay 读数由 `PathSampler::Script` 钉住喂进去 —— 真机上一次"确实有 relay 流量"的括号没有执行过, 正对照 (RAI-366) 仍未跑。客户端 `rdog control --put/--get` 仍恒传 `NOT_PATH_AWARE`, 它写出的那半是 `not_applicable` + 四 `null`, 所以跨端 `relay_bytes_zero` 在当前 CLI 路径上不可能为真。`bulk_path_pin` 仍是 `false`, 本票不主张 pin。
-- 提交: 08db409
+- **回执 (补口后)**: `-- bulk_path` 17 / 0 / 0; `-- control_iroh` 60 / 0 / 2; 全量 1261 / 0 / 4。
+- 提交: 08db409、423b377
 
 ## [2026-11-26] RAI-476 文档: 把三处「声明比机制宽」的措辞改准
 
