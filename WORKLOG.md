@@ -11,7 +11,8 @@
 - **I**:动词清单只写一份 —— `control_core::file_transfer_verb` 唯一取出七个动词,谓词与执行入口都从它派生(match 穷举),lane 分支不再 `expect`。
 - **回执**:`cargo +1.95.0 test --bin rdog -- control_iroh` 53 passed / 0 failed / 2 ignored;`cargo +1.95.0 test --bin rdog` 1244 passed / 0 failed / 4 ignored;`check-carrier-assertions` OK;`check-bookkeeping` exit 0。
 - **未验**:`src/main.rs:503` 恒传 `NOT_PATH_AWARE`,`rdog --put`/`--get` 走不到这条 lane,真机上的拒绝没有被证明;步骤 3+4(真机采样与两端快照 join)未做。
-- 提交: 9f5507b
+- **CI 暴露的两条平台伤**:首个 head 上 `Lane` 夹具在客户端先断后调服务端 `shutdown`,macOS/Windows 都回 ENOTCONN 被 `Drop` 断言读成 lane 失败(改为容忍 `NotConnected`);随后 `test (windows-latest)` 在 `save_policy` 处全红 —— 它 fsync 父目录确认 durable,而 Windows 打不开目录句柄,夹具改用 `save_policy_with(.., |_| Ok(()))`(证明的是"策略已落盘",不是"目录项已刷盘")。
+- 提交: 9f5507b、1c3968e
 
 ## [2026-11-26] iroh lane 承载 bulk + 路径钉住门禁 (RAI-476 步骤 1+2)
 
