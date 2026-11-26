@@ -493,3 +493,23 @@ RUST-3 真机第二轮(家宽 -> 手机热点)补的两条, 写进规格与交�
 同步到交付文档: `real3/README.md` 的客户端参数节与 relay 部署节、`profiles/README.md`(模板旁注意事项)。
 守卫 `check-carrier-assertions.py` OK。
 - 提交: 72b4220
+
+## 2026-11-26 RAI-305 bind 通配化与注册契约放宽(Rais 批准)
+
+动机: 客户端必须填本机 IP 才能用, 换网就得改配置。Rais 追问后批准同时放宽注册契约。
+
+- `bind_addr` 在 `routable` 下把"省略"与 `0.0.0.0:0` 都解析成通配绑定 `0.0.0.0:0`, daemon 与 client
+  共用; `bindable` 让绑定面接受未指定地址。通配 + 固定端口仍拒; loopback profile 仍回环。
+- `register` 改为枚举端点实际接口地址(`data.addr().ip_addrs()`), 通配绑定下逐接口展开, 不出现
+  `0.0.0.0` 字面值; `connect_route` 把**全部** IP 候选一起拨, 不再只用第一个。
+- `Registry::request` 的 `Register` 分支: 去掉 `addrs.len() == 2` 与 `ip_addrs().count() == 1`,
+  改为 `>= 1` 个 IP 候选 + 恰好 1 个等于配置值的 relay; 逐 IP 过 `network` 且端口非 0。保留
+  `owners[name] == Some(peer)` 与 `addr.id == peer`(一个名字一个 owner)。去重无需代码:
+  `EndpointAddr.addrs` 是 `BTreeSet`。
+- 新增 `src/control_iroh/registry_tests.rs`: 多候选注册+回读, 以及 0 候选/未指定地址/relay 不匹配/
+  非 owner 四个负例都落在 `iroh_registration_denied`。
+
+复跑(同一二进制): 回环 13/13(`receipts/u11/loopback.log`)、routable 17/17 显式(`routable.log`)、
+routable 17/17 daemon 通配(`routable-wildcard.log`, netns 双接口)、advertise 3/3(`advertise.log`)、
+iroh+shell 单测 74 通过 / 2 ignored(netns 专用)、载体守卫 OK。
+- 提交: 8ad4aa6
