@@ -435,6 +435,16 @@ Issues 和 Wayfinder maps 使用 GitHub Issues。详见 `docs/agents/issue-track
   - 用途: 固定从 `String @response` 返回模型演进到 `ControlExecutionOutcome + ControlFrame + ControlPeerSession` 的实施顺序,以及 TCP/WebSocket 先行、Zenoh 后续迁移的验证路径
   - 何时阅读: 准备开始写双向控制代码、评估先改哪层抽象、或 review `@savefile`/双向 frame 改造顺序时
 
+- `specs/file-transfer-control-spec.md`
+  - 主题: 双向分块文件传输 lane 的需求与决策记录 (2026-10-06 决策已定)
+  - 用途: 固定“为什么不复用 `SaveFileFrame`”的四条硬约束、chunk 编码/大小/路径策略/目录打包四项决策,以及双向/有界/续传/摘要+穿越四条 SHALL
+  - 何时阅读: 修改 `src/control_file_transfer.rs`、`@put-file`/`@get-file`/`@file-chunk`/`@file-read` 语义,或评估任何“用已有帧搬大文件”的提案前
+
+- `specs/rdog-bulk-direct-only-spec.md`
+  - 主题: bulk 传输原语的直连强制语义与请求级 relay 字节观测口径 (RAI-367, 父票 RAI-302 P7 第 3 项)
+  - 用途: 固定“bulk 复用 `control_file_transfer` + 扩展网关”的现状判定, 路径判定的穷举表 (`direct`/`relay`/`unknown`/`not_applicable`), `iroh_direct_path_unavailable` / `iroh_direct_path_lost` / `iroh_path_unknown` 三个原因码, `rdog.bulk-path.v1` 快照格式与 `relay_bytes_zero` 判定式, 以及四类验收矩阵与正对照要求
+  - 何时阅读: 实现 bulk 传输入口、给传输适配器加 `path_class` / relay 字节计数、写跨网 bulk 验收, 或在任何票上被提议“直连不可得时先用 relay 顶上”时
+
 - `specs/rdog-macos-operation-capture-research.md`
   - 主题: macOS Recorder 的全局键鼠捕获、AX/Workspace 语义富化、权限生命周期、Secure Input 与 App Sandbox 边界
   - 用途: 固定 session listen-only event tap、独立权限 lane、gap/status、self-event marker、窗口几何通知和 prototype 未知项

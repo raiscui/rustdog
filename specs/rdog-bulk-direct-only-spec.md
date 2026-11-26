@@ -1,0 +1,382 @@
+# bulk 传输原语与直连强制规格 (RAI-367)
+
+> 状态: **设计已定, 实现未开始**
+> 父票: RAI-302 P7 第 3 项「bulk 只允许直连」
+> 前置: RAI-366 (直连可用的拓扑与判据), RAI-413 (iroh lane 落到 main)
+> 本文只写协议与验收口径, 不含实现. 实现落地后须把本文里"待回填"的指针补成 `src/` 定义位置.
+
+---
+
+## 0. 这份规格要解决的问题
+
+P7 第 3 项今天**既不可验证也不可证伪**: 候选没有任何 bulk 传输入口, 所以"relay 上 bulk 字节为 0"
+这句话没有实测对象. 本规格落一个 bulk 原语, 并把"直连不可得时显式失败"写成可判定的条款.
+
+三条不变量按优先级排列, 后面所有条款都服务于它们:
+
+1. **bulk 字节永远不会经过 relay.** 直连不可得就失败, 不存在"先用 relay 顶上"的中间态.
+2. **路径判定不可读时按失败处理.** 读不到路径类别 ≠ 直连.
+3. **失败与成功的判定必须能在同一台机器、同一次运行里被证伪.** 计数器坏了要能被正对照抓出来.
+
+---
+
+## 1. 现状判定: 复用 `control_file_transfer`, 扩展网关, 不另起
+
+结论: **数据面复用 `src/control_file_transfer.rs`, 网关扩展, 明确不复用 `SaveFileFrame`.**
+
+### 1.1 为什么不复用 `SaveFileFrame`
+
+`SaveFileFrame` (`src/control_frames.rs:45`) 的字段是 `filename/mime/encoding/data/quality/width/height`:
+整文件塞一个 base64 字段、单向 (被控端 → 控制端)、带截图语义 (`quality/width/height`).
+`specs/file-transfer-control-spec.md` 已在 2026-10-06 用四条硬约束否掉它 (单向、不分块、字段无上限、
+无校验无续传) 并定下"另建传输 lane". 本规格不再重新论证, 只沿用该决策.
+
+要补一句 10-06 没写到的地方: **给 `SaveFile` 加分块不算"扩展", 算改写.**
+分块要求 offset/sha256/resume/多帧生命周期, 这些一旦加进 `SaveFileFrame`, 它就同时承担
+"给你看这张图"和"搬一个 178 MB 的东西"两种生命周期, 而这两者的失败模式不同 ——
+截图失败重拍即可, 传输失败要保住已收字节. 合并会让截图回传帧长出传输会话状态机.
+
+### 1.2 为什么复用 `control_file_transfer`
+
+`src/control_file_transfer.rs` (597 行) 今天已经提供 bulk 需要的几乎全部语义:
+
+| 能力 | 落点 |
+| --- | --- |
+| 分块上传 (`@put-file` → `@file-chunk*` → `@file-end`) | `execute_put_file` / `execute_file_chunk` / `execute_file_end` |
+| 分块下载 (拉取式 `@get-file` → `@file-read*`) | `execute_get_file` / `execute_file_read` |
+| chunk 有界 (上限从帧上限推导, 不硬编码) | `CHUNK_BASE64_LIMIT` (推导式在 `src/control_file_transfer.rs:44`, 单一真相源 `src/control_line_read.rs:30`) |
+| 摘要校验 + 不符即清理半成品 | `execute_file_end` |
+| 续传 (partial 保留 + `resume:true`) | `execute_put_file` |
+| 顺序写 (offset 必须等于已写长度) | `execute_file_chunk` |
+| 路径穿越拒绝 | `validate_transfer_path` |
+| 协议接线 | 解析 `src/control_protocol.rs:692-696`, 派发 `src/control_core.rs:274-286` |
+| 与默认 executor 隔离 | `src/control_actions.rs:327` 明确声明 file 动词不走默认分支 |
+
+这些全在 main 上, 有单测覆盖. 重建一套没有理由.
+
+### 1.3 缺的是什么 (两个缺口, 都不是协议)
+
+**G1 客户端驱动缺位.** 协议在 daemon 侧是完整的, 但没有任何 CLI 能驱动它. 今天的用法只能是
+`rdog control <target> '@file-chunk:{...}'`, 而:
+
+- chunk 载荷塞进命令行参数会撞 `E2BIG`;
+- `send_control_lines_for_invocation` (`src/control_invocation.rs:320`) 收的是预构造的 `&[String]`,
+  即"整文件先进内存再发" —— 178 MB 文件 base64 后约 238 MB 全部驻留, 直接与分块的初衷相反.
+
+所以 G1 是"缺一个流式驱动", 不是"缺一个协议字段".
+
+**G2 路径门禁缺位.** daemon 与 client 都不知道传输的路径类别, 于是 bulk 可以静默骑在 relay 上.
+这是本票的核心. G2 的落点不在 `control_file_transfer` 内部, 而在**发起方向的那一端**.
+
+---
+
+## 2. bulk 原语的协议面
+
+### 2.1 传输能力声明
+
+路径类别是**传输的属性**, 不是控制协议的属性. 现有四个传输适配器里只有一个有路径概念:
+
+| 传输 | `path_aware` | 说明 |
+| --- | --- | --- |
+| TCP (`ControlInvocation::Tcp`) | false | 单跳 socket, 无 relay 概念 |
+| WebSocket (`ControlInvocation::WebSocket`) | false | 同上 |
+| Zenoh (`ControlInvocation::Zenoh` / `ZenohLocal`) | false | router 是转发跳, 但不是 iroh relay, 没有 direct/relay 分类 |
+| iroh (RAI-413 落地, 今天不在 main) | true | QUIC, 有 `iroh_path=direct\|relay` |
+
+`path_aware=false` 的传输上, "relay 字节为零"是**拓扑上不存在**的命题 (没有 relay 跳),
+快照记 `path_class:"not_applicable"`, 判定门禁不适用. 这一条必须写在验收里,
+否则可以用回环 TCP 跑一次 bulk 就"证明"了 bulk 只走直连 —— 那是空真.
+
+### 2.2 请求 / 响应字段 (相对今天的最小增量)
+
+现有五个动词的形状不变 (见 `src/control_file_transfer.rs` 模块头注), 只加以下字段:
+
+`@put-file` 新增可选字段:
+
+| 字段 | 类型 | 语义 |
+| --- | --- | --- |
+| `attempt_id` | string, 可选 | 本次尝试的身份. 缺省时 daemon 按 `transfer_id` + 打开序号派生. 用于把"续传的第二次尝试"与"第一次尝试"在证据里分开 (§5.3) |
+
+响应 (五个动词的 `ok` 信封) 新增 `evidence` 子对象, 由 §5.4 定义.
+
+新增动词:
+
+| 动词 | 载荷 | 语义 |
+| --- | --- | --- |
+| `@file-cancel` | `{transfer_id}` | 释放会话并删除 partial. 幂等: 未知 id 返回 `state:"absent"`, 不算错误 |
+
+`@file-cancel` 不是"顺手加的功能". 今天的会话表 (`TRANSFERS`) 没有任何过期机制,
+一次被拒或中断的 178 MB 上传会在盘上留一个 `.yino-partial` 并且在 `HashMap` 里留一条永久条目.
+对"被直连门禁拒绝"的传输尤其致命 —— 拒绝本来应该什么都不留下.
+
+### 2.3 分块与校验和
+
+- 分块大小与上限**不重述**数值: 权威是 `CHUNK_BASE64_LIMIT` 的推导式
+  (`src/control_file_transfer.rs:44`) 与帧上限 `MAX_CONTROL_MESSAGE_BYTES` (`src/control_line_read.rs:30`).
+  任何载体 (含本文) 不得手抄这两个数.
+- 校验和: 单文件 sha256, 由控制端在 `@put-file` 声明、在 `@file-end` 复述; daemon 两处都要比对
+  (`execute_file_end` 已实现双校验). 下载方向 `@get-file` 返回源文件 sha256, 由**客户端**在拼装完后比对 ——
+  客户端不得直接相信 daemon 的 `state:"committed"`.
+
+### 2.4 大小上限 / 并发 / 取消 / 超时
+
+四项都进 daemon 配置的新 `[bulk]` 段 (配置段形状沿用 `src/config.rs` 里既有的
+`ZenohConfig` / `ObservationConfig` 模式, 见 `src/config.rs:211`、`:173`):
+
+| 配置项 | 语义 | 默认值来源 |
+| --- | --- | --- |
+| `bulk.max_bytes` | 单文件上限. 在 `@put-file` 按声明 size 拒一次, 在 `@file-chunk` 按累计写入**再**拒一次 (声明可以撒谎) | 本规格定义, 待实现落地 (最小要容得下 10-06 规格里记录的 178 MB 模型件) |
+| `bulk.max_concurrent_sessions` | daemon 侧并发会话上限, 超出返回稳定码 `bulk_session_limit_reached` | 本规格定义 |
+| `bulk.idle_timeout_ms` | 会话空闲过期: 超过该时长无 `@file-chunk` / `@file-read`, evict 会话并删 partial. 由单一 sweep 驱动, **不**为每个会话起线程 | 本规格定义 |
+| `bulk.chunk_ack_timeout_ms` | 客户端侧单块应答超时, 超时即 `@file-cancel` 并失败 | 本规格定义 |
+
+取消链路有两条, 互补, 都要实现:
+
+1. **显式取消**: 客户端调 `@file-cancel` (`@cancel#seq` 取消的是 in-flight 命令, 取消不了已经提交的传输会话).
+2. **隐式过期**: `bulk.idle_timeout_ms` 的 sweep. 覆盖客户端进程被杀、网络断掉、机器睡眠这些没人来
+   调 cancel 的情况.
+
+---
+
+## 3. 直连强制语义
+
+### 3.1 判定表 (穷举, 按尝试的开头与每个 chunk 边界各判一次)
+
+| `path_aware` | 采样到的 `path_class` | 时机 | bulk 判定 | `error_code` |
+| --- | --- | --- | --- | --- |
+| true | `direct` | open / 任意 chunk 边界 | **允许** | — |
+| true | `relay` | open | **拒绝**, 未写任何字节 | `iroh_direct_path_unavailable` |
+| true | `direct` → `relay` | 中途 chunk 边界 | **中止**, 删 partial 后可续传 | `iroh_direct_path_lost` |
+| true | `unknown` / 读取失败 / 未建立 | open / 任意 chunk 边界 | **拒绝** (fail-closed) | `iroh_path_unknown` |
+| true | `relay` → `direct` | 中途 | 不可达: relay 在 open 已被拒, 没有字节可以"切回" (见 §8 的 D2) | — |
+| false | `not_applicable` | open | **允许**, 证据记 `not_applicable` | — |
+
+三条读表时容易读错的:
+
+- `unknown` **永远不许**被强转成 `direct`. 一个"读不到就当直连"的门禁就是伪装成门禁的静默回退.
+- `path_aware=true` 且 `path_class` 采样缺失 (老 iroh 版本、字段被裁掉、解析失败) 归入 `unknown`, 不归入 `not_applicable`.
+- `not_applicable` 是**声明出来的**能力缺失 (适配器自己声明 `path_aware=false`), 不是"没读到", 两者不得混用.
+
+### 3.2 原因码命名空间
+
+原因码走既有 `iroh_*` 前缀, 与父票措辞对齐 (`direct_path_unavailable` / `direct_path_lost`):
+
+| 码 | 触发条件 | 终态 | 可重试 |
+| --- | --- | --- | --- |
+| `iroh_direct_path_unavailable` | 路径层观测到没有直连, 当前走 relay | 是 | 路径变直连后可 (见 D2) |
+| `iroh_direct_path_lost` | 直连曾建立, 中途丢失 | 是 (本次尝试) | 可, 带 `resume:true` 新开一次尝试 |
+| `iroh_path_unknown` | 路径类别读不出 | 是 | 可, 但重试前先修路径可观测性 |
+
+**刻意不加**第四个"bulk 被门禁拒绝"的码: 门禁相对路径层没有增加任何语义, 多一个码只会让
+"relay" 有两种写法, 逼调用方同时匹配两个. 会话级资源拒绝用 `bulk_session_limit_reached`,
+它**不进** `iroh_*` 命名空间 —— 它不是路径事实, 混进去会让"看到 `iroh_*` 就是路径问题"这条
+排查直觉失效.
+
+### 3.3 明确禁止项 (写成条款, 用来否掉后续"临时可用"提案)
+
+| 禁止 | 理由 |
+| --- | --- |
+| `--allow-relay` / `bulk.allow_relay` / 任何形式的 relay 放行开关 | 一旦存在, "bulk 只允许直连"就退化为"默认只允许直连". 要证明的是不变量, 不是默认值 |
+| 直连不可得时降级为控制面内联 (把文件塞进 `@run` / `@cmd` 的 shell 参数) | 同一条字节流换了动词而已, 仍然过 relay, 而且绕开了本规格全部超时与上限 |
+| 直连失败后自动重试 N 次再报错 | 重试可以在路径层做 (见 D2), 但**不能**在 bulk 原语内偷偷改路径类别. 每次尝试的路径类别都要单独入账 |
+| 把路径判定结果缓存超过一次尝试 | 缓存是"上一次是直连"的证据, 不是"这一次是直连"的证据 |
+
+### 3.4 门禁落在哪一层 (两条方向各一个承重点)
+
+不变量是"bulk 字节不经过 relay", 而**只有产生字节的那一端能保证这一点**:
+
+| 方向 | 字节从哪来 | 承重门禁 | 检查点 |
+| --- | --- | --- | --- |
+| 上传 (`@put-file`/`@file-chunk`) | 控制端 (客户端) | **客户端**拒发 | open 前 + 每个 chunk 发送前 |
+| 下载 (`@get-file`/`@file-read`) | 被控端 (daemon) | **daemon**拒读 | open 时 + 每个 `@file-read` 读取前 |
+
+推论: **只在 CLI 里做门禁等于没做下载方向的门禁** —— 任何老客户端发一条 `@get-file`,
+daemon 都会把 178 MB 从 relay 推出去. 所以两端都要, 且两端都要在 chunk 边界复查 (不是只查 open,
+否则中途 direct→relay 的切换会漏过去).
+
+---
+
+## 4. 请求级观测口径
+
+### 4.1 计数在哪一层
+
+计数点必须落在**传输适配器的 relay 传输句柄**上: 即该端点经 relay 的累计发送/接收字节数
+(`relay_tx_bytes` / `relay_rx_bytes`, 由 iroh 的 relay 传输暴露). 两条硬约束:
+
+- **不得由配置推断**. "我的配置说 direct"不是观测, 是假设.
+- **不得在 relay 服务端做**. relay 转发的是不透明 QUIC 数据报, 它无法把字节归属到应用层请求;
+  在 P7 的拓扑里 relay 还是不归我们运营的 ECS 主机.
+
+这一条是已知限制, 要写进证据里而不是藏起来: **relay 侧字节数只能由端点自报, 不能由 relay 自证.**
+
+### 4.2 怎么归属到单个请求: 括号采样
+
+一次尝试的生命周期内, 在两端各采样两次累计量: 打开前 (`before`) 与结束/中止后 (`after`).
+该尝试的 relay 归属字节 = `after - before`.
+
+括号采样只有在**同一连接上没有其他并发流量**时才是干净的单次归属. 因此:
+
+- bulk 尝试 SHALL 独占其控制会话/连接 (不与 PTY 会话或其他 one-shot 共用).
+  不独占时读数会被同连接的无关流量污染, 只产生"该为零而不为零"的假阳性, 不产生假阳性安全 ——
+  所以这一条是**证据洁净度要求**, 不做成硬拒绝.
+- 若 daemon 检测到同一连接上存在并发流量, 快照里 `concurrency_suspected:true` 必须置位,
+  该条证据不得单独用于"relay 字节为 0"的结论.
+
+### 4.3 快照格式与判定式
+
+两端各发自己那一半, 由验收工具 join, **任何一端都不得替对端填数**:
+
+```json
+{
+  "schema": "rdog.bulk-path.v1",
+  "attempt_id": "<string>",
+  "transfer_id": "<string>",
+  "direction": "put | get",
+  "path_aware": true,
+  "path_class": "direct | relay | unknown | not_applicable",
+  "direct_addr": "<脱敏后的对端直连地址, 仅 direct 时存在>",
+  "bulk_bytes": 123,
+  "wire_bytes": 164,
+  "chunks": 3,
+  "concurrency_suspected": false,
+  "endpoint": "client | daemon",
+  "relay_tx_before": 0, "relay_tx_after": 0,
+  "relay_rx_before": 0, "relay_rx_after": 0,
+  "verdict": "relay_bytes_zero | relay_bytes_nonzero | aborted"
+}
+```
+
+`bulk_bytes` 是载荷字节 (base64 解码后), `wire_bytes` 是实际压上控制行的 base64 字节 ——
+两者都要, 因为"relay 上为 0"证的是后者, 而用户关心的是前者.
+
+**判定式** (验收脚本按此逐字实现, 不做主观解读):
+
+- `relay_bytes_zero` 当且仅当 `path_class == "direct"` 且**两端各自**满足
+  `relay_tx_after - relay_tx_before == 0` 且 `relay_rx_after - relay_rx_before == 0`.
+- `path_class == "not_applicable"` 时判定式不适用, 该条不得用于"relay 字节为 0"的结论 (空真).
+- 其余情况一律 `relay_bytes_nonzero` 或 `aborted`.
+
+### 4.4 正对照 (本规格最容易被做坏的地方)
+
+一次"直连尝试 delta 为 0"的读数, 与"计数器根本没接上"的读数,**在数值上完全一样**.
+所以每一次验收运行里都必须包含正对照:
+
+| 对照 | 构造 | 期望 |
+| --- | --- | --- |
+| 正 | 同一条 relay 路径上发一条普通控制面请求 (`@ping`), 同一仪表、同一次运行 | 两端 `relay_tx/rx` delta **严格 > 0** |
+| 负 | 同一条直连路径上的一次 bulk 尝试 | 两端 delta **== 0** |
+
+断言必须是**严格不等式** `> 0`. `>= 0` 的断言在计数器坏掉时照样通过, 等于没有正对照.
+
+---
+
+## 5. CLI 入口
+
+形状沿用 `rdog control` 现有的 flag 风格 (`--pty`、`--ui-script` 就是这么加的, 见 `src/input.rs:124-153`):
+
+```
+rdog control <TARGET> --put <LOCAL_PATH> --remote-path <REMOTE_PATH> [--resume]
+rdog control <TARGET> --get <REMOTE_PATH> --local-path <LOCAL_PATH> [--resume]
+```
+
+| 项 | 规定 |
+| --- | --- |
+| 目标解析 | 复用 `resolve_control_invocation` (`src/control_invocation.rs:95/131/207`), 与其它控制面调用**完全同一套** target/namespace/entry-point/transport 解析. 这是选 flag 而不是选 `rdog transfer` 独立子命令的理由: 独立子命令要把这段解析再写一遍 |
+| 互斥 | 与 `--pty` / `--pty-close` / `--pty-detach` / `--pty-attach` / `--ui-script` / 尾部 `@<one-shot-line>` 全部互斥, 用 clap `conflicts_with_all`, 与 `src/input.rs:128-145` 一致 |
+| stdout | 只有一行结果 JSON (与其它控制响应的打印方式一致) |
+| stderr | 进度行 (每 N 字节一条), 不污染 stdout |
+| 退出码 | 沿用现有约定: 成功 0, 失败 1. **不新造退出码** —— 细分原因读结果 JSON 里的 `error_code` |
+| 下载侧校验 | 客户端拼装完必须自己算 sha256 与 `@get-file` 返回的比对, 不符即失败并删本地半成品 |
+| 直连门禁 | 无开关. 由 §3 判定表决定, 默认且唯一行为 |
+
+远端路径与本地路径**不做 shell 解析** (走 JSON 字段, 这是 10-06 规格里列出的相对 scp 的价值之一).
+
+---
+
+## 6. 实现落点清单 (供实现票拆用, 本步不写代码)
+
+| # | 落点 | 内容 |
+| --- | --- | --- |
+| 1 | `src/control_file_transfer.rs` | `attempt_id` 字段、`@file-cancel`、`bulk.max_bytes` 双次校验、会话 TTL sweep、并发上限 |
+| 2 | 传输适配器 (iroh: RAI-413) | 暴露 `path_aware` 与 `path_class` 采样 + `relay_tx_bytes` / `relay_rx_bytes` 累计量. 这是本规格对 RAI-413 的唯一硬要求, 是**依赖接口**不是本票实现 |
+| 3 | `src/control_core.rs` 派发 | daemon 侧下载方向门禁 (open + 每次 `@file-read` 前) |
+| 4 | 新客户端驱动 (与 `src/control_invocation.rs` 同层) | 流式: 读一块 → 发一块 → 等应答 → 推进 offset, 不整文件驻留 |
+| 5 | `src/input.rs` + `src/main.rs` | 四个新 flag + 互斥 + 调用驱动 |
+| 6 | `src/config.rs` | `[bulk]` 段四个配置项 |
+| 7 | 验收工具 | 两端快照 join + §4.3 判定式 + §4.4 正对照 |
+
+---
+
+## 7. 未决 / 依赖 (实现前必须收口)
+
+1. **RAI-366 未交付时, 验收 A 类不可执行.** "直连可用"需要一个真实的、可复现的直连拓扑;
+   今天 iroh lane 的直连从未在任何拓扑上打通 (P7 累计结论: 第 1 项"部分"). 本规格不替它下结论.
+2. **RAI-413 未落地时, 第 2 条落点不存在.** `src/control_iroh/` 今天不在 main、不在任何远程分支
+   (已逐分支核过). 本规格里所有 `iroh_*` 码与 `path_class` 采样都是**在本规格里首次定义的契约**,
+   实现落地后须回填到 `src/` 的具体位置, 并按 `docs/agents/knowledge-carriers.md` 的约定
+   把"待回填"改成指针.
+3. **`bulk.*` 默认值**由实现票给具体数值; 本文只固定语义与判定, 不固定数字 (避免再造第二份真相源).
+
+---
+
+## 8. 验收矩阵
+
+四类都必须有原始回执. 每行的证据形式统一, 便于逐行对账.
+
+### A 类: 直连可用
+
+| 项 | 内容 |
+| --- | --- |
+| 输入 | `rdog control <TARGET> --put <178MB 文件> --remote-path <REMOTE>` |
+| 前置 | RAI-366 给出 direct 可用的拓扑; 双方 `@ping` 返回同 id 且 `pong:true`; 路径层报 `direct` |
+| 预期 | 传输完成; 响应 `state:"committed"`; 返回 `size` 与 `sha256` 与本地一致; 快照 `path_class=direct`, 两端 delta 均 0, `verdict=relay_bytes_zero` |
+| 证据 | 两端快照 JSON; 传输前后的 `sha256sum`; 二进制 sha256; 原始响应行 |
+
+### B 类: 直连不可得 (只有 relay)
+
+| 项 | 内容 |
+| --- | --- |
+| 输入 | 同上, 在已知只能走 relay 的拓扑 (如 CGNAT 侧) |
+| 前置 | 路径层报 `relay`; `@ping` 仍能 `pong:true` (证明控制面可用, 只是没直连) |
+| 预期 | **请求失败**, 一个 bulk 字节都不发; `error_code:"iroh_direct_path_unavailable"`; daemon 侧无 partial 残留; 不需要等到超时, open 阶段即拒 |
+| 证据 | 两端快照 (`verdict=aborted`); 失败响应原文; **同一路径上 `@ping` 快照的 delta 严格 > 0** (正对照, §4.4); 失败后目标路径与临时路径均不存在的 `ls` 回执 |
+
+### C 类: relay 存在但直连失败
+
+| 项 | 内容 |
+| --- | --- |
+| 输入 | 同上, 拓扑上双方都能到 relay, 但打洞失败 |
+| 前置 | 路径层报 `relay`, 且能区分"根本没试 direct"与"试了失败". 后者才有区分价值 |
+| 预期 | 同 B 类结果 (`iroh_direct_path_unavailable`), 但证据里要能读到"直连尝试存在且失败"这一层, 不能只有"relay" |
+| 证据 | 同 B 类 + 路径层的尝试记录 |
+
+B 与 C 的区别不在结果 (两者都必须失败), 而在**失败原因的可归因性**: C 类如果读到与 B 类
+一模一样的证据, 说明路径层没有区分"没试"和"试了失败", 那 RAI-366 的排障会瞎.
+
+### D1 类: 中途 direct → relay
+
+| 项 | 内容 |
+| --- | --- |
+| 输入 | 大文件上传, 传输进行中把路径打断 (断 UDP / 切网) |
+| 前置 | 起始 `direct`, 传输已过一个或多个 chunk |
+| 预期 | **中止**, `error_code:"iroh_direct_path_lost"`; 已写 partial 保留 (可续传); 快照 `verdict=aborted` 且 delta 非 0 |
+| 证据 | 两端快照; 中止时的 offset (证明不是从头开始也不是静默完成); partial 存在与大小; 续传一次到 `direct` 后完成的回执 |
+
+### D2 类: relay → direct
+
+| 项 | 内容 |
+| --- | --- |
+| 输入 | 先在被拒的 relay 状态下发起 (B 类现场), 修好直连后**重新发起**同一文件 (`--resume`) |
+| 前置 | 第一次尝试已在 open 被拒, 零字节 |
+| 预期 | 第一次 `iroh_direct_path_unavailable`; 路径改善后第二次 `direct` 并完成; 两次 `attempt_id` **不同**, 各自快照独立 |
+| 证据 | 两次尝试的两端快照 (attempt_id 不同); 两次的 `error_code` / `state` |
+
+D2 的形状与票面字面不同, 这里要说明原因: **relay 上开头的 bulk 尝试已在 open 被拒, 没有字节,
+所以 bulk 内部不存在一个 "relay → direct" 的切换可观测.** 唯一可观测的 relay→direct 转移是
+"拒 → 重试成功". 把它写成"中途从 relay 切到直连完成"会验收一个不可能发生的状态,
+反而掩盖了"拒绝是不是粘性的、续传能不能接上"这两个真问题.
+
+### 每条回执的固定字段
+
+所有类别的回执都带: 两个端点的二进制 sha256、拓扑描述 (哪些段跨网)、脱敏后的地址、
+判定式计算结果、`attempt_id`. 缺任一项按未验收处理.
