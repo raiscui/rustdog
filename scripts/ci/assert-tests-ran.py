@@ -27,6 +27,12 @@ RESULT = re.compile(
 )
 
 
+def _utf8_stdio() -> None:
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
+
+
 def annotate(level: str, title: str, message: str) -> None:
     if os.environ.get("GITHUB_ACTIONS") == "true":
         print(f"::{level} title={title}::{message}")
@@ -58,9 +64,10 @@ def main() -> int:
             "the harness exited 0 without exercising anything",
         )
         return 1
-    print(f"{args.label}: OK — {passed} test(s) really ran")
+    print(f"{args.label}: OK - {passed} test(s) really ran")
     return 0
 
 
 if __name__ == "__main__":
+    _utf8_stdio()
     raise SystemExit(main())

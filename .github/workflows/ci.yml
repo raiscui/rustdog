@@ -1,15 +1,17 @@
 name: CI
 
 # Run the full rdog test suite on every push to main and every PR.
-# Matrix covers macOS (the production target), Ubuntu (most CI runners)
-# and Windows (2026-10-06 加入: 跨平台测试修复后 bin 单测可全平台跑).
+# Matrix 覆盖 macOS (生产目标)、Ubuntu (最常见的 CI runner) 与 Windows
+# (2026-10-06 加入: 跨平台测试修复后 bin 单测可全平台跑)。
 # Windows 执行记录很重要 — `#[cfg(windows)]` 门的测试 (win_dpi /
-# zenoh_router_client_windows 等) 在 mac/ubuntu 上从不编译, 假设从未被
-# 检验过, 真机实证已经连续抓出两颗这类雷 (伪句柄判据 / json5 转义).
-# recording e2e 套件仍限 unix (POSIX-only control transport / unixpipe).
+# zenoh_router_client_windows 等) 在 mac/ubuntu 上从不编译, 假设从未被检验过,
+# 真机实证已经连续抓出两颗这类雷 (伪句柄判据 / json5 转义)。
+# recording e2e 套件仍限 unix (POSIX-only control transport / unixpipe)。
 #
-# 构建与测试拆成两个 job (build (os) → test (os)), 目的只有一个: 让合并门能区分
-# "测试没跑到" 与 "测试失败"。口径与必需检查表见 docs/agents/ci-merge-gate.md。
+# 结构: 每个 OS 一对 job —— `build (<os>)` → `test (<os>)`, 后者只依赖**同一 OS**
+# 的 build (所以一个平台的外部依赖红了, 不会连带吞掉其它平台的测试证据)。
+# 同 OS 的 test 被跳过 = 测试未运行, test 红 = 测试失败。口径:
+# docs/agents/ci-merge-gate.md §3。
 
 on:
   push:
@@ -26,117 +28,44 @@ env:
   CARGO_NET_RETRY: 10
 
 jobs:
-  # 只负责把它编译出来。这里红了 = 代码/工具链/外部依赖的问题, 与测试结论无关,
-  # 而且 test (os) 会被跳过 —— 这正是"未运行"在门上的可辨识形态。
-  build:
-    name: build (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
-    # Windows 要静态链接 341MB 的 onnxruntime.lib, 编译 + 链接比 unix 慢一截。
-    timeout-minutes: 60
+  build-ubuntu:
+    name: build (ubuntu-latest)
+    uses: ./.github/workflows/build-phase.yml
+    with:
+      os: ubuntu-latest
 
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+  build-macos:
+    name: build (macos-latest)
+    uses: ./.github/workflows/build-phase.yml
+    with:
+      os: macos-latest
 
-      - uses: ./.github/actions/cargo-prep
+  build-windows:
+    name: build (windows-latest)
+    uses: ./.github/workflows/build-phase.yml
+    with:
+      os: windows-latest
 
-      - name: Build
-        shell: bash
-        run: cargo build --bin rdog
+  test-ubuntu:
+    name: test (ubuntu-latest)
+    needs: [build-ubuntu]
+    uses: ./.github/workflows/test-phase.yml
+    with:
+      os: ubuntu-latest
 
-      # ort-sys 会把 dist 里的 DirectML.dll 复制到可执行文件旁边; 复制不到时
-      # Windows 的测试二进制会在加载阶段就失败 (而且报错更难归因)。这里显式断言
-      # 一次, 让"dylib 没铺到"与"测试逻辑失败"在日志里分开。
-      - name: Assert ort runtime DLL staged next to the binary
-        if: runner.os == 'Windows'
-        shell: bash
-        run: |
-          staged=$(find target/debug -maxdepth 2 -name 'DirectML.dll')
-          if [ -z "$staged" ]; then
-            echo "::error title=onnxruntime runtime DLL missing::ort-sys copy-dylibs staged no DirectML.dll under target/debug; the test binaries would fail at load time"
-            exit 1
-          fi
-          echo "$staged"
+  test-macos:
+    name: test (macos-latest)
+    needs: [build-macos]
+    uses: ./.github/workflows/test-phase.yml
+    with:
+      os: macos-latest
 
-      # build 红了就代表这次运行对该 OS **没有测试证据** —— 把这句话写进 job summary,
-      # 免得下次又有人拿一个「红点」当「测试失败」去翻几千行日志。
-      - name: Classify the failure (coverage gap vs code)
-        if: failure()
-        shell: bash
-        run: |
-          {
-            echo "### build (${{ matrix.os }}) 失败 —— 本 OS 没有测试证据"
-            echo ""
-            echo "test (${{ matrix.os }}) 被跳过, 这次运行对该 OS 的测试覆盖为空。"
-            echo "按失败步骤的注解归因:"
-            echo ""
-            echo "| 注解 | 结论 |"
-            echo "| --- | --- |"
-            echo "| \`onnxruntime dist unavailable\` / \`onnxruntime dist digest mismatch\` | 外部依赖缺口 (基础设施), 不是本改动坏了东西 |"
-            echo "| \`onnxruntime runtime DLL missing\` | ort-sys 的 dylib 铺放前提变了 (见 ci-merge-gate.md §4) |"
-            echo "| 其它 | 编译 / 代码问题, 按真实失败处理 |"
-            echo ""
-            echo "判读口径: \`docs/agents/ci-merge-gate.md\` §3"
-          } >> "$GITHUB_STEP_SUMMARY"
-
-  # 只负责跑测试。build 绿了才会执行; 被跳过 = 测试没跑, 失败 = 测试真的失败。
-  test:
-    name: test (${{ matrix.os }})
-    needs: [build]
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
-    timeout-minutes: 60
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      # 与 build 共用同一份准备与同一份缓存 key, 所以 test job 复用 build 的产物,
-      # 不做第二次环境岔路。校验和 cost 见 .github/actions/cargo-prep/action.yml。
-      - uses: ./.github/actions/cargo-prep
-
-      # Unit tests inside the rdog binary (recording handler, lifecycle, journal, etc.).
-      # The handler-level tests in `src/control_recording/` cover the auto-stop /
-      # StopTrigger invariants; the integration tests in `tests/control_lanes.rs`
-      # etc. cover the daemon's line-control surface.
-      # pipefail 必需: 没有它 tee 的退出码会盖掉 cargo 的失败。
-      - name: Unit tests
-        shell: bash
-        run: |
-          set -o pipefail
-          cargo test --bin rdog 2>&1 | tee unit-tests.log
-
-      # 退出码 0 不等于跑过: filter 打错、测试全被 #[ignore]、平台门把整组编译掉
-      # (本仓库大量 `#[cfg(windows)]`) 都会静默变成"绿但零执行"。
-      - name: Assert unit tests actually ran
-        shell: bash
-        run: |
-          PY=$(command -v python3 || command -v python)
-          "$PY" scripts/ci/assert-tests-ran.py unit-tests.log --label "unit tests (${{ matrix.os }})"
-
-      # Recording e2e suite: spawn a real rdog daemon subprocess, drive it over TCP /
-      # unixpipe, and assert the auto-stop pipeline commits a bundle and stamps the
-      # right stop_trigger. The suite is `#[cfg(unix)]` and only runs on Linux / macOS.
-      - name: Recording e2e tests
-        if: runner.os != 'Windows'
-        shell: bash
-        run: |
-          set -o pipefail
-          cargo test --test recording_e2e 2>&1 | tee recording-e2e.log
-
-      - name: Assert recording e2e tests actually ran
-        if: runner.os != 'Windows'
-        shell: bash
-        run: |
-          PY=$(command -v python3 || command -v python)
-          "$PY" scripts/ci/assert-tests-ran.py recording-e2e.log --label "recording e2e (${{ matrix.os }})"
+  test-windows:
+    name: test (windows-latest)
+    needs: [build-windows]
+    uses: ./.github/workflows/test-phase.yml
+    with:
+      os: windows-latest
 
   # 知识载体守卫 (docs/agents/knowledge-carriers.md 的约定 ① / ③)。
   # 与平台无关, 纯静态检查, 所以单独一个 job, 不进测试矩阵。

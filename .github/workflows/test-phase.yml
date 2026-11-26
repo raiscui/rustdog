@@ -1,0 +1,63 @@
+name: test
+description: |
+  CI 的测试阶段 (被 ci.yml 按 OS 各调一次, 且只依赖同一 OS 的 build)。
+
+  build 绿了才会执行: 被跳过 = 测试没跑, 这里红了 = 测试真的失败。
+  口径见 docs/agents/ci-merge-gate.md §3。
+
+on:
+  workflow_call:
+    inputs:
+      os:
+        description: 目标 runner (ubuntu-latest / macos-latest / windows-latest)
+        type: string
+        required: true
+
+jobs:
+  test:
+    runs-on: ${{ inputs.os }}
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # 与 build 共用同一份准备与同一份缓存 key, 所以这一步复用 build 的产物,
+      # 不做第二次环境岔路。
+      - uses: ./.github/actions/cargo-prep
+
+      # Unit tests inside the rdog binary (recording handler, lifecycle, journal, etc.).
+      # The handler-level tests in `src/control_recording/` cover the auto-stop /
+      # StopTrigger invariants; the integration tests in `tests/control_lanes.rs`
+      # etc. cover the daemon's line-control surface.
+      # pipefail 必需: 没有它 tee 的退出码会盖掉 cargo 的失败。
+      - name: Unit tests
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo test --bin rdog 2>&1 | tee unit-tests.log
+
+      # 退出码 0 不等于跑过: filter 打错、测试全被 #[ignore]、平台门把整组编译掉
+      # (本仓库大量 `#[cfg(windows)]`) 都会静默变成"绿但零执行"。
+      - name: Assert unit tests actually ran
+        shell: bash
+        run: |
+          PY=$(command -v python3 || command -v python)
+          "$PY" scripts/ci/assert-tests-ran.py unit-tests.log --label "unit tests (${{ inputs.os }})"
+
+      # Recording e2e suite: spawn a real rdog daemon subprocess, drive it over TCP /
+      # unixpipe, and assert the auto-stop pipeline commits a bundle and stamps the
+      # right stop_trigger. The suite is `#[cfg(unix)]` and only runs on Linux / macOS.
+      - name: Recording e2e tests
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo test --test recording_e2e 2>&1 | tee recording-e2e.log
+
+      - name: Assert recording e2e tests actually ran
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          PY=$(command -v python3 || command -v python)
+          "$PY" scripts/ci/assert-tests-ran.py recording-e2e.log --label "recording e2e (${{ inputs.os }})"

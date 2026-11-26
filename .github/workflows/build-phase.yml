@@ -1,0 +1,79 @@
+name: build
+description: |
+  CI 的编译阶段 (被 ci.yml 按 OS 各调一次)。
+
+  只做"能不能编译出来", 不跑任何测试: 这里红了就是代码 / 工具链 / 外部依赖的问题,
+  与测试结论无关, 而同一 OS 的 test job 会被跳过 —— 这就是「测试未运行」在门上的
+  可辨识形态 (docs/agents/ci-merge-gate.md §3)。
+
+  测试目标 (`--cfg(test)` 与 tests/) 的编译也放在这一段: 让"测试代码编译不过"归到
+  "测试没跑"而不是"测试失败", 否则 test job 里的零执行断言会被 cargo 的编译失败
+  直接跳过, 又变回一个说不清的红点。
+
+on:
+  workflow_call:
+    inputs:
+      os:
+        description: 目标 runner (ubuntu-latest / macos-latest / windows-latest)
+        type: string
+        required: true
+
+jobs:
+  build:
+    runs-on: ${{ inputs.os }}
+    # Windows 要静态链接 341MB 的 onnxruntime.lib, 编译 + 链接比 unix 慢一截。
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - uses: ./.github/actions/cargo-prep
+
+      - name: Build
+        shell: bash
+        run: cargo build --bin rdog
+
+      # 只编译不运行: 覆盖 bin 里的 `#[cfg(test)]` 模块与 integration 测试目标。
+      - name: Compile test targets
+        shell: bash
+        run: |
+          cargo test --no-run --bin rdog
+          if [ "${{ runner.os }}" != "Windows" ]; then
+            cargo test --no-run --test recording_e2e
+          fi
+
+      # ort-sys 会把 dist 里的 DirectML.dll 复制到可执行文件旁边; 复制不到时
+      # Windows 的测试二进制会在加载阶段就失败 (而且报错更难归因)。这里显式断言
+      # 一次, 让"dylib 没铺到"与"测试逻辑失败"在日志里分开。
+      - name: Assert ort runtime DLL staged next to the binary
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          staged=$(find target/debug -maxdepth 2 -name 'DirectML.dll')
+          if [ -z "$staged" ]; then
+            echo "::error title=onnxruntime runtime DLL missing::ort-sys copy-dylibs staged no DirectML.dll under target/debug; the test binaries would fail at load time"
+            exit 1
+          fi
+          echo "$staged"
+
+      # build 红了就代表这次运行对该 OS **没有测试证据** —— 把这句话写进 job summary,
+      # 免得下次又有人拿一个"红点"当"测试失败"去翻几千行日志。
+      - name: Classify the failure (coverage gap vs code)
+        if: failure()
+        shell: bash
+        run: |
+          {
+            echo "### build (${{ inputs.os }}) 失败 —— 本 OS 没有测试证据"
+            echo ""
+            echo "test (${{ inputs.os }}) 被跳过, 这次运行对该 OS 的测试覆盖为空。"
+            echo "按失败步骤的注解归因:"
+            echo ""
+            echo "| 注解 | 结论 |"
+            echo "| --- | --- |"
+            echo "| \`onnxruntime dist unavailable\` / \`onnxruntime dist digest mismatch\` | 外部依赖缺口 (基础设施), 不是本改动坏了东西 |"
+            echo "| \`onnxruntime runtime DLL missing\` | ort-sys 的 dylib 铺放前提变了 (见 ci-merge-gate.md §4) |"
+            echo "| 其它 | 编译 / 代码问题, 按真实失败处理 |"
+            echo ""
+            echo "判读口径: \`docs/agents/ci-merge-gate.md\` §3"
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -54,6 +54,7 @@ on:
 | `build (os)` 红, 同 OS 的 `test (os)` **skipped** | **测试未运行**。门应当拦住, 但不能当成"测试失败"记 | `build` job 里失败步骤的 `::error title=…` 注解 |
 | `build (os)` 绿, `test (os)` 红 | 测试真的失败 | `test` job 的 `Unit tests` / 断言步骤日志 |
 | `test (os)` 绿, 但日志里 `tests did not run` 是红的 | 断言步骤红 = 零测试被执行 | `assert-tests-ran.py` 输出 |
+| `build (os)` 红的注解是 `build prep failed` | 准备阶段 (工具链 / 拉取 / 目录) 出了问题, 不是测试结论 | `cargo-prep` 步骤日志 |
 | 该 head 一个 run 都没有 | `missing-checks`, 门结构性缺口 | `ci-check` skill 第 2/3 检查 |
 | `knowledge carriers` 红 | 载体断言与 `src/` 真相源分叉 | 脚本输出 |
 
@@ -61,10 +62,19 @@ on:
 
 - `onnxruntime dist unavailable` / `onnxruntime dist digest mismatch` — 外部依赖拿不到或被篡改
   (见 §4), 测试没跑;
+- `build prep failed` — 准备阶段异常 (工具链 / registry 等), 同样没有测试证据;
 - `tests did not run` — 测试框架退出码 0 但执行数为 0 (filter 打错, 或 `#[cfg(windows)]`
   之类平台门把整组测试编译掉了)。
 
-**这两类都不许改判成绿。** 需要的是"可辨识", 不是"放行"。
+**这些都不许改判成绿。** 需要的是"可辨识", 不是"放行"。
+
+两条结构性保证 (2026-11-26 第一版实现被评审指出后补的):
+
+- **每个 OS 的 `test` 只依赖自己 OS 的 `build`** (六个独立 job, 不是一对 matrix),
+  所以 Windows 的外部依赖红了不会连带吞掉 ubuntu / macOS 的测试证据;
+- **测试目标 (`#[cfg(test)]` 模块与 `tests/`) 在 build 阶段用 `--no-run` 编译**。
+  否则"测试代码编译不过"会落在 test 阶段, 把 cargo 的编译失败与测试失败混成一个红点,
+  零执行断言还会被跳过。
 
 ## 4. `ort-sys` / onnxruntime 的获取契约
 

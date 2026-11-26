@@ -29,6 +29,8 @@
 
 from __future__ import annotations
 
+from typing import NoReturn
+
 import argparse
 import hashlib
 import lzma
@@ -52,12 +54,33 @@ DOWNLOAD_ATTEMPTS = 3
 LZMA2_DICT_CANDIDATES = (1 << 26, 1 << 27, 1 << 28)
 
 
+def _utf8_stdio() -> None:
+    """Windows runner 的控制台是 cp1252, 非 ASCII 的 print 会抛 UnicodeEncodeError。
+
+    日志里出现一次 `\u2192` 就够让整个预取步骤红掉 (`charmap codec can't encode`),
+    所以这里显式把 stdout/stderr 换成 UTF-8 且不容错失败。
+    """
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
+
+
 def annotate(level: str, title: str, message: str) -> None:
     """GitHub Actions 注解; 本地跑时退化成 stderr。"""
     if os.environ.get("GITHUB_ACTIONS") == "true":
         print(f"::{level} title={title}::{message}")
     else:
         print(f"[{level}] {title}: {message}", file=sys.stderr)
+
+
+def die(message: str) -> "NoReturn":
+    """外部依赖缺口唯一的出口: 先发门认得的注解, 再退出。
+
+    直接 `raise SystemExit(msg)` 会绕过注解 (顶层 handler 显式重抛 SystemExit),
+    下游就只能把这次红归到"其它编译问题"里 —— 那正是本票要消灭的不可辨识红点。
+    """
+    annotate("error", "onnxruntime dist unavailable", message)
+    raise SystemExit(1)
 
 
 def step_summary(text: str) -> None:
@@ -82,7 +105,7 @@ def host_target() -> str:
     for line in out.splitlines():
         if line.startswith("host:"):
             return line.split(":", 1)[1].strip()
-    raise SystemExit("could not read host triple from `rustc -vV`")
+    raise RuntimeError("could not read host triple from `rustc -vV`")
 
 
 def pyke_cache_root() -> Path:
@@ -108,7 +131,7 @@ def ort_sys_version(repo_root: Path) -> str:
             in_pkg = True
         elif in_pkg and line.startswith("version = "):
             return line.split('"')[1]
-    raise SystemExit(f"Cargo.lock has no {ORT_SYS_CRATE} package entry")
+    die(f"Cargo.lock has no {ORT_SYS_CRATE} package entry")
 
 
 def dist_table_text(version: str) -> str:
@@ -121,7 +144,7 @@ def dist_table_text(version: str) -> str:
             member = archive.extractfile(f"{ORT_SYS_CRATE}-{version}/{DIST_TABLE_MEMBER}")
             if member is not None:
                 return member.read().decode("utf-8")
-    raise SystemExit(
+    die(
         f"cannot find {DIST_TABLE_MEMBER} for {ORT_SYS_CRATE} {version}; run `cargo fetch --locked` first"
     )
 
@@ -136,7 +159,7 @@ def resolve_dist(version: str, target: str) -> tuple[str, str]:
     for row in rows:
         if len(row) == 4 and row[0] == target:
             return row[2], row[3]
-    raise SystemExit(
+    die(
         f"{ORT_SYS_CRATE} {version} ships no prebuilt binaries for {target} "
         f"(no row in {DIST_TABLE_MEMBER})"
     )
@@ -156,7 +179,7 @@ def fetch(url: str) -> bytes:
             print(f"prefetch attempt {attempt}/{DOWNLOAD_ATTEMPTS} failed: {error}", file=sys.stderr)
             if attempt < DOWNLOAD_ATTEMPTS:
                 time.sleep(5 * attempt)
-    raise SystemExit(f"download failed after {DOWNLOAD_ATTEMPTS} attempts: {last}")
+    die(f"download failed after {DOWNLOAD_ATTEMPTS} attempts: {last}")
 
 
 def decompress_lzma2(data: bytes) -> bytes:
@@ -171,7 +194,7 @@ def decompress_lzma2(data: bytes) -> bytes:
         except lzma.LZMAError as error:
             last = error
             continue
-    raise SystemExit(f"cannot decode LZMA2 payload: {last}")
+    die(f"cannot decode LZMA2 payload: {last}")
 
 
 def extract_into(tar_bytes: bytes, destination: Path) -> list[str]:
@@ -184,17 +207,17 @@ def extract_into(tar_bytes: bytes, destination: Path) -> list[str]:
             for member in archive.getmembers():
                 name = Path(member.name)
                 if name.is_absolute() or any(part == ".." for part in name.parts):
-                    raise SystemExit(f"refusing unsafe archive member: {member.name}")
+                    die(f"refusing unsafe archive member: {member.name}")
                 if member.isdir():
                     (destination / name).mkdir(parents=True, exist_ok=True)
                     continue
                 if not member.isfile():
-                    raise SystemExit(f"refusing non-regular archive member: {member.name}")
+                    die(f"refusing non-regular archive member: {member.name}")
                 out_path = destination / name
                 out_path.parent.mkdir(parents=True, exist_ok=True)
                 source = archive.extractfile(member)
                 if source is None:
-                    raise SystemExit(f"archive member has no data: {member.name}")
+                    die(f"archive member has no data: {member.name}")
                 with out_path.open("wb") as handle:
                     shutil.copyfileobj(source, handle)
                 written.append(member.name)
@@ -215,14 +238,14 @@ def main() -> int:
     url, digest = resolve_dist(version, target)
     install_dir = cache_root / "dfbin" / target / digest
 
-    print(f"ort-dist: {ORT_SYS_CRATE} {version} → {target}")
+    print(f"ort-dist: {ORT_SYS_CRATE} {version} -> {target}")
     print(f"ort-dist: dist {url.rsplit('/', 1)[-1]} sha256={digest}")
 
     existing = sorted(p.name for p in install_dir.glob("*")) if install_dir.is_dir() else []
     if existing:
         print(f"ort-dist: HIT {install_dir} ({', '.join(existing)})")
         step_summary(
-            f"**ort dist cache hit** `{target}` — `{', '.join(existing)}` (sha256 `{digest[:12]}…`)"
+            f"**ort dist cache hit** `{target}` — `{', '.join(existing)}` (sha256 `{digest[:12]}...`)"
         )
         return 0
 
@@ -256,16 +279,17 @@ def main() -> int:
 
     print(f"ort-dist: PREFETCHED {install_dir} ({', '.join(written)})")
     step_summary(
-        f"**ort dist prefetched** `{target}` — `{', '.join(written)}` (sha256 `{digest[:12]}…` verified)"
+        f"**ort dist prefetched** `{target}` — `{', '.join(written)}` (sha256 `{digest[:12]}...` verified)"
     )
     return 0
 
 
 if __name__ == "__main__":
+    _utf8_stdio()
     try:
         raise SystemExit(main())
     except SystemExit:
         raise
     except Exception as error:  # 任何其它异常同样要变成 CI 注解而不是裸 traceback
-        annotate("error", "onnxruntime dist unavailable", f"{type(error).__name__}: {error}")
+        annotate("error", "build prep failed", f"{type(error).__name__}: {error}")
         raise SystemExit(1)
