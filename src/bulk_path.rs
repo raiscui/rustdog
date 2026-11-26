@@ -182,6 +182,11 @@ pub(crate) struct BulkPathSnapshot {
     pub(crate) concurrency_suspected: Option<bool>,
     /// `client | daemon` —— 这一半是谁测的。join 靠它分左右, 不靠文件顺序。
     pub(crate) endpoint: String,
+    /// 产出这一半的**构建身份** (7 位 git sha, 或 `unknown`)。
+    ///
+    /// 两端的 `build` 不相同 ⇒ 它们不是同一次构建 ⇒ 这条读数作废: 跨版本比对出来的"直连/relay"
+    /// 结论可能只是两端行为不同造成的。
+    pub(crate) build: String,
     /// 四个计数都是 `Option`: `None` = **本端没有 relay 句柄可读**, `Some(0)` = 真的读到了 0。
     ///
     /// 这一层类型区分是刻意的。用 `u64` 加一个 `relay_sample_available: bool` 也"能表达",
@@ -289,6 +294,7 @@ impl BulkPathSnapshot {
             "chunks": self.chunks,
             "concurrency_suspected": self.concurrency_suspected,
             "endpoint": self.endpoint,
+            "build": self.build,
             "relay_tx_before": self.relay_tx_before,
             "relay_tx_after": self.relay_tx_after,
             "relay_rx_before": self.relay_rx_before,
@@ -342,6 +348,12 @@ impl BulkPathSnapshot {
             "not_applicable" => PathClass::NotApplicable,
             _ => return Err(BULK_PATH_SCHEMA_MISMATCH),
         };
+        // 老快照没有这一栏: 读回 `unknown` 而不是报错 —— 但它会被 join 判成"两端不同源"。
+        let build = value
+            .get("build")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown")
+            .to_owned();
         let endpoint = text("endpoint")?;
         if !matches!(endpoint.as_str(), "client" | "daemon") {
             return Err(BULK_PATH_SCHEMA_MISMATCH);
@@ -379,6 +391,7 @@ impl BulkPathSnapshot {
                 Some(flag) => Some(flag.as_bool().ok_or(BULK_PATH_SCHEMA_MISMATCH)?),
             },
             endpoint,
+            build,
             relay_tx_before: optional_count("relay_tx_before")?,
             relay_tx_after: optional_count("relay_tx_after")?,
             relay_rx_before: optional_count("relay_rx_before")?,
@@ -413,12 +426,15 @@ pub(crate) struct HalfReport {
     pub(crate) path_class: &'static str,
     pub(crate) aborted: bool,
     pub(crate) concurrency_suspected: Option<bool>,
+    /// 这一半的构建身份 —— 账本里 `client_sha=` / `daemon_sha=` 抄的就是它。
+    pub(crate) build: String,
 }
 
 impl HalfReport {
     fn of(snapshot: &BulkPathSnapshot) -> Self {
         Self {
             endpoint: snapshot.endpoint.clone(),
+            build: snapshot.build.clone(),
             verdict: snapshot.verdict(),
             relay_bytes_zero_own_half: snapshot.relay_bytes_zero_own_half(),
             relay_sample_available: snapshot.relay_sample_available(),
@@ -431,6 +447,7 @@ impl HalfReport {
     fn to_json(&self) -> Value {
         json!({
             "endpoint": self.endpoint,
+            "build": self.build,
             "verdict": self.verdict,
             "relay_bytes_zero_own_half": self.relay_bytes_zero_own_half,
             "relay_sample_available": self.relay_sample_available,
@@ -766,6 +783,7 @@ mod tests {
             chunks: 1,
             concurrency_suspected: None,
             endpoint: "client".into(),
+            build: "test".into(),
             relay_tx_before: Some(0),
             relay_tx_after: Some(0),
             relay_rx_before: Some(0),
@@ -1252,6 +1270,20 @@ mod tests {
             Some(BULK_PATH_CONCURRENCY_SUSPECTED)
         );
         assert_eq!(reports[0].relay_bytes_zero, None);
+    }
+
+    #[test]
+    fn the_snapshot_carries_its_build_identity() {
+        // 两端 build 不同即整条读数作废 (§8): 这一格必须在快照里, 且老快照读回 `unknown` 而不是报错。
+        let value = snapshot(PathCapability::NOT_PATH_AWARE, PathClass::NotApplicable).to_json();
+        assert_eq!(value["build"], "test");
+        let read_back = BulkPathSnapshot::from_json(&value).unwrap();
+        assert_eq!(read_back.build, "test");
+
+        let mut legacy = value;
+        legacy.as_object_mut().unwrap().remove("build");
+        let read_back = BulkPathSnapshot::from_json(&legacy).unwrap();
+        assert_eq!(read_back.build, "unknown", "没有这一栏的老快照读成 unknown");
     }
 
     #[test]

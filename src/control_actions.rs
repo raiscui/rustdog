@@ -1066,6 +1066,8 @@ pub(crate) fn build_ping_response_json(shell: &str) -> String {
         "bind_state": crate::daemon::bind_state(),
         "control": crate::control_diagnostics::snapshot(),
         "shell": shell,
+        // 读数要能回答"对端是哪个构建": 两端 build 不同即整条读数作废 (RAI-476 A 类纪律)。
+        "build": crate::build_info::BUILD_SHA,
     })
     .to_string()
 }

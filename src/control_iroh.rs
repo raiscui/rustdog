@@ -1038,6 +1038,7 @@ impl DaemonPathEvidence {
             // daemon 也不检测同连接上的并发流量: `null`, 不是 `false` (§4.3)。
             concurrency_suspected: None,
             endpoint: "daemon".to_owned(),
+            build: crate::build_info::BUILD_SHA.to_owned(),
             relay_tx_before: bracket.tx_before,
             relay_tx_after: bracket.tx_after,
             relay_rx_before: bracket.rx_before,

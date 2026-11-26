@@ -503,6 +503,7 @@ chunk in flight**: 每个被拒的边界保证的是"这一 chunk 之后不再�
   "chunks": 3,
   "concurrency_suspected": true,
   "endpoint": "client | daemon",
+  "build": "<这一半的构建身份: 7 位 git sha, 或 unknown>",
   "relay_tx_before": 0, "relay_tx_after": 0,
   "relay_rx_before": 0, "relay_rx_after": 0,
   "relay_sample_available": true,
@@ -896,5 +897,10 @@ D2 的形状与票面字面不同, 这里要说明原因: **relay 上开头的 b
 
 ### 每条回执的固定字段
 
-所有类别的回执都带: 两个端点的二进制 sha256、拓扑描述 (哪些段跨网)、脱敏后的地址、
-判定式计算结果、`attempt_id`. 缺任一项按未验收处理.
+所有类别的回执都带: **两端各自的构建身份 `client_sha=` / `daemon_sha=`**、两个端点的二进制
+sha256、拓扑描述 (哪些段跨网)、脱敏后的地址、判定式计算结果、`attempt_id`. 缺任一项按未验收处理.
+
+**构建身份不是可选元数据, 是这条读数成立的前提**: 两个 sha 不相同即整条读数作废 —— 跨版本的
+"直连/relay" 差异可能只是两端行为不同造成的, 那种数不能进任何结论. 两个 sha 分别抄自两份快照的
+`build` 字段 (客户端那一半 `endpoint:"client"`, daemon 那一半 `endpoint:"daemon"`), 由编译期注入的
+git 提交号 (7 位) 提供; 没有 git 可查时是 `unknown` —— 写 `unknown` 也要写, 不许留空.
