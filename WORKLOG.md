@@ -1,5 +1,19 @@
 # WORKLOG: rustdog
 
+## [2026-11-26] RAI-476 步骤 3+4: daemon 侧 relay 括号采样 + 两端快照 join
+
+- **括号采样 (daemon)**: 准入 lane 新增 `DaemonPathEvidence` —— open **执行前**取一次 relay 基线 (`before`), 终态请求**执行后**取一次 (`after`); 量是这条连接上 `conn.paths()` 里被 `is_relay()` 判为 relay 的 path 的 `stats().udp_tx.bytes` / `udp_rx.bytes` 之和。三条"读不到就是 `None`"的规则: 空 `PathList`; `before` 时在场的 relay path 地址在 `after` 时不见了 (`PathList` 只保留未关闭的 path, 关闭那条的字节已不在快照里, 相减会得到假零); 测试面显式钉 `None`。
+- **半快照的交付 (不新开传输)**: 挂在终态 ok 信封的 `evidence` 字段 —— 上传落 `@file-end` 应答 (成功与失败都算终态), 下载落 `eof:true` 的那一帧 `@file-read`, 中止落 `@file-cancel` 与门禁拒绝响应。形状与 `BulkPathSnapshot::to_json()` 同 schema, `endpoint:"daemon"`。非终态应答不带, 免得被读成最终结论。
+- **字节记账**: 上传按每个**被 daemon 确认**的 chunk 载荷记 (`bulk_bytes` = base64 解码后长度, `wire_bytes` = base64 串长度), 下载按 `@file-read` 应答里的 `length`/`data` 长度记。
+- **两端对齐**: `attempt_id` 由客户端在 `@put-file` / `@get-file` 载荷里交来 (规格 §2.2 的可选字段), 缺省时 daemon 按 `<transfer_id>#<open 序号>` 派生; 两端不相等时 join 只会给 `attempt_mismatch` —— 那是实话。
+- **join 工具**: `rdog bulk-path join <PATH>...` (文件或目录里的 `*.json`) → `rdog.bulk-path-join.v1`。**只按 `transfer_id` 配对**, 左右由每份快照自己的 `endpoint` 决定 (不看顺序, 少给一个文件时不会把两份客户端快照凑成两端)。`unknown` 原因码: `bulk_path_endpoint_missing` / `bulk_path_endpoint_duplicated` / `bulk_path_attempt_mismatch` / `bulk_path_schema_mismatch` / `bulk_path_concurrency_suspected`。`relay_bytes_zero` 只在 `status:"joined"` 时非 `null` (两端 `relay_bytes_zero_own_half()` 都为真), 否则 `null` —— 不用 `false` 顶替, 否则"缺一半"会被读成"测到非零"。退出码 0/1/2 = 全部成结论 / 有组无结论 / 参数或 IO 错。
+- **快照读回**: `BulkPathSnapshot::from_json` 严格读 —— schema 必须是本版,  четыре 计数可以 `null` 但**不能缺键**, `relay_sample_available` 必须与四个计数一致 (不一致 = 被人改过, 不是零), `endpoint` 只认 `client` / `daemon`。为此 `direction` / `endpoint` 从 `&'static str` 改成 `String`。
+- **用例**: `bulk_path` 新增 join 与读回 10 条 (往返 / 四种 schema 不符 / 缺一端不填数 / attempt 不一致 / 两端各零才为真 / 一端未采样即否 / 任一端非零即否 / 分组不串 / 两端同 endpoint / 并发可疑作废结论); `control_iroh::bulk_tests` 新增 6 条走准入 lane 的 (上传在 `@file-end` 带 daemon 半快照 / 括号 delta 60-40 → `relay_bytes_nonzero` / 未采样 → 四个 null + `relay_sample_unavailable` / relay path 括号内关闭 → 作废 / 下载在 eof 帧 / 门禁拒绝也带 `aborted` 证据)。
+- **规格**: §4.3 新增「daemon 半快照落在哪条响应里」与「join 工具与原因码」两段, §4.4 实现状态改准 ("仪表接上了"≠"正对照跑过了"), §6 第 7 项指向 `rdog bulk-path join`。
+- **回执**: `cargo +1.95.0 test --bin rdog -- bulk_path` 17 passed / 0 failed / 0 ignored; `-- control_iroh` 59 passed / 0 failed / 2 ignored (两条既有 ignore: 私有 loopback+pid namespace / 真 TTY); `cargo +1.95.0 test --bin rdog` 1260 passed / 0 failed / 4 ignored; `check-carrier-assertions` OK (断言数 3 / 载体数 8)。
+- **未验**: 回环拓扑只有 direct, relay 读数由 `PathSampler::Script` 钉住喂进去 —— 真机上一次"确实有 relay 流量"的括号没有执行过, 正对照 (RAI-366) 仍未跑。客户端 `rdog control --put/--get` 仍恒传 `NOT_PATH_AWARE`, 它写出的那半是 `not_applicable` + 四 `null`, 所以跨端 `relay_bytes_zero` 在当前 CLI 路径上不可能为真。`bulk_path_pin` 仍是 `false`, 本票不主张 pin。
+- 提交: 08db409
+
 ## [2026-11-26] RAI-476 文档: 把三处「声明比机制宽」的措辞改准
 
 - **触发**:评审复核指出——机制全对,但声明在多个载体里各留了一份旧说法:改了 §3.5/§3.1,§2.2 的码表、§3.2 的重试列、§8 D1 的证据要求、准入契约的三处段落都还是 pin 时代的口径。
