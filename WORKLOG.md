@@ -14,7 +14,10 @@
 - 剩余 1 个失败 (`control_pty_ctrl_c_...`) 与夹具无关: python 真 pty(不经 script)复现同一行为; 远端 pty 实测
   `isig icanon`、helper 即该 pty 的 foreground pgrp、0x03 也确实作为字节送到远端(raw 读端收到 `61 03 62`),
   只是不产生 SIGINT — 属 pty lane 产品侧缺口, 本票范围外。
-- 提交: 370317f
+- 评审修复: `control_pty_should_treat_control_words_as_remote_input` 原先写完就关 stdin,
+  而 BSD/macOS 的 script 见到 stdin EOF 可能提前收掉伪终端 (control_tty 里有同类记录); 改成等远端打印
+  `GOT:` 后再关写端, stdout/stderr 走收集器。
+- 提交: 370317f (评审修复 6c187d7)
 
 ## [2026-11-26] tests/ 下 17 处 rdog 二进制路径反推收成一处 (RAI-405)
 
