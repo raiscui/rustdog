@@ -1278,7 +1278,7 @@ zenoh_router_client 38/2 ignored)。
 
 ### 2026-11-26 RAI-411 第六个真缺陷 (macos): unixpipe e2e 假设 ~/.rdog/run 已存在
 
-- 提交: e26b885
+- 提交: e26b885 (候选用例) + 726c0da (stale 用例, 同一个假设)
 
 `zenoh_unixpipe_fast_path::empty_target_should_use_local_default_even_when_extra_fifo_candidate_exists`
 在 macos runner 上 `mkfifo /Users/runner/.rdog/run/lde50254__x.lde50254.pipe_uplink 失败` ——
@@ -1286,6 +1286,8 @@ zenoh_router_client 38/2 ignored)。
 用例自己造候选就得自己保证目录在: `create_fake_uplink_candidate` 先 `create_dir_all(parent)`。
 本地 linux 上该 target 被 `cfg(target_os = "macos")` 门掉 (0 tests 可跑), 所以这条只有
 macos runner 能验证 —— 编译证据是 `cargo test --no-run --test zenoh_unixpipe_fast_path` 通过。
+同文件的 `stale_unixpipe_socket_files_should_be_cleaned_on_daemon_start` 有一模一样的假设
+(mkfifo 进同一个目录), 它此前是「别的用例先建好了目录」才通过, 顺序一变就红, 一并修掉。
 ### 2026-11-26 RAI-411 第五个真缺陷 (windows): target 没有墙钟上限
 
 - 提交: 0a85b3f
