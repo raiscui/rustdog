@@ -13,6 +13,19 @@
   各 target 计数与改动前一致。
 - 提交: 8792422
 
+## [2026-11-26] 控制行分片到达时被读超时丢弃, PTY 的 ^C 因此失效 (RAI-415)
+
+- 根因: `src/control_line_read.rs::read_line_limited` 入口 `buf.clear()`; `read_until` 在
+  「正文已到、换行未到」时被读超时打断返回 WouldBlock, 下一轮调用把半行清掉 → 整条消息静默丢失。
+- 触发面: `transport.write_message` 是 `write_all(message)` + `write_all("\n")` 两次写, 25ms 读超时的
+  PTY 桥接最容易在两次读之间撞超时。表现: `@pty-stdin`(含 ^C) 帧被吞, 远端收不到 SIGINT。
+- 定位链: 远端 pty termios 正常 → helper 即前台 pgrp → python `pty.fork` 纯 kernel 对照正常 →
+  直连 daemon TCP 发同一帧正常 → strace 双侧发现 daemon 收到帧却只写出过 `\4` 没写出 `\3`。
+- 改法: 入口不清 buf, `total` 从 `buf.len()` 起算, 只在整行交出/超限丢弃/干净 EOF 时清空。
+- 回执: `control_pty` 9 passed(断言零改动) / 全量单测 1108 passed / control_tty·shell_pty·control_lanes·
+  control_websocket·connect_modes 全绿; 分片复现命令修复后 3/3 成功。
+- 提交: 7067f40
+
 ## [2026-11-26] tests/ TTY 夹具改按能力探测选择 script 调用形式 (RAI-410)
 
 - 4 处夹具写 `script -q /dev/null <rdog> control ...`(BSD/macOS 尾随命令形式), util-linux 2.39.3 只认
