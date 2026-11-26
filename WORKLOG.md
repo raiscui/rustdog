@@ -824,3 +824,31 @@ daemon + 主张量 profile 的客户端 = 凭证不同源, zenoh 在 OpenSyn 阶
 表象像网络问题。该门槛写进 docs/solutions/conventions/e2e-isolated-home-credentials.md
 Guidance 第 0 条 (不只 e2e, 人工跨机验收同样适用)。
 - 提交: a06f59f
+
+## 2026-11-26 RAI-367 bulk 原语的直连强制语义与请求级 relay 字节口径 (设计票)
+
+P7 第 3 项「bulk 只允许直连」从未执行, 原因不是没测, 而是候选没有 bulk 传输入口 ——
+所以「relay 上 bulk 字节为 0」既不可验证也不可证伪。本步只写设计, 不动 `src/`.
+
+- **现状判定**: 数据面复用 `src/control_file_transfer.rs` (协议解析 `control_protocol.rs:692-696`、
+  daemon 派发 `control_core.rs:274-286`、sha256 双校验、续传、chunk 有界、穿越拒绝都在 main
+  且有单测), 网关扩展, `SaveFileFrame` 不复用也不扩展 —— 给单帧截图帧加分块属于改写而非扩展。
+- **两个缺口都不是协议**: 客户端流式驱动缺位 (`send_control_lines_for_invocation` 收预构造
+  `&[String]`, 整文件驻留内存), 以及路径门禁缺位 (两端都不知道路径类别, bulk 可静默骑 relay)。
+- **直连强制**: 穷举判定表 (`direct`/`relay`/`unknown`/`not_applicable`)、三个原因码
+  (`iroh_direct_path_unavailable` / `iroh_direct_path_lost` / `iroh_path_unknown`)、
+  `unknown` 一律 fail-closed、无任何 relay 放行开关、门禁落在每个方向产生字节的那一端并逐 chunk 复查。
+- **观测口径**: 计数落在传输适配器的 relay 句柄上, 括号采样归属到单次尝试 (`attempt_id`),
+  `rdog.bulk-path.v1` 快照由两端各发一半 (任一端不得替对端填数), `relay_bytes_zero` 判定式
+  逐字可执行; 正对照要求 delta **严格 > 0** —— `>= 0` 在计数器坏掉时照样通过。
+- **验收矩阵**四类 + 两处对票面字面的修正: D2 不能写成「中途 relay→direct」(relay 开头已在
+  open 被拒, 零字节), 只有「拒 → 重试成功」可观测; B 与 C 结果必须相同, 区别只在可归因性。
+- **顺带记一个既有缺陷**: `TRANSFERS` 无 TTL 也无 `@file-cancel`, 被拒或中断的 178 MB 上传会
+  永久留 `.yino-partial` 与表项 —— 对被门禁拒绝的传输尤其致命, 拒绝本该什么都不留下。
+- A 类验收阻塞于 RAI-366 (直连在任何拓扑上都还没打通); `path_class` 与 relay 计数的接口
+  阻塞于 RAI-413 (`src/control_iroh/` 目前不在 main、不在任何远程分支, 已逐分支核过)。
+- 提交: ddd8d27
+
+账本补记: 以下两个合并提交为纯账本缺口 (无代码改动), 与本轮无关, 一并补记 ——
+- 提交: b227c63
+- 提交: 718eb8c
