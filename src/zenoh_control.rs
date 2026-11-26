@@ -80,6 +80,7 @@ pub struct ZenohDaemonRuntimeConfig {
     pub startup_guard_window_ms: u64,
     pub key_input_events: KeyInputEventsConfig,
     pub observation: ObservationConfig,
+    pub file_transfer: crate::config::FileTransferConfig,
     pub coding: crate::coding::model::CodingConfig,
     /// `@key` 的送达后端 (2026-08-03 wayfinder #37)。
     pub key_delivery_backend: crate::config::KeyDeliveryBackend,
@@ -147,6 +148,9 @@ pub fn run_router_daemon(config: ZenohDaemonRuntimeConfig, shell: &str) -> io::R
         Some(&config.namespace),
         &config.daemon_name,
     )?;
+    // Zenoh daemon 是与 TCP 并列的另一条启动路径: 漏了这一行, 走 zenoh 的 daemon 会接受
+    // [file_transfer] 配置却永远不回收中断的传输 (注册表条目与半成品一直留着).
+    crate::control_file_transfer::initialize_file_transfer_maintenance(&config.file_transfer)?;
 
     // service-name 之外再锁定 canonical FIFO path,覆盖不同 daemon name 共用显式路径。
     // prepare 只有在 path guard 成功后才会执行 stale cleanup;guard 同时写

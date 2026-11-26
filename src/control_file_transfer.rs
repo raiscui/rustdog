@@ -151,6 +151,19 @@ pub fn execute_put_file(payload: &str) -> std::io::Result<Value> {
     ));
 
     let mut sessions = transfers().lock().expect("transfer table poisoned");
+    // 先做准入, 再动任何落盘状态. 放在 remove_file 之后就是"拒绝带副作用" ——
+    // 一次被拒的重试会把上一次收到的字节抹掉, 而那正是本模块要消除的行为.
+    let path_holder = sessions.iter().find_map(|(other_id, other)| {
+        (other_id != &transfer_id && other.temp_path.as_deref() == Some(temp_path.as_path()))
+            .then(|| other_id.clone())
+    });
+    if let Some(holder) = path_holder {
+        return Err(std::io::Error::other(format!(
+            "file_transfer_path_in_use: 暂存路径 {} 已被活跃会话 {holder} 持有; 等它完成或先 @file-cancel 它",
+            temp_path.display()
+        )));
+    }
+
     let previous = sessions.remove(&transfer_id);
     let written = if resume {
         // 续传: 保留已有 partial 的进度; 无 partial 从 0 起
@@ -160,10 +173,14 @@ pub fn execute_put_file(payload: &str) -> std::io::Result<Value> {
         let _ = std::fs::remove_file(&temp_path);
         0
     };
-    // 同 id 重开但换了一条暂存路径时, 旧会话的半成品不在新路径上, 没人会清理它
+    // 同 id 重开但换了一条暂存路径时, 旧会话的半成品不在新路径上, 没人会清理它.
+    // 这条是过渡行为: 规格 §2.5 的 C2/C3 (路径索引 + 续传窗口) 落地后应改成"按旧路径留着,
+    // 由窗口回收", 因为旧半成品是另一个文件的有效进度.
     if let Some(previous) = previous {
         if previous.temp_path.as_deref() != Some(temp_path.as_path()) {
-            reap_partial(&previous);
+            if let Some(previous_temp) = previous.temp_path.as_deref() {
+                reap_file(previous_temp);
+            }
         }
     }
     sessions.insert(
@@ -315,6 +332,13 @@ pub fn execute_file_end(payload: &str) -> std::io::Result<Value> {
             })?;
         let _ = std::fs::remove_file(&temp_path);
     }
+    // 提交成功即退役会话. 不退的话, 这条已完成的条目会在 TTL 到期时被 sweep 拿去"回收"它的
+    // 暂存路径 —— 而那个路径是按目标文件推导的, 同一目标的**下一次**上传正用着它, 于是
+    // 一次无关的过期会把别人正在推进的 178 MB 删掉.
+    transfers()
+        .lock()
+        .expect("transfer table poisoned")
+        .remove(&transfer_id);
     Ok(json!({
         "kind": "file-transfer",
         "state": "committed",
@@ -419,12 +443,9 @@ pub fn execute_file_read(payload: &str) -> std::io::Result<Value> {
     }))
 }
 
-/// 回收一条会话的半成品文件。取消、空闲过期、同 id 换路径重开三处共用这条路径 ——
-/// 回收语义只写一次, 免得某一条将来漏掉盘上的残留。返回是否真的删掉了文件。
-fn reap_partial(session: &TransferSession) -> bool {
-    let Some(temp_path) = session.temp_path.as_deref() else {
-        return false;
-    };
+/// 删一个暂存文件。NotFound 视为已删 (幂等), 其他错误记 warn 但不算失败 ——
+/// 回收是尽力而为, 它不该让取消 / 过期本身失败。
+fn reap_file(temp_path: &Path) -> bool {
     match std::fs::remove_file(temp_path) {
         Ok(()) => true,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => false,
@@ -438,6 +459,42 @@ fn reap_partial(session: &TransferSession) -> bool {
     }
 }
 
+/// 摘掉一条会话并回收它的暂存文件, 返回 (会话, 是否真的删掉了半成品)。
+/// **调用方必须持有会话表锁。**
+///
+/// 两个不变量都靠"持锁"成立, 缺一个就会踩掉别人正在写的字节:
+///
+/// 1. **摘表与 unlink 之间不能放锁.** 否则并发的 `@put-file resume:true` 会在这两步之间
+///    读走这个半成品的长度、登记成新会话, 随后文件被删 —— 新会话带着旧 offset 继续写,
+///    前缀丢了, 最后摘要校验失败。
+/// 2. **暂存路径可能被另一条活跃会话持有.** 暂存文件名从目标路径推导
+///    (`<target>.<ext>.yino-partial`), 指向同一目标的两条上传共用同一个文件; 别的会话
+///    还拿着它的时候不能删, 否则会毁掉那条正在推进的传输。
+fn remove_session_locked(
+    sessions: &mut HashMap<String, TransferSession>,
+    transfer_id: &str,
+) -> Option<(TransferSession, bool)> {
+    let session = sessions.remove(transfer_id)?;
+    let partial_removed = match session.temp_path.as_deref() {
+        Some(temp_path) => {
+            let held_by_other = sessions
+                .values()
+                .any(|other| other.temp_path.as_deref() == Some(temp_path));
+            if held_by_other {
+                log::warn!(
+                    "文件传输半成品仍被其他活跃会话持有, 跳过删除: path={}, transfer_id={transfer_id}",
+                    temp_path.display()
+                );
+                false
+            } else {
+                reap_file(temp_path)
+            }
+        }
+        None => false,
+    };
+    Some((session, partial_removed))
+}
+
 /// `@file-cancel`: 主动取消一次传输 (上传或下载), 语义与空闲过期完全相同 ——
 /// 移除会话条目 + 删半成品。只删暂存文件, **不碰**目标路径上已有的文件。
 /// 幂等: 未知 transfer_id 返回 `state:"absent"`, 不算错误 (重复取消是正常调用顺序)。
@@ -446,13 +503,12 @@ pub fn execute_file_cancel(payload: &str) -> std::io::Result<Value> {
     let value = parse_object(payload, VERB)?;
     let transfer_id = require_string(&value, "transfer_id", VERB)?.to_owned();
 
-    let removed = transfers()
-        .lock()
-        .expect("transfer table poisoned")
-        .remove(&transfer_id);
-    let (state, partial_removed) = match removed {
-        Some(session) => ("cancelled", reap_partial(&session)),
-        None => ("absent", false),
+    let (state, partial_removed) = {
+        let mut sessions = transfers().lock().expect("transfer table poisoned");
+        match remove_session_locked(&mut sessions, &transfer_id) {
+            Some((_, partial_removed)) => ("cancelled", partial_removed),
+            None => ("absent", false),
+        }
     };
     Ok(json!({
         "kind": "file-transfer",
@@ -505,7 +561,9 @@ pub fn execute_file_list() -> std::io::Result<Value> {
 /// RAI-367 落地"中途路径丢失"这个**可续传**中止后, 这里必须按规格 §2.5 分开: 可续传的半成品
 /// 留到 `bulk.resume_window_ms`, 否则续传 offset (真相源就是半成品的文件长度) 会静默归零。
 pub(crate) fn reap_idle_transfers(now_ms: u64, idle_timeout_ms: u64) -> (usize, usize) {
-    let expired: Vec<TransferSession> = {
+    let mut reaped = 0;
+    let mut partials = 0;
+    {
         let mut sessions = transfers().lock().expect("transfer table poisoned");
         let expired_ids: Vec<String> = sessions
             .iter()
@@ -514,16 +572,19 @@ pub(crate) fn reap_idle_transfers(now_ms: u64, idle_timeout_ms: u64) -> (usize, 
             })
             .map(|(id, _)| id.clone())
             .collect();
-        expired_ids
-            .into_iter()
-            .filter_map(|id| sessions.remove(&id))
-            .collect()
-    };
-    let partials = expired
-        .iter()
-        .filter(|session| reap_partial(session))
-        .count();
-    (expired.len(), partials)
+        for id in expired_ids {
+            match remove_session_locked(&mut sessions, &id) {
+                Some((_, partial_removed)) => {
+                    reaped += 1;
+                    if partial_removed {
+                        partials += 1;
+                    }
+                }
+                None => {}
+            }
+        }
+    }
+    (reaped, partials)
 }
 
 /// 测试专用: 把一条会话的"最近进展"时刻改成指定值。
@@ -810,6 +871,200 @@ mod tests {
         ))
         .unwrap_err();
         assert!(err.to_string().contains("载荷超过上限"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn committed_session_is_retired_so_a_later_upload_keeps_its_partial() {
+        let _guard = TRANSFER_TABLE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let dir = std::env::temp_dir().join(format!("rdog-ft-retire-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("shared-target.bin");
+        let target_json = escape_json(&target.display().to_string());
+
+        // A: 完整上传到目标路径并提交
+        let first = unique_id("first");
+        execute_put_file(&format!(
+            r#"{{"transfer_id":"{first}","path":"{target_json}","size":5}}"#
+        ))
+        .unwrap();
+        let data = BASE64_STANDARD.encode(b"AAAAA");
+        execute_file_chunk(&format!(
+            r#"{{"transfer_id":"{first}","offset":0,"data":"{data}"}}"#
+        ))
+        .unwrap();
+        let sha = format!("{:x}", Sha256::digest(b"AAAAA"));
+        execute_file_end(&format!(
+            r#"{{"transfer_id":"{first}","sha256":"{sha}"}}"#
+        ))
+        .unwrap();
+
+        // 提交成功后会话必须退役: 留着它, TTL 到期时 sweep 会把**同一个目标路径**推导出的
+        // 暂存文件拿去"回收", 而下面 B 正用着那个文件。
+        assert!(
+            !active_ids().iter().any(|id| id == &first),
+            "已提交的会话不得留在注册表里"
+        );
+
+        // B: 不同 id, 同一目标路径, 正在推进
+        let second = unique_id("second");
+        execute_put_file(&format!(
+            r#"{{"transfer_id":"{second}","path":"{target_json}","size":5}}"#
+        ))
+        .unwrap();
+        execute_file_chunk(&format!(
+            r#"{{"transfer_id":"{second}","offset":0,"data":"{data}"}}"#
+        ))
+        .unwrap();
+        let partial = dir.join("shared-target.bin.yino-partial");
+        assert!(partial.exists());
+
+        // 拿 A 的 id 去取消 (客户端重试的常见形态) 不得伤到 B
+        let cancelled = execute_file_cancel(&format!(r#"{{"transfer_id":"{first}"}}"#)).unwrap();
+        assert_eq!(cancelled["state"], "absent");
+        assert!(partial.exists(), "无权取消的 id 不得删掉别人的半成品");
+
+        execute_file_cancel(&format!(r#"{{"transfer_id":"{second}"}}"#)).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn reclaim_skips_a_partial_still_held_by_another_session() {
+        // open 准入已经让"两条活跃会话共用同一暂存路径"不可能发生, 所以这条按白盒构造状态:
+        // 它测的是回收路径上最后一道防线 —— 假如将来有人动了 open 的准入顺序, 这里仍然不许
+        // 删掉别人正在写的文件. 静默毁掉一条进行中的传输是不可恢复的, 值得留一道冗余检查.
+        let _guard = TRANSFER_TABLE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let dir = std::env::temp_dir().join(format!("rdog-ft-shared-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let partial = dir.join("contended.bin.yino-partial");
+        std::fs::write(&partial, b"xxxxx").unwrap();
+
+        let holder = unique_id("holder");
+        let victim = unique_id("victim");
+        let session = |id: &str| TransferSession {
+            path: dir.join("contended.bin"),
+            size: 10,
+            expected_sha256: None,
+            written: 5,
+            temp_path: Some(partial.clone()),
+            is_upload: true,
+            last_activity_ms: now_ms(),
+            };
+        {
+            let mut sessions = transfers().lock().unwrap();
+            sessions.insert(holder.clone(), session(&holder));
+            sessions.insert(victim.clone(), session(&victim));
+        }
+
+        let removed = {
+            let mut sessions = transfers().lock().unwrap();
+            remove_session_locked(&mut sessions, &victim)
+        };
+        let (_, partial_removed) = removed.expect("victim 应在表里");
+        assert_eq!(partial_removed, false);
+        assert!(partial.exists(), "仍被其他活跃会话持有的半成品不得被回收");
+
+        let removed = {
+            let mut sessions = transfers().lock().unwrap();
+            remove_session_locked(&mut sessions, &holder)
+        };
+        let (_, partial_removed) = removed.expect("holder 应在表里");
+        assert_eq!(partial_removed, true);
+        assert!(!partial.exists(), "最后一个持有者摘除时才删");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn open_is_refused_when_another_session_holds_the_same_partial_path() {
+        let _guard = TRANSFER_TABLE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let dir = std::env::temp_dir().join(format!("rdog-ft-inuse-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("contended-open.bin");
+        let target_json = escape_json(&target.display().to_string());
+        let data = BASE64_STANDARD.encode(b"xxxxx");
+
+        let holder = unique_id("holder");
+        execute_put_file(&format!(
+            r#"{{"transfer_id":"{holder}","path":"{target_json}","size":10}}"#
+        ))
+        .unwrap();
+        execute_file_chunk(&format!(
+            r#"{{"transfer_id":"{holder}","offset":0,"data":"{data}"}}"#
+        ))
+        .unwrap();
+        let partial = dir.join("contended-open.bin.yino-partial");
+        let before = std::fs::metadata(&partial).unwrap().len();
+
+        // 另一个 id 指向同一目标: 必须拒绝, 且**不能**先把 holder 的半成品删掉再拒绝
+        let intruder = unique_id("intruder");
+        let err = execute_put_file(&format!(
+            r#"{{"transfer_id":"{intruder}","path":"{target_json}","size":10}}"#
+        ))
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("file_transfer_path_in_use"),
+            "应拒绝并给出稳定码: {err}"
+        );
+        assert_eq!(
+            std::fs::metadata(&partial).unwrap().len(),
+            before,
+            "拒绝不得动 holder 的半成品"
+        );
+
+        // holder 自己仍可继续写
+        execute_file_chunk(&format!(
+            r#"{{"transfer_id":"{holder}","offset":5,"data":"{data}"}}"#
+        ))
+        .unwrap();
+        execute_file_cancel(&format!(r#"{{"transfer_id":"{holder}"}}"#)).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn file_cancel_executes_from_the_compact_object_syntax() {
+        // 只断言"解析成了 FileCancel 变体"是不够的: 行协议面向模型, 模型会写
+        // `@file-cancel:{transfer_id:"x"}` 这种不带引号的键. 这条从解析一路走到执行,
+        // 证明那个写法真的能取消掉一条传输, 而不是在 serde_json 那里就断了.
+        let _guard = TRANSFER_TABLE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let dir = std::env::temp_dir().join(format!("rdog-ft-compact-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("compact.bin");
+        let tid = unique_id("compact");
+
+        execute_put_file(&format!(
+            r#"{{"transfer_id":"{tid}","path":"{}","size":10}}"#,
+            escape_json(&target.display().to_string())
+        ))
+        .unwrap();
+        let data = BASE64_STANDARD.encode(b"xxxxx");
+        execute_file_chunk(&format!(
+            r#"{{"transfer_id":"{tid}","offset":0,"data":"{data}"}}"#
+        ))
+        .unwrap();
+        let partial = dir.join("compact.bin.yino-partial");
+        assert!(partial.exists());
+
+        let line = format!(r#"@file-cancel:{{transfer_id:"{tid}"}}"#);
+        let parsed = crate::control_protocol::parse_control_line(&line).unwrap();
+        let crate::control_protocol::ControlParseResult::Control(request) = parsed else {
+            panic!("应解析为控制请求");
+        };
+        let crate::control_protocol::ControlCommand::FileCancel(payload) = request.command else {
+            panic!("应解析为 FileCancel");
+        };
+        let cancelled = execute_file_cancel(&payload).unwrap();
+        assert_eq!(cancelled["state"], "cancelled");
+        assert_eq!(cancelled["partial_removed"], true);
+        assert!(!partial.exists());
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 
