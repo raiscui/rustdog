@@ -5,7 +5,8 @@
 - RAI-366 真机腿暴露:`relay_allowed` 要求 `url.port().is_some()`,而 `RelayUrl` 会把 https 的默认端口 443 规范化掉 —— **任何标准公共 relay 都配不通**,daemon 启动即报 `iroh routable profile requires an explicit HTTPS relay and QAD port`。
 - 门禁按 profile 分档:**回环 profile 维持 https + 显式端口 + QAD 非 0**(自建/测试的随机端口场景);**routable 只要求 https + 主机名 + QAD 非 0**,端口可缺省。`http://` 两边仍一律拒。
 - 用例 `a_public_relay_spelled_with_the_default_port_is_accepted_where_it_matters`:公共 relay 在 routable 下通过、在回环 profile 下仍拒(http 亦拒),并断言 `public.port() == None` 这条事实本身。
-- 回执:`control_iroh` 39 passed / 0 failed / 2 ignored;`check-carrier-assertions` OK。
+- 评审后三处(RAI-475):回环用例补 `https://127.0.0.1`(只缺端口)单独覆盖显式端口规则;routable 错误文案改成 `requires an HTTPS relay host and a non-zero QAD port`(端口已不要求);规格 `:19` 那句同步。
+- 回执:`control_iroh` 39 passed / 0 failed / 2 ignored;`check-carrier-assertions` OK。bd08e5c
 - 提交: 1eebc36
 
 ## [2026-11-26] rendezvous 注册契约可声明 registry_relay (RAI-462)
