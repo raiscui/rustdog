@@ -168,3 +168,13 @@ RAI-387: unixpipe 本机 fast path 从 `$TMPDIR` 迁到固定运行目录,补名
       该分支仅做隔离类型检查,未在 Windows 上构建(本机 `cargo check --target` 被 ring 的
       lib.exe 挡住,见 docs/solutions/runtime-errors/cross-compile-windows-rust-electron-tool.md)
 - [ ] `rdog local list --json` 机器可读形态(当前是 `key=value` 单行,够 agent grep)
+
+### [2026-11-26 06:20:00] 评审 8 条修复
+- [x] Windows 构建断裂 (CleanReport 引用 unix-only RunEntry + test 钩子 PathBuf)、
+      显式 base 父目录被 chmod、显式 base 被改写扩展名、跨版本互斥丢失、
+      legacy 去重丢活 owner 证据、clean TOCTOU、删 lock 允许双 owner、
+      macOS 测试夹具超预算 —— 全部修复并补 4 个回归用例
+- [x] CI 红点归因: ubuntu/macOS 的 `script_success_should_keep_legacy_bare_stdout_response_shape`
+      是既有 figment::Jail 删除 cwd 的并行竞态(8123e21 那次 main CI 同一个测试就红过);
+      windows 是 ort-sys 下载 onnxruntime 的 panic(网络,基础设施)
+- 提交: 7b4e728
