@@ -247,7 +247,11 @@ impl LinkUnicastTls {
                 // 锁外等可写: waker 唤醒, 或 100ms 兜底重试 (链路关闭时不会永远挂住)。
                 tokio::select! {
                     biased;
-                    _ = self.write_wake.permits.acquire() => {}
+                    permit = self.write_wake.permits.acquire() => {
+                        if let Ok(permit) = permit {
+                            permit.forget();
+                        }
+                    }
                     _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {
                         rai524_short::note_fallback();
                     }
@@ -296,7 +300,12 @@ impl LinkUnicastTls {
                 // 关闭时读任务不会永远挂在这把信号量上。
                 tokio::select! {
                     biased;
-                    _ = self.read_wake.permits.acquire() => {}
+                    permit = self.read_wake.permits.acquire() => {
+                        // 必须消费许可: 否则一次通知会让这一分支永久就绪, 变成高频重 poll。
+                        if let Ok(permit) = permit {
+                            permit.forget();
+                        }
+                    }
                     _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {
                         rai524_short::note_fallback();
                     }
@@ -348,6 +357,45 @@ impl LinkUnicastTls {
 
     async fn close(&self) -> ZResult<()> {
         tracing::trace!("Closing TLS link: {}", self);
+        // 先把 rustls 里待发的记录推完 (有界): 锁内一次非阻塞 poll, Pending 就放锁等可写,
+        // 最多等到握手超时。推不完就按 abortive close 处理并**回报错误**, 不再"关掉就报 Ok"。
+        const CLOSE_FLUSH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+        let deadline = tokio::time::Instant::now() + CLOSE_FLUSH_TIMEOUT;
+        loop {
+            let mut flush_now = true;
+            {
+                let _guard = zasynclock!(self.write_mtx);
+                let waker = std::task::Waker::from(self.write_wake.clone());
+                let mut cx = std::task::Context::from_waker(&waker);
+                match std::pin::Pin::new(self.get_mut_socket()).poll_flush(&mut cx) {
+                    std::task::Poll::Ready(Ok(())) => {}
+                    std::task::Poll::Ready(Err(err)) => {
+                        tracing::trace!("TLS flush on close failed for {}: {}", self, err);
+                        return Err(zerror!(err).into());
+                    }
+                    std::task::Poll::Pending => flush_now = false,
+                }
+            }
+            if flush_now {
+                break;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return Err(zerror!(
+                    "TLS link {} could not flush pending records before close",
+                    self
+                )
+                .into());
+            }
+            tokio::select! {
+                biased;
+                permit = self.write_wake.permits.acquire() => {
+                    if let Ok(permit) = permit {
+                        permit.forget();
+                    }
+                }
+                _ = tokio::time::sleep(std::time::Duration::from_millis(50)) => {}
+            }
+        }
         // 锁内只做**非阻塞**的 flush/shutdown 各一次, 不跨 await 持锁 (否则关闭期间读会被挡住)。
         // 一次性 poll 足以把已缓冲的 TLS 记录推出去; 推不完就由底层 TCP 关闭代劳 —— 关闭路径
         // 本来就是 best effort, 这里不接受"为了 flush 完整而挂住整条 lane"。
