@@ -360,7 +360,7 @@ fn the_directory_switch_never_invents_a_dial_target() {
         (
             "relay without the switch",
             format!(
-                r#"{{"id": "{}", "relay": {{"url": "https://127.0.0.1:7100"}}}}"#,
+                r#"{{"id": "{}", "relay": {{"url": "https://127.0.0.1:7100", "root_cert": "/tmp/directory.pem"}}}}"#,
                 endpoint_id(2)
             ),
             "only read with `via_relay`",
@@ -376,7 +376,59 @@ fn the_directory_switch_never_invents_a_dial_target() {
             .expect("an ambiguous directory profile must not pick a target");
         assert!(err.to_string().contains(expected), "{label}: {err}");
     }
+    let anchorless = scratch.write(
+        "anchorless.json",
+        &relay_carried_client(
+            &format!(
+                r#"{{"id": "{}", "via_relay": true, "relay": {{"url": "https://127.0.0.1:7100"}}}}"#,
+                endpoint_id(2)
+            ),
+            false,
+        ),
+    );
+    assert!(
+        profile::<ClientConfig>(&anchorless).is_err(),
+        "a relay-carried directory without a named CA chain must not parse at all"
+    );
     println!("directory: every half-configured profile fails closed");
+}
+
+#[test]
+fn only_a_named_directory_anchor_widens_the_roots() {
+    let scratch = Scratch::new();
+    let client = scratch.write(
+        "client.json",
+        &relay_carried_client(
+            &format!(
+                r#"{{"id": "{}", "via_relay": true, "relay": {{"url": "https://127.0.0.1:7100", "root_cert": "/tmp/directory.pem"}}}}"#,
+                endpoint_id(2)
+            ),
+            false,
+        ),
+    );
+    let parsed: ClientConfig = profile(&client).expect("a relay-carried directory profile parses");
+    let lane = Relay {
+        url: "https://127.0.0.1:7001".parse().unwrap(),
+        qad_port: 9002,
+        root_cert: PathBuf::from("/tmp/relay.pem"),
+    };
+    let dial = parsed.directory.dial(parsed.routable).expect("the switch resolves");
+    let directory = dial.relay.expect("the switch carries a relay");
+
+    assert_eq!(
+        relay_roots(None, &directory),
+        RelayRoots::Pinned(PathBuf::from("/tmp/directory.pem")),
+        "a directory endpoint trusts exactly the chain the profile named"
+    );
+    assert_eq!(
+        relay_roots(Some(&lane), &directory),
+        RelayRoots::LaneAndDirectory(
+            PathBuf::from("/tmp/relay.pem"),
+            PathBuf::from("/tmp/directory.pem")
+        ),
+        "a shared endpoint adds the lane's chain to the named directory anchor"
+    );
+    println!("directory: the named anchor decides the root set, nothing else does");
 }
 
 #[test]
@@ -384,16 +436,12 @@ fn a_directory_relay_follows_the_profile_without_weakening_it() {
     let loopback: RelayUrl = "https://127.0.0.1:7100".parse().unwrap();
     let routable: RelayUrl = "https://10.21.0.1:7100".parse().unwrap();
     let plaintext: RelayUrl = "http://127.0.0.1:7100".parse().unwrap();
-    let relay = |url: &RelayUrl, cert: Option<&str>| DirectoryRelay {
-        url: url.clone(),
-        root_cert: cert.map(PathBuf::from),
-    };
-    assert!(directory_relay(&relay(&loopback, None), false).is_ok());
-    assert!(directory_relay(&relay(&routable, None), true).is_ok());
-    let err = directory_relay(&relay(&routable, None), false)
+    assert!(directory_url_ok(&loopback, false).is_ok());
+    assert!(directory_url_ok(&routable, true).is_ok());
+    let err = directory_url_ok(&routable, false)
         .expect_err("a loopback profile keeps its relay on loopback");
     assert!(err.to_string().contains("loopback"), "{err}");
-    let err = directory_relay(&relay(&plaintext, None), true)
+    let err = directory_url_ok(&plaintext, true)
         .expect_err("a directory relay is never plaintext");
     assert!(err.to_string().contains("HTTPS"), "{err}");
     println!("directory: the relay URL follows the same profile gate as the lane relay");

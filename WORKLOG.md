@@ -10,8 +10,9 @@
   (`Relay server reports problem: Another endpoint connected with the same endpoint id`),随后注册超时、daemon 非零退出。
   所以打开开关时 daemon 复用服务端点本身(ALPN 同时带 `CONTROL`/`DIRECTORY`,relay map = lane ∪ directory);
   关掉开关时仍是「目录端点无 relay + 服务端点挂 lane relay」两个端点,与今天逐项一致。
-- 一个 endpoint 只有一份 TLS 配置:打开开关时根证书是 `embedded().with_extra_roots(lane 链[, directory 链])`
-  (公共目录 relay 要 WebPKI,lane 的 pinned CA 同时保留),关掉时仍是 `custom_roots(lane 链)`。这比只信 pinned CA 宽,
+- 一个 endpoint 只有一份 TLS 配置,根集合由 `relay_roots` 一处决定:目录专用端点 `custom_roots(root_cert)`;
+  daemon 的共享端点 `embedded().with_extra_roots(lane 链 + directory 链)`。`directory.relay.root_cert` 因此是**必填**,
+  打开开关不给信任锚 profile 直接解析失败 —— 宽化只挂在显式信任锚上,不挂在功能开关上(Captain 2026-11-26 裁定)。
   已在 `specs/rdog-iroh-admission-contract.md` 记账。
 - rendezvous 侧新增 `directory_relay`,把目录端点挂到该 relay 并把自身 id 加进自建 relay 的 ACL(否则它会被自己拒掉);
   ready 行相应多出 `directory_relay=<url>`。三种半配置(有 `relay` 没 `via_relay`、有 `via_relay` 没 `relay`、都没有又不给

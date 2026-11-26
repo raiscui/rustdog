@@ -123,8 +123,11 @@ struct Directory {
 #[serde(deny_unknown_fields)]
 struct DirectoryRelay {
     url: RelayUrl,
-    #[serde(default)]
-    root_cert: Option<PathBuf>,
+    /// The CA chain that verifies this relay. It is required, not optional: naming
+    /// the anchor is what lets a shared endpoint accept public WebPKI roots
+    /// alongside the lane's pinned chain, so trust is never widened by merely
+    /// flipping `via_relay` on.
+    root_cert: PathBuf,
 }
 
 /// Where a directory is dialled, and the relay that carries the dial when the
@@ -436,12 +439,8 @@ fn directory_url_ok(url: &RelayUrl, routable: bool) -> Result<()> {
 /// a direct path, which is the path a NAT'd directory does not have.
 fn directory_relay(relay: &DirectoryRelay, routable: bool) -> Result<RelayTransport> {
     directory_url_ok(&relay.url, routable)?;
-    let roots = match &relay.root_cert {
-        Some(path) => CaTlsConfig::custom_roots(certificates(path)?),
-        None => CaTlsConfig::embedded(),
-    };
     Ok((
-        roots,
+        relay_roots(None, relay).config()?,
         RelayMode::Custom(RelayMap::from_iter([RelayConfig::new(
             relay.url.clone(),
             None,
@@ -449,12 +448,51 @@ fn directory_relay(relay: &DirectoryRelay, routable: bool) -> Result<RelayTransp
     ))
 }
 
+/// Which roots verify one endpoint's relays. A directory relay is trusted only
+/// once the operator names its CA chain, and that named anchor is what allows an
+/// endpoint shared with the lane to keep accepting public WebPKI roots beside the
+/// lane's pinned chain — a public hop cannot be verified by a private anchor.
+/// Widening therefore hangs on the explicit `directory.relay.root_cert`, never on
+/// `via_relay` alone.
+#[derive(Debug, PartialEq, Eq)]
+enum RelayRoots {
+    /// Only this chain, for a directory endpoint that dials one relay and nothing
+    /// else.
+    Pinned(PathBuf),
+    /// The lane's pinned chain plus the directory relay's named chain, over the
+    /// embedded WebPKI roots.
+    LaneAndDirectory(PathBuf, PathBuf),
+}
+
+/// The one place that decides what an endpoint trusts: a directory-only endpoint
+/// pins the chain the profile named, while an endpoint that also carries the lane
+/// adds that same chain on top of the lane's pinned chain and the embedded WebPKI
+/// roots.
+fn relay_roots(lane: Option<&Relay>, directory: &DirectoryRelay) -> RelayRoots {
+    match lane {
+        Some(lane) => RelayRoots::LaneAndDirectory(
+            lane.root_cert.clone(),
+            directory.root_cert.clone(),
+        ),
+        None => RelayRoots::Pinned(directory.root_cert.clone()),
+    }
+}
+
+impl RelayRoots {
+    fn config(&self) -> io::Result<CaTlsConfig> {
+        Ok(match self {
+            Self::Pinned(chain) => CaTlsConfig::custom_roots(certificates(chain)?),
+            Self::LaneAndDirectory(lane, directory) => CaTlsConfig::embedded()
+                .with_extra_roots(certificates(lane)?)
+                .with_extra_roots(certificates(directory)?),
+        })
+    }
+}
+
 /// A directory and the lane live on one endpoint once the directory is relay
 /// carried: a peer identity holds one connection per relay, so a second endpoint
 /// of the same peer on the same relay would evict the first one every few
-/// seconds. One endpoint also means one TLS config, so the lane's pinned CA and
-/// the directory relay's issuer are trusted together — WebPKI roots plus the
-/// lane's chain.
+/// seconds. That endpoint keeps both relays in one map and one root set.
 fn shared_relay(
     lane: &Relay,
     directory: &DirectoryRelay,
@@ -472,11 +510,7 @@ fn shared_relay(
             Arc::new(RelayConfig::new(directory.url.clone(), None)),
         );
     }
-    let mut roots = CaTlsConfig::embedded().with_extra_roots(certificates(&lane.root_cert)?);
-    if let Some(path) = &directory.root_cert {
-        roots = roots.with_extra_roots(certificates(path)?);
-    }
-    Ok((roots, RelayMode::Custom(map)))
+    Ok((relay_roots(Some(lane), directory).config()?, RelayMode::Custom(map)))
 }
 
 async fn endpoint_on(

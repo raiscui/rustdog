@@ -30,7 +30,11 @@ relay 侧另有一个 `advertise` 字段（缺省空），只改写给对端的 
 - **拨号目标只有 `TransportAddr::Relay(url)`**，不带任何 IP 候选——地址在配置里本来就不存在，不是查出来的。这一跳的预算用 `RELAY_CONNECT` 而不是 `CONNECT`，因为 relay home 要先建起来；同时**关掉 QAD**（`RelayConfig::new(url, None)`），目录请求因此不会漂到直连路径。
 - **目录侧**（rendezvous profile 的 `directory_relay: {url, root_cert?}`）把自己的目录端点挂到该 relay 上（同一个 key，id 不变），并把自身 id 加进自建 relay 的准入表，否则它自己会被自己的 ACL 拒掉；ready 行随之多出 `directory_relay=<url>`。
 - **daemon 侧不能有第二个端点**：一条对端身份在一个 relay 上只有一条连接，目录端点与服务端点同时挂同一个 relay 会互相顶掉（实测原文 `Relay server reports problem: Another endpoint connected with the same endpoint id`，随后注册超时、daemon 非零退出）。所以打开开关时 daemon 复用服务端点本身（ALPN 同时带 `CONTROL` 与 `DIRECTORY`，relay map 是 lane relay ∪ directory relay）；关掉开关时仍是"目录端点无 relay + 服务端点挂 lane relay"两个端点。
-- **一处 TLS 取舍要记账**：一个 endpoint 只有一份 TLS 配置，所以打开开关时根证书是 `embedded().with_extra_roots(lane 链[, directory 链])`——公共目录 relay 需要 WebPKI，lane relay 的 pinned CA 同时保留。这比只信 pinned CA 宽，是"两种 issuer 共用一个 endpoint"的必然代价；关掉开关时仍是 `custom_roots(lane 链)`。
+- **宽化只挂在显式的信任锚上**：一个 endpoint 只有一份 TLS 配置，根集合由 [`relay_roots`](../src/control_iroh.rs) 一处决定：
+  - 只拨目录的端点（rendezvous 的目录端点、client 的查找端点）用 `custom_roots(directory.relay.root_cert)`，**不引入公共根**；
+  - daemon 的共享端点（lane + 目录同一个 endpoint）用 `embedded().with_extra_roots(lane 链 + directory 链)`，也就是 WebPKI 加两份链，因为公共 hop 无法用私建锚验证。
+
+  `root_cert` 因此是**必填字段**：打开 `via_relay` 却不给信任锚时 profile 直接解析失败，不存在"开关一开顺带放宽 TLS"的路径 —— 功能维度（开不开目录的 relay 承载）与安全维度（信任面）不共用一个布尔量。关掉开关时仍是 `custom_roots(lane 链)`。
 - **地址策略不放宽**：目录 relay 的 URL 必须 https，非 `routable` profile 还必须是回环主机。三种半配置一律 fail closed：有 `relay` 没 `via_relay`、有 `via_relay` 没 `relay`、两者都没有又不给 `addr`。
 
 实测（`tests/manual/iroh_directory_relay.sh` → `iroh_directory_relay.py`，三网络栈，目录端点绑在中转机回环上、任何对端都拨不到它；回执 `handoffs/rai426/receipts/directory-relay.log`）：
