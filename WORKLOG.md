@@ -8,7 +8,7 @@
 - **F6**:`data.online()` 的语义写进规格——只表示 relay map 里至少一条 home 已建立(可能是目录 relay),**注册成功才是发布的 lane relay 承载证据**。
 - **F2 残窗**:`directory_call` 整次包一层 `timeout(LEASE - RENEW, ...)`,不再靠 connect/open/write/read 串行相加估算;`lane_relay` 内联的 `custom_roots` 收进 `relay_roots`(新增 `Lane` 变体),信任策略只剩一个构造点。
 - 回执:`cargo test --bin rdog -- control_iroh` **36 passed / 0 failed / 2 ignored**;`tests/manual/iroh_directory_relay.sh` 四例全过(每例额外打印 `directory_hop=`);`check-carrier-assertions` OK;`handoffs/rai450/receipts/directory-relay.log`。
-- 提交: 827e494
+- 提交: 827e494(五条残留)、2ad1c9a(评审后三处改动:F5 路径行改到查询成功后发、稳态按状态变化才打 `info`、F6 就绪判据改写)
 
 ## [2026-11-26] iroh 目录的 relay 承载 `directory.via_relay` (RAI-426)
 
