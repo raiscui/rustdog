@@ -696,8 +696,31 @@ pub(crate) fn run_join(inputs: &[std::path::PathBuf]) -> Result<i32, String> {
         "schema": BULK_PATH_JOIN_SCHEMA,
         "reports": reports.iter().map(JoinReport::to_json).collect::<Vec<_>>(),
     });
+    // stdout 只有那一份 JSON (机器读的那份不许掺行); 摘要走 stderr。
     println!("{rendered}");
+    for report in &reports {
+        eprintln!("{}", summary_line(report));
+    }
     Ok(if conclusive { 0 } else { 1 })
+}
+
+/// 人读摘要的一行: 把「有没有得出结论」与「结论是什么」分开写清。
+///
+/// 退出码只回答前一半 —— `relay_bytes_zero: false` 同样是一次"得到了结论", 也照样退 0。所以
+/// 摘要必须**逐组**把三态值写出来: 少了这一行, `exit 0` 会被读成"通过"。
+fn summary_line(report: &JoinReport) -> String {
+    let transfer = report.transfer_id.as_deref().unwrap_or("<unknown-transfer>");
+    let attempt = report.attempt_id.as_deref().unwrap_or("-");
+    let reason = report.reason.as_deref().unwrap_or("-");
+    let (zero, conclusion) = match report.relay_bytes_zero {
+        Some(true) => ("true", "得出了结论: 两端各自测到 relay 字节增量为零"),
+        Some(false) => ("false", "得出了结论: 至少一端测到 relay 字节增量为非零"),
+        None => ("null", "未得出结论"),
+    };
+    format!(
+        "{transfer} attempt={attempt} status={} relay_bytes_zero: {zero} — {conclusion} ({reason})",
+        report.status
+    )
 }
 
 /// 输入可以是文件, 也可以是目录; 目录只取 `*.json` (按名字排序, 让输出可重现)。
@@ -1016,6 +1039,29 @@ mod tests {
         assert_eq!(reports[0].relay_bytes_zero, None);
         // 两半仍然各自列出: 它们确实存在, 只是不能组成一个结论。
         assert!(reports[0].client.is_some() && reports[0].daemon.is_some());
+    }
+
+    #[test]
+    fn the_summary_line_says_whether_there_is_a_conclusion_and_what_it_is() {
+        // 退出码只回答"有没有结论", 所以摘要必须把三态值与"是否构成结论"分开写。
+        let zero = join_inputs(&[half("client", Some(0)), half("daemon", Some(0))]);
+        let line = summary_line(&zero[0]);
+        assert!(line.contains("relay_bytes_zero: true"), "line={line}");
+        assert!(line.contains("得出了结论"), "line={line}");
+
+        // 结论是非零 —— 同样退 0, 摘要必须让人看见"结论是 false", 不是"通过"。
+        let nonzero = join_inputs(&[half("client", Some(0)), half("daemon", Some(9))]);
+        let line = summary_line(&nonzero[0]);
+        assert!(line.contains("relay_bytes_zero: false"), "line={line}");
+        assert!(line.contains("得出了结论"), "line={line}");
+        assert!(!line.contains("未得出结论"), "line={line}");
+
+        // 没结论: 三态是 null, 措辞也必须说"未得出结论"。
+        let empty = join_inputs(&[half("client", None), half("daemon", None)]);
+        let line = summary_line(&empty[0]);
+        assert!(line.contains("relay_bytes_zero: null"), "line={line}");
+        assert!(line.contains("未得出结论"), "line={line}");
+        assert!(line.contains("relay_sample_unavailable"), "line={line}");
     }
 
     #[test]

@@ -613,9 +613,16 @@ schema 完全一致 (`endpoint:"daemon"`). 三个终态各挂一处, 除此之�
 | `null` | 其余全部: 任一端 `no_bulk_bytes` / `relay_sample_unavailable` / `not_applicable` / `aborted`, 或任一端 `concurrency_suspected:true` | **没证出来**, 不是证否 |
 
 把第三格压成 `false` 是把"未采样 ≠ 0"做对之后**反向**漏掉的同一类谎: 读到 `false` 的人会以为
-"测到了 relay 流量", 真相却是"这次没有结论". 退出码: `0` 每组都给得出结论 (`true` 或 `false`),
-`1` 至少一组配上了但没结论、或根本没配上, `2` 参数 / IO 错误. "配上了但没结论"必须落在 `1`,
-不能混进 `0`.
+"测到了 relay 流量", 真相却是"这次没有结论".
+
+退出码: `0` 每组都得出过结论 (`true` 或 `false`), `1` 至少一组配上了但没结论、或根本没配上,
+`2` 参数 / IO 错误. "配上了但没结论"必须落在 `1`, 不能混进 `0`.
+
+> **退出码只回答"有没有得出结论", 不回答"结论是什么", 所以 `exit 0` 不是"通过"**:
+> `relay_bytes_zero: false` (真的测到 relay 上有字节) 同样退 `0`. 结论本身只在输出的三态值里。
+> 这条不写在人眼前, `exit 0` 就会被读成"bulk 没走 relay" —— 与所有假零事故是同一个形状。
+> 因此工具同时给一份人读摘要: **stdout 只有那一份 JSON**, 摘要逐组打印 `relay_bytes_zero` 的三态值
+> 与"是否构成结论", 走 **stderr**, 不掺进 stdout。
 
 `joined` 但 `relay_bytes_zero` 为 `null` 时, `reason` 给 `bulk_path_inconclusive_<verdict>`
 (两端 verdict 不同且都不是零时按本端 → 对端用 `+` 串起来, 如
