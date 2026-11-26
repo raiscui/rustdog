@@ -108,6 +108,12 @@ struct RendezvousConfig {
     /// `bind` still has an address to dial it through.
     #[serde(default)]
     directory_relay: Option<DirectoryRelay>,
+    /// The relay a registration must carry when its data path uses a relay other
+    /// than the one this rendezvous advertises — a daemon behind NAT whose lane
+    /// runs over a public relay, for instance. Omitted, the advertised relay is
+    /// the one registration has to match.
+    #[serde(default)]
+    registry_relay: Option<RelayUrl>,
 }
 
 #[derive(Deserialize)]
@@ -760,9 +766,13 @@ pub(crate) fn run_rendezvous(path: &Path) -> Result<()> {
             Some(ip) => SocketAddr::new(ip, tls_addr.port()),
             None => tls_addr,
         };
+        let expected_relay = match cfg.registry_relay.clone() {
+            Some(url) => url,
+            None => format!("https://{advertised}").parse()?,
+        };
         let registry = Arc::new(Mutex::new(Registry {
             owners: cfg.registrations, readers: cfg.lookups, leases: HashMap::new(),
-            relay: format!("https://{advertised}").parse()?, routable: cfg.routable,
+            relay: expected_relay, routable: cfg.routable,
         }));
         match &cfg.directory_relay {
             Some(relay) => log::info!(

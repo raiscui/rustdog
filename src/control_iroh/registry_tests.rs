@@ -147,3 +147,33 @@ fn a_registration_needs_an_address_a_matching_relay_and_its_owner() {
     );
     assert!(matches!(still_owner, DirectoryReply::Registered));
 }
+
+#[test]
+fn a_registry_declared_on_another_relay_still_pins_the_one_registration_carries() {
+    // A daemon behind NAT publishes a public relay as its lane, so the rendezvous
+    // has to expect that relay rather than the one it advertises itself. The check
+    // is unchanged: the registration must carry exactly that relay.
+    let owner = endpoint_id(2);
+    let public: RelayUrl = "https://use1-1.relay.n0.iroh.link.:443".parse().unwrap();
+    let base = registry(owner);
+    let mut directory = Registry { relay: public.clone(), ..base };
+
+    let accepted = register(
+        &mut directory,
+        owner,
+        vec![ip("10.42.0.2:7000"), TransportAddr::Relay(public.clone())],
+    );
+    assert!(matches!(accepted, DirectoryReply::Registered));
+
+    let mut directory = Registry { relay: public.clone(), ..registry(owner) };
+    let denied = register(
+        &mut directory,
+        owner,
+        vec![ip("10.42.0.2:7000"), TransportAddr::Relay(relay_url())],
+    );
+    let DirectoryReply::Rejected { reason } = denied else {
+        panic!("a registration on another relay must be refused");
+    };
+    assert_eq!(reason, "iroh_registration_denied");
+    println!("registry: the declared relay is expected, and nothing else is accepted");
+}
