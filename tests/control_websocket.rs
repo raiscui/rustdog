@@ -8,6 +8,11 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[path = "support/child_guard.rs"]
+mod child_guard;
+
+use child_guard::ChildGuard;
+
 fn next_free_port() -> u16 {
     let listener = TcpListener::bind(("127.0.0.1", 0)).expect("ephemeral listener should bind");
     let port = listener
@@ -138,27 +143,31 @@ fn control_cli_should_drive_websocket_daemon_end_to_end() {
     let binary = rdog_binary_path();
     let url = websocket_url(port);
 
-    let mut daemon = Command::new(&binary)
-        .arg("daemon")
-        .env("RDOG_ZENOH__ENABLED", "false")
-        .env("RDOG_OBSERVATION__DURABLE_ENABLED", "false")
-        .env("RDOG_DAEMON__RETRY_SECONDS", "1")
-        .env("RDOG_OUTBOUND__ENABLED", "false")
-        .env("RDOG_INBOUND__ENABLED", "true")
-        .env("RDOG_INBOUND__HOST", "127.0.0.1")
-        .env("RDOG_INBOUND__PORT", port.to_string())
-        .env("RDOG_INBOUND__SHELL", platform_test_shell())
-        .env("RDOG_INBOUND__MODE", "control")
-        .env("RDOG_INBOUND__TRANSPORT", "websocket")
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("daemon should start");
+    let mut daemon = ChildGuard::new(
+        Command::new(&binary)
+            .arg("daemon")
+            .env("RDOG_ZENOH__ENABLED", "false")
+            .env("RDOG_OBSERVATION__DURABLE_ENABLED", "false")
+            .env("RDOG_DAEMON__RETRY_SECONDS", "1")
+            .env("RDOG_OUTBOUND__ENABLED", "false")
+            .env("RDOG_INBOUND__ENABLED", "true")
+            .env("RDOG_INBOUND__HOST", "127.0.0.1")
+            .env("RDOG_INBOUND__PORT", port.to_string())
+            .env("RDOG_INBOUND__SHELL", platform_test_shell())
+            .env("RDOG_INBOUND__MODE", "control")
+            .env("RDOG_INBOUND__TRANSPORT", "websocket")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("daemon should start"),
+    );
 
     if !wait_until_port_is_busy(&mut daemon, port, Duration::from_secs(6)) {
         let _ = daemon.kill();
         let output = daemon
+            .take()
+            .expect("guard should still own the daemon")
             .wait_with_output()
             .expect("should capture daemon output after timeout");
 
@@ -292,27 +301,31 @@ fn control_cli_should_run_websocket_pty_command_end_to_end() {
     let binary = rdog_binary_path();
     let url = websocket_url(port);
 
-    let mut daemon = Command::new(&binary)
-        .arg("daemon")
-        .env("RDOG_ZENOH__ENABLED", "false")
-        .env("RDOG_OBSERVATION__DURABLE_ENABLED", "false")
-        .env("RDOG_DAEMON__RETRY_SECONDS", "1")
-        .env("RDOG_OUTBOUND__ENABLED", "false")
-        .env("RDOG_INBOUND__ENABLED", "true")
-        .env("RDOG_INBOUND__HOST", "127.0.0.1")
-        .env("RDOG_INBOUND__PORT", port.to_string())
-        .env("RDOG_INBOUND__SHELL", platform_test_shell())
-        .env("RDOG_INBOUND__MODE", "control")
-        .env("RDOG_INBOUND__TRANSPORT", "websocket")
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("websocket daemon should start");
+    let mut daemon = ChildGuard::new(
+        Command::new(&binary)
+            .arg("daemon")
+            .env("RDOG_ZENOH__ENABLED", "false")
+            .env("RDOG_OBSERVATION__DURABLE_ENABLED", "false")
+            .env("RDOG_DAEMON__RETRY_SECONDS", "1")
+            .env("RDOG_OUTBOUND__ENABLED", "false")
+            .env("RDOG_INBOUND__ENABLED", "true")
+            .env("RDOG_INBOUND__HOST", "127.0.0.1")
+            .env("RDOG_INBOUND__PORT", port.to_string())
+            .env("RDOG_INBOUND__SHELL", platform_test_shell())
+            .env("RDOG_INBOUND__MODE", "control")
+            .env("RDOG_INBOUND__TRANSPORT", "websocket")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("websocket daemon should start"),
+    );
 
     if !wait_until_port_is_busy(&mut daemon, port, Duration::from_secs(6)) {
         let _ = daemon.kill();
         let output = daemon
+            .take()
+            .expect("guard should still own the daemon")
             .wait_with_output()
             .expect("should capture daemon output after timeout");
 
@@ -370,28 +383,32 @@ fn control_cli_should_execute_screenshot_and_save_file_over_websocket() {
     let url = websocket_url(port);
     let workdir = temp_workdir("screenshot");
 
-    let mut daemon = Command::new(&binary)
-        .arg("daemon")
-        .env("RDOG_ZENOH__ENABLED", "false")
-        .env("RDOG_OBSERVATION__DURABLE_ENABLED", "false")
-        .env("RDOG_DAEMON__RETRY_SECONDS", "1")
-        .env("RDOG_OUTBOUND__ENABLED", "false")
-        .env("RDOG_INBOUND__ENABLED", "true")
-        .env("RDOG_INBOUND__HOST", "127.0.0.1")
-        .env("RDOG_INBOUND__PORT", port.to_string())
-        .env("RDOG_INBOUND__SHELL", platform_test_shell())
-        .env("RDOG_INBOUND__MODE", "control")
-        .env("RDOG_INBOUND__TRANSPORT", "websocket")
-        .current_dir(&workdir)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("daemon should start");
+    let mut daemon = ChildGuard::new(
+        Command::new(&binary)
+            .arg("daemon")
+            .env("RDOG_ZENOH__ENABLED", "false")
+            .env("RDOG_OBSERVATION__DURABLE_ENABLED", "false")
+            .env("RDOG_DAEMON__RETRY_SECONDS", "1")
+            .env("RDOG_OUTBOUND__ENABLED", "false")
+            .env("RDOG_INBOUND__ENABLED", "true")
+            .env("RDOG_INBOUND__HOST", "127.0.0.1")
+            .env("RDOG_INBOUND__PORT", port.to_string())
+            .env("RDOG_INBOUND__SHELL", platform_test_shell())
+            .env("RDOG_INBOUND__MODE", "control")
+            .env("RDOG_INBOUND__TRANSPORT", "websocket")
+            .current_dir(&workdir)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("daemon should start"),
+    );
 
     if !wait_until_port_is_busy(&mut daemon, port, Duration::from_secs(6)) {
         let _ = daemon.kill();
         let output = daemon
+            .take()
+            .expect("guard should still own the daemon")
             .wait_with_output()
             .expect("should capture daemon output after timeout");
 

@@ -8,6 +8,11 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[path = "support/child_guard.rs"]
+mod child_guard;
+
+use child_guard::ChildGuard;
+
 fn next_free_port() -> u16 {
     let listener = TcpListener::bind(("127.0.0.1", 0)).expect("ephemeral listener should bind");
     let port = listener
@@ -136,26 +141,30 @@ fn read_socket_output_until_contains(
 fn control_mode_should_bridge_agent_protocol_to_daemon_inbound() {
     let port = next_free_port();
     let binary = rdog_binary_path();
-    let mut daemon = Command::new(&binary)
-        .arg("daemon")
-        .env("RDOG_ZENOH__ENABLED", "false")
-        .env("RDOG_OBSERVATION__DURABLE_ENABLED", "false")
-        .env("RDOG_DAEMON__RETRY_SECONDS", "1")
-        .env("RDOG_OUTBOUND__ENABLED", "false")
-        .env("RDOG_INBOUND__ENABLED", "true")
-        .env("RDOG_INBOUND__HOST", "127.0.0.1")
-        .env("RDOG_INBOUND__PORT", port.to_string())
-        .env("RDOG_INBOUND__SHELL", "/bin/sh")
-        .env("RDOG_INBOUND__MODE", "control")
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("daemon should start");
+    let mut daemon = ChildGuard::new(
+        Command::new(&binary)
+            .arg("daemon")
+            .env("RDOG_ZENOH__ENABLED", "false")
+            .env("RDOG_OBSERVATION__DURABLE_ENABLED", "false")
+            .env("RDOG_DAEMON__RETRY_SECONDS", "1")
+            .env("RDOG_OUTBOUND__ENABLED", "false")
+            .env("RDOG_INBOUND__ENABLED", "true")
+            .env("RDOG_INBOUND__HOST", "127.0.0.1")
+            .env("RDOG_INBOUND__PORT", port.to_string())
+            .env("RDOG_INBOUND__SHELL", "/bin/sh")
+            .env("RDOG_INBOUND__MODE", "control")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("daemon should start"),
+    );
 
     if !wait_until_port_is_busy(&mut daemon, port, Duration::from_secs(6)) {
         let _ = daemon.kill();
         let output = daemon
+            .take()
+            .expect("guard should still own the daemon")
             .wait_with_output()
             .expect("should capture daemon output after timeout");
 

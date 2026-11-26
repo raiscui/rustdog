@@ -1,5 +1,18 @@
 # WORKLOG: rustdog
 
+## [2026-11-26] 测试夹具的 daemon 在 panic 路径被收掉 (RAI-423)
+
+- 现象: 夹具只在正常路径 `stop_child`; 断言 panic 后子进程被 init 收养, 一轮批次留下 27 个孤儿
+  `rdog daemon`, 放大后续用例的假红(一次 panic 污染整批)。
+- 改法: 新增 `tests/support/child_guard.rs`: `ChildGuard` 持有 Child、`Drop` 里 kill+wait,
+  `take()` 供 `wait_with_output` 用, `ChildHandle` trait 让 `stop_child(&mut impl ChildHandle)`
+  同时接受裸 `Child` 与 `ChildGuard`(调用点语义不变)。
+- 迁移: control_lanes / control_mode / control_pty / control_websocket / daemon_inbound /
+  zenoh_router_client / connect_modes; zenoh_unixpipe 自带 Drop 的 TestDaemon 未动。
+- 回执: panic 探针 → guard 那个被收、裸 Child 对照残留 1 个; 连跑三轮批次 leftover 恒为 0;
+  各 target 计数与改动前一致。
+- 提交: 8792422
+
 ## [2026-11-26] tests/ TTY 夹具改按能力探测选择 script 调用形式 (RAI-410)
 
 - 4 处夹具写 `script -q /dev/null <rdog> control ...`(BSD/macOS 尾随命令形式), util-linux 2.39.3 只认
@@ -413,4 +426,48 @@ drill 分支 poison 预取 URL 后, 第一次真的跑到 failure 分支, 发现
 `scripts/ci/coverage-gap-summary.md` + 三个 job 各自 `cat`, 文字不再经过 shell 解析,
 同一份文字也不再在三处各抄一遍。本地用同一条命令回放, 摘要内容已验证完整。
 - 提交: 4a3069a
-- 提交: aa68f95 (PowerShell 启动失败也纳入有界重试)
+
+### 2026-11-26 Windows PowerShell 启动失败也纳入有界重试 (RAI-429)
+
+run 45777540822 的 \`tests.rs:51\` 红是第二种环境性失败: PowerShell 起来了但托管运行时装载失败
+(\`Internal Windows PowerShell error ... 8009001d\`)。\`run_powershell_probe()\` 只对
+\`NotFound\` 与这种启动失败重试, 其它错误与断言不成立照旧直接红。
+- 提交: aa68f95
+- 提交: 8db8a35
+
+## 2026-11-26 serial listen endpoint 不再当可达 locator 通告 (RAI-383)
+
+Zenoh 对 serial 端点是惰性的 (`zenoh-link-serial::new_listener` 不打开串口, 只把
+endpoint 记进 locator 集合), 于是打不开的串口也会出现在 `Zenoh can be reached at:`
+里, 对端按它拨号必然失败且启动日志无提示。RAI-383 按 RUST-3 的真机实测重写后,
+落地两层:
+
+- 新增 `src/zenoh_runtime/listen_plan.rs`: 启动期分类 listen_endpoints —— 必选
+  (tcp/udp/tls/unixpipe) 原样交给 Zenoh (绑定失败仍致命, 形状非法直接报错),
+  可选 (serial) 先探测设备 (unix 看字符设备, windows 按 zenoh 的 exclusive 语义试开);
+  不可用的 serial 记入 dropped 并由 `run_router_daemon` 打一条含 endpoint/原因/
+  影响/改法的 warn, daemon 继续启动。ready 日志改为回读实际生效集合。
+- 模板收窄: `rdog_win.toml` / `rdog_linux.toml` 的 serial 端点改为注释 (与
+  `rdog_macos.toml` 一致), README 最小配置同步并写明该语义。
+- 实测 (Linux 云机, 隔离 HOME): 修前同配置下 `serial/NOSUCHPORT` 与
+  `serial//dev/rdog-rai383-no-such-port` 都出现在 `can be reached at`; 修后两者
+  都被剔除并各留一条 warn, `tcp` 入口 `@ping` 回执 `pong:true`; socat pty 冒充
+  可用串口时该 endpoint 正常进入通告集合。`cargo test --bin rdog` 1111 passed /
+  0 failed / 2 ignored (新增 4 条 listen_plan 单测)。
+- 未验: Windows 侧只落到代码与语义 (试开 `\\.\COMxx`), 本机无 Windows 环境实跑。
+- 提交: 564fc4a
+
+## 2026-11-26 RAI-383 评审修复与知识 Capture
+
+- 评审抓到 windows 探测缺陷: `std::fs::OpenOptions` 默认共享模式与 Windows 通信设备
+  不兼容 (`serialport-4.9.0/src/windows/com.rs:62` 用 `share_mode 0`), 会让可用串口在
+  探测阶段被判死并永久剔除。已改成读写 + `share_mode(0)`, 与 zenoh 底层同一打开语义。
+  本机无 windows 环境, 该修复的编译与 `COM255` 负例由 windows-latest job 给出证据;
+  Linux 侧重跑 `cargo test --bin rdog` 1111 passed / 0 failed / 2 ignored, 两份真机
+  回执 (不可用剔除 + socat pty 可用保留) 在新二进制上复跑一致。
+- 知识 Capture: `docs/solutions/conventions/zenoh-serial-listener-lazy-locator.md`,
+  根 `AGENTS.md` 粗索引与 capture 记录同提交更新。仓库里没有
+  `docs/solutions/AGENTS.md` 细索引, 也没有 `scripts/check-solutions-index.mjs`,
+  故只跑现存的两份守卫 (`check-carrier-assertions.py` / `check-bookkeeping.py`)。
+- 提交: ddf32fb
+- 提交: d226320

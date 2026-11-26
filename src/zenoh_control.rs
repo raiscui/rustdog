@@ -190,6 +190,18 @@ pub fn run_router_daemon(config: ZenohDaemonRuntimeConfig, shell: &str) -> io::R
         None
     };
 
+    // RAI-383: serial 端点在 Zenoh 侧是惰性的, 打不开的设备也会进入公开
+    // locator 集合。这里先剔除实际不可用的 serial endpoint, 必选入口
+    // (tcp/udp/tls/unixpipe) 保持原样交给 Zenoh 绑定, 失败仍然致命。
+    let listen_plan = zenoh_runtime::plan_listen_endpoints(&config.listen_endpoints)?;
+    for dropped in &listen_plan.dropped {
+        log::warn!(
+            "serial listen endpoint 不可用, 已从对外通告的 locator 集合剔除: endpoint={}, 原因={}, 影响=daemon 照常启动, 但该串口不再出现在 `Zenoh can be reached at` 的 locator 里, 对端无法按它建立 serial link; 改法=修正 [zenoh].listen_endpoints 里的这一条(设备路径写错/设备未插/被独占), 不需要串口就删掉或注释掉",
+            dropped.endpoint,
+            dropped.reason
+        );
+    }
+
     // TLS 机密性 (issue #88, spec: specs/rdog-tls-plan.md): enabled 时 listen
     // 的 tcp/ 切换 tls/ 并注入 ~/.rdog/tls/ 材料; unixpipe/serial 前缀不动。
     let (listen_endpoints, tls_listen) = if config.tls.enabled {
@@ -220,8 +232,8 @@ pub fn run_router_daemon(config: ZenohDaemonRuntimeConfig, shell: &str) -> io::R
             },
             enable_mtls: config.tls.enable_mtls,
         };
-        let switched: Vec<String> = config
-            .listen_endpoints
+        let switched: Vec<String> = listen_plan
+            .endpoints
             .iter()
             .map(|endpoint| {
                 if let Some(rest) = endpoint.strip_prefix("tcp/") {
@@ -237,7 +249,7 @@ pub fn run_router_daemon(config: ZenohDaemonRuntimeConfig, shell: &str) -> io::R
         );
         (switched, Some(tls_config))
     } else {
-        (config.listen_endpoints.clone(), None)
+        (listen_plan.endpoints.clone(), None)
     };
 
     let session = zenoh_runtime::open_router_session_tls(
@@ -320,7 +332,7 @@ pub fn run_router_daemon(config: ZenohDaemonRuntimeConfig, shell: &str) -> io::R
         alive_key,
         control_key,
         key_input_event_key,
-        config.listen_endpoints,
+        listen_endpoints,
         config.request_timeout_ms
     );
 
