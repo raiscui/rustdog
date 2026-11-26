@@ -86,6 +86,9 @@ fn run_powershell_probe(script: &str) -> std::io::Result<std::process::Output> {
     }
 
     for attempt in 1..=ATTEMPTS {
+        // 串行化 shell 子进程 (RAI-429): 同时涌入的 console-less 子进程越少,
+        // PowerShell 托管运行时装载失败的窗口越小。
+        let _shell_guard = crate::test_support::shell_spawn_guard();
         let outcome = build_shell_command("powershell.exe", script).output();
         let retryable = match &outcome {
             Ok(output) => startup_failed(output),
@@ -94,7 +97,7 @@ fn run_powershell_probe(script: &str) -> std::io::Result<std::process::Output> {
         if !retryable || attempt == ATTEMPTS {
             return outcome;
         }
-        std::thread::sleep(std::time::Duration::from_millis(250 * attempt as u64));
+        std::thread::sleep(std::time::Duration::from_secs(attempt as u64));
     }
     unreachable!("loop always returns on the last attempt")
 }
@@ -117,6 +120,7 @@ fn shell_builder_preserves_non_powershell_command_text() {
 
 #[test]
 fn shell_stderr_is_not_reported_as_nonzero_exit() {
+    let _shell_guard = crate::test_support::shell_spawn_guard();
     let _cwd_guard = crate::test_support::cwd_test_guard();
     #[cfg(windows)]
     let (shell, script) = ("cmd.exe", "echo diagnostic 1>&2 & exit /b 0");
@@ -135,6 +139,7 @@ fn shell_stderr_is_not_reported_as_nonzero_exit() {
 #[cfg(windows)]
 #[test]
 fn powershell_progress_should_be_silent_but_real_errors_preserved() {
+    let _shell_guard = crate::test_support::shell_spawn_guard();
     let _cwd_guard = crate::test_support::cwd_test_guard();
     // Windows PowerShell 的重定向 progress 会生成 CLIXML, 不能作为脚本失败依据.
     let result = execute_script(
