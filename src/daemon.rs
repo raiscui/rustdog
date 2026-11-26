@@ -95,7 +95,14 @@ pub fn run(config: DaemonConfig) -> io::Result<()> {
     let retry_interval = config.retry_interval();
     let observation_daemon_name = tcp_observation_daemon_name(&config);
     initialize_durable_observation_state(&config.observation, None, &observation_daemon_name)?;
-    initialize_file_transfer_maintenance(&config.file_transfer)?;
+    initialize_file_transfer_maintenance(
+        &config.file_transfer,
+        crate::control_file_transfer::TransferIndexIdentity {
+            // TCP daemon 没有 zenoh namespace 概念, 与 observation 的 identity 口径一致。
+            namespace: None,
+            daemon_name: observation_daemon_name.clone(),
+        },
+    )?;
 
     // 停止标记必须跨 worker 共享。改造前 stop 在每个闭包里各建一份且从不置位,
     // 于是 `stop` 参数在生产路径上事实上是死代码,SIGINT 只能靠进程默认行为硬杀。

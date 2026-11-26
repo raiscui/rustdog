@@ -1106,3 +1106,49 @@ RAI-367 设计期间查出的既有缺陷: 被拒绝或中途中断的传输永�
 - 提交: c1b9434
 - 提交: e81025f
 - 提交: 7c79397
+
+## 2026-11-26 RAI-424 可续传半成品的持久化索引
+
+RAI-417 的会话表只在内存里: daemon 重启后, 盘上留着的半成品既不知道该续到哪, 也不会被 TTL sweep
+回收, 同一个目标再传一次还会另起一个暂存名。修法是给上传会话加一份持久化索引
+(`<state>/rdog/file-transfer/partials.json`), 落盘点覆盖 `@put-file` (新建与续传复用)、`@file-end`
+的成功与四条失败分支、`@file-cancel`、以及真的回收了会话的 sweep; 启动时先 `restore_index()`
+再起回收 worker。
+
+索引只回答"去哪里找": `written` 取暂存文件长度, `last_activity_ms` 取文件 mtime —— 与
+`specs/rdog-bulk-direct-only-spec.md` §2.5 的真相源一致, 索引里再存一份进度就是给同一件事两个答案。
+三条 fail-closed 纪律 (读不懂账本就不认账且不动盘上文件 / 索引项指向的文件不存在就丢掉该条 /
+进度只从文件本身取) 写进了 `specs/file-transfer-control-spec.md`, 不只留在代码注释里。
+
+踩到一个测试隔离坑: 索引路径 override 最初是进程全局的, 并行用例的正常落盘会盖掉另一个用例刚写的
+损坏索引, 症状是"单跑绿、全量红"。改成 thread-local (`cargo test` 每个用例一个线程), 未设置的测试
+线程返回 `None` 让落盘/恢复 no-op, 既不写真实用户目录也不串台。
+
+验证: `cargo test --bin rdog` **1197 passed / 0 failed / 4 ignored**; `control_file_transfer` 模块
+29 passed; 新增 4 条验收用例 (重启后续传 offset 来自盘上长度、重启后 sweep 能回收、损坏索引 fail-closed、
+索引缺失不凭空创建) 加 `forget_sessions_for_tests(&[ids])`。macOS / Windows 的默认索引路径只经编译期
+验证, 真实重启续传只在 Linux 上跑过。
+- 提交: 89ace73
+
+### RAI-424 rebase 到 `f9e67da` 之后的 sha 对照, 以及评审 M1/M2 修复
+
+- 提交: 192ab12 (索引持久化本体)
+- 提交: c09ad28 (评审 M1/M2: 恢复路径按不可信输入校验 + 索引按 daemon 实例分文件)
+
+M1 是评审抓出的**本地提权面**, 不是风格问题: `restore_index()` 把索引里的 `target_path` /
+`temp_path` 原样当真相, 而 sweep 会按 `temp_path` `remove_file`、`@file-end` 会按它 `rename`、
+`@file-chunk` 会向它追加 —— 于是能写 `partials.json` 的本地主体可以让 daemon 操作任意路径,
+本模块"请求路径不可信"的决策在恢复路径上被整个绕过。修法是恢复时对目标跑
+`validate_transfer_path` 并要求 `temp_path == staging_path(target)` (归一后相等), 不符即丢条;
+规格纪律表补上第四行「账本是用户可写的输入」。
+M2 是同一类前提错误: 索引原本每用户一份而每个 daemon 整张覆写, 同用户两个 daemon 会互相抹条目、
+互相把幽灵条目写回。改成 `<state>/rdog/file-transfer/<namespace>/<daemon_name>/partials.json`,
+两段名字归一成安全单段。
+
+### RAI-424 评审第二轮 (RUST-15): 归一撞名与 M1 用例判别力
+
+- 提交: 46a32a3
+
+两点都成立并已修: ① 归一是有损映射 (`lab/1` 与 `lab-1` 同形), 用归一去兼做唯一性必在损失处漏 ——
+改成"归一管安全、原值短哈希管唯一"; ② M1 的穿越支原先 temp 也指向 victim, 摘掉目标校验也不会红,
+等于没测 —— 改成 temp 正好是该目标推导出的暂存路径, 并实测摘掉校验后变红作反证。

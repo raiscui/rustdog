@@ -53,6 +53,10 @@ const STAGING_DIR: &str = ".rdog-partial";
 /// 暂存文件名后缀 (只用于识别, 不承担隔离职责 —— 隔离由 `STAGING_DIR` 提供)。
 const STAGING_SUFFIX: &str = ".partial";
 
+/// 半成品索引所在目录名与文件名 (默认落在平台 state 目录下, 与 observation 同一套约定)。
+const INDEX_DIR: &str = "file-transfer";
+const INDEX_FILE: &str = "partials.json";
+
 /// 单个 @file-chunk data 载荷的字节上限 (解码前 base64 文本的字符数上限)。
 /// 取帧上限 8MiB 的 80% — 决策 2 的落地: chunk 永远塞得进一行。
 const CHUNK_BASE64_LIMIT: usize = (MAX_CONTROL_MESSAGE_BYTES * 4) / 5;
@@ -261,6 +265,7 @@ pub fn execute_put_file(payload: &str) -> std::io::Result<Value> {
             // 只有真的从非 0 接着写才算 resumed: 会话存在但一个字节都没收到时, 报 "resumed" 是
             // 在撒谎 —— 客户端会以为续上了. resume_honored 就是这个事实的判定位.
             let honored = written > 0;
+            persist_index(&sessions);
             return Ok(json!({
                 "kind": "file-transfer",
                 "state": if honored { "resumed" } else { "open" },
@@ -311,6 +316,7 @@ pub fn execute_put_file(payload: &str) -> std::io::Result<Value> {
             last_activity_ms: now_ms(),
         },
     );
+    persist_index(&sessions);
     // resume:true 但半成品不存在 (从没上传过, 或已被 sweep 按窗口删掉) 时起始 offset 是 0.
     // 这时报 "resumed" 会把"重来了"伪装成"续上了", 而后者正是本模块反复要防的静默重传.
     let resume_honored = resume && written > 0;
@@ -417,6 +423,7 @@ pub fn execute_file_end(payload: &str) -> std::io::Result<Value> {
     if written != size {
         reap_file(&temp_path);
         sessions.remove(&transfer_id);
+        persist_index(&sessions);
         return Err(std::io::Error::other(format!(
             "@file-end 字节数不符: 已写 {written}, 声明 {size} — 半成品已清理"
         )));
@@ -425,6 +432,7 @@ pub fn execute_file_end(payload: &str) -> std::io::Result<Value> {
     if !actual_sha256.eq_ignore_ascii_case(&declared_sha256) {
         reap_file(&temp_path);
         sessions.remove(&transfer_id);
+        persist_index(&sessions);
         return Err(std::io::Error::other(format!(
             "@file-end 摘要不符: 声明 {declared_sha256}, 实际 {actual_sha256} — 半成品已清理"
         )));
@@ -434,6 +442,7 @@ pub fn execute_file_end(payload: &str) -> std::io::Result<Value> {
         if !actual_sha256.eq_ignore_ascii_case(expected) {
             reap_file(&temp_path);
             sessions.remove(&transfer_id);
+            persist_index(&sessions);
             return Err(std::io::Error::other(
                 "@file-end 与 @put-file 声明摘要不一致 — 半成品已清理",
             ));
@@ -445,6 +454,7 @@ pub fn execute_file_end(payload: &str) -> std::io::Result<Value> {
         std::fs::copy(&temp_path, &final_path).map_err(|e| {
             reap_file(&temp_path);
             sessions.remove(&transfer_id);
+            persist_index(&sessions);
             std::io::Error::other(format!("提交文件失败 (rename 与 copy 均失败): {e}"))
         })?;
         reap_file(&temp_path);
@@ -452,6 +462,7 @@ pub fn execute_file_end(payload: &str) -> std::io::Result<Value> {
     // 提交成功即退役会话. 不退的话, 这条已完成的条目会在 TTL 到期时被 sweep 拿去"回收"它的
     // 暂存路径 —— 而那个路径是按目标文件推导的, 同一目标的**下一次**上传正用着它.
     sessions.remove(&transfer_id);
+    persist_index(&sessions);
     // 提交把暂存文件 rename 走了, 保留目录可能因此变空; 收掉它, 免得每次上传都在目标目录里
     // 留下一个空的 .rdog-partial (remove_dir 只对空目录成功, 别的传输还在用就不会误删).
     if let Some(staging_dir) = temp_path.parent() {
@@ -656,10 +667,12 @@ pub fn execute_file_cancel(payload: &str) -> std::io::Result<Value> {
 
     let (state, partial_removed) = {
         let mut sessions = transfers().lock().expect("transfer table poisoned");
-        match remove_session_locked(&mut sessions, &transfer_id) {
+        let outcome = match remove_session_locked(&mut sessions, &transfer_id) {
             Some((_, partial_removed)) => ("cancelled", partial_removed),
             None => ("absent", false),
-        }
+        };
+        persist_index(&sessions);
+        outcome
     };
     Ok(json!({
         "kind": "file-transfer",
@@ -734,8 +747,24 @@ pub(crate) fn reap_idle_transfers(now_ms: u64, idle_timeout_ms: u64) -> (usize, 
                 None => {}
             }
         }
+        if reaped > 0 {
+            persist_index(&sessions);
+        }
     }
     (reaped, partials)
+}
+
+/// 测试专用: 模拟 daemon 重启 —— 丢掉内存里的会话表, **但不动盘上任何文件**。
+///
+/// 与 `reap_file` 的区别就是这一点: 重启不是取消, 半成品必须留在盘上等索引来认领。
+#[cfg(test)]
+fn forget_sessions_for_tests(transfer_ids: &[&str]) {
+    // 只丢自己那几条: 会话表是同进程全局的, 清整张表会踩到并行运行的其它用例
+    // (同 docs/solutions/best-practices/parallel-test-global-state-single-lock.md 的纪律)。
+    let mut sessions = transfers().lock().expect("transfer table poisoned");
+    for id in transfer_ids {
+        sessions.remove(*id);
+    }
 }
 
 /// 测试专用: 把一条会话的"最近进展"时刻改成指定值。
@@ -748,6 +777,247 @@ fn stamp_last_activity_for_tests(transfer_id: &str, last_activity_ms: u64) {
     if let Some(session) = sessions.get_mut(transfer_id) {
         session.last_activity_ms = last_activity_ms;
     }
+}
+
+/// 半成品索引的持久化位置: `<平台 state 目录>/rdog/file-transfer/partials.json`。
+///
+/// 与 observation 的默认根同一套平台约定 (`control_observation::durable::default_observation_root`),
+/// 只是换成本 lane 的子目录 —— 索引必须落在**重启后还在**的位置, 不能进临时目录。
+/// 索引属于**一个 daemon 实例**, 不是"这台机器上的用户"。
+///
+/// 同用户起两个 daemon 是受支持形态 (`acquire_daemon_name_guard(namespace, daemon_name)` 就是为它存在的).
+/// 若两者共用一份索引, 会坏两种方式: 后启动的把前者的条目整张覆写掉; 重启后两个实例恢复同一批条目,
+/// 一方 sweep 删了文件、另一方下次落盘又把幽灵条目写回去。所以文件名带 namespace + daemon_name,
+/// 与 observation 存储按 daemon 分目录是同一条纪律。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TransferIndexIdentity {
+    pub namespace: Option<String>,
+    pub daemon_name: String,
+}
+
+static INDEX_IDENTITY: Mutex<Option<TransferIndexIdentity>> = Mutex::new(None);
+
+/// 把 namespace / daemon_name 收敛成一个安全的单段目录名。
+///
+/// 这两个值来自配置, 可以含 `/` 或 `..`; 直接拼进路径就等于允许配置把索引写到任意位置。
+/// 非 `[A-Za-z0-9._-]` 一律折成 `-`; 折叠后为空或只剩点 (`.` / `..`) 时用固定占位, 不留穿越面。
+fn sanitize_index_component(value: &str) -> String {
+    let sanitized: String = value
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '.' | '-' | '_') {
+                ch
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    let sanitized = if sanitized.is_empty() || sanitized.chars().all(|ch| ch == '.') {
+        "-unnamed".to_string()
+    } else {
+        sanitized
+    };
+    // 归一化解决的是**安全** (不产生 `..` 与空段), 唯一性它解决不了: `lab/1` 与 `lab-1`
+    // 折叠后都是 `lab-1`, 两个不同的 daemon 会共用一份索引 —— 正是本改动要消灭的那类损坏,
+    // 只是换了个触发方式。所以折叠一旦动过原文, 就拼一段原值的短哈希, 让
+    // (namespace, daemon_name) → 目录名成为单射; 名字本来就安全时不加, 保持可读。
+    if sanitized == value {
+        return sanitized;
+    }
+    let digest = format!("{:x}", Sha256::digest(value.as_bytes()));
+    format!("{sanitized}-{}", &digest[..12])
+}
+
+fn default_index_path(identity: &TransferIndexIdentity) -> PathBuf {
+    let base = if cfg!(windows) {
+        std::env::var_os("LOCALAPPDATA").map(PathBuf::from)
+    } else if cfg!(target_os = "macos") {
+        std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .map(|home| home.join("Library").join("Application Support"))
+    } else {
+        std::env::var_os("XDG_STATE_HOME")
+            .map(PathBuf::from)
+            .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/state")))
+    }
+    .unwrap_or_else(|| PathBuf::from("."));
+    let namespace = identity
+        .namespace
+        .as_deref()
+        .map(sanitize_index_component)
+        .unwrap_or_else(|| "-no-namespace".to_string());
+    base.join("rdog")
+        .join(INDEX_DIR)
+        .join(namespace)
+        .join(sanitize_index_component(&identity.daemon_name))
+        .join(INDEX_FILE)
+}
+
+/// 测试里索引路径是按**线程**记的, 不是进程全局: `cargo test` 每个用例一个线程, 而索引读写都发生在
+/// 用例自己的线程上。用全局变量会让并行用例互相覆盖同一份索引文件 (一个用例写损坏文件, 另一个用例
+/// 的正常落盘把它盖掉), 表现为"单跑绿、全量红"。
+///
+/// 没有显式设置的测试线程返回 `None`, 落盘/恢复一律 no-op —— 既不会把索引写进真实用户目录, 也不会串台。
+#[cfg(test)]
+thread_local! {
+    static INDEX_PATH_OVERRIDE: std::cell::RefCell<Option<PathBuf>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+fn index_path() -> Option<PathBuf> {
+    #[cfg(test)]
+    {
+        INDEX_PATH_OVERRIDE.with(|cell| cell.borrow().clone())
+    }
+    #[cfg(not(test))]
+    {
+        // 没有实例身份 (没跑过 daemon 初始化) 就不落盘也不恢复: 猜一个位置写下去,
+        // 只会让另一个实例的条目在两份文件之间来回打架。
+        let identity = INDEX_IDENTITY
+            .lock()
+            .ok()
+            .and_then(|guard| guard.clone())?;
+        Some(default_index_path(&identity))
+    }
+}
+
+#[cfg(test)]
+fn set_index_path_for_tests(path: PathBuf) {
+    INDEX_PATH_OVERRIDE.with(|cell| *cell.borrow_mut() = Some(path));
+}
+
+/// 把当前**上传**会话落到磁盘。下载会话没有半成品, 不落。
+///
+/// 只写"有哪些半成品、属于哪个目标"——**进度以文件长度为准, 活性以 mtime 为准**, 都从盘上读,
+/// 不在这里记账: 规格 §2.5 已经把这两件事定为真相源, 索引里再存一份就等于给同一件事两个答案。
+fn persist_index(sessions: &HashMap<String, TransferSession>) {
+    let Some(path) = index_path() else {
+        return;
+    };
+    let entries: Vec<Value> = sessions
+        .iter()
+        .filter(|(_, session)| session.is_upload)
+        .filter_map(|(transfer_id, session)| {
+            let temp_path = session.temp_path.as_ref()?;
+            Some(json!({
+                "transfer_id": transfer_id,
+                "target_path": session.path.to_string_lossy(),
+                "temp_path": temp_path.to_string_lossy(),
+                "size": session.size,
+                "sha256": session.expected_sha256,
+            }))
+        })
+        .collect();
+    let document = json!({"version": 1, "transfers": entries});
+
+    let write = || -> std::io::Result<()> {
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        // 先写临时文件再 rename: 崩溃时不会留下半个 JSON, 索引永远要么是旧的要么是新的。
+        let staging = path.with_extension("json.tmp");
+        std::fs::write(&staging, document.to_string())?;
+        std::fs::rename(&staging, &path)
+    };
+    if let Err(err) = write() {
+        log::warn!("半成品索引写入失败 (不影响传输本身): path={}, error={err}", path.display());
+    }
+}
+
+/// 重启后从索引重建会话表, 返回恢复的条数。
+///
+/// 三条 fail-closed 纪律:
+/// 1. 索引读不出/不是合法 JSON → **不动盘上任何文件**, 只 warn, 以空表继续 (未知的东西不销毁);
+/// 2. 索引里的路径已经不存在 → 丢掉这条 (不假装传输还在);
+/// 3. 会话状态一律从文件本身取: `written` = 文件长度, `last_activity_ms` = 文件 mtime。
+///    索引只回答"去哪里找", 不回答"进度是多少"。
+fn restore_index() -> usize {
+    let Some(path) = index_path() else {
+        return 0;
+    };
+    let raw = match std::fs::read_to_string(&path) {
+        Ok(raw) => raw,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return 0,
+        Err(err) => {
+            log::warn!("半成品索引读取失败, 本次不恢复任何索引项: path={}, error={err}", path.display());
+            return 0;
+        }
+    };
+    let parsed: Value = match serde_json::from_str(&raw) {
+        Ok(value) => value,
+        Err(err) => {
+            log::warn!(
+                "半成品索引已损坏, 本次不恢复任何索引项, 盘上文件保持原样: path={}, error={err}",
+                path.display()
+            );
+            return 0;
+        }
+    };
+    let Some(entries) = parsed.get("transfers").and_then(Value::as_array) else {
+        log::warn!("半成品索引缺少 transfers 数组, 本次不恢复: path={}", path.display());
+        return 0;
+    };
+
+    let mut restored = 0;
+    let mut sessions = transfers().lock().expect("transfer table poisoned");
+    for entry in entries {
+        let (Some(temp_path), Some(target_path), Some(transfer_id)) = (
+            entry.get("temp_path").and_then(Value::as_str),
+            entry.get("target_path").and_then(Value::as_str),
+            entry.get("transfer_id").and_then(Value::as_str),
+        ) else {
+            continue;
+        };
+        // 索引是**用户可写**的文件, 所以恢复路径必须与请求路径同等不可信:
+        // 目标路径要过 `validate_transfer_path` (拒 `..` / 保留目录组件), 暂存路径必须是
+        // 从该目标推导出来的那一个 —— 不校验的话, 能写 partials.json 的本地主体就能让
+        // sweep 删任意文件、`@file-end` rename 任意路径、`@file-chunk` 向任意文件追加。
+        let Ok(target_path) = validate_transfer_path(target_path, "restore-index") else {
+            log::warn!("半成品索引条目的目标路径不合法, 丢弃该条: {target_path}");
+            continue;
+        };
+        let Ok(expected_temp) = staging_path(&target_path) else {
+            continue;
+        };
+        let temp_path = PathBuf::from(temp_path);
+        if !temp_path_matches(Some(&temp_path), &expected_temp) {
+            log::warn!(
+                "半成品索引条目的暂存路径与目标不匹配, 丢弃该条: target={}, temp={}, expected={}",
+                target_path.display(),
+                temp_path.display(),
+                expected_temp.display()
+            );
+            continue;
+        }
+        let temp_path = expected_temp;
+        let Ok(metadata) = std::fs::metadata(&temp_path) else {
+            continue;
+        };
+        let written = metadata.len();
+        let last_activity_ms = metadata
+            .modified()
+            .ok()
+            .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
+            .map(|elapsed| elapsed.as_millis() as u64)
+            .unwrap_or_else(now_ms);
+        sessions.insert(
+            transfer_id.to_owned(),
+            TransferSession {
+                path: target_path.clone(),
+                size: entry.get("size").and_then(Value::as_u64).unwrap_or(written),
+                expected_sha256: entry
+                    .get("sha256")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned),
+                written,
+                temp_path: Some(temp_path),
+                is_upload: true,
+                last_activity_ms,
+            },
+        );
+        restored += 1;
+    }
+    restored
 }
 
 static TRANSFER_MAINTENANCE: OnceLock<Mutex<Option<TransferMaintenance>>> = OnceLock::new();
@@ -813,7 +1083,19 @@ impl Drop for TransferMaintenance {
 /// 幂等, 重复调用会停掉旧 worker 再起新的。
 pub fn initialize_file_transfer_maintenance(
     config: &crate::config::FileTransferConfig,
+    identity: TransferIndexIdentity,
 ) -> std::io::Result<()> {
+    // 实例身份必须先落定: `restore_index()` 靠它决定读哪一份索引文件。
+    if let Ok(mut guard) = INDEX_IDENTITY.lock() {
+        *guard = Some(identity);
+    }
+    // 先按索引把上次进程留下的半成品接回会话表, 再起 worker —— 否则第一轮 sweep 看到的是空表,
+    // 盘上的遗留半成品要等到"有人恰好再来"才会被认领 (而它可能永远不会来)。
+    let restored = restore_index();
+    if restored > 0 {
+        log::info!("文件传输: 从索引恢复了 {restored} 条半成品会话");
+    }
+
     let maintenance = TransferMaintenance::start(
         Duration::from_millis(config.sweep_interval_ms),
         config.idle_timeout_ms,
@@ -1377,6 +1659,295 @@ mod tests {
     }
 
     #[test]
+
+    #[test]
+    fn restored_index_resumes_from_the_partial_length() {
+        // 验收 2: 重启后 resume:true 的 offset 必须来自盘上的长度, 不是 0。
+        let _guard = TRANSFER_TABLE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let dir = std::env::temp_dir().join(format!("rdog-ft-idx-resume-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        set_index_path_for_tests(dir.join("partials.json"));
+        let target = dir.join("resume-after-restart.bin");
+        let tid = unique_id("idxresume");
+        let data = BASE64_STANDARD.encode(b"xxxxx");
+
+        execute_put_file(&format!(
+            r#"{{"transfer_id":"{tid}","path":"{}","size":10}}"#,
+            escape_json(&target.display().to_string())
+        ))
+        .unwrap();
+        execute_file_chunk(&format!(
+            r#"{{"transfer_id":"{tid}","offset":0,"data":"{data}"}}"#
+        ))
+        .unwrap();
+
+        // 重启
+        forget_sessions_for_tests(&[&tid]);
+        assert_eq!(restore_index(), 1, "索引里应有一条可恢复会话");
+
+        // 同一 id + resume:true → 接上, 不是从 0 重来
+        let resumed = execute_put_file(&format!(
+            r#"{{"transfer_id":"{tid}","path":"{}","size":10,"resume":true}}"#,
+            escape_json(&target.display().to_string())
+        ))
+        .unwrap();
+        assert_eq!(resumed["resume_honored"], true);
+        assert_eq!(resumed["written"], 5, "offset 必须来自盘上的文件长度");
+
+        execute_file_cancel(&format!(r#"{{"transfer_id":"{tid}"}}"#)).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn restored_index_lets_the_sweep_reclaim_after_restart() {
+        // 验收 1: 重启后 TTL 仍能回收遗留半成品 (盘上无残留)。
+        let _guard = TRANSFER_TABLE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let dir = std::env::temp_dir().join(format!("rdog-ft-idx-sweep-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        set_index_path_for_tests(dir.join("partials.json"));
+        let target = dir.join("sweep-after-restart.bin");
+        let tid = unique_id("idxsweep");
+        let data = BASE64_STANDARD.encode(b"xxxxx");
+
+        execute_put_file(&format!(
+            r#"{{"transfer_id":"{tid}","path":"{}","size":10}}"#,
+            escape_json(&target.display().to_string())
+        ))
+        .unwrap();
+        execute_file_chunk(&format!(
+            r#"{{"transfer_id":"{tid}","offset":0,"data":"{data}"}}"#
+        ))
+        .unwrap();
+        let partial = staging_path(&target).unwrap();
+        assert!(partial.exists());
+
+        forget_sessions_for_tests(&[&tid]);
+        assert_eq!(restore_index(), 1);
+
+        // 用**小数值假时钟**触发过期, 不能用"真实时钟 + 偏移": 后者会把并行运行的其它用例的
+        // 真实时间戳也判成过期 (saturating_sub 保不住), 从而串台。
+        stamp_last_activity_for_tests(&tid, 1_000);
+        let (reaped, _) = reap_idle_transfers(10_500, 5_000);
+        assert_eq!(reaped, 1, "重启后的遗留半成品必须能被 sweep 认领");
+        assert!(!partial.exists(), "回收后盘上不得留残留");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn corrupt_index_is_ignored_and_leaves_files_untouched() {
+        // 验收 3: 索引损坏 → fail-closed, 不静默当成新传输, 也不销毁盘上的东西。
+        let _guard = TRANSFER_TABLE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let dir = std::env::temp_dir().join(format!("rdog-ft-idx-corrupt-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let index = dir.join("partials.json");
+        set_index_path_for_tests(index.clone());
+        let target = dir.join("corrupt-index.bin");
+        let tid = unique_id("idxcorrupt");
+        let data = BASE64_STANDARD.encode(b"xxxxx");
+
+        execute_put_file(&format!(
+            r#"{{"transfer_id":"{tid}","path":"{}","size":10}}"#,
+            escape_json(&target.display().to_string())
+        ))
+        .unwrap();
+        execute_file_chunk(&format!(
+            r#"{{"transfer_id":"{tid}","offset":0,"data":"{data}"}}"#
+        ))
+        .unwrap();
+        let partial = staging_path(&target).unwrap();
+        forget_sessions_for_tests(&[&tid]);
+
+        std::fs::write(&index, b"{ this is not json").unwrap();
+        assert_eq!(restore_index(), 0, "损坏的索引不得恢复出任何条目");
+        assert!(partial.exists(), "读不懂账本不等于可以扔掉货");
+        let listed = execute_file_list().unwrap();
+        let mine = listed["transfers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry["transfer_id"] == tid.as_str());
+        assert!(!mine, "损坏索引里的条目不得变成一条可查的传输");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+
+    #[test]
+    fn index_path_is_per_daemon_instance() {
+        // M2: 同用户两个 daemon 不能共用一份索引. 同名 namespace 不同 daemon 必须落在不同文件上,
+        // 否则后写的会把前者的条目整张覆写掉。
+        let alpha = default_index_path(&TransferIndexIdentity {
+            namespace: Some("lab".into()),
+            daemon_name: "alpha".into(),
+        });
+        let beta = default_index_path(&TransferIndexIdentity {
+            namespace: Some("lab".into()),
+            daemon_name: "beta".into(),
+        });
+        let other_ns = default_index_path(&TransferIndexIdentity {
+            namespace: Some("prod".into()),
+            daemon_name: "alpha".into(),
+        });
+        assert_ne!(alpha, beta, "同 namespace 的两个 daemon 必须各有索引文件");
+        assert_ne!(alpha, other_ns, "同 daemon 名的两个 namespace 必须各有索引文件");
+        assert_eq!(
+            alpha.file_name().and_then(|n| n.to_str()),
+            Some(INDEX_FILE)
+        );
+        assert_eq!(
+            alpha.parent().and_then(|p| p.file_name()).and_then(|n| n.to_str()),
+            Some("alpha")
+        );
+        assert_eq!(
+            alpha
+                .parent()
+                .and_then(|p| p.parent())
+                .and_then(|p| p.file_name())
+                .and_then(|n| n.to_str()),
+            Some("lab")
+        );
+    }
+
+    #[test]
+    fn index_path_stays_injective_when_sanitizing_collides() {
+        // `lab/1` 与 `lab-1` 折叠后都是 `lab-1`; 单靠折叠会让两个不同的 daemon 共用一份索引,
+        // 也就是把 M2 修掉的那个损坏重新引回来。
+        let slash = default_index_path(&TransferIndexIdentity {
+            namespace: None,
+            daemon_name: "lab/1".into(),
+        });
+        let dash = default_index_path(&TransferIndexIdentity {
+            namespace: None,
+            daemon_name: "lab-1".into(),
+        });
+        assert_ne!(slash, dash, "折叠撞名时必须有原值哈希兜底");
+        assert!(slash
+            .components()
+            .all(|component| !matches!(component, std::path::Component::ParentDir)));
+    }
+
+    #[test]
+    fn index_path_sanitizes_traversal_shaped_identity() {
+        // namespace / daemon_name 来自配置, 可以含 `/` 与 `..`: 直接拼进路径等于允许配置
+        // 把索引写到任意位置。
+        let path = default_index_path(&TransferIndexIdentity {
+            namespace: Some("../../etc".into()),
+            daemon_name: "..".into(),
+        });
+        // 判据是**组件**层面: 归一后不许出现 `..` 这个组件 (名字里含两个点是无害的字面量,
+        // 真正危险的是它能被当成上级目录)。
+        let escapes = path
+            .components()
+            .any(|component| matches!(component, std::path::Component::ParentDir));
+        assert!(
+            !escapes,
+            "归一后不得留下可穿越的父目录组件: {}",
+            path.display()
+        );
+        let daemon_component = path
+            .parent()
+            .and_then(|p| p.file_name())
+            .and_then(|n| n.to_str())
+            .unwrap_or_default();
+        assert!(
+            daemon_component.starts_with("-unnamed"),
+            "只有点的名字要换成固定占位 (折叠动过原文时还要带原值哈希): {daemon_component}"
+        );
+    }
+
+    #[test]
+    fn restored_index_discards_entries_whose_paths_a_request_would_be_refused() {
+        // M1: 索引是用户可写的文件. 恢复路径必须与请求路径同等不可信 —— 否则能写
+        // partials.json 的本地主体就能让 sweep 删 / @file-end rename 任意路径。
+        //
+        // 两支刻意各自只有**一个**可能被拒的理由, 否则用例证明不了谁在承重:
+        //   甲 目标合法但 temp 不是该目标的暂存路径 → 只能由 "temp == staging_path(target)" 拒;
+        //   乙 temp 恰好就是该目标推导出来的暂存路径且文件存在 → 只能由目标校验 (拒 `..`) 拒。
+        let _guard = TRANSFER_TABLE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let dir = std::env::temp_dir().join(format!("rdog-ft-idx-m1-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let index = dir.join("partials.json");
+        set_index_path_for_tests(index.clone());
+
+        // 甲: 受害者是一个完全正常的文件, 不是任何传输的暂存文件
+        let victim = dir.join("victim.bin");
+        std::fs::write(&victim, b"important").unwrap();
+        let legit_target = dir.join("legit-target.bin");
+
+        // 乙: 带 `..` 的目标, 但 temp 正是它推导出来的暂存路径 (文件真实存在)
+        let traversal_target = dir
+            .join("sub")
+            .join("..")
+            .join("escape.bin")
+            .display()
+            .to_string();
+        let traversal_temp = staging_path(Path::new(&traversal_target)).unwrap();
+        std::fs::create_dir_all(traversal_temp.parent().unwrap()).unwrap();
+        std::fs::write(&traversal_temp, b"plausible").unwrap();
+        // 前提钉住: 不看目标合不合法的话, 这条 (temp, target) 组合本身是自洽的
+        assert_eq!(
+            staging_path(Path::new(&traversal_target)).unwrap(),
+            traversal_temp,
+            "乙支的 temp 必须正是该目标的暂存路径, 否则它测的是甲支的判据"
+        );
+
+        let document = json!({
+            "version": 1,
+            "transfers": [
+                {
+                    "transfer_id": "m1-arbitrary-temp",
+                    "target_path": legit_target.to_string_lossy(),
+                    "temp_path": victim.to_string_lossy(),
+                    "size": 9,
+                },
+                {
+                    "transfer_id": "m1-traversal-target",
+                    "target_path": traversal_target,
+                    "temp_path": traversal_temp.to_string_lossy(),
+                    "size": 9,
+                }
+            ]
+        });
+        std::fs::write(&index, document.to_string()).unwrap();
+
+        assert_eq!(
+            restore_index(),
+            0,
+            "temp 与目标不匹配 / 目标含穿越组件时, 一条都不得恢复"
+        );
+        assert!(victim.exists(), "恢复不得让任意文件进入可删/可 rename 的状态");
+        assert_eq!(std::fs::read(&victim).unwrap(), b"important");
+        assert!(
+            traversal_temp.exists(),
+            "目标不合法的条目也不得顺手删掉它指向的文件"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn missing_index_restores_nothing_and_creates_nothing() {
+        // 验收 3 的另一半: 索引路径不存在时不得凭空造一个, 也不得把"没有索引"当成错误去重试。
+        let dir = std::env::temp_dir().join(format!("rdog-ft-idx-missing-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let index = dir.join("does-not-exist.json");
+        set_index_path_for_tests(index.clone());
+
+        assert_eq!(restore_index(), 0);
+        assert!(!index.exists(), "恢复不得凭空创建索引文件");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn target_may_not_live_in_the_reserved_staging_dir() {
         // 暂存文件住在 <目标目录>/.rdog-partial/ 里。目标路径若被允许落进这个目录, 就等于允许
