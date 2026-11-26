@@ -43,120 +43,206 @@ pub enum LineOutcome {
     },
 }
 
+/// 跨调用保留的读行状态。
+///
+/// 一条消息可能被对端拆成多次写, 而中间只要撞上一次读超时(`WouldBlock`),
+/// `read_until` 就会带着已读到的字节返回 `Err`。半分好消息必须留在 `buf` 里交给
+/// 下一次调用—— 入口清空就等于把消息丢了(RAI-415: `@pty-stdin` 帧被吞, 远端收不到 ^C)。
+///
+/// 超限行的丢弃也必须跨调用进行: `discarding` 标记与已丢弃字节数一起留在状态里,
+/// 否则读超时会把「正在丢弃」忘掉, 把坏行的剩余部分当成一条新行收下。
+#[derive(Debug, Default)]
+pub struct LineReadState {
+    buf: Vec<u8>,
+    discarding: bool,
+    discarded_bytes: usize,
+}
+
+impl LineReadState {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn reset(&mut self) {
+        self.buf.clear();
+        self.discarding = false;
+        self.discarded_bytes = 0;
+    }
+
+    fn consumed(&self) -> usize {
+        self.discarded_bytes + self.buf.len()
+    }
+}
+
+/// 完整行的内容长度: 不含行尾 `\n`, 也不含 CRLF 里的 `\r`。
+fn complete_content_len(buf: &[u8]) -> usize {
+    let without_lf = buf.strip_suffix(b"\n").unwrap_or(buf);
+    without_lf.strip_suffix(b"\r").unwrap_or(without_lf).len()
+}
+
+/// 尚未读到行尾时的有效长度: 结尾那个 `\r` 可能正好是 CRLF 的前半截,
+/// 不能算进内容长度 —— 否则「同一串字节一次性到达」与「被读超时切在 `\r` 之后」
+/// 会给出不同判定。
+fn pending_content_len(buf: &[u8]) -> usize {
+    buf.strip_suffix(b"\r").unwrap_or(buf).len()
+}
+
 /// 从 `reader` 读一条以 `\n` 结尾的消息，行**内容**（不含行尾）超过
 /// `limit` 字节时返回 [`LineOutcome::TooLong`]，并把该行剩余部分消费掉。
 ///
-/// `buf` 与 `sink` 由调用方持有并在多次调用间复用，避免每行重新分配。
-/// `sink` 只在超限丢弃阶段使用。
+/// `state` 由调用方持有并在多次调用间复用: 半行、丢弃标记与已丢弃字节数都在里面,
+/// 所以读超时不会丢数据, 也不会让超限行绕过上限。
 pub fn read_line_limited<R: BufRead>(
     reader: &mut R,
-    buf: &mut Vec<u8>,
-    sink: &mut Vec<u8>,
+    state: &mut LineReadState,
     limit: usize,
 ) -> io::Result<LineOutcome> {
-    // 不清 buf: 上一次调用可能因读超时/中断返回错误, 而半个行已经攒在里面。
-    // 清掉它就是把对端「先发正文、后发换行」的分片消息丢掉 —— 25ms 读超时的
-    // PTY 桥接最容易踩到 (RAI-415: @pty-stdin 帧被吞, 远端收不到 ^C)。
-    let mut total = buf.len();
-    // 跨调用保留的半行也可能已经超限: 每次进入都先判一次, 超了就立刻转入丢弃模式,
-    // 否则「分片到达 + 读超时」的对端能让这条半行绕过上限一直涨。
-    // 丢弃状态靠「buf 里留 limit+1 字节」跨调用传递 —— 不能清空, 清了下一轮就会
-    // 把状态忘掉, 把剩余数据当成一条新行收下。
-    let mut over_limit = buf.len() > limit;
+    let mut scratch: Vec<u8> = Vec::new();
 
     loop {
-        // read_until 读到行尾或 EOF 为止 —— 这是"消费到换行"的唯一动作。
-        // sink 是丢弃目标, 每轮清空即可; buf 是累积目标, **绝不能每轮清**
-        // —— 否则对端在没有换行的情况下关闭时, 末行内容会被清掉。
-        if over_limit {
-            sink.clear();
+        if state.discarding {
+            scratch.clear();
+            match reader.read_until(b'\n', &mut scratch) {
+                Ok(0) => {
+                    let consumed = state.consumed();
+                    state.reset();
+                    return Ok(LineOutcome::TooLong {
+                        consumed_bytes: consumed,
+                    });
+                }
+                Ok(n) => {
+                    state.discarded_bytes += n;
+                    if scratch.last() == Some(&b'\n') {
+                        let consumed = state.consumed();
+                        state.reset();
+                        return Ok(LineOutcome::TooLong {
+                            consumed_bytes: consumed,
+                        });
+                    }
+                    continue;
+                }
+                // read_until 会带着已消费的字节返回错误, 这段也要计入丢弃量,
+                // 否则跨读超时丢弃的字节数会从 consumed_bytes 里凭空消失。
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => {
+                    state.discarded_bytes += scratch.len();
+                    continue;
+                }
+                // 丢弃状态留在 state 里, 下一次调用接着丢
+                Err(e) => {
+                    state.discarded_bytes += scratch.len();
+                    return Err(e);
+                }
+            }
         }
-        let target: &mut Vec<u8> = if over_limit { sink } else { buf };
 
-        let n = match reader.read_until(b'\n', target) {
-            Ok(n) => n,
+        match reader.read_until(b'\n', &mut state.buf) {
+            Ok(0) => {
+                if state.buf.is_empty() {
+                    state.reset();
+                    return Ok(LineOutcome::Eof);
+                }
+                // 对端关闭且末行没有换行: 仍然按内容长度判超限
+                let consumed = state.consumed();
+                let outcome = if complete_content_len(&state.buf) > limit
+                    || pending_content_len(&state.buf) > limit
+                {
+                    LineOutcome::TooLong {
+                        consumed_bytes: consumed,
+                    }
+                } else {
+                    decode_line(&state.buf, consumed)
+                };
+                state.reset();
+                return Ok(outcome);
+            }
+            Ok(_) => {}
             Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
-            Err(e) => return Err(e),
-        };
-
-        if n == 0 {
-            // 对端关闭且本行未收到任何字节
-            if total == 0 {
-                buf.clear();
-                return Ok(LineOutcome::Eof);
+            Err(e) => {
+                if pending_content_len(&state.buf) > limit {
+                    state.discarded_bytes += state.buf.len();
+                    state.buf.clear();
+                    state.discarding = true;
+                }
+                return Err(e);
             }
-            break;
-        }
-        total += n;
-
-        if over_limit {
-            // 丢弃阶段：只等行尾，不累积
-            if target.last() == Some(&b'\n') {
-                break;
-            }
-            continue;
         }
 
-        if buf.last() == Some(&b'\n') {
-            // 行已完整：按"内容长度"判超限（不把行尾算进去）
-            let content_len = buf.len() - 1;
-            let content_len = if buf.ends_with(b"\r\n") {
-                content_len - 1
+        if state.buf.last() == Some(&b'\n') {
+            let consumed = state.consumed();
+            let outcome = if complete_content_len(&state.buf) > limit {
+                LineOutcome::TooLong {
+                    consumed_bytes: consumed,
+                }
             } else {
-                content_len
+                decode_line(&state.buf, consumed)
             };
-            if content_len > limit {
-                over_limit = true;
-                buf.clear();
-                // 本次已消费到行尾，直接收手
-                break;
-            }
-            break;
+            state.reset();
+            return Ok(outcome);
         }
 
-        // 行尚未读完：累积已超限就切换到丢弃模式 (buf 截到 limit+1 当状态标记)
-        if buf.len() > limit {
-            over_limit = true;
-            buf.truncate(limit + 1);
+        if pending_content_len(&state.buf) > limit {
+            state.discarded_bytes += state.buf.len();
+            state.buf.clear();
+            state.discarding = true;
         }
     }
+}
 
-    if over_limit {
-        buf.clear();
-        return Ok(LineOutcome::TooLong {
-            consumed_bytes: total,
-        });
-    }
-
-    // 去掉行尾 \r / \n（兼容 CRLF）
-    let line = buf.strip_suffix(b"\n").unwrap_or(&buf[..]);
+/// 去掉行尾 `\r` / `\n`（兼容 CRLF）后解码; 无效 UTF-8 当作坏行。
+fn decode_line(buf: &[u8], consumed: usize) -> LineOutcome {
+    let line = buf.strip_suffix(b"\n").unwrap_or(buf);
     let line = line.strip_suffix(b"\r").unwrap_or(line);
-    let outcome = match String::from_utf8(line.to_vec()) {
+    match String::from_utf8(line.to_vec()) {
         Ok(text) => LineOutcome::Line(text),
         // 无效 UTF-8：当作坏行处理（流已对齐到行尾, 不影响后续消息）
         Err(_) => LineOutcome::TooLong {
-            consumed_bytes: total,
+            consumed_bytes: consumed,
         },
-    };
-    // 行已消费完, 这里才清 —— 交给下一次调用一个干净的起点。
-    buf.clear();
-    Ok(outcome)
+    }
 }
 
 #[cfg(test)]
+#[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::VecDeque;
     use std::io::Cursor;
 
     fn read_all(input: &[u8], limit: usize) -> Vec<LineOutcome> {
         let mut reader = Cursor::new(input.to_vec());
-        let mut buf = Vec::new();
-        let mut sink = Vec::new();
+        let mut state = LineReadState::new();
         let mut out = Vec::new();
         loop {
-            match read_line_limited(&mut reader, &mut buf, &mut sink, limit).unwrap() {
+            match read_line_limited(&mut reader, &mut state, limit).unwrap() {
                 LineOutcome::Eof => return out,
                 other => out.push(other),
+            }
+        }
+    }
+
+    /// 按脚本吐出数据块 / 读超时的假 reader: 复现「正文与换行分两次到达,
+    /// 中间被读超时打断」的分片消息 (RAI-415)。
+    struct ChunkedReader {
+        steps: VecDeque<Result<Vec<u8>, io::ErrorKind>>,
+    }
+
+    impl ChunkedReader {
+        fn new(steps: Vec<Result<Vec<u8>, io::ErrorKind>>) -> Self {
+            Self {
+                steps: VecDeque::from(steps),
+            }
+        }
+    }
+
+    impl std::io::Read for ChunkedReader {
+        fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
+            match self.steps.pop_front() {
+                Some(Ok(chunk)) => {
+                    out[..chunk.len()].copy_from_slice(&chunk);
+                    Ok(chunk.len())
+                }
+                Some(Err(kind)) => Err(io::Error::new(kind, "scripted read error")),
+                None => Ok(0),
             }
         }
     }
@@ -179,93 +265,78 @@ mod tests {
         assert_eq!(got, vec![LineOutcome::Line("@ping".into())]);
     }
 
-    /// 按脚本吐出数据块 / 读超时的假 reader: 复现「正文与换行分两次到达,
-    /// 中间被读超时打断」的分片消息 (RAI-415)。
-    struct ChunkedReader {
-        steps: std::collections::VecDeque<Result<Vec<u8>, io::ErrorKind>>,
-    }
-
-    impl std::io::Read for ChunkedReader {
-        fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
-            match self.steps.pop_front() {
-                Some(Ok(chunk)) => {
-                    out[..chunk.len()].copy_from_slice(&chunk);
-                    Ok(chunk.len())
-                }
-                Some(Err(kind)) => Err(io::Error::new(kind, "scripted read error")),
-                None => Ok(0),
-            }
-        }
-    }
-
     #[test]
     fn partial_line_survives_read_timeout_between_chunks() {
-        let mut reader = std::io::BufReader::new(ChunkedReader {
-            steps: std::collections::VecDeque::from(vec![
-                Ok(b"@pty-stdin {\"session_id\":\"a\"".to_vec()),
-                Err(io::ErrorKind::WouldBlock),
-                Ok(b",\"data\":\"Aw==\"}\n".to_vec()),
-            ]),
-        });
-        let mut buf = Vec::new();
-        let mut sink = Vec::new();
+        let mut reader = std::io::BufReader::new(ChunkedReader::new(vec![
+            Ok(b"@pty-stdin {\"session_id\":\"a\"".to_vec()),
+            Err(io::ErrorKind::WouldBlock),
+            Ok(b",\"data\":\"Aw==\"}\n".to_vec()),
+        ]));
+        let mut state = LineReadState::new();
 
-        let err = read_line_limited(&mut reader, &mut buf, &mut sink, MAX_CONTROL_MESSAGE_BYTES)
+        let err = read_line_limited(&mut reader, &mut state, MAX_CONTROL_MESSAGE_BYTES)
             .expect_err("首块没有换行, 应把读超时原样上抛");
         assert_eq!(err.kind(), io::ErrorKind::WouldBlock);
-        assert_eq!(
-            String::from_utf8_lossy(&buf),
-            "@pty-stdin {\"session_id\":\"a\"",
-            "已收到的半行必须留在 buf 里"
-        );
 
-        let outcome =
-            read_line_limited(&mut reader, &mut buf, &mut sink, MAX_CONTROL_MESSAGE_BYTES)
-                .expect("超时后的续读应成功");
         assert_eq!(
-            outcome,
+            read_line_limited(&mut reader, &mut state, MAX_CONTROL_MESSAGE_BYTES)
+                .expect("超时后的续读应成功"),
             LineOutcome::Line("@pty-stdin {\"session_id\":\"a\",\"data\":\"Aw==\"}".to_owned()),
             "续读必须拼上后半截, 而不是只剩后半截"
         );
-        assert!(buf.is_empty(), "整行交出后 buf 应被清空");
+    }
+
+    #[test]
+    fn crlf_split_after_cr_is_not_rejected_at_the_limit() {
+        // limit=10 时 "xxxxxxxxxx\r" 的内容长度正好是 10; 读超时把它切成两半,
+        // 不能因为原始长度 11 就判成超限 (同一串字节一次到达是合法的 Line)。
+        let mut reader = std::io::BufReader::new(ChunkedReader::new(vec![
+            Ok(b"xxxxxxxxxx\r".to_vec()),
+            Err(io::ErrorKind::WouldBlock),
+            Ok(b"\n".to_vec()),
+        ]));
+        let mut state = LineReadState::new();
+        let err = read_line_limited(&mut reader, &mut state, 10)
+            .expect_err("首块没有换行, 应把读超时原样上抛");
+        assert_eq!(err.kind(), io::ErrorKind::WouldBlock);
+
+        assert_eq!(
+            read_line_limited(&mut reader, &mut state, 10).expect("续读应成功"),
+            LineOutcome::Line("xxxxxxxxxx".to_owned()),
+            "切在 CRLF 的 \\r 之后不能改变判定"
+        );
     }
 
     #[test]
     fn retained_partial_line_cannot_grow_past_the_limit_across_timeouts() {
-        // 每块都不带换行, 且中间都被读超时打断: 半行跨调用保留后必须仍然受 limit 约束。
+        // 每块都不带换行, 且中间都被读超时打断: 半行跨调用保留后必须仍然受 limit 约束,
+        // 丢掉的字节数还要如实报出来 (consumed_bytes 是给用户/日志看的真实规模)。
         let limit = 1_024;
-        let mut steps = std::collections::VecDeque::new();
+        let mut steps = Vec::new();
         for _ in 0..8 {
-            steps.push_back(Ok(vec![b'a'; 512]));
-            steps.push_back(Err(io::ErrorKind::WouldBlock));
+            steps.push(Ok(vec![b'a'; 512]));
+            steps.push(Err(io::ErrorKind::WouldBlock));
         }
-        steps.push_back(Ok(b"\n".to_vec()));
-        let mut reader = std::io::BufReader::new(ChunkedReader { steps });
-        let mut buf = Vec::new();
-        let mut sink = Vec::new();
+        steps.push(Ok(b"\n".to_vec()));
+        let mut reader = std::io::BufReader::new(ChunkedReader::new(steps));
+        let mut state = LineReadState::new();
 
-        let mut outcome = None;
+        let mut consumed = None;
         for _ in 0..24 {
-            match read_line_limited(&mut reader, &mut buf, &mut sink, limit) {
+            match read_line_limited(&mut reader, &mut state, limit) {
                 Ok(LineOutcome::TooLong { consumed_bytes }) => {
-                    outcome = Some(consumed_bytes);
+                    consumed = Some(consumed_bytes);
                     break;
                 }
                 Ok(other) => panic!("超限半行不应正常交出: {other:?}"),
-                Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
-                    assert!(
-                        buf.len() <= limit + 512,
-                        "保留的半行必须在 limit 附近被封顶, 实际 {} 字节",
-                        buf.len()
-                    );
-                }
+                Err(err) if err.kind() == io::ErrorKind::WouldBlock => continue,
                 Err(err) => panic!("非预期错误: {err}"),
             }
         }
-        let consumed = outcome.expect("累计超过 limit 的半行必须被判成 TooLong");
-        assert!(
-            consumed > limit,
-            "consumed_bytes 要覆盖整条坏行, 实际 {consumed}"
+        assert_eq!(
+            consumed.expect("累计超过 limit 的半行必须被判成 TooLong"),
+            8 * 512 + 1,
+            "consumed_bytes 必须覆盖整条坏行(含跨读超时丢弃的部分)"
         );
     }
 
@@ -275,23 +346,51 @@ mod tests {
     }
 
     #[test]
-    fn oversized_line_is_reported_and_stream_stays_aligned() {
-        // 首行超限, 后面跟一条正常行 —— 关键断言: 坏行被消费干净
-        let input = b"aaaaaaaaaaaaaaaaaaaaaaaaaaaa\n@ping\n".to_vec();
-        let got = read_all(&input, 10);
+    fn empty_lines_are_returned_as_empty_strings() {
+        let got = read_all(b"\n\n", MAX_CONTROL_MESSAGE_BYTES);
         assert_eq!(
             got,
             vec![
-                LineOutcome::TooLong { consumed_bytes: 29 },
-                LineOutcome::Line("@ping".into()),
+                LineOutcome::Line(String::new()),
+                LineOutcome::Line(String::new()),
             ]
         );
     }
 
     #[test]
-    fn oversized_line_spanning_many_chunks_is_reported() {
-        // 远大于 limit, 迫使 read_until 多次循环
-        let mut input = vec![b'x'; 100_000];
+    fn final_line_without_newline_is_returned() {
+        let got = read_all(b"@ping\n@exit", MAX_CONTROL_MESSAGE_BYTES);
+        assert_eq!(
+            got,
+            vec![
+                LineOutcome::Line("@ping".into()),
+                LineOutcome::Line("@exit".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn line_at_exact_limit_is_accepted() {
+        let content = "a".repeat(1024);
+        let got = read_all(format!("{content}\n").as_bytes(), 1024);
+        assert_eq!(got, vec![LineOutcome::Line(content)]);
+    }
+
+    #[test]
+    fn line_one_over_limit_is_rejected() {
+        let content = "a".repeat(1025);
+        let got = read_all(format!("{content}\n").as_bytes(), 1024);
+        assert_eq!(
+            got,
+            vec![LineOutcome::TooLong {
+                consumed_bytes: 1026
+            }]
+        );
+    }
+
+    #[test]
+    fn oversized_line_is_reported_and_stream_stays_aligned() {
+        let mut input = "a".repeat(100_000).into_bytes();
         input.push(b'\n');
         input.extend_from_slice(b"@ping\n");
         let got = read_all(&input, 1_024);
@@ -305,57 +404,36 @@ mod tests {
     }
 
     #[test]
-    fn line_at_exact_limit_is_accepted() {
-        // 恰好等于上限不算超限 (边界: > limit 才算)
-        let line = "x".repeat(10);
-        let mut input = line.clone().into_bytes();
-        input.push(b'\n');
-        let got = read_all(&input, 10);
-        assert_eq!(got, vec![LineOutcome::Line(line)]);
-    }
-
-    #[test]
-    fn line_one_over_limit_is_rejected() {
-        let line = "x".repeat(11);
-        let mut input = line.into_bytes();
-        input.push(b'\n');
-        let got = read_all(&input, 10);
-        assert_eq!(got, vec![LineOutcome::TooLong { consumed_bytes: 12 }]);
+    fn oversized_line_spanning_many_chunks_is_reported() {
+        let mut steps = Vec::new();
+        for _ in 0..40 {
+            steps.push(Ok(vec![b'z'; 512]));
+        }
+        steps.push(Ok(b"\n".to_vec()));
+        let mut reader = std::io::BufReader::new(ChunkedReader::new(steps));
+        let mut state = LineReadState::new();
+        let outcome = read_line_limited(&mut reader, &mut state, 1_024).expect("应读到行尾");
+        assert_eq!(
+            outcome,
+            LineOutcome::TooLong {
+                consumed_bytes: 40 * 512 + 1
+            }
+        );
     }
 
     #[test]
     fn multibyte_utf8_line_is_preserved() {
-        let got = read_all("点击 @click:{x:1}\n".as_bytes(), MAX_CONTROL_MESSAGE_BYTES);
-        assert_eq!(got, vec![LineOutcome::Line("点击 @click:{x:1}".into())]);
+        let got = read_all("@cmd:中文\r\n".as_bytes(), MAX_CONTROL_MESSAGE_BYTES);
+        assert_eq!(got, vec![LineOutcome::Line("@cmd:中文".into())]);
     }
 
     #[test]
     fn invalid_utf8_is_reported_as_bad_line_without_desync() {
-        // 无效 UTF-8 字节后跟正常行 —— 流必须仍然对齐
-        let mut input = vec![0xff, 0xfe, b'\n'];
+        let mut input = vec![0xff, 0xfe, 0xfd];
+        input.push(b'\n');
         input.extend_from_slice(b"@ping\n");
         let got = read_all(&input, MAX_CONTROL_MESSAGE_BYTES);
         assert!(matches!(got[0], LineOutcome::TooLong { .. }));
         assert_eq!(got[1], LineOutcome::Line("@ping".into()));
-    }
-
-    #[test]
-    fn final_line_without_newline_is_returned() {
-        let got = read_all(b"@ping", MAX_CONTROL_MESSAGE_BYTES);
-        assert_eq!(got, vec![LineOutcome::Line("@ping".into())]);
-    }
-
-    #[test]
-    fn empty_lines_are_returned_as_empty_strings() {
-        // 调用方负责跳过空行, 这里只保证不吞行
-        let got = read_all(b"@a\n\n@b\n", MAX_CONTROL_MESSAGE_BYTES);
-        assert_eq!(
-            got,
-            vec![
-                LineOutcome::Line("@a".into()),
-                LineOutcome::Line("".into()),
-                LineOutcome::Line("@b".into()),
-            ]
-        );
     }
 }

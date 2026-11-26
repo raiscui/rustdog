@@ -249,10 +249,8 @@ pub fn accept_websocket_stream(mut stream: TcpStream) -> io::Result<ControlTrans
 pub(crate) struct TcpLineTransport {
     reader: BufReader<TcpStream>,
     writer: TcpStream,
-    /// 读行缓冲 (跨调用复用, 避免每行重新分配)
-    read_buf: Vec<u8>,
-    /// 超限行的丢弃缓冲 (只在超限阶段使用)
-    discard_buf: Vec<u8>,
+    /// 读行状态 (半行累积 + 丢弃标记, 跨调用复用; 避免每行重新分配)
+    line_state: crate::control_line_read::LineReadState,
 }
 
 pub(crate) struct TcpLineWriter {
@@ -264,8 +262,7 @@ impl TcpLineTransport {
         Ok(Self {
             reader: BufReader::new(stream.try_clone()?),
             writer: stream,
-            read_buf: Vec::new(),
-            discard_buf: Vec::new(),
+            line_state: crate::control_line_read::LineReadState::new(),
         })
     }
 
@@ -273,8 +270,7 @@ impl TcpLineTransport {
         loop {
             match read_line_limited(
                 &mut self.reader,
-                &mut self.read_buf,
-                &mut self.discard_buf,
+                &mut self.line_state,
                 MAX_CONTROL_MESSAGE_BYTES,
             )? {
                 // 超限行: 已被消费丢弃, 流仍对齐 —— 记日志后继续服务,

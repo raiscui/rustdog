@@ -285,15 +285,14 @@ fn line_reader_decorator(
 ) -> Result<()> {
     let stdin = stdin();
     let mut reader = io::BufReader::new(stdin.lock());
-    let mut buf = Vec::new();
-    let mut sink = Vec::new();
+    let mut line_state = crate::control_line_read::LineReadState::new();
 
     loop {
         if should_stop() {
             return Ok(());
         }
 
-        match read_line_limited(&mut reader, &mut buf, &mut sink, MAX_CONTROL_MESSAGE_BYTES)?
+        match read_line_limited(&mut reader, &mut line_state, MAX_CONTROL_MESSAGE_BYTES)?
         {
             // 管道喂进来的超长行: 丢弃后继续, 不让无界读拖垮 shell 模式
             LineOutcome::TooLong { consumed_bytes } => {
