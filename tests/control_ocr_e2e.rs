@@ -37,7 +37,7 @@ use std::{
 mod support;
 
 use support::{
-    next_free_port, rdog_binary_path, temp_workdir, wait_until_port_is_busy, ControlSession,
+    allocate_tcp_port, rdog_binary_path, temp_workdir, wait_until_port_is_busy, ControlSession,
 };
 
 const LIVE_OCR_E2E_ENV: &str = "RDOG_OCR_LIVE_E2E";
@@ -500,7 +500,7 @@ fn live_ocr_three_piece_calculator_flow() {
 
     let binary = rdog_binary_path();
     let workdir = temp_workdir("ocr-live");
-    let port = next_free_port();
+    let port = allocate_tcp_port();
     let _terminal_daemon = if terminal_host_enabled() {
         let daemon = start_terminal_ocr_daemon(&binary, &workdir, port, &oar_home);
         assert!(

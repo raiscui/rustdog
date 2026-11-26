@@ -4,7 +4,7 @@ use serde_json::Value;
 use std::{
     fs,
     io::{BufRead, BufReader, Read},
-    net::{TcpListener, TcpStream},
+    net::TcpStream,
     path::{Path, PathBuf},
     process::{Child, Command, Output, Stdio},
     sync::mpsc,
@@ -154,13 +154,13 @@ mod rdog_binary;
 fn rdog_binary_path() -> PathBuf {
     rdog_binary::rdog_binary_path_with_override(&["RDOG_DISPLAY_AWARE_E2E_BINARY"])
 }
-fn next_free_port() -> u16 {
-    let listener = TcpListener::bind(("127.0.0.1", 0)).expect("应该能分配临时 TCP 端口");
-    listener.local_addr().expect("listener 应该有地址").port()
-}
+#[path = "support/test_ports.rs"]
+mod test_ports;
+
+use test_ports::allocate_tcp_port;
 
 fn start_daemon(binary: &Path) -> (DaemonGuard, u16) {
-    let port = next_free_port();
+    let port = allocate_tcp_port();
     let workdir = std::env::temp_dir().join(format!(
         "rdog-display-aware-daemon-{}-{port}",
         std::process::id()

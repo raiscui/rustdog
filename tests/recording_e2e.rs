@@ -12,7 +12,7 @@
 use std::{
     fs,
     io::{Read, Write},
-    net::{TcpListener, TcpStream},
+    net::TcpStream,
     path::PathBuf,
     process::{Child, Command, Stdio},
     thread,
@@ -35,15 +35,10 @@ impl Drop for RecordingDaemon {
     }
 }
 
-fn next_free_port() -> u16 {
-    let listener = TcpListener::bind(("127.0.0.1", 0)).expect("ephemeral listener should bind");
-    let port = listener
-        .local_addr()
-        .expect("listener should expose local addr")
-        .port();
-    drop(listener);
-    port
-}
+#[path = "support/test_ports.rs"]
+mod test_ports;
+
+use test_ports::allocate_tcp_port;
 
 /// 按优先级列出 `rdog` 可能所在的位置。
 ///
@@ -172,7 +167,7 @@ fn spawn_recording_daemon() -> (RecordingDaemon, u16, PathBuf) {
         .expect("recording E2E lock should open");
     test_lock.lock().expect("recording E2E lock should acquire");
 
-    let port = next_free_port();
+    let port = allocate_tcp_port();
     let recording_root = std::env::temp_dir().join(format!(
         "rdog-recording-e2e-{}-{}",
         std::process::id(),
@@ -220,7 +215,7 @@ fn wait_until_daemon_answers(port: u16, timeout: Duration) -> bool {
 
 #[test]
 fn recording_daemon_spawn_failure_should_remove_temporary_root() {
-    let port = next_free_port();
+    let port = allocate_tcp_port();
     let recording_root = std::env::temp_dir().join(format!(
         "rdog-recording-e2e-spawn-failure-{}-{port}",
         std::process::id()

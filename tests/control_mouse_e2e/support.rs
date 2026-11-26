@@ -1,7 +1,6 @@
 use std::{
     fs,
     io::{BufRead, BufReader, Read, Write},
-    net::TcpListener,
     path::{Path, PathBuf},
     process::{Child, ChildStdin, Command, Stdio},
     sync::mpsc::{self, Receiver},
@@ -132,21 +131,16 @@ pub fn start_daemon(binary: &Path, workdir: &Path, port: u16) -> DaemonGuard {
     }
 }
 
-pub fn next_free_port() -> u16 {
-    let listener = TcpListener::bind(("127.0.0.1", 0)).expect("ephemeral listener should bind");
-    let port = listener
-        .local_addr()
-        .expect("listener should expose local addr")
-        .port();
-    drop(listener);
-    port
-}
+#[path = "../support/test_ports.rs"]
+mod test_ports;
+
+pub use test_ports::allocate_tcp_port;
 
 pub fn temp_workdir(name: &str) -> PathBuf {
     let path = std::env::temp_dir().join(format!(
         "rdog-control-mouse-e2e-{name}-{}-{}",
         std::process::id(),
-        next_free_port()
+        allocate_tcp_port()
     ));
     fs::create_dir_all(&path).expect("temp workdir should create");
     path
