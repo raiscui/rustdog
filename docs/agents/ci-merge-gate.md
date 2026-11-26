@@ -115,10 +115,25 @@ target 的 `passed` 必须 > 0**, 否则判红 —— 「退出码 0 但零执�
 (summary 表格与失败详情里有中文), 归因看起来却是「target 红」。2026-11-26 为这件事连修两轮。
 现在 `main()` 开头把 `stdout` / `stderr` 一起 `reconfigure(encoding="utf-8", errors="replace")`。
 
-**单个 target 有 1500s 墙钟上限** (`TARGET_TIMEOUT_SECONDS`), 超时判该 target 红并把它
-已有的输出留进失败详情, summary 里同时给出每个 target 的 `elapsed`。原因是反过来的:
-挂住的 target 会一路撑到 GitHub 的 job timeout 被 cancel, 日志只剩一句
-`The job has been cancelled` —— 既指不出是哪个 target, 也分不清「慢」与「死等」。
+**墙钟上限分三层, 缺一层就漏一类对象** (RAI-510):
+
+| 层 | 值 | 缺了会怎样 |
+| --- | --- | --- |
+| 单 target | `TARGET_TIMEOUT_SECONDS` = 1500s | 挂住的 target 撑到 job timeout 被 cancel, 日志只剩 `The job has been cancelled` |
+| 整步预算 | `JOB_BUDGET_SECONDS` = 3300s (env `RDOG_JOB_BUDGET_SECONDS` 可覆盖) | 两次 1500s 挂起就把 60 分钟的 job 撑爆, 「点不出是哪个」原样复现 |
+| 编译期 (`--no-run`, compile-only) | 同上两个 | `--no-run` 也会挂 (链接/依赖解析), 没有上限同样无名 |
+
+预算耗尽**不是跳过而是失败**: 未执行的 target 会被点名并判红 (`job 预算耗尽: …` 未执行),
+因为「没跑」不能报成「通过」。
+
+**超时按进程组整组终止, 不是只 kill 直接子进程。** `cargo test` 会把测试二进制和 daemon 派生
+出去; 只 kill 直接子进程时它们变成孤儿留在 runner 上, 污染同一个 job 里后续 target (实测: 一个
+挂死的 target 让后面 target 的全局状态断言连带变红, 看起来像另一个用例的问题)。POSIX 用
+`start_new_session` + `killpg`, windows 用 `taskkill /F /T /PID` (按 PID 带 `/T`, 绝不按映像名)。
+回读判据是**超时后 runner 上不残留该 target 派生的进程**, 不是「代码里加了 kill」。
+
+附带产物: 失败详情里会写明终止方式 (`已整组终止 (killpg <pgid>)` / `(taskkill /T /PID <pid>)`),
+summary 同时给出每个 target 的 `elapsed`。
 
 **ubuntu 侧 1 个 target 显式豁免** (`PLATFORM_EXEMPTIONS`): `zenoh_router_client`。连续三轮
 ubuntu 各挂一个**不同**的用例 (`control_lanes` 的 key 注入 / TLS 换 CA / mTLS client cert),

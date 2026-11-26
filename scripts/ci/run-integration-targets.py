@@ -21,6 +21,7 @@ from __future__ import annotations
 import argparse
 import os
 import re
+import signal
 import subprocess
 import time
 import sys
@@ -184,29 +185,74 @@ def failure_detail(target: str, log: str) -> str:
 # 是哪个 target 挂住, 也无法区分"慢"与"死等"。
 TARGET_TIMEOUT_SECONDS = 1500
 
+# 一次运行 (整个 job 步骤) 的总预算。**上限必须是 job 级而不是每 target 常数**: 两次各 1500s 的
+# 挂起就把 60 分钟的 job 撑爆, GitHub 一 cancel, 日志只剩 "The job has been cancelled" ——
+# 「点不出是哪个 target」原样复现。留出余量给收尾与 summary。
+JOB_BUDGET_SECONDS = int(os.environ.get("RDOG_JOB_BUDGET_SECONDS", "3300"))
+
+# 剩余预算低于这个数就不再起新 target: 起了也只会被截断, 不如直接报「预算不足」并点名。
+BUDGET_FLOOR_SECONDS = 120
+
+
+def _spawn(argv: list[str]) -> subprocess.Popen:
+    """起一个**可整组回收**的子进程。
+
+    `cargo test` 自己会把测试二进制、daemon 当子进程派生出去。只 kill 直接子进程时它们会变成
+    孤儿留在 runner 上, 污染同一个 job 里后续的 target (2026-11-26 实测: 一个挂死的 target 让
+    后面 target 的全局状态断言连带变红, 看起来像另一个用例的问题)。所以子进程进独立进程组。
+    """
+    kwargs: dict = {
+        "stdout": subprocess.PIPE,
+        "stderr": subprocess.PIPE,
+        "text": True,
+        "encoding": "utf-8",
+        "errors": "replace",
+    }
+    if os.name == "nt":
+        kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+    else:
+        kwargs["start_new_session"] = True
+    return subprocess.Popen(argv, **kwargs)
+
+
+def _kill_tree(proc: subprocess.Popen) -> str:
+    """按 PID 整组终止 (windows 用 taskkill /T, 绝不按映像名)。返回做了什么, 供日志留痕。"""
+    if proc.poll() is not None:
+        return "already exited"
+    if os.name == "nt":
+        subprocess.run(
+            ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+            capture_output=True,
+            check=False,
+        )
+        return f"taskkill /T /PID {proc.pid}"
+    try:
+        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        return f"killpg {os.getpgid(proc.pid)}"
+    except ProcessLookupError:
+        return "process group already gone"
+
 
 def run(argv: list[str], timeout: int | None = None) -> tuple[int, str]:
     # encoding 固定 utf-8: 默认按平台 locale 解码 (windows runner 是 cp1252), 而 cargo test
     # 的输出里有 UTF-8 中文断言文案 —— 会在这里抛 UnicodeDecodeError 让整步崩掉, 归因看起来
     # 像"target 红"但其实是解码失败。errors=replace 保证任何残余字节都不会中断。
+    proc = _spawn(argv)
     try:
-        completed = subprocess.run(
-            argv,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=timeout,
+        stdout, stderr = proc.communicate(timeout=timeout)
+        return proc.returncode, ANSI.sub("", (stdout or "") + (stderr or ""))
+    except subprocess.TimeoutExpired:
+        # 先整组杀, 再把管道里已有的输出读干净 (杀完管道会 EOF, communicate 立刻返回)。
+        killed = _kill_tree(proc)
+        try:
+            stdout, stderr = proc.communicate(timeout=30)
+        except subprocess.TimeoutExpired:
+            stdout, stderr = "", ""
+        partial = ANSI.sub("", (stdout or "") + (stderr or ""))
+        return (
+            124,
+            partial + f"\n[timeout] 超过 {timeout}s 未结束, 已整组终止 ({killed})\n",
         )
-    except subprocess.TimeoutExpired as expired:
-        # text=True 下 expired.stdout/stderr 仍可能是 bytes, 逐段判定再拼。
-        partial = "".join(
-            chunk if isinstance(chunk, str) else (chunk or b"").decode("utf-8", "replace")
-            for chunk in (expired.stdout, expired.stderr)
-            if chunk
-        )
-        return 124, ANSI.sub("", partial) + f"\n[timeout] 超过 {timeout}s 未结束, 已终止\n"
-    return completed.returncode, ANSI.sub("", completed.stdout + completed.stderr)
 
 
 def main() -> int:
@@ -230,10 +276,25 @@ def main() -> int:
     executed_rows: list[str] = []
     compile_rows: list[str] = []
     failures: list[str] = []
+    budget_skipped: list[str] = []
+
+    # 预算从这一步开始时算起, 不是从 job 开始 (前面的 build 步骤耗时与本步无关)。
+    deadline = time.monotonic() + JOB_BUDGET_SECONDS
+
+    def budget_timeout() -> int:
+        """本次可用的墙钟: 取「单 target 上限」与「剩余预算」的小者。"""
+        remaining = deadline - time.monotonic()
+        return max(1, int(min(TARGET_TIMEOUT_SECONDS, remaining)))
+
+    def out_of_budget() -> bool:
+        return deadline - time.monotonic() <= BUDGET_FLOOR_SECONDS
 
     for target in executed_targets(args.os):
+        if out_of_budget():
+            budget_skipped.append(target)
+            continue
         started = time.monotonic()
-        code, log = run(["cargo", "test", "--test", target], timeout=TARGET_TIMEOUT_SECONDS)
+        code, log = run(["cargo", "test", "--test", target], timeout=budget_timeout())
         passed, failed, ignored = summarize(log)
         elapsed = round(time.monotonic() - started)
         executed_rows.append(
@@ -244,7 +305,14 @@ def main() -> int:
             print(f"--- {target} failure detail ---\n{failure_detail(target, log)}\n", file=sys.stderr)
 
     for target in compile_only_targets(args.os):
-        code, log = run(["cargo", "test", "--no-run", "--test", target])
+        if out_of_budget():
+            budget_skipped.append(target)
+            continue
+        # compile-only 也要上限: `--no-run` 一样会挂 (链接/依赖解析), 没有上限时它撑到 job
+        # timeout, 同样点不出名字。
+        code, log = run(
+            ["cargo", "test", "--no-run", "--test", target], timeout=budget_timeout()
+        )
         compile_rows.append(f"| `{target}` | {code} |")
         if code != 0:
             failures.append(f"{target}: compile failed (exit={code})")
@@ -253,6 +321,19 @@ def main() -> int:
 
     # 一个 target 都没执行 = 绿, 和「一条测试都没跑」长得一模一样 (RAI-397 要消灭的形态)。
     # 今天不可达 (每个平台至少 1 个), 但豁免可以让 executed 集合变空, 所以在这里判红。
+    if budget_skipped:
+        # 预算耗尽不是「跳过」而是失败: 这些 target 没有被验过, 报绿等于把「没跑」当成「通过」。
+        failures.append(
+            "job 预算耗尽: "
+            + ", ".join(budget_skipped)
+            + f" 未执行 (JOB_BUDGET_SECONDS={JOB_BUDGET_SECONDS})"
+        )
+        annotate(
+            "error",
+            "integration target budget",
+            f"job 预算 {JOB_BUDGET_SECONDS}s 不足, 未执行: {', '.join(budget_skipped)}",
+        )
+
     if not executed_rows:
         annotate("error", "integration target inventory", f"{args.os} 没有任何 target 被执行")
         return 1
