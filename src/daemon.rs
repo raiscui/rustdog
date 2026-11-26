@@ -651,7 +651,12 @@ fn shell_mode_from_endpoint(mode: EndpointMode) -> ShellMode {
 }
 
 #[cfg(all(test, unix))]
+#[path = "../tests/support/test_ports.rs"]
+mod test_ports;
+
+#[cfg(all(test, unix))]
 mod tests {
+    use super::test_ports::allocate_tcp_port;
     use super::*;
     use std::{net::TcpStream, sync::atomic::AtomicUsize, time::Instant};
 
@@ -663,7 +668,7 @@ mod tests {
 
         #[test]
         fn outbound_worker_should_retry_after_session_failure() {
-            let port = next_free_port();
+            let port = allocate_tcp_port();
             let accept_count = Arc::new(AtomicUsize::new(0));
             let server = spawn_counting_server(port, 2, Arc::clone(&accept_count));
             let stop = Arc::new(AtomicBool::new(false));
@@ -696,7 +701,7 @@ mod tests {
 
         #[test]
         fn inbound_worker_should_retry_after_bind_failure() {
-            let port = next_free_port();
+            let port = allocate_tcp_port();
             let guard = TcpListener::bind((TEST_HOST, port)).expect("guard listener should bind");
             let stop = Arc::new(AtomicBool::new(false));
             let config = InboundConfig {
@@ -728,7 +733,7 @@ mod tests {
 
         #[test]
         fn inbound_worker_should_keep_listening_after_session_failure() {
-            let port = next_free_port();
+            let port = allocate_tcp_port();
             let stop = Arc::new(AtomicBool::new(false));
             let config = InboundConfig {
                 enabled: true,
@@ -754,14 +759,6 @@ mod tests {
 
             worker.join().expect("worker thread should finish").unwrap();
         }
-    }
-
-    fn next_free_port() -> u16 {
-        let listener = TcpListener::bind((TEST_HOST, 0)).expect("ephemeral listener should bind");
-        listener
-            .local_addr()
-            .expect("listener should have local addr")
-            .port()
     }
 
     fn spawn_counting_server(

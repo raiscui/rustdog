@@ -13,15 +13,10 @@ mod child_guard;
 
 use child_guard::ChildGuard;
 
-fn next_free_port() -> u16 {
-    let listener = TcpListener::bind(("127.0.0.1", 0)).expect("ephemeral listener should bind");
-    let port = listener
-        .local_addr()
-        .expect("listener should expose local addr")
-        .port();
-    drop(listener);
-    port
-}
+#[path = "support/test_ports.rs"]
+mod test_ports;
+
+use test_ports::allocate_tcp_port;
 
 #[path = "support/rdog_binary.rs"]
 mod rdog_binary;
@@ -144,7 +139,7 @@ fn read_agent_response(stream: &TcpStream) -> (i32, String, String) {
 
 #[test]
 fn connect_stdio_mode_should_forward_clean_noninteractive_output() {
-    let port = next_free_port();
+    let port = allocate_tcp_port();
     let listener = TcpListener::bind(("127.0.0.1", port)).expect("controller listener should bind");
     let mut child = spawn_connect("stdio", port);
     let mut stream = accept_with_timeout(&listener, &mut child, Duration::from_secs(3));
@@ -178,7 +173,7 @@ fn connect_stdio_mode_should_forward_clean_noninteractive_output() {
 
 #[test]
 fn connect_agent_mode_should_return_stdout_stderr_and_exit_code_per_command() {
-    let port = next_free_port();
+    let port = allocate_tcp_port();
     let listener = TcpListener::bind(("127.0.0.1", port)).expect("controller listener should bind");
     let mut child = spawn_connect("agent", port);
     let mut stream = accept_with_timeout(&listener, &mut child, Duration::from_secs(3));

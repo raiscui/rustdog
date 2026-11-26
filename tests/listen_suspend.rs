@@ -8,15 +8,10 @@ use std::{
     time::{Duration, Instant},
 };
 
-fn next_free_port() -> u16 {
-    let listener = TcpListener::bind(("127.0.0.1", 0)).expect("ephemeral listener should bind");
-    let port = listener
-        .local_addr()
-        .expect("listener should expose local addr")
-        .port();
-    drop(listener);
-    port
-}
+#[path = "support/test_ports.rs"]
+mod test_ports;
+
+use test_ports::allocate_tcp_port;
 
 #[path = "support/rdog_binary.rs"]
 mod rdog_binary;
@@ -96,7 +91,7 @@ fn assert_child_still_running(child: &mut Child, context: &str) {
 
 #[test]
 fn listen_should_release_port_after_sigtstp() {
-    let port = next_free_port();
+    let port = allocate_tcp_port();
     let binary = rdog_binary_path();
     let mut child = Command::new(binary)
         .args(["listen", &port.to_string()])
@@ -135,7 +130,7 @@ fn listen_should_release_port_after_sigtstp() {
 
 #[test]
 fn listen_should_not_exit_just_because_connected_stream_is_temporarily_idle() {
-    let port = next_free_port();
+    let port = allocate_tcp_port();
     let binary = rdog_binary_path();
     let mut child = Command::new(binary)
         .args(["listen", &port.to_string()])

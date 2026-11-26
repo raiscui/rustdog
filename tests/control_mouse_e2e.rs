@@ -14,7 +14,7 @@ use image::{imageops, ImageFormat, RgbImage};
 mod support;
 
 use support::{
-    next_free_port, rdog_binary_path, start_daemon, temp_workdir, wait_until_port_is_busy,
+    allocate_tcp_port, rdog_binary_path, start_daemon, temp_workdir, wait_until_port_is_busy,
     ControlSession,
 };
 
@@ -924,7 +924,7 @@ fn ocr_image_text(ocr_input: &Path) -> String {
 fn daemon_control_lane_should_click_apple_menu_about_this_mac_via_rdog_control() {
     close_existing_about_this_mac_window();
 
-    let port = next_free_port();
+    let port = allocate_tcp_port();
     let binary = rdog_binary_path();
     let workdir = temp_workdir("apple-menu-about-this-mac");
     let mut daemon = start_daemon(&binary, &workdir, port);

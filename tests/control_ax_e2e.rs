@@ -3,7 +3,7 @@
 use std::{
     fs,
     io::{Read, Write},
-    net::{TcpListener, TcpStream},
+    net::TcpStream,
     path::{Path, PathBuf},
     process::{Child, Command, Output, Stdio},
     thread,
@@ -84,7 +84,7 @@ impl TextEditDocumentFixture {
         let file_path = std::env::temp_dir().join(format!(
             "rdog-ax-textedit-{name}-{}-{}.txt",
             std::process::id(),
-            next_free_port()
+            allocate_tcp_port()
         ));
         fs::write(&file_path, contents).expect("TextEdit fixture file should write");
 
@@ -237,7 +237,7 @@ impl LiveAxDaemon {
 }
 
 fn start_live_ax_daemon(name: &str) -> LiveAxDaemon {
-    let port = next_free_port();
+    let port = allocate_tcp_port();
     let binary = rdog_binary_path();
     let workdir = temp_workdir(name);
     let mut direct_daemon = None::<ChildGuard>;
@@ -271,15 +271,10 @@ fn start_live_ax_daemon(name: &str) -> LiveAxDaemon {
     }
 }
 
-fn next_free_port() -> u16 {
-    let listener = TcpListener::bind(("127.0.0.1", 0)).expect("ephemeral listener should bind");
-    let port = listener
-        .local_addr()
-        .expect("listener should expose local addr")
-        .port();
-    drop(listener);
-    port
-}
+#[path = "support/test_ports.rs"]
+mod test_ports;
+
+use test_ports::allocate_tcp_port;
 
 #[path = "support/rdog_binary.rs"]
 mod rdog_binary;
@@ -291,7 +286,7 @@ fn temp_workdir(name: &str) -> PathBuf {
     let path = std::env::temp_dir().join(format!(
         "rdog-control-ax-e2e-{name}-{}-{}",
         std::process::id(),
-        next_free_port()
+        allocate_tcp_port()
     ));
     fs::create_dir_all(&path).expect("temp workdir should create");
     path

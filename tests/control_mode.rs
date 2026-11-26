@@ -2,7 +2,7 @@
 
 use std::{
     io::{self, BufRead, BufReader, Read, Write},
-    net::{TcpListener, TcpStream},
+    net::TcpStream,
     process::{Child, Command, Stdio},
     thread,
     time::{Duration, Instant},
@@ -13,15 +13,10 @@ mod child_guard;
 
 use child_guard::ChildGuard;
 
-fn next_free_port() -> u16 {
-    let listener = TcpListener::bind(("127.0.0.1", 0)).expect("ephemeral listener should bind");
-    let port = listener
-        .local_addr()
-        .expect("listener should expose local addr")
-        .port();
-    drop(listener);
-    port
-}
+#[path = "support/test_ports.rs"]
+mod test_ports;
+
+use test_ports::allocate_tcp_port;
 
 #[path = "support/rdog_binary.rs"]
 mod rdog_binary;
@@ -139,7 +134,7 @@ fn read_socket_output_until_contains(
 
 #[test]
 fn control_mode_should_bridge_agent_protocol_to_daemon_inbound() {
-    let port = next_free_port();
+    let port = allocate_tcp_port();
     let binary = rdog_binary_path();
     let mut daemon = ChildGuard::new(
         Command::new(&binary)

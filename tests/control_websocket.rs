@@ -1,7 +1,6 @@
 use std::{
     fs,
     io::{BufRead, BufReader, Read, Write},
-    net::TcpListener,
     path::PathBuf,
     process::{Child, Command, Stdio},
     thread,
@@ -13,15 +12,10 @@ mod child_guard;
 
 use child_guard::ChildGuard;
 
-fn next_free_port() -> u16 {
-    let listener = TcpListener::bind(("127.0.0.1", 0)).expect("ephemeral listener should bind");
-    let port = listener
-        .local_addr()
-        .expect("listener should expose local addr")
-        .port();
-    drop(listener);
-    port
-}
+#[path = "support/test_ports.rs"]
+mod test_ports;
+
+use test_ports::allocate_tcp_port;
 
 #[path = "support/rdog_binary.rs"]
 mod rdog_binary;
@@ -51,7 +45,7 @@ fn temp_workdir(name: &str) -> PathBuf {
     let path = std::env::temp_dir().join(format!(
         "rdog-control-websocket-{name}-{}-{}",
         std::process::id(),
-        next_free_port()
+        allocate_tcp_port()
     ));
     fs::create_dir_all(&path).expect("temp workdir should create");
     path
@@ -139,7 +133,7 @@ fn wait_with_output_timeout(
 
 #[test]
 fn control_cli_should_drive_websocket_daemon_end_to_end() {
-    let port = next_free_port();
+    let port = allocate_tcp_port();
     let binary = rdog_binary_path();
     let url = websocket_url(port);
 
@@ -297,7 +291,7 @@ fn control_cli_should_drive_websocket_daemon_end_to_end() {
 #[test]
 #[cfg(unix)]
 fn control_cli_should_run_websocket_pty_command_end_to_end() {
-    let port = next_free_port();
+    let port = allocate_tcp_port();
     let binary = rdog_binary_path();
     let url = websocket_url(port);
 
@@ -378,7 +372,7 @@ fn control_cli_should_run_websocket_pty_command_end_to_end() {
 #[test]
 #[ignore = "requires real screenshot backend and host screen capture permissions"]
 fn control_cli_should_execute_screenshot_and_save_file_over_websocket() {
-    let port = next_free_port();
+    let port = allocate_tcp_port();
     let binary = rdog_binary_path();
     let url = websocket_url(port);
     let workdir = temp_workdir("screenshot");

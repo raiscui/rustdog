@@ -16,14 +16,34 @@ mod child_guard;
 
 use child_guard::ChildGuard;
 
-fn next_free_port() -> u16 {
-    let listener = TcpListener::bind(("127.0.0.1", 0)).expect("ephemeral listener should bind");
-    let port = listener
-        .local_addr()
-        .expect("listener should expose local addr")
-        .port();
-    drop(listener);
-    port
+#[path = "support/test_ports.rs"]
+mod test_ports;
+
+use test_ports::allocate_tcp_port;
+
+#[test]
+fn test_ports_should_not_be_reissued_before_the_caller_binds() {
+    const WORKERS: usize = 8;
+    let start = std::sync::Barrier::new(WORKERS);
+    thread::scope(|scope| {
+        let workers: Vec<_> = (0..WORKERS)
+            .map(|_| {
+                scope.spawn(|| {
+                    start.wait();
+                    (0..64).map(|_| allocate_tcp_port()).collect::<Vec<_>>()
+                })
+            })
+            .collect();
+
+        let mut claims = std::collections::HashMap::new();
+        for (worker, handle) in workers.into_iter().enumerate() {
+            for port in handle.join().unwrap() {
+                if let Some(previous) = claims.insert(port, worker) {
+                    panic!("port {port} was reissued: worker {previous} and worker {worker}");
+                }
+            }
+        }
+    });
 }
 
 #[path = "support/rdog_binary.rs"]
@@ -135,7 +155,7 @@ fn temp_workdir(name: &str) -> PathBuf {
     let path = std::env::temp_dir().join(format!(
         "rdog-control-lanes-{name}-{}-{}",
         std::process::id(),
-        next_free_port()
+        allocate_tcp_port()
     ));
     fs::create_dir_all(&path).expect("temp workdir should create");
     path
@@ -160,7 +180,7 @@ fn temp_cat_shell(name: &str) -> PathBuf {
 
 #[test]
 fn daemon_control_lane_should_execute_script_via_rdog_control() {
-    let port = next_free_port();
+    let port = allocate_tcp_port();
     let binary = rdog_binary_path();
     let mut daemon = ChildGuard::new(
         Command::new(&binary)
@@ -226,7 +246,7 @@ fn daemon_control_lane_should_execute_script_via_rdog_control() {
 
 #[test]
 fn daemon_control_lane_should_roundtrip_request_id_in_response() {
-    let port = next_free_port();
+    let port = allocate_tcp_port();
     let binary = rdog_binary_path();
     let mut daemon = ChildGuard::new(
         Command::new(&binary)
@@ -297,7 +317,7 @@ fn daemon_control_lane_should_roundtrip_request_id_in_response() {
 // "Integration targets" 步骤); runner 上没有 display 时这条会确定性失败。
 #[test]
 fn daemon_control_lane_should_accept_key_object_payload_with_request_id() {
-    let port = next_free_port();
+    let port = allocate_tcp_port();
     let binary = rdog_binary_path();
     let mut daemon = ChildGuard::new(
         Command::new(&binary)
@@ -364,7 +384,7 @@ fn daemon_control_lane_should_accept_key_object_payload_with_request_id() {
 #[test]
 #[ignore = "requires real screenshot backend and host screen capture permissions"]
 fn daemon_control_lane_should_execute_screenshot_and_save_file_via_rdog_control() {
-    let port = next_free_port();
+    let port = allocate_tcp_port();
     let binary = rdog_binary_path();
     let workdir = temp_workdir("screenshot-smoke");
     let mut daemon = ChildGuard::new(
@@ -484,7 +504,7 @@ fn daemon_control_lane_should_execute_screenshot_and_save_file_via_rdog_control(
 
 #[test]
 fn daemon_control_lane_should_report_invalid_key_name_to_client() {
-    let port = next_free_port();
+    let port = allocate_tcp_port();
     let binary = rdog_binary_path();
     let mut daemon = ChildGuard::new(
         Command::new(&binary)
@@ -558,7 +578,7 @@ fn daemon_control_lane_should_report_invalid_key_name_to_client() {
 
 #[test]
 fn daemon_outbound_control_lane_should_execute_remote_script() {
-    let port = next_free_port();
+    let port = allocate_tcp_port();
     let binary = rdog_binary_path();
     let listener = TcpListener::bind(("127.0.0.1", port)).expect("control server should bind");
 
@@ -615,7 +635,7 @@ fn daemon_outbound_control_lane_should_execute_remote_script() {
 
 #[test]
 fn connect_control_mode_should_execute_escaped_line_as_literal_shell_text() {
-    let port = next_free_port();
+    let port = allocate_tcp_port();
     let wrapper = temp_shell_wrapper("connect");
     let binary = rdog_binary_path();
     let listener = TcpListener::bind(("127.0.0.1", port)).expect("test listener should bind");
@@ -671,7 +691,7 @@ fn connect_control_mode_should_execute_escaped_line_as_literal_shell_text() {
 
 #[test]
 fn connect_interactive_mode_should_not_interpret_control_lines() {
-    let port = next_free_port();
+    let port = allocate_tcp_port();
     let cat_shell = temp_cat_shell("interactive-negative");
     let binary = rdog_binary_path();
     let listener = TcpListener::bind(("127.0.0.1", port)).expect("negative listener should bind");
@@ -734,7 +754,7 @@ fn connect_interactive_mode_should_not_interpret_control_lines() {
 
 #[test]
 fn listen_local_interactive_should_reach_connect_control_lane() {
-    let port = next_free_port();
+    let port = allocate_tcp_port();
     let binary = rdog_binary_path();
     let mut listener = Command::new(&binary)
         .args(["listen", "--local-interactive", &port.to_string()])
@@ -877,7 +897,7 @@ fn listen_local_interactive_should_reach_connect_control_lane() {
 
 #[test]
 fn control_one_shot_should_send_ping_and_exit_for_tcp_lane() {
-    let port = next_free_port();
+    let port = allocate_tcp_port();
     let binary = rdog_binary_path();
     let mut daemon = ChildGuard::new(
         Command::new(&binary)
@@ -932,7 +952,7 @@ fn control_one_shot_should_send_ping_and_exit_for_tcp_lane() {
 
 #[test]
 fn control_one_shot_should_send_ping_with_request_id() {
-    let port = next_free_port();
+    let port = allocate_tcp_port();
     let binary = rdog_binary_path();
     let mut daemon = ChildGuard::new(
         Command::new(&binary)
@@ -1027,7 +1047,7 @@ fn control_one_shot_should_accept_two_at_lines_and_run_in_order_for_tcp_lane() {
     // 走和 N=1 / N>1 一样的 collect frames 路径,
     // 共享同一条 TCP 连接,顺序串行执行。这条用例锁住 one-shot N=1 / N>1 已经统一
     // 走 `send_control_lines_*` 这条契约,不让 spec / test 再退回老设计。
-    let port = next_free_port();
+    let port = allocate_tcp_port();
     let binary = rdog_binary_path();
     let mut daemon = ChildGuard::new(
         Command::new(&binary)
@@ -1092,7 +1112,7 @@ fn control_one_shot_should_accept_two_at_lines_and_run_in_order_for_tcp_lane() {
 
 #[test]
 fn control_multi_one_shot_should_run_lines_in_order_for_tcp_lane() {
-    let port = next_free_port();
+    let port = allocate_tcp_port();
     let binary = rdog_binary_path();
     let mut daemon = ChildGuard::new(
         Command::new(&binary)
@@ -1162,7 +1182,7 @@ fn control_multi_one_shot_should_run_lines_in_order_for_tcp_lane() {
 #[test]
 fn control_multi_one_shot_should_run_with_one_line_for_tcp_lane() {
     // 1 line 的多 line 形式应该等价于单 line one-shot
-    let port = next_free_port();
+    let port = allocate_tcp_port();
     let binary = rdog_binary_path();
     let mut daemon = ChildGuard::new(
         Command::new(&binary)

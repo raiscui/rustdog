@@ -3,7 +3,7 @@
 use std::{
     fs,
     io::{BufRead, BufReader, Read, Write},
-    net::{TcpListener, TcpStream},
+    net::TcpStream,
     os::unix::fs::PermissionsExt,
     process::{Child, Command, Output, Stdio},
     sync::{Arc, Mutex},
@@ -21,15 +21,10 @@ mod child_guard;
 
 use child_guard::ChildGuard;
 
-fn next_free_port() -> u16 {
-    let listener = TcpListener::bind(("127.0.0.1", 0)).expect("ephemeral listener should bind");
-    let port = listener
-        .local_addr()
-        .expect("listener should expose local addr")
-        .port();
-    drop(listener);
-    port
-}
+#[path = "support/test_ports.rs"]
+mod test_ports;
+
+use test_ports::allocate_tcp_port;
 
 #[path = "support/rdog_binary.rs"]
 mod rdog_binary;
@@ -229,7 +224,7 @@ fn read_until_pty_output_contains(
 
 #[test]
 fn control_pty_cli_should_spawn_remote_real_tty() {
-    let port = next_free_port();
+    let port = allocate_tcp_port();
     let mut daemon = ChildGuard::new(spawn_control_daemon(port));
     assert!(
         wait_until_port_is_busy(&mut daemon, port, Duration::from_secs(4)),
@@ -272,7 +267,7 @@ fn control_pty_cli_should_spawn_remote_real_tty() {
 
 #[test]
 fn control_pty_string_shorthand_should_switch_cli_into_pty_mode() {
-    let port = next_free_port();
+    let port = allocate_tcp_port();
     let mut daemon = ChildGuard::new(spawn_control_daemon(port));
     assert!(
         wait_until_port_is_busy(&mut daemon, port, Duration::from_secs(4)),
@@ -318,7 +313,7 @@ fn control_pty_string_shorthand_should_forward_enter_as_carriage_return_in_tty()
     let helper_path = std::env::temp_dir().join(format!(
         "rdog-pty-enter-byte-{}-{}.sh",
         std::process::id(),
-        next_free_port()
+        allocate_tcp_port()
     ));
     fs::write(
         &helper_path,
@@ -331,7 +326,7 @@ fn control_pty_string_shorthand_should_forward_enter_as_carriage_return_in_tty()
     permissions.set_mode(0o700);
     fs::set_permissions(&helper_path, permissions).expect("raw byte helper should be executable");
 
-    let port = next_free_port();
+    let port = allocate_tcp_port();
     let mut daemon = ChildGuard::new(spawn_control_daemon(port));
     assert!(
         wait_until_port_is_busy(&mut daemon, port, Duration::from_secs(4)),
@@ -392,7 +387,7 @@ fn control_pty_ctrl_c_should_exit_remote_program_and_return_to_control_prompt() 
     let helper_path = std::env::temp_dir().join(format!(
         "rdog-pty-ctrl-c-{}-{}.sh",
         std::process::id(),
-        next_free_port()
+        allocate_tcp_port()
     ));
     fs::write(
         &helper_path,
@@ -405,7 +400,7 @@ fn control_pty_ctrl_c_should_exit_remote_program_and_return_to_control_prompt() 
     permissions.set_mode(0o700);
     fs::set_permissions(&helper_path, permissions).expect("ctrl-c helper should be executable");
 
-    let port = next_free_port();
+    let port = allocate_tcp_port();
     let mut daemon = ChildGuard::new(spawn_control_daemon(port));
     assert!(
         wait_until_port_is_busy(&mut daemon, port, Duration::from_secs(4)),
@@ -488,7 +483,7 @@ fn control_pty_ctrl_c_should_exit_remote_program_and_return_to_control_prompt() 
 
 #[test]
 fn control_pty_should_treat_control_words_as_remote_input() {
-    let port = next_free_port();
+    let port = allocate_tcp_port();
     let mut daemon = ChildGuard::new(spawn_control_daemon(port));
     assert!(
         wait_until_port_is_busy(&mut daemon, port, Duration::from_secs(4)),
@@ -584,7 +579,7 @@ fn control_pty_should_treat_control_words_as_remote_input() {
 
 #[test]
 fn control_pty_resize_frame_should_update_remote_winsize() {
-    let port = next_free_port();
+    let port = allocate_tcp_port();
     let mut daemon = ChildGuard::new(spawn_control_daemon(port));
     assert!(
         wait_until_port_is_busy(&mut daemon, port, Duration::from_secs(4)),
@@ -647,7 +642,7 @@ fn control_pty_resize_frame_should_update_remote_winsize() {
 
 #[test]
 fn control_pty_close_should_kill_active_session_by_id() {
-    let port = next_free_port();
+    let port = allocate_tcp_port();
     let mut daemon = ChildGuard::new(spawn_control_daemon(port));
     assert!(
         wait_until_port_is_busy(&mut daemon, port, Duration::from_secs(4)),
@@ -723,7 +718,7 @@ fn control_pty_close_should_kill_active_session_by_id() {
 
 #[test]
 fn control_pty_detach_should_allow_later_attach() {
-    let port = next_free_port();
+    let port = allocate_tcp_port();
     let mut daemon = ChildGuard::new(spawn_control_daemon_with_output(port));
     let daemon_stdout = daemon.stdout.take().expect("daemon stdout should exist");
     let daemon_stderr = daemon.stderr.take().expect("daemon stderr should exist");

@@ -12,16 +12,10 @@ use std::{
 mod rdog_binary;
 
 use rdog_binary::rdog_binary_path;
-fn next_free_port() -> u16 {
-    let listener =
-        std::net::TcpListener::bind(("127.0.0.1", 0)).expect("ephemeral listener should bind");
-    let port = listener
-        .local_addr()
-        .expect("listener should expose local addr")
-        .port();
-    drop(listener);
-    port
-}
+#[path = "support/test_ports.rs"]
+mod test_ports;
+
+use test_ports::allocate_tcp_port;
 
 fn is_port_listening(port: u16) -> bool {
     let output = Command::new("lsof")
@@ -74,7 +68,7 @@ fn spawn_output_collector(
 
 #[test]
 fn reverse_shell_should_run_with_tty_semantics() {
-    let port = next_free_port();
+    let port = allocate_tcp_port();
     let binary = rdog_binary_path();
     let mut listener = Command::new(&binary)
         .args(["listen", &port.to_string()])
