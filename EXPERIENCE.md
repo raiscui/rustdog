@@ -612,3 +612,31 @@
 - 相关: EPIPHANY_LOG 2026-10-22 条目 (载体分叉的完整分析),
   `docs/solutions/best-practices/remote-control-blocked-command-pitfalls.md`
   (落地表本身也是"会过期的进度真相源")
+
+## [2026-11-26 06:10:00] [Session ID: RAI-387] 主题: 本机 fast path 的 liveness 必须用 flock 而不是 PID
+
+### 落盘位置: 固定运行目录 > per-session `$TMPDIR`
+
+- 场景: unixpipe FIFO 原本落在 `$TMPDIR/rdog-<ns>-<name>.pipe`。
+- 踩坑: macOS `$TMPDIR` 按会话生成,重启即换路径;旧 pipe 永不回收,daemon 被 `kill -9`
+  后越堆越多,业主原话「端口文件会开一堆一堆的」。
+- 结论: 落盘位置要选**用户可见且稳定**的目录(`~/.rdog/run`,Linux 优先
+  `$XDG_RUNTIME_DIR/rdog`),并在同目录写 `<stem>.lock` / `<stem>.meta`,让"谁占着"和
+  "它是谁"都能被 `rdog local list` 直接读出来。
+
+### liveness 判据: OS advisory lock 是唯一真相源,PID 只是旁证
+
+- 场景: 需要区分"daemon 还活着"和"上次 kill -9 的残留"。
+- 踩坑: 只按 `kill -0 <pid>` 判断会被 PID 复用骗(residual 的 pid 被别的进程占用 →
+  误判存活,永不回收);反过来只按 PID 不存活判断,又解释不了"为什么文件还在但进程是别的"。
+- 结论: lock 文件上持一把 flock,能拿到锁就等于上一个 owner 一定死了;PID 只作为
+  回执里的判定依据(`previous_pid_alive=no`)打出来。`rdog local list` 的
+  `stale-pid-dead` / `stale-pid-reused` 就是这个区分。
+
+### 长驻 daemon 没有信号处理器 = RAII 清理永不执行
+
+- 场景: 给 router daemon 加了 pipe/lock 的 Drop 清理,`kill -TERM` 后文件仍在。
+- 踩坑: `install_shutdown_handlers` 只在 TCP daemon 路径装过,zenoh router 路径没装,
+  SIGTERM 按默认处置直接打死进程(退出码 143),`Drop` 根本没跑。
+- 结论: 凡是靠 RAII 清理落盘状态的长驻进程,必须先确认信号能被接住并让主循环正常返回;
+  轮询式 `recv_timeout` + 停止标志比"阻塞 recv + 默认处置"安全。

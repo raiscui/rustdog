@@ -142,3 +142,29 @@ commit + 10-11 跨机 Electron 调试 + 10-20 跨网互联 wayfinder 建图 13 �
 ## [2026-10-23 20:27:06] [Session ID: 01a168b3-33af-7c53-9c6b-0fb808d7e9dc] 支线索引: yino 使用反馈优化
 
 启用 `yino_rdog_feedback` 支线, 检索 pireel 当前与 archive 上下文, 分析 rdog 需求/缺陷并实施已证实且可验证的调整. 过程见 task_plan__yino_rdog_feedback.md.
+
+## [2026-11-26 06:10:00] [Session ID: RAI-387] 本机 fast path 落盘与生命周期收口
+
+RAI-387: unixpipe 本机 fast path 从 `$TMPDIR` 迁到固定运行目录,补名字派生/死进程回收
+与 `rdog local list|clean`。
+
+### 已完成
+- [x] 落盘: `$XDG_RUNTIME_DIR/rdog` / `~/.rdog/run`(0700),名字 `<ns>__<name>.pipe`,
+      超 95 字节预算压缩成 `<slug>-<8位哈希>.pipe` + `<stem>.meta` 记完整身份;FIFO 0600
+- [x] 生命周期: `<stem>.lock`(flock + pid + 启动时刻),拿到 lock 即判定旧 owner 已死并回收;
+      正常退出与 SIGINT/SIGTERM 删 FIFO + lock + meta
+- [x] router daemon 补信号处理: 原先 SIGTERM 走默认处置打死进程,RAII 清理永不执行
+- [x] 命令: `rdog local list`(live / stale-pid-dead / stale-pid-reused / legacy-stale)
+      与 `rdog local clean`(默认 dry-run,`--force` 删死残留;活 daemon 一律不动)
+- [x] 旧 `$TMPDIR` 残留纳入 list/clean;local-default 未托管候选改读运行目录 + meta
+- [x] 验证: 20 轮启停目录回落 0 文件 / kill -9 回执 `pid_alive=no` + `previous_pid_alive=false` /
+      60+60 字符身份 base=95 字节且显示全名 / 权限 0700+0600 / `cargo test --bin rdog` 1098 passed
+- [x] 文档: spec §3.1 重写 + rdog-control skill 入册 (v2.31-local-run)
+- 提交: dce9397 (实现+单测), 98879fc (文档)
+
+### 未覆盖 / 留给后续
+- [ ] macOS 真机回执(本机 Linux 已跑真 daemon 验收;mac 由 Captain 代跑同一脚本)
+- [ ] Windows 命名管道 fast path 本身(Rai-385);本票只提供 `rdog local list` 观测面,
+      该分支仅做隔离类型检查,未在 Windows 上构建(本机 `cargo check --target` 被 ring 的
+      lib.exe 挡住,见 docs/solutions/runtime-errors/cross-compile-windows-rust-electron-tool.md)
+- [ ] `rdog local list --json` 机器可读形态(当前是 `key=value` 单行,够 agent grep)
