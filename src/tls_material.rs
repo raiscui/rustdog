@@ -57,18 +57,46 @@ pub fn tls_init(tls_dir: &Path) -> io::Result<TlsInitReport> {
     let client_cert =
         CertifiedIssuer::signed_by(client_params, &client_key, &ca).map_err(to_io_error)?;
 
-    // 落盘布局 (spec 固定)
-    let daemon_dir = tls_dir.join("daemon");
-    let client_dir = tls_dir.join("client");
-    fs::create_dir_all(&daemon_dir)?;
-    fs::create_dir_all(&client_dir)?;
+    // 落盘布局 (spec 固定)。先在唯一暂存目录里写完六件, 再整目录 rename 到位:
+    // "目录存在"因此等价于"材料完整", 两个并发 tls-init 只可能有一方 rename 成功,
+    // 落败方按已初始化跳过。边创建边写入会让两个进程的 CA 与证书交错落进同一目录,
+    // daemon 证书签自 CA-A 而 ca.pem 来自 CA-B —— TLS/mTLS 握手必然失败。
+    let staging_dir = tls_dir.with_file_name(format!(
+        "{}.staging-{}-{}",
+        tls_dir
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| TLS_DIR_NAME.to_owned()),
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|elapsed| elapsed.subsec_nanos())
+            .unwrap_or(0)
+    ));
+    fs::create_dir_all(&staging_dir)?;
+    let materialize = || -> io::Result<()> {
+        let daemon_dir = staging_dir.join("daemon");
+        let client_dir = staging_dir.join("client");
+        fs::create_dir_all(&daemon_dir)?;
+        fs::create_dir_all(&client_dir)?;
 
-    write_private(&tls_dir.join("ca-key.pem"), &ca_key.serialize_pem())?;
-    write_public(&tls_dir.join("ca.pem"), &ca.as_ref().pem())?;
-    write_private(&daemon_dir.join("key.pem"), &daemon_key.serialize_pem())?;
-    write_public(&daemon_dir.join("cert.pem"), &daemon_cert.pem())?;
-    write_private(&client_dir.join("key.pem"), &client_key.serialize_pem())?;
-    write_public(&client_dir.join("cert.pem"), &client_cert.pem())?;
+        write_private(&staging_dir.join("ca-key.pem"), &ca_key.serialize_pem())?;
+        write_public(&staging_dir.join("ca.pem"), &ca.as_ref().pem())?;
+        write_private(&daemon_dir.join("key.pem"), &daemon_key.serialize_pem())?;
+        write_public(&daemon_dir.join("cert.pem"), &daemon_cert.pem())?;
+        write_private(&client_dir.join("key.pem"), &client_key.serialize_pem())?;
+        write_public(&client_dir.join("cert.pem"), &client_cert.pem())?;
+        Ok(())
+    };
+    if let Err(err) = materialize().and_then(|()| fs::rename(&staging_dir, tls_dir)) {
+        let _ = fs::remove_dir_all(&staging_dir);
+        if tls_dir.exists() {
+            // 并发方先落地: 它的材料是完整的, 本进程按已初始化跳过。
+            report.skipped.push(tls_dir.display().to_string());
+            return Ok(report);
+        }
+        return Err(err);
+    }
 
     report.created = vec![
         "ca.pem".into(),
@@ -172,6 +200,59 @@ mod tests {
             "USER TWEAKED",
             "已存在材料不得被覆盖"
         );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// 两个 `tls-init` 并发时只能有一方落盘。
+    ///
+    /// 反例 (2026-11-26 实测): 目录先创建、文件后写入, 且"已初始化"的判据是
+    /// `tls_dir.exists()`。两个进程同时进入时, 要么双方都生成、把两份 CA 的证书
+    /// 交错写进同一目录 (daemon 证书签自 CA-A, ca.pem 来自 CA-B), 要么后者看到
+    /// 空目录就跳过、留下半套材料。两种结局都让 TLS/mTLS 握手必然失败。
+    #[test]
+    fn concurrent_tls_init_should_publish_exactly_one_material_set() {
+        let dir = temp_tls_dir("concurrent");
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));
+        let handles: Vec<_> = (0..8)
+            .map(|_| {
+                let dir = dir.clone();
+                let barrier = std::sync::Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    tls_init(&dir).expect("concurrent tls_init should not fail")
+                })
+            })
+            .collect();
+        let reports: Vec<TlsInitReport> = handles
+            .into_iter()
+            .map(|handle| handle.join().expect("tls_init thread should not panic"))
+            .collect();
+
+        let created = reports.iter().filter(|r| !r.created.is_empty()).count();
+        assert_eq!(
+            created, 1,
+            "并发 tls-init 只能有一方生成完整材料, 实际 {created}: {reports:?}"
+        );
+        for path in [
+            "ca.pem",
+            "ca-key.pem",
+            "daemon/cert.pem",
+            "daemon/key.pem",
+            "client/cert.pem",
+            "client/key.pem",
+        ] {
+            assert!(dir.join(path).is_file(), "missing {path}");
+        }
+
+        // 落败的并发方必须收走自己的暂存目录, 不在 ~/.rdog 里留残渣。
+        let leftovers: Vec<_> = fs::read_dir(dir.parent().expect("tls dir should have parent"))
+            .expect("parent dir should be readable")
+            .flatten()
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.contains("staging"))
+            .collect();
+        assert!(leftovers.is_empty(), "暂存目录残留: {leftovers:?}");
+
         let _ = fs::remove_dir_all(&dir);
     }
 
