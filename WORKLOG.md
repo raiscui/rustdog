@@ -283,7 +283,7 @@ DPI 修正 / zenoh namespace / recording 修复), 它们当时连一行账本都
 
 **两个失败的根因是同一个**: Windows 上同一个路径有两种拼法。
 - `execute_control_command_should_run_script_via_shell`: 并发单测里
-  `figment::Jail` 把进程级 cwd 切到带 `\\?` verbatim 前缀的临时目录,
+  `figment::Jail` 把进程级 cwd 切到带 `\\?\\` verbatim 前缀的临时目录,
   cmd.exe 认不了这种 cwd → 打 "UNC paths are not supported" 告警 →
   挂在"stderr 必须为空"这条断言上 (脚本本身照常执行, stdout/exit_code 都对)。
   修法: 与 unix 侧同类放行 (`is_deleted_cwd_shell_warning`) 对称, 放行这一类
@@ -292,7 +292,7 @@ DPI 修正 / zenoh namespace / recording 修复), 它们当时连一行账本都
 - `shell_lane_should_apply_cwd_env_and_script_text`: runner 的 TEMP 是 **8.3 短名**
   (`RUNNER~1`), 而 PowerShell 的 `$PWD` 报的是**长名** (`runneradmin`);
   同一目录两种拼法。修法: 期望值改走 `shell_visible_path()` (canonicalize
-  把短名解析成长名, 再去 `\\?` 前缀), unix 侧行为不变。
+  把短名解析成长名, 再去 `\\?\\` 前缀), unix 侧行为不变。
 
 **顺带捞出两个从未执行的测试**: `src/control_protocol/tests.rs` 里两个 `@run`
 解析测试被**嵌套在**另一个测试函数体内 —— 嵌套的 `#[test]` fn 不被框架收集,
