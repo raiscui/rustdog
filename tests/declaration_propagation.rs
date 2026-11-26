@@ -48,7 +48,11 @@ fn rdog_binary() -> PathBuf {
 }
 
 fn isolated_home(tag: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("rdog-propagation-{tag}-{}", std::process::id()));
+    // 短根目录: macOS runner 上 `temp_dir()` 是 /var/folders/... 的长路径, daemon 的 unixpipe
+    // socket 名会超过 sun_path 上限而起不来 (同 `docs/solutions/conventions/e2e-isolated-home-credentials.md`
+    // 里 a45f1fa 修过的那条)。
+    let dir = PathBuf::from("/tmp").join(format!("rdog-prop-{tag}-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(dir.join(".rdog")).expect("isolated home");
     fs::write(
         dir.join(".rdog/auth.toml"),
@@ -126,7 +130,11 @@ fn start_daemon() -> (Daemon, String) {
         }
         thread::sleep(Duration::from_millis(20));
     }
-    panic!("daemon never reported ready");
+    let log_text = fs::read_to_string(&log).unwrap_or_default();
+    panic!(
+        "daemon never reported ready; last log lines:\n{}",
+        log_text.lines().rev().take(15).collect::<Vec<_>>().join("\n")
+    );
 }
 
 fn open_session(entrypoint: &str) -> Session {
