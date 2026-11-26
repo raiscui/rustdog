@@ -146,6 +146,9 @@ const DENIED_CODE: u32 = 43;
 /// refused with its own code, not a target denial it would misread.
 const UNSERVED: &str = "iroh_directory_alpn_unserved";
 const UNSERVED_CODE: u32 = 44;
+/// 已准入 lane 结束时记一行关闭原因: 连接真关了的时刻才是"这条 lane 没了"的事实, 不用猜。
+const LANE_CLOSED: &str = "iroh_lane_closed";
+
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -2165,6 +2168,14 @@ pub(crate) fn run_daemon(path: &Path) -> Result<()> {
     })
 }
 
+/// lane 收尾时记一行"连接怎么关的": 排障要靠对端给的关闭原因, 而不是"我们猜它死了"。
+fn log_lane_closed(conn: &Connection, session: &str) {
+    match conn.close_reason() {
+        Some(reason) => log::info!("{LANE_CLOSED} session={session} reason={reason:?}"),
+        None => log::info!("{LANE_CLOSED} session={session} reason=<stream ended>"),
+    }
+}
+
 /// 未开准入策略时的默认 lane: 只答一次 `@ping`。
 ///
 /// bulk 只走准入 lane —— 那条路径上有租约与主体判定; 这个入口没有, 所以它连字节都不收
@@ -2418,6 +2429,9 @@ fn serve_admitted(
         gate,
         &mut evidence,
     );
+    if let PathSampler::Lane { conn, .. } = sampler {
+        log_lane_closed(conn, &lease);
+    }
     result.and(transport.close())
 }
 
@@ -3180,24 +3194,19 @@ impl IrohBulkLane {
             return Err(self.poison(format!("设置读超时失败: {err}")));
         }
         if let Err(err) = self.transport.write_message(line) {
-            return Err(self.poison(format!("发送失败: {err}")));
+            return Err(self.poison(format!("发送失败: {err} ({})", self.peer_state())));
         }
         match self.transport.read_message() {
             Ok(Some(reply)) => Ok(reply),
             Ok(None) => Err(self.poison("对端在回执前关闭了连接".to_string())),
             Err(err) if err.kind() == io::ErrorKind::TimedOut => {
-                // 超时时把对端连接此刻的状态一起带出来: "对端已关 (原因 X)" 与 "对端还开着但没回"
-                // 是两条完全不同的线索, 只报"超时"就分不开。
-                let peer = match self.conn.close_reason() {
-                    Some(reason) => format!("对端已关: {reason:?}"),
-                    None => "对端连接仍开着".to_string(),
-                };
                 Err(self.poison(format!(
-                    "等待回执超时 ({}ms; {peer})",
-                    timeout.as_millis()
+                    "等待回执超时 ({}ms; {})",
+                    timeout.as_millis(),
+                    self.peer_state()
                 )))
             }
-            Err(err) => Err(self.poison(format!("读回执失败: {err}"))),
+            Err(err) => Err(self.poison(format!("读回执失败: {err} ({})", self.peer_state()))),
         }
     }
 
@@ -3211,6 +3220,15 @@ impl IrohBulkLane {
             class: sampler.sample(),
             direct_addr: sampler.selected_direct_addr(),
             relay: sampler.relay_read(),
+        }
+    }
+
+    /// 对端连接此刻的状态: "对端已关 (原因 X)" 与 "对端还开着但没回" 是两条完全不同的线索,
+    /// 写失败与读超时都把它一起带出来 —— 只报 "connection lost" 会把人指向网络。
+    fn peer_state(&self) -> String {
+        match self.conn.close_reason() {
+            Some(reason) => format!("对端已关: {reason:?}"),
+            None => "对端连接仍开着".to_string(),
         }
     }
 

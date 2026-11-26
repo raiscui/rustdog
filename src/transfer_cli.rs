@@ -297,6 +297,12 @@ impl TransferIdStore {
         Self { dir: Some(dir) }
     }
 
+    /// 测试专用: 预置一条"上一次尝试用过这个 id"的记录。
+    #[cfg(test)]
+    pub(crate) fn seed(&self, target: &str, local: &Path, remote: &str, transfer_id: &str) {
+        self.put(target, local, remote, transfer_id);
+    }
+
     /// 键是 (目标, 本地路径, 远端路径): 同一个本地文件发往两台不同主机是两次传输, 吃同一个
     /// transfer_id 会让第二次的 `@put-file` 在 daemon 侧撞上"同 id 换目标"那条分支。
     fn key(target: &str, local: &Path, remote: &str) -> String {
@@ -791,6 +797,7 @@ impl LineExchange for IrohExchange<'_> {
 }
 
 /// `rdog control <target> --transport iroh --put/--get` 的一次尝试。
+#[derive(Clone)]
 pub(crate) enum IrohBulkRequest {
     Put {
         local: PathBuf,
@@ -809,6 +816,37 @@ pub(crate) enum IrohBulkRequest {
 /// `bulk_path_checked_per_chunk=true`。`bulk_path_pin` 只能是 `false` —— 逐边界检查证明的是
 /// "每个边界上直连", 不是"边界之间不会改走 relay" (§3.5); 真 pin 归 RAI-501。
 pub(crate) fn run_iroh_bulk(
+    path: &Path,
+    name: &str,
+    request: IrohBulkRequest,
+    out: Option<PathBuf>,
+) -> Result<TransferReceipt, String> {
+    // 被中止的 lane 会在 daemon 侧留一条已死的连接: 它搬过字节、然后不再有任何帧, 而 iroh 按
+    // endpoint id 管路径状态 —— 同一身份的下一条连接的路径会停在 `selected=false`, 门禁读到的
+    // 就是 `iroh_path_unknown`。**重拨本身就是修路径的手段** (实测: 重拨在 8.16 s 拿到可用路径,
+    // 不重试时那条连接要 30.0 s 才被传输层放掉), 不是"等它过期"。该码在 §2.2 里可重试, 所以
+    // 这里按它重拨, 让使用者看到的第一次重跑就能续上。
+    let mut waited = Duration::ZERO;
+    loop {
+        let attempt = run_iroh_bulk_once(path, name, request.clone(), out.clone());
+        match attempt {
+            Err(err) if err.contains(crate::bulk_path::IROH_PATH_UNKNOWN)
+                && waited < IROH_PATH_RETRY_BUDGET =>
+            {
+                std::thread::sleep(IROH_PATH_RETRY_STEP);
+                waited += IROH_PATH_RETRY_STEP;
+            }
+            other => return other,
+        }
+    }
+}
+
+/// 路径读不出时重拨的间隔与总量: 一次重拨通常就够 (重拨自己会修路径), 预算只防"旧连接还没被
+/// 传输层放掉"的那几秒。
+const IROH_PATH_RETRY_STEP: Duration = Duration::from_secs(2);
+const IROH_PATH_RETRY_BUDGET: Duration = Duration::from_secs(18);
+
+fn run_iroh_bulk_once(
     path: &Path,
     name: &str,
     request: IrohBulkRequest,
