@@ -1160,12 +1160,10 @@ fn serve_bulk_request(
         GateVerdict::Ungated => {}
     }
 
-    log::info!("iroh bulk executing request_id={request_id:?}");
     let Some(outcome) = crate::control_core::execute_file_transfer_request(request_id, command)
     else {
         return refuse_frame(transport, request_id, LANE_REFUSED_CODE, LANE_REFUSED);
     };
-    log::info!("iroh bulk executed request_id={request_id:?}");
 
     let payload = response_payload(&outcome);
     let failed = payload
@@ -2546,13 +2544,12 @@ fn serve_lane(
     let subject = peer.to_string();
     loop {
         let Some(line) = transport.read_message()? else {
-            // 对端把写半边关了: 这是"没有回执"最常见的真相, 必须落日志而不是静默返回。
-            log::info!("iroh lane saw end of stream");
+            // 对端把写半边关了。debug 级: 正常收尾也会走到这里, 默认输出里不该多一行。
+            log::debug!("iroh lane saw end of stream");
             return Ok(());
         };
-        // 诊断: 每条都记 verb + 字节数 —— 真机上"卡在第一块"到底是没收到、还是收到了没回,
-        // 这两行日志能分开。
-        log::info!(
+        // 逐行的 verb 与字节数是排障面 (卡在首块时"收没收到"靠它), 但不该进默认输出。
+        log::debug!(
             "iroh lane line bytes={} verb={}",
             line.len(),
             line.split_once(':').map(|(verb, _)| verb).unwrap_or(line.as_str())
