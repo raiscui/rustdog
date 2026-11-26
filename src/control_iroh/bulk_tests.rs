@@ -121,12 +121,15 @@ fn start_admitted(readings: Vec<PathClass>) -> Lane {
     let target = SecretKey::generate();
     let client = SecretKey::generate();
     let policy = root.0.join("policy.json");
-    admission::save_policy(
+    // 用 `save_policy_with` 传入空目录同步: `save_policy` 会 fsync 父目录, 而 Windows 打不开
+    // 目录句柄 (`DurabilityUnconfirmed(PermissionDenied)`)。夹具只需要"策略已落盘"这一件事。
+    admission::save_policy_with(
         &policy,
         &admission::Policy {
             allow: BTreeSet::from([client.public()]),
             ..admission::Policy::default()
         },
+        |_| Ok(()),
     )
     .expect("write admission policy");
 
