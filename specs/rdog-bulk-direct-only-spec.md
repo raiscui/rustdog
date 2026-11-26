@@ -521,8 +521,9 @@ chunk in flight**: 每个被拒的边界保证的是"这一 chunk 之后不再�
 
 **判定式** (可执行实现: `BulkPathSnapshot::relay_bytes_zero_own_half()`, `src/bulk_path.rs`;
 验收脚本按此逐字实现, 不做主观解读. 正对照那一条的判据在 §4.4 的表里, 仓库内的可执行参考是
-`bulk_path::tests::positive_control_uses_a_strict_inequality` —— 它今天**没有生产消费者**, 因为
-relay 计数还没接线, 见 RAI-476):
+`bulk_path::tests::positive_control_uses_a_strict_inequality` —— 它今天**没有生产消费者**
+(正对照要一条真走 relay 的拓扑, 见 §4.4 与 RAI-366); daemon 侧的 relay 计数已经接线 (RAI-476
+步骤 3), 但"计数接上了"与"正对照跑过了"是两件事):
 
 **本端**构成 `relay_bytes_zero` 的四个必要条件 (缺一即是别的 verdict):
 
@@ -537,6 +538,74 @@ relay 计数还没接线, 见 RAI-476):
 `relay_sample_unavailable` / `no_bulk_bytes` / `relay_bytes_nonzero` 之一 —— **前四个都不是结论**,
 尤其 `not_applicable` (没有 relay 跳, 空真) 与 `relay_sample_unavailable` (采不到计数) 不得被读成
 "relay 字节为 0". 跨端结论必须两端各自的 `relay_bytes_zero_own_half()` 都为真 (`§4.3` 的 join).
+
+#### daemon 半快照落在哪条响应里 (不新开传输)
+
+daemon 这一半**不另起通道**: 它作为终态 ok 信封里的 `evidence` 字段返回, 形状与本节的快照
+schema 完全一致 (`endpoint:"daemon"`). 三个终态各挂一处, 除此之外不挂:
+
+| 方向 / 终态 | 承载响应的位置 |
+| --- | --- |
+| 上传 (`put`) | `@file-end` 的应答 (提交成功与失败都算终态; 失败那次 `aborted:true`) |
+| 下载 (`get`) | `eof:true` 的那一帧 `@file-read` 的应答 |
+| 中止 | `@file-cancel` 的应答, 以及路径门禁拒绝时那条拒绝响应 (`aborted:true`) |
+
+非终态的应答 (`@put-file` / `@file-chunk` / 非 EOF 的 `@file-read`) **不带** `evidence`:
+半快照在括号还没闭合时没有意义, 提前发一份只会让人以为那就是最终结论.
+
+括号两端是**这条连接上被归类为 relay 的 path 的累计收发字节** (`conn.paths()` 的每个 `Path`:
+`remote_addr()` 判 direct/relay, `stats().udp_tx/udp_rx.bytes` 取字节). `before` 在 open 执行
+**前**取, `after` 在终态请求执行**后**取. 读不到就是四个 `null`, 绝不写 0, 具体三条:
+
+1. 连接上一条 path 都枚举不到 (读到空快照) → `null`;
+2. `before` 时在场的 relay path 在 `after` 时不见了 → `null` (`PathList` 只保留未关闭的 path,
+   关闭那条的字节已经不在快照里, 相减会得到一个假的零);
+3. 测试面显式给 `None` → `null`.
+
+**已知边界 (不假装解决)**: 一条 relay path 若在括号**内部**开了又关, 两端快照都看不到它, 这条
+检测不出来. 它需要订阅 `PathEvent::Closed` 并按连接累计关闭字节 (iroh 的 `PathList` 文档明说关闭
+的 path 不保留). 本版不做, 因此这里能主张的只是"括号两端可见的 relay 字节增量为 0",
+不是"这条连接上从未有字节经过 relay".
+
+#### join 工具与原因码
+
+`rdog bulk-path join <PATH>...` 读若干 `rdog.bulk-path.v1` 文件 (或目录里的 `*.json`), **只按
+`transfer_id` 配对**, 左右由每份快照自己的 `endpoint` 决定 (不看文件名、不看顺序 —— 按顺序配会在
+少给一个文件时把两份客户端快照当成两端). 输出 `rdog.bulk-path-join.v1`:
+
+```json
+{
+  "schema": "rdog.bulk-path-join.v1",
+  "transfer_id": "<string> | null",
+  "attempt_id": "<string> | null",
+  "status": "joined | unknown",
+  "reason": "<原因码> | null",
+  "client": { "endpoint": "client", "verdict": "...", "relay_bytes_zero_own_half": false,
+              "relay_sample_available": false, "path_class": "direct", "aborted": false,
+              "concurrency_suspected": null } | null,
+  "daemon": { ...同上, endpoint:"daemon" } | null,
+  "relay_bytes_zero": true | false | null
+}
+```
+
+`relay_bytes_zero` 是**唯一允许的跨端结论**, 只在 `status:"joined"` 时非 `null`: 两端
+`relay_bytes_zero_own_half()` 都为真是 `true`, 否则 `false`. 没组成结论时它是 `null` —— **不是
+`false`**, 否则"缺一半"会被读成"测到了非零". 退出码: `0` 每组都组成结论, `1` 至少一组没有结论,
+`2` 参数 / IO 错误.
+
+| 原因码 | 触发 |
+| --- | --- |
+| `bulk_path_endpoint_missing` | 同一 `transfer_id` 只有一端 (`client` 或 `daemon` 缺一) |
+| `bulk_path_endpoint_duplicated` | 同一 `transfer_id` 出现两份同 `endpoint` 的快照 |
+| `bulk_path_attempt_mismatch` | 两端的 `attempt_id` 不一致 |
+| `bulk_path_schema_mismatch` | `schema` 不是本版 / 缺键 / 计数与 `relay_sample_available` 互相矛盾 |
+| `bulk_path_concurrency_suspected` | 任一端 `concurrency_suspected:true` (§4.2: 该证据不得单独用于结论) |
+
+这些**不是**控制面稳定码, 不进 §2.2 的码表: 只有验收工具与人在读, 命名空间仍是 `bulk_path_*`.
+
+`attempt_id` 由客户端在 `@put-file` / `@get-file` 载荷里交给 daemon (§2.2 的可选字段); 缺省时
+daemon 按 `<transfer_id>#<该 id 被 open 的序号>` 派生. 派生的那个与客户端自选的值不会相等, 所以
+**两端都交身份之前 join 只会得到 `attempt_mismatch`** —— 那是实话, 不是缺陷.
 
 ### 4.4 正对照 (本规格最容易被做坏的地方)
 
@@ -570,9 +639,20 @@ relay 计数还没接线, 见 RAI-476):
 > 证明**, 只有回环 + 钉住读数.
 >
 > 跑批单 (`handoffs/rai367/positive-control-runsheet.md`) 是 RAI-367 当时的形态记录 (那时 lane
-> 不承载 bulk), 不再是当前行为的描述; 新的回环用例在 `src/control_iroh/bulk_tests.rs`. daemon 侧
-> relay 计数尚未接线, 所以快照里仍然只有客户端那一半; **拿不到正对照计数时, 门禁那个"零"不得
-> 用于任何结论**。
+> 不承载 bulk), 不再是当前行为的描述; 新的回环用例在
+> `src/control_iroh/bulk_tests.rs`.
+>
+> **daemon 侧的括号采样已接线 (RAI-476 步骤 3)**: `@file-end` / `eof:true` 的 `@file-read` /
+> `@file-cancel` 与门禁拒绝响应里带 `evidence` (形状与 §4.3 的 schema 一致, `endpoint:"daemon"`),
+> 括号两端的读数取 `conn.paths()` 上 relay path 的累计字节. 但**它只在回环 + 钉住读数上验过**:
+> 回环拓扑只有 direct, relay 读数由 `PathSampler::Script` 钉住喂进去, 真机上一次"确实有 relay 流量
+> 的括号"没有被执行过. 所以实况是 —— 仪表接上了, 正对照 (需要 RAI-366 的 relay 拓扑) 仍未跑:
+> **拿不到正对照读数时, 门禁那个"零"不得用于任何结论**.
+>
+> **两端 join 的工具已就绪** (`rdog bulk-path join`, §4.3), 但客户端驱动 `rdog control --put/--get`
+> 仍恒传 `NOT_PATH_AWARE` (`src/main.rs`), 它写出的客户端那半永远是 `path_class:"not_applicable"`
+> 且计数为 `null`; 于是跨端 `relay_bytes_zero` 在当前 CLI 路径上不可能为真. 这不是缺陷而是缺口:
+> 客户端要走到 iroh lane 才能产出可用的一半.
 
 ---
 
@@ -610,7 +690,7 @@ rdog control <TARGET> --get <REMOTE_PATH> --local-path <LOCAL_PATH> [--resume]
 | 4 | 新客户端驱动 (与 `src/control_invocation.rs` 同层) | 流式: 读一块 → 发一块 → 等应答 → 推进 offset, 不整文件驻留 |
 | 5 | `src/input.rs` + `src/main.rs` | 四个新 flag + 互斥 + 调用驱动 |
 | 6 | `src/config.rs` | `[bulk]` 段四个配置项 |
-| 7 | 验收工具 | 两端快照 join + §4.3 判定式 + §4.4 正对照 |
+| 7 | 验收工具 | 两端快照 join (`rdog bulk-path join` → `src/bulk_path.rs::join_inputs`) + §4.3 判定式 + §4.4 正对照 (未执行) |
 
 ---
 

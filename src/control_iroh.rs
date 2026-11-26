@@ -536,7 +536,26 @@ const PATH_SAMPLE_STEP: Duration = Duration::from_millis(50);
 enum PathSampler<'a> {
     Lane { conn: &'a Connection, routable: bool },
     #[cfg(test)]
-    Script(Mutex<Vec<PathClass>>),
+    Script {
+        readings: Mutex<Vec<PathClass>>,
+        /// 每次 `relay_read()` 取一个读数; `None` = 这一读"读不到" (用来钉住"未采样不是零")。
+        relay: Mutex<Vec<Option<RelayReading>>>,
+    },
+}
+
+/// 本端 iroh 连接上**被归类为 relay** 的那些 path 的累计收发字节 (§4.1/§4.2)。
+///
+/// `relay_paths` 是采样时在场的 relay path 标识。括号采样用它做一件必须做的事: `PathList` 只保留
+/// **未关闭**的 path, 一次在 `before` 时在场、`after` 前关掉的 relay path, 它的字节已经从快照里
+/// 消失 —— 那种读数是"少算了", 与前一次读数相减会得到一个假的零。所以在场集合对不上时整份读数作废
+/// (`None`), 不是拿剩下的 path 凑一个数。
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RelayReading {
+    tx: u64,
+    rx: u64,
+    /// 在场 relay path 的对端地址。用地址而不是 `PathId`, 因为地址是快照里能印出来给人看的、
+    /// 也是测试能构造的那个 (PathId 的构造函数不在公开 API 里)。
+    relay_paths: Vec<String>,
 }
 
 impl PathSampler<'_> {
@@ -560,7 +579,7 @@ impl PathSampler<'_> {
             }
             // 按顺序取读数; 用完最后一个就一直用它 (单读数的用例写一个元素即可)。
             #[cfg(test)]
-            Self::Script(readings) => {
+            Self::Script { readings, .. } => {
                 let mut readings = readings.lock().expect("path readings poisoned");
                 if readings.len() > 1 {
                     readings.remove(0)
@@ -568,6 +587,92 @@ impl PathSampler<'_> {
                     readings[0]
                 }
             }
+        }
+    }
+
+    /// 本端 relay 累计字节的**一次**读数 (§4.2 的括号端点)。
+    ///
+    /// `None` 是"读不到", 不是 0: 生产侧在读不到或在场集合对不上时给 `None` (见 `RelayReading`),
+    /// 测试侧靠 `Script` 显式钉 `None`。四个计数最终是 `Option<u64>`, 所以这条区分能一路带到
+    /// 快照与 JSON —— 中间任何一层把它当 0 处理, `relay_bytes_zero` 就会在"没接仪表"时成立。
+    fn relay_read(&self) -> Option<RelayReading> {
+        match self {
+            Self::Lane { conn, .. } => {
+                // `PathList` 是调用时刻的快照; 枚举本身不会失败, 失败的是"读不到任何 path"
+                // (连接刚关/还没选路), 那种情况没有可用的字节读数。
+                let paths = conn.paths();
+                let mut reading = RelayReading {
+                    tx: 0,
+                    rx: 0,
+                    relay_paths: Vec::new(),
+                };
+                let mut seen_any = false;
+                for path in paths.iter() {
+                    seen_any = true;
+                    if !path.is_relay() {
+                        continue;
+                    }
+                    let stats = path.stats();
+                    reading.tx += stats.udp_tx.bytes;
+                    reading.rx += stats.udp_rx.bytes;
+                    reading.relay_paths.push(path.remote_addr().to_string());
+                }
+                // 一条 path 都没有: 连接此刻什么都测不到, 不是"relay 上没有字节"。
+                seen_any.then_some(reading)
+            }
+            #[cfg(test)]
+            Self::Script { relay, .. } => {
+                let mut readings = relay.lock().expect("relay readings poisoned");
+                if readings.is_empty() {
+                    return None;
+                }
+                if readings.len() > 1 {
+                    readings.remove(0)
+                } else {
+                    readings[0].clone()
+                }
+            }
+        }
+    }
+
+    /// 此刻被选中的那条 path 的对端地址 —— 只在它是直连 (IP) 时给出。
+    ///
+    /// 证据里的 `direct_addr` 只回答"当时直连到哪个地址", 不参与任何判定; 读不到就是 `None`,
+    /// 不影响 `path_class` (那一格由门禁的采样决定)。
+    fn selected_direct_addr(&self) -> Option<String> {
+        match self {
+            Self::Lane { conn, .. } => conn
+                .paths()
+                .iter()
+                .find(|path| path.is_selected())
+                .map(|path| path.remote_addr().clone())
+                .filter(|address| matches!(address, TransportAddr::Ip(_)))
+                .map(|address| address.to_string()),
+            #[cfg(test)]
+            Self::Script { .. } => None,
+        }
+    }
+}
+
+#[cfg(test)]
+impl PathSampler<'static> {
+    /// 同时钉住路径读数与 relay 读数: 括号的两端各取走一个 `relay` 元素。
+    fn script_with_relay(readings: Vec<PathClass>, relay: Vec<Option<RelayReading>>) -> Self {
+        Self::Script {
+            readings: Mutex::new(readings),
+            relay: Mutex::new(relay),
+        }
+    }
+}
+
+#[cfg(test)]
+impl RelayReading {
+    /// 一次 relay 累计读数 (不含具体 relay path 地址): 括号相减的用例只需要这两个数。
+    fn at(tx: u64, rx: u64) -> Self {
+        Self {
+            tx,
+            rx,
+            relay_paths: Vec::new(),
         }
     }
 }
@@ -645,22 +750,44 @@ fn gate_bulk(
     gate: &mut BulkPathGate,
     sampler: &PathSampler,
     command: &ControlCommand,
-) -> Option<&'static str> {
+) -> GateVerdict {
     use crate::control_core::FileTransferVerb;
 
-    let (step, transfer_id) = match crate::control_core::file_transfer_verb(command)? {
-        FileTransferVerb::PutFile(payload) | FileTransferVerb::GetFile(payload) => {
+    let (step, transfer_id) = match crate::control_core::file_transfer_verb(command) {
+        Some(FileTransferVerb::PutFile(payload))
+        | Some(FileTransferVerb::GetFile(payload)) => {
             (BulkStep::Open, payload_transfer_id(payload))
         }
-        FileTransferVerb::Chunk(payload)
-        | FileTransferVerb::End(payload)
-        | FileTransferVerb::Read(payload) => (BulkStep::Continue, payload_transfer_id(payload)),
-        FileTransferVerb::List | FileTransferVerb::Cancel(_) => return None,
+        Some(
+            FileTransferVerb::Chunk(payload)
+            | FileTransferVerb::End(payload)
+            | FileTransferVerb::Read(payload),
+        ) => (BulkStep::Continue, payload_transfer_id(payload)),
+        // 这两个动词不搬字节 (也不进括号), `None` 的动词同理由执行器兜。
+        _ => return GateVerdict::Ungated,
     };
-    match gate.admit(step, transfer_id.as_deref(), sampler.sample()) {
-        BulkDecision::Allowed => None,
-        BulkDecision::Refused(code) => Some(code),
+    let observed = sampler.sample();
+    let decision = gate.admit(step, transfer_id.as_deref(), observed);
+    GateVerdict::Gated {
+        observed,
+        refusal: match decision {
+            BulkDecision::Allowed => None,
+            BulkDecision::Refused(code) => Some(code),
+        },
     }
+}
+
+/// 门禁对这条请求的结论, 连同它读到的那次采样。
+///
+/// 采样要**一次**、两处用: 门禁拿它判, 证据 (daemon 半快照) 拿它记 `path_class`。各读一次
+/// 会留下"拒了但同时记成 direct"这种自相矛盾的可能。
+enum GateVerdict {
+    Gated {
+        observed: PathClass,
+        refusal: Option<&'static str>,
+    },
+    /// 不搬字节 / 不是 bulk 动词: 既不过门禁, 也不进证据。
+    Ungated,
 }
 
 /// 载荷里的 `transfer_id` —— 一次尝试的身份。
@@ -673,6 +800,378 @@ fn payload_transfer_id(payload: &str) -> Option<String> {
         .get("transfer_id")?
         .as_str()
         .map(str::to_owned)
+}
+
+/// daemon 一侧一次 bulk 尝试的括号采样与字节记账 (§4.2/§4.3)。
+///
+/// 括号的两端是这条连接上的 relay 累计量: open **执行前**取 `before`, 终态请求**执行后**取
+/// `after`。中间每一步只累加"被 daemon 确认过"的字节 —— 记账在发送之前会把从未落盘的字节
+/// 算进去, 两端 join 就对不上账 (§4.3)。
+struct AttemptEvidence {
+    /// 两端快照对齐用的身份 (§4.3): 客户端在 open 载荷里交来的那个, 缺省时由 daemon 派生。
+    attempt_id: String,
+    direction: &'static str,
+    relay_before: Option<RelayReading>,
+    /// 每次边界采样后的类别, **最后一次赢了**: 门禁只在全 direct 时放行, 所以能走到终态的
+    /// 尝试这一格就是 `direct`; 中途掉 relay 的那次会被拒, 快照按 `aborted` 记。
+    path_class: PathClass,
+    direct_addr: Option<String>,
+    bulk_bytes: u64,
+    wire_bytes: u64,
+    chunks: u64,
+}
+
+/// 本端 (daemon) 的 bulk 证据表, 键是 `transfer_id`。
+///
+/// 与 `BulkPathGate` 分开: 门禁的问题是"这条请求能不能过", 证据的问题是"这次尝试搬了多少字节、
+/// 两端对不对得上"。合成一个结构会让"拒了"同时意味着"证据没了" —— 而拒绝本身正是最该留证据的时刻。
+struct DaemonPathEvidence {
+    capability: PathCapability,
+    attempts: HashMap<String, AttemptEvidence>,
+    /// 每个 `transfer_id` 被 open 过几次 —— 只用来派生缺省的 `attempt_id` (§2.2)。
+    opens: HashMap<String, u64>,
+}
+
+impl DaemonPathEvidence {
+    fn new(capability: PathCapability) -> Self {
+        Self {
+            capability,
+            attempts: HashMap::new(),
+            opens: HashMap::new(),
+        }
+    }
+
+    /// open 执行**前**的基线。同 id 重开是一次新尝试, 旧基线必须被覆盖 (§4.2)。
+    fn begin(
+        &mut self,
+        transfer_id: &str,
+        attempt_id: Option<&str>,
+        direction: &'static str,
+        sampler: &PathSampler,
+    ) {
+        let seq = self.opens.entry(transfer_id.to_owned()).or_insert(0);
+        *seq += 1;
+        let attempt_id = attempt_id
+            .map(str::to_owned)
+            .unwrap_or_else(|| format!("{transfer_id}#{seq}"));
+        self.attempts.insert(
+            transfer_id.to_owned(),
+            AttemptEvidence {
+                attempt_id,
+                direction,
+                relay_before: sampler.relay_read(),
+                path_class: PathClass::Unknown,
+                direct_addr: None,
+                bulk_bytes: 0,
+                wire_bytes: 0,
+                chunks: 0,
+            },
+        );
+    }
+
+    /// 记下这一次边界的采样结果。
+    fn observe(&mut self, transfer_id: &str, observed: PathClass, sampler: &PathSampler) {
+        let Some(attempt) = self.attempts.get_mut(transfer_id) else {
+            return;
+        };
+        attempt.path_class = observed;
+        if observed == PathClass::Direct && attempt.direct_addr.is_none() {
+            attempt.direct_addr = sampler.selected_direct_addr();
+        }
+    }
+
+    /// 记一块**已被 daemon 确认**的字节。
+    fn note_confirmed(&mut self, transfer_id: &str, bulk: u64, wire: u64) {
+        if let Some(attempt) = self.attempts.get_mut(transfer_id) {
+            attempt.bulk_bytes += bulk;
+            attempt.wire_bytes += wire;
+            attempt.chunks += 1;
+        }
+    }
+
+    /// 终态: 取 `after`、给这份尝试收尾, 返回要挂进响应信的 `evidence` 子对象。
+    ///
+    /// `aborted` 只由"这条尝试没有成功走完"决定, 不由调用方感觉决定。
+    fn finalize(
+        &mut self,
+        transfer_id: &str,
+        sampler: &PathSampler,
+        aborted: bool,
+    ) -> Option<serde_json::Value> {
+        let attempt = self.attempts.remove(transfer_id)?;
+        let after = sampler.relay_read();
+        // 在 `before` 时在场的 relay path, `after` 时必须还在: 少了一条就说明它中途关了,
+        // 它的关闭字节不在快照里 —— 相减会得到一个假的零。宁可交白卷 (§4.3 的 `null`)。
+        let readable = match (&attempt.relay_before, &after) {
+            (Some(before), Some(after)) => before
+                .relay_paths
+                .iter()
+                .all(|id| after.relay_paths.contains(id)),
+            _ => false,
+        };
+        let (tx_before, tx_after, rx_before, rx_after) = if readable {
+            match (&attempt.relay_before, &after) {
+                (Some(before), Some(after)) => (
+                    Some(before.tx),
+                    Some(after.tx),
+                    Some(before.rx),
+                    Some(after.rx),
+                ),
+                _ => (None, None, None, None),
+            }
+        } else {
+            (None, None, None, None)
+        };
+        let snapshot = crate::bulk_path::BulkPathSnapshot {
+            attempt_id: attempt.attempt_id,
+            transfer_id: transfer_id.to_owned(),
+            direction: attempt.direction.to_owned(),
+            capability: self.capability,
+            path_class: attempt.path_class,
+            direct_addr: attempt.direct_addr,
+            bulk_bytes: attempt.bulk_bytes,
+            wire_bytes: attempt.wire_bytes,
+            chunks: attempt.chunks,
+            // daemon 也不检测同连接上的并发流量: `null`, 不是 `false` (§4.3)。
+            concurrency_suspected: None,
+            endpoint: "daemon".to_owned(),
+            relay_tx_before: tx_before,
+            relay_tx_after: tx_after,
+            relay_rx_before: rx_before,
+            relay_rx_after: rx_after,
+            aborted,
+        };
+        Some(snapshot.to_json())
+    }
+}
+
+/// 载荷里客户端交来的 `attempt_id` (§2.2 的可选字段)。
+///
+/// 不合法 / 缺省都给 `None`: daemon 随后按 `transfer_id#序号` 派生一个。这里不替执行器判载荷。
+fn payload_attempt_id(payload: &str) -> Option<String> {
+    serde_json::from_str::<serde_json::Value>(payload)
+        .ok()?
+        .get("attempt_id")?
+        .as_str()
+        .map(str::to_owned)
+}
+
+/// base64 串解码后的字节数 —— 不真解码, 只按长度与填充算。
+///
+/// `bulk_bytes` 记的是载荷字节, `wire_bytes` 记的是压上控制行的 base64 字节 (§4.3), 两者都要。
+fn decoded_base64_len(encoded: &str) -> u64 {
+    let padding = encoded
+        .as_bytes()
+        .iter()
+        .rev()
+        .take_while(|byte| **byte == b'=')
+        .count() as u64;
+    (encoded.len() as u64 / 4).saturating_mul(3).saturating_sub(padding)
+}
+
+/// 响应里的载荷对象: 带 id 的信封取 `value`, 错误信与裸对象取它自己。
+fn response_payload(
+    outcome: &crate::control_frames::ControlExecutionOutcome,
+) -> Option<serde_json::Value> {
+    use crate::control_frames::ControlFrame;
+
+    let [ControlFrame::ResponseLine(line)] = outcome.outbound_frames.as_slice() else {
+        return None;
+    };
+    let value: serde_json::Value = serde_json::from_str(line.strip_prefix("@response ")?).ok()?;
+    match value.get("value") {
+        Some(inner @ serde_json::Value::Object(_)) => Some(inner.clone()),
+        _ => match value {
+            serde_json::Value::Object(_) => Some(value),
+            _ => None,
+        },
+    }
+}
+
+/// 一条 bulk 请求的完整处理: 门禁 → 执行 → 记账 → 终态时把 daemon 半快照挂进响应。
+///
+/// 半快照**不新开传输**: 它落在已有的终态响应信封里 (§4.3)。上传的终态是 `@file-end`
+/// (成功或失败), 下载的终态是 `eof:true` 的那一帧 `@file-read`, 中止的终态是 `@file-cancel`
+/// 与门禁拒绝。
+fn serve_bulk_request(
+    transport: &mut ControlTransport,
+    request_id: Option<u64>,
+    command: &ControlCommand,
+    sampler: &PathSampler,
+    gate: &mut BulkPathGate,
+    evidence: &mut DaemonPathEvidence,
+) -> io::Result<()> {
+    use crate::control_core::FileTransferVerb;
+
+    let verb = crate::control_core::file_transfer_verb(command);
+    let transfer_id = verb
+        .as_ref()
+        .and_then(verb_payload)
+        .and_then(payload_transfer_id);
+
+    // 基线必须先于执行器: open 一旦建会话/碰盘, 这次尝试就已经开始了 (§4.2)。
+    if let (Some(verb), Some(id)) = (verb.as_ref(), transfer_id.as_deref()) {
+        match verb {
+            FileTransferVerb::PutFile(payload) => {
+                evidence.begin(id, payload_attempt_id(payload).as_deref(), "put", sampler);
+            }
+            FileTransferVerb::GetFile(payload) => {
+                evidence.begin(id, payload_attempt_id(payload).as_deref(), "get", sampler);
+            }
+            _ => {}
+        }
+    }
+
+    match gate_bulk(gate, sampler, command) {
+        GateVerdict::Gated {
+            observed,
+            refusal: None,
+        } => {
+            if let Some(id) = transfer_id.as_deref() {
+                evidence.observe(id, observed, sampler);
+            }
+        }
+        GateVerdict::Gated {
+            observed,
+            refusal: Some(code),
+        } => {
+            log::info!("iroh bulk refused code={code}");
+            let mut outcome = crate::control_frames::ControlExecutionOutcome::from_response_line(
+                crate::control_core::render_protocol_error_response(
+                    request_id,
+                    LANE_REFUSED_CODE,
+                    code,
+                ),
+            );
+            if let Some(id) = transfer_id.as_deref() {
+                evidence.observe(id, observed, sampler);
+                // 被拒的尝试同样要留证据: 这次没搬字节, 但"那一刻读到的是 relay / 读不出"
+                // 正是结论本身。按 `aborted` 记 —— 它不是结论 (§4.3)。
+                if let Some(evidence_json) = evidence.finalize(id, sampler, true) {
+                    outcome = splice_evidence(outcome, evidence_json);
+                }
+            }
+            ControlPeerSession::new("iroh-admitted").dispatch_outcome(outcome, transport)?;
+            return Ok(());
+        }
+        GateVerdict::Ungated => {}
+    }
+
+    let Some(outcome) = crate::control_core::execute_file_transfer_request(request_id, command)
+    else {
+        return refuse_frame(transport, request_id, LANE_REFUSED_CODE, LANE_REFUSED);
+    };
+
+    let payload = response_payload(&outcome);
+    let failed = payload
+        .as_ref()
+        .map(|value| value.get("error").is_some() || value.get("code").is_some())
+        .unwrap_or(true);
+
+    let mut terminal: Option<serde_json::Value> = None;
+    if let (Some(verb), Some(id)) = (verb.as_ref(), transfer_id.as_deref()) {
+        match verb {
+            // 上传: 一块被 daemon 确认后才入账 —— 记账在发送之前会把从未落盘的字节算进去。
+            FileTransferVerb::Chunk(payload) => {
+                if !failed {
+                    let data = serde_json::from_str::<serde_json::Value>(payload)
+                        .ok()
+                        .and_then(|value| {
+                            value.get("data").and_then(serde_json::Value::as_str).map(str::to_owned)
+                        });
+                    if let Some(data) = data {
+                        evidence.note_confirmed(id, decoded_base64_len(&data), data.len() as u64);
+                    }
+                }
+            }
+            // 下载: 字节由 daemon 发出, 应答里带的就是它这次真送出去的量。
+            FileTransferVerb::Read(_) => {
+                if !failed {
+                    let length = payload
+                        .as_ref()
+                        .and_then(|value| value.get("length"))
+                        .and_then(serde_json::Value::as_u64);
+                    let data = payload
+                        .as_ref()
+                        .and_then(|value| value.get("data"))
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_owned);
+                    if let (Some(length), Some(data)) = (length, data) {
+                        evidence.note_confirmed(id, length, data.len() as u64);
+                    }
+                    let eof = payload
+                        .as_ref()
+                        .and_then(|value| value.get("eof"))
+                        .and_then(serde_json::Value::as_bool)
+                        .unwrap_or(false);
+                    if eof {
+                        terminal = evidence.finalize(id, sampler, false);
+                    }
+                }
+            }
+            FileTransferVerb::End(_) => {
+                terminal = evidence.finalize(id, sampler, failed);
+            }
+            FileTransferVerb::Cancel(_) => {
+                terminal = evidence.finalize(id, sampler, true);
+            }
+            _ => {}
+        }
+    }
+
+    let outcome = match terminal {
+        Some(evidence_json) => splice_evidence(outcome, evidence_json),
+        None => outcome,
+    };
+    ControlPeerSession::new("iroh-admitted").dispatch_outcome(outcome, transport)?;
+    Ok(())
+}
+
+/// 动词的请求载荷 (不含 `@file-list`, 它没有载荷)。
+fn verb_payload<'a>(verb: &crate::control_core::FileTransferVerb<'a>) -> Option<&'a str> {
+    use crate::control_core::FileTransferVerb;
+
+    match verb {
+        FileTransferVerb::PutFile(payload)
+        | FileTransferVerb::GetFile(payload)
+        | FileTransferVerb::Chunk(payload)
+        | FileTransferVerb::End(payload)
+        | FileTransferVerb::Read(payload)
+        | FileTransferVerb::Cancel(payload) => Some(payload),
+        FileTransferVerb::List => None,
+    }
+}
+
+/// 把 `evidence` 挂进这个 outcome 唯一那条 `@response` 的对象里。
+///
+/// 不改传输、不改协议: daemon 半快照就落在已有的终态响应信封里 (§4.3)。解析不出对象时原样返回 ——
+/// 证据是旁路产物, 不该让一条已经成立的响应因为"我加不上字段"而变成失败; 但也不假装挂上了。
+fn splice_evidence(
+    outcome: crate::control_frames::ControlExecutionOutcome,
+    evidence: serde_json::Value,
+) -> crate::control_frames::ControlExecutionOutcome {
+    use crate::control_frames::{ControlExecutionOutcome, ControlFrame};
+
+    let [ControlFrame::ResponseLine(line)] = outcome.outbound_frames.as_slice() else {
+        return outcome;
+    };
+    let Some(body) = line.strip_prefix("@response ") else {
+        return outcome;
+    };
+    let Ok(mut value) = serde_json::from_str::<serde_json::Value>(body) else {
+        return outcome;
+    };
+    // 带 id 的响应是 `{"id":N,"value":{...}}`: 载荷在 `value` 里。错误信是裸对象, 载荷就是它自己。
+    let target = match value.get_mut("value") {
+        Some(serde_json::Value::Object(payload)) => payload,
+        Some(_) => return outcome,
+        None => match &mut value {
+            serde_json::Value::Object(payload) => payload,
+            _ => return outcome,
+        },
+    };
+    target.insert("evidence".to_owned(), evidence);
+    ControlExecutionOutcome::from_response_line(format!("@response {value}"))
 }
 
 fn certificates(path: &Path) -> io::Result<Vec<rustls::pki_types::CertificateDer<'static>>> {
@@ -1759,6 +2258,7 @@ fn serve_admitted(
     sampler: &PathSampler,
     gate: &mut BulkPathGate,
 ) -> io::Result<()> {
+    let mut evidence = DaemonPathEvidence::new(gate.capability);
     transport.set_read_timeout(Some(HANDSHAKE_TIMEOUT))?;
     log::info!("iroh admitted lane reading the handshake");
     let Some(first) = transport.read_message()? else {
@@ -1816,7 +2316,15 @@ fn serve_admitted(
     }
     transport.set_read_timeout(None)?;
     log::info!("iroh session admitted peer={peer} path={path}");
-    let result = serve_lane(&mut transport, peer, &lease, &admission, sampler, gate);
+    let result = serve_lane(
+        &mut transport,
+        peer,
+        &lease,
+        &admission,
+        sampler,
+        gate,
+        &mut evidence,
+    );
     result.and(transport.close())
 }
 
@@ -1939,6 +2447,7 @@ fn serve_lane(
     admission: &Arc<Mutex<admission::Admission>>,
     sampler: &PathSampler,
     gate: &mut BulkPathGate,
+    evidence: &mut DaemonPathEvidence,
 ) -> io::Result<()> {
     let subject = peer.to_string();
     loop {
@@ -2181,22 +2690,14 @@ fn serve_lane(
                     refuse_frame(transport, request.request_id, code as i32, reason)?;
                     continue;
                 }
-                if let Some(code) = gate_bulk(gate, sampler, &other) {
-                    log::info!("iroh bulk refused code={code} peer={peer}");
-                    refuse_frame(transport, request.request_id, LANE_REFUSED_CODE, code)?;
-                    continue;
-                }
-                // 谓词与执行入口共用 `control_core::file_transfer_verb`, 所以这里必然是
-                // `Some`; 仍不 `expect` —— 这条分支跑在 spawn_blocking 里, panic 会直接
-                // 断掉连接, 而"看起来不可能"的分支正是最值得留一条诚实出口的地方。
-                let Some(outcome) = crate::control_core::execute_file_transfer_request(
+                serve_bulk_request(
+                    transport,
                     request.request_id,
                     &other,
-                ) else {
-                    refuse_frame(transport, request.request_id, LANE_REFUSED_CODE, LANE_REFUSED)?;
-                    continue;
-                };
-                ControlPeerSession::new("iroh-admitted").dispatch_outcome(outcome, transport)?;
+                    sampler,
+                    gate,
+                    evidence,
+                )?;
             }
             _ => refuse_frame(transport, None, LANE_REFUSED_CODE, LANE_REFUSED)?,
         }

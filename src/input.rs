@@ -350,6 +350,13 @@ pub enum Command {
         host: Vec<String>,
     },
 
+    /// bulk 直连证据 (`rdog.bulk-path.*`) 的验收工具
+    #[clap(alias = "bulk")]
+    BulkPath {
+        #[clap(subcommand)]
+        command: BulkPathCommand,
+    },
+
     /// Structured diff of two AxSnapshot JSON files
     AxDiff {
         /// Path to the "before" AxSnapshot JSON
@@ -390,6 +397,20 @@ pub struct RecordCommandShared {
     pub entry_point: Vec<String>,
     /// target / host / port 位置参数, 跟 `Command::Control` 同源。
     pub host: Vec<String>,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum BulkPathCommand {
+    /// 按 `transfer_id` 把两端快照 join 成一份判读 (`rdog.bulk-path.v1` → `rdog.bulk-path-join.v1`)
+    ///
+    /// 只按 `transfer_id` 配对, 左右由每份快照自己的 `endpoint` 决定. 缺一端 / `attempt_id`
+    /// 不一致 / schema 不符一律给 `unknown` + 原因码, **绝不拿一端的数替另一端填**
+    /// (specs/rdog-bulk-direct-only-spec.md §4.3).
+    Join {
+        /// 快照文件或目录 (目录里取 `*.json`), 可给多个
+        #[clap(value_name = "PATH", required = true, num_args = 1..)]
+        inputs: Vec<PathBuf>,
+    },
 }
 
 #[derive(Subcommand, Debug)]
