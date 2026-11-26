@@ -24,3 +24,22 @@ pub(crate) fn cwd_test_guard() -> MutexGuard<'static, ()> {
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
+
+/// 串行化"真的启动 shell 子进程"的用例。
+///
+/// 2026-11-26 实测 (RAI-429): windows runner 上 `build_shell_command("powershell.exe", …)`
+/// 偶发宿主级失败 —— PowerShell 起来了但托管运行时装载不成功, stderr 为
+/// `Internal Windows PowerShell error ... failed with error 8009001d`。被测对象是 builder
+/// 的建台标志, 不是 PowerShell 自己能不能起来, 所以两件事一起做: 让"启动 shell 的用例"
+/// 互斥 (降低同时涌入的 console-less 子进程数), 再对**启动失败**做有界重试。
+///
+/// 与 `cwd_test_guard` 分开是刻意的: 那条锁保护的是 cwd 语义, 持锁时间短得多,
+/// 混用会把无关用例也拖成串行。
+static SHELL_SPAWN_LOCK: Mutex<()> = Mutex::new(());
+
+/// 取 shell 子进程串行锁。
+pub(crate) fn shell_spawn_guard() -> MutexGuard<'static, ()> {
+    SHELL_SPAWN_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
