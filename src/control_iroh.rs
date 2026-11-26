@@ -553,8 +553,12 @@ enum PathSampler<'a> {
 struct RelayReading {
     tx: u64,
     rx: u64,
-    /// 在场 relay path 的对端地址。用地址而不是 `PathId`, 因为地址是快照里能印出来给人看的、
-    /// 也是测试能构造的那个 (PathId 的构造函数不在公开 API 里)。
+    /// 在场 relay path 的标识, 形如 `PathId(3)@relay:https://relay.example:443/`。
+    ///
+    /// **唯一性来自 `PathId`, 可读性来自地址**。只用地址是不够的: relay path 关闭后以同一
+    /// `RelayUrl` 重建是 iroh 的正常事件, 新 path 是新 `PathId`、计数从 0 起, 而地址字符串一模一样 ——
+    /// 只看地址会把"换了条 path"读成"同一条 path 还在", 于是 `before > after` 那两个数自己打架,
+    /// 相减却得到一个漂亮的零。
     relay_paths: Vec<String>,
 }
 
@@ -615,7 +619,9 @@ impl PathSampler<'_> {
                     let stats = path.stats();
                     reading.tx += stats.udp_tx.bytes;
                     reading.rx += stats.udp_rx.bytes;
-                    reading.relay_paths.push(path.remote_addr().to_string());
+                    reading
+                        .relay_paths
+                        .push(format!("{:?}@{}", path.id(), path.remote_addr()));
                 }
                 // 一条 path 都没有: 连接此刻什么都测不到, 不是"relay 上没有字节"。
                 seen_any.then_some(reading)

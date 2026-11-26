@@ -198,12 +198,17 @@ impl BulkPathSnapshot {
     /// 本端的 relay 字节归属 = `after - before` (括号采样, §4.2)。
     ///
     /// 任一端计数缺失就是 `None` —— "不知道", 不是 0。
+    ///
+    /// **用 `checked_sub` 而不是 `saturating_sub`**: 计数变小说明括号里那条 path 被换掉了
+    /// (relay path 关闭后以同一 `RelayUrl` 重建是 iroh 的正常事件 —— 新 `PathId`、计数从 0 起)。
+    /// `1000 → 100` 相减得到的是一个漂亮的 0, 而那个 0 会被读成"测到了零": 这正是"看起来更安全"
+    /// 的函数把矛盾藏起来的样子。计数倒退 = 这份读数作废, 不是 0。
     pub(crate) fn relay_tx_delta(&self) -> Option<u64> {
-        Some(self.relay_tx_after?.saturating_sub(self.relay_tx_before?))
+        self.relay_tx_after?.checked_sub(self.relay_tx_before?)
     }
 
     pub(crate) fn relay_rx_delta(&self) -> Option<u64> {
-        Some(self.relay_rx_after?.saturating_sub(self.relay_rx_before?))
+        self.relay_rx_after?.checked_sub(self.relay_rx_before?)
     }
 
     /// 本次尝试到底搬没搬字节。
@@ -436,10 +441,9 @@ impl HalfReport {
     }
 }
 
-/// 同一个 `transfer_id` 上两端快照的合订本 (`rdog.bulk-path-join.v1`)。
+/// 同一个 `(transfer_id, attempt_id)` 上两端快照的合订本 (`rdog.bulk-path-join.v1`)。
 ///
-/// `relay_bytes_zero` 是**唯一允许的跨端结论**, 且只在 `status == "joined"` 时非 `null`:
-/// `relay_bytes_zero` 是**三态**, 不是布尔:
+/// `relay_bytes_zero` 是**唯一允许的跨端结论**, 而且是**三态**, 不是布尔:
 ///
 /// | 值 | 什么时候 | 读法 |
 /// | --- | --- | --- |
@@ -489,23 +493,38 @@ impl JoinReport {
     }
 }
 
-/// 把一组 `rdog.bulk-path.v1` 快照按 `transfer_id` 配对。
+/// 把一组 `rdog.bulk-path.v1` 快照按 `(transfer_id, attempt_id)` 配对。
 ///
-/// 配对**只按 `transfer_id`**: 左右由每一半自己的 `endpoint` 决定, 不看文件顺序、不看文件名 ——
-/// 按顺序配会在"某人少给一个文件"时把两份客户端快照当成两端, 而那种错配恰好能凑出一个
-/// 看起来完整的结论。
+/// 一次尝试的身份是这两者合起来: `transfer_id` 由客户端自选且可复用, 同一个 id 上的第二次尝试
+/// (续传重开) 必须与第一次分开算, 否则两轮的快照会在一组里互相冒充"对端"。
+///
+/// 左右由每一半自己的 `endpoint` 决定, 不看文件顺序、不看文件名 —— 按顺序配会在"某人少给一个
+/// 文件"时把两份客户端快照当成两端, 而那种错配恰好能凑出一个看起来完整的结论。
 ///
 /// 任一端缺失、`attempt_id` 不一致、schema 不符、两端自称同一 `endpoint`, 都写 `unknown` + 原因码;
 /// **绝不拿一端的数替另一端填** —— 只有 `status == "joined"` 的报告里才会出现跨端结论。
 pub(crate) fn join_inputs(values: &[Value]) -> Vec<JoinReport> {
     let mut reports: Vec<JoinReport> = Vec::new();
-    let mut groups: Vec<(String, Vec<BulkPathSnapshot>)> = Vec::new();
+    // 分组键是 **(transfer_id, attempt_id)**, 不是 transfer_id 单独一个: 同一个 id 上的两次尝试
+    // (续传重开、同 id 幂等重试) 是两次尝试, 不是"重复端"。只按 id 分组会把它们塞进一组, 报
+    // `bulk_path_endpoint_duplicated` 并整组作废 —— 连那次完整尝试也读不出来, 而原因码还指错了方向。
+    // 外层按 `transfer_id` 分桶, 桶内再按 `attempt_id` 分: 光按 `(transfer_id, attempt_id)` 分组
+    // 会让"两端交了不同的 attempt_id"退化成两条 `endpoint_missing`, 而真因是"这两半对不上号";
+    // 分桶以后这条仍能被认出来 (`attempt_mismatch`), 同时同 id 的两次完整尝试各成一条报告。
+    let mut buckets: Vec<(String, Vec<(String, Vec<BulkPathSnapshot>)>)> = Vec::new();
     for value in values {
         match BulkPathSnapshot::from_json(value) {
             Ok(snapshot) => {
-                match groups.iter_mut().find(|(id, _)| *id == snapshot.transfer_id) {
+                let bucket = match buckets.iter_mut().find(|(id, _)| *id == snapshot.transfer_id) {
+                    Some((_, bucket)) => bucket,
+                    None => {
+                        buckets.push((snapshot.transfer_id.clone(), Vec::new()));
+                        &mut buckets.last_mut().expect("just pushed").1
+                    }
+                };
+                match bucket.iter_mut().find(|(attempt, _)| *attempt == snapshot.attempt_id) {
                     Some((_, halves)) => halves.push(snapshot),
-                    None => groups.push((snapshot.transfer_id.clone(), vec![snapshot])),
+                    None => bucket.push((snapshot.attempt_id.clone(), vec![snapshot])),
                 }
             }
             Err(reason) => {
@@ -523,15 +542,53 @@ pub(crate) fn join_inputs(values: &[Value]) -> Vec<JoinReport> {
         }
     }
 
-    for (transfer_id, halves) in groups {
-        reports.push(join_group(transfer_id, halves));
+    for (transfer_id, attempts) in buckets {
+        // 一次尝试被交成了两个 `attempt_id` 各一半: 这不是"缺一端", 是"两端对不上号"。
+        if let Some((client, daemon)) = split_attempt(&attempts) {
+            let mut report =
+                JoinReport::unknown(Some(transfer_id), BULK_PATH_ATTEMPT_MISMATCH);
+            report.client = Some(HalfReport::of(&client));
+            report.daemon = Some(HalfReport::of(&daemon));
+            reports.push(report);
+            continue;
+        }
+        for (_, halves) in attempts {
+            reports.push(join_group(transfer_id.clone(), halves));
+        }
     }
     reports
 }
 
-fn join_group(transfer_id: String, halves: Vec<BulkPathSnapshot>) -> JoinReport {
+/// 同一个 `transfer_id` 下**恰好两组各只有一端、且两端互补** = 一次尝试被交成了两个 `attempt_id`。
+///
+/// 只认这一种形状: 组数更多 (两次完整尝试 + 一次半截) 时按组各报各的, 不去猜哪两半本该是一对。
+fn split_attempt(
+    attempts: &[(String, Vec<BulkPathSnapshot>)],
+) -> Option<(BulkPathSnapshot, BulkPathSnapshot)> {
+    if attempts.len() != 2 {
+        return None;
+    }
     let mut client = None;
     let mut daemon = None;
+    for (_, halves) in attempts {
+        let [half] = halves.as_slice() else {
+            return None;
+        };
+        let slot = if half.endpoint == "client" {
+            &mut client
+        } else {
+            &mut daemon
+        };
+        if slot.replace(half.clone()).is_some() {
+            return None;
+        }
+    }
+    Some((client?, daemon?))
+}
+
+fn join_group(transfer_id: String, halves: Vec<BulkPathSnapshot>) -> JoinReport {
+    let mut client: Option<BulkPathSnapshot> = None;
+    let mut daemon: Option<BulkPathSnapshot> = None;
     for half in halves {
         let slot = if half.endpoint == "client" {
             &mut client
@@ -539,7 +596,22 @@ fn join_group(transfer_id: String, halves: Vec<BulkPathSnapshot>) -> JoinReport 
             &mut daemon
         };
         if slot.is_some() {
-            return JoinReport::unknown(Some(transfer_id), BULK_PATH_ENDPOINT_DUPLICATED);
+            // 照实列出两半 (与 missing / attempt_mismatch 一致): 它们确实存在, 只是配不成对。
+            // 丢成 `null` 会让"为什么没配上"在证据里没有着落。
+            let existing = slot.as_ref().expect("just checked");
+            let mut report =
+                JoinReport::unknown(Some(transfer_id), BULK_PATH_ENDPOINT_DUPLICATED);
+            match existing.endpoint.as_str() {
+                "client" => {
+                    report.client = Some(HalfReport::of(existing));
+                    report.daemon = Some(HalfReport::of(&half));
+                }
+                _ => {
+                    report.daemon = Some(HalfReport::of(existing));
+                    report.client = Some(HalfReport::of(&half));
+                }
+            }
+            return report;
         }
         *slot = Some(half);
     }
@@ -803,6 +875,25 @@ mod tests {
     }
 
     #[test]
+    fn a_counter_that_went_backwards_voids_the_reading() {
+        // relay path 关闭后又以同一 RelayUrl 重建: 新 path 计数从 0 起, 于是 after < before。
+        // `saturating_sub` 会把 1000 → 100 算成一个漂亮的 0, verdict 就成了"测得零" —— 那是
+        // 把矛盾藏起来。倒退 = 这份读数作废。
+        let mut value = snapshot(PathCapability::PATH_AWARE_CHECKED_PER_CHUNK, PathClass::Direct);
+        value.relay_tx_before = Some(1000);
+        value.relay_tx_after = Some(100);
+        assert_eq!(value.relay_tx_delta(), None);
+        assert_eq!(value.verdict(), "relay_sample_unavailable");
+        assert!(!value.relay_bytes_zero_own_half());
+        assert_eq!(value.to_json()["relay_sample_available"], false);
+
+        // 单调增长照旧给正确增量 —— 别把"防止倒退"做成"永远不可用"。
+        value.relay_tx_after = Some(1060);
+        assert_eq!(value.relay_tx_delta(), Some(60));
+        assert_eq!(value.verdict(), "relay_bytes_nonzero");
+    }
+
+    #[test]
     fn a_transfer_that_moved_nothing_is_not_evidence() {
         // 一次"续传时半成品已经完整"的尝试一个字节都不用发 —— 它的 relay 计数当然是零, 而这
         // 与"bulk 没走 relay"在数值上完全一样。这条不依赖任何失败路径, 是最纯的空真。
@@ -1055,7 +1146,8 @@ mod tests {
 
     #[test]
     fn two_halves_claiming_the_same_endpoint_are_not_a_pair() {
-        // 两份都是 client: 左右配不上, 不能"按顺序"凑成两端。
+        // 同一 (transfer_id, attempt_id) 上两份都是 client: 左右配不上, 不能"按顺序"凑成两端。
+        // 但两半都要照实列出来 —— 它们确实存在, 只是配不成对。
         let reports = join_inputs(&[half("client", Some(0)), half("client", Some(0))]);
         assert_eq!(reports[0].status, "unknown");
         assert_eq!(
@@ -1063,6 +1155,42 @@ mod tests {
             Some(BULK_PATH_ENDPOINT_DUPLICATED)
         );
         assert_eq!(reports[0].relay_bytes_zero, None);
+        let rendered = reports[0].to_json();
+        assert!(rendered["client"].is_object(), "重复的那一端要照实列出");
+        assert!(rendered["daemon"].is_object(), "另一端同样要照实列出");
+    }
+
+    #[test]
+    fn two_attempts_on_one_transfer_id_are_two_groups() {
+        // 同一个 transfer_id 上的两次尝试 (续传重开) 是两次尝试, 不是"重复端": 只按 id 分组会把
+        // 它们塞进一组、整组 `unknown`, 连那次完整尝试都读不出来。
+        let first = |endpoint: &str, after: Option<u64>| {
+            let mut value = half(endpoint, after);
+            value["attempt_id"] = json!("attempt-1");
+            value
+        };
+        let second = |endpoint: &str, after: Option<u64>| {
+            let mut value = half(endpoint, after);
+            value["attempt_id"] = json!("attempt-2");
+            value
+        };
+        let reports = join_inputs(&[
+            first("client", Some(0)),
+            first("daemon", Some(0)),
+            second("client", Some(0)),
+            second("daemon", Some(0)),
+        ]);
+        assert_eq!(reports.len(), 2, "两次尝试各一条报告");
+        let mut attempts = reports
+            .iter()
+            .map(|report| {
+                assert_eq!(report.status, "joined", "两次尝试都必须能组成结论");
+                assert_eq!(report.relay_bytes_zero, Some(true));
+                report.attempt_id.clone().expect("attempt id")
+            })
+            .collect::<Vec<_>>();
+        attempts.sort();
+        assert_eq!(attempts, vec!["attempt-1".to_owned(), "attempt-2".to_owned()]);
     }
 
     #[test]

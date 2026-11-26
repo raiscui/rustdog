@@ -595,7 +595,7 @@ fn a_relay_path_that_closed_inside_the_bracket_is_not_a_zero() {
     let before = RelayReading {
         tx: 10,
         rx: 0,
-        relay_paths: vec!["relay:https://relay.invalid".to_owned()],
+        relay_paths: vec!["PathId(7)@relay:https://relay.invalid".to_owned()],
     };
     let mut lane = start_admitted_with_relay(
         vec![PathClass::Direct],
@@ -693,4 +693,59 @@ fn an_empty_transfer_is_not_evidence_of_a_clean_path() {
     assert_eq!(evidence["chunks"], 0);
     assert_eq!(evidence["bulk_bytes"], 0);
     assert_eq!(evidence["verdict"], "no_bulk_bytes");
+}
+
+#[test]
+fn a_relay_path_rebuilt_inside_the_bracket_is_not_a_zero() {
+    // relay path 关闭后以同一 RelayUrl 重建, 新 PathId、计数从 0 起 —— 这是 iroh 的正常事件。
+    // 只按地址比对的在场集合会认为"同一条 path 还在", 于是 1000 → 100 相减得到一个漂亮的零,
+    // verdict 就成了"测得零"。键必须带 PathId, 而且相减必须 checked。
+    let dir = TempRoot::new("evidence-rebuilt");
+    let target = dir.0.join("landed.bin");
+    let payload = b"rebuilt path";
+    let sha = sha256_hex(payload);
+    let id = transfer_id("ev-rebuilt");
+    let before = RelayReading {
+        tx: 1000,
+        rx: 0,
+        relay_paths: vec!["PathId(1)@relay:https://relay.example/".to_owned()],
+    };
+    let after = RelayReading {
+        tx: 100,
+        rx: 0,
+        relay_paths: vec!["PathId(2)@relay:https://relay.example/".to_owned()],
+    };
+    let mut lane = start_admitted_with_relay(vec![PathClass::Direct], vec![Some(before), Some(after)]);
+
+    put_file(&mut lane, &id, &target, payload.len(), &sha);
+    put_chunk(&mut lane, &id, 0, payload);
+    lane.send(&format!(r#"@file-end:{{"transfer_id":"{id}","sha256":"{sha}"}}"#));
+    let evidence = lane.reply()["evidence"].clone();
+    assert_eq!(evidence["relay_tx_before"], Value::Null);
+    assert_eq!(evidence["relay_tx_after"], Value::Null);
+    assert_eq!(evidence["relay_sample_available"], false);
+    assert_eq!(evidence["verdict"], "relay_sample_unavailable");
+}
+
+#[test]
+fn a_counter_that_went_backwards_on_the_same_path_is_not_a_zero() {
+    // 同一条 path 的计数倒退 (不该发生, 但真发生了) 也必须是"没结论", 不是"零"。
+    let dir = TempRoot::new("evidence-backwards");
+    let target = dir.0.join("landed.bin");
+    let payload = b"backwards";
+    let sha = sha256_hex(payload);
+    let id = transfer_id("ev-backwards");
+    let key = "PathId(3)@relay:https://relay.example/".to_owned();
+    let before = RelayReading { tx: 500, rx: 0, relay_paths: vec![key.clone()] };
+    let after = RelayReading { tx: 20, rx: 0, relay_paths: vec![key] };
+    let mut lane = start_admitted_with_relay(vec![PathClass::Direct], vec![Some(before), Some(after)]);
+
+    put_file(&mut lane, &id, &target, payload.len(), &sha);
+    put_chunk(&mut lane, &id, 0, payload);
+    lane.send(&format!(r#"@file-end:{{"transfer_id":"{id}","sha256":"{sha}"}}"#));
+    let evidence = lane.reply()["evidence"].clone();
+    assert_eq!(evidence["relay_tx_before"], 500);
+    assert_eq!(evidence["relay_tx_after"], 20);
+    assert_eq!(evidence["relay_sample_available"], false, "倒退不是零");
+    assert_eq!(evidence["verdict"], "relay_sample_unavailable");
 }

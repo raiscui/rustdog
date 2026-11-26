@@ -536,7 +536,8 @@ chunk in flight**: 每个被拒的边界保证的是"这一 chunk 之后不再�
    (`bulk_path_inconclusive_no_bulk_bytes`), 不会被读成"传输失败"或"relay 上有字节";
 3. `path_class == "direct"`;
 4. 四个计数**都采到了** (`relay_sample_available == true`) 且本端 `relay_tx` 与 `relay_rx` 的
-   `after - before` **都为 0**。计数为 `null` 表示未采样, 不是零.
+   `after - before` **都为 0** (减法可失败: `after < before` 是"读数作废", 见下节第 3 条)。
+   计数为 `null` 表示未采样, 不是零.
 
 不满足时按 `BulkPathSnapshot::verdict()` 的顺序给出 `aborted` / `not_applicable` /
 `relay_sample_unavailable` / `no_bulk_bytes` / `relay_bytes_nonzero` 之一 —— **前四个都不是结论**,
@@ -563,8 +564,12 @@ schema 完全一致 (`endpoint:"daemon"`). 三个终态各挂一处, 除此之�
 
 1. 连接上一条 path 都枚举不到 (读到空快照) → `null`;
 2. `before` 时在场的 relay path 在 `after` 时不见了 → `null` (`PathList` 只保留未关闭的 path,
-   关闭那条的字节已经不在快照里, 相减会得到一个假的零);
-3. 测试面显式给 `None` → `null`.
+   关闭那条的字节已经不在快照里, 相减会得到一个假的零). **在场判据是 `PathId` + 地址, 不是地址**:
+   relay path 关闭后以同一 `RelayUrl` 重建是 iroh 的正常事件 —— 新 path 是新 `PathId`、计数从 0 起,
+   地址字符串却一模一样, 只看地址会把"换了条 path"读成"同一条还在";
+3. `after < before` (计数倒退) → `null`: 相减必须 `checked_sub`, 不许 `saturating_sub` ——
+   后者把 `1000 → 100` 算成一个漂亮的 0, 而那个 0 会被读成"测到了零";
+4. 测试面显式给 `None` → `null`.
 
 **已知边界 (不假装解决)**: 一条 relay path 若在括号**内部**开了又关, 两端快照都看不到它, 这条
 检测不出来. 它需要订阅 `PathEvent::Closed` 并按连接累计关闭字节 (iroh 的 `PathList` 文档明说关闭
@@ -573,9 +578,16 @@ schema 完全一致 (`endpoint:"daemon"`). 三个终态各挂一处, 除此之�
 
 #### join 工具与原因码
 
-`rdog bulk-path join <PATH>...` 读若干 `rdog.bulk-path.v1` 文件 (或目录里的 `*.json`), **只按
-`transfer_id` 配对**, 左右由每份快照自己的 `endpoint` 决定 (不看文件名、不看顺序 —— 按顺序配会在
-少给一个文件时把两份客户端快照当成两端). 输出 `rdog.bulk-path-join.v1`:
+`rdog bulk-path join <PATH>...` 读若干 `rdog.bulk-path.v1` 文件 (或目录里的 `*.json`), 先按
+`transfer_id` 分桶、**桶内再按 `attempt_id` 分**, 左右由每份快照自己的 `endpoint` 决定 (不看文件名、
+不看顺序 —— 按顺序配会在少给一个文件时把两份客户端快照当成两端). 分组键必须是两者合起来:
+
+- 同一个 `transfer_id` 上的**两次尝试** (续传重开、同 id 幂等重试) 是两次尝试, 各自成一条报告;
+  只按 `transfer_id` 分组会把它们塞进一组、报"重复端"并整组作废, 连那次完整尝试也读不出来。
+- 反过来, 一次尝试若被交成两个 `attempt_id` 各一半 (桶里恰好两组、各只有一端、两端互补),
+  真因是"两端对不上号", 报 `bulk_path_attempt_mismatch`, 不报成"缺一端"。
+
+输出 `rdog.bulk-path-join.v1`:
 
 ```json
 {
