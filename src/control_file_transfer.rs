@@ -240,7 +240,21 @@ pub fn execute_put_file(payload: &str) -> std::io::Result<Value> {
         .get("sha256")
         .and_then(Value::as_str)
         .map(str::to_owned);
-    let resume = value.get("resume").and_then(Value::as_bool).unwrap_or(false);
+    // `resume` 是必填字段, 不给默认值: 默认 false 会静默抹掉进度, 默认 true 会在调用方想重来时
+    // 静默续上 —— 两个默认值都错, 所以这里既不猜也不兜底 (specs/rdog-bulk-direct-only-spec.md §2.5 D1).
+    let Some(resume) = value.get("resume").and_then(Value::as_bool) else {
+        return Err(std::io::Error::other(
+            "@put-file 缺少必填字段 resume (true=续传窗口内的半成品, false=从 0 重来并删除既有半成品): 不给默认值",
+        ));
+    };
+
+    let limits = limits();
+    if size > limits.max_bytes {
+        return Err(std::io::Error::other(format!(
+            "file_transfer_size_limit_exceeded: @put-file 声明 {size} 字节, 超过 file_transfer.max_bytes = {}",
+            limits.max_bytes
+        )));
+    }
 
     let temp_path = staging_path(&path)?;
 
@@ -252,6 +266,7 @@ pub fn execute_put_file(payload: &str) -> std::io::Result<Value> {
     // (specs/file-transfer-control-spec.md 的"传输 SHALL 可续传"就是这条), 拒掉它等于把续传
     // 这个能力本身拒掉 —— 而且错误信息让人去 @file-cancel, cancel 又会删半成品, 等于绕一圈
     // 回到从 0 开始.
+    admit_new_session(&sessions, &transfer_id, limits.max_concurrent_sessions)?;
     if let Some(existing) = sessions.get_mut(&transfer_id) {
         // 与下面的路径占用检查用同一个比较口径: 两处若对"同一个文件"判断不一致,
         // ./a.bin 与 a.bin 这种同义写法就会一边算续传、另一边算换目标.
@@ -273,6 +288,8 @@ pub fn execute_put_file(payload: &str) -> std::io::Result<Value> {
                 "written": written,
                 "next_offset": written,
                 "resume_honored": honored,
+                // 活跃会话没有"过期半成品"这回事: 它一直在被 sweep 盯着, 到不了窗口外。
+                "stale_partial_discarded": false,
             }));
         }
         return Err(std::io::Error::other(format!(
@@ -296,9 +313,19 @@ pub fn execute_put_file(payload: &str) -> std::io::Result<Value> {
         )));
     }
 
+    let mut stale_discarded = false;
     let written = if resume {
         // 续传: 保留已有 partial 的进度; 无 partial 从 0 起
-        std::fs::metadata(&temp_path).map(|m| m.len()).unwrap_or(0)
+        let existing = std::fs::metadata(&temp_path).map(|m| m.len()).unwrap_or(0);
+        if existing > 0 && partial_is_stale(&temp_path, limits.resume_window_ms) {
+            // A5: 窗口外的半成品删掉, offset 归 0 —— 并且必须**回报**, 否则"过期被丢、从 0 开始"
+            // 与"续上了"在回执上分不开, 那就是另一个版本的静默重传.
+            let _ = std::fs::remove_file(&temp_path);
+            stale_discarded = true;
+            0
+        } else {
+            existing
+        }
     } else {
         // 重开: 清掉旧 partial (半损坏文件不留盘, NSIS 教训同族)
         let _ = std::fs::remove_file(&temp_path);
@@ -324,6 +351,7 @@ pub fn execute_put_file(payload: &str) -> std::io::Result<Value> {
         "kind": "file-transfer",
         "state": if resume_honored { "resumed" } else { "open" },
         "resume_honored": resume_honored,
+        "stale_partial_discarded": stale_discarded,
         "transfer_id": transfer_id,
         "written": written,
         "next_offset": written,
@@ -779,6 +807,84 @@ fn stamp_last_activity_for_tests(transfer_id: &str, last_activity_ms: u64) {
     }
 }
 
+/// 并发上限的准入判定 (纯函数, 便于在固定大小的表上直接验证判据)。
+///
+/// 只拦**新建**会话: 续传是同一会话的继续, 拿它去撞上限等于把续传拒在门外。
+fn admit_new_session(
+    sessions: &HashMap<String, TransferSession>,
+    transfer_id: &str,
+    max_concurrent_sessions: usize,
+) -> std::io::Result<()> {
+    if sessions.contains_key(transfer_id) || sessions.len() < max_concurrent_sessions {
+        return Ok(());
+    }
+    Err(std::io::Error::other(format!(
+        "bulk_session_limit_reached: 活跃传输会话已达上限 file_transfer.max_concurrent_sessions = {max_concurrent_sessions}; 等已有会话收尾或先 @file-cancel"
+    )))
+}
+
+/// 半成品的 mtime 是否已超出续传窗口。
+///
+/// 时钟回拨 (mtime 在未来) 不算过期: 宁可多留一份可用进度, 也不因为本机时钟跳一下就删掉
+/// 客户端正要续的数据。
+fn partial_is_stale(path: &Path, window_ms: u64) -> bool {
+    let Ok(metadata) = std::fs::metadata(path) else {
+        return false;
+    };
+    let Ok(modified) = metadata.modified() else {
+        return false;
+    };
+    let Ok(elapsed) = SystemTime::now().duration_since(modified) else {
+        return false;
+    };
+    elapsed.as_millis() as u64 > window_ms
+}
+
+/// bulk 门禁的运行时参数, 由 daemon 启动时从 `[file_transfer]` 注入。
+///
+/// 默认值与 `FileTransferConfig` 的默认值一致: 单测与"没跑 daemon 初始化"的调用方拿到的是同一组数,
+/// 不会出现"测试里没有上限、生产里有"这种只在一边成立的假设。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TransferLimits {
+    max_bytes: u64,
+    max_concurrent_sessions: usize,
+    resume_window_ms: u64,
+}
+
+const DEFAULT_TRANSFER_LIMITS: TransferLimits = TransferLimits {
+    max_bytes: 1024 * 1024 * 1024,
+    max_concurrent_sessions: 8,
+    resume_window_ms: 24 * 60 * 60 * 1000,
+};
+
+static TRANSFER_LIMITS: Mutex<Option<TransferLimits>> = Mutex::new(None);
+
+/// 测试里按**线程**覆盖 (与索引路径同一套理由: 并行用例不能共用一个可变全局)。
+#[cfg(test)]
+thread_local! {
+    static LIMITS_OVERRIDE: std::cell::Cell<Option<TransferLimits>> =
+        const { std::cell::Cell::new(None) };
+}
+
+fn limits() -> TransferLimits {
+    #[cfg(test)]
+    {
+        if let Some(limits) = LIMITS_OVERRIDE.with(|cell| cell.get()) {
+            return limits;
+        }
+    }
+    TRANSFER_LIMITS
+        .lock()
+        .ok()
+        .and_then(|guard| *guard)
+        .unwrap_or(DEFAULT_TRANSFER_LIMITS)
+}
+
+#[cfg(test)]
+fn set_limits_for_tests(limits: TransferLimits) {
+    LIMITS_OVERRIDE.with(|cell| cell.set(Some(limits)));
+}
+
 /// 半成品索引的持久化位置: `<平台 state 目录>/rdog/file-transfer/partials.json`。
 ///
 /// 与 observation 的默认根同一套平台约定 (`control_observation::durable::default_observation_root`),
@@ -1096,6 +1202,13 @@ pub fn initialize_file_transfer_maintenance(
         log::info!("文件传输: 从索引恢复了 {restored} 条半成品会话");
     }
 
+    if let Ok(mut guard) = TRANSFER_LIMITS.lock() {
+        *guard = Some(TransferLimits {
+            max_bytes: config.max_bytes,
+            max_concurrent_sessions: config.max_concurrent_sessions,
+            resume_window_ms: config.resume_window_ms,
+        });
+    }
     let maintenance = TransferMaintenance::start(
         Duration::from_millis(config.sweep_interval_ms),
         config.idle_timeout_ms,
@@ -1173,7 +1286,7 @@ mod tests {
         let sha = format!("{:x}", hasher.finalize());
 
         let open = execute_put_file(&format!(
-            r#"{{"transfer_id":"{tid}","path":"{}","size":{},"sha256":"{sha}"}}"#,
+            r#"{{"transfer_id":"{tid}","path":"{}","size":{},"sha256":"{sha}","resume":false}}"#,
             escape_json(&target.display().to_string()),
             payload.len()
         ))
@@ -1208,7 +1321,7 @@ mod tests {
         let tid = unique_id("bad");
 
         execute_put_file(&format!(
-            r#"{{"transfer_id":"{tid}","path":"{}","size":5}}"#,
+            r#"{{"transfer_id":"{tid}","path":"{}","size":5,"resume":false}}"#,
             escape_json(&target.display().to_string())
         ))
         .unwrap();
@@ -1236,7 +1349,7 @@ mod tests {
         let target = dir.join("ooo.bin");
         let tid = unique_id("ooo");
         execute_put_file(&format!(
-            r#"{{"transfer_id":"{tid}","path":"{}","size":10}}"#,
+            r#"{{"transfer_id":"{tid}","path":"{}","size":10,"resume":false}}"#,
             escape_json(&target.display().to_string())
         ))
         .unwrap();
@@ -1294,7 +1407,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let tid = unique_id("big");
         execute_put_file(&format!(
-            r#"{{"transfer_id":"{tid}","path":"{}","size":1}}"#,
+            r#"{{"transfer_id":"{tid}","path":"{}","size":1,"resume":false}}"#,
             escape_json(&dir.join("big.bin").display().to_string())
         ))
         .unwrap();
@@ -1320,7 +1433,7 @@ mod tests {
         // A: 完整上传到目标路径并提交
         let first = unique_id("first");
         execute_put_file(&format!(
-            r#"{{"transfer_id":"{first}","path":"{target_json}","size":5}}"#
+            r#"{{"transfer_id":"{first}","path":"{target_json}","size":5,"resume":false}}"#
         ))
         .unwrap();
         let data = BASE64_STANDARD.encode(b"AAAAA");
@@ -1344,7 +1457,7 @@ mod tests {
         // B: 不同 id, 同一目标路径, 正在推进
         let second = unique_id("second");
         execute_put_file(&format!(
-            r#"{{"transfer_id":"{second}","path":"{target_json}","size":5}}"#
+            r#"{{"transfer_id":"{second}","path":"{target_json}","size":5,"resume":false}}"#
         ))
         .unwrap();
         execute_file_chunk(&format!(
@@ -1425,7 +1538,7 @@ mod tests {
 
         let holder = unique_id("holder");
         execute_put_file(&format!(
-            r#"{{"transfer_id":"{holder}","path":"{target_json}","size":10}}"#
+            r#"{{"transfer_id":"{holder}","path":"{target_json}","size":10,"resume":false}}"#
         ))
         .unwrap();
         execute_file_chunk(&format!(
@@ -1438,7 +1551,7 @@ mod tests {
         // 另一个 id 指向同一目标: 必须拒绝, 且**不能**先把 holder 的半成品删掉再拒绝
         let intruder = unique_id("intruder");
         let err = execute_put_file(&format!(
-            r#"{{"transfer_id":"{intruder}","path":"{target_json}","size":10}}"#
+            r#"{{"transfer_id":"{intruder}","path":"{target_json}","size":10,"resume":false}}"#
         ))
         .unwrap_err();
         assert!(
@@ -1474,7 +1587,7 @@ mod tests {
         let tid = unique_id("compact");
 
         execute_put_file(&format!(
-            r#"{{"transfer_id":"{tid}","path":"{}","size":10}}"#,
+            r#"{{"transfer_id":"{tid}","path":"{}","size":10,"resume":false}}"#,
             escape_json(&target.display().to_string())
         ))
         .unwrap();
@@ -1529,7 +1642,7 @@ mod tests {
         let tid = unique_id("cancel");
 
         execute_put_file(&format!(
-            r#"{{"transfer_id":"{tid}","path":"{}","size":10}}"#,
+            r#"{{"transfer_id":"{tid}","path":"{}","size":10,"resume":false}}"#,
             escape_json(&target.display().to_string())
         ))
         .unwrap();
@@ -1571,7 +1684,7 @@ mod tests {
         let tid = unique_id("keep");
 
         execute_put_file(&format!(
-            r#"{{"transfer_id":"{tid}","path":"{}","size":5}}"#,
+            r#"{{"transfer_id":"{tid}","path":"{}","size":5,"resume":false}}"#,
             escape_json(&target.display().to_string())
         ))
         .unwrap();
@@ -1627,7 +1740,7 @@ mod tests {
 
         for (id, name) in [(&stale, "stale.bin"), (&fresh, "fresh.bin")] {
             execute_put_file(&format!(
-                r#"{{"transfer_id":"{id}","path":"{}","size":10}}"#,
+                r#"{{"transfer_id":"{id}","path":"{}","size":10,"resume":false}}"#,
                 escape_json(&dir.join(name).display().to_string())
             ))
             .unwrap();
@@ -1674,7 +1787,7 @@ mod tests {
         let data = BASE64_STANDARD.encode(b"xxxxx");
 
         execute_put_file(&format!(
-            r#"{{"transfer_id":"{tid}","path":"{}","size":10}}"#,
+            r#"{{"transfer_id":"{tid}","path":"{}","size":10,"resume":false}}"#,
             escape_json(&target.display().to_string())
         ))
         .unwrap();
@@ -1714,7 +1827,7 @@ mod tests {
         let data = BASE64_STANDARD.encode(b"xxxxx");
 
         execute_put_file(&format!(
-            r#"{{"transfer_id":"{tid}","path":"{}","size":10}}"#,
+            r#"{{"transfer_id":"{tid}","path":"{}","size":10,"resume":false}}"#,
             escape_json(&target.display().to_string())
         ))
         .unwrap();
@@ -1753,7 +1866,7 @@ mod tests {
         let data = BASE64_STANDARD.encode(b"xxxxx");
 
         execute_put_file(&format!(
-            r#"{{"transfer_id":"{tid}","path":"{}","size":10}}"#,
+            r#"{{"transfer_id":"{tid}","path":"{}","size":10,"resume":false}}"#,
             escape_json(&target.display().to_string())
         ))
         .unwrap();
@@ -1778,6 +1891,175 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+
+
+    #[test]
+    fn put_file_without_resume_field_is_rejected() {
+        // resume 是必填字段: 默认 false 会静默抹掉进度, 默认 true 会在调用方想重来时静默续上,
+        // 两个默认值都错 —— 所以缺字段一律拒, 不猜。
+        let dir = std::env::temp_dir().join(format!("rdog-ft-noresume-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("no-resume.bin");
+        let tid = unique_id("noresume");
+        let err = execute_put_file(&format!(
+            r#"{{"transfer_id":"{tid}","path":"{}","size":5}}"#,
+            escape_json(&target.display().to_string())
+        ))
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("必填字段 resume"),
+            "错误必须点名缺失字段: {err}"
+        );
+        assert!(!staging_path(&target).unwrap().exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn declared_size_over_the_limit_is_rejected_before_any_disk_write() {
+        // 上限在 open 按声明 size 先拒一次: 一次被拒的大上传不该先落满盘再失败。
+        set_limits_for_tests(TransferLimits {
+            max_bytes: 4,
+            max_concurrent_sessions: 4,
+            resume_window_ms: 60_000,
+        });
+        let dir = std::env::temp_dir().join(format!("rdog-ft-sizelimit-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("too-big.bin");
+        let tid = unique_id("toobig");
+        let err = execute_put_file(&format!(
+            r#"{{"transfer_id":"{tid}","path":"{}","size":5,"resume":false}}"#,
+            escape_json(&target.display().to_string())
+        ))
+        .unwrap_err();
+        assert!(err.to_string().contains("file_transfer_size_limit_exceeded"));
+        assert!(!staging_path(&target).unwrap().exists(), "拒绝必须零副作用");
+
+        // 不是靠拒绝"所有传输"通过: 恰好在限内的仍然能开
+        let ok = execute_put_file(&format!(
+            r#"{{"transfer_id":"{tid}","path":"{}","size":4,"resume":false}}"#,
+            escape_json(&target.display().to_string())
+        ))
+        .unwrap();
+        assert_eq!(ok["state"], "open");
+        execute_file_cancel(&format!(r#"{{"transfer_id":"{tid}"}}"#)).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn session_limit_rejects_a_new_transfer_but_not_a_resume() {
+        // 判据本身用固定大小的小表验证: 会话表是同进程全局的, 并行用例的会话也在里面,
+        // 直接打计数上限会变成"看同时跑了几个用例"。
+        let mut table = HashMap::new();
+        table.insert(
+            "occupied".to_string(),
+            TransferSession {
+                path: std::env::temp_dir().join("occupied.bin"),
+                size: 1,
+                expected_sha256: None,
+                written: 0,
+                temp_path: None,
+                is_upload: true,
+                last_activity_ms: 0,
+            },
+        );
+        let err = admit_new_session(&table, "newcomer", 1).unwrap_err();
+        assert!(err.to_string().contains("bulk_session_limit_reached"));
+        assert!(
+            admit_new_session(&table, "occupied", 1).is_ok(),
+            "续传是同一会话的继续, 不能被并发上限挡在门外"
+        );
+    }
+
+    #[test]
+    fn session_limit_is_enforced_end_to_end() {
+        // 用 limit=0 让判定与"此刻表里有几个会话"无关 (并行用例也在同一张表里),
+        // 这样断言的仍然是产品判据: 新 id 一律拒, 已有会话的续传一律放行。
+        set_limits_for_tests(TransferLimits {
+            max_bytes: 1024 * 1024,
+            max_concurrent_sessions: 0,
+            resume_window_ms: 60_000,
+        });
+        let dir = std::env::temp_dir().join(format!("rdog-ft-limit-e2e-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("e2e.bin");
+        let tid = unique_id("limite2e");
+
+        let err = execute_put_file(&format!(
+            r#"{{"transfer_id":"{tid}","path":"{}","size":10,"resume":false}}"#,
+            escape_json(&target.display().to_string())
+        ))
+        .unwrap_err();
+        assert!(err.to_string().contains("bulk_session_limit_reached"));
+        assert!(!staging_path(&target).unwrap().exists(), "拒绝必须零副作用");
+
+        // 预置一条会话 (模拟"已经在传"的那条), 续传必须放行
+        let temp_path = staging_path(&target).unwrap();
+        transfers().lock().unwrap().insert(
+            tid.clone(),
+            TransferSession {
+                path: target.clone(),
+                size: 10,
+                expected_sha256: None,
+                written: 5,
+                temp_path: Some(temp_path),
+                is_upload: true,
+                last_activity_ms: now_ms(),
+            },
+        );
+        let resumed = execute_put_file(&format!(
+            r#"{{"transfer_id":"{tid}","path":"{}","size":10,"resume":true}}"#,
+            escape_json(&target.display().to_string())
+        ))
+        .unwrap();
+        assert_eq!(resumed["resume_honored"], true);
+        forget_sessions_for_tests(&[&tid]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn partial_outside_the_resume_window_is_discarded_and_reported() {
+        // A5: 窗口外的半成品删掉并回报, 不能静默 —— "过期被丢、从 0 开始"与"续上了"在回执上
+        // 必须分得开, 否则就是另一个版本的静默重传。
+        set_limits_for_tests(TransferLimits {
+            max_bytes: 1024 * 1024,
+            max_concurrent_sessions: 4,
+            resume_window_ms: 0,
+        });
+        let dir = std::env::temp_dir().join(format!("rdog-ft-stalewindow-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("stale.bin");
+        let tid = unique_id("stalewindow");
+        let data = BASE64_STANDARD.encode(b"abcde");
+
+        execute_put_file(&format!(
+            r#"{{"transfer_id":"{tid}","path":"{}","size":10,"resume":false}}"#,
+            escape_json(&target.display().to_string())
+        ))
+        .unwrap();
+        execute_file_chunk(&format!(
+            r#"{{"transfer_id":"{tid}","offset":0,"data":"{data}"}}"#
+        ))
+        .unwrap();
+        let partial = staging_path(&target).unwrap();
+        assert!(partial.exists());
+
+        // A5 的场景是"盘上有半成品, 但注册表里没有会话" —— daemon 重启后就是这一形态。
+        forget_sessions_for_tests(&[&tid]);
+        // 让 mtime 明确落在窗口外 (窗口是 0)
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let reopened = execute_put_file(&format!(
+            r#"{{"transfer_id":"{tid}","path":"{}","size":10,"resume":true}}"#,
+            escape_json(&target.display().to_string())
+        ))
+        .unwrap();
+        assert_eq!(reopened["stale_partial_discarded"], true);
+        assert_eq!(reopened["resume_honored"], false);
+        assert_eq!(reopened["written"], 0);
+        assert!(!partial.exists(), "过期半成品必须被删掉");
+
+        execute_file_cancel(&format!(r#"{{"transfer_id":"{tid}"}}"#)).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn index_path_is_per_daemon_instance() {
@@ -1973,7 +2255,7 @@ mod tests {
         }
         for target in targets {
             let err = execute_put_file(&format!(
-                r#"{{"transfer_id":"{tid}","path":"{}","size":5}}"#,
+                r#"{{"transfer_id":"{tid}","path":"{}","size":5,"resume":false}}"#,
                 escape_json(&target.display().to_string())
             ))
             .unwrap_err();
@@ -2053,7 +2335,7 @@ mod tests {
         let data = BASE64_STANDARD.encode(b"xxxxx");
 
         execute_put_file(&format!(
-            r#"{{"transfer_id":"{first}","path":"{}","size":10}}"#,
+            r#"{{"transfer_id":"{first}","path":"{}","size":10,"resume":false}}"#,
             escape_json(&no_ext.display().to_string())
         ))
         .unwrap();
@@ -2066,7 +2348,7 @@ mod tests {
 
         // 另一个目标 (不同文件) 非续传重开: 不得删掉 model 的半成品
         execute_put_file(&format!(
-            r#"{{"transfer_id":"{second}","path":"{}","size":10}}"#,
+            r#"{{"transfer_id":"{second}","path":"{}","size":10,"resume":false}}"#,
             escape_json(&with_ext.display().to_string())
         ))
         .unwrap();
@@ -2157,7 +2439,7 @@ mod tests {
         let second = BASE64_STANDARD.encode(b"BBBBB");
 
         execute_put_file(&format!(
-            r#"{{"transfer_id":"{tid}","path":"{target_json}","size":10}}"#
+            r#"{{"transfer_id":"{tid}","path":"{target_json}","size":10,"resume":false}}"#
         ))
         .unwrap();
         execute_file_chunk(&format!(
@@ -2190,7 +2472,7 @@ mod tests {
         // 活跃会话上换目标路径仍必须拒绝: 复用 id 去写另一个文件是错误, 不是续传
         let other = dir.join("other.bin");
         execute_put_file(&format!(
-            r#"{{"transfer_id":"{tid}","path":"{target_json}","size":10}}"#
+            r#"{{"transfer_id":"{tid}","path":"{target_json}","size":10,"resume":false}}"#
         ))
         .unwrap();
         let err = execute_put_file(&format!(
@@ -2219,7 +2501,7 @@ mod tests {
         let data = BASE64_STANDARD.encode(b"xxxxx");
 
         execute_put_file(&format!(
-            r#"{{"transfer_id":"{tid}","path":"{target_json}","size":10}}"#
+            r#"{{"transfer_id":"{tid}","path":"{target_json}","size":10,"resume":false}}"#
         ))
         .unwrap();
         execute_file_chunk(&format!(
@@ -2232,7 +2514,7 @@ mod tests {
         // 同一 id 再来一次必须拒绝: 否则这次 open 会替换掉活跃会话, resume:false 还会把
         // 它正在写的文件删掉
         let err = execute_put_file(&format!(
-            r#"{{"transfer_id":"{tid}","path":"{target_json}","size":10}}"#
+            r#"{{"transfer_id":"{tid}","path":"{target_json}","size":10,"resume":false}}"#
         ))
         .unwrap_err();
         assert!(
@@ -2258,7 +2540,7 @@ mod tests {
         // 取消之后同 id 可以正常重开 (新的一次传输)
         execute_file_cancel(&format!(r#"{{"transfer_id":"{tid}"}}"#)).unwrap();
         execute_put_file(&format!(
-            r#"{{"transfer_id":"{tid}","path":"{target_json}","size":10}}"#
+            r#"{{"transfer_id":"{tid}","path":"{target_json}","size":10,"resume":false}}"#
         ))
         .unwrap();
         execute_file_cancel(&format!(r#"{{"transfer_id":"{tid}"}}"#)).unwrap();
