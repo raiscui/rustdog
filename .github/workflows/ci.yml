@@ -318,7 +318,9 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          # 记账检查要读 git 历史 (判定 commit 是否进账本), shallow clone 不够
+          # 记账检查要读 git 历史 (判定 commit 是否进账本), shallow clone 不够。
+          # PR 上取 head sha 而不是 GitHub 造的 merge commit, 否则 --since base 的口径会飘。
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
           fetch-depth: 0
 
       # 约定 ①: 载体 (skill / README / specs) 里的断言必须与 src/ 真相源一致。
@@ -326,10 +328,19 @@ jobs:
       - name: Carrier assertions match src/
         run: python3 scripts/check-carrier-assertions.py
 
-      # 约定 ③: 工作 commit 必须进六文件账本。
-      # **只报告不阻断**: 账本滞后是流程债, 不该卡住别人推送; 漏账条目用
-      # ::warning:: 注解显示在提交/PR 视图, 而不是把整轮 CI 拉红。
-      # 本地要硬门禁就跑 `python3 scripts/check-bookkeeping.py` (默认 strict)。
-      - name: Commits accounted in the ledger (report only)
-        if: github.event_name == 'push'
-        run: python3 scripts/check-bookkeeping.py --report-only --limit 50
+      # 约定 ③: 工作 commit 必须进账本 (RAI-433 起按票分文件 `ledger/<票号>.md`)。
+      #
+      # 两档, 按分支分而不是按心情分:
+      # - **PR**: 只报告 (::warning::)。账本滞后是流程债, 不该卡住别人推送; 而且 PR 的 sha
+      #   会随 rebase 变, 在 PR 阶段要求 sha 等于强制每人写一个马上过期的值。
+      # - **main**: `--main` 硬门禁 —— 除最新 3 个 commit (刚合入、sha 还没补) 之外, 缺 sha
+      #   就是漏账。合入之后 sha 已经稳定, 这时候再缺就没有借口了。
+      - name: Commits accounted in the ledger - PR report only
+        if: github.event_name == 'pull_request'
+        run: |
+          git fetch --no-tags origin "+refs/heads/${{ github.base_ref }}:refs/remotes/origin/${{ github.base_ref }}"
+          python3 scripts/check-bookkeeping.py --report-only --since "origin/${{ github.base_ref }}"
+
+      - name: Commits accounted in the ledger - main requires sha beyond grace
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: python3 scripts/check-bookkeeping.py --main --main-grace 3 --limit 50

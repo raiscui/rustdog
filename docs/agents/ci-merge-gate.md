@@ -173,6 +173,22 @@ cargo test --test control_window_e2e
 改动其中任何一个 target 的名字或前置时, 同票更新本表与 `run-integration-targets.py` 的
 `CLASSIFICATION` (标成 `compile-only:macos`)。
 
+### 3c. 堆叠 PR = 未验证 (RAI-433 顺带补的合并门缺口)
+
+**基座不是 `main` 的 PR, 它的检查不能当合并依据。** 两个独立原因:
+
+1. 必需检查是按 `main` 配的, 一次 `pull_request` 运行即使全绿, 证明的是「相对那个基座」;
+2. 基座分支一旦前进, 已通过的层不会自动重跑 —— 于是那个「绿」可能是几轮之前的事实。
+
+处置 (硬判定, 写在这里而不是靠人记):
+
+- 要合的那一层, **先把 base 改成 `main` 并重跑一轮**, 用那一轮的读数做合并门;
+- 层与层之间的绿只用来判断「这一层自己有没有把东西改坏」, 不用于合并;
+- rebase 到最新 main 之后同样要重跑 (旧 head 的绿不作数)。
+
+2026-11-26 实测过一次代价: 分支 rebase 前 `mergeable=dirty` 时新 head 的 `pull_request` 运行
+**一条都没有**, 看起来像「没有新提交」, 实际是 GitHub 生成不出 merge commit 就不触发。
+
 ## 4. `ort-sys` / onnxruntime 的获取契约
 
 `oar-ocr` → `ort` → `ort-sys` 在 build 时按目标三元组取一份 pyke 预编译 onnxruntime。

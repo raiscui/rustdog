@@ -1992,6 +1992,11 @@ mod tests {
     #[test]
     fn restored_index_resumes_from_the_partial_length() {
         // 验收 2: 重启后 resume:true 的 offset 必须来自盘上的长度, 不是 0。
+        // `restore_index()` 会把索引里的孤儿塞回**全局孤儿表** (persist_index 落盘时把当时的孤儿
+        // 一起写进去), 所以除了会话表锁, 也按 :1810 那条纪律拿回收锁。
+        let _sweep_guard = SWEEP_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let _guard = TRANSFER_TABLE_TEST_LOCK
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -2086,6 +2091,10 @@ mod tests {
     #[test]
     fn corrupt_index_is_ignored_and_leaves_files_untouched() {
         // 验收 3: 索引损坏 → fail-closed, 不静默当成新传输, 也不销毁盘上的东西。
+        // 调 `restore_index()` 就要拿回收锁 (见 :1810 的纪律): 索引可读时它会写全局孤儿表。
+        let _sweep_guard = SWEEP_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let _guard = TRANSFER_TABLE_TEST_LOCK
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -2334,6 +2343,11 @@ mod tests {
         // 数值会被它们判成过期而先删掉 (saturating_sub 保不住), 断言就随跑法变化。未来时刻让
         // 别的用例的 `now - last_activity` 恒为 0。
         let anchor_ms = now_ms() + 1_000_000;
+        // 全局孤儿表是进程级单例: 同进程其它用例会往里塞条目且不负责清理 (例如 `restore_index`
+        // 按索引里的旧时刻恢复孤儿)。回收锁只保证**串行**, 不保证**隔离** —— 于是「这一轮回收了
+        // 几条」在整表口径下天然 flaky (2026-11-26 macos CI 与本地并行实测: reaped 会变成 2/3/5)。
+        // 在锁内先快照再清空, 收尾还原: 计数只反映本用例自己的孤儿, 断言才承重。
+        let snapshot = std::mem::take(&mut *orphan_partials().lock().unwrap());
         orphan_partials()
             .lock()
             .unwrap()
@@ -2350,6 +2364,7 @@ mod tests {
         assert!(!partial.exists(), "窗口过了必须回收, 不留残留");
         assert!(!orphan_partials().lock().unwrap().contains_key(&partial));
 
+        *orphan_partials().lock().unwrap() = snapshot;
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -2545,6 +2560,11 @@ mod tests {
         // 两支刻意各自只有**一个**可能被拒的理由, 否则用例证明不了谁在承重:
         //   甲 目标合法但 temp 不是该目标的暂存路径 → 只能由 "temp == staging_path(target)" 拒;
         //   乙 temp 恰好就是该目标推导出来的暂存路径且文件存在 → 只能由目标校验 (拒 `..`) 拒。
+        // 同 `restored_index_resumes_from_the_partial_length`: 这里也调 `restore_index()`,
+        // 会写全局孤儿表, 必须连回收锁一起拿。
+        let _sweep_guard = SWEEP_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let _guard = TRANSFER_TABLE_TEST_LOCK
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -2615,6 +2635,10 @@ mod tests {
     #[test]
     fn missing_index_restores_nothing_and_creates_nothing() {
         // 验收 3 的另一半: 索引路径不存在时不得凭空造一个, 也不得把"没有索引"当成错误去重试。
+        // 调 `restore_index()` 就要拿回收锁 (见 :1810 的纪律): 索引可读时它会写全局孤儿表。
+        let _sweep_guard = SWEEP_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let dir = std::env::temp_dir().join(format!("rdog-ft-idx-missing-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let index = dir.join("does-not-exist.json");
