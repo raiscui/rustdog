@@ -338,6 +338,39 @@ pub fn run_router_daemon(config: ZenohDaemonRuntimeConfig, shell: &str) -> io::R
         config.request_timeout_ms
     );
 
+    // 本机 fast path 登记 (RAI-385): daemon 以 zenoh 模式运行时 TCP inbound 被强制关闭,
+    // 本机客户端只剩 zenoh 这条路; 登记控制 lane 后 `rdog control self` / `rdog control <port>`
+    // 才能在不写地址的前提下找到它,并知道该端口说 zenoh 而不是 line-control。
+    // 登记失败不阻断 daemon: 本机便利性不该让被控端起不来,只在日志里说清楚。
+    //
+    // 只在非 unix 登记: unix 的本机 fast path 已经是 unixpipe FIFO,再登记一份会让
+    // "self 到底选了哪条 lane" 出现两个真相源(且会绕过 FIFO 的 unmanaged 拒绝语义)。
+    #[cfg(not(unix))]
+    let _local_daemon_guard = match crate::local_daemon_registry::register_local_daemon(
+        &config.namespace,
+        &config.daemon_name,
+        crate::local_daemon_registry::LocalControlLane::Zenoh {
+            connect_endpoints: crate::local_daemon_registry::loopback_zenoh_endpoints(
+                &listen_endpoints,
+            ),
+        },
+    ) {
+        Ok(guard) => {
+            log::info!(
+                "本机 daemon 已登记: namespace={}, daemon_name={}",
+                config.namespace,
+                config.daemon_name
+            );
+            Some(guard)
+        }
+        Err(err) => {
+            log::warn!(
+                "本机 daemon 登记失败 (不影响远端接入, `rdog control self` 会不可用): {err}"
+            );
+            None
+        }
+    };
+
     // agent messaging Phase 3 (issue #75): 通配 sub card keyexpr,
     // daemon 缓存 per-agent 最新卡片 (托管分发, 不解释内容)。
     {

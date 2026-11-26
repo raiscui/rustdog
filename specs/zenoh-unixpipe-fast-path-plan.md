@@ -105,6 +105,21 @@ agent 高频跑 `@web-find` / `@screenshot` / `@click` 时,这段延迟会肉眼
   - 关键实现: Zenoh 1.8.0 实际只创建 `<base>_uplink` 和 `<base>_downlink` 两个 FIFO,
     `<base>` 本身不一定存在,所以判据是"派生 FIFO 还在";身份来自同目录 `<stem>.meta`
 
+- **非 unix 平台的本机 lane**(2026-11-26 加, RAI-385):
+  - Windows 的 zenoh 构建没有 `transport_unixpipe`,unixpipe 登记表不适用
+  - daemon 以 zenoh 模式启动并在路由就绪后写
+    `~/.rdog/run/local-daemon/<namespace>__<daemon_name>.json`
+    (`src/local_daemon_registry.rs`),lane 形如
+    `{"kind":"zenoh","connect_endpoints":"tcp/127.0.0.1:<port>"}`
+  - 回环 endpoint 由 listen endpoint 推导: `tcp/` `udp/` 的 `0.0.0.0` → `127.0.0.1`,
+    `[::]` → `[::1]`;`serial/` `tls/` `unixpipe/` 不进本机 lane
+  - liveness 判据是记录旁 `.lock` 上的 OS advisory lock(不是 PID);过期记录在查找时清理
+  - 客户端 `self` / 空 target 读登记表解析 `namespace + daemon_name + connect_endpoints`;
+    `rdog control <port>` 在 host 是回环时按登记认领该端口的协议
+  - 登记失败只告警,不阻断 daemon 启动;unix 仍独占 unixpipe lane,不写这份登记
+  - 未指定地址(`0.0.0.0` / `::`)作为 connect 目标时统一映射回环
+    (`src/control_invocation.rs::connect_host`)
+
 ### 3.4 错误处理契约
 
 - FIFO base 路径超预算: 先压缩成 `<slug>-<8位哈希>`;只有当运行目录本身长到连压缩名都放不下时,

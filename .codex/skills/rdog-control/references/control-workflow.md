@@ -70,6 +70,25 @@ rdog control @ping @capabilities#1 @observe#3
    - **0个** → `NotFound`,提示启用`local_default = true`并启动daemon,或显式指定target
    - **1个或多个** → `NotFound`,列出全部候选并说明FIFO自动选择已退役
 
+**平台差异 (2026-11-26, RAI-385)**:
+
+unix 的本机 lane 是 unixpipe FIFO(上面那套 registry)。Windows 的 zenoh 构建没有
+`transport_unixpipe`,所以 daemon 启动成功后把身份与本机落点写进
+`~/.rdog/run/local-daemon/<namespace>__<daemon_name>.json`
+(`{"kind":"zenoh","connect_endpoints":["tcp/127.0.0.1:<port>"]}`),`self` / 空 target
+读这份登记,直接按回环 endpoint 连本机 zenoh router。liveness 看记录旁的 `.lock`
+(OS advisory lock),不是 PID。
+
+**端口简写与协议认领**(`src/control_invocation.rs`):
+
+- `rdog control <port> @<line>` = "这台机器上的 daemon",connect 目标是 `127.0.0.1:<port>`;
+  显式写 `0.0.0.0` / `::` 也会被映射回环(`0.0.0.0` 是 listen 地址,当 connect 目标在
+  Windows 上是 `os error 10049`)。
+- 回环端口如果属于某个已登记 daemon 的控制 lane,客户端改走那条 lane 的协议
+  (zenoh 模式的 daemon 在 `tcp/...` 端口上只说 zenoh 协议,发 line-control 会被断开)。
+- 显式 `--transport tcp` 不参与认领 —— 那是用户的协议选择,失败时报
+  "一帧 control 都没回就关闭了会话",并提示 `rdog control self` 或 zenoh 目标。
+
 **落盘位置与残留回收**(`rdog local`):
 
 本机 fast path 的生命周期文件是用户可见的落盘状态,agent 排障时直接读它们:

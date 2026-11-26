@@ -119,6 +119,11 @@ pub(crate) fn run(options: UiScriptRunOptions) -> Result<(), String> {
         options.entry_point,
         control_positionals,
     )?;
+    // 与 `rdog control` 同口径: 推断出来的回环端口先按本机 daemon 登记表认领协议。
+    let invocation = match options.transport {
+        Some(_) => invocation,
+        None => control_invocation::promote_loopback_tcp(invocation),
+    };
     let mut state = UiScriptRunState::create(&script_path, &dry_run, options.trace_dir)?;
     let result = execute_ui_script_plan(&invocation, &dry_run, &mut state);
     let (status, error) = match &result {

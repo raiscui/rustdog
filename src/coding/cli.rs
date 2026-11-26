@@ -270,10 +270,21 @@ fn run_inner(options: CodingCli) -> Result<CodingReply, CodingError> {
             entry_point,
         } => (namespace, target_name, entry_point),
         ControlInvocation::ZenohLocal { namespace } => {
-            let target = crate::zenoh_runtime::find_local_daemon_name(namespace.as_deref())?;
-            let namespace = namespace
-                .or_else(|| crate::zenoh_identity::infer_namespace_from_daemon_name(&target));
-            (namespace, Some(target), Vec::new())
+            match crate::control_invocation::resolve_local_control_target(namespace).map_err(
+                |err| CodingError::new(ErrorCode::AuthenticationRequired, err),
+            )? {
+                crate::control_invocation::LocalControlTarget::Zenoh {
+                    namespace,
+                    daemon_name,
+                    entry_points,
+                } => (namespace, Some(daemon_name), entry_points),
+                crate::control_invocation::LocalControlTarget::Tcp { .. } => {
+                    return Err(CodingError::new(
+                        ErrorCode::AuthenticationRequired,
+                        "coding requires Zenoh",
+                    ))
+                }
+            }
         }
         _ => {
             return Err(CodingError::new(
