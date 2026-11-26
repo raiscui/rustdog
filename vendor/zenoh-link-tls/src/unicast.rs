@@ -71,6 +71,7 @@ pub struct LinkUnicastTls {
     write_mtx: AsyncMutex<()>,
     read_mtx: AsyncMutex<()>,
     auth_identifier: LinkAuthId,
+    rai524_seq: std::sync::atomic::AtomicUsize,
     read_wake: std::sync::Arc<ReadWake>,
     mtu: BatchSize,
     expiration_manager: Option<LinkCertExpirationManager>,
@@ -184,6 +185,7 @@ impl LinkUnicastTls {
             write_mtx: AsyncMutex::new(()),
             read_mtx: AsyncMutex::new(()),
             auth_identifier,
+            rai524_seq: std::sync::atomic::AtomicUsize::new(0),
             read_wake: std::sync::Arc::new(ReadWake {
                 permits: tokio::sync::Semaphore::new(0),
             }),
@@ -322,11 +324,18 @@ impl LinkUnicastTrait for LinkUnicastTls {
     }
 
     async fn write_all(&self, buffer: &[u8]) -> ZResult<()> {
+        let seq = self.rai524_seq.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
         let _guard = zasynclock!(self.write_mtx);
-        self.get_mut_socket().write_all(buffer).await.map_err(|e| {
-            tracing::trace!("Write error on TLS link {}: {}", self, e);
-            zerror!(e).into()
-        })
+        match self.get_mut_socket().write_all(buffer).await {
+            Ok(()) => Ok(()),
+            Err(err) => {
+                tracing::warn!(
+                    "RAI524 residual: write #{seq} on TLS link {} failed: {err}",
+                    self
+                );
+                Err(zerror!(err).into())
+            }
+        }
     }
 
     async fn read(&self, buffer: &mut [u8]) -> ZResult<usize> {
