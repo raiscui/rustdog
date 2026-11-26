@@ -145,6 +145,11 @@ fn validate_transfer_path(raw: &str, verb: &str) -> Result<PathBuf, std::io::Err
     // (Win32 忽略它们)、Windows 上再剥掉从 `:` 开始的备用数据流部分、最后折叠大小写 ——
     // 一次覆盖五种别名面, 不需要逐个列。过拒无害 (没人会拿 .rdog-partial 当目标目录名),
     // 漏拒会毁数据。
+    // 已知残余: NTFS 上开启 8.3 短名生成时, `.rdog-partial` 还有一个短名别名 (形如
+    // `RDOG-P~1`), 客户端若**故意**按短名拼出目标路径就能落进暂存区. 堵它要解析路径真实身份
+    // (GetFinalPathNameByHandle), 而暂存目录此刻可能还不存在; 且现代 Windows 卷默认不生成 8.3
+    // 短名. 这一条写进规格的已知边界, 不假装已解决 —— 但也不装作不存在.
+    //
     // 任意位置都拒, **包括最后一段**: 一个名叫 `.rdog-partial` 的普通文件落在 /d 里之后,
     // 之后所有往 /d 的传输都会因为要建 <dir>/.rdog-partial/ 目录而失败。
     let hits_staging_dir = path.components().any(|component| {
@@ -385,7 +390,7 @@ pub fn execute_file_end(payload: &str) -> std::io::Result<Value> {
 
     // 双校验: 字节数先查 (便宜), 摘要后算 (贵)
     if written != size {
-        let _ = std::fs::remove_file(&temp_path);
+        reap_file(&temp_path);
         sessions.remove(&transfer_id);
         return Err(std::io::Error::other(format!(
             "@file-end 字节数不符: 已写 {written}, 声明 {size} — 半成品已清理"
@@ -393,7 +398,7 @@ pub fn execute_file_end(payload: &str) -> std::io::Result<Value> {
     }
     let actual_sha256 = sha256_file(&temp_path)?;
     if !actual_sha256.eq_ignore_ascii_case(&declared_sha256) {
-        let _ = std::fs::remove_file(&temp_path);
+        reap_file(&temp_path);
         sessions.remove(&transfer_id);
         return Err(std::io::Error::other(format!(
             "@file-end 摘要不符: 声明 {declared_sha256}, 实际 {actual_sha256} — 半成品已清理"
@@ -402,7 +407,7 @@ pub fn execute_file_end(payload: &str) -> std::io::Result<Value> {
     // 会话里声明的 sha256 (若有) 也要一致 — 防控制端两次声明漂移
     if let Some(expected) = &declared_in_put {
         if !actual_sha256.eq_ignore_ascii_case(expected) {
-            let _ = std::fs::remove_file(&temp_path);
+            reap_file(&temp_path);
             sessions.remove(&transfer_id);
             return Err(std::io::Error::other(
                 "@file-end 与 @put-file 声明摘要不一致 — 半成品已清理",
@@ -413,11 +418,11 @@ pub fn execute_file_end(payload: &str) -> std::io::Result<Value> {
     // 提交: 原子改名到目标 (同目录 rename, 失败回退为复制)
     if std::fs::rename(&temp_path, &final_path).is_err() {
         std::fs::copy(&temp_path, &final_path).map_err(|e| {
-            let _ = std::fs::remove_file(&temp_path);
+            reap_file(&temp_path);
             sessions.remove(&transfer_id);
             std::io::Error::other(format!("提交文件失败 (rename 与 copy 均失败): {e}"))
         })?;
-        let _ = std::fs::remove_file(&temp_path);
+        reap_file(&temp_path);
     }
     // 提交成功即退役会话. 不退的话, 这条已完成的条目会在 TTL 到期时被 sweep 拿去"回收"它的
     // 暂存路径 —— 而那个路径是按目标文件推导的, 同一目标的**下一次**上传正用着它.
