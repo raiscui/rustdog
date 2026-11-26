@@ -468,3 +468,19 @@ fn the_directory_hop_fits_inside_the_lease_it_renews() {
     assert!(DIRECTORY_CONNECT >= IO, "the hop still needs a usable budget");
     println!("directory: the hop budget stays inside the lease it refreshes");
 }
+
+#[test]
+fn a_renewal_never_outlives_the_lease_it_refreshes() {
+    assert_eq!(
+        renewal_budget(LEASE),
+        DIRECTORY_CONNECT,
+        "a healthy renewal keeps the full directory budget"
+    );
+    let nearly_due = Duration::from_secs(2);
+    assert_eq!(
+        renewal_budget(nearly_due),
+        nearly_due,
+        "an attempt near the deadline gets only the time that is left"
+    );
+    println!("directory: a late renewal cannot run past the lease it refreshes");
+}
