@@ -4,7 +4,6 @@ use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use std::{
     fs,
     io::{Read, Write},
-    net::TcpListener,
     path::PathBuf,
     process::{Child, Command, Stdio},
     sync::{Arc, Mutex},
@@ -23,13 +22,10 @@ mod child_guard;
 
 use child_guard::ChildGuard;
 
-fn next_port() -> u16 {
-    TcpListener::bind(("127.0.0.1", 0))
-        .expect("ephemeral port probe should bind")
-        .local_addr()
-        .expect("ephemeral port probe should expose local addr")
-        .port()
-}
+#[path = "support/test_ports.rs"]
+mod test_ports;
+
+use test_ports::allocate_tcp_port;
 
 /// 认证的测试 zenoh session (issue #82): 读 ~/.rdog/auth.toml 注入 usrpwd
 /// 凭证 — daemon 默认开启认证, 裸 session 的 pub 会被拒。
@@ -137,7 +133,7 @@ fn write_temp_zenoh_router_config(
     let path = std::env::temp_dir().join(format!(
         "rdog-zenoh-router-{}-{}.toml",
         std::process::id(),
-        next_port()
+        allocate_tcp_port()
     ));
 
     let listen_endpoints = listen_endpoints
@@ -296,7 +292,7 @@ fn temp_workdir(name: &str) -> PathBuf {
     let path = std::env::temp_dir().join(format!(
         "rdog-zenoh-{name}-{}-{}",
         std::process::id(),
-        next_port()
+        allocate_tcp_port()
     ));
     fs::create_dir_all(&path).expect("temp workdir should create");
     path
@@ -636,7 +632,7 @@ fn render_session_bridge_payload(session_id: &str, line: &str) -> String {
 #[test]
 fn control_should_use_single_positional_name_as_zenoh_target() {
     let daemon_name = unique_name("short");
-    let listen_port = next_port();
+    let listen_port = allocate_tcp_port();
     let (mut daemon, config_path, _entrypoint, buffer) =
         start_zenoh_daemon_with_combined_output(&daemon_name, listen_port);
     wait_until_output_contains(
@@ -663,7 +659,7 @@ fn control_should_use_single_positional_name_as_zenoh_target() {
 #[test]
 fn control_should_reach_daemon_via_explicit_entrypoint_fallback() {
     let daemon_name = unique_name("entry");
-    let listen_port = next_port();
+    let listen_port = allocate_tcp_port();
     let (mut daemon, config_path, entrypoint, buffer) =
         start_zenoh_daemon_with_combined_output(&daemon_name, listen_port);
     wait_until_output_contains(
@@ -722,8 +718,8 @@ fn control_should_fail_when_no_router_is_discoverable_and_no_entrypoint_is_given
 #[test]
 fn daemon_should_fail_fast_on_duplicate_name() {
     let daemon_name = unique_name("dup");
-    let first_port = next_port();
-    let second_port = next_port();
+    let first_port = allocate_tcp_port();
+    let second_port = allocate_tcp_port();
     let (mut first, first_config, _entrypoint, buffer) =
         start_zenoh_daemon_with_combined_output(&daemon_name, first_port);
     wait_until_output_contains(
@@ -759,7 +755,7 @@ fn daemon_should_fail_fast_on_duplicate_name() {
 #[test]
 fn control_should_execute_literal_shell_line_in_zenoh_profile() {
     let daemon_name = unique_name("literal");
-    let listen_port = next_port();
+    let listen_port = allocate_tcp_port();
     let (mut daemon, config_path, entrypoint, buffer) =
         start_zenoh_daemon_with_combined_output(&daemon_name, listen_port);
     wait_until_output_contains(
@@ -795,7 +791,7 @@ fn control_should_execute_literal_shell_line_in_zenoh_profile() {
 #[test]
 fn control_should_route_key_request_in_zenoh_profile() {
     let daemon_name = unique_name("key");
-    let listen_port = next_port();
+    let listen_port = allocate_tcp_port();
     let (mut daemon, config_path, entrypoint, buffer) =
         start_zenoh_daemon_with_combined_output(&daemon_name, listen_port);
     wait_until_output_contains(
@@ -835,7 +831,7 @@ fn control_should_route_key_request_in_zenoh_profile() {
 #[ignore = "requires real input simulation backend permissions on the daemon host"]
 fn control_should_execute_safe_mouse_move_in_zenoh_profile() {
     let daemon_name = unique_name("mouse");
-    let listen_port = next_port();
+    let listen_port = allocate_tcp_port();
     let (mut daemon, config_path, entrypoint, buffer) =
         start_zenoh_daemon_with_combined_output(&daemon_name, listen_port);
     wait_until_output_contains(
@@ -892,7 +888,7 @@ fn control_should_execute_safe_mouse_move_in_zenoh_profile() {
 #[test]
 fn control_should_publish_key_event_after_successful_key_request() {
     let daemon_name = unique_name("keyevent");
-    let listen_port = next_port();
+    let listen_port = allocate_tcp_port();
     let (mut daemon, config_path, entrypoint, buffer) =
         start_zenoh_daemon_with_combined_output(&daemon_name, listen_port);
     wait_until_output_contains(
@@ -961,7 +957,7 @@ fn control_should_publish_key_event_after_successful_key_request() {
 #[test]
 fn external_peer_should_send_control_request_via_zenoh_to_daemon_channel() {
     let daemon_name = unique_name("channel");
-    let listen_port = next_port();
+    let listen_port = allocate_tcp_port();
     let (mut daemon, config_path, entrypoint, buffer) =
         start_zenoh_daemon_with_combined_output(&daemon_name, listen_port);
     wait_until_output_contains(
@@ -1100,7 +1096,7 @@ fn external_peer_should_send_control_request_via_zenoh_to_daemon_channel() {
 #[test]
 fn control_should_wait_for_slow_session_channel_response() {
     let daemon_name = unique_name("slow-response");
-    let listen_port = next_port();
+    let listen_port = allocate_tcp_port();
     let (mut daemon, config_path, entrypoint, buffer) =
         start_zenoh_daemon_with_combined_output(&daemon_name, listen_port);
     wait_until_output_contains(
@@ -1145,7 +1141,7 @@ fn control_should_wait_for_slow_session_channel_response() {
 #[test]
 fn control_should_reject_rich_frame_over_legacy_queryable_path() {
     let daemon_name = unique_name("legacy-rich");
-    let listen_port = next_port();
+    let listen_port = allocate_tcp_port();
     let (mut daemon, config_path, entrypoint, buffer) =
         start_zenoh_daemon_with_combined_output(&daemon_name, listen_port);
     wait_until_output_contains(
@@ -1199,7 +1195,7 @@ fn control_should_reject_rich_frame_over_legacy_queryable_path() {
 #[test]
 fn control_should_reject_rich_frame_over_legacy_session_query_payload() {
     let daemon_name = unique_name("legacy-session-rich");
-    let listen_port = next_port();
+    let listen_port = allocate_tcp_port();
     let (mut daemon, config_path, entrypoint, buffer) =
         start_zenoh_daemon_with_combined_output(&daemon_name, listen_port);
     wait_until_output_contains(
@@ -1278,7 +1274,7 @@ fn control_should_reject_rich_frame_over_legacy_session_query_payload() {
 #[test]
 fn control_should_route_paste_request_in_zenoh_profile() {
     let daemon_name = unique_name("paste");
-    let listen_port = next_port();
+    let listen_port = allocate_tcp_port();
     let (mut daemon, config_path, entrypoint, buffer) =
         start_zenoh_daemon_with_combined_output(&daemon_name, listen_port);
     wait_until_output_contains(
@@ -1322,7 +1318,7 @@ fn control_should_route_paste_request_in_zenoh_profile() {
 #[test]
 fn control_should_run_pty_command_in_zenoh_profile() {
     let daemon_name = unique_name("pty");
-    let listen_port = next_port();
+    let listen_port = allocate_tcp_port();
     let (mut daemon, config_path, entrypoint, buffer) =
         start_zenoh_daemon_with_combined_output(&daemon_name, listen_port);
     wait_until_output_contains(
@@ -1377,7 +1373,7 @@ fn control_should_run_pty_command_in_zenoh_profile() {
 #[test]
 fn control_should_accept_pty_string_shorthand_in_zenoh_profile() {
     let daemon_name = unique_name("pty-short");
-    let listen_port = next_port();
+    let listen_port = allocate_tcp_port();
     let (mut daemon, config_path, entrypoint, buffer) =
         start_zenoh_daemon_with_combined_output(&daemon_name, listen_port);
     wait_until_output_contains(
@@ -1441,7 +1437,7 @@ fn control_should_accept_pty_string_shorthand_in_zenoh_profile() {
 #[test]
 fn control_should_forward_pty_resize_frame_in_zenoh_profile() {
     let daemon_name = unique_name("pty-resize");
-    let listen_port = next_port();
+    let listen_port = allocate_tcp_port();
     let (mut daemon, config_path, entrypoint, buffer) =
         start_zenoh_daemon_with_combined_output(&daemon_name, listen_port);
     wait_until_output_contains(
@@ -1526,7 +1522,7 @@ fn control_should_forward_pty_resize_frame_in_zenoh_profile() {
 #[test]
 fn control_should_forward_tty_input_after_zenoh_pty_output_goes_idle() {
     let daemon_name = unique_name("pty-tty-input");
-    let listen_port = next_port();
+    let listen_port = allocate_tcp_port();
     let (mut daemon, config_path, entrypoint, buffer) =
         start_zenoh_daemon_with_combined_output(&daemon_name, listen_port);
     wait_until_output_contains(
@@ -1617,7 +1613,7 @@ fn control_should_forward_tty_input_after_zenoh_pty_output_goes_idle() {
 #[test]
 fn control_should_repaint_tui_input_while_zenoh_pty_output_is_busy() {
     let daemon_name = unique_name("pty-tui-input");
-    let listen_port = next_port();
+    let listen_port = allocate_tcp_port();
     let (mut daemon, config_path, entrypoint, daemon_buffer) =
         start_zenoh_daemon_with_combined_output(&daemon_name, listen_port);
     wait_until_output_contains(
@@ -1713,7 +1709,7 @@ fn control_should_repaint_tui_input_while_zenoh_pty_output_is_busy() {
 #[test]
 fn control_should_detach_and_attach_pty_in_zenoh_profile() {
     let daemon_name = unique_name("pty-reattach");
-    let listen_port = next_port();
+    let listen_port = allocate_tcp_port();
     let (mut daemon, config_path, entrypoint, buffer) =
         start_zenoh_daemon_with_combined_output(&daemon_name, listen_port);
     wait_until_output_contains(
@@ -1901,7 +1897,7 @@ fn control_should_detach_and_attach_pty_in_zenoh_profile() {
 #[ignore = "requires real screenshot backend and host screen capture permissions"]
 fn control_should_execute_screenshot_and_save_file_in_zenoh_profile() {
     let daemon_name = unique_name("screenshot");
-    let listen_port = next_port();
+    let listen_port = allocate_tcp_port();
     let workdir = temp_workdir("screenshot");
     let entrypoint = format!("tcp/127.0.0.1:{listen_port}");
     let config_path =
@@ -2019,7 +2015,7 @@ fn control_should_execute_screenshot_and_save_file_in_zenoh_profile() {
 #[test]
 fn daemon_should_reuse_same_control_key_after_restart_by_default() {
     let daemon_name = unique_name("stable");
-    let listen_port = next_port();
+    let listen_port = allocate_tcp_port();
     let first_output = {
         let (mut daemon, config_path, _entrypoint, buffer) =
             start_zenoh_daemon_with_combined_output(&daemon_name, listen_port);
@@ -2069,7 +2065,7 @@ fn daemon_should_reuse_same_control_key_after_restart_by_default() {
 #[test]
 fn control_session_should_reresolve_after_daemon_restart() {
     let daemon_name = unique_name("resume");
-    let listen_port = next_port();
+    let listen_port = allocate_tcp_port();
     let (mut first, first_config, entrypoint, first_buffer) =
         start_zenoh_daemon_with_combined_output(&daemon_name, listen_port);
     wait_until_output_contains(
@@ -2213,7 +2209,7 @@ fn legacy_peer_mode_config_should_report_migration_error() {
     let daemon_name = unique_name("legacy-mode");
     let config_path = write_temp_zenoh_router_config(
         &daemon_name,
-        &[format!("tcp/127.0.0.1:{}", next_port())],
+        &[format!("tcp/127.0.0.1:{}", allocate_tcp_port())],
         "peer",
     );
 
@@ -2294,7 +2290,7 @@ fn run_control_multi_one_shot(
 #[test]
 fn control_multi_one_shot_should_run_lines_in_order_for_zenoh_profile() {
     let daemon_name = unique_name("multi");
-    let listen_port = next_port();
+    let listen_port = allocate_tcp_port();
     let (mut daemon, config_path, _entrypoint, buffer) =
         start_zenoh_daemon_with_combined_output(&daemon_name, listen_port);
     wait_until_output_contains(
@@ -2333,7 +2329,7 @@ fn control_multi_one_shot_should_run_lines_in_order_for_zenoh_profile() {
 #[test]
 fn control_multi_one_shot_should_run_three_lines_in_order_for_zenoh_profile() {
     let daemon_name = unique_name("tri");
-    let listen_port = next_port();
+    let listen_port = allocate_tcp_port();
     let (mut daemon, config_path, _entrypoint, buffer) =
         start_zenoh_daemon_with_combined_output(&daemon_name, listen_port);
     wait_until_output_contains(
@@ -2378,7 +2374,7 @@ fn control_multi_one_shot_should_run_three_lines_with_3_responses_in_zenoh_profi
     // 仍然顺序执行(daemon 不为每条 line 做事务)。后续若引入 response-code
     // fail-fast 行为,可以再加一条覆盖。占位期间给一条稳健的 3 line 顺序烟测。
     let daemon_name = unique_name("ok3");
-    let listen_port = next_port();
+    let listen_port = allocate_tcp_port();
     let (mut daemon, config_path, _entrypoint, buffer) =
         start_zenoh_daemon_with_combined_output(&daemon_name, listen_port);
     wait_until_output_contains(
@@ -2448,7 +2444,7 @@ fn extract_task_id_from_output(stdout: &str) -> String {
 #[test]
 fn task_spawn_progress_frames_should_reach_control_client() {
     let daemon_name = unique_name("task-frames");
-    let listen_port = next_port();
+    let listen_port = allocate_tcp_port();
     let (mut daemon, config_path, entrypoint, buffer) =
         start_zenoh_daemon_with_combined_output(&daemon_name, listen_port);
     wait_until_output_contains(
@@ -2522,7 +2518,7 @@ fn task_spawn_progress_frames_should_reach_control_client() {
 #[test]
 fn task_spawn_cancel_should_work_across_client_processes() {
     let daemon_name = unique_name("task-cancel");
-    let listen_port = next_port();
+    let listen_port = allocate_tcp_port();
     let (mut daemon, config_path, entrypoint, buffer) =
         start_zenoh_daemon_with_combined_output(&daemon_name, listen_port);
     wait_until_output_contains(
@@ -2583,7 +2579,7 @@ fn task_spawn_cancel_should_work_across_client_processes() {
 #[test]
 fn agent_mailbox_should_accept_delivery_and_support_pull_and_ack() {
     let daemon_name = unique_name("agent-mb");
-    let listen_port = next_port();
+    let listen_port = allocate_tcp_port();
     let (mut daemon, config_path, entrypoint, buffer) =
         start_zenoh_daemon_with_combined_output(&daemon_name, listen_port);
     wait_until_output_contains(
@@ -2699,7 +2695,7 @@ fn agent_mailbox_should_accept_delivery_and_support_pull_and_ack() {
 #[test]
 fn agent_runtime_should_answer_task_message_via_echo_decision() {
     let daemon_name = unique_name("agent-rt");
-    let listen_port = next_port();
+    let listen_port = allocate_tcp_port();
     let (mut daemon, config_path, entrypoint, buffer) =
         start_zenoh_daemon_with_combined_output(&daemon_name, listen_port);
     wait_until_output_contains(
@@ -2839,7 +2835,7 @@ fn agent_runtime_should_answer_task_message_via_echo_decision() {
 #[test]
 fn agent_card_should_be_published_and_queryable_with_version_updates() {
     let daemon_name = unique_name("agent-card");
-    let listen_port = next_port();
+    let listen_port = allocate_tcp_port();
     let (mut daemon, config_path, entrypoint, buffer) =
         start_zenoh_daemon_with_combined_output(&daemon_name, listen_port);
     wait_until_output_contains(
@@ -2945,7 +2941,7 @@ fn agent_card_should_be_published_and_queryable_with_version_updates() {
 #[test]
 fn agent_message_delivered_before_agent_start_should_be_recovered_via_mailbox() {
     let daemon_name = unique_name("agent-pre");
-    let listen_port = next_port();
+    let listen_port = allocate_tcp_port();
     let (mut daemon, config_path, entrypoint, buffer) =
         start_zenoh_daemon_with_combined_output(&daemon_name, listen_port);
     wait_until_output_contains(
@@ -3069,7 +3065,7 @@ fn agent_message_delivered_before_agent_start_should_be_recovered_via_mailbox() 
 #[test]
 fn agent_mailbox_should_deduplicate_repeated_delivery_by_id() {
     let daemon_name = unique_name("agent-dedup");
-    let listen_port = next_port();
+    let listen_port = allocate_tcp_port();
     let (mut daemon, config_path, entrypoint, buffer) =
         start_zenoh_daemon_with_combined_output(&daemon_name, listen_port);
     wait_until_output_contains(
@@ -3146,7 +3142,7 @@ fn agent_mailbox_should_deduplicate_repeated_delivery_by_id() {
 #[test]
 fn auth_wrong_credentials_should_be_rejected_by_daemon() {
     let daemon_name = unique_name("auth-reject");
-    let listen_port = next_port();
+    let listen_port = allocate_tcp_port();
     let (mut daemon, config_path, entrypoint, buffer) =
         start_zenoh_daemon_with_combined_output(&daemon_name, listen_port);
     wait_until_output_contains(
@@ -3244,7 +3240,7 @@ fn tls_enabled_daemon_should_serve_ca_client_and_reject_wrong_ca() {
     );
 
     let daemon_name = unique_name("tls-e2e");
-    let listen_port = next_port();
+    let listen_port = allocate_tcp_port();
     let config_path = write_temp_zenoh_tls_config(&daemon_name, listen_port);
     let entrypoint = format!("tls/127.0.0.1:{listen_port}");
     let _ = user_dir;
@@ -3392,7 +3388,7 @@ fn mtls_daemon_should_require_client_certificate_and_accept_configured_client() 
     let workdir = PathBuf::from(format!(
         "/tmp/rdog-mtls-{}-{}",
         std::process::id(),
-        next_port()
+        allocate_tcp_port()
     ));
     fs::create_dir_all(&workdir).expect("mTLS workdir should create");
     let daemon_tmp = workdir.join("daemon-tmp");
@@ -3413,7 +3409,7 @@ fn mtls_daemon_should_require_client_certificate_and_accept_configured_client() 
     .expect("CA-only client should trust the server");
 
     let daemon_name = unique_name("mtls-e2e");
-    let port = next_port();
+    let port = allocate_tcp_port();
     let config_path = write_temp_zenoh_tls_config(&daemon_name, port);
     fs::OpenOptions::new()
         .append(true)
@@ -3515,7 +3511,7 @@ fn dirs_home_rdkg() -> Option<std::path::PathBuf> {
 #[test]
 fn diag_pub_reaches_mailbox_with_and_without_agent() {
     let daemon_name = unique_name("diag-pub");
-    let listen_port = next_port();
+    let listen_port = allocate_tcp_port();
     let (mut daemon, config_path, entrypoint, buffer) =
         start_zenoh_daemon_with_combined_output(&daemon_name, listen_port);
     wait_until_output_contains(

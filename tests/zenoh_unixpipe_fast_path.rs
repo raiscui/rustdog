@@ -33,7 +33,7 @@ fn unique_daemon_name(prefix: &str) -> String {
     format!(
         "{prefix}-{}-{}.{RDOG_NAMESPACE}",
         std::process::id(),
-        next_port()
+        allocate_tcp_port()
     )
 }
 
@@ -148,7 +148,7 @@ fn unixpipe_endpoint_should_be_created_when_daemon_starts_with_unixpipe_enabled(
     let base_path = derive_unixpipe_base_path(RDOG_NAMESPACE, &daemon_name);
     cleanup_unixpipe_artifacts(&base_path);
 
-    let daemon = start_zenoh_daemon_with_combined_output(&daemon_name, next_port(), true);
+    let daemon = start_zenoh_daemon_with_combined_output(&daemon_name, allocate_tcp_port(), true);
 
     // 等待 daemon 起来 + log
     wait_for_marker(
@@ -175,7 +175,7 @@ fn unixpipe_fast_path_should_make_ping_respond_within_budget() {
     let base_path = derive_unixpipe_base_path(RDOG_NAMESPACE, &daemon_name);
     cleanup_unixpipe_artifacts(&base_path);
 
-    let daemon = start_zenoh_daemon_with_combined_output(&daemon_name, next_port(), true);
+    let daemon = start_zenoh_daemon_with_combined_output(&daemon_name, allocate_tcp_port(), true);
 
     wait_for_marker(
         daemon.output(),
@@ -234,7 +234,7 @@ fn stale_unixpipe_socket_files_should_be_cleaned_on_daemon_start() {
     }
 
     // 启动 daemon,触发 stale cleanup。
-    let daemon = start_zenoh_daemon_with_combined_output(&daemon_name, next_port(), true);
+    let daemon = start_zenoh_daemon_with_combined_output(&daemon_name, allocate_tcp_port(), true);
 
     // daemon 起来后,残留的 3 个文件必须已经被清理。
     // 重新创建新的 FIFO 是 daemon 自己的事,我们只验证旧的被 unlink。
@@ -265,7 +265,7 @@ fn stale_unixpipe_socket_files_should_be_cleaned_on_daemon_start() {
 #[test]
 fn duplicate_daemon_start_should_not_break_running_local_default_unixpipe() {
     // 使用短 namespace 控制 unixpipe 路径长度,同时隔离 registry 和历史 FIFO。
-    let namespace = format!("dup{}", next_port());
+    let namespace = format!("dup{}", allocate_tcp_port());
     cleanup_namespace_artifacts(&namespace);
     let state_home = TestStateHome::new("duplicate-start");
     let daemon_name = format!("d.{namespace}");
@@ -275,7 +275,7 @@ fn duplicate_daemon_start_should_not_break_running_local_default_unixpipe() {
     let first = start_zenoh_daemon_with_namespace_and_local_default(
         &daemon_name,
         &namespace,
-        next_port(),
+        allocate_tcp_port(),
         true,
         true,
         state_home.path(),
@@ -299,7 +299,7 @@ fn duplicate_daemon_start_should_not_break_running_local_default_unixpipe() {
     let mut second = start_zenoh_daemon_with_namespace_and_local_default(
         &daemon_name,
         &namespace,
-        next_port(),
+        allocate_tcp_port(),
         true,
         true,
         state_home.path(),
@@ -342,7 +342,7 @@ fn duplicate_daemon_start_should_not_break_running_local_default_unixpipe() {
 
 #[test]
 fn crashed_daemon_should_release_all_leases_for_same_identity_restart() {
-    let namespace = format!("cr{}", next_port());
+    let namespace = format!("cr{}", allocate_tcp_port());
     cleanup_namespace_artifacts(&namespace);
     let state_home = TestStateHome::new("crash-restart");
     let daemon_name = format!("d.{namespace}");
@@ -352,7 +352,7 @@ fn crashed_daemon_should_release_all_leases_for_same_identity_restart() {
     let mut first = start_zenoh_daemon_with_namespace_and_local_default(
         &daemon_name,
         &namespace,
-        next_port(),
+        allocate_tcp_port(),
         true,
         true,
         state_home.path(),
@@ -413,7 +413,7 @@ fn crashed_daemon_should_release_all_leases_for_same_identity_restart() {
     let second = start_zenoh_daemon_with_namespace_and_local_default(
         &daemon_name,
         &namespace,
-        next_port(),
+        allocate_tcp_port(),
         true,
         true,
         state_home.path(),
@@ -441,7 +441,7 @@ fn crashed_daemon_should_release_all_leases_for_same_identity_restart() {
 #[test]
 fn distinct_daemon_names_should_not_replace_a_shared_explicit_unixpipe() {
     // service-name 不同,但显式 socket_path 相同;FIFO path 必须有独立 ownership guard。
-    let namespace = format!("p{}", next_port());
+    let namespace = format!("p{}", allocate_tcp_port());
     let state_home = TestStateHome::new("shared-unixpipe");
     let daemon_a = format!("a.{namespace}");
     let daemon_b = format!("b.{namespace}");
@@ -451,7 +451,7 @@ fn distinct_daemon_names_should_not_replace_a_shared_explicit_unixpipe() {
     let first = start_zenoh_daemon_with_namespace_and_local_default(
         &daemon_a,
         &namespace,
-        next_port(),
+        allocate_tcp_port(),
         true,
         false,
         state_home.path(),
@@ -477,7 +477,7 @@ fn distinct_daemon_names_should_not_replace_a_shared_explicit_unixpipe() {
     let mut second = start_zenoh_daemon_with_namespace_and_local_default(
         &daemon_b,
         &namespace,
-        next_port(),
+        allocate_tcp_port(),
         true,
         false,
         state_home.path(),
@@ -515,7 +515,7 @@ fn distinct_daemon_names_should_not_replace_a_shared_explicit_unixpipe() {
 #[test]
 fn self_target_with_explicit_namespace_should_reject_unmanaged_daemon() {
     // 独立 namespace,完全跟其他 `lab` 测试隔离,允许 cargo test 默认并发。
-    let ns = format!("self{}", next_port());
+    let ns = format!("self{}", allocate_tcp_port());
     let state_home = TestStateHome::new("self-explicit");
     cleanup_namespace_artifacts(&ns);
 
@@ -526,7 +526,7 @@ fn self_target_with_explicit_namespace_should_reject_unmanaged_daemon() {
     let daemon = start_zenoh_daemon_with_namespace_and_local_default(
         &daemon_name,
         &ns,
-        next_port(),
+        allocate_tcp_port(),
         true,
         false,
         state_home.path(),
@@ -562,7 +562,7 @@ fn self_target_with_explicit_namespace_should_reject_unmanaged_daemon() {
 
 #[test]
 fn empty_target_with_namespace_should_reject_unmanaged_daemon() {
-    let ns = format!("empty{}", next_port());
+    let ns = format!("empty{}", allocate_tcp_port());
     let state_home = TestStateHome::new("empty-target");
     cleanup_namespace_artifacts(&ns);
 
@@ -573,7 +573,7 @@ fn empty_target_with_namespace_should_reject_unmanaged_daemon() {
     let daemon = start_zenoh_daemon_with_namespace_and_local_default(
         &daemon_name,
         &ns,
-        next_port(),
+        allocate_tcp_port(),
         true,
         false,
         state_home.path(),
@@ -609,11 +609,11 @@ fn empty_target_with_namespace_should_reject_unmanaged_daemon() {
 
 #[test]
 fn empty_target_should_use_local_default_even_when_extra_fifo_candidate_exists() {
-    let ns = format!("lde{}", next_port());
+    let ns = format!("lde{}", allocate_tcp_port());
     cleanup_namespace_artifacts(&ns);
     let state_home = TestStateHome::new("localdefempty");
 
-    let daemon_name = format!("d{}.{ns}", next_port());
+    let daemon_name = format!("d{}.{ns}", allocate_tcp_port());
     let extra_daemon_name = format!("x.{ns}");
     let base_path = derive_unixpipe_base_path(&ns, &daemon_name);
     let extra_base = create_fake_uplink_candidate(&ns, &extra_daemon_name);
@@ -622,7 +622,7 @@ fn empty_target_should_use_local_default_even_when_extra_fifo_candidate_exists()
     let daemon = start_zenoh_daemon_with_namespace_and_local_default(
         &daemon_name,
         &ns,
-        next_port(),
+        allocate_tcp_port(),
         true,
         true,
         state_home.path(),
@@ -664,18 +664,18 @@ fn empty_target_should_use_local_default_even_when_extra_fifo_candidate_exists()
 /// (日志可见 auth enabled), `rdog control self` 无任何凭证参数即通过
 /// (client 与 daemon 同用户共享 ~/.rdog/auth.toml, 自动配对)。
 fn self_target_should_pass_authentication_with_zero_config() {
-    let ns = format!("authz{}", next_port());
+    let ns = format!("authz{}", allocate_tcp_port());
     cleanup_namespace_artifacts(&ns);
     let state_home = TestStateHome::new("authzero");
 
-    let daemon_name = format!("d{}.{ns}", next_port());
+    let daemon_name = format!("d{}.{ns}", allocate_tcp_port());
     let base_path = derive_unixpipe_base_path(&ns, &daemon_name);
     cleanup_unixpipe_artifacts(&base_path);
 
     let daemon = start_zenoh_daemon_with_namespace_and_local_default(
         &daemon_name,
         &ns,
-        next_port(),
+        allocate_tcp_port(),
         true,
         true,
         state_home.path(),
@@ -717,11 +717,11 @@ fn self_target_should_pass_authentication_with_zero_config() {
 
 #[test]
 fn self_target_should_use_local_default_even_when_extra_fifo_candidate_exists() {
-    let ns = format!("lds{}", next_port());
+    let ns = format!("lds{}", allocate_tcp_port());
     cleanup_namespace_artifacts(&ns);
     let state_home = TestStateHome::new("localdefself");
 
-    let daemon_name = format!("d{}.{ns}", next_port());
+    let daemon_name = format!("d{}.{ns}", allocate_tcp_port());
     let extra_daemon_name = format!("x.{ns}");
     let base_path = derive_unixpipe_base_path(&ns, &daemon_name);
     let extra_base = create_fake_uplink_candidate(&ns, &extra_daemon_name);
@@ -730,7 +730,7 @@ fn self_target_should_use_local_default_even_when_extra_fifo_candidate_exists() 
     let daemon = start_zenoh_daemon_with_namespace_and_local_default(
         &daemon_name,
         &ns,
-        next_port(),
+        allocate_tcp_port(),
         true,
         true,
         state_home.path(),
@@ -770,7 +770,7 @@ fn self_target_should_use_local_default_even_when_extra_fifo_candidate_exists() 
 #[test]
 fn self_target_should_error_when_no_local_daemon_running() {
     // 用唯一 namespace 和 state home 构造空环境,不能删除真实 daemon 的 FIFO。
-    let namespace = format!("none{}", next_port());
+    let namespace = format!("none{}", allocate_tcp_port());
     let state_home = TestStateHome::new("no-local-daemon");
     cleanup_namespace_artifacts(&namespace);
 
@@ -794,7 +794,7 @@ fn self_target_should_error_when_no_local_daemon_running() {
 #[test]
 fn self_target_should_report_multiple_unmanaged_local_daemons() {
     // 使用私有 namespace/state 启动两个 daemon,不能读取或清理真实 lab registry。
-    let namespace = format!("multi{}", next_port());
+    let namespace = format!("multi{}", allocate_tcp_port());
     let state_home = TestStateHome::new("multiple-daemons");
     let daemon_name_a = format!("a.{namespace}");
     let daemon_name_b = format!("b.{namespace}");
@@ -806,7 +806,7 @@ fn self_target_should_report_multiple_unmanaged_local_daemons() {
     let daemon_a = start_zenoh_daemon_with_namespace_and_local_default(
         &daemon_name_a,
         &namespace,
-        next_port(),
+        allocate_tcp_port(),
         true,
         false,
         state_home.path(),
@@ -815,7 +815,7 @@ fn self_target_should_report_multiple_unmanaged_local_daemons() {
     let daemon_b = start_zenoh_daemon_with_namespace_and_local_default(
         &daemon_name_b,
         &namespace,
-        next_port(),
+        allocate_tcp_port(),
         true,
         false,
         state_home.path(),

@@ -763,6 +763,7 @@ fn write_payload_len(header: &mut Vec<u8>, payload_len: usize, mask: bool) -> io
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::test_ports::allocate_tcp_port;
     use std::{thread, time::Duration};
 
     fn bind_loopback_listener() -> std::net::TcpListener {
@@ -810,10 +811,7 @@ mod tests {
         ignore = "Windows 下端口释放/重绑时机不稳定,建连退避由 unix 侧用例覆盖"
     )]
     fn connect_tcp_with_retry_should_succeed_when_listener_binds_late() {
-        // 占一个端口再立刻放掉, 制造"拨号时没人 listen"的瞬时窗口。
-        let probe = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("probe should bind");
-        let port = probe.local_addr().expect("probe should expose addr").port();
-        drop(probe);
+        let port = allocate_tcp_port();
 
         let server = thread::spawn(move || {
             thread::sleep(Duration::from_millis(50));
@@ -834,9 +832,7 @@ mod tests {
     fn connect_tcp_stream_should_surface_refused_for_closed_loopback_port() {
         // 退避逻辑挂在 ConnectionRefused 上, 这条断言守住的是那个前提本身:
         // "没人 listen" 在各平台上都归一到同一个 kind, 不会退化成不可重试的形态。
-        let probe = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("probe should bind");
-        let port = probe.local_addr().expect("probe should expose addr").port();
-        drop(probe);
+        let port = allocate_tcp_port();
 
         let err = connect_tcp_stream("127.0.0.1", port).expect_err("closed port should be refused");
         assert_eq!(err.kind(), ErrorKind::ConnectionRefused);
