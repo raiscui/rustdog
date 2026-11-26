@@ -852,3 +852,21 @@ P7 第 3 项「bulk 只允许直连」从未执行, 原因不是没测, 而是�
 账本补记: 以下两个合并提交为纯账本缺口 (无代码改动), 与本轮无关, 一并补记 ——
 - 提交: b227c63
 - 提交: 718eb8c
+
+## 2026-11-26 RAI-367 规格评审收口 (三条 finding 全部成立)
+
+评审对 #143 提了三条, 全部成立, 按性质分别处置:
+
+1. **(medium, investigate) 应用层采样不是直连强制的充分条件.** 一个 chunk 通过检查后可能仍排在发送
+   队列里或需要重传, 路径此时切到 relay, 那批已放行的字节就会从 relay 走, 而下一个 chunk 边界只是
+   「知道得太晚」. 新增 §3.5: bulk 连接必须由**传输层** pin 在直连上 (`bulk_path_pin`), 排队与重传字节
+   也计入 relay 累计量; `path_aware=true` 但 pin 不了的传输**拒绝**承载 bulk, 新增原因码
+   `iroh_bulk_path_pin_unavailable`. 并写明 `bulk_path_pin` 与 `path_aware` 是两个独立事实, 不得互相
+   顶替 —— 把「钉不住」当成「没有 relay 跳」, 就得到一条看起来有门禁其实没有的路径. D1 的证据项加上
+   「在途字节归属」, 用来验证 pin 真生效而不是查得太晚.
+2. **(medium, confirmed) 判定表与 D1 自相矛盾.** §3.1 写「删 partial 后可续传」, §8 D1 写「partial 保留」;
+   而 `execute_put_file` 的 resume offset 正是从 partial 大小推导 —— 删了就等于从头重传. 改为「保留」.
+3. **(low, confirmed) 报告两张表缺「最后复核」列** (AGENTS.md 规则 ②), 已补并逐行填 2026-11-26.
+
+守卫: `check-carrier-assertions.py` OK (3 断言 / 8 载体).
+- 提交: fe29d8f
