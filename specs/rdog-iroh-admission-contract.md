@@ -14,9 +14,9 @@
 - 其余 control 行一律拒绝，错误码与文案取自 [`LANE_REFUSED`](../src/control_iroh.rs)。
 - bulk 传输不在这条通道上，P4 保持关闭。
 
-跨网地址放开用 profile 的 `routable` 字段（缺省 `false`）。地址的策略是 [`network`](../src/control_iroh.rs) 与 [`relay_allowed`](../src/control_iroh.rs)：目录、endpoint、relay/relay-QAD 的**绑定**地址与注册校验都走它们。缺省时仍是 P1 的 IPv4 回环门禁与原错误文案；`routable` 下拒绝未指定、组播和广播地址。
+跨网地址放开用 profile 的 `routable` 字段（缺省 `false`）。地址的策略是 [`network`](../src/control_iroh.rs) 与 [`relay_allowed`](../src/control_iroh.rs)：目录、endpoint、relay/relay-QAD 的**绑定**地址与注册校验都走它们。缺省时仍是 P1 的 IPv4 回环门禁与原错误文案；`routable` 下拒绝未指定、组播和广播地址。relay 的 URL 门禁按 profile 分档：**回环 profile 要求 https + 显式端口 + `qad_port != 0`**；**`routable` profile 只要求 https、主机名与 `qad_port != 0`**，端口可缺省 —— 标准公共 relay 只监听 443，而 `RelayUrl` 会把默认端口规范化掉，要求显式端口等于拒绝公共 relay 唯一合法的写法。显式端口这条规则服务的是自建 relay 的随机端口，不是安全属性；`http://` 在两个 profile 下一律拒绝。
 
-relay 侧另有一个 `advertise` 字段（缺省空），只改写给对端的 relay URL，不改绑定位：1:1 NAT 机型的公网地址（EIP）只存在于 NAT 设备上，本机网卡根本绑不住（`EADDRNOTAVAIL`），而 registry 原本用绑定地址拼 relay URL，于是对端拿到一个它到不了的地址、注册被 `iroh_registration_denied` 拒。所以 `bind`/`relay_*`/`qad` 绑网卡上的私有地址，`advertise` 填公网地址。**`advertise` 有意不过 [`network`](../src/control_iroh.rs)**：它不是本机地址，按绑定地址的规则校验它只会把唯一可用的配置方式判死；它进 URL 后仍要过 `RelayUrl` 解析与对端的 `relay_allowed`（https + 显式端口）。
+relay 侧另有一个 `advertise` 字段（缺省空），只改写给对端的 relay URL，不改绑定位：1:1 NAT 机型的公网地址（EIP）只存在于 NAT 设备上，本机网卡根本绑不住（`EADDRNOTAVAIL`），而 registry 原本用绑定地址拼 relay URL，于是对端拿到一个它到不了的地址、注册被 `iroh_registration_denied` 拒。所以 `bind`/`relay_*`/`qad` 绑网卡上的私有地址，`advertise` 填公网地址。**`advertise` 有意不过 [`network`](../src/control_iroh.rs)**：它不是本机地址，按绑定地址的规则校验它只会把唯一可用的配置方式判死；它进 URL 后仍要过 `RelayUrl` 解析与对端的 `relay_allowed`（https + 主机名 + 非 0 QAD 端口；端口按 profile 分档，见下）。
 
 运维事实（真机跨网两轮后补，别当 bug 查）：
 

@@ -322,16 +322,22 @@ fn network(addr: SocketAddr, routable: bool) -> Result<SocketAddr> {
     Ok(addr)
 }
 
+/// A relay URL plus its QAD port. The explicit-port rule is not a security property:
+/// it exists because a self-hosted relay listens on a random port, so the profile
+/// has to say which one. A public relay listens on the default 443, and `RelayUrl`
+/// normalizes that away, so demanding an explicit port there would refuse the only
+/// spelling a standard public relay can have. HTTPS and a non-zero QAD port stay
+/// required in both profiles, and the loopback profile keeps the explicit port.
 fn relay_allowed(url: &RelayUrl, qad_port: u16, routable: bool) -> Result<()> {
-    let https = url.scheme() == "https" && url.port().is_some() && qad_port != 0;
+    let https = url.scheme() == "https" && qad_port != 0;
     if !routable {
-        if !https || url.host_str() != Some("127.0.0.1") {
+        if !https || url.port().is_none() || url.host_str() != Some("127.0.0.1") {
             return Err("P1 iroh requires an explicit HTTPS loopback relay and QAD port".into());
         }
         return Ok(());
     }
     if !https || url.host_str().is_none() {
-        return Err("iroh routable profile requires an explicit HTTPS relay and QAD port".into());
+        return Err("iroh routable profile requires an HTTPS relay host and a non-zero QAD port".into());
     }
     Ok(())
 }
