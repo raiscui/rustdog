@@ -680,11 +680,10 @@ daemon 按 `<transfer_id>#<该 id 被 open 的序号>` 派生. 派生的那个�
 拿不到安静的空闲窗口。它来自测量分支 `capy/rai476-relay-baseline` @ `e3ae713` 的
 `rdog iroh relay-baseline` 子命令 (隐藏的诊断探头, 不用于出货验收), 后来的人可以用同一 sha 复跑。
 
-**强度声明 (这一节最该被引用的两句)**:
-
-- `relay_bytes_zero=true` **等价于**「括号跨度内没有 relay path 在承载」;
-- **不等价于**「relay 链路上字节为零」—— 一条 relay path 若整个生命周期落在两个块边界之间, 或在本端的
-  `PathList` 之外 (对端的 relay 跳) 承载, 这个判定都看不见 (§3.5 / §4.2 的已知边界)。
+**强度声明 (这一节最该被引用的一句)**: `relay_bytes_zero=true` 的含义只有一条 ——
+**两个括号采样点上都没有 relay path 在场, 且在场 relay path 的累计计数没有增长**。
+它**不是**「relay 链路上字节为零」: 一条 relay path 若整个生命周期落在两个块边界之间, 或在对端的
+relay 跳上承载, 这个判定都看不见 (§3.5 / §4.2 的已知边界)。
 
 **正对照门槛**: relay-only 正对照的增量必须**显著大于噪声** —— 千字节量级才有区分力; 只涨几百字节
 与上面的 25 B/s 同量级, 不构成正对照, 只能如实记「未建立」.
@@ -695,18 +694,19 @@ daemon 按 `<transfer_id>#<该 id 被 open 的序号>` 派生. 派生的那个�
 > 还没在任何一次运行里达到, 所以在它达到之前"relay 上 bulk 字节为 0"这条不做结论; 而且本版连传输层 pin
 > 都没有, 所以那句结论的资格比上一版更低: 能主张的只有"每个边界上路径是直连"。
 >
-> **`established_direct` 现在有了生产者, 但只在 daemon 侧**: `BulkPathGate` 在读采样的同时记录
-> 「本次尝试是否曾观测到 direct」, 所以 §2.5 D1 的「中途 direct → relay」(`iroh_direct_path_lost`)
-> 在 lane 上真的会走到, 并有回环用例 (钉住读数) 与门禁单测覆盖. **客户端门禁仍恒传
-> `established_direct = false`** (`src/transfer_cli.rs`), 因为客户端还没有采样源 —— 所以
-> "上传方向的中途路径丢失已处理"**不得主张**: 上传字节由客户端发出, 那一侧的记录还没接上.
+> **`established_direct` 两端都有生产者**: daemon 的 `BulkPathGate` 与客户端的
+> `BulkPathRecorder` 都在读采样的同时记录「本次尝试是否曾观测到 direct」, 所以 §2.5 D1 的
+> 「中途 direct → relay」(`iroh_direct_path_lost`) 在两个方向都会走到, 各有钉住读数的用例覆盖
+> (`control_iroh/bulk_tests.rs` 与 `transfer_cli.rs` 的 `losing_the_direct_path_mid_upload_*`).
 >
 > `PathClass::Relay` 上那行带撤除条件的 `#[allow(dead_code)]` 已按约定撤掉: 采样生产者到位后,
 > 它是门禁里会走到并有用例覆盖的分支.
 >
-> **未验的一条要说清**: `src/main.rs:503` 仍恒传 `NOT_PATH_AWARE`, `rdog --put` / `--get` 根本走不到
-> 这条 lane —— 今天只有手写的控制行 (或用例) 能触发它。所以"真机上 lane 会拒 relay"这件事**没有被
-> 证明**, 只有回环 + 钉住读数.
+> **`--put` / `--get` 已经在走这条 lane**: `--transport iroh` 分支传的是
+> `PATH_AWARE_CHECKED_PER_CHUNK` (`src/transfer_cli.rs` 的 `run_iroh_bulk`), 逐 chunk 门禁与括号采样
+> 都在真实 CLI 路径上。真机已验: 直连路径上 20 MB 上传完成 (relay 四计数未被碰),
+> 以及 relay 上 open 即拒 (`iroh_direct_path_unavailable`)。**仍未验**的是 relay 上"直连不可得时
+> 拒发"的完整读数对齐 (需要 A 类直连拓扑与 B 类 relay 拓扑各一次)。
 >
 > 跑批单 (`handoffs/rai367/positive-control-runsheet.md`) 是 RAI-367 当时的形态记录 (那时 lane
 > 不承载 bulk), 不再是当前行为的描述; 新的回环用例在
