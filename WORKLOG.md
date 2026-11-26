@@ -7,7 +7,7 @@
 - 同 PR 顺带清掉 RAI-450 最后一条:`EXPERIENCE.md` 里 `embedded().with_extra_roots(...)` 的失效示例改成 `custom_roots(链A).with_extra_roots(链B)`,并写明整条 lane 不用任何内嵌公共根。
 - 评审后三处(RAI-462):ready 行增 `registry_relay=<url>`、注册拒绝落 `expected_relay=… carried_relay=…`、`registry_relay` 启动时按 `directory_url_ok` 校验;规格写明它是**单一期望值**(所有 daemon 共用一条 lane relay),跨不同公共 relay 的注册不在本版能力内。3518414
 - 回执:`control_iroh` 38 passed / 0 failed / 2 ignored;`check-carrier-assertions` OK。
-- 提交: a515523
+- 提交: 358ec12(rebase 前 a515523)、5a6099b(评审后三处)
 
 ## [2026-11-26] RAI-450 合后三条残项 (F4 原因码 / F2 零余量 / F1 注释)
 
