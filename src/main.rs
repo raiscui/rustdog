@@ -352,6 +352,39 @@ fn run(opts: input::Opts) -> Result<(), String> {
                     return Err("iroh control only serves NAMESPACE/NAME targets".into());
                 }
                 let path = iroh_config.as_deref().ok_or("iroh control requires --iroh-config")?;
+                if put.is_some() || get.is_some() {
+                    // bulk 只走准入 lane (需要 profile 里的准入策略), 而准入 lane 是一条长连接:
+                    // 七条动词行共用它, 本端在每个边界读路径与 relay 计数。
+                    if pty
+                        || !pty_command.is_empty()
+                        || pty_close.is_some()
+                        || pty_detach.is_some()
+                        || pty_attach.is_some()
+                        || !one_shot_lines.is_empty()
+                    {
+                        return Err(
+                            "`--put` / `--get` 不能和 PTY / one-shot 请求同时使用".to_string()
+                        );
+                    }
+                    let request = match (put, get) {
+                        (Some(local), None) => transfer_cli::IrohBulkRequest::Put {
+                            local,
+                            remote: remote_path
+                                .ok_or("`--put` 需要 `--remote-path <REMOTE>`".to_string())?,
+                            restart,
+                        },
+                        (None, Some(remote)) => transfer_cli::IrohBulkRequest::Get {
+                            remote,
+                            local: local_path
+                                .ok_or("`--get` 需要 `--local-path <LOCAL>`".to_string())?,
+                        },
+                        _ => return Err("`--put` 与 `--get` 互斥".to_string()),
+                    };
+                    let receipt =
+                        transfer_cli::run_iroh_bulk(path, name, request, bulk_path_json)?;
+                    println!("{}", receipt.render());
+                    return Ok(());
+                }
                 let lifecycle = [pty_close.is_some(), pty_detach.is_some(), pty_attach.is_some()]
                     .into_iter()
                     .filter(|set| *set)
@@ -498,8 +531,9 @@ fn run(opts: input::Opts) -> Result<(), String> {
                     invocation.clone(),
                     transfer_cli::chunk_ack_timeout_ms_from_config(),
                 );
-                // 客户端今天只走 TCP / WebSocket / Zenoh: 这三条链路上没有 relay 跳,
-                // 所以本端证据的 path_class 恒为 not_applicable (判定不适用, 不是"通过")。
+                // 这条分支只可能是 TCP / WebSocket / Zenoh (iroh 在更早处分流): 三条链路
+                // 都没有 relay 跳, 所以本端证据的 path_class 恒为 not_applicable
+                // (判定不适用, 不是"通过")。
                 let mut recorder = transfer_cli::BulkPathRecorder::new(
                     format!("cli-{}", std::process::id()),
                     crate::bulk_path::PathCapability::NOT_PATH_AWARE,
@@ -509,7 +543,15 @@ fn run(opts: input::Opts) -> Result<(), String> {
                     (Some(local), None) => {
                         let remote = remote_path
                             .ok_or("`--put` 需要 `--remote-path <REMOTE>`".to_string())?;
-                        transfer_cli::run_put(&peer, &mut recorder, &local, &remote, restart)?
+                        transfer_cli::run_put(
+                            &peer,
+                            &mut recorder,
+                            &transfer_cli::TransferIdStore::user_default(),
+                            &transfer_cli::target_label(&invocation),
+                            &local,
+                            &remote,
+                            restart,
+                        )?
                     }
                     (None, Some(remote)) => {
                         let local = local_path

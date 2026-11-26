@@ -418,6 +418,10 @@ daemon 都会把 178 MB 从 relay 推出去. 所以两端都要, 且两端都要
 - 把第三种当第一种, 就得到一条"看起来有门禁、其实只在边界上有"的路径; 把第二种当第三种, 则白扔了
   它确实做到的那一半。两种错都在这一格上发生过, 所以能力是**三格**而不是一个布尔。
 
+**"边界之间"到底有多宽**: 就是一个 chunk 的间隔 —— iroh lane 上上传 256 KiB、下载 36 KiB (§5.1)。
+一条 relay path 若只活在这个窗口里, §4.2 的并集对账也看不见它, 那次尝试仍会报 `relay_bytes_zero`。
+这条残余由 `bulk_path_pin=false` 这一格**如实声明**, 因此不是缺陷; 但它必须与 §4.2 的结论一起被引用。
+
 **当前落地形态 (2026-11-26 RAI-476 步骤 1+2, 按评审裁定回填).** iroh **准入 lane** 承载 bulk 数据面:
 七个 bulk 动词与 `@ping` 共用同一条连接, 每条 chunk 是一条独立请求行 (`serve_admitted`, 见
 `specs/rdog-iroh-admission-contract.md`); 未开准入策略的默认 lane 仍拒绝 bulk (`readonly_request` →
@@ -576,6 +580,12 @@ schema 完全一致 (`endpoint:"daemon"`). 三个终态各挂一处, 除此之�
 的 path 不保留). 本版不做, 因此这里能主张的只是"括号两端可见的 relay 字节增量为 0",
 不是"这条连接上从未有字节经过 relay".
 
+**第二条已知边界, 与门禁的采样窗口重合**: 一条 relay path 若整个生命周期都落在**两个 chunk 边界
+之间** (开了又关, 边界采样时都不在场), 并集里也不会出现它 —— 那次尝试仍会报 `relay_bytes_zero`.
+窗口就是一个块的间隔 (iroh lane 上上传 256 KiB / 下载 36 KiB), 且 `bulk_path_pin=false` 已经声明
+"边界之间的排队与重传看不见" (§3.5), 所以这条残余属于"已声明的能力边界"而不属于缺陷; 但它是本票
+唯一那个结论的**残余不确定度**, 验收读数里必须与结论一起引用, 不能只在评审对话里存在.
+
 #### join 工具与原因码
 
 `rdog bulk-path join <PATH>...` 读若干 `rdog.bulk-path.v1` 文件 (或目录里的 `*.json`), 先按
@@ -700,8 +710,8 @@ daemon 按 `<transfer_id>#<该 id 被 open 的序号>` 派生. 派生的那个�
 形状沿用 `rdog control` 现有的 flag 风格 (`--pty`、`--ui-script` 就是这么加的, 见 `src/input.rs:124-153`):
 
 ```
-rdog control <TARGET> --put <LOCAL_PATH> --remote-path <REMOTE_PATH> [--resume]
-rdog control <TARGET> --get <REMOTE_PATH> --local-path <LOCAL_PATH> [--resume]
+rdog control <TARGET> --put <LOCAL_PATH> --remote-path <REMOTE_PATH> [--restart]
+rdog control <TARGET> --get <REMOTE_PATH> --local-path <LOCAL_PATH>
 ```
 
 | 项 | 规定 |
@@ -713,9 +723,70 @@ rdog control <TARGET> --get <REMOTE_PATH> --local-path <LOCAL_PATH> [--resume]
 | 退出码 | 沿用现有约定: 成功 0, 失败 1. **不新造退出码** —— 细分原因读结果 JSON 里的 `error_code` |
 | 下载侧校验 | 客户端拼装完必须自己算 sha256 与 `@get-file` 返回的比对, 不符即失败并删本地半成品 |
 | 直连门禁 | 无开关. 由 §3 判定表决定, 默认且唯一行为 |
-| `--resume` | 检测到未过期的半成品时**默认按续传发** (`resume:true`), 把"从头来"留给调用方显式选择. 理由同 §2.5: 静默抹掉 178 MB 进度是比多传一遍更坏的默认 |
+| 续传默认值 | 检测到未过期的半成品时**默认按续传发** (`resume:true`), 把"从头来"留给调用方显式选择 (`--restart`). 理由同 §2.5: 静默抹掉 178 MB 进度是比多传一遍更坏的默认 |
+| `--restart` | 只在 `--put` 上: 先按 id store 里的旧 id 发 `@file-cancel`, 再换新 id 从 0 开始 (§5.1) |
 
 远端路径与本地路径**不做 shell 解析** (走 JSON 字段, 这是 10-06 规格里列出的相对 scp 的价值之一).
+
+### 5.1 iroh 出口 (`--transport iroh`) 的客户端行为 (RAI-476)
+
+`--transport iroh --iroh-config <PROFILE> <NAMESPACE/NAME> --put/--get` 走**准入 lane**: 一条长
+连接承载整次尝试的七条 bulk 请求行, 能力声明与 daemon 侧同一格 (`path_aware=true` /
+`bulk_path_pin=false` / `bulk_path_checked_per_chunk=true`, 见 §2.1)。
+
+| 项 | 客户端的规定 |
+| --- | --- |
+| 连接与握手 | 与 PTY 客户端同一套: profile → identity → directory lookup → `connect_with_path` → `open_bi` → `Handshake::Admit` (共用 `admit_lane`)。租约按 `lease_ttl_ms` 续期, 传输期间不断租 |
+| 门禁时机 | open 前判一次, **上传与下载两个方向的每个 chunk 边界都再判一次**, 判定用边界上的即时采样 (§3.1) |
+| chunk 大小 | **上传 256 KiB** (受帧写预算与 noq 单流窗口约束, 见下方算术); **下载 36096 B ≈ 35 KiB** (受响应行统一的 48 KiB 预算约束, `run_get_inner` 按 `response_payload_bytes()` 切)。两个方向撞的是两条不同的预算, 所以不共用同一个值 |
+| 单帧写预算 | `max(frame_timeout_ms, 帧长 / 96 KiB/s)`。`frame_timeout_ms` 是 profile 的上限语义, 不是"每条链路的实际吞吐"; 大帧的等待时间按最慢目标链路放量, 见下方算术 |
+| 括号端点 | `before` 在 open 请求发出**之前**取, `after` 在终态请求之后取; 两端都是本端这条连接上 relay path 的累计 UDP 字节, 换算与 daemon 侧共用 `relay_bracket` (§4.2) |
+| 括号对账 | 终态对账用的是**本次尝试见过的 relay path 并集** (`before` + 每个边界采样 + 终态采样), 不是 `before` 那一刻的集合。并集里任何一条在 `after` 不在场 → 四个 `null`。`before` 集合为空不构成豁免: 两个计数仍必须都在 |
+| `established_direct` | 按 `transfer_id` 记"本次尝试曾观测到 direct", open 复位。它让 `iroh_direct_path_lost` 在客户端有生产者 (与 daemon 的 `BulkPathGate` 同一形状, 两个方向都走同一个门禁) |
+| 中途掉 relay | 门禁在块**发出之前**判, 所以被拒的那个边界一个字节都没上线; 不走 `@file-cancel` —— 按 §2.5 B3 保留半成品供续传 |
+| `transfer_id` 复用 | `--put` 的 id 按 (目标, 本地路径, 远端路径) **一个键一个文件**记在 `<rdog 用户目录>/bulk-transfer-ids/<FNV-1a 64>.json` (内容写真实键与 id)。lane 层失败后 daemon 的会话仍占着目标推导出的暂存名, 换新 id 会被 `file_transfer_path_in_use` 挡到窗口过期; 复用 id 让下一次自然落到 `resume:true`。提交成功后删掉这条记录, `--restart` 先按记录里的旧 id 发 `@file-cancel` 再换新 id。`--get` 不复用: daemon 没有"未完成的下载"状态, 同 id 换不来续传 |
+| daemon 半快照 | `@file-end` / `eof:true` 的 `@file-read` 响应里的 `evidence` 被**原样**写到 `--bulk-path-json` 同目录的 `bulk-path.daemon.json`; **错误回执**上带的 `evidence` 同样收下。每次尝试开始前删掉上一次留下的那份, 免得两半配错。收不到就**不写**, 只在 stderr 说明, 让 join 落到 `bulk_path_endpoint_missing` |
+| 失败码 | 准入 lane 握不上手且连接按 `DENIED` 关闭 → `iroh_bulk_path_pin_unavailable` (对端没有策略文件, 该入口不承载 bulk); 路径类失败走 §2.2 的 `iroh_*` 三码 |
+| 非 iroh 传输 | 行为不变: 逐请求建链, `path_class` 恒 `not_applicable`, 不产出 daemon 半快照 |
+
+**chunk 与写预算的算术 (为什么不能靠使用者抬 `frame_timeout_ms`)。** bulk 的默认块是
+`chunk_payload_bytes()` ≈ 5.03 MB, base64 之后的整帧约 6.7 MB; `noq` 单流接收窗口只有 1.25 MB,
+`write_all` 必须等对端边读边腾窗口 —— 于是"帧写超时"实际度量的是**对端消费速度 × 帧长**,
+而固定 3 s 在 ~2.2 MB/s 以下就必然不够, 首块就能把 lane 打成 poison。两层一起做:
+
+1. 这条 lane 把块收到 256 KiB: 帧 ≈ 341 KiB ≈ 窗口的 27%, 一帧最多挡一两次窗口更新。
+2. 帧写预算按 `max(frame_timeout_ms, 帧长 / 96 KiB/s)` 兜底: 96 KiB/s ≈ 0.77 Mbit/s 是"仍应
+   成功"的最慢链路, 6.7 MB 的帧因此有 ~71 s 而不是 3 s。`frame_timeout_ms` 仍是最小值, 不会被
+   大帧的算术压到它下面。
+
+两者都不需要使用者改配置 —— 抬 `frame_timeout_ms` 只能救一条已知慢的链路, 救不了"帧本身就比
+窗口大一个量级"这件事。
+
+**id store 的存储形态: 一个键一个文件。** 共用一张表时 `load → insert → save` 之间没有互斥, 两条
+并发的传输会各自拿旧快照把整表覆盖掉 (200 轮实测丢一条键 144 次); 临时文件 + rename 只保证"读者
+看不到半张表", 挡不住"读-改-写丢更新"。键天然可分, 所以每个键一份文件: `put` / `remove` 只碰自己
+那份, 没有读-改-写窗口, 不需要锁, 也不会丢别人的键。单文件仍用 temp + rename —— 那才是它该保的
+(一个键的文件要么是旧的完整内容, 要么是新的完整内容)。读出截断/坏 JSON 时按"该键无 id"处理并
+warn, **不删文件** (留给排障); 最坏只坏这一个键。文件名是键的 FNV-1a 64 十六进制 (确定性、无依赖),
+真实键写在文件内容里 —— 既便于人读, 也让读取路径能校验一次: 文件里的键与请求的键不一致 (哈希撞车)
+按**缺失**处理并 warn, 绝不把别人的 id 当本键返回。旧的单文件 `<rdog 用户目录>/bulk-transfer-ids.json` 不迁移也不读:
+这个 store 在同一个 PR 里引入、从未随发布版本出去, 盘上那份只是本分支早期构建留下的。
+
+**id store 的已知边界 (没有在途 owner)。** 键是 `(target, local, remote)`，**不含进程身份, 也没有
+"这条 id 现在归谁用"的守卫**。同一键上若有另一个进程正在传, 会出两件事: 它写的 id 覆盖本机的
+记录; 而 `--restart` 读到那个 id 后发出的 `@file-cancel` 会把**那条在途会话**一起取消 (daemon 的
+cancel 只认 `transfer_id`, 不认发起者)。本版只写清不解决: 规避方式是同一键不要并发; 根治要给
+daemon 侧的会话加 owner 租约 (**RAI-526**, Backlog/low)。
+
+**下载方向的结构上限 (写在这里, 免得被当成 bug)**: 下载每块 36096 B, 而每块是一次完整往返, 所以
+吞吐上限 ≈ `36096 / RTT`。100 ms RTT 约 **0.34 MB/s**, 1 GiB 约 **50 min**。这个数字来自结构
+(每块一往返 + 响应行预算), **不是实测** —— 它随 RTT 线性变化; 改大要靠"一条 `@file-read` 带多块"
+这类协议改动, 不在本票范围。
+
+**措辞上限 (与 §4.4 正对照一并读)。** 客户端能给出的结论只到"括号两点之间读到的 relay 累计量增
+量为 0"这一层: `stats().udp_tx/rx.bytes` 是这条 path 上的**全部** UDP 字节 (含 ACK、keepalive、
+PATH_CHALLENGE), 空闲 relay path 自己也会涨, 所以在真机上"增量为 0"可能结构性不可达。写成
+"relay 字节为零"会把一个判据问题说成实现保证 —— 那是本规格明确不允许的表述。
 
 ---
 
@@ -792,7 +863,7 @@ B 与 C 的区别不在结果 (两者都必须失败), 而在**失败原因的�
 
 | 项 | 内容 |
 | --- | --- |
-| 输入 | 先在被拒的 relay 状态下发起 (B 类现场), 修好直连后**重新发起**同一文件 (`--resume`) |
+| 输入 | 先在被拒的 relay 状态下发起 (B 类现场), 修好直连后**重新发起**同一文件 (默认续传; `--restart` 才从 0 重来) |
 | 前置 | 第一次尝试已在 open 被拒, 零字节 |
 | 预期 | 第一次 `iroh_direct_path_unavailable`; 路径改善后第二次 `direct` 并完成; 两次 `attempt_id` **不同**, 各自快照独立 |
 | 证据 | 两次尝试的两端快照 (attempt_id 不同); 两次的 `error_code` / `state` |

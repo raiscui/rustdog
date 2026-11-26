@@ -183,11 +183,20 @@ pub enum Command {
         local_path: Option<PathBuf>,
 
         /// `--put` 时显式从 0 重来 (并要求被控端删掉既有半成品), 不续传。
+        ///
+        /// 这一支会先取消本机记录里的那条旧会话 (`~/.rdog/bulk-transfer-ids/`, 每个
+        /// 目标 + 本地路径 + 远端路径 一个文件)。键不含进程身份, 所以同一目标的同一路径上若
+        /// **另一个进程正在传**, 那条在途会话会被一起取消 —— 同一键不要并发跑两个 `--put`
+        /// (根治要给 daemon 侧会话加 owner 租约: RAI-526, Backlog/low)。
         #[clap(long = "restart", requires = "put")]
         restart: bool,
 
         /// 把本次尝试的本端 `rdog.bulk-path.v1` 证据快照写到这个文件
         /// (另一端有它自己的一半, 由验收工具 join)。
+        ///
+        /// 走 `--transport iroh` 时, daemon 在自己终态响应里挂的那半快照会被**原样**写到
+        /// 同目录的 `bulk-path.daemon.json`; 收不到就不写, 只在 stderr 说明, 让 join 落到
+        /// `bulk_path_endpoint_missing` 而不是被一份本端补出来的证据顶掉。
         #[clap(long = "bulk-path-json", value_name = "FILE")]
         bulk_path_json: Option<PathBuf>,
 
