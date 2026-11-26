@@ -193,3 +193,13 @@ RAI-387: unixpipe 本机 fast path 从 `$TMPDIR` 迁到固定运行目录,补名
 - [x] 新增"派生路径不产生兼容守卫"用例;跨版本用例改用运行目录外的共享 base
 - [x] `cargo test --bin rdog` 1105 passed;真机脚本 20/20 干净
 - 提交: fcb4680
+
+### [2026-11-26 06:35:00] 四轮评审 + recording e2e / shell_lane 红点对账
+- [x] 四轮 low: 兼容守卫改按 base **来源**判定(`UnixpipeRunPaths.shared`),覆盖"显式路径落在运行目录里"
+- [x] recording e2e 红点归因(三向对照): cargo 1.100 换 build-dir 布局使 `rdog_binary_path()` 夹具失效;
+      main 11-06(rustc 1.99.1, deps 布局)绿、本 PR 与兄弟分支 capy/rai368-scout(同日 1.100.0)同款红;
+      base+head 等条件本地各 6 passed
+- [x] shell_lane 红点: base 5588fcb 本地 16 线程 5 轮中 4 轮复现 ⇒ 既有 flake(figment::Jail 删 cwd),
+      本 PR 只提高了并行压力;根治(共享锁)属另一票
+- [x] 回执: handoffs/rai387/regression-check/{README.md,recording-e2e-{base,head}.log,run_recording_e2e.sh}
+- 提交: 07a3bcf
