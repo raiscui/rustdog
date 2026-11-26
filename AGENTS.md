@@ -125,6 +125,11 @@ Issues 和 Wayfinder maps 使用 GitHub Issues。详见 `docs/agents/issue-track
   - 用途: 固定"先 sub、留传播窗口、再触发对端 pub"的 e2e/集成时序契约与 daemon 侧投递日志纪律
   - 何时阅读: 写 zenoh pub/sub 集成或 e2e 前; "消息偶发不到达"类问题诊断
 
+- `docs/solutions/conventions/zenoh-serial-listener-lazy-locator.md`
+  - 主题: zenoh serial listener 惰性通告 — 不开设备也会进可达 locator 集合
+  - 用途: 固定「可达 = 登记过, 与设备是否存在无关」的源码断言 (new_listener / get_locators / print_locators)、tcp 与 serial 失败语义的分叉, 以及 rdog 的通告前分类与四要素 warn 口径
+  - 何时阅读: 改 `[zenoh].listen_endpoints`、daemon 启动策略、locator 通告或 ready 日志前; 排查「日志说有地址但对端连不上」且该 transport 是 serial 时; 给 rdog 增加新的可选 listen transport 时
+
 - `docs/solutions/conventions/e2e-isolated-home-credentials.md`
   - 主题: e2e 子进程 HOME 隔离与三方同源凭证 (认证后的 hard gate)
   - 用途: 固定 test_isolated_home + ensure_test_home_credentials + spawn 点穷举纪律
@@ -521,3 +526,10 @@ Issues 和 Wayfinder maps 使用 GitHub Issues。详见 `docs/agents/issue-track
 - CI 事件异常 (PR #90/#91): 平台瞬时问题, workaround 已验证
   (workflow_dispatch --ref), task_plan 有完整记录, 不构成长期知识。
 - mailbox 通配 sub 单点归属/材料 fail-fast 等: 代码注释 + ticket 承接。
+
+## [2026-11-26] RAI-383 serial listener 惰性通告
+
+### 已 Capture (新增指针)
+- [2026-11-26] zenoh serial listener 不开设备也进可达 locator 集合 ->
+  `docs/solutions/conventions/zenoh-serial-listener-lazy-locator.md`
+  (Windows 真机反证「打不开就 exit(1)」的推论 + 通告前分类实现 + share_mode 0 探测修复)。
