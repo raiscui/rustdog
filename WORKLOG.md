@@ -1278,7 +1278,7 @@ zenoh_router_client 38/2 ignored)。
 
 ### 2026-11-26 RAI-411 第七个发现 (windows): e2e 不隔离 HOME, 两个 target 无法在 windows 执行
 
-- 提交: (本条随修复提交记入下一次账本)
+- 提交: 7d96da8
 
 跑通 timeout 修复后两个 windows 红都点得出名字了: `control_websocket` 整 target 挂死后被
 1500s 上限终止 (`[timeout] 超过 1500s 未结束`), `zenoh_router_client_windows` 的 daemon 因
