@@ -130,6 +130,12 @@ pub(crate) struct BulkPathSnapshot {
     pub(crate) relay_tx_after: u64,
     pub(crate) relay_rx_before: u64,
     pub(crate) relay_rx_after: u64,
+    /// 本端**是否真的能采到** relay 计数。
+    ///
+    /// 这一格是防"假零"的闸门: 计数器没接上时, `relay_tx_after` 也是 0, 与"一个字节都没走
+    /// relay"在数值上完全一样。没有这一格, 快照就会把"没采到"记成"零"。今天的客户端驱动
+    /// 就是这种状态 —— 它没有 relay 句柄可读, 所以这里必须是 `false`。
+    pub(crate) relay_sample_available: bool,
     pub(crate) aborted: bool,
 }
 
@@ -153,7 +159,9 @@ impl BulkPathSnapshot {
     /// 单端只能证自己那一半, 所以这个函数**不是**"整个请求 relay 字节为零"的结论 —— 结论要两端
     /// 各自的 `relay_bytes_zero_own_half()` 都为真才能下 (§4.3 要求 join)。
     pub(crate) fn relay_bytes_zero_own_half(&self) -> bool {
+        // 采样不可得时这条**永远为假**: 拿不到计数就不是"零", 而是"不知道"。
         !self.aborted
+            && self.relay_sample_available
             && self.path_class == PathClass::Direct
             && self.relay_tx_delta() == 0
             && self.relay_rx_delta() == 0
@@ -167,6 +175,10 @@ impl BulkPathSnapshot {
         if self.path_class == PathClass::NotApplicable {
             // 不适用, 不是"通过": 没有 relay 跳的链路上"relay 字节为 0"是空真 (§2.1)。
             return "not_applicable";
+        }
+        if !self.relay_sample_available {
+            // 采不到计数: 既不能报零, 也不能报非零 —— 这是一条"无结论"。
+            return "relay_sample_unavailable";
         }
         if self.relay_bytes_zero_own_half() {
             "relay_bytes_zero"
@@ -201,6 +213,7 @@ impl BulkPathSnapshot {
             "relay_tx_after": self.relay_tx_after,
             "relay_rx_before": self.relay_rx_before,
             "relay_rx_after": self.relay_rx_after,
+            "relay_sample_available": self.relay_sample_available,
             "verdict": self.verdict(),
         })
     }
@@ -227,6 +240,7 @@ mod tests {
             relay_tx_after: 0,
             relay_rx_before: 0,
             relay_rx_after: 0,
+            relay_sample_available: true,
             aborted: false,
         }
     }
@@ -303,6 +317,21 @@ mod tests {
             value
         };
         assert_eq!(aborted.verdict(), "aborted");
+    }
+
+    #[test]
+    fn unsampled_counters_never_read_as_zero() {
+        // 计数器没接上时 relay_tx/rx 也是 0, 与"一字节没走 relay"数值上完全一样。
+        // 这一格与"永远为假"的判定式一起, 保证那种零只能读成"不知道"。
+        let mut value = snapshot(PathCapability::PATH_AWARE_PINNED, PathClass::Direct);
+        value.relay_sample_available = false;
+        assert_eq!(value.verdict(), "relay_sample_unavailable");
+        assert!(!value.relay_bytes_zero_own_half());
+        assert_eq!(value.to_json()["relay_sample_available"], false);
+
+        // 采样可用 && direct && 两个 delta 都 0 时, 才是真正的零
+        value.relay_sample_available = true;
+        assert_eq!(value.verdict(), "relay_bytes_zero");
     }
 
     #[test]

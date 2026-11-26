@@ -27,7 +27,9 @@
 
 ## 1. 前置（执行前打勾，缺一项就停）
 
-- [ ] `rdog` 二进制 sha256 记进回执（`shasum -a 256 <binary>`）。
+- [ ] **二进制必须构建自 `capy/rai-367-bulk-gate` 的当前 head**（含 PR #158），并在回执里写:
+      分支名、`git rev-parse --short HEAD`、`shasum -a 256 <binary>`。跑了别的分支等于没跑 ——
+      上一轮（#157 二进制）就是这么白跑一轮的。
 - [ ] razer 上没有上一次执行遗留的 rdog 进程：`pgrep -af rdog` 输出进回执；**若只看到业主自己的
       `lab` daemon，不要动它**，并把它的 PID 写进回执说明"存在但不是本次的"。
 - [ ] 两份 profile 路径与内容摘要（key / CA 不进回执，只写路径与 sha256 的**前 8 位**）。
@@ -53,8 +55,11 @@ echo $! > s1-daemon.pid
 - `s1-ping.txt` 的 `@response` 全文；
 - 客户端 stderr 里的 `iroh_path=relay` 行（若为 `direct`，本步无效 —— 说明它没走 relay，重排 profile 再来）；
 - daemon 日志里的 `iroh_directory_path=` 与 relay home 建立行；
-- **客户端 relay 计数**：若当前二进制还没有 `--bulk-path-json` 的 relay 采样（见 §0 第 2 条），
-  本步的"计数非零"由 iroh 端点自报的 relay 统计提供 —— **拿不到就如实写"本步未取得计数"**，
+- **客户端 relay 计数**：**别指望 `--bulk-path-json` 补上这一格。** 该快照里的
+  `relay_sample_available` 在客户端恒为 `false`、`verdict` 恒为 `relay_sample_unavailable` ——
+  那是**正确的"无结论"**，不是失败：客户端驱动没有 relay 句柄可读。真正的 relay delta 要等适配器
+  的计数接线（RAI-476）。
+  所以本步的"计数非零"只能由 iroh 端点自报的 relay 统计提供；**拿不到就如实写"本步未取得计数"**，
   并**直接判定：正对照未成立，S3 的"零"不得用于任何结论**。
 
 ## 3. S2 直连可用：这对真机上直连确实可得
@@ -81,10 +86,16 @@ done
 
 判据（三条全中才算成立）：
 
-1. 每一条都报 `iroh_bulk_path_pin_unavailable`；
-2. `/tmp/pc.bin` 与 `/tmp/.rdog-partial/` **都不存在**（`ls -la /tmp/pc.bin /tmp/.rdog-partial` 进回执，
-   预期两次 `No such file`）；
-3. `s3-bulk.txt` 里没有任何 `state:"accepting"` / `state:"reading"` 之类表示字节流动过的回执。
+1. 每一条都报 **`iroh_bulk_path_pin_unavailable`**（能力事实码）。
+   - **先核二进制**：这个码来自 PR #158 的改动。若回执里看到的是 `iroh_readonly_ping_required`，
+     说明跑的是 #158 之前的二进制（`ping_only` 的旧行为），**本步不判定** —— 记下版本差异、停下、
+     换分支重编再跑。两次实测都栽在这里，别再当成门禁失败。
+2. **拒绝发生在任何路径被触碰之前**（跨平台证据，不用文件是否存在来判断 —— 在 Windows 上
+   `/tmp` 本就不存在，那个断言是空真）：
+   - 回执里没有任何 `state:"accepting"` / `state:"reading"` 阶段；
+   - daemon 日志里没有该目标路径相关的行（`grep -i pc.bin <daemon.log>` 为空）；
+   - daemon 工作目录与目标目录下都没有新建 `.rdog-partial`（Windows 上按 `dir /a` 记录）。
+3. 每条命令 `exit != 0`（拒绝不是成功）。
 
 ## 5. 判读规则（我按这个读，执行方不需要判断）
 

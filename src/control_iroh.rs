@@ -1927,6 +1927,9 @@ fn serve_lane(
                     }
                 }
             }
+            other if is_bulk_command(&other) => {
+                refuse_frame(transport, None, LANE_REFUSED_CODE, BULK_REFUSED)?
+            }
             _ => refuse_frame(transport, None, LANE_REFUSED_CODE, LANE_REFUSED)?,
         }
     }

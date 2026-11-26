@@ -195,6 +195,9 @@ impl BulkPathRecorder {
             relay_tx_after: 0,
             relay_rx_before: 0,
             relay_rx_after: 0,
+            // 客户端驱动**没有 relay 句柄**可读 (它走 TCP / WebSocket / Zenoh), 所以这里必须是
+            // false: 让快照把"没采到"记成"零"就是今天一整天在防的那种假通过。
+            relay_sample_available: false,
             aborted: self.aborted,
         };
         let _ = std::fs::write(out, snapshot.to_json().to_string());
