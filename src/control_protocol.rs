@@ -86,8 +86,6 @@ pub enum ControlCommand {
     FileChunk(String),
     FileEnd(String),
     FileRead(String),
-    FileCancel(String),
-    FileList,
     /// 在指定页执行 JS (Runtime.evaluate)
     CdpEval(crate::control_cdp::CdpEvalRequest),
     /// 直接 spawn 可执行文件, 同步等退出 + 退出码 (不经 shell, 参数逐个原样)
@@ -696,8 +694,6 @@ pub fn parse_control_line(line: &str) -> io::Result<ControlParseResult> {
         "file-chunk" => ControlCommand::FileChunk(payload.to_owned()),
         "file-end" => ControlCommand::FileEnd(payload.to_owned()),
         "file-read" => ControlCommand::FileRead(payload.to_owned()),
-        "file-cancel" => ControlCommand::FileCancel(payload.to_owned()),
-        "file-list" => ControlCommand::FileList,
         "cdp-targets" => {
             ControlCommand::CdpTargets(crate::control_cdp::parse_cdp_targets_request(payload)?)
         }

@@ -322,9 +322,7 @@ impl ControlActionExecutor for SystemControlActionExecutor {
             | ControlCommand::FileGetFile(_)
             | ControlCommand::FileChunk(_)
             | ControlCommand::FileEnd(_)
-            | ControlCommand::FileRead(_)
-            | ControlCommand::FileCancel(_)
-            | ControlCommand::FileList => Err(io::Error::new(
+            | ControlCommand::FileRead(_) => Err(io::Error::new(
                 io::ErrorKind::Unsupported,
                 "@file* / @put-file / @get-file 由 control_core 直接走文件传输 lane,不应进入默认 executor 分支",
             )),

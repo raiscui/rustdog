@@ -33,9 +33,7 @@
 use std::collections::HashMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Condvar, Mutex, OnceLock};
-use std::thread;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::sync::{Mutex, OnceLock};
 
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use serde_json::{json, Value};
@@ -70,16 +68,6 @@ struct TransferSession {
     temp_path: Option<PathBuf>,
     /// 上传方向?
     is_upload: bool,
-    /// 最近一次有进展的时刻 (epoch ms)。空闲过期 (reap_idle_transfers) 据此判定。
-    last_activity_ms: u64,
-}
-
-/// 当前 epoch 毫秒。过期判定收 now 参数而不是内部取时钟, 让单测能确定性地构造时间。
-fn now_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64
 }
 
 // ============================================================
@@ -151,7 +139,6 @@ pub fn execute_put_file(payload: &str) -> std::io::Result<Value> {
     ));
 
     let mut sessions = transfers().lock().expect("transfer table poisoned");
-    let previous = sessions.remove(&transfer_id);
     let written = if resume {
         // 续传: 保留已有 partial 的进度; 无 partial 从 0 起
         std::fs::metadata(&temp_path).map(|m| m.len()).unwrap_or(0)
@@ -160,12 +147,6 @@ pub fn execute_put_file(payload: &str) -> std::io::Result<Value> {
         let _ = std::fs::remove_file(&temp_path);
         0
     };
-    // 同 id 重开但换了一条暂存路径时, 旧会话的半成品不在新路径上, 没人会清理它
-    if let Some(previous) = previous {
-        if previous.temp_path.as_deref() != Some(temp_path.as_path()) {
-            reap_partial(&previous);
-        }
-    }
     sessions.insert(
         transfer_id.clone(),
         TransferSession {
@@ -175,7 +156,6 @@ pub fn execute_put_file(payload: &str) -> std::io::Result<Value> {
             written,
             temp_path: Some(temp_path),
             is_upload: true,
-            last_activity_ms: now_ms(),
         },
     );
     Ok(json!({
@@ -235,7 +215,6 @@ pub fn execute_file_chunk(payload: &str) -> std::io::Result<Value> {
         file.write_all(&bytes)?;
     }
     session.written += bytes.len() as u64;
-    session.last_activity_ms = now_ms();
     Ok(json!({
         "kind": "file-transfer",
         "state": "accepting",
@@ -351,7 +330,6 @@ pub fn execute_get_file(payload: &str) -> std::io::Result<Value> {
             written: 0,
             temp_path: None,
             is_upload: false,
-            last_activity_ms: now_ms(),
         },
     );
     Ok(json!({
@@ -383,7 +361,6 @@ pub fn execute_file_read(payload: &str) -> std::io::Result<Value> {
         if session.is_upload {
             return Err(std::io::Error::other("@file-read 只用于下载会话"));
         }
-        session.last_activity_ms = now_ms();
         (
             session.path.clone(),
             session.size,
@@ -417,197 +394,6 @@ pub fn execute_file_read(payload: &str) -> std::io::Result<Value> {
         "eof": eof,
         "sha256": expected_sha256,
     }))
-}
-
-/// 回收一条会话的半成品文件。取消、空闲过期、同 id 换路径重开三处共用这条路径 ——
-/// 回收语义只写一次, 免得某一条将来漏掉盘上的残留。返回是否真的删掉了文件。
-fn reap_partial(session: &TransferSession) -> bool {
-    let Some(temp_path) = session.temp_path.as_deref() else {
-        return false;
-    };
-    match std::fs::remove_file(temp_path) {
-        Ok(()) => true,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => false,
-        Err(err) => {
-            log::warn!(
-                "文件传输半成品删除失败: path={}, error={err}",
-                temp_path.display()
-            );
-            false
-        }
-    }
-}
-
-/// `@file-cancel`: 主动取消一次传输 (上传或下载), 语义与空闲过期完全相同 ——
-/// 移除会话条目 + 删半成品。只删暂存文件, **不碰**目标路径上已有的文件。
-/// 幂等: 未知 transfer_id 返回 `state:"absent"`, 不算错误 (重复取消是正常调用顺序)。
-pub fn execute_file_cancel(payload: &str) -> std::io::Result<Value> {
-    const VERB: &str = "file-cancel";
-    let value = parse_object(payload, VERB)?;
-    let transfer_id = require_string(&value, "transfer_id", VERB)?.to_owned();
-
-    let removed = transfers()
-        .lock()
-        .expect("transfer table poisoned")
-        .remove(&transfer_id);
-    let (state, partial_removed) = match removed {
-        Some(session) => ("cancelled", reap_partial(&session)),
-        None => ("absent", false),
-    };
-    Ok(json!({
-        "kind": "file-transfer",
-        "state": state,
-        "transfer_id": transfer_id,
-        "partial_removed": partial_removed,
-    }))
-}
-
-/// `@file-list`: 回读当前活跃的传输会话。
-///
-/// 存在的理由是"被拒绝/被取消后注册表无残留"这件事必须能**直接读**, 而不是靠"再取消一次看它
-/// 回 absent"来推断. 只列元信息, 不读文件内容.
-pub fn execute_file_list() -> std::io::Result<Value> {
-    let sessions = transfers().lock().expect("transfer table poisoned");
-    let mut entries: Vec<Value> = sessions
-        .iter()
-        .map(|(transfer_id, session)| {
-            json!({
-                "transfer_id": transfer_id,
-                "direction": if session.is_upload { "put" } else { "get" },
-                "path": session.path,
-                "size": session.size,
-                "written": session.written,
-                "last_activity_ms": session.last_activity_ms,
-            })
-        })
-        .collect();
-    // 顺序稳定: 回执要对账, HashMap 的迭代顺序不能进证据
-    entries.sort_by(|a, b| {
-        a["transfer_id"]
-            .as_str()
-            .unwrap_or_default()
-            .cmp(b["transfer_id"].as_str().unwrap_or_default())
-    });
-    Ok(json!({
-        "kind": "file-transfer",
-        "state": "listed",
-        "active": entries.len(),
-        "transfers": entries,
-    }))
-}
-
-/// 空闲过期: 超过 `idle_timeout_ms` 没有进展的会话走与 `@file-cancel` 相同的回收路径。
-///
-/// 收 now 参数而不是内部取时钟, 单测才能确定性地构造过期而不用真睡。
-/// 返回 (回收的会话数, 删掉的半成品数)。
-pub(crate) fn reap_idle_transfers(now_ms: u64, idle_timeout_ms: u64) -> (usize, usize) {
-    let expired: Vec<TransferSession> = {
-        let mut sessions = transfers().lock().expect("transfer table poisoned");
-        let expired_ids: Vec<String> = sessions
-            .iter()
-            .filter(|(_, session)| {
-                now_ms.saturating_sub(session.last_activity_ms) >= idle_timeout_ms
-            })
-            .map(|(id, _)| id.clone())
-            .collect();
-        expired_ids
-            .into_iter()
-            .filter_map(|id| sessions.remove(&id))
-            .collect()
-    };
-    let partials = expired
-        .iter()
-        .filter(|session| reap_partial(session))
-        .count();
-    (expired.len(), partials)
-}
-
-/// 测试专用: 把一条会话的"最近进展"时刻改成指定值。
-///
-/// 过期判定必须能区分"同一次调用里, 一条过期一条没过期", 而两条会话若都在同一毫秒创建,
-/// 真实时钟做不到这个区分 —— 与其让测试真睡, 不如把时刻写死。
-#[cfg(test)]
-fn stamp_last_activity_for_tests(transfer_id: &str, last_activity_ms: u64) {
-    let mut sessions = transfers().lock().expect("transfer table poisoned");
-    if let Some(session) = sessions.get_mut(transfer_id) {
-        session.last_activity_ms = last_activity_ms;
-    }
-}
-
-static TRANSFER_MAINTENANCE: OnceLock<Mutex<Option<TransferMaintenance>>> = OnceLock::new();
-
-/// 文件传输会话的空闲过期 worker。
-///
-/// 为什么必须是后台线程而不是"下次请求时顺手扫一遍": 残留的正是**没有后续请求**的场景 ——
-/// 传输被拒或中断后 daemon 安静下来, 半成品就在盘上一直躺着。惰性扫描只能保证
-/// "有人再来时会被清", 保证不了"盘上没有残留"。
-pub struct TransferMaintenance {
-    stop: Arc<(Mutex<bool>, Condvar)>,
-    join: Option<thread::JoinHandle<()>>,
-}
-
-impl TransferMaintenance {
-    pub fn start(interval: Duration, idle_timeout_ms: u64) -> Self {
-        let stop = Arc::new((Mutex::new(false), Condvar::new()));
-        let worker_stop = Arc::clone(&stop);
-        let join = thread::spawn(move || loop {
-            let (reaped, partials) = reap_idle_transfers(now_ms(), idle_timeout_ms);
-            if reaped > 0 {
-                log::info!(
-                    "文件传输空闲过期: 回收会话={reaped}, 删除半成品={partials}"
-                );
-            }
-
-            let (lock, wake) = &*worker_stop;
-            let Ok(stopped) = lock.lock() else {
-                return;
-            };
-            if *stopped {
-                return;
-            }
-            let Ok((stopped, _)) = wake.wait_timeout(stopped, interval) else {
-                return;
-            };
-            if *stopped {
-                return;
-            }
-        });
-
-        Self {
-            stop,
-            join: Some(join),
-        }
-    }
-}
-
-impl Drop for TransferMaintenance {
-    fn drop(&mut self) {
-        let (lock, wake) = &*self.stop;
-        if let Ok(mut stopped) = lock.lock() {
-            *stopped = true;
-            wake.notify_all();
-        }
-        if let Some(join) = self.join.take() {
-            let _ = join.join();
-        }
-    }
-}
-
-/// 启动文件传输的空闲过期 worker。跟 `initialize_durable_observation_state` 同模式:
-/// 幂等, 重复调用会停掉旧 worker 再起新的。
-pub fn initialize_file_transfer_maintenance(
-    config: &crate::config::FileTransferConfig,
-) -> std::io::Result<()> {
-    let maintenance = TransferMaintenance::start(
-        Duration::from_millis(config.sweep_interval_ms),
-        config.idle_timeout_ms,
-    );
-    let slot = TRANSFER_MAINTENANCE.get_or_init(|| Mutex::new(None));
-    let mut guard = slot
-        .lock()
-        .map_err(|_| std::io::Error::other("文件传输 worker 锁已中毒"))?;
-    *guard = Some(maintenance);
-    Ok(())
 }
 
 /// 文件摘要 (流式 8KB 读, 不整载内存)。
@@ -806,205 +592,6 @@ mod tests {
         ))
         .unwrap_err();
         assert!(err.to_string().contains("载荷超过上限"));
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// 会话表是进程级单例: 所有读表或改表的用例串行化。锁放模块顶层唯一定义,
-    /// 不在每个用例里各建一把 (同 docs/solutions/best-practices/
-    /// parallel-test-global-state-single-lock.md 的四例收敛纪律)。
-    static TRANSFER_TABLE_TEST_LOCK: Mutex<()> = Mutex::new(());
-
-    /// 只在"我这条用例的 id"上做断言, 不断言整表条数 —— 同进程并行跑的其他用例
-    /// 随时可能在表里放着它们的会话, 整表计数必然 flaky。
-    fn active_ids() -> Vec<String> {
-        execute_file_list().unwrap()["transfers"]
-            .as_array()
-            .expect("transfers 必须是数组")
-            .iter()
-            .filter_map(|entry| entry["transfer_id"].as_str().map(str::to_owned))
-            .collect()
-    }
-
-    #[test]
-    fn cancel_drops_registry_entry_and_partial() {
-        let _guard = TRANSFER_TABLE_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let dir = std::env::temp_dir().join(format!("rdog-ft-cancel-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let target = dir.join("cancel-me.bin");
-        let tid = unique_id("cancel");
-
-        execute_put_file(&format!(
-            r#"{{"transfer_id":"{tid}","path":"{}","size":10}}"#,
-            escape_json(&target.display().to_string())
-        ))
-        .unwrap();
-        let data = BASE64_STANDARD.encode(b"xxxxx");
-        execute_file_chunk(&format!(
-            r#"{{"transfer_id":"{tid}","offset":0,"data":"{data}"}}"#
-        ))
-        .unwrap();
-        let partial = dir.join("cancel-me.bin.yino-partial");
-        assert!(partial.exists(), "写入后应留下半成品");
-        assert_eq!(active_ids().iter().any(|id| id == &tid), true);
-
-        let cancelled = execute_file_cancel(&format!(r#"{{"transfer_id":"{tid}"}}"#)).unwrap();
-        assert_eq!(cancelled["state"], "cancelled");
-        assert_eq!(cancelled["partial_removed"], true);
-        assert!(!partial.exists(), "取消后半成品必须消失");
-        assert!(!target.exists(), "取消不得凭空造出目标文件");
-        assert!(
-            !active_ids().iter().any(|id| id == &tid),
-            "取消后注册表不得残留该 id"
-        );
-
-        // 幂等: 重复取消是正常调用顺序 (客户端可能重试), 不是错误
-        let again = execute_file_cancel(&format!(r#"{{"transfer_id":"{tid}"}}"#)).unwrap();
-        assert_eq!(again["state"], "absent");
-        assert_eq!(again["partial_removed"], false);
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn cancel_leaves_existing_target_file_untouched() {
-        let _guard = TRANSFER_TABLE_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let dir = std::env::temp_dir().join(format!("rdog-ft-keep-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let target = dir.join("existing.bin");
-        std::fs::write(&target, b"do not delete me").unwrap();
-        let tid = unique_id("keep");
-
-        execute_put_file(&format!(
-            r#"{{"transfer_id":"{tid}","path":"{}","size":5}}"#,
-            escape_json(&target.display().to_string())
-        ))
-        .unwrap();
-        let data = BASE64_STANDARD.encode(b"abcde");
-        execute_file_chunk(&format!(
-            r#"{{"transfer_id":"{tid}","offset":0,"data":"{data}"}}"#
-        ))
-        .unwrap();
-        execute_file_cancel(&format!(r#"{{"transfer_id":"{tid}"}}"#)).unwrap();
-
-        // 回收只针对半成品。取消一次上传不得动目标路径上原有的文件。
-        assert_eq!(std::fs::read(&target).unwrap(), b"do not delete me");
-        assert!(!dir.join("existing.bin.yino-partial").exists());
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn cancel_of_download_session_drops_entry_without_touching_source() {
-        let _guard = TRANSFER_TABLE_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let dir = std::env::temp_dir().join(format!("rdog-ft-dlcancel-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let source = dir.join("source.bin");
-        std::fs::write(&source, b"read only source").unwrap();
-        let tid = unique_id("dlcancel");
-
-        execute_get_file(&format!(
-            r#"{{"transfer_id":"{tid}","path":"{}"}}"#,
-            escape_json(&source.display().to_string())
-        ))
-        .unwrap();
-        assert!(active_ids().iter().any(|id| id == &tid));
-
-        let cancelled = execute_file_cancel(&format!(r#"{{"transfer_id":"{tid}"}}"#)).unwrap();
-        assert_eq!(cancelled["state"], "cancelled");
-        // 下载会话没有半成品, 被取消的也不该删源文件
-        assert_eq!(cancelled["partial_removed"], false);
-        assert!(!active_ids().iter().any(|id| id == &tid));
-        assert_eq!(std::fs::read(&source).unwrap(), b"read only source");
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn idle_reap_reclaims_stale_session_and_keeps_progressing_one() {
-        let _guard = TRANSFER_TABLE_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let dir = std::env::temp_dir().join(format!("rdog-ft-idle-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let stale = unique_id("stale");
-        let fresh = unique_id("fresh");
-
-        for (id, name) in [(&stale, "stale.bin"), (&fresh, "fresh.bin")] {
-            execute_put_file(&format!(
-                r#"{{"transfer_id":"{id}","path":"{}","size":10}}"#,
-                escape_json(&dir.join(name).display().to_string())
-            ))
-            .unwrap();
-            let data = BASE64_STANDARD.encode(b"xxxxx");
-            execute_file_chunk(&format!(
-                r#"{{"transfer_id":"{id}","offset":0,"data":"{data}"}}"#
-            ))
-            .unwrap();
-        }
-
-        // 用一个小数值的假时钟: 只可能命中本用例自己写死的两条会话, 别处用真实
-        // epoch 毫秒戳的会话在 saturating_sub 下差值归零, 不会被误回收。
-        stamp_last_activity_for_tests(&stale, 1_000);
-        stamp_last_activity_for_tests(&fresh, 10_000);
-
-        let (reaped, partials) = reap_idle_transfers(10_500, 5_000);
-        assert_eq!(reaped, 1, "只应回收 stale 那条");
-        assert_eq!(partials, 1, "stale 的半成品应被删掉");
-        assert!(!dir.join("stale.bin.yino-partial").exists());
-        assert!(dir.join("fresh.bin.yino-partial").exists(), "在推进的会话不受影响");
-
-        let ids = active_ids();
-        assert!(!ids.iter().any(|id| id == &stale), "过期会话应离开注册表");
-        assert!(ids.iter().any(|id| id == &fresh), "未过期会话应仍在注册表");
-
-        // 收尾: 把 fresh 也回收掉, 别把会话留在表里影响后续用例
-        execute_file_cancel(&format!(r#"{{"transfer_id":"{fresh}"}}"#)).unwrap();
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn reopening_same_id_on_another_path_reclaims_the_old_partial() {
-        let _guard = TRANSFER_TABLE_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let dir = std::env::temp_dir().join(format!("rdog-ft-reopen-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let tid = unique_id("reopen");
-        let data = BASE64_STANDARD.encode(b"xxxxx");
-
-        execute_put_file(&format!(
-            r#"{{"transfer_id":"{tid}","path":"{}","size":10}}"#,
-            escape_json(&dir.join("first.bin").display().to_string())
-        ))
-        .unwrap();
-        execute_file_chunk(&format!(
-            r#"{{"transfer_id":"{tid}","offset":0,"data":"{data}"}}"#
-        ))
-        .unwrap();
-        assert!(dir.join("first.bin.yino-partial").exists());
-
-        // 同 id 换一条路径重开: 旧半成品不在新路径上, 没有别的代码会清理它
-        execute_put_file(&format!(
-            r#"{{"transfer_id":"{tid}","path":"{}","size":10}}"#,
-            escape_json(&dir.join("second.bin").display().to_string())
-        ))
-        .unwrap();
-        assert!(!dir.join("first.bin.yino-partial").exists(), "旧路径的半成品应被回收");
-        // 同 id 但换了路径, 进度不继承 —— 新会话从 0 起
-        let reopened = execute_file_list().unwrap();
-        let entry = reopened["transfers"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|entry| entry["transfer_id"] == tid.as_str())
-            .cloned()
-            .expect("新会话应在表里");
-        assert_eq!(entry["written"], 0);
-
-        execute_file_cancel(&format!(r#"{{"transfer_id":"{tid}"}}"#)).unwrap();
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
