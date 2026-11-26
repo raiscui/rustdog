@@ -994,3 +994,36 @@ rebase 重写了全部 sha, 下面是现存对象。条目内容与提交标题�
 - 提交: fbeeb9d
 - 提交: 0f30ab1
 - 提交: e5a926b
+
+## 2026-11-26 RAI-417 文件传输残骸: `@file-cancel` + 空闲 TTL sweep + `@file-list`
+
+RAI-367 设计期间查出的既有缺陷: 被拒绝或中途中断的传输永久留下盘上的 `.yino-partial` 与
+`TRANSFERS` 里一条不回收的 `HashMap` 条目。对被门禁拒绝的传输尤其致命 —— 拒绝本该是零副作用,
+一次 178 MB 上传被拒就是 178 MB 垃圾。
+
+- **`@file-cancel`**: 移除会话 + 删半成品; 只删暂存文件**不碰**目标路径; 未知 id 回
+  `state:"absent"`, 重复取消幂等。
+- **空闲 TTL**: 会话记 `last_activity_ms`, 每个 chunk / `file-read` 刷新; 后台 worker 按
+  `file_transfer.sweep_interval_ms` 扫, 超过 `idle_timeout_ms` 没进展的走与 cancel 相同的回收路径。
+  选后台线程而不是惰性扫描: 残留的正是**没有后续请求**的场景, 惰性扫描只能保证"有人再来时会被清"。
+- **`@file-list`**: 让"注册表无残留"能直接读, 不靠"再取消一次看它回 absent"推断 —— 后者是
+  一等证据缺失。输出按 `transfer_id` 排序, HashMap 迭代顺序不能进证据。
+- **同 id 换路径重开**: 回收旧半成品 (此前旧 partial 不在新路径上, 没有代码会清理它)。
+- 三项回收共用一条 `reap_partial`, 避免将来某条漏掉。
+- 配置 `[file_transfer]` 两项都必须 > 0; worker 生命周期照 `ObservationMaintenance` 的
+  stop flag + condvar + Drop join 模式, 在 daemon 启动处与 observation 并排初始化。
+
+**一个必须写下来的分叉点**: 今天三种中止 (显式取消 / 摘要不符 / open 拒绝) 都是终态的, 删一律成立;
+但 RAI-367 的"中途路径丢失"是**可续传**中止 —— 续传 offset 的真相源就是半成品的文件长度
+(`execute_put_file` 的 resume 分支), 那时删了会让 `resume:true` 静默从 0 重传。已在
+`reap_idle_transfers` 的注释里指回规格 §2.5, 并加了 D1 的"续传起始 offset 不等于 0"证据项 ——
+否则静默重传会伪装成续传通过。
+
+验证: `cargo test --bin rdog` **1114 passed / 0 failed / 2 ignored**; 新增 6 条用例
+(取消清盘+清表+幂等、取消不动既有目标、下载会话取消不删源、空闲只收过期不影响在推进、同 id 换路径、
+两个 verb 的行协议解析) 加 1 条配置校验负例。
+
+顺带修一处工程失误: 上一轮 `git add -A` 把工作区里正在写的 RAI-417 `src/` 改动误带进了纯文档分支
+#143, 已用 `revert` 提交从 #143 撤出并转到 `capy/rai-417-transfer-residue` 单独评审。教训是
+跨线程切分支前先 `git stash`, 不要依赖 `git add -A` 的范围直觉。
+- 提交: 4b585b4
