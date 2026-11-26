@@ -2206,6 +2206,8 @@ mod shell_lane_tests {
         assert!(value["control"]["active_requests"].is_u64());
         assert!(value["control"]["queued_requests"].is_u64());
         assert_eq!(value["shell"], "/usr/bin/powershell.exe");
+        // 读数的对端身份: pong 必须自报构建身份, 两端不同源时读数作废 (RAI-476)。
+        assert_eq!(value["build"], crate::build_info::BUILD_SHA);
         assert!(
             value["uptime_ms"].is_u64(),
             "uptime_ms 应是数字, 实际 {}",

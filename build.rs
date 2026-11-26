@@ -7,8 +7,11 @@ use std::process::Command;
 
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
-    // HEAD 与 refs 变了才需要重编: 只看 HEAD 这一行会漏掉"同一分支被 amend"这种情况。
+    // `.git/HEAD` 的内容是 `ref: refs/heads/x`, **提交不会改它** —— 只盯它会烘出一个陈旧的 sha,
+    // 而一个贴错标签的读数比 `unknown` 更坏。真正的变更信号是 reflog: 每次 commit / checkout /
+    // reset 都会追加一行, mtime 必变。
     println!("cargo:rerun-if-changed=.git/HEAD");
+    println!("cargo:rerun-if-changed=.git/logs/HEAD");
     println!("cargo:rerun-if-env-changed=GIT_SHA");
 
     let from_env = std::env::var("GIT_SHA").ok().filter(|sha| !sha.is_empty());
