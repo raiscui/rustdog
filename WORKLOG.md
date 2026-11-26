@@ -1088,3 +1088,26 @@ RAI-367 设计期间查出的既有缺陷: 被拒绝或中途中断的传输永�
 - 提交: c1b9434
 - 提交: e81025f
 - 提交: 7c79397
+
+## 2026-11-26 RAI-424 可续传半成品的持久化索引
+
+RAI-417 的会话表只在内存里: daemon 重启后, 盘上留着的半成品既不知道该续到哪, 也不会被 TTL sweep
+回收, 同一个目标再传一次还会另起一个暂存名。修法是给上传会话加一份持久化索引
+(`<state>/rdog/file-transfer/partials.json`), 落盘点覆盖 `@put-file` (新建与续传复用)、`@file-end`
+的成功与四条失败分支、`@file-cancel`、以及真的回收了会话的 sweep; 启动时先 `restore_index()`
+再起回收 worker。
+
+索引只回答"去哪里找": `written` 取暂存文件长度, `last_activity_ms` 取文件 mtime —— 与
+`specs/rdog-bulk-direct-only-spec.md` §2.5 的真相源一致, 索引里再存一份进度就是给同一件事两个答案。
+三条 fail-closed 纪律 (读不懂账本就不认账且不动盘上文件 / 索引项指向的文件不存在就丢掉该条 /
+进度只从文件本身取) 写进了 `specs/file-transfer-control-spec.md`, 不只留在代码注释里。
+
+踩到一个测试隔离坑: 索引路径 override 最初是进程全局的, 并行用例的正常落盘会盖掉另一个用例刚写的
+损坏索引, 症状是"单跑绿、全量红"。改成 thread-local (`cargo test` 每个用例一个线程), 未设置的测试
+线程返回 `None` 让落盘/恢复 no-op, 既不写真实用户目录也不串台。
+
+验证: `cargo test --bin rdog` **1197 passed / 0 failed / 4 ignored**; `control_file_transfer` 模块
+29 passed; 新增 4 条验收用例 (重启后续传 offset 来自盘上长度、重启后 sweep 能回收、损坏索引 fail-closed、
+索引缺失不凭空创建) 加 `forget_sessions_for_tests(&[ids])`。macOS / Windows 的默认索引路径只经编译期
+验证, 真实重启续传只在 Linux 上跑过。
+- 提交: 89ace73
