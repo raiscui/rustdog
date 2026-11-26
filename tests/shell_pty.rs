@@ -2,31 +2,16 @@
 
 use std::{
     io::{Read, Write},
-    path::PathBuf,
     process::{Command, Stdio},
     sync::{Arc, Mutex},
     thread,
     time::{Duration, Instant},
 };
 
-fn rdog_binary_path() -> PathBuf {
-    let current_exe = std::env::current_exe().expect("current test binary path should exist");
-    let debug_dir = current_exe
-        .parent()
-        .expect("test binary should have parent directory")
-        .parent()
-        .expect("test binary should live under target/debug/deps");
-    let binary = debug_dir.join("rdog");
+#[path = "support/rdog_binary.rs"]
+mod rdog_binary;
 
-    assert!(
-        binary.exists(),
-        "expected rdog binary at {}",
-        binary.display()
-    );
-
-    binary
-}
-
+use rdog_binary::rdog_binary_path;
 fn next_free_port() -> u16 {
     let listener =
         std::net::TcpListener::bind(("127.0.0.1", 0)).expect("ephemeral listener should bind");

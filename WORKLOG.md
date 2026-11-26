@@ -1,5 +1,19 @@
 # WORKLOG: rustdog
 
+## [2026-11-26] tests/ 下 17 处 rdog 二进制路径反推收成一处 (RAI-405)
+
+- `tests/` 下 17 个集成测试各自复制「测试可执行文件上两级 + `/rdog`」; cargo 1.100 把测试可执行文件放到
+  `target/{profile}/build/rustdog/<hash>/out/`, 这些夹具解析到不存在的路径, 一旦被跑起来就在夹具阶段 0.00s 失败。
+- 新增 `tests/support/rdog_binary.rs` 作为唯一实现 (候选顺序同 RAI-396 验证过的那份: `CARGO_BIN_EXE_rdog` →
+  `{profile}/rdog` → `deps/rdog` → `build/rustdog/<hash>/out/rdog` 新→旧 → 测试可执行文件目录及上级);
+  17 个调用点只剩一行 include + 一行 `use` (3 个带 env override 的保留一行委托)。
+- 集成测试是独立 crate, 链接不到 bin crate 的 `src/test_support.rs`, 所以公共实现只能住 `tests/` 下。
+- 回执: 迁移后 9 个此前不在 CI 的用例集实测 (connect_modes 2/2、control_lanes 15/15+1 ignored、daemon_inbound、
+  listen_suspend、shell_pty、control_mode、control_websocket、recording_e2e 6/6 全绿); 6 个失败全部是
+  `Command::new("script")` 与本机 util-linux 2.39 的调用形式不兼容, base 对照同样失败; 缺二进制时 panic 列出全部候选;
+  `cargo test --bin rdog -- --test-threads=4` 连绿 8 轮 (1107 passed × 8)。
+- 提交: cbe31b5
+
 ## [2026-11-06] Persistent coding sessions
 
 - Added authenticated coding sessions, their RPC dependency, and protocol documentation.

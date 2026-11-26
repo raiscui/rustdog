@@ -21,24 +21,10 @@ fn next_free_port() -> u16 {
     port
 }
 
-fn rdog_binary_path() -> PathBuf {
-    let current_exe = std::env::current_exe().expect("current test binary path should exist");
-    let debug_dir = current_exe
-        .parent()
-        .expect("test binary should have parent directory")
-        .parent()
-        .expect("test binary should live under target/debug/deps");
-    let binary = debug_dir.join("rdog");
+#[path = "support/rdog_binary.rs"]
+mod rdog_binary;
 
-    assert!(
-        binary.exists(),
-        "expected rdog binary at {}",
-        binary.display()
-    );
-
-    binary
-}
-
+use rdog_binary::rdog_binary_path;
 fn is_port_listening(port: u16) -> bool {
     let output = Command::new("lsof")
         .args(["-nP", &format!("-iTCP:{port}"), "-sTCP:LISTEN"])

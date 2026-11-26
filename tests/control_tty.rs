@@ -3,40 +3,15 @@
 use std::{
     io::{BufRead, BufReader, Write},
     net::TcpListener,
-    path::PathBuf,
     process::{Command, Stdio},
     thread,
     time::Duration,
 };
 
-fn rdog_binary_path() -> PathBuf {
-    if let Some(binary) = std::env::var_os("CARGO_BIN_EXE_rdog") {
-        let binary = PathBuf::from(binary);
-        assert!(
-            binary.exists(),
-            "expected rdog binary from CARGO_BIN_EXE_rdog at {}",
-            binary.display()
-        );
-        return binary;
-    }
+#[path = "support/rdog_binary.rs"]
+mod rdog_binary;
 
-    let current_exe = std::env::current_exe().expect("current test binary path should exist");
-    let debug_dir = current_exe
-        .parent()
-        .expect("test binary should have parent directory")
-        .parent()
-        .expect("test binary should live under target/debug/deps");
-    let binary = debug_dir.join("rdog");
-
-    assert!(
-        binary.exists(),
-        "expected rdog binary at {}",
-        binary.display()
-    );
-
-    binary
-}
-
+use rdog_binary::rdog_binary_path;
 #[test]
 fn control_cli_should_treat_arrow_keys_as_local_cursor_motion_in_tty() {
     let listener = TcpListener::bind(("127.0.0.1", 0)).expect("test listener should bind");
