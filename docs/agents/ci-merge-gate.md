@@ -96,6 +96,18 @@ target 的 `passed` 必须 > 0**, 否则判红 —— 「退出码 0 但零执�
 | 全平台 (build 阶段) | `cargo test --no-run` 编译**全部** target, 含下面的 compile-only 面 |
 | compile-only (macos) | `control_ax_e2e`、`control_display_aware_e2e`、`control_mouse_e2e`、`control_ocr_e2e`、`control_window_e2e` |
 
+**各平台实际执行 target 数 (每次放量或豁免变更都更新这张表)**:
+
+| 平台 | 实际执行的 integration target 数 | 豁免/只编译 |
+| --- | --- | --- |
+| ubuntu | **10** | `zenoh_router_client` (issue #163) |
+| macos | **12** | 5 个 compile-only (需真实桌面会话) |
+| windows | **1** (`computer_use_density`) | `control_websocket`、`zenoh_router_client_windows` (issue #162) |
+
+**判读口径: 「三平台绿」在 windows 上只代表 1 个 integration target, 不能读成「windows 的 e2e 面
+在跑」; 读绿点必须连着这三个数字一起读。** 数字与 `PLATFORM_EXEMPTIONS` 是同一次改动的东西:
+加/撤一条豁免就要改这里, 否则下一份报告会拿旧的覆盖数去说新的绿。
+
 `recording_e2e` 仍由它自己那一步执行 (unix)。
 
 **单个 target 有 1500s 墙钟上限** (`TARGET_TIMEOUT_SECONDS`), 超时判该 target 红并把它

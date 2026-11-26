@@ -1292,6 +1292,15 @@ zenoh_router_client 38/2 ignored)。
 rebase 会重写分支上每个 commit 的 sha, 本票在合并前又被 rebase 了两次, 所以这里补一张对照表;
 按 `docs/agents/ci-merge-gate.md` §2 的口径, 这类 sha 漂移属于流程设计问题, 由 RAI-433 统一治 (合入后纯账本提交补记),
 不为它单独推提交刷 sha。
+### 2026-11-26 RAI-411 覆盖数进载体 + 票面改成可 actionable
+
+- 提交: (本条随修复提交记入下一次账本)
+
+两件事: ① `ci-merge-gate.md` §3b 增加固定位置的「各平台实际执行 target 数」表 (ubuntu 10 /
+macos 12 / windows 1) 与判读口径 —— 「三平台绿」在 windows 上只代表 1 个 integration target,
+不能读成 windows 覆盖, 加/撤豁免就要改这张表; ② issue #163 从「这两个 target 不稳」改写成
+两候选假设 (启动就绪竞态 / runner 环境差异) + 两个区分实验 (@ping 先行 / 单跑该 target),
+并写明豁免不是结案。
 ### 2026-11-26 RAI-411 第八个发现 (ubuntu): 连接类 e2e 是「一族」不稳定
 
 - 提交: f0ebc7e
