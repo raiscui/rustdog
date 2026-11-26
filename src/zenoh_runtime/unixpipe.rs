@@ -78,7 +78,10 @@ pub fn prepare_unixpipe_listener(
     namespace: &str,
     daemon_name: &str,
 ) -> io::Result<UnixpipePathGuard> {
-    let paths = crate::local_run::paths_for_base(base)?;
+    let mut paths = crate::local_run::paths_for_base(base)?;
+    // base 的来源只有这里能判定: 与"按身份推导出的路径"相同就是派生路径,
+    // 否则是用户显式给的(显式路径才需要旧格式兼容守卫)。
+    paths.shared = !crate::local_run::is_derived_base(base, namespace, daemon_name);
     crate::local_run::UnixpipeRunGuard::acquire(paths, namespace, daemon_name)
 }
 
