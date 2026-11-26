@@ -80,6 +80,10 @@ const MAX_DIRECTORY: usize = 2048;
 const MAX_SESSIONS: usize = 16;
 const DENIED: &str = "iroh_target_denied";
 const DENIED_CODE: u32 = 43;
+/// This endpoint carries a directory *client*: a peer asking it for a lookup is
+/// refused with its own code, not a target denial it would misread.
+const UNSERVED: &str = "iroh_directory_alpn_unserved";
+const UNSERVED_CODE: u32 = 44;
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -121,9 +125,9 @@ struct Directory {
     relay: Option<DirectoryRelay>,
 }
 
-/// The relay that carries directory traffic. `root_cert` names the CA chain of a
-/// private relay; a public relay leaves it out, because the embedded WebPKI roots
-/// already verify it.
+/// The relay that carries directory traffic. `root_cert` names the CA chain that
+/// verifies it and is required: nothing here falls back to public WebPKI, so a
+/// public relay needs its root bundle handed in as `root_cert`.
 #[derive(Deserialize, Clone)]
 #[serde(deny_unknown_fields)]
 struct DirectoryRelay {
@@ -478,8 +482,7 @@ enum RelayRoots {
 
 /// The one place that decides what an endpoint trusts: a directory-only endpoint
 /// pins the chain the profile named, while an endpoint that also carries the lane
-/// adds that same chain on top of the lane's pinned chain and the embedded WebPKI
-/// roots.
+/// pins the two chains together. Neither ever falls back to public WebPKI.
 fn relay_roots(lane: Option<&Relay>, directory: &DirectoryRelay) -> RelayRoots {
     match lane {
         Some(lane) => RelayRoots::LaneAndDirectory(
@@ -579,16 +582,24 @@ async fn frame_put<T: Serialize>(write: &mut SendStream, value: &T) -> Result<()
     Ok(())
 }
 
+/// A renewal only has whatever lease time is left: an attempt that starts late must
+/// not outlive the deadline it refreshes, or the daemon denies every peer for the
+/// difference. A healthy renewal keeps the full directory budget.
+fn renewal_budget(remaining: Duration) -> Duration {
+    DIRECTORY_CONNECT.min(remaining)
+}
+
 async fn directory_call(
     ep: &Endpoint,
     dial: &DirectoryDial,
     request: DirectoryRequest,
     routable: bool,
+    budget: Duration,
 ) -> Result<DirectoryReply> {
-    let budget = match dial.relay {
+    let budget = budget.min(match dial.relay {
         Some(_) => DIRECTORY_CONNECT,
         None => CONNECT,
-    };
+    });
     // One call touches several steps (connect, open, write, read), and a daemon
     // renews every `RENEW` against a `LEASE`: bounding the call as a whole is what
     // keeps it inside the lease, instead of adding up the steps and hoping each one
@@ -610,7 +621,7 @@ async fn directory_call(
         }
         Ok::<_, Box<dyn std::error::Error + Send + Sync>>(reply)
     };
-    match timeout(LEASE - RENEW, call).await?? {
+    match timeout(budget, call).await?? {
         DirectoryReply::Rejected { reason } => Err(reason.into()),
         reply => Ok(reply),
     }
@@ -792,6 +803,7 @@ async fn register(
     dial: &DirectoryDial,
     cfg: &DaemonConfig,
     data: &Endpoint,
+    budget: Duration,
 ) -> Result<Instant> {
     // Every interface the endpoint actually has, not just the first bound socket:
     // a wildcard bind covers several, and a peer may not reach the first one.
@@ -814,6 +826,7 @@ async fn register(
             addr,
         },
         cfg.routable,
+        budget,
     )
     .await?
     {
@@ -1067,7 +1080,7 @@ pub(crate) fn run_daemon(path: &Path) -> Result<()> {
         // is reachable; whether the lane relay carries this daemon is a separate
         // question, answered by that relay's own connection state.
         timeout(CONNECT, data.online()).await?;
-        let deadline = register(&directory, &dial, &cfg, &data).await?;
+        let deadline = register(&directory, &dial, &cfg, &data, DIRECTORY_CONNECT).await?;
         let allow = Arc::new(cfg.allow.clone());
         let routable = cfg.routable;
         let admission = match &cfg.policy_file {
@@ -1086,7 +1099,19 @@ pub(crate) fn run_daemon(path: &Path) -> Result<()> {
         tokio::spawn(async move {
             loop {
                 tokio::time::sleep(RENEW).await;
-                match register(&directory, &dial, &cfg, &renewal_data).await {
+                let remaining = renewal_expires
+                    .lock()
+                    .map(|when| when.saturating_duration_since(Instant::now()))
+                    .unwrap_or(DIRECTORY_CONNECT);
+                match register(
+                    &directory,
+                    &dial,
+                    &cfg,
+                    &renewal_data,
+                    renewal_budget(remaining),
+                )
+                .await
+                {
                     Ok(deadline) => {
                         if let Ok(mut when) = renewal_expires.lock() { *when = deadline; }
                     }
@@ -1118,7 +1143,7 @@ pub(crate) fn run_daemon(path: &Path) -> Result<()> {
                                     "iroh directory alpn not served peer={}",
                                     conn.remote_id()
                                 );
-                                conn.close(DENIED_CODE.into(), DENIED.as_bytes());
+                                conn.close(UNSERVED_CODE.into(), UNSERVED.as_bytes());
                                 return Ok(());
                             }
                             log::info!("iroh connection accepted peer={}", conn.remote_id());
@@ -1217,6 +1242,7 @@ pub(crate) fn run_control(path: &Path, name: &str, line: &str) -> Result<()> {
             &dial,
             DirectoryRequest::Lookup { name: name.to_owned() },
             cfg.routable,
+            DIRECTORY_CONNECT,
         )
         .await;
         directory.close().await;
@@ -2049,6 +2075,7 @@ pub(crate) fn run_pty_control(path: &Path, name: &str, request: IrohPtyRequest) 
                 name: name.to_owned(),
             },
             cfg.routable,
+            DIRECTORY_CONNECT,
         )
         .await;
         directory.close().await;
