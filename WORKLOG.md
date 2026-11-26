@@ -329,3 +329,37 @@ cargo 1.100 的 build-dir 布局让 `recording_e2e` 的 `rdog_binary_path()` 在
 - 提交: 1034bb7
 - 提交: 176d191
 - 提交: 6924b82
+
+## 2026-11-26 ort-sys 获取可复现 + 合并门区分「未运行 / 失败」(RAI-397)
+
+`main` 的 `test (windows-latest)` 自基线起在 Build 就红, 一次测试都没跑到。日志里的
+`Os { code: 3, kind: NotFound }` **不是下载失败**: ort-sys build script 先成功下载
+`+directml` 包, 然后 `build/dynamic_link.rs` 的 copy-dylibs 把 dist 里的 `DirectML.dll`
+复制到 `<OUT_DIR 第 3 个祖先>` 及其 `examples/`、`deps/`, 而 `cargo build --bin rdog`
+从不创建 `examples/` → `fs::copy` 目标路径不存在 → panic。Linux 的 dist 只有静态
+`libonnxruntime.a` (匹配不到 `.so`), 所以这条路在 linux/macos 上从未被走到。
+
+本地复现 (linux, 在 pyke 缓存目录里放一个 `libdummy_rai397.so` 再 `cargo clean -p ort-sys`):
+panic 于 `dynamic_link.rs:45` (unix 分支, 同一循环); `mkdir -p target/debug/build/examples`
+后同一构建 16.5s 成功并把 dummy 软链进 3 处。Windows 侧的第 3 个祖先是 `<profile>/`
+而不是 `<profile>/build/`, 所以两个层级的目录都铺。
+
+- 新增 `scripts/ci/prefetch-ort-dist.py`: 目标三元组→dist 行的映射**不手抄**, 从
+  `Cargo.lock` 锁定的 ort-sys crate 内嵌 `build/download/dist.tsv` 读 URL+sha256
+  (选行规则对齐 `resolve_dist()`: 本仓库没开任何 ort backend feature, 取首行),
+  校验后按 `<cache_root>/dfbin/<target>/<sha256>/` 落盘 → build script 命中即跳过网络。
+  实测: 缓存移走后 MISS→下载→PREFETCHED (linux `libonnxruntime.a`, windows
+  `DirectML.dll` + `onnxruntime.lib`); 随后把 `HTTPS_PROXY` 指向不可达端口构建仍
+  `Finished dev profile`, 日志里没有 ort-sys 的 `downloading from`。
+- 新增 `scripts/ci/assert-tests-ran.py`: 解析 `cargo test` 日志的 `test result:` 行。
+  `0 passed` 判红 (`tests did not run` 注解), 有 failed 判红。本地真实日志 1107 passed 通过。
+- `.github/actions/cargo-prep/action.yml`: build / test 两个 job 共用同一份准备
+  (原生依赖 / 工具链 / cargo 缓存 / ort dist 缓存 / `cargo fetch --locked` / 预取 /
+  ort-sys 目录), 避免"两边环境不同"制造新的不可归因红点。
+- `.github/workflows/ci.yml`: `build (os)` 与 `test (os)` 拆开 —— 同 OS 的 test 被跳过
+  就是「测试未运行」, test 红才是「测试失败」; Windows 加 `find ... DirectML.dll`
+  铺放断言; `pull_request.types` 显式带 `ready_for_review` (默认类型不含它, 标 ready
+  的 PR 会 0 run 而门读成"没有失败")。
+- `docs/agents/ci-merge-gate.md`: 必需检查表 (7 条)、触发面、红点判读表格, 以及
+  ort-sys/onnxruntime 获取契约与"改 Cargo.lock 里的 ort-sys 版本 = 复核这条链"。
+- 提交: 139becb
