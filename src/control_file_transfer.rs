@@ -812,11 +812,20 @@ fn sanitize_index_component(value: &str) -> String {
             }
         })
         .collect();
-    if sanitized.is_empty() || sanitized.chars().all(|ch| ch == '.') {
+    let sanitized = if sanitized.is_empty() || sanitized.chars().all(|ch| ch == '.') {
         "-unnamed".to_string()
     } else {
         sanitized
+    };
+    // 归一化解决的是**安全** (不产生 `..` 与空段), 唯一性它解决不了: `lab/1` 与 `lab-1`
+    // 折叠后都是 `lab-1`, 两个不同的 daemon 会共用一份索引 —— 正是本改动要消灭的那类损坏,
+    // 只是换了个触发方式。所以折叠一旦动过原文, 就拼一段原值的短哈希, 让
+    // (namespace, daemon_name) → 目录名成为单射; 名字本来就安全时不加, 保持可读。
+    if sanitized == value {
+        return sanitized;
     }
+    let digest = format!("{:x}", Sha256::digest(value.as_bytes()));
+    format!("{sanitized}-{}", &digest[..12])
 }
 
 fn default_index_path(identity: &TransferIndexIdentity) -> PathBuf {
@@ -1807,6 +1816,24 @@ mod tests {
     }
 
     #[test]
+    fn index_path_stays_injective_when_sanitizing_collides() {
+        // `lab/1` 与 `lab-1` 折叠后都是 `lab-1`; 单靠折叠会让两个不同的 daemon 共用一份索引,
+        // 也就是把 M2 修掉的那个损坏重新引回来。
+        let slash = default_index_path(&TransferIndexIdentity {
+            namespace: None,
+            daemon_name: "lab/1".into(),
+        });
+        let dash = default_index_path(&TransferIndexIdentity {
+            namespace: None,
+            daemon_name: "lab-1".into(),
+        });
+        assert_ne!(slash, dash, "折叠撞名时必须有原值哈希兜底");
+        assert!(slash
+            .components()
+            .all(|component| !matches!(component, std::path::Component::ParentDir)));
+    }
+
+    #[test]
     fn index_path_sanitizes_traversal_shaped_identity() {
         // namespace / daemon_name 来自配置, 可以含 `/` 与 `..`: 直接拼进路径等于允许配置
         // 把索引写到任意位置。
@@ -1829,13 +1856,20 @@ mod tests {
             .and_then(|p| p.file_name())
             .and_then(|n| n.to_str())
             .unwrap_or_default();
-        assert_eq!(daemon_component, "-unnamed", "只有点的名字要换成固定占位");
+        assert!(
+            daemon_component.starts_with("-unnamed"),
+            "只有点的名字要换成固定占位 (折叠动过原文时还要带原值哈希): {daemon_component}"
+        );
     }
 
     #[test]
     fn restored_index_discards_entries_whose_paths_a_request_would_be_refused() {
         // M1: 索引是用户可写的文件. 恢复路径必须与请求路径同等不可信 —— 否则能写
         // partials.json 的本地主体就能让 sweep 删 / @file-end rename 任意路径。
+        //
+        // 两支刻意各自只有**一个**可能被拒的理由, 否则用例证明不了谁在承重:
+        //   甲 目标合法但 temp 不是该目标的暂存路径 → 只能由 "temp == staging_path(target)" 拒;
+        //   乙 temp 恰好就是该目标推导出来的暂存路径且文件存在 → 只能由目标校验 (拒 `..`) 拒。
         let _guard = TRANSFER_TABLE_TEST_LOCK
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -1844,24 +1878,41 @@ mod tests {
         let index = dir.join("partials.json");
         set_index_path_for_tests(index.clone());
 
-        // 受害者: 一个完全正常的文件, 不是任何传输的暂存文件
+        // 甲: 受害者是一个完全正常的文件, 不是任何传输的暂存文件
         let victim = dir.join("victim.bin");
         std::fs::write(&victim, b"important").unwrap();
-        let target = dir.join("legit-target.bin");
+        let legit_target = dir.join("legit-target.bin");
+
+        // 乙: 带 `..` 的目标, 但 temp 正是它推导出来的暂存路径 (文件真实存在)
+        let traversal_target = dir
+            .join("sub")
+            .join("..")
+            .join("escape.bin")
+            .display()
+            .to_string();
+        let traversal_temp = staging_path(Path::new(&traversal_target)).unwrap();
+        std::fs::create_dir_all(traversal_temp.parent().unwrap()).unwrap();
+        std::fs::write(&traversal_temp, b"plausible").unwrap();
+        // 前提钉住: 不看目标合不合法的话, 这条 (temp, target) 组合本身是自洽的
+        assert_eq!(
+            staging_path(Path::new(&traversal_target)).unwrap(),
+            traversal_temp,
+            "乙支的 temp 必须正是该目标的暂存路径, 否则它测的是甲支的判据"
+        );
 
         let document = json!({
             "version": 1,
             "transfers": [
                 {
                     "transfer_id": "m1-arbitrary-temp",
-                    "target_path": target.to_string_lossy(),
+                    "target_path": legit_target.to_string_lossy(),
                     "temp_path": victim.to_string_lossy(),
                     "size": 9,
                 },
                 {
                     "transfer_id": "m1-traversal-target",
-                    "target_path": format!("{}", target.join("..").join("..").join("escape.bin").display()),
-                    "temp_path": victim.to_string_lossy(),
+                    "target_path": traversal_target,
+                    "temp_path": traversal_temp.to_string_lossy(),
                     "size": 9,
                 }
             ]
@@ -1871,10 +1922,14 @@ mod tests {
         assert_eq!(
             restore_index(),
             0,
-            "暂存路径与目标不匹配 / 目标含穿越组件时, 一条都不得恢复"
+            "temp 与目标不匹配 / 目标含穿越组件时, 一条都不得恢复"
         );
         assert!(victim.exists(), "恢复不得让任意文件进入可删/可 rename 的状态");
         assert_eq!(std::fs::read(&victim).unwrap(), b"important");
+        assert!(
+            traversal_temp.exists(),
+            "目标不合法的条目也不得顺手删掉它指向的文件"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
