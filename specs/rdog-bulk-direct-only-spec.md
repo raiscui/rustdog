@@ -120,21 +120,21 @@ P7 第 3 项今天**既不可验证也不可证伪**: 候选没有任何 bulk �
 
 ### 2.4 大小上限 / 并发 / 取消 / 超时
 
-四项都进 daemon 配置的新 `[bulk]` 段 (配置段形状沿用 `src/config.rs` 里既有的
+四项都进 daemon 配置的 `[file_transfer]` 段 (配置段形状沿用 `src/config.rs` 里既有的
 `ZenohConfig` / `ObservationConfig` 模式, 见 `src/config.rs:211`、`:173`):
 
 | 配置项 | 语义 | 默认值来源 |
 | --- | --- | --- |
-| `bulk.max_bytes` | 单文件上限. 在 `@put-file` 按声明 size 拒一次, 在 `@file-chunk` 按累计写入**再**拒一次 (声明可以撒谎) | 本规格定义, 待实现落地 (最小要容得下 10-06 规格里记录的 178 MB 模型件) |
-| `bulk.max_concurrent_sessions` | daemon 侧并发会话上限, 超出返回稳定码 `bulk_session_limit_reached` | 本规格定义 |
-| `bulk.idle_timeout_ms` | 会话空闲过期: 超过该时长无 `@file-chunk` / `@file-read` 进展, 把会话移出注册表. **是否连带删半成品见 §2.5** | 本规格定义 |
-| `bulk.resume_window_ms` | 可续传半成品的保留窗口, 必须 **大于** `bulk.idle_timeout_ms` (`validate_file_transfer_config` 同族校验) | 本规格定义 |
-| `bulk.chunk_ack_timeout_ms` | 客户端侧单块应答超时, 超时即 `@file-cancel` 并失败 | 本规格定义 |
+| `file_transfer.max_bytes` | 单文件上限. 在 `@put-file` 按声明 size 拒一次, 在 `@file-chunk` 按累计写入**再**拒一次 (声明可以撒谎) | 本规格定义, 待实现落地 (最小要容得下 10-06 规格里记录的 178 MB 模型件) |
+| `file_transfer.max_concurrent_sessions` | daemon 侧并发会话上限, 超出返回稳定码 `bulk_session_limit_reached` | 本规格定义 |
+| `file_transfer.idle_timeout_ms` | 会话空闲过期: 超过该时长无 `@file-chunk` / `@file-read` 进展, 把会话移出注册表. **是否连带删半成品见 §2.5** | 本规格定义; 与 `sweep_interval_ms` 一起已由 RAI-417 落地 |
+| `file_transfer.resume_window_ms` | 可续传半成品的保留窗口, 必须 **大于** `file_transfer.idle_timeout_ms` (`validate_file_transfer_config` 同族校验) | 本规格定义 |
+| `file_transfer.chunk_ack_timeout_ms` | 客户端侧单块应答超时, 超时即 `@file-cancel` 并失败 | 本规格定义 |
 
 取消链路有两条, 互补, 都要实现:
 
 1. **显式取消**: 客户端调 `@file-cancel` (`@cancel#seq` 取消的是 in-flight 命令, 取消不了已经提交的传输会话).
-2. **隐式过期**: `bulk.idle_timeout_ms` 的 sweep. 覆盖客户端进程被杀、网络断掉、机器睡眠这些没人来
+2. **隐式过期**: `file_transfer.idle_timeout_ms` 的 sweep. 覆盖客户端进程被杀、网络断掉、机器睡眠这些没人来
    调 cancel 的情况.
 
 ### 2.5 半成品回收: 终态删, 可续传留 (带窗口)
@@ -148,8 +148,8 @@ P7 第 3 项今天**既不可验证也不可证伪**: 候选没有任何 bulk �
 | 显式 `@file-cancel` | 移出注册表 | **删** | 调用方明确表示不要了 |
 | 门禁在 open 拒绝 (`iroh_direct_path_unavailable` / `iroh_path_unknown` / `iroh_bulk_path_pin_unavailable`) | 不移出, 因为根本没建 | **不存在** | 拒绝必须是零副作用: open 时连 partial 都还没创建 |
 | 摘要/字节数不符 (`@file-end`) | 移出注册表 | **删** | 坏文件不得留盘 |
-| 中途路径丢失/不可读 (`iroh_direct_path_lost` / `iroh_path_unknown`) | 移出注册表 | **留**, 到 `bulk.resume_window_ms` 为止 | 这是唯一可续传的中止; 续传 offset 就是从这份半成品的长度推导的 |
-| 空闲超过 `bulk.idle_timeout_ms` | 移出注册表 | 取决于中止原因: 终态删, 可续传留到窗口末 | 空闲只说明"没人来了", 不说明"不要了" |
+| 中途路径丢失/不可读 (`iroh_direct_path_lost` / `iroh_path_unknown`) | 移出注册表 | **留**, 到 `file_transfer.resume_window_ms` 为止 | 这是唯一可续传的中止; 续传 offset 就是从这份半成品的长度推导的 |
+| 空闲超过 `file_transfer.idle_timeout_ms` | 移出注册表 | 取决于中止原因: 终态删, 可续传留到窗口末 | 空闲只说明"没人来了", 不说明"不要了" |
 
 一张表说清为什么必须有第二个 TTL: `idle_timeout_ms` 回答的是"多久没有进展就不再跟踪这个会话",
 `resume_window_ms` 回答的是"那道半成品还值不值得留着". 两者用同一个数, 就必然把其中一个需求压死.
@@ -191,7 +191,7 @@ P7 第 3 项今天**既不可验证也不可证伪**: 候选没有任何 bulk �
 | 码 | 触发条件 | 终态 | 可重试 |
 | --- | --- | --- | --- |
 | `iroh_direct_path_unavailable` | 路径层观测到没有直连, 当前走 relay | 是 | 路径变直连后可 (见 D2) |
-| `iroh_direct_path_lost` | 直连曾建立, 中途丢失 | 是 (本次尝试) | 可, 带 `resume:true` 新开一次尝试; 半成品保留 `bulk.resume_window_ms` (§2.5) |
+| `iroh_direct_path_lost` | 直连曾建立, 中途丢失 | 是 (本次尝试) | 可, 带 `resume:true` 新开一次尝试; 半成品保留 `file_transfer.resume_window_ms` (§2.5) |
 | `iroh_path_unknown` | 路径类别读不出 | 是 | 可, 但重试前先修路径可观测性 |
 | `iroh_bulk_path_pin_unavailable` | 传输是路径感知的, 但无法把 bulk 连接钉在直连上 | 是 | 不可, 除非传输侧补上路径 pin |
 
@@ -204,7 +204,7 @@ P7 第 3 项今天**既不可验证也不可证伪**: 候选没有任何 bulk �
 
 | 禁止 | 理由 |
 | --- | --- |
-| `--allow-relay` / `bulk.allow_relay` / 任何形式的 relay 放行开关 | 一旦存在, "bulk 只允许直连"就退化为"默认只允许直连". 要证明的是不变量, 不是默认值 |
+| `--allow-relay` / `file_transfer.allow_relay` / 任何形式的 relay 放行开关 | 一旦存在, "bulk 只允许直连"就退化为"默认只允许直连". 要证明的是不变量, 不是默认值 |
 | 直连不可得时降级为控制面内联 (把文件塞进 `@run` / `@cmd` 的 shell 参数) | 同一条字节流换了动词而已, 仍然过 relay, 而且绕开了本规格全部超时与上限 |
 | 直连失败后自动重试 N 次再报错 | 重试可以在路径层做 (见 D2), 但**不能**在 bulk 原语内偷偷改路径类别. 每次尝试的路径类别都要单独入账 |
 | 把路径判定结果缓存超过一次尝试 | 缓存是"上一次是直连"的证据, 不是"这一次是直连"的证据 |
@@ -349,7 +349,7 @@ rdog control <TARGET> --get <REMOTE_PATH> --local-path <LOCAL_PATH> [--resume]
 
 | # | 落点 | 内容 |
 | --- | --- | --- |
-| 1 | `src/control_file_transfer.rs` | `attempt_id` 字段、`@file-cancel`、`bulk.max_bytes` 双次校验、会话 TTL sweep、并发上限 |
+| 1 | `src/control_file_transfer.rs` | `attempt_id` 字段、`@file-cancel`、`file_transfer.max_bytes` 双次校验、会话 TTL sweep、并发上限 |
 | 2 | 传输适配器 (iroh: RAI-413) | 暴露 `path_aware` / `bulk_path_pin` / `path_class` 采样 + `relay_tx_bytes` / `relay_rx_bytes` 累计量 (含排队与重传字节). 这是本规格对 RAI-413 的硬要求, 是**依赖接口**不是本票实现 |
 | 3 | `src/control_core.rs` 派发 | daemon 侧下载方向门禁 (open + 每次 `@file-read` 前) |
 | 4 | 新客户端驱动 (与 `src/control_invocation.rs` 同层) | 流式: 读一块 → 发一块 → 等应答 → 推进 offset, 不整文件驻留 |
@@ -367,7 +367,7 @@ rdog control <TARGET> --get <REMOTE_PATH> --local-path <LOCAL_PATH> [--resume]
    (已逐分支核过). 本规格里所有 `iroh_*` 码与 `path_class` 采样都是**在本规格里首次定义的契约**,
    实现落地后须回填到 `src/` 的具体位置, 并按 `docs/agents/knowledge-carriers.md` 的约定
    把"待回填"改成指针.
-3. **`bulk.*` 默认值**由实现票给具体数值; 本文只固定语义与判定, 不固定数字 (避免再造第二份真相源).
+3. **`file_transfer.*` 默认值**由实现票给具体数值; 本文只固定语义与判定, 不固定数字 (避免再造第二份真相源).
 
 ---
 
@@ -411,7 +411,7 @@ B 与 C 的区别不在结果 (两者都必须失败), 而在**失败原因的�
 | --- | --- |
 | 输入 | 大文件上传, 传输进行中把路径打断 (断 UDP / 切网) |
 | 前置 | 起始 `direct`, 传输已过一个或多个 chunk |
-| 预期 | **中止**, `error_code:"iroh_direct_path_lost"`; 已写 partial **保留到 `bulk.resume_window_ms`** (续传 offset 就是从它推导的, 删了就退化成重传); 快照 `verdict=aborted` 且 delta 非 0 |
+| 预期 | **中止**, `error_code:"iroh_direct_path_lost"`; 已写 partial **保留到 `file_transfer.resume_window_ms`** (续传 offset 就是从它推导的, 删了就退化成重传); 快照 `verdict=aborted` 且 delta 非 0 |
 | 证据 | 两端快照; 中止时的 offset (证明不是从头开始也不是静默完成); partial 存在与大小; 续传一次到 `direct` 后完成的回执, 且续传的起始 offset **不等于 0** (证明是真续传而不是静默重传); **在途字节的归属**: 中止前已放行但未确认的字节数与其最终路径类别 (验证 §3.5 的 pin 确实生效, 不是"查到得太晚") |
 
 ### D2 类: relay → direct
