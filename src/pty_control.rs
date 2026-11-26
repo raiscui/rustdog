@@ -34,6 +34,9 @@ pub enum PtyRuntimeCommand {
     Close {
         reason: String,
     },
+    Disconnect {
+        control_session_id: String,
+    },
     Detach {
         reason: String,
     },
@@ -48,6 +51,7 @@ pub enum PtyRuntimeCommand {
 
 pub struct AttachedPtySession {
     session_id: String,
+    control_session_id: String,
     input_tx: mpsc::Sender<PtyRuntimeCommand>,
     output_rx: mpsc::Receiver<ControlFrame>,
 }
@@ -81,6 +85,12 @@ impl AttachedPtySession {
             .map_err(|_| io::Error::other("PTY runtime command channel closed"))
     }
 
+    pub(crate) fn disconnect(&self) {
+        let _ = self.input_tx.send(PtyRuntimeCommand::Disconnect {
+            control_session_id: self.control_session_id.clone(),
+        });
+    }
+
     pub fn detach(&self, reason: &str) -> io::Result<()> {
         self.input_tx
             .send(PtyRuntimeCommand::Detach {
@@ -102,7 +112,11 @@ use std::{
         raw::{c_int, c_ulong},
     },
     sync::OnceLock,
+    time::Instant,
 };
+
+#[cfg(unix)]
+const PTY_KILL_GRACE: Duration = Duration::from_millis(750);
 
 #[cfg(unix)]
 use termios::{
@@ -122,10 +136,12 @@ type PtyCloseHandle = Arc<Mutex<Box<dyn ChildKiller + Send + Sync>>>;
 #[cfg(unix)]
 #[derive(Clone)]
 struct ActivePtySession {
+    pid: Option<u32>,
     close_handle: PtyCloseHandle,
     terminal_reason: Arc<Mutex<Option<String>>>,
     input_tx: mpsc::Sender<PtyRuntimeCommand>,
     attached_control_session_id: Arc<Mutex<Option<String>>>,
+    subject: Arc<Mutex<Option<String>>>,
 }
 
 #[cfg(unix)]
@@ -178,12 +194,107 @@ pub fn parse_pty_attach_request(line: &str) -> io::Result<Option<PtyAttachReques
     }
 }
 
+/// 谁能关闭 / 解绑 / 重附一个 PTY 会话。
+///
+/// 准入 lane 按主体判定: 会话登记了主体时只有同一主体可以操作它。
+/// 旧 TCP / WebSocket / Zenoh lane 的会话没有主体, 对准入 lane 一律拒绝 ——
+/// 那些 lane 自己仍按 id 关闭, 属"可达即全权", 不是 owner 授权。
+#[derive(Debug, PartialEq, Eq)]
+pub enum SubjectAccess {
+    Allowed,
+    Foreign,
+    Missing,
+}
+
+/// 把准入主体登记到 PTY 会话上。
+#[cfg(unix)]
+pub fn bind_pty_session_subject(session_id: &str, subject: &str) -> io::Result<bool> {
+    let session = {
+        let sessions = active_pty_sessions()
+            .lock()
+            .map_err(|_| io::Error::other("PTY session registry lock poisoned"))?;
+        sessions.get(session_id).cloned()
+    };
+    let Some(session) = session else {
+        return Ok(false);
+    };
+    *session
+        .subject
+        .lock()
+        .map_err(|_| io::Error::other("PTY subject lock poisoned"))? = Some(subject.to_owned());
+    Ok(true)
+}
+
+#[cfg(not(unix))]
+pub fn bind_pty_session_subject(_session_id: &str, _subject: &str) -> io::Result<bool> {
+    Ok(false)
+}
+
+/// 准入 lane 操作前的主体判定。
+#[cfg(unix)]
+pub fn authorize_pty_subject(session_id: &str, subject: &str) -> io::Result<SubjectAccess> {
+    let session = {
+        let sessions = active_pty_sessions()
+            .lock()
+            .map_err(|_| io::Error::other("PTY session registry lock poisoned"))?;
+        sessions.get(session_id).cloned()
+    };
+    let Some(session) = session else {
+        return Ok(SubjectAccess::Missing);
+    };
+    let owner = session
+        .subject
+        .lock()
+        .map_err(|_| io::Error::other("PTY subject lock poisoned"))?
+        .clone();
+    Ok(if owner.as_deref() == Some(subject) {
+        SubjectAccess::Allowed
+    } else {
+        SubjectAccess::Foreign
+    })
+}
+
+#[cfg(not(unix))]
+pub fn authorize_pty_subject(_session_id: &str, _subject: &str) -> io::Result<SubjectAccess> {
+    Ok(SubjectAccess::Missing)
+}
+
+/// PTY 会话是否还在注册表里 —— daemon 用它确认终止已经收尾。
+#[cfg(unix)]
+pub fn pty_session_registered(session_id: &str) -> bool {
+    active_pty_sessions()
+        .lock()
+        .map(|sessions| sessions.contains_key(session_id))
+        .unwrap_or(false)
+}
+
+#[cfg(not(unix))]
+pub fn pty_session_registered(_session_id: &str) -> bool {
+    false
+}
+
 /// 尝试按 session id 关闭一个活动 PTY。
 ///
 /// 返回 `Ok(false)` 表示没有找到这个 session。
 #[cfg(unix)]
 pub fn close_active_pty_session(session_id: &str) -> io::Result<bool> {
     close_active_pty_session_with_reason(session_id, "force_close")
+}
+
+/// 按显式 reason 关闭一个活动 PTY（准入 lane 与测试共用）。
+#[cfg(unix)]
+pub fn close_pty_session_with_reason(session_id: &str, reason: &str) -> io::Result<bool> {
+    close_active_pty_session_with_reason(session_id, reason)
+}
+
+#[cfg(not(unix))]
+pub fn close_pty_session_with_reason(_session_id: &str, _reason: &str) -> io::Result<bool> {
+    Ok(false)
+}
+
+#[cfg(all(test, target_os = "linux"))]
+pub(crate) fn close_test_pty_fixture(session_id: &str, reason: &str) -> io::Result<bool> {
+    close_active_pty_session_with_reason(session_id, reason)
 }
 
 #[cfg(unix)]
@@ -203,12 +314,61 @@ fn close_active_pty_session_with_reason(session_id: &str, reason: &str) -> io::R
         *terminal_reason = Some(reason.to_owned());
     }
 
-    let mut killer = session
-        .close_handle
-        .lock()
-        .map_err(|_| io::Error::other("PTY close handle lock poisoned"))?;
-    killer.kill().map_err(to_io_error)?;
+    match session.pid {
+        Some(pid) => {
+            // portable-pty starts the command as a session leader, so the group
+            // signal covers everything the command spawned. A command that
+            // ignores the hangup is escalated to a kill once the session has had
+            // its grace period, so a reclaimed lease cannot outlive its daemon.
+            signal_pty_group(pid, libc::SIGHUP)?;
+            escalate_pty_group_kill(Some(session_id.to_owned()), pid);
+        }
+        None => {
+            let mut killer = session
+                .close_handle
+                .lock()
+                .map_err(|_| io::Error::other("PTY close handle lock poisoned"))?;
+            killer.kill().map_err(to_io_error)?;
+        }
+    }
     Ok(true)
+}
+
+#[cfg(unix)]
+fn signal_pty_group(pid: u32, signal: i32) -> io::Result<()> {
+    // SAFETY: kill(2) 只投递信号, 不触碰本进程内存; 负 pid 即进程组信号。
+    if unsafe { libc::kill(-(pid as libc::pid_t), signal) } == 0 {
+        return Ok(());
+    }
+    let err = io::Error::last_os_error();
+    if err.raw_os_error() == Some(libc::ESRCH) {
+        return Ok(());
+    }
+    Err(err)
+}
+
+#[cfg(unix)]
+fn escalate_pty_group_kill(session_id: Option<String>, pid: u32) {
+    thread::spawn(move || {
+        let deadline = Instant::now() + PTY_KILL_GRACE;
+        while Instant::now() < deadline {
+            // A session that left the registry early needs no further waiting; a
+            // caller without one waits the whole grace period.
+            if session_id.as_deref().is_some_and(|id| !pty_session_registered(id)) {
+                break;
+            }
+            thread::sleep(Duration::from_millis(25));
+        }
+        // The leaders may already be gone while a background job still holds the
+        // slave open, so ask the group rather than the session registry.
+        // SAFETY: signal probe only, negative pid addresses the child's group.
+        if unsafe { libc::kill(-(pid as libc::pid_t), 0) } == 0 {
+            match signal_pty_group(pid, libc::SIGKILL) {
+                Ok(()) => log::info!("PTY group killed after the hangup: pid={pid}"),
+                Err(err) => log::warn!("PTY group kill failed: pid={pid}: {err}"),
+            }
+        }
+    });
 }
 
 #[cfg(unix)]
@@ -277,7 +437,7 @@ pub fn attach_active_pty_session(
     session
         .input_tx
         .send(PtyRuntimeCommand::Attach {
-            control_session_id,
+            control_session_id: control_session_id.clone(),
             cols: request.cols,
             rows: request.rows,
             sender: frame_tx,
@@ -290,6 +450,7 @@ pub fn attach_active_pty_session(
 
     Ok(Some(AttachedPtySession {
         session_id: request.session_id,
+        control_session_id,
         input_tx: session.input_tx,
         output_rx: frame_rx,
     }))
@@ -507,6 +668,7 @@ pub fn open_attached_pty_session(request: PtyOpenRequest) -> io::Result<Attached
     }
 
     let mut child = pair.slave.spawn_command(command).map_err(to_io_error)?;
+    let child_pid = child.process_id();
     drop(pair.slave);
 
     let mut pty_writer = pair.master.take_writer().map_err(to_io_error)?;
@@ -524,10 +686,12 @@ pub fn open_attached_pty_session(request: PtyOpenRequest) -> io::Result<Attached
     register_active_pty_session(
         &session_id,
         ActivePtySession {
+            pid: child.process_id(),
             close_handle: Arc::clone(&close_handle),
             terminal_reason: Arc::clone(&terminal_reason),
             input_tx: input_tx.clone(),
             attached_control_session_id: Arc::clone(&attached_control_session_id),
+            subject: Arc::new(Mutex::new(None)),
         },
     )?;
 
@@ -651,7 +815,20 @@ pub fn open_attached_pty_session(request: PtyOpenRequest) -> io::Result<Attached
                 }
                 Ok(PtyRuntimeCommand::Close { reason }) => {
                     terminal_outcome = Some(PtyTerminalOutcome::Closed { reason });
-                    let _ = kill_pty_child(&close_handle);
+                    let _ = kill_pty_child(&close_handle, child_pid);
+                }
+                Ok(PtyRuntimeCommand::Disconnect { control_session_id }) => {
+                    if terminal_outcome.is_none()
+                        && terminal_reason.lock().is_ok_and(|reason| reason.is_none())
+                        && attached_control_session_id.lock().is_ok_and(|owner| {
+                            owner.as_deref() == Some(control_session_id.as_str())
+                        })
+                    {
+                        terminal_outcome = Some(PtyTerminalOutcome::Closed {
+                            reason: "control_disconnect".to_owned(),
+                        });
+                        let _ = kill_pty_child(&close_handle, child_pid);
+                    }
                 }
                 Ok(PtyRuntimeCommand::Detach { reason }) => {
                     if let Ok(mut attached) = attached_control_session_id.lock() {
@@ -720,13 +897,14 @@ pub fn open_attached_pty_session(request: PtyOpenRequest) -> io::Result<Attached
                             reason: "transport_lost".to_owned(),
                         });
                     }
-                    let _ = kill_pty_child(&close_handle);
+                    let _ = kill_pty_child(&close_handle, child_pid);
                 }
             }
         }
     });
 
     Ok(AttachedPtySession {
+        control_session_id: session_id.clone(),
         session_id,
         input_tx,
         output_rx: frame_rx,
@@ -797,6 +975,13 @@ fn run_pty_client_threaded_stdin_loop(
                     "remote PTY closed before natural exit: {}",
                     frame.reason
                 )));
+            }
+            // detach 只结束本地这一端的所有权, 远端进程继续存活等待重附。
+            ControlFrame::PtyDetached(frame) if frame.session_id == ready.session_id => {
+                if input_thread.is_finished() {
+                    let _ = input_thread.join();
+                }
+                return Ok(());
             }
             _ => {}
         }
@@ -872,6 +1057,10 @@ fn run_pty_client_tty_loop_inner(
                         "remote PTY closed before natural exit: {}",
                         frame.reason
                     )));
+                }
+                // detach 只结束本地这一端的所有权, 远端进程继续存活等待重附。
+                ControlFrame::PtyDetached(frame) if frame.session_id == ready.session_id => {
+                    return Ok(());
                 }
                 _ => {}
             },
@@ -1093,6 +1282,7 @@ where
     }
 
     let mut child = pair.slave.spawn_command(command).map_err(to_io_error)?;
+    let child_pid = child.process_id();
     drop(pair.slave);
 
     let mut pty_writer = pair.master.take_writer().map_err(to_io_error)?;
@@ -1103,10 +1293,12 @@ where
     register_active_pty_session(
         &session_id,
         ActivePtySession {
+            pid: child.process_id(),
             close_handle: Arc::clone(&close_handle),
             terminal_reason: Arc::clone(&terminal_reason),
             input_tx: placeholder_tx,
             attached_control_session_id: Arc::new(Mutex::new(Some(session_id.clone()))),
+            subject: Arc::new(Mutex::new(None)),
         },
     )?;
 
@@ -1207,7 +1399,7 @@ where
             terminal_outcome = Some(PtyTerminalOutcome::Closed {
                 reason: "force_close".to_owned(),
             });
-            let _ = kill_pty_child(&close_handle);
+            let _ = kill_pty_child(&close_handle, child_pid);
             continue;
         }
 
@@ -1236,7 +1428,7 @@ where
             }
         }
     }
-    let _ = kill_pty_child(&close_handle);
+    let _ = kill_pty_child(&close_handle, child_pid);
     unregister_active_pty_session(&session_id);
     let _ = wait_thread.join();
     let _ = output_thread.join();
@@ -1291,7 +1483,13 @@ fn unregister_active_pty_session(session_id: &str) {
 }
 
 #[cfg(unix)]
-fn kill_pty_child(handle: &PtyCloseHandle) -> io::Result<()> {
+fn kill_pty_child(handle: &PtyCloseHandle, pid: Option<u32>) -> io::Result<()> {
+    if let Some(pid) = pid {
+        if signal_pty_group(pid, libc::SIGHUP).is_ok() {
+            escalate_pty_group_kill(None, pid);
+            return Ok(());
+        }
+    }
     let mut killer = handle
         .lock()
         .map_err(|_| io::Error::other("PTY close handle lock poisoned"))?;
