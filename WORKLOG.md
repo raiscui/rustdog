@@ -1191,3 +1191,14 @@ resume_window), 孤儿也进索引跨重启恢复, 恢复时只认暂存区里�
 `reap_idle_transfers` 是全局动作, 并行用例会互相回收对方的条目 (CI ubuntu 连红两次: 一个用例的
 `reaped` 从 1 变 2, 另一个的孤儿被先删)。加 `SWEEP_TEST_LOCK`, 凡是调用回收或往孤儿表塞条目的
 用例都先拿锁; 同时把 `clear()` 换成只删自己那条。
+
+### RAI-367 评审第一轮 (H1/H2/M1/M2)
+
+- 提交: 5c9bd59
+
+两条 high 都是"载体承诺了、代码里没有": chunk 侧第二道大小门不存在 (声明可以撒谎 → 暂存文件
+无界增长); 空闲回收直接删上传半成品, 与 §2.5 B4 相反 (于是 `resume_window_ms` 从未参与, 跨重启
+恢复只在"15 分钟内回来"时成立)。另修孤儿回收与 resume 重开的锁序竞态、下载直接覆盖目标文件。
+真机冒烟补上了之前缺的那一段: TCP line-control daemon 上 20 MB 上传/下载 sha 一致, 中断后
+CLI 重跑得到 `resume=honored`。教训: 之前 CLI 挂住不是 CLI 的 bug, 是 daemon 跑在 zenoh router
+模式 (`--transport tcp` 才是 line-control), 我把它当成"CLI 未验"记了一条不准确的边界。
