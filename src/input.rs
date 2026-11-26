@@ -183,6 +183,10 @@ pub enum Command {
         local_path: Option<PathBuf>,
 
         /// `--put` 时显式从 0 重来 (并要求被控端删掉既有半成品), 不续传。
+        ///
+        /// 这一支会先取消本机记录里的那条旧会话 (`~/.rdog/bulk-transfer-ids.json`, 键是
+        /// 目标 + 本地路径 + 远端路径)。键不含进程身份, 所以同一目标的同一路径上若**另一个进程
+        /// 正在传**, 那条在途会话会被一起取消 —— 同一键不要并发跑两个 `--put`。
         #[clap(long = "restart", requires = "put")]
         restart: bool,
 

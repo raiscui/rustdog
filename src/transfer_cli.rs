@@ -237,6 +237,16 @@ pub(crate) const DAEMON_HALF_FILE: &str = "bulk-path.daemon.json";
 ///
 /// 存储: `<rdog 用户目录>/bulk-transfer-ids.json` (与 `~/.rdog/` 下其它文件同一约定)。
 /// 只记 `--put`: 下载方向 daemon 没有"未完成的下载"这种状态, 同 id 换不来续传, 记了也只是垃圾。
+///
+/// # 已知边界: 没有在途 owner
+///
+/// 键是 `(target, local, remote)`, **不含进程身份, 也没有"谁在用这条 id"的守卫**。于是同一键上
+/// 有另一个进程正在传时: 它写的 id 会覆盖这条, 而 `--restart` 读到那个 id 后发的 `@file-cancel`
+/// 会把**那条在途会话**一起取消 (daemon 的 cancel 只认 `transfer_id`, 不认发起者)。
+///
+/// 规避是"同一键不要并发"; 根治要给 daemon 侧的会话加 owner 租约 (与 §5.1 同一条, 未开票)。
+/// 这里刻意不做进程锁: 一把锁只能挡住"读-改-写"那几毫秒, 挡不住"我在传的时候你 restart", 反而
+/// 让人以为这个问题已经解决。
 pub(crate) struct TransferIdStore {
     path: Option<PathBuf>,
 }
