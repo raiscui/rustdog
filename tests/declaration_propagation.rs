@@ -179,7 +179,8 @@ fn deliver_one_round(entrypoint: &str, key: &str, guard: bool) -> bool {
 #[test]
 fn declaration_self_check_should_make_first_message_deterministic() {
     let _serial = TEST_LOCK.lock().unwrap_or_else(|err| err.into_inner());
-    let (daemon, entrypoint) = start_daemon();
+    // `_daemon` 只用来保活: drop 时 kill。
+    let (_daemon, entrypoint) = start_daemon();
     let total = rounds();
 
     let mut guarded_lost = Vec::new();
@@ -200,6 +201,32 @@ fn declaration_self_check_should_make_first_message_deterministic() {
     assert!(
         guarded_lost.is_empty(),
         "self-checked declaration still lost the first message in rounds {guarded_lost:?}"
+    );
+}
+
+/// 承重断言的口子: 只有「keyexpr 是探针那条 **且** payload 带着本次 nonce」的回复才算可见。
+///
+/// 这一条直接测谓词, 不去造路由: 第三方在 `rdog/lab/**` 下挂 queryable 时, 旧版本 (只判
+/// `result().is_ok()`) 会被它 3.6ms 骗过; 现在它的回复既没有探针 keyexpr 也没有 nonce, 不算数。
+#[test]
+fn probe_should_only_accept_its_own_nonce_carrying_reply() {
+    use zenoh::key_expr::KeyExpr;
+    let probe = KeyExpr::try_from("rdog/lab/propagation/x/rdog-visibility-probe-1-7").unwrap();
+    let other = KeyExpr::try_from("rdog/lab/propagation/y/rdog-visibility-probe-1-7").unwrap();
+    let expected = "visible-7";
+
+    assert!(propagation::is_probe_reply(&probe, Some(expected.to_owned()), &probe, expected));
+    assert!(
+        !propagation::is_probe_reply(&other, Some(expected.to_owned()), &probe, expected),
+        "a reply from another keyexpr must not count"
+    );
+    assert!(
+        !propagation::is_probe_reply(&probe, Some("visible".to_owned()), &probe, expected),
+        "a reply without the per-call nonce must not count (this is the foreign-queryable hole)"
+    );
+    assert!(
+        !propagation::is_probe_reply(&probe, None, &probe, expected),
+        "an empty payload must not count"
     );
 }
 

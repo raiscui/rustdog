@@ -49,15 +49,18 @@ pub fn await_subscriber_visible_within(
     subscribed: &str,
     budget: Duration,
 ) -> Result<(), String> {
-    let probe = probe_key_expr(subscribed, nonce())?;
+    let nonce = nonce();
+    let probe = probe_key_expr(subscribed, nonce)?;
     // queryable 的声明晚于订阅声明, 且两者的 Declare 在同一 session 上按序发出。
+    // 回复里带 nonce: 只判 `result().is_ok()` 的话, 任何第三方在本 keyexpr 下挂的 queryable 都会让
+    // 探针假绿 (实测 3.6ms 就 Ok) —— 那等于在承重断言上开了口子。
     let answer_key = probe.clone();
+    let answer = format!("visible-{nonce}");
+    let reply_body = answer.clone();
     let _queryable = declaring
         .declare_queryable(probe.clone())
         .callback(move |query| {
-            let _ = query
-                .reply(answer_key.clone(), "visible")
-                .wait();
+            let _ = query.reply(answer_key.clone(), reply_body.clone()).wait();
         })
         .wait()
         .map_err(|err| format!("declare visibility queryable on {probe}: {err}"))?;
@@ -73,7 +76,17 @@ pub fn await_subscriber_visible_within(
         // 用 recv_timeout 而不是 for: 没有答复时 query 要等到超时才收尾, 那会把每次重试拖到
         // 会话的默认 query 超时 (秒级); 我们只需要「这一次有没有答出来」。
         while let Ok(Some(reply)) = replies.recv_timeout(Duration::from_millis(200)) {
-            if reply.result().is_ok() {
+            let Ok(sample) = reply.result() else { continue };
+            if is_probe_reply(
+                sample.key_expr(),
+                sample
+                    .payload()
+                    .try_to_string()
+                    .ok()
+                    .map(|body| body.into_owned()),
+                &probe,
+                &answer,
+            ) {
                 return Ok(());
             }
         }
@@ -85,6 +98,14 @@ pub fn await_subscriber_visible_within(
         }
         std::thread::sleep(Duration::from_millis(5));
     }
+}
+
+/// 一条回复算不算本探针的答复: keyexpr 必须是探针自己那条, payload 必须带着本次的 nonce。
+///
+/// 抽成纯函数是为了能直接测: 只判 `result().is_ok()` 的版本会把任何一个第三方在 `rdog/lab/**`
+/// 下挂的 queryable 当成「可见」—— 断言还在, 但它已经不证明任何事了。
+pub fn is_probe_reply(keyexpr: &KeyExpr, payload: Option<String>, probe: &KeyExpr, expected: &str) -> bool {
+    keyexpr == probe && payload.as_deref() == Some(expected)
 }
 
 fn nonce() -> u64 {
