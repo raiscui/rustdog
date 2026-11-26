@@ -94,7 +94,7 @@ target 的 `passed` 必须 > 0**, 否则判红 —— 「退出码 0 但零执�
 
 | 平台 | 执行的 target |
 | --- | --- |
-| ubuntu | `connect_modes`、`control_lanes`、`control_mode`、`control_pty`、`control_tty`、`shell_pty`、`daemon_inbound`、`listen_suspend`、`computer_use_density`、`control_websocket`、`zenoh_router_client` (后者有 2 条用例具名跳过, 见下)、`tls_link` |
+| ubuntu | `connect_modes`、`control_lanes`、`control_mode`、`control_pty`、`control_tty`、`shell_pty`、`daemon_inbound`、`listen_suspend`、`computer_use_density`、`control_websocket`、`zenoh_router_client`、`tls_link` |
 | macos | ubuntu 那 12 个 target 全部, 且无具名跳过 |
 | windows | `computer_use_density`、`tls_link` (另有 2 个 target 在 windows 显式豁免, 见下) |
 | 全平台 (build 阶段) | `cargo test --no-run` 编译**全部** target, 含下面的 compile-only 面 |
@@ -104,7 +104,7 @@ target 的 `passed` 必须 > 0**, 否则判红 —— 「退出码 0 但零执�
 
 | 平台 | 实际执行的 integration target 数 | 具名跳过 / 豁免 / 只编译 |
 | --- | --- | --- |
-| ubuntu | **12** | `zenoh_router_client` 里 2 条 TLS 用例具名跳过 (issue #163); 20 处 `#[ignore]` 见 §6 |
+| ubuntu | **12** | 无具名跳过 (RAI-524 已撤, 见下); 20 处 `#[ignore]` 见 §6 |
 | macos | **12** | 6 个 compile-only (`zenoh_unixpipe_fast_path` 见 issue #164; 5 个 GUI 面需真实桌面会话) |
 | windows | **2** (`computer_use_density`、`tls_link`) | `control_websocket`、`zenoh_router_client_windows` (issue #162) |
 
@@ -176,13 +176,13 @@ target 的 `passed` 必须 > 0**, 否则判红 —— 「退出码 0 但零执�
 | 家族 | 机制 | 现状 |
 | --- | --- | --- |
 | `@key` 注入类 (`control_lanes` 的对象载荷用例 + 本 target 的 key 事件用例) | linux 输入后端要先连 X11/Wayland display; runner 没有时 enigo 直接报 `no connection could be established: (no successful connection)` (code 70), 与 control client 到 daemon 的连接**无关** | **已修**: ubuntu 的 integration 步骤改在 `xvfb-run` 下执行 (`ci.yml`), `control_lanes` 那条已撤 `#[ignore]` 并在 ubuntu 执行 |
-| TLS/mTLS 两例 | `zenoh-link-tls` 1.8.0 在 rustls 握手完成前就把链路交给 transport: 首帧写入报 `handshake not complete` 并关链路 (daemon 侧), client 侧看到 `peer closed connection without sending TLS close_notify`; 同族还有 `tls_init` 并发写坏材料 (两个 `tls-init` 交错落盘 → TLS 握手必失败), 后者已修为「整目录 rename 原子落地」 | **未收回**: 首帧竞态在风味机与 2 核本地都能复现 (全 target 一轮约 1/3), 需要 zenoh 链路层或 rdog 链路启动时序的修复, 见 issue #163 |
+| TLS/mTLS 两例 | `zenoh-link-tls` 1.8.0 让读任务与写任务可同时进入同一个 rustls `Connection` (`UnsafeCell` + 两把不同的锁), 首帧写入被以 `handshake not complete` 拒绝并关链路 (daemon 侧), client 侧看到 `peer closed connection without sending TLS close_notify`; 同族还有 `tls_init` 并发写坏材料 (两个 `tls-init` 交错落盘 → TLS 握手必失败), 后者已修为「整目录 rename 原子落地」 | **已收回 (2026-11-27, RAI-524)**: 读写共用一把 `tls_mtx` 且不跨 await 持锁, `handshake not complete` 在 1600 次连接里 0 次; 2 条用例在 ubuntu 与 macos 连续三轮通过后撤掉具名跳过, 机制由 `tls_link` target 的三条回归测试长期看着 |
 
-处置是 `TARGET_TEST_SKIPS` 的**具名跳过**: ubuntu 上 `zenoh_router_client` 照常执行 (36 passed,
-其余 30 多条与 TLS 无关的用例都在跑), 只跳过上面那 2 条 TLS 用例; job summary 单列
-**named skip on this platform** 表 (名字 + 理由) 并计入 ran 集合。**不再是整 target 豁免** ——
-豁免的是"这 2 条用例碰上的首帧竞态", 不是这个 target 的全部。
-收回条件 (issue #163 / RAI-464, 到期 2026-12-03) 是首帧竞态有结论、2 条用例连续三轮在 ubuntu 通过。
+当时处置是 `TARGET_TEST_SKIPS` 的**具名跳过** (target 照常执行并计入 ran 集合, 只按名字放过那 2 条)。
+**2026-11-27 (RAI-524) 已收回**: 机制定位为「读任务与写任务可同时进入同一个 rustls 连接」并修掉,
+2 条用例在 ubuntu 与 macos 连续三轮通过, `TARGET_TEST_SKIPS` 现在为空表。机制本身改由 `tls_link`
+target 的三条回归测试 (close 完整性 / 空闲 CPU / 并发写不交错) 长期盯着, 所以下一轮即使再红,
+也是这三条行为断言先红, 而不是靠人记得去翻 `zenoh_router_client` 的日志。
 
 **windows 侧 2 个 target 显式豁免** (`PLATFORM_EXEMPTIONS`): `control_websocket` (整 target 挂死,
 1500s 上限才终止) 与 `zenoh_router_client_windows` (daemon 因遗留 `service_name` 守卫拒启动) ——
@@ -293,7 +293,7 @@ cargo clean -p ort-sys && cargo build --bin rdog    # 走一遍 build script
 | 现象 | 归因 | 负责人 | 到期日 |
 | --- | --- | --- | --- |
 | `zenoh_control::tests::diagnostic_ping_should_bypass_busy_query_worker_and_preserve_queue` 间歇红 (28 轮 2 次, panic 文案 `worker 未进入执行`, 疑 TMPDIR 进程级改写) | 单跑 5/5 绿, 只在并行/全量时出现 (`src/zenoh_control.rs` 的 panic 行) | RAI-405 承接线程 | 2026-11-30 |
-| ubuntu runner 上 `zenoh_router_client` 的跨进程连接 e2e 不稳定 | **两族, 2026-11-26 (RAI-464) 按证据拆开**: ① `@key`/`@type` 类 = enigo 连不上 display (code 70) → **已修** (ubuntu 步骤改 `xvfb-run`); ② TLS/mTLS 两例 = `zenoh-link-tls` 1.8.0 首帧写入早于 rustls 握手完成 (`TX task failed: handshake not complete` + client 侧 `peer closed ... without TLS close_notify`), 串行跑同样复现; ②的同族 `tls_init` 并发写坏材料已修为整目录原子落地。**不是**「client 连不上刚启动的 daemon」, 也不是 runner 特有; ① 已撤销 `control_lanes` 那条 `#[ignore]`, ② 在 ubuntu 上按 `TARGET_TEST_SKIPS` 具名跳过那 2 条 (target 其余用例照跑); 入口=具名跳过表 + issue #163 | issue #163 / RAI-464 | 2026-12-03 |
+| ~~ubuntu runner 上 `zenoh_router_client` 的跨进程连接 e2e 不稳定~~ (2026-11-27 收口: RAI-524 修掉 TLS 首帧竞态并撤具名跳过) | **两族, 2026-11-26 (RAI-464) 按证据拆开**: ① `@key`/`@type` 类 = enigo 连不上 display (code 70) → **已修** (ubuntu 步骤改 `xvfb-run`); ② TLS/mTLS 两例 = `zenoh-link-tls` 1.8.0 首帧写入早于 rustls 握手完成 (`TX task failed: handshake not complete` + client 侧 `peer closed ... without TLS close_notify`), 串行跑同样复现; ②的同族 `tls_init` 并发写坏材料已修为整目录原子落地。**不是**「client 连不上刚启动的 daemon」, 也不是 runner 特有; ① 已撤销 `control_lanes` 那条 `#[ignore]`, ② 在 ubuntu 上按 `TARGET_TEST_SKIPS` 具名跳过那 2 条 (target 其余用例照跑); 入口=具名跳过表 + issue #163 | issue #163 / RAI-464 | 2026-12-03 |
 | windows runner 上 `control_websocket` 整 target 挂死、`zenoh_router_client_windows` daemon 因遗留 `service_name` 守卫拒启动 | 两者都不隔离 HOME, 与同 job 前序用例共用 `.rdog` / `zenoh-guards`; 入口=`PLATFORM_EXEMPTIONS` 两条理由 + `tests/` 无 `HOME` 注入 | issue #162 承接 | 2026-12-03 |
 | macos runner 上 `zenoh_unixpipe_fast_path` 的连接类用例逐个接力红, 最后一个卡在「运行中的 daemon 拒绝新 client 的专用 FIFO」(`Received a close message (reason GENERIC) in response to an OpenSyn`) | 前两条是用例假设 `~/.rdog/run` 已存在 (已修); 第三条开发机绿、runner 红, 是 runner 与真机在这条链路上的环境差; 处置=分类降为 `compile-only:macos` 并给真机 lane 命令; 入口=CLASSIFICATION + issue #164 | issue #164 承接 | 2026-12-03 |
 
