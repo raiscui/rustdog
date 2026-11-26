@@ -369,3 +369,4 @@ panic 于 `dynamic_link.rs:45` (unix 分支, 同一循环); `mkdir -p target/deb
 - 提交: 85f7df7 (评审第三轮: 覆盖说法收敛到实际范围 + 缺口进已知红表)
 - 提交: 403fb9a (评审第四轮: 覆盖缺口 18 个 + 从已知红表移入 §3 披露)
 - 提交: 80ddfc3 (windows 首次跑到本组测试抓到的 ConnectionReset: 12 处读响应改成 EOF/reset 皆终止)
+- 提交: 00bb079 (windows 并行 spawn 偶发 ERROR_FILE_NOT_FOUND: 对 NotFound 有界重试)
