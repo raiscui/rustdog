@@ -174,14 +174,15 @@ python3 scripts/check-bookkeeping.py --main     # main 上: 无条目出宽限�
 | 情形 | 判据 |
 | --- | --- |
 | 账本里**完全没有**这条 commit 的条目 | `--main-grace N` (默认 10) 个位置内的宽限; 出宽限还缺 → 漏账 |
-| 账本里有条目、只差 sha (**占位**) | **时间**: 从该 commit **落到 main 的那一刻**起算 —— 参照点是 **HEAD 一线父链上最早的、以它为先祖的 commit** (不是 commit date, 也不是分支里某次同步 main 的 merge), 超过 `--max-placeholder-age-days` (默认 3 天) → 「占位超期」 |
+| 账本里有条目、只差 sha (**占位**) | **时间**: 从该 commit **落到这条 main 历史的那一刻**起算 —— 参照点是 **HEAD 一线父链上最早的、以它为先祖的 commit** (不是 commit date, 也不是分支里某次同步 main 的 merge), 超过 `--max-placeholder-age-days` (默认 3 天) → 「占位超期」 |
 
 为什么占位不按位置判: 位置口径要一直追着最大的合并跑 (实测 main 最近 12 次合并的工作 commit 数
 1–26 不等), 无论阈值抬到几, 下一张更大的 PR 一合入就让 main 当天变红。按时间判则与合并规模解耦:
 **年龄的参照点必须在 HEAD 的一线父链上找** —— 不是 commit date, 也不是分支里任何一次同步 main 的
 merge。否则一张活了一周才合的分支, 合入当天 main 就红 (假阳性换了个方向回来)。输出里**带参照 commit
-的短 sha**: `(落 main 已 N 天, 参照 <sha>)` / `(未在一线父链上找到落点, 按 commit date N 天)` ——
-只写天数时, 一旦挑错了 merge, 读日志的人无从发现。
+的短 sha**: `(落点 N 天, 参照 <sha>)` / `(未在一线父链上找到落点, 按 commit date N 天)` ——
+只写天数时, 一旦挑错了 merge, 读日志的人无从发现。其中「未在一线父链上找到落点」是**防御性**分支 ——
+`--main` 下范围恒为 HEAD 的祖先、父链首元素恒为 HEAD, 所以实际不会出现, 只在读不出父链时兜底。
 **非 main 模式 (本地 strict / PR) 永不判占位超期** ——
 sha 在 PR 阶段本来就不稳定。
 

@@ -361,10 +361,12 @@ def main(argv: list[str]) -> int:
                 if epoch is not None:
                     days = (time.time() - epoch) / 86400.0
                     if reference:
-                        subject = f"{subject} (落 main 已 {days:.1f} 天, 参照 {reference})"
+                        # 「落 main」是守卫没校验过的事实 (--main 也可能跑在非 main 的 tip 上), 所以只写
+                        # 「落点」—— 参照 sha 在, 谁都能去核它到底落在哪。
+                        subject = f"{subject} (落点 {days:.1f} 天, 参照 {reference})"
                     else:
                         subject = (
-                            f"{subject} (未在一线父链上找到落点, 按 commit date {days:.1f} 天)"
+                            f"{subject} (未在一线父链上找到落点, 按 commit date {days:.1f} 天, 防御性分支)"
                         )
             pending.append((short, subject))
             continue
