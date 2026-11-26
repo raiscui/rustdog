@@ -76,6 +76,13 @@ P7 第 3 项今天**既不可验证也不可证伪**: 候选没有任何 bulk �
 
 路径类别是**传输的属性**, 不是控制协议的属性. 现有四个传输适配器里只有一个有路径概念:
 
+**三格的定义与读者 (唯一登记处是 `src/bulk_path.rs` 的模块文档, 这里只引用)**: `path_aware` 是
+**传输适配器**的拓扑属性 (这条链路上有没有 relay 跳), `bulk_path_pin` 是适配器能否把 bulk 连接钉在
+直连上 (禁止迁移、排队与重传不得改走 relay), 两者由门禁 `decide()` 读; `path_class` 是**本次尝试
+此刻**观测到的类别, 由传输入口在 open 与每个 chunk 边界读。读到 `path_aware=false` ⇒ 放行并记
+`not_applicable`; 读到 `path_aware=true && bulk_path_pin=false` ⇒ **拒绝** (不采样也不放行);
+读到 `unknown` ⇒ **拒绝** (fail-closed, 永不强转 `direct`)。
+
 | 传输 | `path_aware` | `bulk_path_pin` | 说明 |
 | --- | --- | --- | --- |
 | TCP (`ControlInvocation::Tcp`) | false | — | 单跳 socket, 无 relay 概念 |
@@ -447,28 +454,52 @@ bulk 一律以 `iroh_bulk_path_pin_unavailable` 拒绝. **适配器补上路径 
   "transfer_id": "<string>",
   "direction": "put | get",
   "path_aware": true,
+  "bulk_path_pin": true,
   "path_class": "direct | relay | unknown | not_applicable",
   "direct_addr": "<脱敏后的对端直连地址, 仅 direct 时存在>",
   "bulk_bytes": 123,
   "wire_bytes": 164,
   "chunks": 3,
-  "concurrency_suspected": false,
+  "concurrency_suspected": true,
   "endpoint": "client | daemon",
   "relay_tx_before": 0, "relay_tx_after": 0,
   "relay_rx_before": 0, "relay_rx_after": 0,
-  "verdict": "relay_bytes_zero | relay_bytes_nonzero | aborted"
+  "relay_sample_available": true,
+  "aborted": false,
+  "verdict": "<见 BulkPathSnapshot::verdict()>"
 }
 ```
 
 `bulk_bytes` 是载荷字节 (base64 解码后), `wire_bytes` 是实际压上控制行的 base64 字节 ——
-两者都要, 因为"relay 上为 0"证的是后者, 而用户关心的是前者.
+两者都要, 因为"relay 上为 0"证的是后者, 而用户关心的是前者. 两者都只记**被对端确认过**的字节:
+记账在发送之前会把从未落盘的字节算进去, 两端 join 就对不上账.
 
-**判定式** (验收脚本按此逐字实现, 不做主观解读):
+**四个计数与 `concurrency_suspected` 都可以是 `null`**: `null` 表示**本端没有采样能力**, 不是
+"测到了 0"/"没有并发". 类型定义是 `Option<u64>` / `Option<bool>` (`src/bulk_path.rs`), 不是
+`u64` + 一个"记得同时设"的布尔. `relay_sample_available` 是这两件事在 JSON 上的落点.
 
-- `relay_bytes_zero` 当且仅当 `path_class == "direct"` 且**两端各自**满足
-  `relay_tx_after - relay_tx_before == 0` 且 `relay_rx_after - relay_rx_before == 0`.
-- `path_class == "not_applicable"` 时判定式不适用, 该条不得用于"relay 字节为 0"的结论 (空真).
-- 其余情况一律 `relay_bytes_nonzero` 或 `aborted`.
+`verdict` 的取值与判定**不在这里枚举** (枚举两处必然分叉): 唯一真相是
+`BulkPathSnapshot::verdict()`, 它今天会给出 `aborted` / `not_applicable` / `relay_sample_unavailable` /
+`no_bulk_bytes` / `relay_bytes_zero` / `relay_bytes_nonzero` 之一. 其中前四个都**不是结论**.
+
+**判定式** (可执行实现: `BulkPathSnapshot::relay_bytes_zero_own_half()`, `src/bulk_path.rs`;
+验收脚本按此逐字实现, 不做主观解读. 正对照那一条的判据在 §4.4 的表里, 仓库内的可执行参考是
+`bulk_path::tests::positive_control_uses_a_strict_inequality` —— 它今天**没有生产消费者**, 因为
+relay 计数还没接线, 见 RAI-476):
+
+**本端**构成 `relay_bytes_zero` 的四个必要条件 (缺一即是别的 verdict):
+
+1. 不是中止 (`aborted == false`);
+2. **本次确有字节移动** (`chunks > 0 || bulk_bytes > 0`) —— 一次"续传时半成品已经完整"的尝试
+   一个字节都不用发, 它的零与"没走 relay"数值上完全一样, 这是最纯的空真;
+3. `path_class == "direct"`;
+4. 四个计数**都采到了** (`relay_sample_available == true`) 且本端 `relay_tx` 与 `relay_rx` 的
+   `after - before` **都为 0**。计数为 `null` 表示未采样, 不是零.
+
+不满足时按 `BulkPathSnapshot::verdict()` 的顺序给出 `aborted` / `not_applicable` /
+`relay_sample_unavailable` / `no_bulk_bytes` / `relay_bytes_nonzero` 之一 —— **前四个都不是结论**,
+尤其 `not_applicable` (没有 relay 跳, 空真) 与 `relay_sample_unavailable` (采不到计数) 不得被读成
+"relay 字节为 0". 跨端结论必须两端各自的 `relay_bytes_zero_own_half()` 都为真 (`§4.3` 的 join).
 
 ### 4.4 正对照 (本规格最容易被做坏的地方)
 
@@ -481,6 +512,24 @@ bulk 一律以 `iroh_bulk_path_pin_unavailable` 拒绝. **适配器补上路径 
 | 负 | 同一条直连路径上的一次 bulk 尝试 | 两端 delta **== 0** |
 
 断言必须是**严格不等式** `> 0`. `>= 0` 的断言在计数器坏掉时照样通过, 等于没有正对照.
+
+> 实现状态 (2026-11-26): 判定表、三格语义与快照格式已落地在 `src/bulk_path.rs`, iroh lane 上的
+> bulk 动词已经按能力表以 `iroh_bulk_path_pin_unavailable` 拒绝。**正对照仍未执行** —— 它需要一条
+> 真的走 relay 的拓扑 (RAI-366), 在那之前"relay 上 bulk 字节为 0"这条不做结论。
+>
+> **客户端门禁恒传 `established_direct = false`**, 所以 §2.5 D1 的「中途 direct → relay」
+> (`iroh_direct_path_lost`) **今天不可产生**: 判定表里那个分支的语义已定义、门禁也按它分支, 但
+> 没有适配器能在读采样的同时记录「本次是否曾观测到 direct」。它只有单测覆盖, **不得据此主张
+> "中途路径丢失已处理"**; 生产者随 RAI-476 的数据面适配器一起到来。
+>
+> 另有一处**带撤除条件的** `#[allow(dead_code)]`: `PathClass::Relay` 在生产路径上没有生产者 (同上,
+> 要等 RAI-476 的适配器读采样), 编译器报 `never constructed` 正是这个事实的指纹。**RAI-476 落地后
+> 撤掉那行 allow**, 它就会成为门禁里真正会走到的分支。一条带理由和到期条件的 `allow` 是文档,
+> 不带的才是债。
+>
+> 跑批单 (`handoffs/rai367/positive-control-runsheet.md`) 已写好并写清了三件边界: iroh lane 今天
+> 不承载 bulk 数据面, 所以单子执行的是**仪表验证 + 门禁验证**而不是 A 类验收; daemon 侧 relay 计数
+> 尚未接线, 所以快照今天只有客户端那一半; **拿不到正对照计数时, 门禁那个"零"不得用于任何结论**。
 
 ---
 

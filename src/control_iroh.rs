@@ -57,6 +57,29 @@ mod readonly_tests {
         assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
         assert_eq!(err.to_string(), "iroh_readonly_ping_required");
     }
+
+    #[test]
+    fn default_iroh_gate_refuses_bulk_with_the_path_pin_code() {
+        // bulk 动词在这条通道上必须回**能力事实**的稳定码, 而不是通用的"只许 ping":
+        // 前者告诉调用方换一条能钉住路径的传输, 后者只说这条通道不许。
+        for line in [
+            r#"@put-file:{"transfer_id":"t","path":"/tmp/a","size":1,"resume":false}"#,
+            r#"@get-file:{"transfer_id":"t","path":"/tmp/a"}"#,
+            r#"@file-chunk:{"transfer_id":"t","offset":0,"data":""}"#,
+            r#"@file-end:{"transfer_id":"t","sha256":""}"#,
+            r#"@file-read:{"transfer_id":"t","offset":0,"length":1}"#,
+            r#"@file-cancel:{"transfer_id":"t"}"#,
+            "@file-list",
+        ] {
+            let err = super::ping_only(line).unwrap_err();
+            assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied, "{line}");
+            assert_eq!(
+                err.to_string(),
+                crate::bulk_path::IROH_BULK_PATH_PIN_UNAVAILABLE,
+                "{line}"
+            );
+        }
+    }
 }
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
@@ -160,17 +183,16 @@ impl Directory {
                 "iroh directory profile names both `addr` and `via_relay`; dial one of them".into(),
             ),
             (true, Some(relay), None) => Ok(DirectoryDial {
-                addr: EndpointAddr::from_parts(
-                    self.id,
-                    [TransportAddr::Relay(relay.url.clone())],
-                ),
+                addr: EndpointAddr::from_parts(self.id, [TransportAddr::Relay(relay.url.clone())]),
                 relay: Some(DirectoryRelay {
                     url: relay.url.clone(),
                     root_cert: relay.root_cert.clone(),
                 }),
             }),
             (true, None, _) => Err("iroh directory `via_relay` requires a `relay`".into()),
-            (false, Some(_), _) => Err("iroh directory `relay` is only read with `via_relay`".into()),
+            (false, Some(_), _) => {
+                Err("iroh directory `relay` is only read with `via_relay`".into())
+            }
             (false, None, Some(addr)) => Ok(DirectoryDial {
                 addr: EndpointAddr::from_parts(
                     self.id,
@@ -337,7 +359,9 @@ fn relay_allowed(url: &RelayUrl, qad_port: u16, routable: bool) -> Result<()> {
         return Ok(());
     }
     if !https || url.host_str().is_none() {
-        return Err("iroh routable profile requires an HTTPS relay host and a non-zero QAD port".into());
+        return Err(
+            "iroh routable profile requires an HTTPS relay host and a non-zero QAD port".into(),
+        );
     }
     Ok(())
 }
@@ -372,9 +396,15 @@ fn bindable(addr: SocketAddr, routable: bool) -> Result<SocketAddr> {
 fn bind_addr(bind: Option<SocketAddr>, routable: bool) -> Result<SocketAddr> {
     let wildcard = bind.map_or(true, |addr| addr.ip().is_unspecified() && addr.port() == 0);
     if routable && wildcard {
-        return Ok(SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED), 0));
+        return Ok(SocketAddr::new(
+            std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
+            0,
+        ));
     }
-    network(bind.unwrap_or_else(|| "127.0.0.1:0".parse().unwrap()), routable)
+    network(
+        bind.unwrap_or_else(|| "127.0.0.1:0".parse().unwrap()),
+        routable,
+    )
 }
 
 fn name_valid(name: &str) -> bool {
@@ -389,11 +419,49 @@ fn name_valid(name: &str) -> bool {
     })
 }
 
+/// bulk 动词在这条通道上不存在 (这条 lane 没有 bulk 数据面, 也就谈不上把连接钉在直连上)。
+///
+/// 用 §2.2 的稳定码 `iroh_bulk_path_pin_unavailable` 而不是通用的 `iroh_readonly_ping_required`:
+/// 前者告诉调用方"换一条支持钉住路径的传输", 后者只说"这条通道不许"。两者对排查的意义不同 ——
+/// 前者是能力事实, 后者是准入策略。
+/// bulk 在这条通道上的拒绝码**由判定表给出**, 不在这里手写字符串:
+/// 这条 lane 的能力是 `path_aware=true / bulk_path_pin=false`, 按 §3.1 它连采样都不必做,
+/// 直接就是 `iroh_bulk_path_pin_unavailable`。查表让"拒绝码"与"能力声明"只有一个真相源。
+fn bulk_refusal_code() -> &'static str {
+    match crate::bulk_path::decide(
+        crate::bulk_path::PathCapability::PATH_AWARE_UNPINNED,
+        crate::bulk_path::PathClass::Unknown,
+        false,
+    ) {
+        crate::bulk_path::BulkDecision::Refused(code) => code,
+        // 走到这里只可能是判决表把"有 relay 跳但钉不住"改成了放行；但这条 lane **无论如何都不承载
+        // bulk 数据面**, 所以仍然拒。这个兜底是 **lane 的能力事实** (没有 bulk 数据面), 不是判决
+        // 结果 —— 两者今天恰好给出同一个码, 但说的不是同一件事。
+        crate::bulk_path::BulkDecision::Allowed => crate::bulk_path::IROH_BULK_PATH_PIN_UNAVAILABLE,
+    }
+}
+
+fn is_bulk_command(command: &ControlCommand) -> bool {
+    matches!(
+        command,
+        ControlCommand::FilePutFile(_)
+            | ControlCommand::FileGetFile(_)
+            | ControlCommand::FileChunk(_)
+            | ControlCommand::FileEnd(_)
+            | ControlCommand::FileRead(_)
+            | ControlCommand::FileCancel(_)
+            | ControlCommand::FileList
+    )
+}
+
 fn ping_only(line: &str) -> io::Result<ControlRequest> {
     match parse_control_line(line)? {
         ControlParseResult::Control(request) if matches!(request.command, ControlCommand::Ping) => {
             Ok(request)
         }
+        ControlParseResult::Control(request) if is_bulk_command(&request.command) => Err(
+            io::Error::new(io::ErrorKind::PermissionDenied, bulk_refusal_code()),
+        ),
         _ => Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
             "iroh_readonly_ping_required",
@@ -497,10 +565,9 @@ enum RelayRoots {
 /// pins the two chains together. Neither ever falls back to public WebPKI.
 fn relay_roots(lane: Option<&Relay>, directory: &DirectoryRelay) -> RelayRoots {
     match lane {
-        Some(lane) => RelayRoots::LaneAndDirectory(
-            lane.root_cert.clone(),
-            directory.root_cert.clone(),
-        ),
+        Some(lane) => {
+            RelayRoots::LaneAndDirectory(lane.root_cert.clone(), directory.root_cert.clone())
+        }
         None => RelayRoots::Pinned(directory.root_cert.clone()),
     }
 }
@@ -540,7 +607,10 @@ fn shared_relay(
             Arc::new(RelayConfig::new(directory.url.clone(), None)),
         );
     }
-    Ok((relay_roots(Some(lane), directory).config()?, RelayMode::Custom(map)))
+    Ok((
+        relay_roots(Some(lane), directory).config()?,
+        RelayMode::Custom(map),
+    ))
 }
 
 async fn endpoint_on(
@@ -700,7 +770,10 @@ impl Registry {
                 }
                 log::info!(
                     "iroh directory registered name={name} candidates={}",
-                    addr.ip_addrs().map(|ip| ip.to_string()).collect::<Vec<_>>().join(",")
+                    addr.ip_addrs()
+                        .map(|ip| ip.to_string())
+                        .collect::<Vec<_>>()
+                        .join(",")
                 );
                 self.leases.insert(name, (addr, Instant::now() + LEASE));
                 DirectoryReply::Registered
@@ -911,7 +984,9 @@ pub(crate) fn run_policy(action: crate::input::PolicyAction, path: &Path) -> Res
 
     let subject = |subject: Option<String>, key: Option<PathBuf>| -> Result<EndpointId> {
         match (subject, key) {
-            (Some(hex), None) => hex.parse().map_err(|_| "subject is not an endpoint id".into()),
+            (Some(hex), None) => hex
+                .parse()
+                .map_err(|_| "subject is not an endpoint id".into()),
             (None, Some(key)) => Ok(identity(&key)?.public()),
             _ => Err("give exactly one of --subject or --subject-key".into()),
         }
@@ -937,8 +1012,16 @@ pub(crate) fn run_policy(action: crate::input::PolicyAction, path: &Path) -> Res
                 println!(
                     "allow {id} fingerprint={} registered={registered} note={note}{}{}",
                     fingerprint(id),
-                    if policy.revoked.contains(id) { " revoked" } else { "" },
-                    if policy.terminate.contains(id) { " terminate" } else { "" }
+                    if policy.revoked.contains(id) {
+                        " revoked"
+                    } else {
+                        ""
+                    },
+                    if policy.terminate.contains(id) {
+                        " terminate"
+                    } else {
+                        ""
+                    }
                 );
             }
             for id in &policy.revoked {
@@ -947,7 +1030,11 @@ pub(crate) fn run_policy(action: crate::input::PolicyAction, path: &Path) -> Res
                 }
             }
         }
-        PolicyAction::Admit { subject: hex, subject_key, note } => {
+        PolicyAction::Admit {
+            subject: hex,
+            subject_key,
+            note,
+        } => {
             let id = subject(hex, subject_key)?;
             if policy.revoked.contains(&id) || policy.terminate.contains(&id) {
                 return Err(format!(
@@ -960,7 +1047,11 @@ pub(crate) fn run_policy(action: crate::input::PolicyAction, path: &Path) -> Res
             save(&policy_path, &policy)?;
             println!("admitted {id} fingerprint={}", fingerprint(&id));
         }
-        PolicyAction::Revoke { subject: hex, subject_key, note } => {
+        PolicyAction::Revoke {
+            subject: hex,
+            subject_key,
+            note,
+        } => {
             let id = subject(hex, subject_key)?;
             policy.allow.insert(id);
             policy.revoked.insert(id);
@@ -970,7 +1061,11 @@ pub(crate) fn run_policy(action: crate::input::PolicyAction, path: &Path) -> Res
                 "revoked {id}: new sessions and renewals are refused; live sessions run to their lease end"
             );
         }
-        PolicyAction::Emergency { subject: hex, subject_key, note } => {
+        PolicyAction::Emergency {
+            subject: hex,
+            subject_key,
+            note,
+        } => {
             let id = subject(hex, subject_key)?;
             policy.allow.insert(id);
             policy.revoked.insert(id);
@@ -1025,16 +1120,19 @@ impl PolicyLock {
 }
 
 fn save(path: &Path, policy: &admission::Policy) -> Result<()> {
-    admission::save_policy(path, policy).map_err(|err| -> Box<dyn std::error::Error + Send + Sync> {
-        match err {
-            admission::PersistenceError::NotWritten(err) => {
-                format!("the policy was not written: {err}").into()
+    admission::save_policy(path, policy).map_err(
+        |err| -> Box<dyn std::error::Error + Send + Sync> {
+            match err {
+                admission::PersistenceError::NotWritten(err) => {
+                    format!("the policy was not written: {err}").into()
+                }
+                admission::PersistenceError::DurabilityUnconfirmed(err) => {
+                    format!("the policy was replaced but its durability is unconfirmed: {err}")
+                        .into()
+                }
             }
-            admission::PersistenceError::DurabilityUnconfirmed(err) => {
-                format!("the policy was replaced but its durability is unconfirmed: {err}").into()
-            }
-        }
-    })
+        },
+    )
 }
 
 fn fingerprint(id: &EndpointId) -> String {
@@ -1274,29 +1372,33 @@ pub(crate) fn run_control(path: &Path, name: &str, line: &str) -> Result<()> {
         let lookup = directory_call(
             &directory,
             &dial,
-            DirectoryRequest::Lookup { name: name.to_owned() },
+            DirectoryRequest::Lookup {
+                name: name.to_owned(),
+            },
             cfg.routable,
             DIRECTORY_CONNECT,
         )
         .await;
         directory.close().await;
-        let DirectoryReply::Found { addr } = lookup? else { return Err("unexpected iroh directory lookup response".into()); };
+        let DirectoryReply::Found { addr } = lookup? else {
+            return Err("unexpected iroh directory lookup response".into());
+        };
         let (data, conn, actual) =
             connect_with_path(&key, Some(bind), &addr, cfg.path, &cfg.relay, cfg.routable).await?;
         log::info!("iroh_path={}", actual.label());
         let streams = timeout(IO, conn.open_bi()).await;
         let reply = match streams {
             Ok(Ok((send, read))) => {
-                let mut transport = ControlTransport::Iroh(IrohLineTransport::new(
-                    send,
-                    read,
-                    cfg.frame_timeout(),
-                ));
+                let mut transport =
+                    ControlTransport::Iroh(IrohLineTransport::new(send, read, cfg.frame_timeout()));
                 let line = line.to_owned();
                 tokio::task::spawn_blocking(move || {
                     transport.write_message(&line)?;
-                    transport.read_message()?.ok_or(io::ErrorKind::UnexpectedEof.into())
-                }).await?
+                    transport
+                        .read_message()?
+                        .ok_or(io::ErrorKind::UnexpectedEof.into())
+                })
+                .await?
             }
             Ok(Err(err)) => Err(io::Error::other(err)),
             Err(err) => Err(io::Error::other(err)),
@@ -1317,14 +1419,26 @@ pub(crate) fn run_control(path: &Path, name: &str, line: &str) -> Result<()> {
             }
         }
         data.close().await;
-        if denied { return Err(DENIED.into()); }
+        if denied {
+            return Err(DENIED.into());
+        }
         let reply = reply?;
-        let body: serde_json::Value = serde_json::from_str(reply.strip_prefix("@response ").ok_or("invalid iroh ping response")?)?;
+        let body: serde_json::Value = serde_json::from_str(
+            reply
+                .strip_prefix("@response ")
+                .ok_or("invalid iroh ping response")?,
+        )?;
         let value = if let Some(id) = request.request_id {
-            if body["id"].as_u64() != Some(id) { return Err("iroh ping response id mismatch".into()); }
+            if body["id"].as_u64() != Some(id) {
+                return Err("iroh ping response id mismatch".into());
+            }
             &body["value"]
-        } else { &body };
-        if value["pong"].as_bool() != Some(true) { return Err("invalid iroh pong".into()); }
+        } else {
+            &body
+        };
+        if value["pong"].as_bool() != Some(true) {
+            return Err("invalid iroh pong".into());
+        }
         println!("{reply}");
         Ok(())
     })
@@ -1528,7 +1642,9 @@ impl crate::shell::PtyBridgeIo for LaneIo<'_> {
                 if session_id != self.session {
                     // A close for any other session is not this session's input,
                     // and the bridge matches only its own id.
-                    log::info!("iroh lifecycle frame refused: session={session_id} is not this lane's");
+                    log::info!(
+                        "iroh lifecycle frame refused: session={session_id} is not this lane's"
+                    );
                     continue;
                 }
                 if !matches!(
@@ -1636,7 +1752,8 @@ fn serve_lane(
                 .lock()
                 .map_err(|_| io::Error::other("admission lock poisoned"))?
                 .session_of(lease);
-            if let Some(held) = held.filter(|held| crate::pty_control::pty_session_registered(held)) {
+            if let Some(held) = held.filter(|held| crate::pty_control::pty_session_registered(held))
+            {
                 log::info!("iroh pty refused: lease already holds session={held}");
                 let (code, reason) = LEASE_BUSY;
                 refuse_frame(transport, None, code, reason)?;
@@ -1756,8 +1873,10 @@ fn serve_lane(
                 }
                 match crate::pty_control::authorize_pty_subject(&close.session_id, &subject)? {
                     crate::pty_control::SubjectAccess::Allowed => {
-                        let closed =
-                            crate::pty_control::close_pty_session_with_reason(&close.session_id, "force_close")?;
+                        let closed = crate::pty_control::close_pty_session_with_reason(
+                            &close.session_id,
+                            "force_close",
+                        )?;
                         if closed {
                             let line = crate::control_core::render_control_response_payload(
                                 request.request_id,
@@ -1771,7 +1890,12 @@ fn serve_lane(
                         }
                     }
                     crate::pty_control::SubjectAccess::Foreign => {
-                        refuse_frame(transport, request.request_id, SUBJECT_REFUSED_CODE, SUBJECT_REFUSED)?;
+                        refuse_frame(
+                            transport,
+                            request.request_id,
+                            SUBJECT_REFUSED_CODE,
+                            SUBJECT_REFUSED,
+                        )?;
                     }
                     crate::pty_control::SubjectAccess::Missing => {
                         refuse_frame(transport, request.request_id, 64, "PTY session not found")?;
@@ -1796,21 +1920,32 @@ fn serve_lane(
                                 );
                                 transport.write_message(&line)?;
                             }
-                            Ok(false) => {
-                                refuse_frame(transport, request.request_id, 64, "PTY session not found")?
-                            }
+                            Ok(false) => refuse_frame(
+                                transport,
+                                request.request_id,
+                                64,
+                                "PTY session not found",
+                            )?,
                             Err(err) => {
                                 refuse_frame(transport, request.request_id, 64, &err.to_string())?
                             }
                         }
                     }
                     crate::pty_control::SubjectAccess::Foreign => {
-                        refuse_frame(transport, request.request_id, SUBJECT_REFUSED_CODE, SUBJECT_REFUSED)?;
+                        refuse_frame(
+                            transport,
+                            request.request_id,
+                            SUBJECT_REFUSED_CODE,
+                            SUBJECT_REFUSED,
+                        )?;
                     }
                     crate::pty_control::SubjectAccess::Missing => {
                         refuse_frame(transport, request.request_id, 64, "PTY session not found")?;
                     }
                 }
+            }
+            other if is_bulk_command(&other) => {
+                refuse_frame(transport, None, LANE_REFUSED_CODE, bulk_refusal_code())?
             }
             _ => refuse_frame(transport, None, LANE_REFUSED_CODE, LANE_REFUSED)?,
         }
@@ -1978,9 +2113,8 @@ fn one_shot_pty_line(transport: &mut ControlTransport, line: String) -> Result<(
     };
     match crate::control_frames::ControlFrame::parse_inbound_result_message(&reply) {
         Ok(crate::control_frames::ControlFrame::ResponseLine(response)) => {
-            let value: serde_json::Value = serde_json::from_str(
-                response.strip_prefix("@response ").unwrap_or(&response),
-            )?;
+            let value: serde_json::Value =
+                serde_json::from_str(response.strip_prefix("@response ").unwrap_or(&response))?;
             if value.get("error").is_some() {
                 return Err(response.into());
             }
@@ -2032,14 +2166,12 @@ fn client_lane(
         ))
     };
     let result: Result<()> = match request {
-        IrohPtyRequest::Open { argv, cols, rows } => {
-            crate::pty_control::run_pty_client_transport(
-                &mut transport,
-                crate::pty_control::render_pty_open_line(&argv, cols, rows)?,
-                true,
-            )
-            .map_err(Into::into)
-        }
+        IrohPtyRequest::Open { argv, cols, rows } => crate::pty_control::run_pty_client_transport(
+            &mut transport,
+            crate::pty_control::render_pty_open_line(&argv, cols, rows)?,
+            true,
+        )
+        .map_err(Into::into),
         IrohPtyRequest::Attach {
             session_id,
             cols,
@@ -2117,22 +2249,12 @@ pub(crate) fn run_pty_control(path: &Path, name: &str, request: IrohPtyRequest) 
             return Err("unexpected iroh directory lookup response".into());
         };
         let target = addr.id;
-        let (data, conn, actual) = connect_with_path(
-            &key,
-            Some(bind),
-            &addr,
-            cfg.path,
-            &cfg.relay,
-            cfg.routable,
-        )
-        .await?;
+        let (data, conn, actual) =
+            connect_with_path(&key, Some(bind), &addr, cfg.path, &cfg.relay, cfg.routable).await?;
         log::info!("iroh_path={}", actual.label());
         let (send, read) = timeout(IO, conn.open_bi()).await??;
-        let transport = ControlTransport::Iroh(IrohLineTransport::new(
-            send,
-            read,
-            cfg.frame_timeout(),
-        ));
+        let transport =
+            ControlTransport::Iroh(IrohLineTransport::new(send, read, cfg.frame_timeout()));
         let result =
             tokio::task::spawn_blocking(move || client_lane(transport, key, target, ttl, request))
                 .await?;
@@ -2184,11 +2306,9 @@ impl IrohLineTransport {
             let mut chunk = [0_u8; 16 * 1024];
             let outcome = handle.block_on(async {
                 match wait {
-                    Some(wait) => timeout(wait, read.read(&mut chunk))
-                        .await
-                        .map_err(|_| {
-                            io::Error::new(io::ErrorKind::TimedOut, "iroh line read timed out")
-                        }),
+                    Some(wait) => timeout(wait, read.read(&mut chunk)).await.map_err(|_| {
+                        io::Error::new(io::ErrorKind::TimedOut, "iroh line read timed out")
+                    }),
                     None => Ok(read.read(&mut chunk).await),
                 }
             });

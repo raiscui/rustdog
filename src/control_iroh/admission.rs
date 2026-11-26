@@ -132,7 +132,11 @@ impl Policy {
         if let Some(index) = self.parties.iter().position(|party| party.id == id) {
             return &mut self.parties[index];
         }
-        self.parties.push(Party { id, note: String::new(), registered_ms: 0 });
+        self.parties.push(Party {
+            id,
+            note: String::new(),
+            registered_ms: 0,
+        });
         self.parties.last_mut().expect("party just pushed")
     }
 
@@ -501,7 +505,10 @@ impl Admission {
         now_ms: u64,
         is_active: impl Fn(&str) -> bool,
     ) -> Vec<Termination> {
-        let terminate = self.policy().map(|policy| policy.terminate).unwrap_or_default();
+        let terminate = self
+            .policy()
+            .map(|policy| policy.terminate)
+            .unwrap_or_default();
         let mut work: Vec<(Uuid, Termination)> = Vec::new();
         let mut confirmed = Vec::new();
         for (id, lease) in &mut self.leases {

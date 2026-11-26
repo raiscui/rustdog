@@ -124,11 +124,6 @@ pub(super) fn setup() -> (TempRoot, SecretKey, SecretKey, Admission) {
     (root, target, client, admission)
 }
 
-pub(super) fn grant(
-    issuer: &SecretKey,
-    target: EndpointId,
-    id: &str,
-    now_ms: u64,
-) -> SignedGrant {
+pub(super) fn grant(issuer: &SecretKey, target: EndpointId, id: &str, now_ms: u64) -> SignedGrant {
     SignedGrant::issue(issuer, target, id, now_ms, Duration::from_secs(1)).unwrap()
 }

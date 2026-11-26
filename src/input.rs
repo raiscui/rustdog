@@ -186,6 +186,11 @@ pub enum Command {
         #[clap(long = "restart", requires = "put")]
         restart: bool,
 
+        /// 把本次尝试的本端 `rdog.bulk-path.v1` 证据快照写到这个文件
+        /// (另一端有它自己的一半, 由验收工具 join)。
+        #[clap(long = "bulk-path-json", value_name = "FILE")]
+        bulk_path_json: Option<PathBuf>,
+
         /// Only parse and compile `--ui-script`, then print the generated control lines.
         #[clap(long = "dry-run", requires = "ui_script")]
         dry_run: bool,

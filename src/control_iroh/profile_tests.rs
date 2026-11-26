@@ -28,7 +28,12 @@ fn endpoint_id(byte: u8) -> EndpointId {
     SecretKey::from_bytes(&[byte; 32]).public()
 }
 
-fn daemon_profile(routable_field: &str, bind_field: &str, directory: &str, relay_url: &str) -> String {
+fn daemon_profile(
+    routable_field: &str,
+    bind_field: &str,
+    directory: &str,
+    relay_url: &str,
+) -> String {
     format!(
         r#"{{
   "key_file": "/tmp/daemon.key",
@@ -42,7 +47,12 @@ fn daemon_profile(routable_field: &str, bind_field: &str, directory: &str, relay
     )
 }
 
-fn client_profile(routable_field: &str, bind_field: &str, directory: &str, relay_url: &str) -> String {
+fn client_profile(
+    routable_field: &str,
+    bind_field: &str,
+    directory: &str,
+    relay_url: &str,
+) -> String {
     client_profile_with_path(routable_field, bind_field, directory, relay_url, "direct")
 }
 
@@ -64,7 +74,12 @@ fn client_profile_with_path(
     )
 }
 
-fn rendezvous_profile(routable_field: &str, relay_http: &str, relay_https: &str, qad: &str) -> String {
+fn rendezvous_profile(
+    routable_field: &str,
+    relay_http: &str,
+    relay_https: &str,
+    qad: &str,
+) -> String {
     format!(
         r#"{{
   "key_file": "/tmp/rendezvous.key",
@@ -97,8 +112,15 @@ fn routable_profile_opens_directory_relay_and_bind() {
     let parsed: DaemonConfig = profile(&daemon).expect("routable daemon profile parses");
     assert!(parsed.routable);
     assert_eq!(parsed.bind, Some("10.21.0.2:0".parse().unwrap()));
-    let dial = parsed.directory.dial(parsed.routable).expect("the directory dial target resolves");
-    assert_eq!(dial.addr.ip_addrs().count(), 1, "a directory with an address is dialled by it");
+    let dial = parsed
+        .directory
+        .dial(parsed.routable)
+        .expect("the directory dial target resolves");
+    assert_eq!(
+        dial.addr.ip_addrs().count(),
+        1,
+        "a directory with an address is dialled by it"
+    );
     assert!(dial.relay.is_none());
     assert!(relay_allowed(&parsed.relay.url, parsed.relay.qad_port, parsed.routable).is_ok());
 
@@ -114,7 +136,10 @@ fn routable_profile_opens_directory_relay_and_bind() {
     let parsed: ClientConfig = profile(&client).expect("routable client profile parses");
     assert!(matches!(parsed.path, Route::Direct));
     assert_eq!(parsed.bind, Some("10.22.0.2:0".parse().unwrap()));
-    let dial = parsed.directory.dial(parsed.routable).expect("the directory dial target resolves");
+    let dial = parsed
+        .directory
+        .dial(parsed.routable)
+        .expect("the directory dial target resolves");
     assert_eq!(dial.addr.ip_addrs().count(), 1);
 
     let rendezvous = scratch.write(
@@ -126,10 +151,19 @@ fn routable_profile_opens_directory_relay_and_bind() {
             "10.21.0.1:7102",
         ),
     );
-    let parsed: RendezvousConfig = profile(&rendezvous).expect("routable rendezvous profile parses");
+    let parsed: RendezvousConfig =
+        profile(&rendezvous).expect("routable rendezvous profile parses");
     assert!(parsed.routable);
-    for addr in [parsed.bind, parsed.relay_http, parsed.relay_https, parsed.qad] {
-        assert!(network(addr, parsed.routable).is_ok(), "{addr} must be routable");
+    for addr in [
+        parsed.bind,
+        parsed.relay_http,
+        parsed.relay_https,
+        parsed.qad,
+    ] {
+        assert!(
+            network(addr, parsed.routable).is_ok(),
+            "{addr} must be routable"
+        );
     }
     println!("routable profiles parse with routable directory, relay and bind addresses");
 }
@@ -163,7 +197,9 @@ fn routable_profile_refuses_unspecified_addresses() {
     assert!(network("[fd00::1]:7000".parse().unwrap(), true).is_ok());
     for refused in ["0.0.0.0:7000", "[::]:7000", "255.255.255.255:7000"] {
         assert_eq!(
-            network(refused.parse().unwrap(), true).unwrap_err().to_string(),
+            network(refused.parse().unwrap(), true)
+                .unwrap_err()
+                .to_string(),
             "iroh routable profile requires an explicit address",
             "{refused} must not be advertised"
         );
@@ -212,8 +248,11 @@ fn frame_timeout_profile_sets_the_write_budget() {
             "https://10.21.0.1:7001",
         ),
     );
-    let parsed: DaemonConfig = profile(&daemon).expect("a daemon profile with a frame budget parses");
-    parsed.check_frame_budget().expect("a supported budget is accepted");
+    let parsed: DaemonConfig =
+        profile(&daemon).expect("a daemon profile with a frame budget parses");
+    parsed
+        .check_frame_budget()
+        .expect("a supported budget is accepted");
     assert_eq!(parsed.frame_timeout(), Duration::from_millis(9000));
 
     let client = scratch.write(
@@ -225,8 +264,11 @@ fn frame_timeout_profile_sets_the_write_budget() {
             "https://10.21.0.1:7001",
         ),
     );
-    let parsed: ClientConfig = profile(&client).expect("a client profile with a frame budget parses");
-    parsed.check_frame_budget().expect("a supported budget is accepted");
+    let parsed: ClientConfig =
+        profile(&client).expect("a client profile with a frame budget parses");
+    parsed
+        .check_frame_budget()
+        .expect("a supported budget is accepted");
     assert_eq!(parsed.frame_timeout(), Duration::from_millis(4500));
 }
 
@@ -265,7 +307,8 @@ fn a_routable_profile_may_bind_the_wildcard_socket() {
         wildcard
     );
     assert_eq!(
-        bind_addr(Some("10.22.0.2:0".parse().unwrap()), true).expect("an explicit address stays valid"),
+        bind_addr(Some("10.22.0.2:0".parse().unwrap()), true)
+            .expect("an explicit address stays valid"),
         "10.22.0.2:0".parse().unwrap()
     );
 }
@@ -306,8 +349,16 @@ fn relay_carried_client(directory: &str, routable: bool) -> String {
   "relay": {{"url": "https://{}", "qad_port": 9002, "root_cert": "/tmp/relay.pem"}},
   "path": "auto"{}
 }}"#,
-        if routable { "10.21.0.1:7001" } else { "127.0.0.1:7001" },
-        if routable { r#", "routable": true"# } else { "" }
+        if routable {
+            "10.21.0.1:7001"
+        } else {
+            "127.0.0.1:7001"
+        },
+        if routable {
+            r#", "routable": true"#
+        } else {
+            ""
+        }
     )
 }
 
@@ -326,9 +377,17 @@ fn a_directory_without_an_address_is_dialled_through_its_relay() {
         ),
     );
     let parsed: ClientConfig = profile(&client).expect("a relay-carried directory profile parses");
-    parsed.check_frame_budget().expect("the profile is otherwise unchanged");
-    assert!(parsed.directory.addr.is_none(), "the profile never names an address");
-    let dial = parsed.directory.dial(parsed.routable).expect("the relay resolves the dial target");
+    parsed
+        .check_frame_budget()
+        .expect("the profile is otherwise unchanged");
+    assert!(
+        parsed.directory.addr.is_none(),
+        "the profile never names an address"
+    );
+    let dial = parsed
+        .directory
+        .dial(parsed.routable)
+        .expect("the relay resolves the dial target");
     assert_eq!(
         dial.addr.ip_addrs().count(),
         0,
@@ -339,7 +398,10 @@ fn a_directory_without_an_address_is_dialled_through_its_relay() {
         Some(&relay),
         "the relay is the only address the lookup is dialled at"
     );
-    assert!(dial.relay.is_some(), "the endpoint needs the relay it dials through");
+    assert!(
+        dial.relay.is_some(),
+        "the endpoint needs the relay it dials through"
+    );
     println!("directory: a relay-carried lookup dials no IP at all");
 }
 
@@ -420,7 +482,10 @@ fn only_a_named_directory_anchor_widens_the_roots() {
         qad_port: 9002,
         root_cert: PathBuf::from("/tmp/relay.pem"),
     };
-    let dial = parsed.directory.dial(parsed.routable).expect("the switch resolves");
+    let dial = parsed
+        .directory
+        .dial(parsed.routable)
+        .expect("the switch resolves");
     let directory = dial.relay.expect("the switch carries a relay");
 
     assert_eq!(
@@ -453,8 +518,7 @@ fn a_directory_relay_url_follows_the_profile_without_weakening_it() {
     let err = directory_url_ok(&routable, false)
         .expect_err("a loopback profile keeps its relay on loopback");
     assert!(err.to_string().contains("loopback"), "{err}");
-    let err = directory_url_ok(&plaintext, true)
-        .expect_err("a directory relay is never plaintext");
+    let err = directory_url_ok(&plaintext, true).expect_err("a directory relay is never plaintext");
     assert!(err.to_string().contains("HTTPS"), "{err}");
     println!("directory: the relay URL follows the same profile gate as the lane relay");
 }
@@ -465,7 +529,10 @@ fn the_directory_hop_fits_inside_the_lease_it_renews() {
         DIRECTORY_CONNECT < LEASE - RENEW,
         "a directory call that outlives the lease it renews denies every peer while it is in flight"
     );
-    assert!(DIRECTORY_CONNECT >= IO, "the hop still needs a usable budget");
+    assert!(
+        DIRECTORY_CONNECT >= IO,
+        "the hop still needs a usable budget"
+    );
     println!("directory: the hop budget stays inside the lease it refreshes");
 }
 

@@ -25,7 +25,11 @@ fn registry(owner: EndpointId) -> Registry {
     }
 }
 
-fn register(registry: &mut Registry, peer: EndpointId, addrs: Vec<TransportAddr>) -> DirectoryReply {
+fn register(
+    registry: &mut Registry,
+    peer: EndpointId,
+    addrs: Vec<TransportAddr>,
+) -> DirectoryReply {
     registry.request(
         peer,
         DirectoryRequest::Register {
@@ -55,7 +59,9 @@ fn a_registration_carries_every_interface_the_daemon_binds() {
     assert!(matches!(reply, DirectoryReply::Registered));
     let lookup = registry.request(
         endpoint_id(9),
-        DirectoryRequest::Lookup { name: "lab/daemon".into() },
+        DirectoryRequest::Lookup {
+            name: "lab/daemon".into(),
+        },
     );
     let DirectoryReply::Found { addr } = lookup else {
         panic!("a registered daemon has to resolve");
@@ -102,7 +108,9 @@ fn a_registration_needs_an_address_a_matching_relay_and_its_owner() {
 
     let mut no_ip = registry(owner);
     let denied = register(&mut no_ip, owner, vec![TransportAddr::Relay(relay_url())]);
-    assert!(matches!(denied, DirectoryReply::Rejected { ref reason } if reason == "iroh_registration_denied"));
+    assert!(
+        matches!(denied, DirectoryReply::Rejected { ref reason } if reason == "iroh_registration_denied")
+    );
 
     let mut wildcard = registry(owner);
     let denied = register(
@@ -156,7 +164,10 @@ fn a_registry_declared_on_another_relay_still_pins_the_one_registration_carries(
     let owner = endpoint_id(2);
     let public: RelayUrl = "https://use1-1.relay.n0.iroh.link.:443".parse().unwrap();
     let base = registry(owner);
-    let mut directory = Registry { relay: public.clone(), ..base };
+    let mut directory = Registry {
+        relay: public.clone(),
+        ..base
+    };
 
     let accepted = register(
         &mut directory,
@@ -165,7 +176,10 @@ fn a_registry_declared_on_another_relay_still_pins_the_one_registration_carries(
     );
     assert!(matches!(accepted, DirectoryReply::Registered));
 
-    let mut directory = Registry { relay: public.clone(), ..registry(owner) };
+    let mut directory = Registry {
+        relay: public.clone(),
+        ..registry(owner)
+    };
     let denied = register(
         &mut directory,
         owner,
