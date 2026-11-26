@@ -840,3 +840,8 @@ daemon + 主张量 profile 的客户端 = 凭证不同源, zenoh 在 OpenSyn 阶
 表象像网络问题。该门槛写进 docs/solutions/conventions/e2e-isolated-home-credentials.md
 Guidance 第 0 条 (不只 e2e, 人工跨机验收同样适用)。
 - 提交: a06f59f
+### 2026-11-26 RAI-429: shell 子进程串行化 (叠在 #147 的退避之上)
+
+宿主级失败 (`8009001d`, PowerShell 托管运行时装载失败) 不是断言语义问题, 加重试只是推后窗口。
+新增 `test_support::shell_spawn_guard()`, 三条真的 spawn shell 的用例互斥; probe 退避拉到 1/2s。
+- 提交: e35c708
