@@ -78,7 +78,7 @@ on:
   (非 Windows 的) `recording_e2e`。否则"测试代码编译不过"会落在 test 阶段, 把 cargo
   的编译失败与测试失败混成一个红点, 零执行断言还会被跳过。
 
-**已知覆盖缺口 (不属于"绿", 见 §6)**: `tests/` 下 19 个 integration target 里, CI 只
+**已知覆盖缺口 (不属于"绿", 故不进 §6 的已知红表)**: `tests/` 下 19 个 integration target 里, CI 只
 编译并运行 `recording_e2e`; `control_lanes` / `control_mode` / `control_pty` /
 `zenoh_*` 等其余 18 个既没编译也没运行。放量由 RAI-411 承接 (排在 RAI-410 的 `script`
 夹具修复之后), 在它落地前, 本门的绿**不覆盖**协议回归面。
