@@ -151,11 +151,23 @@ pub fn execute_put_file(payload: &str) -> std::io::Result<Value> {
     ));
 
     let mut sessions = transfers().lock().expect("transfer table poisoned");
-    // 先做准入, 再动任何落盘状态. 放在 remove_file 之后就是"拒绝带副作用" ——
+    // 准入必须早于任何落盘动作. 放在 remove_file 之后就是"拒绝带副作用" ——
     // 一次被拒的重试会把上一次收到的字节抹掉, 而那正是本模块要消除的行为.
+    //
+    // 两条互斥, 合起来保证"一个暂存文件最多被一条活跃会话写":
+    // - 同 id 还有活跃会话: 拒绝. 否则这次 open 会替换掉它, 而 resume:false 会把它正在写的
+    //   文件删掉 —— 换个 id 干同样的事只是把问题藏起来.
+    // - 别的 id 已持有同一暂存路径: 拒绝. 暂存文件名从**目标路径**推导, 两个 id 指向同一目标
+    //   就共用一个文件, 交错写会让先到的 @file-end 把混合字节的哈希算过、把损坏的文件 rename
+    //   到目标上, 全程没有一处报错.
+    if let Some(existing) = sessions.get(&transfer_id) {
+        return Err(std::io::Error::other(format!(
+            "file_transfer_id_in_use: transfer_id {transfer_id} 已有活跃会话 (已收 {} 字节); 要重传先 @file-cancel 再重开",
+            existing.written
+        )));
+    }
     let path_holder = sessions.iter().find_map(|(other_id, other)| {
-        (other_id != &transfer_id && other.temp_path.as_deref() == Some(temp_path.as_path()))
-            .then(|| other_id.clone())
+        (other.temp_path.as_deref() == Some(temp_path.as_path())).then(|| other_id.clone())
     });
     if let Some(holder) = path_holder {
         return Err(std::io::Error::other(format!(
@@ -164,7 +176,6 @@ pub fn execute_put_file(payload: &str) -> std::io::Result<Value> {
         )));
     }
 
-    let previous = sessions.remove(&transfer_id);
     let written = if resume {
         // 续传: 保留已有 partial 的进度; 无 partial 从 0 起
         std::fs::metadata(&temp_path).map(|m| m.len()).unwrap_or(0)
@@ -173,16 +184,6 @@ pub fn execute_put_file(payload: &str) -> std::io::Result<Value> {
         let _ = std::fs::remove_file(&temp_path);
         0
     };
-    // 同 id 重开但换了一条暂存路径时, 旧会话的半成品不在新路径上, 没人会清理它.
-    // 这条是过渡行为: 规格 §2.5 的 C2/C3 (路径索引 + 续传窗口) 落地后应改成"按旧路径留着,
-    // 由窗口回收", 因为旧半成品是另一个文件的有效进度.
-    if let Some(previous) = previous {
-        if previous.temp_path.as_deref() != Some(temp_path.as_path()) {
-            if let Some(previous_temp) = previous.temp_path.as_deref() {
-                reap_file(previous_temp);
-            }
-        }
-    }
     sessions.insert(
         transfer_id.clone(),
         TransferSession {
@@ -1225,45 +1226,62 @@ mod tests {
     }
 
     #[test]
-    fn reopening_same_id_on_another_path_reclaims_the_old_partial() {
+    fn open_is_refused_while_the_same_id_has_a_live_session() {
         let _guard = TRANSFER_TABLE_TEST_LOCK
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let dir = std::env::temp_dir().join(format!("rdog-ft-reopen-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("rdog-ft-idlive-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let tid = unique_id("reopen");
+        let target = dir.join("live.bin");
+        let target_json = escape_json(&target.display().to_string());
+        let tid = unique_id("live");
         let data = BASE64_STANDARD.encode(b"xxxxx");
 
         execute_put_file(&format!(
-            r#"{{"transfer_id":"{tid}","path":"{}","size":10}}"#,
-            escape_json(&dir.join("first.bin").display().to_string())
+            r#"{{"transfer_id":"{tid}","path":"{target_json}","size":10}}"#
         ))
         .unwrap();
         execute_file_chunk(&format!(
             r#"{{"transfer_id":"{tid}","offset":0,"data":"{data}"}}"#
         ))
         .unwrap();
-        assert!(dir.join("first.bin.yino-partial").exists());
+        let partial = dir.join("live.bin.yino-partial");
+        let before = std::fs::metadata(&partial).unwrap().len();
 
-        // 同 id 换一条路径重开: 旧半成品不在新路径上, 没有别的代码会清理它
-        execute_put_file(&format!(
-            r#"{{"transfer_id":"{tid}","path":"{}","size":10}}"#,
-            escape_json(&dir.join("second.bin").display().to_string())
+        // 同一 id 再来一次必须拒绝: 否则这次 open 会替换掉活跃会话, resume:false 还会把
+        // 它正在写的文件删掉
+        let err = execute_put_file(&format!(
+            r#"{{"transfer_id":"{tid}","path":"{target_json}","size":10}}"#
         ))
-        .unwrap();
-        assert!(!dir.join("first.bin.yino-partial").exists(), "旧路径的半成品应被回收");
-        // 同 id 但换了路径, 进度不继承 —— 新会话从 0 起
-        let reopened = execute_file_list().unwrap();
-        let entry = reopened["transfers"]
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("file_transfer_id_in_use"),
+            "应拒绝并给稳定码: {err}"
+        );
+        assert_eq!(
+            std::fs::metadata(&partial).unwrap().len(),
+            before,
+            "拒绝不得动活跃会话的半成品"
+        );
+        // 活跃会话仍在表里, 进度没丢
+        let listed = execute_file_list().unwrap();
+        let entry = listed["transfers"]
             .as_array()
             .unwrap()
             .iter()
             .find(|entry| entry["transfer_id"] == tid.as_str())
             .cloned()
-            .expect("新会话应在表里");
-        assert_eq!(entry["written"], 0);
+            .expect("活跃会话应仍在表里");
+        assert_eq!(entry["written"], before);
 
+        // 取消之后同 id 可以正常重开 (新的一次传输)
+        execute_file_cancel(&format!(r#"{{"transfer_id":"{tid}"}}"#)).unwrap();
+        execute_put_file(&format!(
+            r#"{{"transfer_id":"{tid}","path":"{target_json}","size":10}}"#
+        ))
+        .unwrap();
         execute_file_cancel(&format!(r#"{{"transfer_id":"{tid}"}}"#)).unwrap();
         let _ = std::fs::remove_dir_all(&dir);
     }
+
 }
