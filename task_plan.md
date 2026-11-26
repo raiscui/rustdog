@@ -203,3 +203,14 @@ RAI-387: unixpipe 本机 fast path 从 `$TMPDIR` 迁到固定运行目录,补名
       本 PR 只提高了并行压力;根治(共享锁)属另一票
 - [x] 回执: handoffs/rai387/regression-check/{README.md,recording-e2e-{base,head}.log,run_recording_e2e.sh}
 - 提交: 07a3bcf
+
+### [2026-11-26 06:40:00] 五轮评审 1 条 low 修复
+- [x] 上一轮(07a3bcf)漏洞: `paths_for_base` 硬编码 `shared: true`,生产入口
+      `prepare_unixpipe_listener` 只会用它 ⇒ **默认 daemon 也在运行目录建 `<stem>.rdog-owner.pid`**
+      (实测修前 4 文件),与 spec "派生路径不设这把锁/退出后为空" 矛盾;kill -9 后该文件
+      不被 `pipe_stem_from_file_name` 认,`local list` 看不到
+- [x] 新增 `is_derived_base(base, ns, name)`;生产入口与 `remove_stale_entry` 都按身份反推来源
+- [x] 实测修后: 默认 daemon 3 文件/退出为空;显式 `socket_path=/tmp/.../control.sock` 建兼容守卫、
+      base 原样保留、退出全清
+- [x] 补用例走生产入口(上一轮用例绕过了它);`cargo test --bin rdog` 1107 passed
+- 提交: 9c3fd43
