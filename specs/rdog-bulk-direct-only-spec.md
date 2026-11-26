@@ -129,7 +129,7 @@ open 与每个 chunk 边界采样、读到非 `direct` 即拒; `path_class` 是*
 | `iroh_direct_path_unavailable` | 路径 (`iroh_*`) | open 时观测到没有直连, 当前走 relay (§3.1) | 是 | 路径变直连后可 (D2) |
 | `iroh_direct_path_lost` | 路径 | 直连曾建立, 中途丢失 (§3.1) | 是 (本次尝试) | 可, 半成品按 §2.5 B3 保留到窗口末 |
 | `iroh_path_unknown` | 路径 | 路径类别读不出 (§3.1) | 是 | 可, 但先修路径可观测性 |
-| `iroh_bulk_path_pin_unavailable` | 路径 | 传输是路径感知的, 但钉不住 bulk 连接 (§3.5) | 是 | 不可, 除非传输侧补上路径 pin |
+| `iroh_bulk_path_pin_unavailable` | 路径 | 该入口既不声明传输层 pin, 也不做逐 chunk 检查 (§3.5); 今天只有默认入口 (`serve_ping`) 返它 | 是 | 不可, 换到逐 chunk 检查的准入 lane, 或等传输层 pin (RAI-501) |
 | `file_transfer_id_in_use` | 会话 | open 时该 `transfer_id` 已有活跃会话 (§2.5 A2) | 是 | 可, 先 `@file-cancel` 再重开 |
 | `file_transfer_path_in_use` | 会话 | open 时另一条活跃会话已持有同一暂存路径 (§2.5 A2b) | 是 | 可, 等那条完成或取消它 |
 | `bulk_session_limit_reached` | 会话 | 活跃会话数超过 `file_transfer.max_concurrent_sessions` (§2.4) | 是 | 可, 等已有会话收尾 |
@@ -366,7 +366,7 @@ B3 写成"唯一可续传的中止"是错的 —— 客户端被杀、断网、�
 - `iroh_direct_path_unavailable` —— 从来没有直连;
 - `iroh_direct_path_lost` —— 曾经有直连, 中途丢了;
 - `iroh_path_unknown` —— 根本问不到路径类别 (fail-closed);
-- `iroh_bulk_path_pin_unavailable` —— 有直连但钉不住 (见 §3.5).
+- `iroh_bulk_path_pin_unavailable` —— 该入口既不钉也不查, 因此不放字节 (见 §3.5).
 
 **刻意不加**第四个"bulk 被门禁拒绝"的码: 门禁相对路径层没有增加任何语义, 多一个码只会让
 "relay" 有两种写法, 逼调用方同时匹配两个. 会话级资源拒绝用 `bulk_session_limit_reached`,
@@ -432,8 +432,9 @@ daemon 都会把 178 MB 从 relay 推出去. 所以两端都要, 且两端都要
 - `@file-list` / `@file-cancel` 不搬字节, 不过路径门禁: 拒一条 cancel 只会把半成品留在盘上.
 
 **这一版没有做到的部分必须说准**: `conn.paths()` 是**事后快照**, 它既禁不了 QUIC 的路径迁移, 也看
-不见排队与重传里改走 relay 的字节; `iroh_bulk_path_pin_unavailable` 因此仍然是"没有适配器达到 pin"
-的意思, 真做传输层 pin 另开票. 结论的措辞上限是"**每个 chunk 边界上路径是直连**", 不得写成"连接被钉
+不见排队与重传里改走 relay 的字节; `iroh_bulk_path_pin_unavailable` 今天的含义是「这个入口既不钉也不
+查」—— 只有默认入口 (`serve_ping`) 返它, 准入 lane 靠逐 chunk 检查放行, 与 pin 无关. 真做传输层 pin
+另开票 (RAI-501). 结论的措辞上限是"**每个 chunk 边界上路径是直连**", 不得写成"连接被钉
 在直连上"、"relay 上 bulk 字节为 0" 或"迁移与重传已覆盖"。
 
 **门禁粒度 (上传方向尤其要写清)**: 上传 chunk 的载荷**内联在请求行里**, daemon 要先读到
@@ -666,7 +667,7 @@ B 与 C 的区别不在结果 (两者都必须失败), 而在**失败原因的�
 | 输入 | 大文件上传, 传输进行中把路径打断 (断 UDP / 切网) |
 | 前置 | 起始 `direct`, 传输已过一个或多个 chunk |
 | 预期 | **中止**, `error_code:"iroh_direct_path_lost"`; 已写 partial **保留到 `file_transfer.resume_window_ms`** (续传 offset 就是从它推导的, 删了就退化成重传); 快照 `verdict=aborted` 且 delta 非 0 |
-| 证据 | 两端快照; 中止时的 offset (证明不是从头开始也不是静默完成); partial 存在与大小; 续传一次到 `direct` 后完成的回执, 且续传的起始 offset **不等于 0** (证明是真续传而不是静默重传); **在途字节的归属**: 中止前已放行但未确认的字节数与其最终路径类别 (验证 §3.5 的 pin 确实生效, 不是"查到得太晚") |
+| 证据 | 两端快照; 中止时的 offset (证明不是从头开始也不是静默完成); partial 存在与大小; 续传一次到 `direct` 后完成的回执, 且续传的起始 offset **不等于 0** (证明是真续传而不是静默重传); **在途字节的归属**: 中止前已放行但未确认的字节数与其最终路径类别 (验证 §3.5 的**逐 chunk 检查**在路径变化后确实拒下一 chunk, 而不是"查到得太晚"; 传输层 pin 属 RAI-501, 不在本条验收面) |
 
 ### D2 类: relay → direct
 
