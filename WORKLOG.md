@@ -1,5 +1,17 @@
 # WORKLOG: rustdog
 
+## [2026-11-26] iroh lane 承载 bulk + 路径钉住门禁 (RAI-476 步骤 1+2)
+
+- **步骤 1 (lane 承载 bulk)**:`ping_only` 拆成两个门禁 —— lane 侧 `readonly_request` 收 `@ping` 与七个 bulk 动词,客户端一次性 `run_control` 的 `ping_request` 仍只收 `@ping`(一次 bulk 尝试要 open/chunk/end 多行,一行一并的入口给不了,给它能力码会让调用方以为 lane 不收 bulk)。`serve_ping` 变 `serve_readonly`:ping 回完即关,bulk 之后继续读同一流的下一行。`serve_lane` 的 bulk 分支不再回能力码:先过租约(与 PTY 同一份 `require_active`),再 `dispatch_outcome`。
+- **唯一执行入口**:七个动词 → `execute_*` 的映射收口成 `control_core::execute_file_transfer_request`,通用执行器(提前返回)与 iroh lane 共用;原先是 match 里七条 arm,第二条承载通道要复制一遍。
+- **步骤 2 (路径钉住)**:`PathSampler` 在 open 与每个 chunk 边界读 `route(&conn, routable)`;`BulkPathGate` 维护 `established_direct`(本次尝试**曾**观测到 direct,换 `transfer_id` 复位 —— 上一次尝试的直连不是这一次的证据),判定走 `bulk_path::decide(PATH_AWARE_PINNED, ..)`。`@file-list` / `@file-cancel` 不搬字节,不过路径门禁:拒 cancel 只会把半成品留在盘上。
+- **顺序**:先读数与判定,最后才把适配器声明从 `PATH_AWARE_UNPINNED` 翻到 `PATH_AWARE_PINNED`,并撤掉 `PathClass::Relay` 那行带到期条件的 `#[allow(dead_code)]`(`PATH_AWARE_UNPINNED` 反过来按测试专用处理,今天没有适配器处于该格)。
+- **用例**(`src/control_iroh/bulk_tests.rs`):上传三 chunk 提交并比对字节 / 下载两次 `@file-read` 拼回与源文件一致 / `@file-list` 可见 + `@file-cancel` 两次 cancelled→absent / 已准入 lane 承载 bulk / 判定表四格(direct 放行、relay `iroh_direct_path_unavailable`、读不出 `iroh_path_unknown`、先 direct 后 relay `iroh_direct_path_lost`,含换 attempt 复位)/ relay lane 拒于任何字节之前 / 中途掉 relay 拒下一个 chunk / list+cancel 不受路径门禁影响。relay 与读不出由 `PathSampler::Script` 钉住读数喂进去 —— 回环拓扑只会给出 direct,那三种读数在回环里造不出来。
+- **规格**:`specs/rdog-bulk-direct-only-spec.md` §3.5 与 §4.4 按「适配器补上 pin 之后必须回来重写这一段」回填(旧结论「lane 不承载 bulk、不变量由能力拒绝保证」不成立,已写明它当时为何是对的);`specs/rdog-iroh-admission-contract.md` 服务面从 ping+PTY 改成 ping+PTY+bulk,门禁指向改成 `readonly_request` / `ping_request`。
+- **回执**:`cargo +1.95.0 test --bin rdog -- control_iroh` 50 passed / 0 failed / 2 ignored;`cargo +1.95.0 test --bin rdog` 1241 passed / 0 failed / 4 ignored;`check-carrier-assertions` OK;`check-bookkeeping` 仅报两个 merge commit(非本次)。
+- **未做**:步骤 3+4(真机采样与两端快照 join)。跨网 bulk、relay 路径上的运行时证据仍未验,本条只有回环证据。
+- 提交: 8ccf268
+
 ## [2026-11-26] routable profile 可表达公共 relay 的默认端口 (RAI-475)
 
 - RAI-366 真机腿暴露:`relay_allowed` 要求 `url.port().is_some()`,而 `RelayUrl` 会把 https 的默认端口 443 规范化掉 —— **任何标准公共 relay 都配不通**,daemon 启动即报 `iroh routable profile requires an explicit HTTPS relay and QAD port`。
