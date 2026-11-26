@@ -688,7 +688,7 @@ panic 于 `dynamic_link.rs:45` (unix 分支, 同一循环); `mkdir -p target/deb
 该分支当前不可达(预检与 `attach_session` 判据同源, 租约无删除路径), 属防御性修正。
 
 复跑: `--bin rdog` 1145 passed / 0 failed / 4 ignored; `control_iroh` 31 passed / 2 ignored; 回环 13/13。
-- 提交: 0f4e2c3
+- 提交: 0b334f1
 
 ## [2026-11-26] 测试夹具的 daemon 在 panic 路径被收掉 (RAI-423)
 
