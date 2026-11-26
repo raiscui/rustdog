@@ -726,13 +726,30 @@ rdog control <TARGET> --get <REMOTE_PATH> --local-path <LOCAL_PATH> [--resume]
 | 项 | 客户端的规定 |
 | --- | --- |
 | 连接与握手 | 与 PTY 客户端同一套: profile → identity → directory lookup → `connect_with_path` → `open_bi` → `Handshake::Admit` (共用 `admit_lane`)。租约按 `lease_ttl_ms` 续期, 传输期间不断租 |
-| 门禁时机 | open 前判一次, **每个 chunk 边界再判一次**, 判定用边界上的即时采样 (§3.1) |
+| 门禁时机 | open 前判一次, **上传与下载两个方向的每个 chunk 边界都再判一次**, 判定用边界上的即时采样 (§3.1) |
+| chunk 大小 | 这条 lane 上单块载荷 256 KiB (见下方算术), 两个方向共用同一个值: 上传按它切块, 下载按它填 `@file-read.length` |
+| 单帧写预算 | `max(frame_timeout_ms, 帧长 / 96 KiB/s)`。`frame_timeout_ms` 是 profile 的上限语义, 不是"每条链路的实际吞吐"; 大帧的等待时间按最慢目标链路放量, 见下方算术 |
 | 括号端点 | `before` 在 open 请求发出**之前**取, `after` 在终态请求之后取; 两端都是本端这条连接上 relay path 的累计 UDP 字节, 换算与 daemon 侧共用 `relay_bracket` (§4.2) |
-| `established_direct` | 按 `transfer_id` 记"本次尝试曾观测到 direct", open 复位。它让上传方向的 `iroh_direct_path_lost` 在客户端有生产者 (与 daemon 的 `BulkPathGate` 同一形状) |
+| 括号对账 | 终态对账用的是**本次尝试见过的 relay path 并集** (`before` + 每个边界采样 + 终态采样), 不是 `before` 那一刻的集合。并集里任何一条在 `after` 不在场 → 四个 `null`。`before` 集合为空不构成豁免: 两个计数仍必须都在 |
+| `established_direct` | 按 `transfer_id` 记"本次尝试曾观测到 direct", open 复位。它让 `iroh_direct_path_lost` 在客户端有生产者 (与 daemon 的 `BulkPathGate` 同一形状, 两个方向都走同一个门禁) |
 | 中途掉 relay | 门禁在块**发出之前**判, 所以被拒的那个边界一个字节都没上线; 不走 `@file-cancel` —— 按 §2.5 B3 保留半成品供续传 |
-| daemon 半快照 | `@file-end` / `eof:true` 的 `@file-read` 响应里的 `evidence` 被**原样**写到 `--bulk-path-json` 同目录的 `bulk-path.daemon.json`。收不到就**不写**, 只在 stderr 说明, 让 join 落到 `bulk_path_endpoint_missing` |
+| `transfer_id` 复用 | `--put` 的 id 按 (本地路径, 目标, 远端路径) 记在 `<rdog 用户目录>/bulk-transfer-ids.json`。lane 层失败后 daemon 的会话仍占着目标推导出的暂存名, 换新 id 会被 `file_transfer_path_in_use` 挡到窗口过期; 复用 id 让下一次自然落到 `resume:true`。提交成功后忘掉这条记录, `--restart` 强制新 id。`--get` 不复用: daemon 没有"未完成的下载"状态, 同 id 换不来续传 |
+| daemon 半快照 | `@file-end` / `eof:true` 的 `@file-read` 响应里的 `evidence` 被**原样**写到 `--bulk-path-json` 同目录的 `bulk-path.daemon.json`; **错误回执**上带的 `evidence` 同样收下。每次尝试开始前删掉上一次留下的那份, 免得两半配错。收不到就**不写**, 只在 stderr 说明, 让 join 落到 `bulk_path_endpoint_missing` |
 | 失败码 | 准入 lane 握不上手且连接按 `DENIED` 关闭 → `iroh_bulk_path_pin_unavailable` (对端没有策略文件, 该入口不承载 bulk); 路径类失败走 §2.2 的 `iroh_*` 三码 |
 | 非 iroh 传输 | 行为不变: 逐请求建链, `path_class` 恒 `not_applicable`, 不产出 daemon 半快照 |
+
+**chunk 与写预算的算术 (为什么不能靠使用者抬 `frame_timeout_ms`)。** bulk 的默认块是
+`chunk_payload_bytes()` ≈ 5.03 MB, base64 之后的整帧约 6.7 MB; `noq` 单流接收窗口只有 1.25 MB,
+`write_all` 必须等对端边读边腾窗口 —— 于是"帧写超时"实际度量的是**对端消费速度 × 帧长**,
+而固定 3 s 在 ~2.2 MB/s 以下就必然不够, 首块就能把 lane 打成 poison。两层一起做:
+
+1. 这条 lane 把块收到 256 KiB: 帧 ≈ 341 KiB ≈ 窗口的 27%, 一帧最多挡一两次窗口更新。
+2. 帧写预算按 `max(frame_timeout_ms, 帧长 / 96 KiB/s)` 兜底: 96 KiB/s ≈ 0.77 Mbit/s 是"仍应
+   成功"的最慢链路, 6.7 MB 的帧因此有 ~71 s 而不是 3 s。`frame_timeout_ms` 仍是最小值, 不会被
+   大帧的算术压到它下面。
+
+两者都不需要使用者改配置 —— 抬 `frame_timeout_ms` 只能救一条已知慢的链路, 救不了"帧本身就比
+窗口大一个量级"这件事。
 
 **措辞上限 (与 §4.4 正对照一并读)。** 客户端能给出的结论只到"括号两点之间读到的 relay 累计量增
 量为 0"这一层: `stats().udp_tx/rx.bytes` 是这条 path 上的**全部** UDP 字节 (含 ACK、keepalive、

@@ -566,15 +566,6 @@ pub(crate) struct RelayReading {
     pub(crate) relay_paths: Vec<String>,
 }
 
-/// 括号两端 → 四个计数 (§4.2)。两端共用这一份: daemon 在自己的终态响应里用, 客户端在
-/// `rdog.bulk-path.v1` 里用 —— 语义必须逐字一致, 复制第二份就会有一天两边不同。
-pub(crate) struct RelayBracket {
-    pub(crate) tx_before: Option<u64>,
-    pub(crate) tx_after: Option<u64>,
-    pub(crate) rx_before: Option<u64>,
-    pub(crate) rx_after: Option<u64>,
-}
-
 impl RelayReading {
     /// 从一次 `Connection::paths()` 快照算本端 relay 累计字节。
     ///
@@ -603,32 +594,75 @@ impl RelayReading {
     }
 }
 
-/// 括号采样: 任一端读不到、或 `before` 时在场的 relay path 到 `after` 时少了一条, 整份读数
-/// 作废 (四个 `None`), **绝不写 0**。
-pub(crate) fn relay_bracket(
-    before: Option<&RelayReading>,
-    after: Option<&RelayReading>,
-) -> RelayBracket {
-    match (before, after) {
-        (Some(before), Some(after))
-            if before
-                .relay_paths
-                .iter()
-                .all(|id| after.relay_paths.contains(id)) =>
-        {
-            RelayBracket {
-                tx_before: Some(before.tx),
-                tx_after: Some(after.tx),
-                rx_before: Some(before.rx),
-                rx_after: Some(after.rx),
-            }
+/// 一次尝试的 relay 括号, 沿途不断并入**见过的所有** relay path (§4.2)。
+///
+/// 为什么不是"`before` 的集合 ⊆ `after` 的集合"就够: 只有直连 path 时 `before` 的集合是**空的**,
+/// 空集合的 `all()` 真空成立 —— 于是一次尝试在边界上短暂 fallback 到 relay、走掉一段字节、终态前
+/// 又只剩直连, 会被读成"四个计数都是 0"并判 `relay_bytes_zero`。所以对账用的集合必须是**并集**:
+/// open 前的读数、每个 chunk 边界的门禁采样、终态前的读数, 见过的 relay path 一个都不许漏。
+pub(crate) struct RelayBracket {
+    before: Option<RelayReading>,
+    seen: std::collections::BTreeSet<String>,
+}
+
+impl RelayBracket {
+    /// open 执行前的基线。`None` = 那一刻读不到 (不是 0)。
+    pub(crate) fn new(before: Option<RelayReading>) -> Self {
+        let mut seen = std::collections::BTreeSet::new();
+        if let Some(before) = before.as_ref() {
+            seen.extend(before.relay_paths.iter().cloned());
         }
-        _ => RelayBracket {
+        Self { before, seen }
+    }
+
+    /// 并入一次边界采样的 relay 读数。
+    pub(crate) fn observe(&mut self, reading: Option<&RelayReading>) {
+        if let Some(reading) = reading {
+            self.seen.extend(reading.relay_paths.iter().cloned());
+        }
+    }
+
+    /// 终态: `after` 与"本次见过的并集"对账, 得到四个计数。
+    ///
+    /// 并集分布在 `after` 里找不到 → 那条 relay path 中途关了, 它的字节已不在快照里, 相减会
+    /// 得到一个假的零, 整份作废。两端任一读不到同样作废。**空的并集不是豁免**: 它只说明这一版
+    /// 确实没观测到 relay path, 两个计数仍必须都在。
+    pub(crate) fn close(&self, after: Option<&RelayReading>) -> RelayCounts {
+        let (Some(before), Some(after)) = (self.before.as_ref(), after) else {
+            return RelayCounts::unavailable();
+        };
+        if self
+            .seen
+            .iter()
+            .any(|path| !after.relay_paths.contains(path))
+        {
+            return RelayCounts::unavailable();
+        }
+        RelayCounts {
+            tx_before: Some(before.tx),
+            tx_after: Some(after.tx),
+            rx_before: Some(before.rx),
+            rx_after: Some(after.rx),
+        }
+    }
+}
+
+/// 括号两端换算出的四个计数: `None` = 未采样 / 不可比, 不是 0。
+pub(crate) struct RelayCounts {
+    pub(crate) tx_before: Option<u64>,
+    pub(crate) tx_after: Option<u64>,
+    pub(crate) rx_before: Option<u64>,
+    pub(crate) rx_after: Option<u64>,
+}
+
+impl RelayCounts {
+    fn unavailable() -> Self {
+        Self {
             tx_before: None,
             tx_after: None,
             rx_before: None,
             rx_after: None,
-        },
+        }
     }
 }
 
@@ -887,7 +921,7 @@ struct AttemptEvidence {
     /// 两端快照对齐用的身份 (§4.3): 客户端在 open 载荷里交来的那个, 缺省时由 daemon 派生。
     attempt_id: String,
     direction: &'static str,
-    relay_before: Option<RelayReading>,
+    bracket: RelayBracket,
     /// 每次边界采样后的类别, **最后一次赢了**: 门禁只在全 direct 时放行, 所以能走到终态的
     /// 尝试这一格就是 `direct`; 中途掉 relay 的那次会被拒, 快照按 `aborted` 记。
     path_class: PathClass,
@@ -935,7 +969,7 @@ impl DaemonPathEvidence {
             AttemptEvidence {
                 attempt_id,
                 direction,
-                relay_before: sampler.relay_read(),
+                bracket: RelayBracket::new(sampler.relay_read()),
                 path_class: PathClass::Unknown,
                 direct_addr: None,
                 bulk_bytes: 0,
@@ -954,6 +988,10 @@ impl DaemonPathEvidence {
         if observed == PathClass::Direct && attempt.direct_addr.is_none() {
             attempt.direct_addr = sampler.selected_direct_addr();
         }
+        // 边界上的 relay 读数也并入括号的并集: 中途短暂 fallback 走过的 relay 字节必须在终态时
+        // 能被"这条 path 现在不见了"这条规则挡住 (§4.2)。
+        let relay = sampler.relay_read();
+        attempt.bracket.observe(relay.as_ref());
     }
 
     /// 记一块**已被 daemon 确认**的字节。
@@ -982,8 +1020,8 @@ impl DaemonPathEvidence {
     ) -> Option<serde_json::Value> {
         let attempt = self.attempts.remove(transfer_id)?;
         let after = sampler.relay_read();
-        // 括号的两次读数怎么变成四个计数 (含"在场集合对不上就作废") 与客户端共用一份实现。
-        let bracket = relay_bracket(attempt.relay_before.as_ref(), after.as_ref());
+        // 对账用的是"本次见过的 relay path 并集"而不是 `before` 那一刻的集合 (见 `RelayBracket`)。
+        let bracket = attempt.bracket.close(after.as_ref());
         let snapshot = crate::bulk_path::BulkPathSnapshot {
             attempt_id: attempt.attempt_id,
             transfer_id: transfer_id.to_owned(),
@@ -3377,6 +3415,21 @@ pub(crate) const FRAME_BROKEN: &str = "iroh_frame_broken";
 const MIN_FRAME_TIMEOUT: Duration = Duration::from_secs(1);
 const MAX_FRAME_TIMEOUT: Duration = Duration::from_secs(120);
 
+/// 一条帧最慢仍应成功的链路吞吐 (字节/秒), 96 KiB/s ≈ 0.77 Mbit/s —— 比真实 relay 的常见下限
+/// 还保守一档。它的唯一用途是给"大帧的写预算"兜一个下限: 一帧要 `帧长 / 这个速率` 秒才传得完,
+/// 少于这个时间就不该判它超时。
+const MIN_FRAME_BYTES_PER_SEC: u64 = 96 * 1024;
+
+/// 一帧的写预算: 取 profile 里的 `frame_timeout_ms` 与"按最慢目标链路算出来该给的时间"的较大值。
+///
+/// 固定 3 s 对 ~6.7 MB 的 bulk 帧是不够的 (noq 单流窗口 1.25 MB, `write_all` 要等对端边读边
+/// 腾窗口): 一条 2 MB/s 的链路光是把这个帧喂进窗口就要 3 s 以上, 于是"慢但可用"的网络会被
+/// 判成坏帧、把整条 lane 打成 poison。让预算随帧长走, 慢链路才有机会把帧传完。
+fn frame_write_budget(frame_len: usize, configured: Duration) -> Duration {
+    let by_size = Duration::from_millis(frame_len as u64 * 1000 / MIN_FRAME_BYTES_PER_SEC);
+    configured.max(by_size)
+}
+
 fn frame_budget(raw: Option<u64>) -> Result<Duration> {
     let timeout = raw.map_or(IO, Duration::from_millis);
     if timeout < MIN_FRAME_TIMEOUT || timeout > MAX_FRAME_TIMEOUT {
@@ -3464,7 +3517,8 @@ fn write_line(
             // A writer that failed while this one waited for the lock has already
             // truncated the stream, so ask again now that the lock is held.
             guard.ensure_intact()?;
-            let outcome = match timeout(guard.timeout, stream.write_all(frame)).await {
+            let budget = frame_write_budget(frame.len(), guard.timeout);
+            let outcome = match timeout(budget, stream.write_all(frame)).await {
                 Ok(Ok(())) => Ok(()),
                 Ok(Err(err)) => Err(io::Error::other(err)),
                 Err(_) => Err(io::Error::new(

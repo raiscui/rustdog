@@ -543,7 +543,14 @@ fn run(opts: input::Opts) -> Result<(), String> {
                     (Some(local), None) => {
                         let remote = remote_path
                             .ok_or("`--put` 需要 `--remote-path <REMOTE>`".to_string())?;
-                        transfer_cli::run_put(&peer, &mut recorder, &local, &remote, restart)?
+                        transfer_cli::run_put(
+                            &peer,
+                            &mut recorder,
+                            &transfer_cli::TransferIdStore::user_default(),
+                            &local,
+                            &remote,
+                            restart,
+                        )?
                     }
                     (None, Some(remote)) => {
                         let local = local_path

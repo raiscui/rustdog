@@ -749,3 +749,48 @@ fn a_counter_that_went_backwards_on_the_same_path_is_not_a_zero() {
     assert_eq!(evidence["relay_sample_available"], false, "倒退不是零");
     assert_eq!(evidence["verdict"], "relay_sample_unavailable");
 }
+
+#[test]
+fn a_relay_path_that_only_appeared_at_a_boundary_voids_the_bracket() {
+    // 评审 #2: `before` 只有直连时它的 relay 集合是空的, 空集合的 `all()` 真空成立 —— 一次
+    // "边界上短暂 fallback 到 relay、终态前又只剩直连"的尝试会被读成四个 0 并判
+    // `relay_bytes_zero`。对账必须用"本次见过的 relay path 并集"。
+    let dir = TempRoot::new("evidence-union");
+    let target = dir.0.join("landed.bin");
+    let payload = b"boundary detour";
+    let sha = sha256_hex(payload);
+    let id = transfer_id("ev-union");
+    let detour = RelayReading {
+        tx: 120,
+        rx: 60,
+        relay_paths: vec!["PathId(9)@relay:https://relay.invalid:443/".to_owned()],
+    };
+    // 五个读数: open 前的基线、三次门禁采样 (@put-file / @file-chunk / @file-end)、终态前一次。
+    // 第二个读数里出现了 relay path, 而基线跟终态都只有直连。
+    let mut lane = start_admitted_with_relay(
+        vec![PathClass::Direct],
+        vec![
+            Some(RelayReading::at(100, 50)),
+            Some(detour),
+            Some(RelayReading::at(120, 60)),
+            Some(RelayReading::at(120, 60)),
+            Some(RelayReading::at(120, 60)),
+        ],
+    );
+
+    put_file(&mut lane, &id, &target, payload.len(), &sha);
+    put_chunk(&mut lane, &id, 0, payload);
+    lane.send(&format!(r#"@file-end:{{"transfer_id":"{id}","sha256":"{sha}"}}"#));
+    let evidence = lane.reply()["evidence"].clone();
+
+    for key in [
+        "relay_tx_before",
+        "relay_tx_after",
+        "relay_rx_before",
+        "relay_rx_after",
+    ] {
+        assert_eq!(evidence[key], Value::Null, "{key} 必须作废, 不是 0");
+    }
+    assert_eq!(evidence["relay_sample_available"], false);
+    assert_eq!(evidence["verdict"], "relay_sample_unavailable");
+}
