@@ -680,6 +680,16 @@ impl Registry {
                     || addr.relay_urls().count() != 1
                     || addr.relay_urls().next() != Some(&self.relay)
                 {
+                    // `iroh_registration_denied` covers five causes, so a pairing
+                    // mistake across two profiles is unreadable without both sides.
+                    log::info!(
+                        "iroh registration denied name={name} expected_relay={} carried_relay={}",
+                        self.relay,
+                        addr.relay_urls()
+                            .map(|url| url.to_string())
+                            .collect::<Vec<_>>()
+                            .join(",")
+                    );
                     return reject("iroh_registration_denied");
                 }
                 log::info!(
@@ -767,20 +777,28 @@ pub(crate) fn run_rendezvous(path: &Path) -> Result<()> {
             None => tls_addr,
         };
         let expected_relay = match cfg.registry_relay.clone() {
-            Some(url) => url,
+            Some(url) => {
+                directory_url_ok(&url, cfg.routable)?;
+                url
+            }
             None => format!("https://{advertised}").parse()?,
         };
         let registry = Arc::new(Mutex::new(Registry {
             owners: cfg.registrations, readers: cfg.lookups, leases: HashMap::new(),
             relay: expected_relay, routable: cfg.routable,
         }));
+        let registry_relay = cfg
+            .registry_relay
+            .as_ref()
+            .map(|url| format!(" registry_relay={url}"))
+            .unwrap_or_default();
         match &cfg.directory_relay {
             Some(relay) => log::info!(
-                "iroh rendezvous ready relay_https={tls_addr} advertised={advertised} qad={qad} directory_relay={}",
+                "iroh rendezvous ready relay_https={tls_addr} advertised={advertised} qad={qad} directory_relay={}{registry_relay}",
                 relay.url
             ),
             None => log::info!(
-                "iroh rendezvous ready relay_https={tls_addr} advertised={advertised} qad={qad}"
+                "iroh rendezvous ready relay_https={tls_addr} advertised={advertised} qad={qad}{registry_relay}"
             ),
         }
         let mut tasks = JoinSet::new();
