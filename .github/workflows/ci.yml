@@ -214,7 +214,8 @@ jobs:
           RDOG_JOB_STARTED_AT_FILE: ${{ runner.temp }}/job-started-at
           RDOG_JOB_TIMEOUT_MINUTES: *job-timeout-minutes
         run: |
-          command -v xvfb-run >/dev/null || sudo apt-get install -y xvfb
+          command -v xvfb-run >/dev/null && command -v xauth >/dev/null || \
+            sudo apt-get install -y xvfb xauth
           PY=$(command -v python3 || command -v python)
           xvfb-run -a --server-args="-screen 0 1280x1024x24" \
             "$PY" scripts/ci/run-integration-targets.py --os ubuntu-latest

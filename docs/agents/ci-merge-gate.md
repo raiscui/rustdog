@@ -187,12 +187,17 @@ ubuntu 连续三轮通过。
 windows 连续 3 轮, 随后删掉这两条豁免。所以本 PR 之后 windows 的 integration 面只有
 `computer_use_density` 一个 —— 这是这一轮的真实覆盖, 不写成"windows 也跑了 e2e"。
 
-逐条 `#[ignore]` 只在**单个用例**确有平台不兼容时用, 且必须挂理由与到期日 (见 §6)。今天只剩
-三处, 全是「需要真实输入后端 / 截图后端」的机器前提, 与消息语义无关:
-`control_lanes` 的截图用例、`zenoh_router_client` 的真实输入模拟与截图用例。
-**`zenoh_router_client` 的 key 注入用例已经不带 `#[ignore]`** —— 它曾经的 platform ignore 与
-`control_lanes` 那条同源 (enigo 连不上 display), 已由 ubuntu job 的 `xvfb-run` 前提解决;
-在该 target 整片豁免撤销前, ubuntu 上它仍随 target 一起不执行, 但不再是「用例级跳过」。
+逐条 `#[ignore]` 只在**单个用例**确有平台不兼容时用, 且必须挂理由与到期日 (见 §6)。
+`tests/` 下现有 20 处 `#[ignore]`: `control_ax_e2e` 6、`control_display_aware_e2e` 8、
+`zenoh_router_client` 2、`control_lanes` / `control_mouse_e2e` / `control_window_e2e` /
+`control_websocket` 各 1。其中 CI 在当前平台会执行的 target 里有 4 处 (`control_lanes` 的截图用例、
+`zenoh_router_client` 的真实输入模拟与截图用例、`control_websocket` 的截图用例), 其余都在
+execute 面之外 (5 个 macOS GUI 面是 compile-only)。
+**`#[cfg_attr(target_os = ..., ignore = ...)]` 这种平台级逐条收窄已归零** —— `control_lanes` 的
+key 注入用例曾用它在 ubuntu 跳过, 根因是 enigo 连不上 display, 已由 ubuntu job 的 `xvfb-run`
+前提解决 (见上)。`zenoh_router_client` 的 key 事件用例在 main 上曾按 `#[ignore]` 跳过 (commit
+`9dbf80f` 加、`f0ebc7e` 随 target 级豁免一起撤), 现在同样不带 `#[ignore]`; 在该 target 整片豁免
+撤销前, ubuntu 上它仍随 target 一起不执行, 但不再是「用例级跳过」。
 
 **compile-only 是显式的, 不是静默 skip —— 但它也不计入「ran」。** 这 6 个 target 里, 5 个
 需要真实桌面会话 (已登录的 GUI 用户 + Accessibility 与 Screen Recording 授权, GitHub runner
@@ -282,7 +287,7 @@ cargo clean -p ort-sys && cargo build --bin rdog    # 走一遍 build script
 | 现象 | 归因 | 负责人 | 到期日 |
 | --- | --- | --- | --- |
 | `zenoh_control::tests::diagnostic_ping_should_bypass_busy_query_worker_and_preserve_queue` 间歇红 (28 轮 2 次, panic 文案 `worker 未进入执行`, 疑 TMPDIR 进程级改写) | 单跑 5/5 绿, 只在并行/全量时出现 (`src/zenoh_control.rs` 的 panic 行) | RAI-405 承接线程 | 2026-11-30 |
-| ubuntu runner 上 `zenoh_router_client` 的跨进程连接 e2e 不稳定: 连续三轮各挂一个**不同**用例 (`control_lanes::daemon_control_lane_should_accept_key_object_payload_with_request_id` code 70、`zenoh_router_client::tls_enabled_daemon_should_serve_ca_client_and_reject_wrong_ca` 空输出、`zenoh_router_client::mtls_daemon_should_require_client_certificate_and_accept_configured_client`), 全部停在「client 连不上刚启动的 daemon」 | 同代码在 macos runner 全绿、本地含 `taskset -c 0,1` 压 2 核也全绿; 是**一族**不稳定而非单个用例缺陷, 所以按 target 级豁免 (`PLATFORM_EXEMPTIONS`) 而不是逐条 `#[ignore]`; 入口=豁免理由 + issue #163 | issue #163 / RAI-464 | 2026-12-03 |
+| ubuntu runner 上 `zenoh_router_client` 的跨进程连接 e2e 不稳定 | **两族, 2026-11-26 (RAI-464) 按证据拆开**: ① `@key`/`@type` 类 = enigo 连不上 display (code 70) → **已修** (ubuntu 步骤改 `xvfb-run`); ② TLS/mTLS 两例 = `zenoh-link-tls` 1.8.0 首帧写入早于 rustls 握手完成 (`TX task failed: handshake not complete` + client 侧 `peer closed ... without TLS close_notify`), 串行跑同样复现; ②的同族 `tls_init` 并发写坏材料已修为整目录原子落地。**不是**「client 连不上刚启动的 daemon」, 也不是 runner 特有; ① 已撤销 `control_lanes` 那条 `#[ignore]`, ② 仍按 target 级豁免 (`PLATFORM_EXEMPTIONS`); 入口=豁免理由 + issue #163 | issue #163 / RAI-464 | 2026-12-03 |
 | windows runner 上 `control_websocket` 整 target 挂死、`zenoh_router_client_windows` daemon 因遗留 `service_name` 守卫拒启动 | 两者都不隔离 HOME, 与同 job 前序用例共用 `.rdog` / `zenoh-guards`; 入口=`PLATFORM_EXEMPTIONS` 两条理由 + `tests/` 无 `HOME` 注入 | issue #162 承接 | 2026-12-03 |
 | macos runner 上 `zenoh_unixpipe_fast_path` 的连接类用例逐个接力红, 最后一个卡在「运行中的 daemon 拒绝新 client 的专用 FIFO」(`Received a close message (reason GENERIC) in response to an OpenSyn`) | 前两条是用例假设 `~/.rdog/run` 已存在 (已修); 第三条开发机绿、runner 红, 是 runner 与真机在这条链路上的环境差; 处置=分类降为 `compile-only:macos` 并给真机 lane 命令; 入口=CLASSIFICATION + issue #164 | issue #164 承接 | 2026-12-03 |
 

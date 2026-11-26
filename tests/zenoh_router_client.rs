@@ -3291,7 +3291,8 @@ fn tls_enabled_daemon_should_serve_ca_client_and_reject_wrong_ca() {
     );
     assert!(
         status.success(),
-        "CA client 应经 tls 连通\nstdout:\n{stdout}\nstderr:\n{stderr}"
+        "CA client 应经 tls 连通\nstdout:\n{stdout}\nstderr:\n{stderr}\ndaemon:\n{}",
+        daemon_output(&buffer)
     );
     let response = stdout
         .lines()
@@ -3350,7 +3351,8 @@ fn tls_enabled_daemon_should_serve_ca_client_and_reject_wrong_ca() {
     let wrong_stderr = String::from_utf8_lossy(&wrong.stderr);
     assert!(
         !wrong.status.success() && !wrong_stdout.contains(r#""pong":true"#),
-        "错 CA 不应连通\nstdout:\n{wrong_stdout}\nstderr:\n{wrong_stderr}"
+        "错 CA 不应连通\nstdout:\n{wrong_stdout}\nstderr:\n{wrong_stderr}\ndaemon:\n{}",
+        daemon_output(&buffer)
     );
 
     fs::copy(
@@ -3495,7 +3497,8 @@ fn mtls_daemon_should_require_client_certificate_and_accept_configured_client() 
     assert!(
         !rejected.status.success()
             && !String::from_utf8_lossy(&rejected.stdout).contains(r#""pong":true"#),
-        "仅持有 CA 证书时不应连接到 mTLS 服务"
+        "仅持有 CA 证书时不应连接到 mTLS 服务\ndaemon:\n{}",
+        daemon_output(&buffer)
     );
 }
 

@@ -24,11 +24,36 @@ pub struct TlsInitReport {
     pub skipped: Vec<String>,
 }
 
+/// 材料布局 (spec 固定): 六件齐备才算初始化完成。
+pub const TLS_MATERIAL_FILES: [&str; 6] = [
+    "ca.pem",
+    "ca-key.pem",
+    "daemon/cert.pem",
+    "daemon/key.pem",
+    "client/cert.pem",
+    "client/key.pem",
+];
+
 /// 生成全部 TLS 材料 (幂等)。
 pub fn tls_init(tls_dir: &Path) -> io::Result<TlsInitReport> {
     let mut report = TlsInitReport::default();
     if tls_dir.exists() {
-        // 幂等: 目录存在即视为已初始化, 不覆盖任何文件
+        // 幂等: 已初始化的目录一个文件都不覆盖 (用户材料是手工调过的不能静默毁掉)。
+        // 但"目录在"不等于"材料完整": 旧版本是边建目录边写文件, 中途崩溃/被杀会留下
+        // 半套材料, 而按半套材料做 TLS 握手必然失败、还会把排查引向"证书不对"。
+        // 因此这里 fail closed, 由操作者决定是删掉重生成还是补文件。
+        let missing: Vec<&str> = TLS_MATERIAL_FILES
+            .iter()
+            .copied()
+            .filter(|relative| !tls_dir.join(relative).is_file())
+            .collect();
+        if !missing.is_empty() {
+            return Err(io::Error::other(format!(
+                "TLS 材料不完整 ({}): 缺少 {}; 确认无进程在用后删除该目录再重跑 `rdog auth tls-init`",
+                tls_dir.display(),
+                missing.join(", ")
+            )));
+        }
         report.skipped.push(tls_dir.display().to_string());
         return Ok(report);
     }
@@ -58,22 +83,10 @@ pub fn tls_init(tls_dir: &Path) -> io::Result<TlsInitReport> {
         CertifiedIssuer::signed_by(client_params, &client_key, &ca).map_err(to_io_error)?;
 
     // 落盘布局 (spec 固定)。先在唯一暂存目录里写完六件, 再整目录 rename 到位:
-    // "目录存在"因此等价于"材料完整", 两个并发 tls-init 只可能有一方 rename 成功,
+    // `<tls_dir>` 目录出现即等价于材料完整, 两个并发 tls-init 只可能有一方 rename 成功,
     // 落败方按已初始化跳过。边创建边写入会让两个进程的 CA 与证书交错落进同一目录,
     // daemon 证书签自 CA-A 而 ca.pem 来自 CA-B —— TLS/mTLS 握手必然失败。
-    let staging_dir = tls_dir.with_file_name(format!(
-        "{}.staging-{}-{}",
-        tls_dir
-            .file_name()
-            .map(|name| name.to_string_lossy().into_owned())
-            .unwrap_or_else(|| TLS_DIR_NAME.to_owned()),
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|elapsed| elapsed.subsec_nanos())
-            .unwrap_or(0)
-    ));
-    fs::create_dir_all(&staging_dir)?;
+    let staging_dir = create_staging_dir(tls_dir)?;
     let materialize = || -> io::Result<()> {
         let daemon_dir = staging_dir.join("daemon");
         let client_dir = staging_dir.join("client");
@@ -98,15 +111,43 @@ pub fn tls_init(tls_dir: &Path) -> io::Result<TlsInitReport> {
         return Err(err);
     }
 
-    report.created = vec![
-        "ca.pem".into(),
-        "ca-key.pem".into(),
-        "daemon/cert.pem".into(),
-        "daemon/key.pem".into(),
-        "client/cert.pem".into(),
-        "client/key.pem".into(),
-    ];
+    report.created = TLS_MATERIAL_FILES
+        .iter()
+        .map(|path| path.to_string())
+        .collect();
     Ok(report)
+}
+
+/// 建一个本次调用独占的暂存目录。
+///
+/// 名字里的 pid + 时间戳只提供低概率唯一, 所以用 `create_dir` (目标已存在即失败) 加上
+/// 进程内计数器重试: 唯一性必须是机制, 而不是"两次调用不会撞在同一纳秒"的巧合 —
+/// 撞名时两个调用会共享暂存目录, 一方的 `remove_dir_all` 会删掉另一方正在写的材料。
+fn create_staging_dir(tls_dir: &Path) -> io::Result<std::path::PathBuf> {
+    use std::sync::atomic::{AtomicU32, Ordering};
+    static ATTEMPT: AtomicU32 = AtomicU32::new(0);
+
+    let name = tls_dir
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| TLS_DIR_NAME.to_owned());
+    loop {
+        let attempt = ATTEMPT.fetch_add(1, Ordering::Relaxed);
+        let candidate =
+            tls_dir.with_file_name(format!("{name}.staging-{}-{attempt}", std::process::id()));
+        match fs::create_dir(&candidate) {
+            Ok(()) => return Ok(candidate),
+            Err(err) if err.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {
+                // 父目录 (通常是 ~/.rdog) 还不存在: 用它建父链后再重试。
+                if let Some(parent) = candidate.parent() {
+                    fs::create_dir_all(parent)?;
+                }
+                continue;
+            }
+            Err(err) => return Err(err),
+        }
+    }
 }
 
 fn distinguished_name(common_name: &str) -> DistinguishedName {
@@ -209,9 +250,14 @@ mod tests {
     /// `tls_dir.exists()`。两个进程同时进入时, 要么双方都生成、把两份 CA 的证书
     /// 交错写进同一目录 (daemon 证书签自 CA-A, ca.pem 来自 CA-B), 要么后者看到
     /// 空目录就跳过、留下半套材料。两种结局都让 TLS/mTLS 握手必然失败。
+    ///
+    /// 暂存目录的检查只扫本用例自持的父目录: `temp_dir()` 是进程级共享命名空间,
+    /// 同二进制里别的用例的 `<...>.staging-*` 也落在那里, 按名字在 `/tmp` 上过滤会把
+    /// 兄弟用例的正常中间态当成泄漏 (见 parallel-test-global-state-single-lock)。
     #[test]
     fn concurrent_tls_init_should_publish_exactly_one_material_set() {
-        let dir = temp_tls_dir("concurrent");
+        let root = temp_tls_dir("concurrent");
+        let dir = root.join(TLS_DIR_NAME);
         let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));
         let handles: Vec<_> = (0..8)
             .map(|_| {
@@ -233,25 +279,46 @@ mod tests {
             created, 1,
             "并发 tls-init 只能有一方生成完整材料, 实际 {created}: {reports:?}"
         );
-        for path in [
-            "ca.pem",
-            "ca-key.pem",
-            "daemon/cert.pem",
-            "daemon/key.pem",
-            "client/cert.pem",
-            "client/key.pem",
-        ] {
+        for path in TLS_MATERIAL_FILES {
             assert!(dir.join(path).is_file(), "missing {path}");
         }
 
         // 落败的并发方必须收走自己的暂存目录, 不在 ~/.rdog 里留残渣。
-        let leftovers: Vec<_> = fs::read_dir(dir.parent().expect("tls dir should have parent"))
-            .expect("parent dir should be readable")
+        let leftovers: Vec<_> = fs::read_dir(&root)
+            .expect("root dir should be readable")
             .flatten()
             .map(|entry| entry.file_name().to_string_lossy().into_owned())
-            .filter(|name| name.contains("staging"))
+            .filter(|name| name != TLS_DIR_NAME)
             .collect();
         assert!(leftovers.is_empty(), "暂存目录残留: {leftovers:?}");
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// 半套材料必须 fail closed, 而不是被当成"已初始化"跳过。
+    ///
+    /// 与并发用例不同, 这条与调度无关: 旧版本边建目录边写文件, 中途崩溃就会留下
+    /// 只有部分文件的目录。此时既不能静默跳过 (后续 TLS 握手必然失败, 排查会被引向
+    /// "证书不对"), 也不能擅自覆盖 (用户材料可能手工调过), 所以直接报错点名缺哪几件。
+    #[test]
+    fn tls_init_should_reject_incomplete_existing_material() {
+        let dir = temp_tls_dir("incomplete");
+        fs::create_dir_all(dir.join("daemon")).unwrap();
+        fs::write(dir.join("ca.pem"), "-----BEGIN CERTIFICATE-----").unwrap();
+
+        let err = tls_init(&dir).expect_err("半套材料不应被当成已初始化");
+        let message = err.to_string();
+        for missing in ["ca-key.pem", "daemon/cert.pem", "client/cert.pem"] {
+            assert!(
+                message.contains(missing),
+                "错误应点名缺失项 {missing}: {message}"
+            );
+        }
+        // 报错路径不得改动既有文件。
+        assert_eq!(
+            fs::read_to_string(dir.join("ca.pem")).unwrap(),
+            "-----BEGIN CERTIFICATE-----"
+        );
 
         let _ = fs::remove_dir_all(&dir);
     }
