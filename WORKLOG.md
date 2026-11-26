@@ -789,7 +789,7 @@ handoffs/rai385/receipts/, reports/RAI-385.md); Windows 真机回执由总控代
 `tests/control_lanes` 15/15 卡在 `rdog_binary_path` 的 target 布局(RAI-396 只修了
 recording_e2e), 属既有测试资产缺陷, 冻结基线同款红; `tests/zenoh_unixpipe_fast_path`
 是 `cfg(target_os = "macos")`, Linux 上 0 用例不是回归。
-- 提交: 268e50f
+- 提交: 0af2db3
 
 ## 2026-11-26 RAI-385 评审回合:四条发现全部为真并修复
 
@@ -806,7 +806,7 @@ Capy review 给出的 4 条(2 high / 2 medium)复核后全部成立,均属会伤
 复验: `cargo test --bin rdog` 三轮 1117 passed / 0 failed / 2 ignored; Linux 三条本机路径
 重新跑过仍全部 `@response`。`tests/control_lanes` 的 15 红在干净基线上逐字同款(回执
 `handoffs/rai385/receipts/04-baseline-control-lanes-red.txt`), 属既有夹具缺陷。
-- 提交: bb94451
+- 提交: c920ecf
 
 ## 2026-11-26 RAI-385 第三轮评审 (1 low) 修复:登记锁与客户端探测的启动竞态
 
@@ -814,7 +814,7 @@ Capy review 给出的 4 条(2 high / 2 medium)复核后全部成立,均属会伤
 正在启动并 `try_lock`,会拿到 WouldBlock 并被当成"已有活跃 daemon",登记静默缺失到下次重启。
 `register_local_daemon` 改为退避重试(5 次 x 80ms),新增用例
 `registration_should_retry_past_a_short_liveness_probe` 锁住该路径。
-- 提交: 03bf1e8
+- 提交: 42c9466
 
 ## 2026-11-26 RAI-385 收尾:跨机验收通过 + 凭证同源坑入册
 
@@ -823,4 +823,4 @@ Capy review 给出的 4 条(2 high / 2 medium)复核后全部成立,均属会伤
 daemon + 主张量 profile 的客户端 = 凭证不同源, zenoh 在 OpenSyn 阶段回 Close(GENERIC),
 表象像网络问题。该门槛写进 docs/solutions/conventions/e2e-isolated-home-credentials.md
 Guidance 第 0 条 (不只 e2e, 人工跨机验收同样适用)。
-- 提交: 6b4893f
+- 提交: a06f59f
