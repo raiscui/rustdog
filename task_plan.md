@@ -178,3 +178,10 @@ RAI-387: unixpipe 本机 fast path 从 `$TMPDIR` 迁到固定运行目录,补名
       是既有 figment::Jail 删除 cwd 的并行竞态(8123e21 那次 main CI 同一个测试就红过);
       windows 是 ort-sys 下载 onnxruntime 的 panic(网络,基础设施)
 - 提交: 7b4e728
+
+### [2026-11-26 06:25:00] 二轮评审 2 条修复
+- [x] (medium) 跨版本互斥单向 → 新 owner 也持 `<base>.rdog-owner.pid` flock + 写 pid(双向闭环)
+- [x] (low) legacy 分支 clean 的 TOCTOU → 两条分支都持锁删除
+- [x] 配套: 接管路径只清 FIFO(不再连带删自己刚拿到的守卫);锁顺序先新后旧,错误信息更准
+- [x] 新增 2 回归用例;`cargo test --bin rdog` 1104 passed
+- 提交: 8dbd209
