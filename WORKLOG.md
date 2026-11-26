@@ -815,3 +815,12 @@ Capy review 给出的 4 条(2 high / 2 medium)复核后全部成立,均属会伤
 `register_local_daemon` 改为退避重试(5 次 x 80ms),新增用例
 `registration_should_retry_past_a_short_liveness_probe` 锁住该路径。
 - 提交: 03bf1e8
+
+## 2026-11-26 RAI-385 收尾:跨机验收通过 + 凭证同源坑入册
+
+总控用同一分支 88ef40e 在 Mac 重建客户端后, 跨机 zenoh 两条命令 (显式 entry-point / 纯发现)
+都拿到 @response, 四条验收全部成立。中途那次失败证伪了"跨网坏了"的猜测: 隔离 profile 的
+daemon + 主张量 profile 的客户端 = 凭证不同源, zenoh 在 OpenSyn 阶段回 Close(GENERIC),
+表象像网络问题。该门槛写进 docs/solutions/conventions/e2e-isolated-home-credentials.md
+Guidance 第 0 条 (不只 e2e, 人工跨机验收同样适用)。
+- 提交: 6b4893f
