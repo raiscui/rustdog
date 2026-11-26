@@ -72,6 +72,9 @@ pub struct LinkUnicastTls {
     read_mtx: AsyncMutex<()>,
     auth_identifier: LinkAuthId,
     rai524_seq: std::sync::atomic::AtomicUsize,
+    /// 同向整调用 gate (可跨 await): 保证一次 read_exact / write_all 不被同向的另一个调用插队。
+    read_gate: AsyncMutex<()>,
+    write_gate: AsyncMutex<()>,
     read_wake: std::sync::Arc<ReadWake>,
     write_wake: std::sync::Arc<ReadWake>,
     mtu: BatchSize,
@@ -92,9 +95,16 @@ mod rai524_short {
     pub static LOCK_HELD_ACROSS_AWAIT: AtomicUsize = AtomicUsize::new(0);
     /// 因为无数据而放锁去等唤醒的次数。
     pub static OUTSIDE_WAITS: AtomicUsize = AtomicUsize::new(0);
+    /// 连续「poll 到 Pending 后没有拿到新事件又立刻重 poll」的次数。
+    /// 正确实现上应与连接数同量级; permit 泄漏那种空转会把它顶高 (见评审 severe 1)。
+    pub static NO_PROGRESS_REPOLLS: AtomicUsize = AtomicUsize::new(0);
 
     pub fn note_poll() {
         POLLS_IN_LOCK.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn note_no_progress_repoll() {
+        NO_PROGRESS_REPOLLS.fetch_add(1, Ordering::Relaxed);
     }
 
     pub fn note_wait() {
@@ -197,6 +207,8 @@ impl LinkUnicastTls {
             read_mtx: AsyncMutex::new(()),
             auth_identifier,
             rai524_seq: std::sync::atomic::AtomicUsize::new(0),
+            read_gate: AsyncMutex::new(()),
+            write_gate: AsyncMutex::new(()),
             read_wake: std::sync::Arc::new(ReadWake {
                 permits: tokio::sync::Semaphore::new(0),
             }),
@@ -230,6 +242,8 @@ impl LinkUnicastTls {
     /// 读与写共用同一把锁 (`write_mtx`), 所以两个任务不可能同时进入同一个 rustls 连接
     /// (这正是 `HandshakeNotComplete` 的来源); 而两侧都不跨 await 持锁, 所以谁也不会把对方饿死。
     async fn write_short_critical_section(&self, buffer: &[u8]) -> ZResult<usize> {
+        // 同向整调用 gate: 一次 write 调用期间不让同向的另一个调用插入, 否则帧会交错。
+        let _gate = zasynclock!(self.write_gate);
         loop {
             let mut pending = false;
             {
@@ -271,7 +285,10 @@ impl LinkUnicastTls {
                 tracing::trace!("Write error on TLS link {}: {}", self, err);
                 Err(zerror!(err).into())
             }
-            std::task::Poll::Pending => Ok(None),
+            std::task::Poll::Pending => {
+                rai524_short::note_no_progress_repoll();
+                Ok(None)
+            }
         }
     }
 
@@ -280,6 +297,7 @@ impl LinkUnicastTls {
         buffer: &mut [u8],
         allow_partial: bool,
     ) -> ZResult<usize> {
+        let _gate = zasynclock!(self.read_gate);
         let mut filled = 0usize;
         loop {
             let mut pending = false;
@@ -350,7 +368,12 @@ impl LinkUnicastTls {
                     tracing::trace!("Read error on TLS link {}: {}", self, err);
                     return Err(zerror!(err).into());
                 }
-                std::task::Poll::Pending => return Ok(None),
+                std::task::Poll::Pending => {
+                    // 每次「poll 到无数据」计一次: 正确实现上与等待次数同量级,
+                    // permit 泄漏导致的空转会让它相对连接数暴涨。
+                    rai524_short::note_no_progress_repoll();
+                    return Ok(None);
+                }
             }
         }
     }
