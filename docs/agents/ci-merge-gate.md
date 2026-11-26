@@ -110,6 +110,11 @@ target 的 `passed` 必须 > 0**, 否则判红 —— 「退出码 0 但零执�
 
 `recording_e2e` 仍由它自己那一步执行 (unix)。
 
+**跑批脚本的编码要在两个方向上都固定 utf-8。** windows runner 的控制台是 cp1252: 只修解码
+(`subprocess.run(..., encoding="utf-8")`) 会让下一步在**输出**端撞上 `UnicodeEncodeError`
+(summary 表格与失败详情里有中文), 归因看起来却是「target 红」。2026-11-26 为这件事连修两轮。
+现在 `main()` 开头把 `stdout` / `stderr` 一起 `reconfigure(encoding="utf-8", errors="replace")`。
+
 **单个 target 有 1500s 墙钟上限** (`TARGET_TIMEOUT_SECONDS`), 超时判该 target 红并把它
 已有的输出留进失败详情, summary 里同时给出每个 target 的 `elapsed`。原因是反过来的:
 挂住的 target 会一路撑到 GitHub 的 job timeout 被 cancel, 日志只剩一句
