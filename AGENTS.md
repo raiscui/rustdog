@@ -85,6 +85,11 @@ Issues 和 Wayfinder maps 使用 GitHub Issues。详见 `docs/agents/issue-track
   - 用途: 固定 `terminate_process_tree` 改用 `libc::kill(2)` 直发进程组信号的决策与验证链, 以及"超时标记对但总时长超标"症状的孤儿管道诊断法
   - 何时阅读: 向进程组/会话发信号、做 PTY/后台任务/shell lane 超时清理, 或考虑用外部命令 (kill/ps/pgrep) 做进程管理前
 
+- `docs/solutions/logic-errors/local-loopback-control-lane-mismatch.md`
+  - 主题: 本机自连的两种坏路径 — 把 listen 的 `0.0.0.0` 当 connect 目标 (Windows os error 10049), 以及 "端口通了但会话提前关闭" 实为该端口只跑 zenoh 协议
+  - 用途: 固定未指定地址 -> 回环的映射出口 (`connect_host`)、本机 daemon 控制 lane 登记表 (`src/local_daemon_registry.rs`) 与回环端口按登记认领协议的语义; unix 仍独占 unixpipe FIFO
+  - 何时阅读: 改 `rdog control` 目标解析/端口简写、`rdog control self` 本机 fast path、`run_zenoh_router` 的 inbound 关闭语义、或排查 "TCP 连上但一帧没回就断开" 前
+
 - `docs/solutions/tooling-decisions/upstream-pi-macos-ops-cli-contract.md`
   - 主题: upstream Pi v0.84.1 macOS ops 的 CLI 工具 allowlist、skill preload、agent 隔离和 models.json 边界
   - 用途: 固定 `--tools bash,read`、绝对 `--append-system-prompt`、`PI_CODING_AGENT_DIR` 与旧 Rust Pi profile 字段的迁移口径

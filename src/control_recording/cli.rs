@@ -85,6 +85,11 @@ pub fn run(
         shared.entry_point.clone(),
         shared.host.clone(),
     )?;
+    // 与 `rdog control` 同口径: 推断出来的回环端口先按本机 daemon 登记表认领协议。
+    let invocation = match shared.transport {
+        Some(_) => invocation,
+        None => crate::control_invocation::promote_loopback_tcp(invocation),
+    };
     let lines = vec![line];
     send_control_lines_for_invocation(&invocation, &lines, artifacts_dir).map(|_| ())
 }

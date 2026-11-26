@@ -6,9 +6,13 @@ use crate::{control_frames, control_transport, zenoh_control, zenoh_runtime};
 pub(crate) const LEGACY_ZENOH_PEER_TRANSPORT_ERROR: &str =
     "旧 transport `zenoh-peer` 已废弃; 请改用 `--transport zenoh`。`rdog control` 默认会自动发现 router，必要时再补 `--entry-point tcp/<router-host>:<port>`";
 
+/// 解析 `HOST [PORT]` 位置参数,保持**监听语义**:只给端口时 host 留 `0.0.0.0`,
+/// 因为 `rdog listen` 用它决定 bind 地址。
+///
+/// 需要 connect 语义(未指定地址 -> 回环)的调用方走 `connect_hosts_from_opts`。
 pub(crate) fn host_from_opts(host: Vec<String>) -> Result<(String, String), String> {
     let fixed_host = if host.len() == 1 {
-        ("0.0.0.0".to_string(), host.get(0).unwrap().to_string()) // Safe to unwrap here
+        (BIND_WILDCARD_HOST.to_string(), host.get(0).unwrap().to_string()) // Safe to unwrap here
     } else if let [host, port] = &host[..] {
         (host.to_string(), port.to_string())
     } else {
@@ -16,6 +20,37 @@ pub(crate) fn host_from_opts(host: Vec<String>) -> Result<(String, String), Stri
     };
 
     Ok(fixed_host)
+}
+
+/// 同 `host_from_opts`,但按 **connect 语义**把未指定地址翻成回环。
+pub(crate) fn connect_hosts_from_opts(host: Vec<String>) -> Result<(String, String), String> {
+    let (host, port) = host_from_opts(host)?;
+    Ok((connect_host(&host).to_string(), port))
+}
+
+/// 只写端口时的默认 connect 目标。
+pub(crate) const LOOPBACK_HOST: &str = "127.0.0.1";
+
+/// 只写端口时 `rdog listen` 的默认 bind 地址。
+pub(crate) const BIND_WILDCARD_HOST: &str = "0.0.0.0";
+
+/// 把"绑定用的未指定地址"翻译成"本机能连的回环地址"。
+///
+/// `0.0.0.0` / `::` 是 listen 地址: 拿它当 connect 目标在 Linux 上碰巧落到本机,
+/// 在 Windows 上直接 `os error 10049`(WSAEADDRNOTAVAIL)。用户真正想说的是
+/// "这台机器上的 daemon",所以这里统一映射回环。
+pub(crate) fn connect_host(host: &str) -> &str {
+    match host {
+        "0.0.0.0" => LOOPBACK_HOST,
+        "::" | "[::]" | "::0" | "[::0]" => "::1",
+        other => other,
+    }
+}
+
+/// 该地址是否指向本机(回环或未指定地址)。
+fn is_local_host(host: &str) -> bool {
+    let host = connect_host(host);
+    host == "::1" || host.eq_ignore_ascii_case("localhost") || host.starts_with("127.")
 }
 
 /// 把 host 末尾连续以 `@` 开头的一组元素抽出当 one-shot line 列表。
@@ -119,7 +154,7 @@ fn resolve_explicit_tcp_control(
         return Ok(ControlInvocation::WebSocket { url });
     }
 
-    let (host, port) = host_from_opts(positional)?;
+    let (host, port) = connect_hosts_from_opts(positional)?;
     Ok(ControlInvocation::Tcp { host, port })
 }
 
@@ -173,7 +208,7 @@ fn resolve_inferred_control(
         // 跟 `self` 关键字路径一样,只是更简洁(`rdog control @<line>`)。
         [] => Ok(ControlInvocation::ZenohLocal { namespace: None }),
         [single] if single.parse::<u16>().is_ok() => Ok(ControlInvocation::Tcp {
-            host: "0.0.0.0".to_string(),
+            host: LOOPBACK_HOST.to_string(),
             port: single.to_string(),
         }),
         [single] if looks_like_ipv4_address(single) => Err(format!(
@@ -185,7 +220,7 @@ fn resolve_inferred_control(
             entry_point,
         }),
         [_, _] => {
-            let (host, port) = host_from_opts(positional)?;
+            let (host, port) = connect_hosts_from_opts(positional)?;
             Ok(ControlInvocation::Tcp { host, port })
         }
         // host: num_args = 0..=3 时,3 个非 `@` 位置参数是用户错误。
@@ -280,6 +315,153 @@ pub(crate) fn parse_port(port: &str) -> Result<u16, String> {
         .map_err(|err| format!("Invalid port `{port}`: {err}"))
 }
 
+/// `self` / 空 target 解析出的本机控制落点。
+///
+/// 本机 daemon 可能是 zenoh router(控制面在 zenoh 上),也可能是 line-control TCP
+/// 接收端。客户端不该猜,所以解析结果直接带上"用哪种协议、连哪里"。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum LocalControlTarget {
+    Zenoh {
+        namespace: Option<String>,
+        daemon_name: String,
+        entry_points: Vec<String>,
+    },
+    Tcp {
+        host: String,
+        port: u16,
+    },
+}
+
+/// 解析本机 fast path 目标。
+///
+/// 平台分工: unix 继续用 unixpipe local-default registry(行为不变); 其他平台读
+/// `local_daemon_registry`(daemon 启动时登记的控制 lane)。两条都不通时,报出当前平台
+/// 那条链路的原始错误 —— 升级排障要看得到 candidates / namespace 提示。
+pub(crate) fn resolve_local_control_target(
+    namespace: Option<String>,
+) -> Result<LocalControlTarget, String> {
+    let unixpipe_outcome = unixpipe_local_target(namespace.as_deref());
+    if let Ok(Some(target)) = &unixpipe_outcome {
+        return Ok(target.clone());
+    }
+
+    match registry_local_target(namespace.as_deref()) {
+        Ok(target) => Ok(target),
+        Err(registry_err) => match unixpipe_outcome {
+            // unix: 老链路的诊断信息更具体(unmanaged FIFO 候选 / namespace 提示),优先保留。
+            Err(unixpipe_err) => Err(unixpipe_err.to_string()),
+            Ok(None) => Err(registry_err.to_string()),
+            Ok(Some(target)) => Ok(target),
+        },
+    }
+}
+
+/// unix 的 unixpipe lane 解析;非 unix 平台恒为 None(那条链路不存在)。
+fn unixpipe_local_target(
+    namespace: Option<&str>,
+) -> Result<Option<LocalControlTarget>, std::io::Error> {
+    if !cfg!(unix) {
+        return Ok(None);
+    }
+
+    let daemon_name = zenoh_runtime::find_local_daemon_name(namespace)?;
+    let resolved_namespace = namespace
+        .map(str::to_string)
+        .or_else(|| crate::zenoh_identity::infer_namespace_from_daemon_name(&daemon_name));
+    Ok(Some(LocalControlTarget::Zenoh {
+        namespace: resolved_namespace,
+        daemon_name,
+        // unix 由 zenoh 层的 unixpipe 探测决定 endpoint,这里不预置。
+        entry_points: Vec::new(),
+    }))
+}
+
+/// 读本机 daemon 登记表,把登记的控制 lane 翻成客户端可直接执行的落点。
+fn registry_local_target(
+    namespace: Option<&str>,
+) -> Result<LocalControlTarget, std::io::Error> {
+    let record = crate::local_daemon_registry::find_local_daemon(namespace)?;
+    Ok(record_into_target(record))
+}
+
+fn record_into_target(
+    record: crate::local_daemon_registry::LocalDaemonRecord,
+) -> LocalControlTarget {
+    match record.lane {
+        crate::local_daemon_registry::LocalControlLane::Zenoh {
+            connect_endpoints,
+        } => LocalControlTarget::Zenoh {
+            namespace: Some(record.namespace),
+            daemon_name: record.daemon_name,
+            entry_points: connect_endpoints,
+        },
+        crate::local_daemon_registry::LocalControlLane::LineTcp { host, port } => {
+            LocalControlTarget::Tcp { host, port }
+        }
+    }
+}
+
+/// 把"回环 host + 端口"的 TCP 目标升级成本机登记表里那条真实控制 lane。
+///
+/// 用户看到的是一个端口(`rdog control 17480`),但 zenoh 模式的 daemon 在那端口上
+/// 只说 zenoh 协议,原始 line-control 打过去只会被断开。这里按端口认领: 命中已登记
+/// daemon 就改用它的协议,没命中就保持 line-control TCP 老行为。
+///
+/// 只对推断出来的目标生效: 显式 `--transport tcp` 是用户的协议选择,不在这里改写。
+pub(crate) fn promote_loopback_tcp_with<F>(invocation: ControlInvocation, lookup: F) -> ControlInvocation
+where
+    F: Fn(u16) -> Option<crate::local_daemon_registry::LocalDaemonRecord>,
+{
+    let ControlInvocation::Tcp { host, port } = &invocation else {
+        return invocation;
+    };
+    if !is_local_host(host) {
+        return invocation;
+    }
+    let Ok(port) = parse_port(port) else {
+        return invocation;
+    };
+    match lookup(port) {
+        Some(record) => match record_into_target(record) {
+            LocalControlTarget::Zenoh {
+                namespace,
+                daemon_name,
+                entry_points,
+            } => {
+                log::debug!(
+                    "control link: local-daemon-registry -> zenoh (port={port}, namespace={namespace:?}, daemon={daemon_name}, connect_endpoints={entry_points:?})"
+                );
+                ControlInvocation::Zenoh {
+                    namespace,
+                    target_name: Some(daemon_name),
+                    entry_point: entry_points,
+                }
+            }
+            LocalControlTarget::Tcp { host, port } => {
+                log::debug!("control link: local-daemon-registry -> line-control tcp {host}:{port}");
+                ControlInvocation::Tcp {
+                    host,
+                    port: port.to_string(),
+                }
+            }
+        },
+        None => invocation,
+    }
+}
+
+/// 生产路径: 端口归属查不到(或查不动)就保持原目标,不因为登记表读失败而拒绝连接。
+pub(crate) fn promote_loopback_tcp(invocation: ControlInvocation) -> ControlInvocation {
+    promote_loopback_tcp_with(invocation, |port| {
+        match crate::local_daemon_registry::find_local_daemon_by_port(port) {
+            Ok(record) => record,
+            Err(err) => {
+                log::debug!("control link: local-daemon-registry lookup for port {port} failed: {err}");
+                None
+            }
+        }
+    })
+}
+
 pub(crate) fn send_single_control_line_tcp(
     host: &str,
     port: u16,
@@ -342,23 +524,28 @@ pub(crate) fn send_control_lines_for_invocation(
             artifacts_dir,
         ),
         ControlInvocation::ZenohLocal { namespace } => {
-            let target_name = zenoh_runtime::find_local_daemon_name(namespace.as_deref())
-                .map_err(|err| err.to_string())?;
-            let resolved_namespace = namespace
-                .clone()
-                .or_else(|| crate::zenoh_identity::infer_namespace_from_daemon_name(&target_name));
-            let Some(resolved_namespace) = resolved_namespace else {
-                return Err(format!(
-                    "`rdog control self` 找不到 namespace;请传 `--namespace`(例如 `--namespace lab`)。daemon_name={target_name:?} 没有可推断的 namespace 后缀"
-                ));
-            };
-            send_control_lines_zenoh(
-                Some(resolved_namespace),
-                Some(target_name),
-                Vec::new(),
-                lines,
-                artifacts_dir,
-            )
+            match resolve_local_control_target(namespace.clone())? {
+                LocalControlTarget::Zenoh {
+                    namespace,
+                    daemon_name,
+                    entry_points,
+                } => {
+                    log::debug!(
+                        "control link: local-daemon -> zenoh (namespace={namespace:?}, daemon={daemon_name}, connect_endpoints={entry_points:?})"
+                    );
+                    send_control_lines_zenoh(
+                        namespace,
+                        Some(daemon_name),
+                        entry_points,
+                        lines,
+                        artifacts_dir,
+                    )
+                }
+                LocalControlTarget::Tcp { host, port } => {
+                    log::debug!("control link: local-daemon -> line-control tcp {host}:{port}");
+                    send_control_lines_tcp(&host, port, lines, artifacts_dir)
+                }
+            }
         }
     }
 }
@@ -375,9 +562,15 @@ fn send_control_lines_tcp(
     lines: &[String],
     artifacts_dir: &Path,
 ) -> Result<Vec<ControlLineExchange>, String> {
+    log::debug!("control link: line-control tcp {host}:{port}");
     let mut transport = connect_control_tcp(host, port)?;
-    collect_control_lines_from_transport(&mut transport, lines, artifacts_dir)
-        .map_err(|err| err.to_string())
+    collect_control_lines_from_transport(
+        &mut transport,
+        lines,
+        artifacts_dir,
+        Some(ControlPeer { host, port }),
+    )
+    .map_err(|err| err.to_string())
 }
 
 /// 建立 control TCP 连接, 并把建连失败翻译成能指导排查的提示。
@@ -426,7 +619,7 @@ fn send_control_lines_websocket(
 ) -> Result<Vec<ControlLineExchange>, String> {
     let mut transport = control_transport::ControlTransport::connect_websocket(url)
         .map_err(|err| err.to_string())?;
-    collect_control_lines_from_transport(&mut transport, lines, artifacts_dir)
+    collect_control_lines_from_transport(&mut transport, lines, artifacts_dir, None)
         .map_err(|err| err.to_string())
 }
 
@@ -452,10 +645,37 @@ fn send_control_lines_zenoh(
         .map_err(|err| err.to_string())
 }
 
+/// TCP line-control 对端身份,只用于把"会话被关"翻译成可行动的错误。
+#[derive(Debug, Clone, Copy)]
+struct ControlPeer<'a> {
+    host: &'a str,
+    port: u16,
+}
+
+impl ControlPeer<'_> {
+    /// 一帧都没收到就被关: 这个端口上说的不是 line-control。
+    ///
+    /// 实测成因 (RAI-385): daemon 以 zenoh 模式启动时, `run_zenoh_router` 会强制关掉
+    /// inbound,配置里的 `tcp/...` 端口只跑 zenoh 协议。原始 TCP 握手照样成功,一发
+    /// line-control 字节就被 zenoh 丢掉链路,客户端只看到 EOF。
+    fn closed_before_any_frame_message(&self) -> String {
+        format!(
+            "对端 {host}:{port} 接受了 TCP 连接, 但一帧 control 都没回就关闭了会话 —— 该端口不是 \
+             line-control 接收端 (daemon 以 zenoh 模式启动时, 配置里的 tcp 端口只跑 zenoh 协议, \
+             daemon 横幅会写 `tcp=不启动`)。改用本机 fast path `rdog control self @<line>`, \
+             或 zenoh 目标 `rdog control --transport zenoh --entry-point tcp/{host}:{port} <daemon-name> @<line>`, \
+             或让 daemon 以 `rdog daemon --transport tcp` 启动",
+            host = self.host,
+            port = self.port
+        )
+    }
+}
+
 fn collect_control_lines_from_transport(
     transport: &mut control_transport::ControlTransport,
     lines: &[String],
     artifacts_dir: &Path,
+    peer: Option<ControlPeer<'_>>,
 ) -> std::io::Result<Vec<ControlLineExchange>> {
     let mut exchanges = Vec::with_capacity(lines.len());
     for line in lines {
@@ -463,9 +683,20 @@ fn collect_control_lines_from_transport(
         let mut frames = Vec::new();
         loop {
             let Some(message) = transport.read_message()? else {
+                let message = match (peer, frames.is_empty()) {
+                    (Some(peer), true) => peer.closed_before_any_frame_message(),
+                    (_, true) => {
+                        "control connection 在收到任何 frame 之前就关闭了;对端可能不是 line-control 接收端"
+                            .to_string()
+                    }
+                    (_, false) => format!(
+                        "control connection 在收到 UI script 结果前就关闭了 (已收到 {} 个 frame)",
+                        frames.len()
+                    ),
+                };
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::UnexpectedEof,
-                    "control connection 在收到 UI script 结果前就关闭了",
+                    message,
                 ));
             };
             let frame = control_frames::ControlFrame::parse_inbound_result_message(&message)?;
@@ -598,7 +829,7 @@ fn print_control_line_exchange(exchange: &ControlLineExchange) -> std::io::Resul
 mod tests {
     use super::{
         describe_tcp_connect_failure, extract_one_shot_lines, parse_port,
-        resolve_control_invocation, ControlInvocation,
+        promote_loopback_tcp_with, resolve_control_invocation, ControlInvocation,
     };
     use crate::input::Transport;
 
@@ -636,11 +867,114 @@ mod tests {
         )
         .expect("single numeric positional should stay tcp port shorthand");
 
+        // 只写端口 = "这台机器上的 daemon": connect 目标必须是回环,
+        // 不能拿 listen 用的 0.0.0.0 去连 (Windows 上 os error 10049)。
         assert_eq!(
             invocation,
             ControlInvocation::Tcp {
-                host: "0.0.0.0".to_string(),
+                host: "127.0.0.1".to_string(),
                 port: "5555".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn control_invocation_should_map_unspecified_bind_host_to_loopback() {
+        let invocation = resolve_control_invocation(
+            None,
+            None,
+            None,
+            None,
+            Vec::new(),
+            vec!["0.0.0.0".to_string(), "17480".to_string()],
+        )
+        .expect("wildcard host should still resolve as a tcp target");
+
+        assert_eq!(
+            invocation,
+            ControlInvocation::Tcp {
+                host: "127.0.0.1".to_string(),
+                port: "17480".to_string()
+            }
+        );
+
+        let ipv6 = resolve_control_invocation(
+            None,
+            None,
+            None,
+            None,
+            Vec::new(),
+            vec!["::".to_string(), "17480".to_string()],
+        )
+        .expect("ipv6 wildcard host should still resolve as a tcp target");
+        assert_eq!(
+            ipv6,
+            ControlInvocation::Tcp {
+                host: "::1".to_string(),
+                port: "17480".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn loopback_port_should_be_promoted_to_the_registered_local_daemon_lane() {
+        let invocation = ControlInvocation::Tcp {
+            host: "127.0.0.1".to_string(),
+            port: "17480".to_string(),
+        };
+
+        let promoted = promote_loopback_tcp_with(invocation, |port| {
+            (port == 17480).then(|| crate::local_daemon_registry::LocalDaemonRecord {
+                schema: crate::local_daemon_registry::LOCAL_DAEMON_SCHEMA.to_string(),
+                namespace: "lab".to_string(),
+                daemon_name: "win-test.lab".to_string(),
+                pid: 7,
+                lane: crate::local_daemon_registry::LocalControlLane::Zenoh {
+                    connect_endpoints: vec!["tcp/127.0.0.1:17480".to_string()],
+                },
+                created_at_unix_ms: 0,
+            })
+        });
+
+        assert_eq!(
+            promoted,
+            ControlInvocation::Zenoh {
+                namespace: Some("lab".to_string()),
+                target_name: Some("win-test.lab".to_string()),
+                entry_point: vec!["tcp/127.0.0.1:17480".to_string()],
+            }
+        );
+    }
+
+    #[test]
+    fn remote_host_or_unregistered_port_should_keep_line_control_tcp() {
+        let promoted = promote_loopback_tcp_with(
+            ControlInvocation::Tcp {
+                host: "192.168.50.57".to_string(),
+                port: "17480".to_string(),
+            },
+            |_| panic!("remote host must not consult the local registry"),
+        );
+        assert_eq!(
+            promoted,
+            ControlInvocation::Tcp {
+                host: "192.168.50.57".to_string(),
+                port: "17480".to_string(),
+            }
+        );
+
+        let unregistered = promote_loopback_tcp_with(
+            ControlInvocation::Tcp {
+                host: "127.0.0.1".to_string(),
+                port: "5555".to_string(),
+            },
+            |_| None,
+        );
+        assert_eq!(
+            unregistered,
+            ControlInvocation::Tcp {
+                host: "127.0.0.1".to_string(),
+                port: "5555".to_string(),
             }
         );
     }

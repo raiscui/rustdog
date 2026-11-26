@@ -1,7 +1,7 @@
 ---
 title: e2e 子进程 HOME 隔离与三方同源凭证 — spawn 点全覆盖纪律
 date: 2026-08-29
-last_updated: 2026-08-30
+last_updated: 2026-11-26
 module: e2e-tests
 component: zenoh_router_client tests / auth / tls material
 problem_type: test_failure
@@ -15,6 +15,7 @@ tags:
   - spawn-points
 verified_by:
   - "PR #92: 19 处 spawn 点 HOME 注入后全量 1034/1034 (此前部分测试的通过是凭证匹配噪声)"
+  - "2026-11-26 RAI-385 真机跨机验收实测: 隔离 profile 的 Windows daemon + 主张量 profile 的 Mac 客户端 = OpenSyn 被 Close(GENERIC) 拒; 把 daemon 的 auth.toml 同源喂给客户端 (auth 保持开启) 后同一条命令通过。该门槛不只用于 e2e, 也适用于人工跨机验收"
   - "对拍: test session 用真实 HOME 凭证连隔离 daemon 时 usrpwd 全拒 (连接探测不通), 修复后 probe 通"
   - "tls e2e: 隔离 HOME 内 tls-init 自持材料, 错 CA BadSignature 拒绝场景不受真实目录污染"
 root_cause: "子进程继承测试进程的真实 HOME; 认证层落地后 daemon 读真实 ~/.rdog/auth.toml, 与测试 session 读到的凭证是否一致成了隐式耦合, 单点遗漏即全链失败且表象多样 (假 flake / 超时 / OpenSyn 被拒)"
@@ -37,6 +38,12 @@ resolution_type: "进程级 test_isolated_home (temp dir) + ensure_test_home_cre
 
 ## Guidance
 
+0. **跨机人工验收同样要凭证同源** (2026-11-26 RAI-385 实测): 被控端用隔离 profile 起 daemon、
+   客户端用自己默认 profile 去连时, zenoh 在握手阶段回 `Close(GENERIC)`
+   (`Received a close message (reason GENERIC) in response to an OpenSyn`), 而
+   `nc -vz` 通、scout 能看到 locator —— 表象像"跨网不通", 实为凭证不同源。
+   判据是先看 daemon 是否 `auth enabled`, 再把同一份 `~/.rdog/auth.toml` 给客户端 (或用无
+   auth.toml 的隔离 HOME 客户端对 no-auth daemon), 不要先去怀疑网络。
 1. **进程级隔离 HOME** (temp dir, 测试二进制进程内 OnceLock);
 2. **手写测试凭证** (不走 daemon 启动生成 — 太重), daemon/client/session 同读一份;
 3. **spawn 点穷举**: daemon `-c config` / control 各 helper / agent 子进程 /

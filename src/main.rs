@@ -58,6 +58,7 @@ mod daemon;
 mod hidden_mode;
 mod input;
 mod listener;
+mod local_daemon_registry;
 mod local_run;
 mod pty_control;
 mod screenshot;
@@ -297,7 +298,8 @@ fn run(opts: input::Opts) -> Result<(), String> {
             listen(&opts).map_err(|err| err.to_string())?;
         }
         Command::Connect { shell, mode, host } => {
-            let (host, port) = match control_invocation::host_from_opts(host) {
+            // connect 语义: 未指定地址(0.0.0.0 / ::)翻回环,别拿 listen 地址去连。
+            let (host, port) = match control_invocation::connect_hosts_from_opts(host) {
                 Ok(value) => value,
                 Err(err) => return Err(err),
             };
@@ -465,6 +467,12 @@ fn run(opts: input::Opts) -> Result<(), String> {
                 entry_point,
                 host,
             )?;
+            // 显式 `--transport tcp` 是用户的协议选择,不改写;推断出来的回环端口才按
+            // 本机 daemon 登记表认领协议(`rdog control 17480` 那种写法)。
+            let invocation = match transport {
+                Some(_) => invocation,
+                None => control_invocation::promote_loopback_tcp(invocation),
+            };
 
             if !one_shot_lines.is_empty() {
                 control_invocation::send_control_lines_for_invocation(
@@ -582,37 +590,30 @@ fn run(opts: input::Opts) -> Result<(), String> {
                         );
                     }
 
-                    // 本机默认选择由runtime层统一处理:
-                    // 只接受active managed local-default registry,FIFO扫描仅用于升级诊断。
-                    let target_name = zenoh_runtime::find_local_daemon_name(namespace.as_deref())
-                        .map_err(|err| err.to_string())?;
-
-                    // 推断 namespace(从 daemon_name 的点后缀),显式给的优先。
-                    let resolved_namespace = namespace.clone().or_else(|| {
-                        crate::zenoh_identity::infer_namespace_from_daemon_name(&target_name)
-                    });
-
-                    // 找不到 namespace 的两种情况:
-                    // 1. 用户没传 --namespace 且 daemon_name 没点后缀(无法推断)
-                    // 2. 用户传了 --namespace 但 daemon 不存在
-                    // 这两种都属于用户配置错,统一报"需要 --namespace"。
-                    let resolved_namespace = match resolved_namespace {
-                        Some(ns) => ns,
-                        None => {
-                            return Err(format!(
-                                "`rdog control self` 找不到 namespace;请传 `--namespace`(例如 `--namespace lab`)。daemon_name={target_name:?} 没有可推断的 namespace 后缀"
-                            ));
+                    // 本机落点由 runtime 层统一解析: unix 看 unixpipe local-default registry,
+                    // 其他平台看 daemon 启动时登记的控制 lane。
+                    // one-shot 已在进入 match 前统一处理,这里只保留交互式 stdin/stdout 路径。
+                    match control_invocation::resolve_local_control_target(namespace)? {
+                        control_invocation::LocalControlTarget::Zenoh {
+                            namespace,
+                            daemon_name,
+                            entry_points,
+                        } => {
+                            log::debug!(
+                                "control link: local-daemon -> zenoh (namespace={namespace:?}, daemon={daemon_name}, connect_endpoints={entry_points:?})"
+                            );
+                            shell::control_remote_zenoh(
+                                namespace,
+                                Some(daemon_name),
+                                entry_points,
+                            )
+                            .map_err(|err| err.to_string())?;
                         }
-                    };
-
-                    // one-shot 已在进入 match 前统一处理。
-                    // 这里仅保留本机默认 daemon 的交互式 stdin/stdout 路径。
-                    shell::control_remote_zenoh(
-                        Some(resolved_namespace),
-                        Some(target_name),
-                        vec![],
-                    )
-                    .map_err(|err| err.to_string())?;
+                        control_invocation::LocalControlTarget::Tcp { host, port } => {
+                            log::debug!("control link: local-daemon -> line-control tcp {host}:{port}");
+                            shell::control_remote(&host, port).map_err(|err| err.to_string())?;
+                        }
+                    }
                 }
             }
         }
