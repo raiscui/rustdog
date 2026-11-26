@@ -1330,41 +1330,31 @@ mod tests {
     }
 
     #[test]
-    fn resume_accepts_a_differently_spelled_but_identical_target() {
-        // ./a.bin 与 a.bin 在 Path 组件层面不相等, 但指的是同一个文件. 若续传判定用纯 Path
-        // 相等, 客户端换个写法重连就会被拒成"换目标", 而错误信息只给 @file-cancel —— 那会
-        // 删掉半成品, 又回到从 0 开始. 两处判定必须用同一个比较口径.
-        let _guard = TRANSFER_TABLE_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let dir = std::env::temp_dir().join(format!("rdog-ft-alias-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let plain = dir.join("alias.bin");
-        let dotted = dir.join(".").join("alias.bin");
-        let tid = unique_id("alias");
-        let data = BASE64_STANDARD.encode(b"xxxxx");
+    fn staging_path_comparison_normalizes_dot_spellings() {
+        // 这条必须直接打比较函数, 不能用 `dir.join(".")` 那种**内部** `.` 去测:
+        // std 的 Path::components() 本来就会丢掉内部 `.`, 于是纯 Path 相等也能过 —— 那样
+        // 用例在修复前就是绿的, 等于没测. 真正需要守的是**前导** `.` (`./a.bin`), 它的 CurDir
+        // 组件会让纯 Path 相等失败.
+        let dotted = Path::new("./a.bin.yino-partial");
+        let plain = Path::new("a.bin.yino-partial");
+        assert_ne!(dotted, plain, "前提: 纯 Path 相等在这里本应失败");
+        assert!(temp_path_matches(Some(dotted), plain), "前导 . 的同义写法应判等");
+        assert!(temp_path_matches(Some(plain), dotted), "反向也应判等");
 
-        execute_put_file(&format!(
-            r#"{{"transfer_id":"{tid}","path":"{}","size":10}}"#,
-            escape_json(&plain.display().to_string())
-        ))
-        .unwrap();
-        execute_file_chunk(&format!(
-            r#"{{"transfer_id":"{tid}","offset":0,"data":"{data}"}}"#
-        ))
-        .unwrap();
+        // 内部 `.` 与绝对路径照旧
+        assert!(temp_path_matches(
+            Some(Path::new("/tmp/x/./a.bin.yino-partial")),
+            Path::new("/tmp/x/a.bin.yino-partial")
+        ));
 
-        let resumed = execute_put_file(&format!(
-            r#"{{"transfer_id":"{tid}","path":"{}","size":10,"resume":true}}"#,
-            escape_json(&dotted.display().to_string())
-        ))
-        .unwrap();
-        assert_eq!(resumed["state"], "resumed");
-        assert_eq!(resumed["written"], 5);
-
-        execute_file_cancel(&format!(r#"{{"transfer_id":"{tid}"}}"#)).unwrap();
-        let _ = std::fs::remove_dir_all(&dir);
+        // 不同文件不能误判成同一个
+        assert!(!temp_path_matches(
+            Some(Path::new("./a.bin.yino-partial")),
+            Path::new("b.bin.yino-partial")
+        ));
+        assert!(!temp_path_matches(None, plain), "没有暂存路径的会话不算命中");
     }
+
 
     #[test]
     fn resume_without_a_partial_reports_open_not_resumed() {
