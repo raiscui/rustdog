@@ -513,12 +513,12 @@ fn control_pty_should_treat_control_words_as_remote_input() {
         .stderr
         .take()
         .expect("script-wrapped control stderr should be piped");
-    let (stderr_buffer, _stderr_collector) = spawn_output_collector(child_stdout);
+    let (stderr_buffer, stderr_collector) = spawn_output_collector(child_stdout);
     let child_stdout = child
         .stdout
         .take()
         .expect("script-wrapped control stdout should be piped");
-    let (stdout_buffer, _stdout_collector) = spawn_output_collector(child_stdout);
+    let (stdout_buffer, stdout_collector) = spawn_output_collector(child_stdout);
 
     let mut child_stdin = child
         .stdin
@@ -538,6 +538,14 @@ fn control_pty_should_treat_control_words_as_remote_input() {
     drop(child_stdin);
 
     let output = wait_with_output_timeout(child, Duration::from_secs(8), "pty transparent input");
+    // 子进程退出只保证管道写端关闭, 收集线程未必已把最后一段读进 buffer;
+    // join 之后快照才是完整内容, 否则断言可能漏掉尾部而假红。
+    stdout_collector
+        .join()
+        .expect("stdout collector thread should finish");
+    stderr_collector
+        .join()
+        .expect("stderr collector thread should finish");
     stop_child(&mut daemon);
     assert!(
         saw_remote_echo,
