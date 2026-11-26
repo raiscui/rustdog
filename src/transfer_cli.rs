@@ -205,13 +205,15 @@ impl TransferReceipt {
             Some(false) => " resume=restarted",
             None => "",
         };
+        // `resume=` / `sha256=` 保持在最后: 依赖最后一列的调用方不该被一个新字段打断,
+        // 所以 `build=` 插在它们前面。
         format!(
-            "{} ok bytes={} sha256={}{} {}",
+            "{} ok bytes={} sha256={} {}{}",
             self.direction,
             self.bytes,
             self.sha256,
-            resume,
-            crate::build_info::build_tag()
+            crate::build_info::build_tag(),
+            resume
         )
     }
 }
@@ -2265,6 +2267,34 @@ mod tests {
         );
         assert!(broken.exists(), "坏文件不删, 留给排障");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_receipt_keeps_its_trailing_resume_column() {
+        // 成功回执是 stdout 的契约行: `resume=` 必须仍是最后一列, 新加的 `build=` 只能插在它前面。
+        let receipt = TransferReceipt {
+            transfer_id: "t".into(),
+            direction: "put",
+            bytes: 10,
+            sha256: "abc".into(),
+            resume_honored: Some(true),
+        };
+        let line = receipt.render();
+        assert!(line.ends_with("resume=honored"), "{line}");
+        assert!(line.contains(" build="), "{line}");
+
+        let plain = TransferReceipt {
+            transfer_id: "t".into(),
+            direction: "get",
+            bytes: 10,
+            sha256: "abc".into(),
+            resume_honored: None,
+        };
+        let plain = plain.render();
+        assert!(
+            plain.ends_with(&format!("build={}", crate::build_info::BUILD_SHA)),
+            "get 没有 resume 列时 build 落在最后: {plain}"
+        );
     }
 
     #[test]

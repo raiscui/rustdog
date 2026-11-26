@@ -15,12 +15,23 @@ fn main() {
     println!("cargo:rerun-if-env-changed=GIT_SHA");
 
     let from_env = std::env::var("GIT_SHA").ok().filter(|sha| !sha.is_empty());
-    let sha = from_env.or_else(git_head).unwrap_or_else(|| "unknown".to_string());
+    let sha = from_env.or_else(workspace_head).unwrap_or_else(|| "unknown".to_string());
     println!("cargo:rustc-env=GIT_SHA={sha}");
 }
 
-fn git_head() -> Option<String> {
+/// 只认**本 workspace 根**的 git 元数据: `CARGO_MANIFEST_DIR` 下没有 `.git` 就写 `unknown`。
+///
+/// 早先直接用 `git rev-parse` 会向上找 —— 把源码包解到别的 checkout 里构建时, 烘进去的是**外层
+/// 仓库**的 sha。那正是这一格要消灭的错: 一个贴错标签的读数比 `unknown` 更坏。
+fn workspace_head() -> Option<String> {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    // `.git` 可以是目录 (普通 checkout) 或文件 (worktree / submodule)。
+    if !root.join(".git").exists() {
+        return None;
+    }
     let output = Command::new("git")
+        .arg("-C")
+        .arg(root)
         .args(["rev-parse", "--short=7", "HEAD"])
         .output()
         .ok()?;

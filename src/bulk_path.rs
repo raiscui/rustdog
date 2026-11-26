@@ -123,6 +123,10 @@ pub(crate) const BULK_PATH_ENDPOINT_DUPLICATED: &str = "bulk_path_endpoint_dupli
 pub(crate) const BULK_PATH_ATTEMPT_MISMATCH: &str = "bulk_path_attempt_mismatch";
 /// §4.2: `concurrency_suspected:true` 的那一半**不得单独用于**"relay 字节为 0"的结论。
 pub(crate) const BULK_PATH_CONCURRENCY_SUSPECTED: &str = "bulk_path_concurrency_suspected";
+/// 两半的 `build` 都在, 但**不是同一个** —— 跨版本比对出来的直连/relay 差异可能只是两端行为不同。
+pub(crate) const BULK_PATH_BUILD_MISMATCH: &str = "bulk_path_build_mismatch";
+/// 两端都是 `unknown`: 无法证明同源。不给结论, 但也不说"不同源" —— 那是另一件事。
+pub(crate) const BULK_PATH_BUILD_UNVERIFIED: &str = "bulk_path_build_unverified";
 /// 两端配上了、但没有任何一端给出可用结论时的前缀 (后面接 `<verdict>[+<verdict>]`)。
 pub(crate) const BULK_PATH_INCONCLUSIVE: &str = "bulk_path_inconclusive";
 
@@ -648,9 +652,19 @@ fn join_group(transfer_id: String, halves: Vec<BulkPathSnapshot>) -> JoinReport 
         return report;
     }
 
+    // 构建身份先判: 两端不是同一次构建时, 后面所有路径判定都不成立 (§8 的固定字段)。
+    let build_reason = if client.build != daemon.build {
+        Some(BULK_PATH_BUILD_MISMATCH.to_owned())
+    } else if client.build == "unknown" {
+        Some(BULK_PATH_BUILD_UNVERIFIED.to_owned())
+    } else {
+        None
+    };
     let suspect = client.concurrency_suspected == Some(true)
         || daemon.concurrency_suspected == Some(true);
-    let (relay_bytes_zero, reason) = if suspect {
+    let (relay_bytes_zero, reason) = if let Some(build_reason) = build_reason {
+        (None, Some(build_reason))
+    } else if suspect {
         // §4.2: 有并发嫌疑的那条证据不得单独用于结论。
         (None, Some(BULK_PATH_CONCURRENCY_SUSPECTED.to_owned()))
     } else if client.relay_bytes_zero_own_half() && daemon.relay_bytes_zero_own_half() {
@@ -1270,6 +1284,32 @@ mod tests {
             Some(BULK_PATH_CONCURRENCY_SUSPECTED)
         );
         assert_eq!(reports[0].relay_bytes_zero, None);
+    }
+
+    #[test]
+    fn halves_from_different_builds_are_not_a_conclusion() {
+        // 两端 build 不同 ⇒ 那条读数不成立 (§8)。不明说的话, join 会把它当正常配对给出
+        // `relay_bytes_zero=true` —— 而两端可能根本不是同一份代码。
+        let mut client = half("client", Some(0));
+        let mut daemon = half("daemon", Some(0));
+        client["build"] = json!("aaaaaaa");
+        daemon["build"] = json!("bbbbbbb");
+        let reports = join_inputs(&[client, daemon]);
+        assert_eq!(reports.len(), 1);
+        assert_eq!(reports[0].status, "joined", "配上了, 只是不给结论");
+        assert_eq!(reports[0].relay_bytes_zero, None);
+        assert_eq!(reports[0].reason.as_deref(), Some(BULK_PATH_BUILD_MISMATCH));
+    }
+
+    #[test]
+    fn halves_without_a_build_identity_cannot_prove_they_match() {
+        let mut client = half("client", Some(0));
+        let mut daemon = half("daemon", Some(0));
+        client["build"] = json!("unknown");
+        daemon["build"] = json!("unknown");
+        let reports = join_inputs(&[client, daemon]);
+        assert_eq!(reports[0].relay_bytes_zero, None);
+        assert_eq!(reports[0].reason.as_deref(), Some(BULK_PATH_BUILD_UNVERIFIED));
     }
 
     #[test]
