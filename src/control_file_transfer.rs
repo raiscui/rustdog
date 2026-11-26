@@ -145,6 +145,8 @@ fn validate_transfer_path(raw: &str, verb: &str) -> Result<PathBuf, std::io::Err
     // (Win32 忽略它们)、Windows 上再剥掉从 `:` 开始的备用数据流部分、最后折叠大小写 ——
     // 一次覆盖五种别名面, 不需要逐个列。过拒无害 (没人会拿 .rdog-partial 当目标目录名),
     // 漏拒会毁数据。
+    // 任意位置都拒, **包括最后一段**: 一个名叫 `.rdog-partial` 的普通文件落在 /d 里之后,
+    // 之后所有往 /d 的传输都会因为要建 <dir>/.rdog-partial/ 目录而失败。
     let hits_staging_dir = path.components().any(|component| {
         let std::path::Component::Normal(name) = component else {
             return false;
@@ -167,6 +169,29 @@ fn validate_transfer_path(raw: &str, verb: &str) -> Result<PathBuf, std::io::Err
     Ok(path.to_path_buf())
 }
 
+/// 目标路径 → 暂存文件路径。这是暂存名的**唯一定义**。
+///
+/// 名字 = `<目标目录>/.rdog-partial/<目标文件名>.<目标串短哈希>.partial`。
+///
+/// 哈希不是装饰: 没有它, `Model.bin` 与 `model.bin` 在**大小写不敏感**的卷 (macOS 默认 APFS,
+/// Windows NTFS) 上会算出两个文本不同、却指向同一个 inode 的暂存名 —— 按文本比较的准入看不见
+/// 这种重合, 于是第二条 upload 的 `resume:false` 会把第一条**正在写**的半成品删掉。把精确目标串
+/// 的哈希放进名字, 两个不同目标串必然得到不同名字, 与卷的大小写策略无关。
+fn staging_path(target: &Path) -> std::io::Result<PathBuf> {
+    let mut staging_name = target
+        .file_name()
+        .ok_or_else(|| std::io::Error::other("@put-file 路径缺少文件名"))?
+        .to_os_string();
+    let digest = format!("{:x}", Sha256::digest(target.to_string_lossy().as_bytes()));
+    staging_name.push(format!(".{}", &digest[..8]));
+    staging_name.push(STAGING_SUFFIX);
+    Ok(target
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join(STAGING_DIR)
+        .join(staging_name))
+}
+
 // ============================================================
 // 上传: put-file / file-chunk / file-end
 // ============================================================
@@ -183,18 +208,7 @@ pub fn execute_put_file(payload: &str) -> std::io::Result<Value> {
         .map(str::to_owned);
     let resume = value.get("resume").and_then(Value::as_bool).unwrap_or(false);
 
-    // 暂存文件放进保留目录, 名字沿用目标文件名 + .partial: 让排障时一眼看出它属于谁,
-    // 而隔离本身由目录提供。
-    let mut staging_name = path
-        .file_name()
-        .ok_or_else(|| std::io::Error::other("@put-file 路径缺少文件名"))?
-        .to_os_string();
-    staging_name.push(STAGING_SUFFIX);
-    let temp_path = path
-        .parent()
-        .unwrap_or_else(|| Path::new("."))
-        .join(STAGING_DIR)
-        .join(staging_name);
+    let temp_path = staging_path(&path)?;
 
     let mut sessions = transfers().lock().expect("transfer table poisoned");
     // 准入必须早于任何落盘动作. 放在 remove_file 之后就是"拒绝带副作用" ——
@@ -408,6 +422,11 @@ pub fn execute_file_end(payload: &str) -> std::io::Result<Value> {
     // 提交成功即退役会话. 不退的话, 这条已完成的条目会在 TTL 到期时被 sweep 拿去"回收"它的
     // 暂存路径 —— 而那个路径是按目标文件推导的, 同一目标的**下一次**上传正用着它.
     sessions.remove(&transfer_id);
+    // 提交把暂存文件 rename 走了, 保留目录可能因此变空; 收掉它, 免得每次上传都在目标目录里
+    // 留下一个空的 .rdog-partial (remove_dir 只对空目录成功, 别的传输还在用就不会误删).
+    if let Some(staging_dir) = temp_path.parent() {
+        let _ = std::fs::remove_dir(staging_dir);
+    }
     Ok(json!({
         "kind": "file-transfer",
         "state": "committed",
@@ -894,7 +913,7 @@ mod tests {
         assert!(err.to_string().contains("摘要不符"));
         // 半成品已清理 (NSIS 教训同族: 坏文件不留盘)
         assert!(!target.exists(), "坏文件不得留在目标路径");
-        assert!(!dir.join(".rdog-partial").join("upload-bad.partial").exists());
+        assert!(!staging_path(&target).unwrap().exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1020,7 +1039,7 @@ mod tests {
             r#"{{"transfer_id":"{second}","offset":0,"data":"{data}"}}"#
         ))
         .unwrap();
-        let partial = dir.join(".rdog-partial").join("shared-target.bin.partial");
+        let partial = staging_path(&target).unwrap();
         assert!(partial.exists());
 
         // 拿 A 的 id 去取消 (客户端重试的常见形态) 不得伤到 B
@@ -1042,7 +1061,7 @@ mod tests {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let dir = std::env::temp_dir().join(format!("rdog-ft-shared-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let partial = dir.join(".rdog-partial").join("contended.bin.partial");
+        let partial = staging_path(&dir.join("contended.bin")).unwrap();
         std::fs::create_dir_all(partial.parent().unwrap()).unwrap();
         std::fs::write(&partial, b"xxxxx").unwrap();
 
@@ -1101,7 +1120,7 @@ mod tests {
             r#"{{"transfer_id":"{holder}","offset":0,"data":"{data}"}}"#
         ))
         .unwrap();
-        let partial = dir.join(".rdog-partial").join("contended-open.bin.partial");
+        let partial = staging_path(&target).unwrap();
         let before = std::fs::metadata(&partial).unwrap().len();
 
         // 另一个 id 指向同一目标: 必须拒绝, 且**不能**先把 holder 的半成品删掉再拒绝
@@ -1152,7 +1171,7 @@ mod tests {
             r#"{{"transfer_id":"{tid}","offset":0,"data":"{data}"}}"#
         ))
         .unwrap();
-        let partial = dir.join(".rdog-partial").join("compact.bin.partial");
+        let partial = staging_path(&target).unwrap();
         assert!(partial.exists());
 
         let line = format!(r#"@file-cancel:{{transfer_id:"{tid}"}}"#);
@@ -1207,7 +1226,7 @@ mod tests {
             r#"{{"transfer_id":"{tid}","offset":0,"data":"{data}"}}"#
         ))
         .unwrap();
-        let partial = dir.join(".rdog-partial").join("cancel-me.bin.partial");
+        let partial = staging_path(&target).unwrap();
         assert!(partial.exists(), "写入后应留下半成品");
         assert_eq!(active_ids().iter().any(|id| id == &tid), true);
 
@@ -1253,7 +1272,7 @@ mod tests {
 
         // 回收只针对半成品。取消一次上传不得动目标路径上原有的文件。
         assert_eq!(std::fs::read(&target).unwrap(), b"do not delete me");
-        assert!(!dir.join(".rdog-partial").join("existing.bin.partial").exists());
+        assert!(!staging_path(&target).unwrap().exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1315,8 +1334,8 @@ mod tests {
         let (reaped, partials) = reap_idle_transfers(10_500, 5_000);
         assert_eq!(reaped, 1, "只应回收 stale 那条");
         assert_eq!(partials, 1, "stale 的半成品应被删掉");
-        assert!(!dir.join(".rdog-partial").join("stale.bin.partial").exists());
-        assert!(dir.join(".rdog-partial").join("fresh.bin.partial").exists(), "在推进的会话不受影响");
+        assert!(!staging_path(&dir.join("stale.bin")).unwrap().exists());
+        assert!(staging_path(&dir.join("fresh.bin")).unwrap().exists(), "在推进的会话不受影响");
 
         let ids = active_ids();
         assert!(!ids.iter().any(|id| id == &stale), "过期会话应离开注册表");
@@ -1368,6 +1387,27 @@ mod tests {
 
 
     #[test]
+    fn case_variant_targets_get_staging_names_that_survive_case_folding() {
+        // 在大小写不敏感的卷上 (macOS 默认 APFS / Windows NTFS), `Model.bin` 与 `model.bin` 的
+        // 暂存名若只差大小写, 它们就是**同一个 inode** —— 按文本比较的准入看不见, 于是第二条
+        // upload 的 resume:false 会把第一条正在写的半成品删掉. 名字里的目标串哈希保证: 折叠
+        // 大小写之后两个暂存名仍然不同.
+        let upper = staging_path(Path::new("/d/Model.bin")).unwrap();
+        let lower = staging_path(Path::new("/d/model.bin")).unwrap();
+        assert_ne!(upper, lower);
+        assert_ne!(
+            upper.to_string_lossy().to_lowercase(),
+            lower.to_string_lossy().to_lowercase(),
+            "折叠大小写后仍必须不同, 否则在大小写不敏感卷上是同一个文件"
+        );
+        // 同一个目标串必须稳定得到同一个路径 (续传靠它)
+        assert_eq!(
+            staging_path(Path::new("/d/Model.bin")).unwrap(),
+            staging_path(Path::new("/d/Model.bin")).unwrap()
+        );
+    }
+
+    #[test]
     fn staging_name_is_injective_so_two_targets_never_share_a_partial() {
         // "model" 与 "model.bin" 用 with_extension 推导会落到同一个暂存名, 于是两个**不同**
         // 目标共用一份半成品: 对 model.bin 的非续传重开会把 model 留着续传的字节删掉, 而
@@ -1392,7 +1432,7 @@ mod tests {
             r#"{{"transfer_id":"{first}","offset":0,"data":"{data}"}}"#
         ))
         .unwrap();
-        let no_ext_partial = dir.join(".rdog-partial").join("model.partial");
+        let no_ext_partial = staging_path(&no_ext).unwrap();
         assert!(no_ext_partial.exists(), "无扩展名目标的暂存名应追加后缀");
 
         // 另一个目标 (不同文件) 非续传重开: 不得删掉 model 的半成品
@@ -1410,7 +1450,7 @@ mod tests {
             "另一个目标的重开不得删掉本目标的半成品"
         );
         assert!(
-            dir.join(".rdog-partial").join("model.bin.partial").exists(),
+            staging_path(&with_ext).unwrap().exists(),
             "两个不同目标各自独立一份暂存文件"
         );
 
@@ -1557,7 +1597,7 @@ mod tests {
             r#"{{"transfer_id":"{tid}","offset":0,"data":"{data}"}}"#
         ))
         .unwrap();
-        let partial = dir.join(".rdog-partial").join("live.bin.partial");
+        let partial = staging_path(&target).unwrap();
         let before = std::fs::metadata(&partial).unwrap().len();
 
         // 同一 id 再来一次必须拒绝: 否则这次 open 会替换掉活跃会话, resume:false 还会把
