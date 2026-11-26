@@ -513,3 +513,19 @@ RUST-3 真机第二轮(家宽 -> 手机热点)补的两条, 写进规格与交�
 routable 17/17 daemon 通配(`routable-wildcard.log`, netns 双接口)、advertise 3/3(`advertise.log`)、
 iroh+shell 单测 74 通过 / 2 ignored(netns 专用)、载体守卫 OK。
 - 提交: 8ad4aa6
+
+## 2026-11-26 RAI-305 routable 下不回环候选(RUST-3 收口要求)
+
+- `candidate_ok`(src/control_iroh.rs): `network` + 端口非 0, 且 `routable` 下拒回环 —— 对端拨
+  `127.0.0.1` 只会打到它自己, 既浪费一次拨号又制造误导性的前半段失败。
+- daemon 侧 `register` 用它过滤通告候选; registry 的 `Register` 校验同样用它, 收到回环候选
+  按 `iroh_registration_denied` 拒; 非 `routable`(回环 profile)不变。
+- `Register` 成功后新增一行 `iroh directory registered name=… candidates=…`, 让通告的候选集
+  可观测, harness 在 routable 下断言该行不含 `127.0.0.1`。
+- 新增 registry 用例: routable 收到回环候选被拒 / 回环 profile 仍接受回环 socket。
+
+复跑(`receipts/u12/`, 同一二进制): 回环 13/13(`loopback.log`)、routable 显式 18/18(`routable.log`,
+`candidates=10.42.0.2:36558`)、routable daemon 通配 18/18(`routable-wildcard.log`, netns 双接口
+仍只通告 `10.42.0.2:58186`)、advertise 3/3(`advertise.log`)、control_iroh 29 passed / 2 ignored、
+shell 46 passed、两个载体守卫 OK。
+- 提交: a897b79
