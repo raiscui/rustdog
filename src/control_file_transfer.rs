@@ -41,12 +41,17 @@ use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
-/// 暂存文件名的保留后缀。
+/// 暂存文件所在的**保留目录** (与目标文件同级的子目录)。
 ///
-/// 它同时是两个方向的护栏: 暂存名一律以它结尾, 而**目标**路径不允许以它结尾 —— 否则一个名叫
-/// `model.yino-partial` 的真实文件会被当成 "上传 model 的暂存区": 非续传重开会 remove_file 删掉
-/// 它, 续传重开会把长度当成已收字节并追加写, 最后按摘要不符再删一次. 那个文件与本次传输毫无关系.
-const PARTIAL_SUFFIX: &str = ".yino-partial";
+/// 为什么是目录而不是"目标名 + 后缀": 只要暂存名和目标名住在同一个命名空间, 就永远存在
+/// "某个目标名恰好等于别人的暂存名"的拼法 —— 后缀版本已经先后踩到五种: 大小写变体、
+/// Win32 结尾的点/空格、NTFS 备用数据流 (`x.yino-partial:s`)、8.3 短名, 以及之后的任何一种.
+/// 把暂存文件放进一个**目标路径不许出现**的目录, 就把"逐个封堵别名"换成"两个命名空间不重叠"
+/// 一条规则: `:` / `~` / 大小写 / 结尾点空格再怎么拼, 都改变不了"它在不在这个目录里".
+const STAGING_DIR: &str = ".rdog-partial";
+
+/// 暂存文件名后缀 (只用于识别, 不承担隔离职责 —— 隔离由 `STAGING_DIR` 提供)。
+const STAGING_SUFFIX: &str = ".partial";
 
 /// 单个 @file-chunk data 载荷的字节上限 (解码前 base64 文本的字符数上限)。
 /// 取帧上限 8MiB 的 80% — 决策 2 的落地: chunk 永远塞得进一行。
@@ -133,29 +138,30 @@ fn validate_transfer_path(raw: &str, verb: &str) -> Result<PathBuf, std::io::Err
     if raw.trim().is_empty() {
         return Err(std::io::Error::other(format!("@{verb} 路径为空")));
     }
-    // 保留后缀归本 lane 所有: 允许把它当目标名, 就等于允许客户端把别人的暂存文件（或自己磁盘上
-    // 恰好叫这个名的真实文件）当成暂存区来删/追加写。
+    // 目标路径不许落在保留目录里: 那是暂存区的命名空间。允许它, 就等于允许客户端把别人的
+    // 暂存文件当成目标来覆盖/删除。
     //
-    // 这里**无条件**折叠大小写, 与 `temp_path_matches` 的口径刻意不同, 两者不是一回事:
-    // - `temp_path_matches` 判"是不是同一个文件", 在 Linux 上折叠会把两个真实存在的不同文件
-    //   混成一个, 所以那里只在 Windows 折叠;
-    // - 这里是**命名策略**: 拒绝一个 `x.bin.YINO-PARTIAL` 目标在任何平台都不冤枉人, 而 Windows
-    //   NTFS 与 macOS 默认的 APFS 都是大小写不敏感的卷 —— 不折叠就等于在那两个平台上留一条
-    //   "目标名恰好是别人暂存路径"的路. 过拒无害, 漏拒会毁数据.
-    //
-    // 还要先剥掉结尾的点和空格: Win32 会把它们从文件名里忽略掉, 于是 `model.yino-partial.`
-    // 与 `model.yino-partial` 是同一个目录项, 而检查会因多一个点和空格放行.
-    if path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .is_some_and(|name| {
-            name.trim_end_matches(['.', ' '])
-                .to_lowercase()
-                .ends_with(PARTIAL_SUFFIX)
-        })
-    {
+    // 比的是**组件**而不是后缀, 并且按各平台"怎么算同一个名字"来比: 去掉结尾的点与空格
+    // (Win32 忽略它们)、Windows 上再剥掉从 `:` 开始的备用数据流部分、最后折叠大小写 ——
+    // 一次覆盖五种别名面, 不需要逐个列。过拒无害 (没人会拿 .rdog-partial 当目标目录名),
+    // 漏拒会毁数据。
+    let hits_staging_dir = path.components().any(|component| {
+        let std::path::Component::Normal(name) = component else {
+            return false;
+        };
+        let Some(name) = name.to_str() else {
+            return false;
+        };
+        let name = if cfg!(windows) {
+            name.split(':').next().unwrap_or(name)
+        } else {
+            name
+        };
+        name.trim_end_matches(['.', ' ']).to_lowercase() == STAGING_DIR
+    });
+    if hits_staging_dir {
         return Err(std::io::Error::other(format!(
-            "@{verb} 路径不得以保留后缀 {PARTIAL_SUFFIX} 结尾 (该后缀是暂存文件专用): {raw}"
+            "@{verb} 路径不得包含保留目录 {STAGING_DIR} (该目录是暂存区专用): {raw}"
         )));
     }
     Ok(path.to_path_buf())
@@ -177,16 +183,18 @@ pub fn execute_put_file(payload: &str) -> std::io::Result<Value> {
         .map(str::to_owned);
     let resume = value.get("resume").and_then(Value::as_bool).unwrap_or(false);
 
-    // 暂存名必须由目标路径**单射**得到: 后缀是追加的, 不是替换扩展名.
-    // 用 with_extension 替换时会撞车 —— "model" 没有扩展名, 落到 "model.bin.yino-partial",
-    // 而 "model.bin" 也落到同一个名字; 于是两个**不同**目标共用一份暂存文件, 一次对 model.bin
-    // 的非续传重开就会把 model 留着续传的那份字节删掉, 而 model 本身没被碰过.
-    let mut file_name = path
+    // 暂存文件放进保留目录, 名字沿用目标文件名 + .partial: 让排障时一眼看出它属于谁,
+    // 而隔离本身由目录提供。
+    let mut staging_name = path
         .file_name()
         .ok_or_else(|| std::io::Error::other("@put-file 路径缺少文件名"))?
         .to_os_string();
-    file_name.push(PARTIAL_SUFFIX);
-    let temp_path = path.with_file_name(file_name);
+    staging_name.push(STAGING_SUFFIX);
+    let temp_path = path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join(STAGING_DIR)
+        .join(staging_name);
 
     let mut sessions = transfers().lock().expect("transfer table poisoned");
     // 准入必须早于任何落盘动作. 放在 remove_file 之后就是"拒绝带副作用" ——
@@ -313,6 +321,10 @@ pub fn execute_file_chunk(payload: &str) -> std::io::Result<Value> {
     // 追加写 (open_append 保证 O_APPEND 语义, 与 session.written 一致)
     {
         use std::io::Write;
+        // 暂存目录在第一次真正落盘时才创建 —— open 阶段不产生任何磁盘副作用。
+        if let Some(staging_dir) = temp_path.parent() {
+            std::fs::create_dir_all(staging_dir)?;
+        }
         let mut file = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
@@ -531,7 +543,7 @@ fn temp_path_matches(a: Option<&Path>, b: &Path) -> bool {
 /// 删一个暂存文件。NotFound 视为已删 (幂等), 其他错误记 warn 但不算失败 ——
 /// 回收是尽力而为, 它不该让取消 / 过期本身失败。
 fn reap_file(temp_path: &Path) -> bool {
-    match std::fs::remove_file(temp_path) {
+    let removed = match std::fs::remove_file(temp_path) {
         Ok(()) => true,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => false,
         Err(err) => {
@@ -541,7 +553,12 @@ fn reap_file(temp_path: &Path) -> bool {
             );
             false
         }
+    };
+    // 收掉空的暂存目录: remove_dir 只在空目录时成功, 所以还有别的传输在用就不会误删。
+    if let Some(staging_dir) = temp_path.parent() {
+        let _ = std::fs::remove_dir(staging_dir);
     }
+    removed
 }
 
 /// 摘掉一条会话并回收它的暂存文件, 返回 (会话, 是否真的删掉了半成品)。
@@ -552,9 +569,9 @@ fn reap_file(temp_path: &Path) -> bool {
 /// 1. **摘表与 unlink 之间不能放锁.** 否则并发的 `@put-file resume:true` 会在这两步之间
 ///    读走这个半成品的长度、登记成新会话, 随后文件被删 —— 新会话带着旧 offset 继续写,
 ///    前缀丢了, 最后摘要校验失败。
-/// 2. **暂存路径可能被另一条活跃会话持有.** 暂存文件名从目标路径推导
-///    (`<target>.<ext>.yino-partial`), 指向同一目标的两条上传共用同一个文件; 别的会话
-///    还拿着它的时候不能删, 否则会毁掉那条正在推进的传输。
+/// 2. **暂存路径可能被另一条活跃会话持有.** 暂存名从目标路径推导
+///    (`<目标目录>/.rdog-partial/<目标名>.partial`), 指向同一目标的两条上传共用同一个文件;
+///    别的会话还拿着它的时候不能删, 否则会毁掉那条正在推进的传输。
 fn remove_session_locked(
     sessions: &mut HashMap<String, TransferSession>,
     transfer_id: &str,
@@ -877,7 +894,7 @@ mod tests {
         assert!(err.to_string().contains("摘要不符"));
         // 半成品已清理 (NSIS 教训同族: 坏文件不留盘)
         assert!(!target.exists(), "坏文件不得留在目标路径");
-        assert!(!dir.join("upload-bad.yino-partial").exists());
+        assert!(!dir.join(".rdog-partial").join("upload-bad.partial").exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1003,7 +1020,7 @@ mod tests {
             r#"{{"transfer_id":"{second}","offset":0,"data":"{data}"}}"#
         ))
         .unwrap();
-        let partial = dir.join("shared-target.bin.yino-partial");
+        let partial = dir.join(".rdog-partial").join("shared-target.bin.partial");
         assert!(partial.exists());
 
         // 拿 A 的 id 去取消 (客户端重试的常见形态) 不得伤到 B
@@ -1025,7 +1042,8 @@ mod tests {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let dir = std::env::temp_dir().join(format!("rdog-ft-shared-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let partial = dir.join("contended.bin.yino-partial");
+        let partial = dir.join(".rdog-partial").join("contended.bin.partial");
+        std::fs::create_dir_all(partial.parent().unwrap()).unwrap();
         std::fs::write(&partial, b"xxxxx").unwrap();
 
         let holder = unique_id("holder");
@@ -1083,7 +1101,7 @@ mod tests {
             r#"{{"transfer_id":"{holder}","offset":0,"data":"{data}"}}"#
         ))
         .unwrap();
-        let partial = dir.join("contended-open.bin.yino-partial");
+        let partial = dir.join(".rdog-partial").join("contended-open.bin.partial");
         let before = std::fs::metadata(&partial).unwrap().len();
 
         // 另一个 id 指向同一目标: 必须拒绝, 且**不能**先把 holder 的半成品删掉再拒绝
@@ -1134,7 +1152,7 @@ mod tests {
             r#"{{"transfer_id":"{tid}","offset":0,"data":"{data}"}}"#
         ))
         .unwrap();
-        let partial = dir.join("compact.bin.yino-partial");
+        let partial = dir.join(".rdog-partial").join("compact.bin.partial");
         assert!(partial.exists());
 
         let line = format!(r#"@file-cancel:{{transfer_id:"{tid}"}}"#);
@@ -1189,7 +1207,7 @@ mod tests {
             r#"{{"transfer_id":"{tid}","offset":0,"data":"{data}"}}"#
         ))
         .unwrap();
-        let partial = dir.join("cancel-me.bin.yino-partial");
+        let partial = dir.join(".rdog-partial").join("cancel-me.bin.partial");
         assert!(partial.exists(), "写入后应留下半成品");
         assert_eq!(active_ids().iter().any(|id| id == &tid), true);
 
@@ -1235,7 +1253,7 @@ mod tests {
 
         // 回收只针对半成品。取消一次上传不得动目标路径上原有的文件。
         assert_eq!(std::fs::read(&target).unwrap(), b"do not delete me");
-        assert!(!dir.join("existing.bin.yino-partial").exists());
+        assert!(!dir.join(".rdog-partial").join("existing.bin.partial").exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1297,8 +1315,8 @@ mod tests {
         let (reaped, partials) = reap_idle_transfers(10_500, 5_000);
         assert_eq!(reaped, 1, "只应回收 stale 那条");
         assert_eq!(partials, 1, "stale 的半成品应被删掉");
-        assert!(!dir.join("stale.bin.yino-partial").exists());
-        assert!(dir.join("fresh.bin.yino-partial").exists(), "在推进的会话不受影响");
+        assert!(!dir.join(".rdog-partial").join("stale.bin.partial").exists());
+        assert!(dir.join(".rdog-partial").join("fresh.bin.partial").exists(), "在推进的会话不受影响");
 
         let ids = active_ids();
         assert!(!ids.iter().any(|id| id == &stale), "过期会话应离开注册表");
@@ -1310,95 +1328,44 @@ mod tests {
     }
 
     #[test]
-    fn reserved_suffix_rejection_strips_windows_trailing_dot_and_space() {
-        // Win32 忽略文件名结尾的点和空格, 于是 model.yino-partial. 与 model.yino-partial 是同一个
-        // 目录项. 检查必须先把它们剥掉, 否则多一个点就能绕过保留后缀.
+    #[test]
+    fn target_may_not_live_in_the_reserved_staging_dir() {
+        // 暂存文件住在 <目标目录>/.rdog-partial/ 里。目标路径若被允许落进这个目录, 就等于允许
+        // 客户端把别人的暂存文件当成目标来覆盖/删除 —— 而目标名怎么拼都改变不了"它在不在这个
+        // 目录里", 所以这一条比"逐个封堵别名"稳。
         let _guard = TRANSFER_TABLE_TEST_LOCK
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let dir = std::env::temp_dir().join(format!("rdog-ft-traildot-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("rdog-ft-stagedir-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let tid = unique_id("traildot");
-        for name in ["dot.yino-partial.", "space.yino-partial "] {
+        let tid = unique_id("stagedir");
+
+        // 大小写与结尾点在任何平台都按"同一个目录名"处理 (过拒无害);
+        // 备用数据流只在 Windows 上是别名 —— 非 Windows 上 `:` 是合法文件名字符,
+        // `.rdog-partial:s` 是**另一个**目录, 不会与暂存目录重叠, 所以那里不拒。
+        let mut targets = vec![
+            dir.join(".rdog-partial").join("shadow.bin"),
+            dir.join(".RDog-Partial").join("shadow.bin"),
+            dir.join(".rdog-partial.").join("shadow.bin"),
+        ];
+        if cfg!(windows) {
+            targets.push(dir.join(".rdog-partial:s").join("shadow.bin"));
+        }
+        for target in targets {
             let err = execute_put_file(&format!(
                 r#"{{"transfer_id":"{tid}","path":"{}","size":5}}"#,
-                escape_json(&dir.join(name).display().to_string())
+                escape_json(&target.display().to_string())
             ))
             .unwrap_err();
             assert!(
-                err.to_string().contains("保留后缀"),
-                "{name:?} 应被拒: {err}"
+                err.to_string().contains("保留目录"),
+                "{} 应被拒: {err}",
+                target.display()
             );
         }
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    #[test]
-    fn reserved_suffix_rejection_folds_case_on_every_platform() {
-        // Windows NTFS 与 macOS 默认 APFS 都大小写不敏感: 不折叠的话, 目标 x.bin.YINO-PARTIAL
-        // 与正在写的暂存文件 x.bin.yino-partial 是同一个文件, 而检查会因为大小写不同放行.
-        // 这条检查是命名策略而不是"是不是同一个文件"的判断, 所以无条件折叠 —— 过拒无害.
-        let _guard = TRANSFER_TABLE_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let dir = std::env::temp_dir().join(format!("rdog-ft-case-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let tid = unique_id("case");
-        for name in ["upper.YINO-PARTIAL", "mixed.Yino-Partial"] {
-            let err = execute_put_file(&format!(
-                r#"{{"transfer_id":"{tid}","path":"{}","size":5}}"#,
-                escape_json(&dir.join(name).display().to_string())
-            ))
-            .unwrap_err();
-            assert!(
-                err.to_string().contains("保留后缀"),
-                "{name} 应被拒: {err}"
-            );
-        }
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn target_may_not_use_the_reserved_staging_suffix() {
-        // 暂存名是 "<目标名>.yino-partial". 若允许把这种名字当目标, 一个恰好在盘上的
-        // `model.yino-partial` 就会被当成"上传 model 的暂存区": 非续传重开删掉它, 续传重开把它的
-        // 长度当成已收字节再追加写. 那个文件与本次传输毫无关系.
-        let _guard = TRANSFER_TABLE_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let dir = std::env::temp_dir().join(format!("rdog-ft-suffix-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let sid = unique_id("suffix");
-        let shadow = dir.join("model.yino-partial");
-        std::fs::write(&shadow, b"unrelated real file").unwrap();
-
-        let err = execute_put_file(&format!(
-            r#"{{"transfer_id":"{sid}","path":"{}","size":5}}"#,
-            escape_json(&shadow.display().to_string())
-        ))
-        .unwrap_err();
-        assert!(
-            err.to_string().contains("保留后缀"),
-            "以保留后缀结尾的目标应被拒: {err}"
-        );
-        assert_eq!(
-            std::fs::read(&shadow).unwrap(),
-            b"unrelated real file",
-            "拒绝不得动那个真实文件"
-        );
-
-        // 上传 model 时, 指向的真实文件也不得被当成暂存区先行删除: 拒绝之后它仍在
-        let model = dir.join("model");
-        execute_put_file(&format!(
-            r#"{{"transfer_id":"{sid}","path":"{}","size":5}}"#,
-            escape_json(&model.display().to_string())
-        ))
-        .unwrap();
-        execute_file_cancel(&format!(r#"{{"transfer_id":"{sid}"}}"#)).unwrap();
-        // 已知边界: 那个残留文件名与暂存名同形, 取消时会按暂存文件处理 —— 这是保留后缀的代价,
-        // 已写进规格 (目标不得使用该后缀, 但盘上手工创建的同名文件无法与暂存文件区分).
-        let _ = std::fs::remove_dir_all(&dir);
-    }
 
     #[test]
     fn staging_name_is_injective_so_two_targets_never_share_a_partial() {
@@ -1425,7 +1392,7 @@ mod tests {
             r#"{{"transfer_id":"{first}","offset":0,"data":"{data}"}}"#
         ))
         .unwrap();
-        let no_ext_partial = dir.join("model.yino-partial");
+        let no_ext_partial = dir.join(".rdog-partial").join("model.partial");
         assert!(no_ext_partial.exists(), "无扩展名目标的暂存名应追加后缀");
 
         // 另一个目标 (不同文件) 非续传重开: 不得删掉 model 的半成品
@@ -1443,7 +1410,7 @@ mod tests {
             "另一个目标的重开不得删掉本目标的半成品"
         );
         assert!(
-            dir.join("model.bin.yino-partial").exists(),
+            dir.join(".rdog-partial").join("model.bin.partial").exists(),
             "两个不同目标各自独立一份暂存文件"
         );
 
@@ -1590,7 +1557,7 @@ mod tests {
             r#"{{"transfer_id":"{tid}","offset":0,"data":"{data}"}}"#
         ))
         .unwrap();
-        let partial = dir.join("live.bin.yino-partial");
+        let partial = dir.join(".rdog-partial").join("live.bin.partial");
         let before = std::fs::metadata(&partial).unwrap().len();
 
         // 同一 id 再来一次必须拒绝: 否则这次 open 会替换掉活跃会话, resume:false 还会把
