@@ -170,6 +170,12 @@ pub(crate) struct UnixpipeRunPaths {
     pub(crate) lock: PathBuf,
     /// 完整身份记录,压缩名场景下是唯一能还原 `namespace/daemon_name` 的地方。
     pub(crate) meta: PathBuf,
+    /// base 是显式给的(`socket_path` / 显式 listen endpoint)还是按身份推导的。
+    ///
+    /// 只有显式 base 才可能被旧二进制用同一路径撞上(它会设 `ProcessLease` 守卫),
+    /// 因此只有它需要持有旧格式兼容守卫。用**来源**而不是"路径在不在运行目录里"
+    /// 判断: 用户完全可能把 `rdog local list` 打印的路径抄进 `socket_path`。
+    pub(crate) shared: bool,
 }
 
 /// 按 (namespace, daemon_name) 推导运行目录里的落盘路径。
@@ -212,6 +218,7 @@ pub(crate) fn paths_for_base(base: &Path) -> io::Result<UnixpipeRunPaths> {
         base: base.to_path_buf(),
         lock: dir.join(format!("{stem}{LOCK_SUFFIX}")),
         meta: dir.join(format!("{stem}{META_SUFFIX}")),
+        shared: true,
     })
 }
 
@@ -224,15 +231,17 @@ fn paths_for_identity(
     Ok(paths_for_stem(
         dir,
         &pipe_stem(dir, namespace, daemon_name)?,
+        false,
     ))
 }
 
 #[cfg(unix)]
-fn paths_for_stem(dir: &Path, stem: &str) -> UnixpipeRunPaths {
+fn paths_for_stem(dir: &Path, stem: &str, shared: bool) -> UnixpipeRunPaths {
     UnixpipeRunPaths {
         base: dir.join(format!("{stem}{PIPE_SUFFIX}")),
         lock: dir.join(format!("{stem}{LOCK_SUFFIX}")),
         meta: dir.join(format!("{stem}{META_SUFFIX}")),
+        shared,
     }
 }
 
@@ -431,7 +440,7 @@ impl UnixpipeRunGuard {
         // 共享显式 base 上,新 owner 自己也在这把锁上 flock + 写 pid —— 旧 owner
         // 还活着就抢不到(直接失败),我们活着时旧二进制也会因 pid 存活而拒绝接管。
         // 派生路径不用这把锁: 旧二进制推导的是 `$TMPDIR/rdog-...`,不会撞上。
-        let legacy_guard = if base_is_shared(&paths.base) {
+        let legacy_guard = if paths.shared {
             match acquire_flock(&legacy_guard_path(&paths.base), true)? {
                 Some(file) => {
                     write_legacy_guard_pid(&file, std::process::id())?;
@@ -657,17 +666,6 @@ fn path_matches_locked_inode(path: &Path, file: &File) -> io::Result<bool> {
         Err(err) => return Err(err),
     };
     Ok(on_disk.ino() == file.metadata()?.ino())
-}
-
-/// base 是否"共享显式路径"(不在专用运行目录里)。
-///
-/// 只有这种 base 才可能被旧二进制用同一路径推导出来,也就才需要旧格式守卫做跨版本互斥。
-#[cfg(unix)]
-fn base_is_shared(base: &Path) -> bool {
-    match (base.parent(), run_dir()) {
-        (Some(parent), Ok(run_dir)) => parent != run_dir,
-        _ => true,
-    }
 }
 
 /// 旧版本 daemon 的路径守卫文件名。
@@ -929,7 +927,7 @@ fn collect_run_dir_entries(dir: &Path) -> io::Result<Vec<RunEntry>> {
 
     let mut entries = Vec::new();
     for stem in stems {
-        let paths = paths_for_stem(dir, &stem);
+        let paths = paths_for_stem(dir, &stem, false);
         let meta = read_meta(&paths.meta);
         let fallback_identity = meta
             .is_none()
@@ -1199,7 +1197,10 @@ fn remove_stale_entry(entry: &RunEntry) -> io::Result<Option<usize>> {
     let Some((_owner_lock, _previous)) = acquire_owner_lock(&paths.lock)? else {
         return Ok(None);
     };
-    let _legacy_guard = if base_is_shared(&entry.pipe_base) {
+    // 旧守卫存在就持锁删除(不凭空创建);不存在时只有显式 base 才补一把,
+    // 因为只有显式 base 可能被旧二进制用同一路径撞上。
+    let legacy_exists = legacy_guard_path(&entry.pipe_base).exists();
+    let _legacy_guard = if legacy_exists || paths.shared {
         match acquire_flock(&legacy_guard_path(&entry.pipe_base), true)? {
             Some(file) => Some(file),
             None => return Ok(None),

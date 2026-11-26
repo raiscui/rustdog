@@ -44,11 +44,13 @@ agent 高频跑 `@web-find` / `@screenshot` / `@click` 时,这段延迟会肉眼
     不是 PID(进程怎么死内核都会释放 lock,而 PID 会被复用)
   - `<stem>.meta`:完整身份 `{namespace, daemon_name, pipe_base, pid, created_at_unix_ms}`,
     压缩名场景下这是唯一能还原完整名字的地方,`rdog local list` 据此显示全名
-  - `<base>.rdog-owner.pid`:旧版本的路径守卫。**只在共享显式 base**(`socket_path` /
-    显式 listen endpoint,即运行目录之外)上出现:新 owner 也在这把锁上 flock + 写 pid,
-    因为跨版本互斥必须**双向** —— 只检查不持有的话,升级窗口里旧二进制会无条件 unlink
-    新 daemon 的 FIFO。派生路径不设这把锁:旧二进制推导的是 `$TMPDIR/rdog-...`,
-    不会撞上,也就没必要在运行目录里多留一个文件。正常退出时会删除。
+  - `<base>.rdog-owner.pid`:旧版本的路径守卫。**只在显式 base**(`socket_path` /
+    显式 listen endpoint)上出现:新 owner 也在这把锁上 flock + 写 pid,因为跨版本互斥
+    必须**双向** —— 只检查不持有的话,升级窗口里旧二进制会无条件 unlink 新 daemon 的
+    FIFO。判定看**来源**而不是"路径在不在运行目录里":用户完全可能把 `rdog local list`
+    打印的路径抄进 `socket_path`。按身份推导出来的路径不设这把锁(旧二进制推导的是
+    `$TMPDIR/rdog-...`,撞不上),运行目录因此保持"运行时 pipe+lock+meta、退出后为空"。
+    正常退出时会删除。
 - 默认路径由 `(namespace, daemon_name)` 稳定推导。若配置显式 unixpipe listen endpoint,
   该 endpoint 的 base path 是 listener、cleanup、registry 与 ownership guard 的唯一真相源;
   lock/meta 由 base 的目录与 stem 反推,因此显式路径也进同一套生命周期。

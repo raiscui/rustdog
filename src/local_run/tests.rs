@@ -613,12 +613,33 @@ fn derived_base_should_not_create_a_legacy_compat_guard() {
         !legacy_guard_path(&paths.base).exists(),
         "派生路径不该留旧格式守卫: 旧二进制推导不出这条路,没有跨版本冲突"
     );
-    assert!(!base_is_shared(&paths.base));
+    assert!(!paths.shared, "推导出来的 base 不是显式 base");
     drop(guard);
     assert!(
         dir_file_names(&dirs.run).is_empty(),
         "派生路径退出后目录应为空: {:?}",
         dir_file_names(&dirs.run)
+    );
+}
+
+#[test]
+fn explicit_base_inside_run_dir_should_still_take_the_legacy_guard() {
+    // 用户完全可能把 `rdog local list` 打印的路径抄进 `socket_path`;
+    // 判定必须看来源(显式/推导),不能看路径是不是在运行目录里。
+    let dirs = TestDirs::new("explicit-in-run");
+    let base = dirs.run.join("copied-from-local-list.pipe");
+    let paths = paths_for_base(&base).expect("paths");
+    assert!(paths.shared);
+
+    let guard = UnixpipeRunGuard::acquire(paths, "lab", "copied.lab").expect("acquire");
+    assert!(
+        legacy_guard_path(&base).exists(),
+        "显式 base 落在运行目录里也必须持旧格式守卫,否则旧二进制能删掉它的 FIFO"
+    );
+    drop(guard);
+    assert!(
+        !legacy_guard_path(&base).exists(),
+        "退出后兼容守卫应一并清掉"
     );
 }
 
