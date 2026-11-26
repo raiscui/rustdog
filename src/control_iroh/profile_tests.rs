@@ -484,3 +484,22 @@ fn a_renewal_never_outlives_the_lease_it_refreshes() {
     );
     println!("directory: a late renewal cannot run past the lease it refreshes");
 }
+
+#[test]
+fn a_public_relay_spelled_with_the_default_port_is_accepted_where_it_matters() {
+    // A standard public relay is https on 443, and `RelayUrl` normalizes that port
+    // away, so the explicit-port rule would refuse the only spelling it has.
+    let public: RelayUrl = "https://relay.example.".parse().unwrap();
+    assert_eq!(public.port(), None, "the default port is normalized away");
+    assert!(
+        relay_allowed(&public, 7842, true).is_ok(),
+        "a routable profile accepts a public relay with the default port"
+    );
+    let err = relay_allowed(&public, 7842, false)
+        .expect_err("the loopback profile still pins an explicit loopback relay");
+    assert!(err.to_string().contains("loopback"), "{err}");
+    let plaintext: RelayUrl = "http://relay.example.".parse().unwrap();
+    let err = relay_allowed(&plaintext, 7842, true).expect_err("plaintext stays refused");
+    assert!(err.to_string().contains("HTTPS"), "{err}");
+    println!("relay: a public relay is spellable, and both profiles keep their own gate");
+}
