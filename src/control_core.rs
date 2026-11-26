@@ -285,6 +285,12 @@ pub fn execute_explicit_control_request<E: ControlActionExecutor>(
         ControlCommand::FileRead(payload) => file_transfer_outcome(request.request_id, || {
             crate::control_file_transfer::execute_file_read(&payload)
         }),
+        ControlCommand::FileCancel(payload) => file_transfer_outcome(request.request_id, || {
+            crate::control_file_transfer::execute_file_cancel(&payload)
+        }),
+        ControlCommand::FileList => file_transfer_outcome(request.request_id, || {
+            crate::control_file_transfer::execute_file_list()
+        }),
         ControlCommand::Capabilities => {
             match capabilities_for_coding(executor.coding_service().is_some())
                 .map(|value| value.to_string())

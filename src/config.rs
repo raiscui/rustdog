@@ -44,6 +44,7 @@ pub struct DaemonConfig {
     pub tls: TlsConfig,
     pub cdp: CdpConfig,
     pub observation: ObservationConfig,
+    pub file_transfer: FileTransferConfig,
     pub coding: crate::coding::model::CodingConfig,
     pub hidden: HiddenResidentConfig,
     pub outbound: OutboundConfig,
@@ -182,6 +183,20 @@ pub struct ObservationConfig {
     pub write_ref_cache: bool,
 }
 
+/// 双向分块文件传输 lane 的回收参数 (specs/file-transfer-control-spec.md)。
+///
+/// 只控制"没有进展的会话什么时候被回收", 不控制传输本体的大小与并发 ——
+/// 那两项属于 bulk 原语的门禁 (specs/rdog-bulk-direct-only-spec.md §2.4), 尚未落地。
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct FileTransferConfig {
+    /// 空闲过期阈值: 超过该时长没有 `@file-chunk` / `@file-read` 进展的会话被回收,
+    /// 半成品一并删除。被拒绝或中断的传输必须靠它兜底 —— 那种场景不会有人来调 `@file-cancel`。
+    pub idle_timeout_ms: u64,
+    /// 后台回收线程的扫描间隔。
+    pub sweep_interval_ms: u64,
+}
+
 /// 主动连出端点的配置。
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(default)]
@@ -292,6 +307,15 @@ impl Default for HiddenResidentConfig {
     fn default() -> Self {
         Self {
             log_file: PathBuf::from("rdog_hidden.log"),
+        }
+    }
+}
+
+impl Default for FileTransferConfig {
+    fn default() -> Self {
+        Self {
+            idle_timeout_ms: 15 * 60 * 1000,
+            sweep_interval_ms: 60 * 1000,
         }
     }
 }
@@ -576,6 +600,7 @@ fn validate_daemon_config(config: &DaemonConfig) -> io::Result<()> {
         config.outbound.enabled || config.inbound.enabled,
     )?;
     validate_observation_config(&config.observation)?;
+    validate_file_transfer_config(&config.file_transfer)?;
 
     Ok(())
 }
@@ -597,7 +622,8 @@ pub fn validate_zenoh_daemon_profile(config: &DaemonConfig) -> io::Result<()> {
         &config.zenoh,
         config.outbound.enabled || config.inbound.enabled,
     )?;
-    validate_observation_config(&config.observation)
+    validate_observation_config(&config.observation)?;
+    validate_file_transfer_config(&config.file_transfer)
 }
 
 /// TCP daemon 路径的严格校验。
@@ -628,6 +654,7 @@ pub fn validate_tcp_daemon_profile(config: &DaemonConfig) -> io::Result<()> {
         config.inbound.shell.as_deref(),
     )?;
     validate_observation_config(&config.observation)?;
+    validate_file_transfer_config(&config.file_transfer)?;
 
     Ok(())
 }
@@ -683,6 +710,28 @@ fn validate_observation_config(config: &ObservationConfig) -> io::Result<()> {
         return Err(io::Error::new(
             ErrorKind::InvalidInput,
             "observation.state_dir 不能是空字符串; 省略该字段表示使用平台默认路径",
+        ));
+    }
+
+    Ok(())
+}
+
+/// 校验文件传输的回收参数。
+///
+/// 两项都必须大于 0: 0 会让过期判定退化成"每个请求都回收"或"worker 空转",
+/// 两种情况都不是"关闭回收"的写法 —— 想要长阈值就写大数, 不拿 0 当"禁用"。
+fn validate_file_transfer_config(config: &FileTransferConfig) -> io::Result<()> {
+    if config.idle_timeout_ms == 0 {
+        return Err(io::Error::new(
+            ErrorKind::InvalidInput,
+            "file_transfer.idle_timeout_ms 必须大于 0",
+        ));
+    }
+
+    if config.sweep_interval_ms == 0 {
+        return Err(io::Error::new(
+            ErrorKind::InvalidInput,
+            "file_transfer.sweep_interval_ms 必须大于 0",
         ));
     }
 
@@ -1427,6 +1476,48 @@ shell = "/bin/bash"
 
                 assert_eq!(err.kind(), ErrorKind::InvalidInput);
                 assert!(err.to_string().contains("cleanup_interval_seconds"));
+                Ok(())
+            });
+        }
+
+        #[test]
+        fn should_reject_zero_file_transfer_recovery_limits() {
+            let _cwd_guard = crate::test_support::cwd_test_guard();
+            Jail::expect_with(|jail| {
+                jail.clear_env();
+                jail.create_file(
+                    default_platform_config_file_name(),
+                    r#"[file_transfer]
+idle_timeout_ms = 0
+
+[inbound]
+enabled = true
+host = "127.0.0.1"
+port = 4444
+shell = "/bin/bash"
+"#,
+                )?;
+
+                let err = load_daemon_config(None).unwrap_err();
+
+                assert_eq!(err.kind(), ErrorKind::InvalidInput);
+                assert!(err.to_string().contains("idle_timeout_ms"));
+
+                jail.create_file(
+                    default_platform_config_file_name(),
+                    r#"[file_transfer]
+sweep_interval_ms = 0
+
+[inbound]
+enabled = true
+host = "127.0.0.1"
+port = 4444
+shell = "/bin/bash"
+"#,
+                )?;
+                let err = load_daemon_config(None).unwrap_err();
+                assert_eq!(err.kind(), ErrorKind::InvalidInput);
+                assert!(err.to_string().contains("sweep_interval_ms"));
                 Ok(())
             });
         }

@@ -1629,3 +1629,26 @@ fn ax_target_should_accept_app_field() {
     assert_eq!(request.target.app.as_deref(), Some("Terminal"));
     assert_eq!(request.target.role.as_deref(), Some("AXTextArea"));
 }
+
+#[test]
+fn file_cancel_and_file_list_should_parse_from_line_protocol() {
+    // 回收原语必须能从真实行协议到达, 不只是模块函数可调 —— 否则 agent 拿不到入口。
+    let result = parse_control_line(r#"@file-cancel:{transfer_id:"t-1"}"#).unwrap();
+    let ControlParseResult::Control(ControlRequest {
+        command: ControlCommand::FileCancel(payload),
+        ..
+    }) = result
+    else {
+        panic!("应解析为 FileCancel");
+    };
+    assert!(payload.contains("t-1"));
+
+    let result = parse_control_line("@file-list").unwrap();
+    let ControlParseResult::Control(ControlRequest {
+        command: ControlCommand::FileList,
+        ..
+    }) = result
+    else {
+        panic!("应解析为 FileList");
+    };
+}

@@ -1,5 +1,6 @@
 use crate::{
     config::{DaemonConfig, EndpointMode, InboundConfig, OutboundConfig},
+    control_file_transfer::initialize_file_transfer_maintenance,
     control_observation::initialize_durable_observation_state,
     control_recording::control_handler::{install_recording_handler, RecordingHandler},
     control_transport::ControlTransportKind,
@@ -94,6 +95,7 @@ pub fn run(config: DaemonConfig) -> io::Result<()> {
     let retry_interval = config.retry_interval();
     let observation_daemon_name = tcp_observation_daemon_name(&config);
     initialize_durable_observation_state(&config.observation, None, &observation_daemon_name)?;
+    initialize_file_transfer_maintenance(&config.file_transfer)?;
 
     // 停止标记必须跨 worker 共享。改造前 stop 在每个闭包里各建一份且从不置位,
     // 于是 `stop` 参数在生产路径上事实上是死代码,SIGINT 只能靠进程默认行为硬杀。
