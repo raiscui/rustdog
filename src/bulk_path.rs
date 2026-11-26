@@ -79,6 +79,8 @@ pub(crate) const IROH_DIRECT_PATH_UNAVAILABLE: &str = "iroh_direct_path_unavaila
 pub(crate) const IROH_DIRECT_PATH_LOST: &str = "iroh_direct_path_lost";
 pub(crate) const IROH_PATH_UNKNOWN: &str = "iroh_path_unknown";
 pub(crate) const IROH_BULK_PATH_PIN_UNAVAILABLE: &str = "iroh_bulk_path_pin_unavailable";
+#[cfg(test)]
+pub(crate) const IROH_BULK_PATH_PIN_UNPINNED_ALIAS: &str = IROH_BULK_PATH_PIN_UNAVAILABLE;
 
 /// 判定表 (§3.1 的穷举实现)。
 ///
@@ -96,7 +98,12 @@ pub(crate) fn decide(
         return BulkDecision::Refused(IROH_BULK_PATH_PIN_UNAVAILABLE);
     }
     match path_class {
-        PathClass::Direct | PathClass::NotApplicable => BulkDecision::Allowed,
+        PathClass::NotApplicable => {
+            // `not_applicable` 是 `path_aware=false` 的**后果**, 不是路径感知传输上的合法输入。
+            // 走到这里说明"读不出被错标成了不适用" —— 按 fail-closed 拒, 不借它放行。
+            BulkDecision::Refused(IROH_PATH_UNKNOWN)
+        }
+        PathClass::Direct => BulkDecision::Allowed,
         PathClass::Relay => {
             if established_direct {
                 // 曾经直连、中途丢: 已收字节仍有效, 调用方按 §2.5 B3 保留半成品后重试。
@@ -124,29 +131,39 @@ pub(crate) struct BulkPathSnapshot {
     pub(crate) bulk_bytes: u64,
     pub(crate) wire_bytes: u64,
     pub(crate) chunks: u64,
-    pub(crate) concurrency_suspected: bool,
+    /// `null` = 本端没有检测并发流量的能力 (今天所有端都是), 不是"没有并发"。
+    pub(crate) concurrency_suspected: Option<bool>,
     pub(crate) endpoint: &'static str,
-    pub(crate) relay_tx_before: u64,
-    pub(crate) relay_tx_after: u64,
-    pub(crate) relay_rx_before: u64,
-    pub(crate) relay_rx_after: u64,
-    /// 本端**是否真的能采到** relay 计数。
+    /// 四个计数都是 `Option`: `None` = **本端没有 relay 句柄可读**, `Some(0)` = 真的读到了 0。
     ///
-    /// 这一格是防"假零"的闸门: 计数器没接上时, `relay_tx_after` 也是 0, 与"一个字节都没走
-    /// relay"在数值上完全一样。没有这一格, 快照就会把"没采到"记成"零"。今天的客户端驱动
-    /// 就是这种状态 —— 它没有 relay 句柄可读, 所以这里必须是 `false`。
-    pub(crate) relay_sample_available: bool,
+    /// 这一层类型区分是刻意的。用 `u64` 加一个 `relay_sample_available: bool` 也"能表达",
+    /// 但它把"未采样"与"测到 0"交给调用方记得同时设两个字段; 类型分开以后, 想写出一个
+    /// "没采到却看起来像零"的快照, 得先显式填一个 0 —— 那是主动说谎, 不是疏忽。
+    pub(crate) relay_tx_before: Option<u64>,
+    pub(crate) relay_tx_after: Option<u64>,
+    pub(crate) relay_rx_before: Option<u64>,
+    pub(crate) relay_rx_after: Option<u64>,
     pub(crate) aborted: bool,
 }
 
 impl BulkPathSnapshot {
     /// 本端的 relay 字节归属 = `after - before` (括号采样, §4.2)。
-    pub(crate) fn relay_tx_delta(&self) -> u64 {
-        self.relay_tx_after.saturating_sub(self.relay_tx_before)
+    ///
+    /// 任一端计数缺失就是 `None` —— "不知道", 不是 0。
+    pub(crate) fn relay_tx_delta(&self) -> Option<u64> {
+        Some(self.relay_tx_after?.saturating_sub(self.relay_tx_before?))
     }
 
-    pub(crate) fn relay_rx_delta(&self) -> u64 {
-        self.relay_rx_after.saturating_sub(self.relay_rx_before)
+    pub(crate) fn relay_rx_delta(&self) -> Option<u64> {
+        Some(self.relay_rx_after?.saturating_sub(self.relay_rx_before?))
+    }
+
+    /// 本次尝试到底搬没搬字节。
+    ///
+    /// 这条是防**最纯的空真**: 一次"续传时半成品已经完整"的尝试一个字节都不用发, 计数当然是零,
+    /// 而它会被读成"bulk 没走 relay"的正面证据 —— 不需要任何失败路径参与。
+    pub(crate) fn moved_bytes(&self) -> bool {
+        self.chunks > 0 || self.bulk_bytes > 0
     }
 
     /// `relay_bytes_zero` 的判定式 (§4.3) —— **逐字可执行**, 不做主观解读。
@@ -159,12 +176,11 @@ impl BulkPathSnapshot {
     /// 单端只能证自己那一半, 所以这个函数**不是**"整个请求 relay 字节为零"的结论 —— 结论要两端
     /// 各自的 `relay_bytes_zero_own_half()` 都为真才能下 (§4.3 要求 join)。
     pub(crate) fn relay_bytes_zero_own_half(&self) -> bool {
-        // 采样不可得时这条**永远为假**: 拿不到计数就不是"零", 而是"不知道"。
         !self.aborted
-            && self.relay_sample_available
+            && self.moved_bytes()
             && self.path_class == PathClass::Direct
-            && self.relay_tx_delta() == 0
-            && self.relay_rx_delta() == 0
+            && self.relay_tx_delta() == Some(0)
+            && self.relay_rx_delta() == Some(0)
     }
 
     /// 快照里的 `verdict` 字段。
@@ -176,9 +192,13 @@ impl BulkPathSnapshot {
             // 不适用, 不是"通过": 没有 relay 跳的链路上"relay 字节为 0"是空真 (§2.1)。
             return "not_applicable";
         }
-        if !self.relay_sample_available {
+        if self.relay_tx_delta().is_none() || self.relay_rx_delta().is_none() {
             // 采不到计数: 既不能报零, 也不能报非零 —— 这是一条"无结论"。
             return "relay_sample_unavailable";
+        }
+        if !self.moved_bytes() {
+            // 一个字节都没搬 (续传已完成等): 这份快照不构成"bulk 没走 relay"的证据。
+            return "no_bulk_bytes";
         }
         if self.relay_bytes_zero_own_half() {
             "relay_bytes_zero"
@@ -191,7 +211,8 @@ impl BulkPathSnapshot {
     ///
     /// 严格不等式是刻意的: `>= 0` 在计数器根本没接上时照样通过, 等于没有正对照。
     pub(crate) fn positive_control_holds(control_probe: &BulkPathSnapshot) -> bool {
-        control_probe.relay_tx_delta() > 0 || control_probe.relay_rx_delta() > 0
+        control_probe.relay_tx_delta().unwrap_or(0) > 0
+            || control_probe.relay_rx_delta().unwrap_or(0) > 0
     }
 
     pub(crate) fn to_json(&self) -> Value {
@@ -213,7 +234,9 @@ impl BulkPathSnapshot {
             "relay_tx_after": self.relay_tx_after,
             "relay_rx_before": self.relay_rx_before,
             "relay_rx_after": self.relay_rx_after,
-            "relay_sample_available": self.relay_sample_available,
+            // null = 未采样。四个计数缺一端就是 null, 验收工具必须把它读成"不知道"。
+            "relay_sample_available": self.relay_tx_delta().is_some() && self.relay_rx_delta().is_some(),
+            "aborted": self.aborted,
             "verdict": self.verdict(),
         })
     }
@@ -234,13 +257,12 @@ mod tests {
             bulk_bytes: 10,
             wire_bytes: 16,
             chunks: 1,
-            concurrency_suspected: false,
+            concurrency_suspected: None,
             endpoint: "client",
-            relay_tx_before: 0,
-            relay_tx_after: 0,
-            relay_rx_before: 0,
-            relay_rx_after: 0,
-            relay_sample_available: true,
+            relay_tx_before: Some(0),
+            relay_tx_after: Some(0),
+            relay_rx_before: Some(0),
+            relay_rx_after: Some(0),
             aborted: false,
         }
     }
@@ -284,6 +306,24 @@ mod tests {
             decide(PathCapability::PATH_AWARE_PINNED, PathClass::Unknown, false),
             BulkDecision::Refused(IROH_PATH_UNKNOWN)
         );
+        // `not_applicable` 是 `path_aware=false` 的**后果**, 在路径感知传输上不是合法输入:
+        // 它只可能是"读不出被错标", 同样必须拒。这一格以前被漏在"穷举"之外。
+        assert_eq!(
+            decide(
+                PathCapability::PATH_AWARE_PINNED,
+                PathClass::NotApplicable,
+                false
+            ),
+            BulkDecision::Refused(IROH_PATH_UNKNOWN)
+        );
+        assert_eq!(
+            decide(
+                PathCapability::PATH_AWARE_UNPINNED,
+                PathClass::NotApplicable,
+                false
+            ),
+            BulkDecision::Refused(IROH_BULK_PATH_PIN_UNAVAILABLE)
+        );
     }
 
     #[test]
@@ -299,13 +339,13 @@ mod tests {
         let mut direct = snapshot(PathCapability::PATH_AWARE_PINNED, PathClass::Direct);
         assert_eq!(direct.verdict(), "relay_bytes_zero");
 
-        direct.relay_tx_after = 1;
+        direct.relay_tx_after = Some(1);
         assert_eq!(direct.verdict(), "relay_bytes_nonzero");
-        direct.relay_tx_after = 0;
+        direct.relay_tx_after = Some(0);
 
-        direct.relay_rx_after = 1;
+        direct.relay_rx_after = Some(1);
         assert_eq!(direct.verdict(), "relay_bytes_nonzero");
-        direct.relay_rx_after = 0;
+        direct.relay_rx_after = Some(0);
 
         // 路径不是 direct 时, 计数器再干净也不构成结论
         let relay = snapshot(PathCapability::PATH_AWARE_PINNED, PathClass::Relay);
@@ -324,13 +364,33 @@ mod tests {
         // 计数器没接上时 relay_tx/rx 也是 0, 与"一字节没走 relay"数值上完全一样。
         // 这一格与"永远为假"的判定式一起, 保证那种零只能读成"不知道"。
         let mut value = snapshot(PathCapability::PATH_AWARE_PINNED, PathClass::Direct);
-        value.relay_sample_available = false;
+        // 只有一端有计数 = 未采样: 类型上就是 None, 不是 0。
+        value.relay_tx_after = None;
         assert_eq!(value.verdict(), "relay_sample_unavailable");
         assert!(!value.relay_bytes_zero_own_half());
         assert_eq!(value.to_json()["relay_sample_available"], false);
+        assert_eq!(value.to_json()["relay_tx_after"], serde_json::Value::Null);
 
         // 采样可用 && direct && 两个 delta 都 0 时, 才是真正的零
-        value.relay_sample_available = true;
+        value.relay_tx_after = Some(0);
+        assert_eq!(value.verdict(), "relay_bytes_zero");
+    }
+
+    #[test]
+    fn a_transfer_that_moved_nothing_is_not_evidence() {
+        // 一次"续传时半成品已经完整"的尝试一个字节都不用发 —— 它的 relay 计数当然是零, 而这
+        // 与"bulk 没走 relay"在数值上完全一样。这条不依赖任何失败路径, 是最纯的空真。
+        let mut value = snapshot(PathCapability::PATH_AWARE_PINNED, PathClass::Direct);
+        value.chunks = 0;
+        value.bulk_bytes = 0;
+        value.wire_bytes = 0;
+        assert!(!value.moved_bytes());
+        assert_eq!(value.verdict(), "no_bulk_bytes");
+        assert!(!value.relay_bytes_zero_own_half());
+
+        // 有字节移动才算证据
+        value.chunks = 1;
+        value.bulk_bytes = 10;
         assert_eq!(value.verdict(), "relay_bytes_zero");
     }
 
@@ -341,11 +401,11 @@ mod tests {
         assert!(!BulkPathSnapshot::positive_control_holds(&broken));
 
         let mut healthy = snapshot(PathCapability::PATH_AWARE_PINNED, PathClass::Relay);
-        healthy.relay_tx_after = 42;
+        healthy.relay_tx_after = Some(42);
         assert!(BulkPathSnapshot::positive_control_holds(&healthy));
 
         let mut healthy_rx = snapshot(PathCapability::PATH_AWARE_PINNED, PathClass::Relay);
-        healthy_rx.relay_rx_after = 7;
+        healthy_rx.relay_rx_after = Some(7);
         assert!(BulkPathSnapshot::positive_control_holds(&healthy_rx));
     }
 

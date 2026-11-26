@@ -454,21 +454,33 @@ bulk 一律以 `iroh_bulk_path_pin_unavailable` 拒绝. **适配器补上路径 
   "transfer_id": "<string>",
   "direction": "put | get",
   "path_aware": true,
+  "bulk_path_pin": true,
   "path_class": "direct | relay | unknown | not_applicable",
   "direct_addr": "<脱敏后的对端直连地址, 仅 direct 时存在>",
   "bulk_bytes": 123,
   "wire_bytes": 164,
   "chunks": 3,
-  "concurrency_suspected": false,
+  "concurrency_suspected": true,
   "endpoint": "client | daemon",
   "relay_tx_before": 0, "relay_tx_after": 0,
   "relay_rx_before": 0, "relay_rx_after": 0,
-  "verdict": "relay_bytes_zero | relay_bytes_nonzero | aborted"
+  "relay_sample_available": true,
+  "aborted": false,
+  "verdict": "<见 BulkPathSnapshot::verdict()>"
 }
 ```
 
 `bulk_bytes` 是载荷字节 (base64 解码后), `wire_bytes` 是实际压上控制行的 base64 字节 ——
-两者都要, 因为"relay 上为 0"证的是后者, 而用户关心的是前者.
+两者都要, 因为"relay 上为 0"证的是后者, 而用户关心的是前者. 两者都只记**被对端确认过**的字节:
+记账在发送之前会把从未落盘的字节算进去, 两端 join 就对不上账.
+
+**四个计数与 `concurrency_suspected` 都可以是 `null`**: `null` 表示**本端没有采样能力**, 不是
+"测到了 0"/"没有并发". 类型定义是 `Option<u64>` / `Option<bool>` (`src/bulk_path.rs`), 不是
+`u64` + 一个"记得同时设"的布尔. `relay_sample_available` 是这两件事在 JSON 上的落点.
+
+`verdict` 的取值与判定**不在这里枚举** (枚举两处必然分叉): 唯一真相是
+`BulkPathSnapshot::verdict()`, 它今天会给出 `aborted` / `not_applicable` / `relay_sample_unavailable` /
+`no_bulk_bytes` / `relay_bytes_zero` / `relay_bytes_nonzero` 之一. 其中前四个都**不是结论**.
 
 **判定式** (可执行实现: `BulkPathSnapshot::relay_bytes_zero_own_half()` / `positive_control_holds()`,
 `src/bulk_path.rs`; 验收脚本按此逐字实现, 不做主观解读):

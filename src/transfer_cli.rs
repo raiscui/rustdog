@@ -71,6 +71,7 @@ impl TransportExchange {
 /// 上传/下载完成后的回执 (给 CLI 打印, 也给验收留证据)。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct TransferReceipt {
+    pub(crate) transfer_id: String,
     pub(crate) direction: &'static str,
     pub(crate) bytes: u64,
     pub(crate) sha256: String,
@@ -126,7 +127,11 @@ pub(crate) struct BulkPathRecorder {
     bulk_bytes: u64,
     wire_bytes: u64,
     chunks: u64,
+    path_class: PathClass,
+    established_direct: bool,
     aborted: bool,
+    /// 失败路径上写快照时用的 id (成功路径用收据里的那个)。
+    last_transfer_id: String,
 }
 
 impl BulkPathRecorder {
@@ -142,35 +147,66 @@ impl BulkPathRecorder {
             bulk_bytes: 0,
             wire_bytes: 0,
             chunks: 0,
+            path_class: if capability.path_aware {
+                PathClass::Unknown
+            } else {
+                PathClass::NotApplicable
+            },
+            established_direct: false,
             aborted: false,
+            last_transfer_id: String::new(),
         }
     }
 
-    /// 门禁 (§3.1)。今天是 `path_aware=false` ⇒ 一律允许并记 `not_applicable`;
-    /// 一旦适配器声明路径感知而这里还没有采样, 就 fail-closed 成 `iroh_path_unknown`。
+    /// 记下此刻观测到的路径类别。真实适配器每读一次采样就调一次; 今天的客户端驱动没有采样源,
+    /// 所以它永远保持构造时的类别 (`not_applicable`)。
+    pub(crate) fn observe(&mut self, path_class: PathClass) {
+        if path_class == PathClass::Direct {
+            self.established_direct = true;
+        }
+        self.path_class = path_class;
+    }
+
+    /// 门禁 (§3.1): open 前一次。
     pub(crate) fn admit(&self) -> Result<(), String> {
-        let path_class = if self.capability.path_aware {
-            PathClass::Unknown
-        } else {
-            PathClass::NotApplicable
-        };
-        match decide(self.capability, path_class, false) {
+        match decide(self.capability, self.path_class, self.established_direct) {
             BulkDecision::Allowed => Ok(()),
-            BulkDecision::Refused(code) => Err(format!("{code}: 当前传输不能承载 bulk 直连传输")),
+            BulkDecision::Refused(code) => Err(refuse_message(code)),
         }
     }
 
-    fn note_chunk(&mut self, bulk: u64, wire: u64) {
+    /// 门禁复查: **每个 chunk 边界都要再来一次**。
+    ///
+    /// 只在 open 判一次会漏掉中途 `direct → relay` 的切换 —— 那恰好是 `iroh_direct_path_lost`
+    /// 存在的理由。少了这一处复查, 那个分支在生产里永远没有调用者。
+    pub(crate) fn recheck(&self) -> Result<(), String> {
+        self.admit()
+    }
+
+    /// 记一块**已被对端确认**的字节。必须在 `request` 成功之后调: 记账在发送之前会把从未被
+    /// 确认的字节算进 `bulk_bytes`, 两端 join 就对不上账。
+    fn note_confirmed_chunk(&mut self, bulk: u64, wire: u64) {
         self.bulk_bytes += bulk;
         self.wire_bytes += wire;
         self.chunks += 1;
+    }
+
+    pub(crate) fn remember_transfer(&mut self, transfer_id: &str) {
+        self.last_transfer_id = transfer_id.to_string();
+    }
+
+    pub(crate) fn transfer_id_or_empty(&self) -> &str {
+        &self.last_transfer_id
     }
 
     fn note_aborted(&mut self) {
         self.aborted = true;
     }
 
-    /// 落盘本端证据。没有 `out` 时什么都不做 (证据是按需留的, 不是每次都写文件)。
+    /// 落盘本端证据。没有 `out` 时什么都不做。
+    ///
+    /// 写失败只 warn: 证据是给验收用的旁路产物, 不该让一次已经成功的传输因为写不了报告而报错 ——
+    /// 但也**不许静默**: 吞掉 IO 错误会让"没有快照"与"快照写了但没落盘"分不开。
     pub(crate) fn write(&self, transfer_id: &str, direction: &'static str) {
         let Some(out) = self.out.as_ref() else {
             return;
@@ -180,28 +216,29 @@ impl BulkPathRecorder {
             transfer_id: transfer_id.to_string(),
             direction,
             capability: self.capability,
-            path_class: if self.capability.path_aware {
-                PathClass::Unknown
-            } else {
-                PathClass::NotApplicable
-            },
+            path_class: self.path_class,
             direct_addr: None,
             bulk_bytes: self.bulk_bytes,
             wire_bytes: self.wire_bytes,
             chunks: self.chunks,
-            concurrency_suspected: false,
+            // 客户端没有并发检测能力: `null`, 不是 `false`。
+            concurrency_suspected: None,
             endpoint: "client",
-            relay_tx_before: 0,
-            relay_tx_after: 0,
-            relay_rx_before: 0,
-            relay_rx_after: 0,
-            // 客户端驱动**没有 relay 句柄**可读 (它走 TCP / WebSocket / Zenoh), 所以这里必须是
-            // false: 让快照把"没采到"记成"零"就是今天一整天在防的那种假通过。
-            relay_sample_available: false,
+            // 客户端驱动没有 relay 句柄可读 —— 四个计数是 `None` (未采样), 不是 0。
+            relay_tx_before: None,
+            relay_tx_after: None,
+            relay_rx_before: None,
+            relay_rx_after: None,
             aborted: self.aborted,
         };
-        let _ = std::fs::write(out, snapshot.to_json().to_string());
+        if let Err(err) = std::fs::write(out, snapshot.to_json().to_string()) {
+            eprintln!("warning: 证据快照写不进 {out:?}: {err}");
+        }
     }
+}
+
+fn refuse_message(code: &str) -> String {
+    format!("{code}: 当前传输不能承载 bulk 直连传输")
 }
 
 fn new_transfer_id(tag: &str) -> String {
@@ -342,6 +379,29 @@ pub(crate) fn run_put(
     remote: &str,
     restart: bool,
 ) -> Result<TransferReceipt, String> {
+    // 任何一条失败路径都必须留下快照: 门禁拒绝、open 失败、分块失败、`@file-end` 失败。
+    // 只在两条路上写会让"这次尝试到底发生了什么"在证据里缺一块 —— 而缺的那块最可能是
+    // 失败原因本身。
+    match run_put_inner(exchange_peer, recorder, local, remote, restart) {
+        Ok(receipt) => {
+            recorder.write(&receipt.transfer_id, "put");
+            Ok(receipt)
+        }
+        Err(err) => {
+            recorder.note_aborted();
+            recorder.write(recorder.transfer_id_or_empty(), "put");
+            Err(err)
+        }
+    }
+}
+
+fn run_put_inner(
+    exchange_peer: &dyn LineExchange,
+    recorder: &mut BulkPathRecorder,
+    local: &Path,
+    remote: &str,
+    restart: bool,
+) -> Result<TransferReceipt, String> {
     recorder.admit()?;
     let metadata = std::fs::metadata(local).map_err(|err| format!("读取 {local:?} 失败: {err}"))?;
     if metadata.is_dir() {
@@ -352,6 +412,7 @@ pub(crate) fn run_put(
     let size = metadata.len();
     let sha256 = sha256_of_file(local)?;
     let transfer_id = new_transfer_id("put");
+    recorder.remember_transfer(&transfer_id);
 
     let open_line = serde_json::json!({
         "transfer_id": transfer_id,
@@ -392,10 +453,9 @@ pub(crate) fn run_put(
             "offset": offset,
             "data": BASE64_STANDARD.encode(&buffer[..read]),
         });
-        recorder.note_chunk(
-            read as u64,
-            chunk_line["data"].as_str().map(str::len).unwrap_or(0) as u64,
-        );
+        // 门禁复查: 每个 chunk 边界都再来一次 (§3.1)。只在 open 判一次会漏掉中途
+        // direct → relay 的切换 —— 那正是 iroh_direct_path_lost 存在的理由。
+        recorder.recheck()?;
         let accepted = match exchange_peer.request(&format!("@file-chunk:{chunk_line}")) {
             Ok(value) => value,
             Err(err) => {
@@ -408,6 +468,17 @@ pub(crate) fn run_put(
                 return Err(format!("@{offset} 处发送分块失败: {err}"));
             }
         };
+        // 只有被对端**确认**过的那部分才入账: 记账在发送之前会把从未落盘的字节算进
+        // bulk_bytes, 两端 join 就对不上账。
+        let confirmed = accepted
+            .get("written")
+            .and_then(Value::as_u64)
+            .map(|written| written.saturating_sub(offset))
+            .unwrap_or(read as u64);
+        recorder.note_confirmed_chunk(
+            confirmed,
+            chunk_line["data"].as_str().map(str::len).unwrap_or(0) as u64,
+        );
         offset = accepted
             .get("written")
             .and_then(Value::as_u64)
@@ -429,6 +500,7 @@ pub(crate) fn run_put(
     }
     recorder.write(&transfer_id, "put");
     Ok(TransferReceipt {
+        transfer_id: transfer_id.clone(),
         direction: "put",
         bytes: size,
         sha256,
@@ -446,8 +518,28 @@ pub(crate) fn run_get(
     remote: &str,
     local: &Path,
 ) -> Result<TransferReceipt, String> {
+    match run_get_inner(exchange_peer, recorder, remote, local) {
+        Ok(receipt) => {
+            recorder.write(&receipt.transfer_id, "get");
+            Ok(receipt)
+        }
+        Err(err) => {
+            recorder.note_aborted();
+            recorder.write(recorder.transfer_id_or_empty(), "get");
+            Err(err)
+        }
+    }
+}
+
+fn run_get_inner(
+    exchange_peer: &dyn LineExchange,
+    recorder: &mut BulkPathRecorder,
+    remote: &str,
+    local: &Path,
+) -> Result<TransferReceipt, String> {
     recorder.admit()?;
     let transfer_id = new_transfer_id("get");
+    recorder.remember_transfer(&transfer_id);
     let open_line = serde_json::json!({
         "transfer_id": transfer_id,
         "path": remote,
@@ -494,7 +586,7 @@ pub(crate) fn run_get(
                 .map_err(|err| format!("分块解码失败: {err}"))?;
             file.write_all(&bytes)
                 .map_err(|err| format!("写入 {staging:?} 失败: {err}"))?;
-            recorder.note_chunk(bytes.len() as u64, data.len() as u64);
+            recorder.note_confirmed_chunk(bytes.len() as u64, data.len() as u64);
             offset += bytes.len() as u64;
             let eof = read.get("eof").and_then(Value::as_bool).unwrap_or(false);
             if eof || offset >= size {
@@ -531,6 +623,7 @@ pub(crate) fn run_get(
     })?;
     recorder.write(&transfer_id, "get");
     Ok(TransferReceipt {
+        transfer_id: transfer_id.clone(),
         direction: "get",
         bytes: offset,
         sha256: actual,
@@ -792,6 +885,46 @@ mod tests {
         assert_eq!(value["endpoint"], "client");
         assert!(value["bulk_bytes"].as_u64().unwrap() > 0);
         assert!(value["wire_bytes"].as_u64().unwrap() >= value["bulk_bytes"].as_u64().unwrap());
+        // 未采样必须写成 null, 不许写成 0 —— 那正是"假零"的来源。
+        assert_eq!(value["relay_sample_available"], false);
+        assert!(value["relay_tx_after"].is_null());
+        assert!(value["concurrency_suspected"].is_null());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_refused_onset_still_leaves_evidence() {
+        // 门禁拒绝是最该留证据的一种尝试 (它连 open 都没发出去), 而它过去不写快照。
+        let dir = scratch_dir("gate-evidence");
+        let local = dir.join("source.bin");
+        std::fs::write(&local, vec![1u8; 8]).unwrap();
+        let remote = dir.join("landed.bin");
+        let out = dir.join("bulk-path.json");
+
+        let peer = LoopbackPeer::new(4);
+        let mut recorder = BulkPathRecorder::new(
+            "attempt".to_string(),
+            PathCapability::PATH_AWARE_UNPINNED,
+            Some(out.clone()),
+        );
+        let err = run_put(
+            &peer,
+            &mut recorder,
+            &local,
+            &remote.to_string_lossy(),
+            false,
+        )
+        .unwrap_err();
+        assert!(
+            err.contains(crate::bulk_path::IROH_BULK_PATH_PIN_UNPINNED_ALIAS),
+            "{err}"
+        );
+
+        let value: Value = serde_json::from_str(&std::fs::read_to_string(&out).unwrap()).unwrap();
+        assert_eq!(value["aborted"], true);
+        assert_eq!(value["bulk_bytes"], 0);
+        assert_eq!(value["verdict"], "aborted");
+        assert!(peer.seen().is_empty(), "门禁拒绝必须在任何一行发出之前发生");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
