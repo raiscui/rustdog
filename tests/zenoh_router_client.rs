@@ -875,6 +875,9 @@ fn control_should_execute_safe_mouse_move_in_zenoh_profile() {
     assert!(combined.contains(r#""dy":0"#));
 }
 
+// 同 control_lanes 那条: ubuntu CI 上 daemon/control 的连接前提不成立, 与 key 注入语义无关。
+// 显式 ignore 而不是删用例: 归因与复现条件见 RAI-464。
+#[ignore = "ubuntu CI: daemon/control 连接前提不成立 (code 70); 见 RAI-464"]
 #[test]
 fn control_should_publish_key_event_after_successful_key_request() {
     let daemon_name = unique_name("keyevent");

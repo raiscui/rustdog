@@ -1281,3 +1281,10 @@ zenoh_router_client 38/2 ignored)。
   `.rdog/run` 的 unixpipe pipe 名超出 95 字节上限, daemon 拒启动。`test_isolated_home()`
   改用 `short_temp_root()` (优先 `/tmp`)。本地 linux 复跑 38 passed / 2 ignored。
 - 提交: (本条随修复提交记入下一次账本)
+
+- 2026-11-26 放量第二个真缺陷 (ubuntu): `control_lanes::daemon_control_lane_should_accept_key_object_payload_with_request_id`
+  与 `zenoh_router_client::control_should_publish_key_event_after_successful_key_request` 在
+  ubuntu runner 上拿到 `@response {"code":70,"error":"no connection could be established"}`
+  —— 是 daemon/control 的连接前提 (端口/回环/fast path) 而非消息语义; 本地稳定通过。
+  按「显式 ignore + 理由」处置并开 RAI-464 跟进, 不删用例。
+- 提交: (随本条修复记入下一次账本)
