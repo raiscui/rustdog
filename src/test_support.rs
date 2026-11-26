@@ -63,11 +63,20 @@ pub(crate) mod console_probe {
     /// 探针自身编译失败时的专用退出码, 与被测性质的任何读数都不重叠。
     pub(crate) const COMPILE_FAILED_EXIT: i32 = 73;
 
+    /// 探针编出来了但调用 `GetConsoleWindow()` 失败 (P/Invoke 层) 时的标记。
+    pub(crate) const CALL_FAILED_MARKER: &str = "PROBE_CALL_FAILED";
+
+    /// 调用阶段的专用退出码, 与编译失败、与被测性质都不重叠。
+    pub(crate) const CALL_FAILED_EXIT: i32 = 74;
+
     /// 探针脚本。仪器可用时 stdout 只有 `GetConsoleWindow()` 的十进制值。
     ///
-    /// `try/catch` 只负责把编译器的原话留给日志; 真正判「仪器可用」的是
-    /// `'Rdog.ConsoleProbe' -as [type]` —— 只要探针类型没建起来 (编译失败, 或失败没有
-    /// 抛成终止错误), 都走同一个标记, 不再掉进「类型找不到」的 exit 1。
+    /// 两个阶段各自留标记与专用退出码, 因为它们在日志里必须长得不一样:
+    ///   1. 编译 —— `try/catch` 把编译器的原话留给日志, 但真正判「仪器可用」的是
+    ///      `'Rdog.ConsoleProbe' -as [type]`: 只要类型没建起来 (编译失败, 或失败没抛成
+    ///      终止错误), 都走同一个标记, 不再掉进「类型找不到」的 exit 1;
+    ///   2. 调用 —— 类型有了但 `GetConsoleWindow()` 本身失败 (P/Invoke 层, 例如在非 windows
+    ///      上跑同一条脚本), 与「句柄为 0」是两件事。
     pub(crate) fn script() -> String {
         format!(
             "$compileError = $null; \
@@ -76,12 +85,17 @@ pub(crate) mod console_probe {
              -ErrorAction Stop }} \
              catch {{ $compileError = $_.Exception.Message }}; \
              if (-not ('Rdog.ConsoleProbe' -as [type])) {{ \
-             Write-Output '{marker}'; \
+             Write-Output '{compile_marker}'; \
              if ($compileError) {{ Write-Error $compileError }}; \
-             exit {exit_code} }}; \
-             [Rdog.ConsoleProbe]::GetConsoleWindow().ToInt64()",
-            marker = COMPILE_FAILED_MARKER,
-            exit_code = COMPILE_FAILED_EXIT,
+             exit {compile_exit} }}; \
+             try {{ $handle = [Rdog.ConsoleProbe]::GetConsoleWindow().ToInt64() }} \
+             catch {{ Write-Output '{call_marker}'; \
+             Write-Error $_.Exception.Message; exit {call_exit} }}; \
+             $handle",
+            compile_marker = COMPILE_FAILED_MARKER,
+            compile_exit = COMPILE_FAILED_EXIT,
+            call_marker = CALL_FAILED_MARKER,
+            call_exit = CALL_FAILED_EXIT,
         )
     }
 
@@ -96,17 +110,32 @@ pub(crate) mod console_probe {
     }
 
     /// `stdout` 传探针的 stdout (`task_control` 那条路径的 stdout 与 stderr 合流)。
+    ///
+    /// `Unavailable` 的文案必须点明**哪个阶段**失败: 下一个读日志的人要能分开
+    /// 「编译失败」「调用失败」「根本没跑起来」, 而不是看到一个笼统的「探针不可用」。
     pub(crate) fn read(exit_code: Option<i32>, stdout: &str, stderr: &str) -> Reading {
         let stdout = stdout.trim();
         let stderr = stderr.trim();
         if stdout.contains(COMPILE_FAILED_MARKER) || exit_code == Some(COMPILE_FAILED_EXIT) {
             return Reading::Unavailable(format!(
-                "Add-Type 没把探针类型编出来\n  stdout: {stdout}\n  stderr: {stderr}"
+                "阶段一 编译失败: Add-Type 没把探针类型编出来\n  stdout: {stdout}\n  stderr: {stderr}"
+            ));
+        }
+        if stdout.contains(CALL_FAILED_MARKER) || exit_code == Some(CALL_FAILED_EXIT) {
+            return Reading::Unavailable(format!(
+                "阶段二 调用失败: 探针编出来了, 但 GetConsoleWindow() 本身抛错 (P/Invoke 层)\n  \
+                 stdout: {stdout}\n  stderr: {stderr}"
+            ));
+        }
+        if exit_code.is_none() {
+            return Reading::Unavailable(format!(
+                "脚本没有正常退出 (超时或被杀), 读数不成立\n  stdout: {stdout}\n  stderr: {stderr}"
             ));
         }
         if exit_code != Some(0) {
             return Reading::Unavailable(format!(
-                "脚本没跑到读数那一步 (exit {exit_code:?})\n  stdout: {stdout}\n  stderr: {stderr}"
+                "脚本以意外退出码结束 (exit {exit_code:?}), 没有走到读数\n  \
+                 stdout: {stdout}\n  stderr: {stderr}"
             ));
         }
         match stdout.parse::<i64>() {
@@ -132,7 +161,7 @@ pub(crate) mod console_probe {
     /// Windows PowerShell 的重定向错误流可能是 UTF-16LE, 先认编码再解码。
     pub(crate) fn decode_stderr(bytes: &[u8]) -> String {
         let is_utf16 = bytes.len() > 1
-            && bytes.len() % 2 == 0
+            && bytes.len().is_multiple_of(2)
             && bytes.chunks(2).take(8).all(|pair| pair[1] == 0);
         if is_utf16 {
             String::from_utf16_lossy(
@@ -170,13 +199,28 @@ mod console_probe_tests {
             "PROBE_COMPILE_FAILED\nAdd-Type : 类型已存在",
             "",
         ));
-        assert!(reason.contains("没把探针类型编出来"), "{reason}");
+        assert!(reason.contains("阶段一 编译失败"), "{reason}");
 
-        // 标记丢了、只有专用退出码时, 也必须读成仪器不可用。
+        // 标记丢了、只有专用退出码时, 也必须读成编译失败。
         assert!(
-            unavailable(console_probe::read(Some(73), "", "")).contains("没把探针类型编出来"),
-            "专用退出码单独出现时也要认出仪器失败"
+            unavailable(console_probe::read(Some(73), "", "")).contains("阶段一 编译失败"),
+            "专用退出码单独出现时也要认出编译失败"
         );
+    }
+
+    /// 编译失败与调用失败必须是两句不同的话 —— 它们在真机上对应完全不同的处置。
+    #[test]
+    fn call_failure_is_read_separately_from_compile_failure() {
+        let compile = unavailable(console_probe::read(Some(73), "PROBE_COMPILE_FAILED", ""));
+        let call = unavailable(console_probe::read(
+            Some(74),
+            "PROBE_CALL_FAILED",
+            "Exception calling GetConsoleWindow",
+        ));
+        assert!(call.contains("阶段二 调用失败"), "{call}");
+        assert!(call.contains("P/Invoke"), "{call}");
+        assert!(!call.contains("阶段一"), "{call}");
+        assert_ne!(compile, call, "两个阶段的文案不许合并成一句");
     }
 
     #[test]
@@ -193,10 +237,14 @@ mod console_probe_tests {
 
     #[test]
     fn anything_else_is_instrument_failure_not_a_verdict() {
-        // 退出码非 0 又没有标记: 脚本没跑到读数那一步, 不许被读成「分了控制台」。
-        let reason = unavailable(console_probe::read(Some(1), "", "boom"));
-        assert!(reason.contains("没跑到读数那一步"), "{reason}");
-        // 退出码 0 但 stdout 不是句柄数值: 同样不构成任何一方的证据。
+        // 没有退出码 = 超时或被杀: 读数根本不成立, 不许被读成「分了控制台」。
+        let timed_out = unavailable(console_probe::read(None, "", ""));
+        assert!(timed_out.contains("超时或被杀"), "{timed_out}");
+        // 意外退出码又没有标记: 也不构成任何一方的证据。
+        let unexpected = unavailable(console_probe::read(Some(1), "", "boom"));
+        assert!(unexpected.contains("意外退出码"), "{unexpected}");
+        assert_ne!(timed_out, unexpected, "超时与意外退出码要能分辨");
+        // 退出码 0 但 stdout 不是句柄数值: 这条曾是最容易假绿的一个形状。
         assert!(unavailable(console_probe::read(Some(0), "hello", "")).contains("不是窗口句柄数值"));
     }
 
@@ -227,6 +275,14 @@ mod console_probe_tests {
         assert!(
             script.contains(&format!("exit {}", console_probe::COMPILE_FAILED_EXIT)),
             "脚本必须用专用退出码: {script}"
+        );
+        assert!(
+            script.contains(&format!("'{}'", console_probe::CALL_FAILED_MARKER)),
+            "脚本必须把调用阶段的失败单独打出来: {script}"
+        );
+        assert!(
+            script.contains(&format!("exit {}", console_probe::CALL_FAILED_EXIT)),
+            "调用阶段必须有独立退出码: {script}"
         );
         assert!(
             script.contains("-as [type]"),
