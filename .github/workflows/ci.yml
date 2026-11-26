@@ -1,5 +1,10 @@
 name: CI
 
+# job 墙钟上限的**单一定义**: 既给下面每个 job 的 `timeout-minutes`, 也给 integration 预算
+# (`RDOG_JOB_TIMEOUT_MINUTES`)。改一处漏一处就是下一次「预算算出剩余 3299s 却被 cancel」。
+x-job-timeout-minutes: &job-timeout-minutes 60
+
+
 # Run the full rdog test suite on every push to main and every PR.
 # Matrix 覆盖 macOS (生产目标)、Ubuntu (最常见的 CI runner) 与 Windows
 # (2026-10-06 加入: 跨平台测试修复后 bin 单测可全平台跑)。
@@ -37,9 +42,13 @@ jobs:
   build-ubuntu:
     name: build (ubuntu-latest)
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: *job-timeout-minutes
 
     steps:
+      - name: Record job start (integration budget baseline)
+        shell: bash
+        run: date +%s > "$RUNNER_TEMP/job-started-at"
+
       - name: Checkout
         uses: actions/checkout@v4
 
@@ -73,9 +82,13 @@ jobs:
   build-macos:
     name: build (macos-latest)
     runs-on: macos-latest
-    timeout-minutes: 60
+    timeout-minutes: *job-timeout-minutes
 
     steps:
+      - name: Record job start (integration budget baseline)
+        shell: bash
+        run: date +%s > "$RUNNER_TEMP/job-started-at"
+
       - name: Checkout
         uses: actions/checkout@v4
 
@@ -110,9 +123,13 @@ jobs:
     name: build (windows-latest)
     runs-on: windows-latest
     # Windows 要静态链接 341MB 的 onnxruntime.lib, 编译 + 链接 + 测试都比 unix 慢一截。
-    timeout-minutes: 60
+    timeout-minutes: *job-timeout-minutes
 
     steps:
+      - name: Record job start (integration budget baseline)
+        shell: bash
+        run: date +%s > "$RUNNER_TEMP/job-started-at"
+
       - name: Checkout
         uses: actions/checkout@v4
 
@@ -159,9 +176,13 @@ jobs:
     name: test (ubuntu-latest)
     needs: [build-ubuntu]
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: *job-timeout-minutes
 
     steps:
+      - name: Record job start (integration budget baseline)
+        shell: bash
+        run: date +%s > "$RUNNER_TEMP/job-started-at"
+
       - name: Checkout
         uses: actions/checkout@v4
 
@@ -173,10 +194,6 @@ jobs:
       # target 由下面的 Integration targets 步骤按平台执行 (清单与计数判据都在
       # scripts/ci/run-integration-targets.py)。
       # pipefail 必需: 没有它 tee 的退出码会盖掉 cargo 的失败。
-      - name: Record job start (integration budget baseline)
-        shell: bash
-        run: date +%s > "$RUNNER_TEMP/job-started-at"
-
       - name: Unit tests
         shell: bash
         run: |
@@ -200,7 +217,7 @@ jobs:
           # 预算按**job 真实剩余时间**算: 起点写在 job 第一个 step, 时间上限由下面传入。
           # 常数预算 + 前缀 (checkout/cargo-prep/unit tests) 会越过 job timeout 被 cancel。
           RDOG_JOB_STARTED_AT_FILE: ${{ runner.temp }}/job-started-at
-          RDOG_JOB_TIMEOUT_MINUTES: "60"
+          RDOG_JOB_TIMEOUT_MINUTES: *job-timeout-minutes
         run: |
           PY=$(command -v python3 || command -v python)
           "$PY" scripts/ci/run-integration-targets.py --os ubuntu-latest
@@ -224,9 +241,13 @@ jobs:
     name: test (macos-latest)
     needs: [build-macos]
     runs-on: macos-latest
-    timeout-minutes: 60
+    timeout-minutes: *job-timeout-minutes
 
     steps:
+      - name: Record job start (integration budget baseline)
+        shell: bash
+        run: date +%s > "$RUNNER_TEMP/job-started-at"
+
       - name: Checkout
         uses: actions/checkout@v4
 
@@ -238,10 +259,6 @@ jobs:
       # target 由下面的 Integration targets 步骤按平台执行 (清单与计数判据都在
       # scripts/ci/run-integration-targets.py)。
       # pipefail 必需: 没有它 tee 的退出码会盖掉 cargo 的失败。
-      - name: Record job start (integration budget baseline)
-        shell: bash
-        run: date +%s > "$RUNNER_TEMP/job-started-at"
-
       - name: Unit tests
         shell: bash
         run: |
@@ -265,7 +282,7 @@ jobs:
           # 预算按**job 真实剩余时间**算: 起点写在 job 第一个 step, 时间上限由下面传入。
           # 常数预算 + 前缀 (checkout/cargo-prep/unit tests) 会越过 job timeout 被 cancel。
           RDOG_JOB_STARTED_AT_FILE: ${{ runner.temp }}/job-started-at
-          RDOG_JOB_TIMEOUT_MINUTES: "60"
+          RDOG_JOB_TIMEOUT_MINUTES: *job-timeout-minutes
         run: |
           PY=$(command -v python3 || command -v python)
           "$PY" scripts/ci/run-integration-targets.py --os macos-latest
@@ -289,9 +306,13 @@ jobs:
     name: test (windows-latest)
     needs: [build-windows]
     runs-on: windows-latest
-    timeout-minutes: 60
+    timeout-minutes: *job-timeout-minutes
 
     steps:
+      - name: Record job start (integration budget baseline)
+        shell: bash
+        run: date +%s > "$RUNNER_TEMP/job-started-at"
+
       - name: Checkout
         uses: actions/checkout@v4
 
@@ -303,10 +324,6 @@ jobs:
       # target 由下面的 Integration targets 步骤按平台执行 (清单与计数判据都在
       # scripts/ci/run-integration-targets.py)。
       # pipefail 必需: 没有它 tee 的退出码会盖掉 cargo 的失败。
-      - name: Record job start (integration budget baseline)
-        shell: bash
-        run: date +%s > "$RUNNER_TEMP/job-started-at"
-
       - name: Unit tests
         shell: bash
         run: |
@@ -330,7 +347,7 @@ jobs:
           # 预算按**job 真实剩余时间**算: 起点写在 job 第一个 step, 时间上限由下面传入。
           # 常数预算 + 前缀 (checkout/cargo-prep/unit tests) 会越过 job timeout 被 cancel。
           RDOG_JOB_STARTED_AT_FILE: ${{ runner.temp }}/job-started-at
-          RDOG_JOB_TIMEOUT_MINUTES: "60"
+          RDOG_JOB_TIMEOUT_MINUTES: *job-timeout-minutes
         run: |
           PY=$(command -v python3 || command -v python)
           "$PY" scripts/ci/run-integration-targets.py --os windows-latest
@@ -342,6 +359,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
+      - name: Record job start (integration budget baseline)
+        shell: bash
+        run: date +%s > "$RUNNER_TEMP/job-started-at"
+
       - name: Checkout
         uses: actions/checkout@v4
         with:

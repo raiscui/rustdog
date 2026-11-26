@@ -120,8 +120,15 @@ target 的 `passed` 必须 > 0**, 否则判红 —— 「退出码 0 但零执�
 | 层 | 值 | 缺了会怎样 |
 | --- | --- | --- |
 | 单 target | `TARGET_TIMEOUT_SECONDS` = 1500s | 挂住的 target 撑到 job timeout 被 cancel, 日志只剩 `The job has been cancelled` |
-| 整 job 预算 | `JOB_TIMEOUT_MINUTES`(60) − 已用 − `JOB_RESERVE_SECONDS`(180s); 起点由 job 第一个 step 写 `$RUNNER_TEMP/job-started-at` | 两次 1500s 挂起就把 60 分钟的 job 撑爆, 「点不出是哪个」原样复现 |
+| 整 job 预算 | `job_timeout(60) − 已用 − JOB_RESERVE_SECONDS(180s)`; 起点由 **job 的第一个 step** 写 `$RUNNER_TEMP/job-started-at` (必须排在 Checkout / cargo-prep 之前, 否则前缀不计入) | 两次 1500s 挂起就把 60 分钟的 job 撑爆, 「点不出是哪个」原样复现 |
 | 编译期 (`--no-run`, compile-only) | 同上两个 | `--no-run` 也会挂 (链接/依赖解析), 没有上限同样无名 |
+
+`timeout-minutes` 与 `RDOG_JOB_TIMEOUT_MINUTES` **共用一个 YAML anchor** (`x-job-timeout-minutes`),
+不许散落字面量 —— 抄三遍、改一处漏两处, 就是下一次「预算算出剩余 3299s 却仍被 cancel」。
+
+**CI 上起点缺失/为空/不可解析 = 判红, 不退回固定预算。** 静默退化会让 job 前缀重新隐形
+(冷缓存 `cargo-prep` 几百秒), 于是「预算充足」这个结论变成猜的。本地跑 (无 `GITHUB_ACTIONS`)
+才允许退回本步固定预算。
 
 预算耗尽**不是跳过而是失败**: 未执行的 target 会被点名并判红 (`job 预算耗尽: …` 未执行),
 因为「没跑」不能报成「通过」。

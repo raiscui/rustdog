@@ -291,32 +291,49 @@ def _kill_tree(proc: subprocess.Popen) -> str:
     return f"killpg {pgid}, 回读 0 存活"
 
 
+def _as_text(chunk) -> str:
+    """`TimeoutExpired.output` 即使在 text=True 下也可能是 **bytes** (CPython 的
+    `_check_timeout` 就是 `b"".join(...)`)。直接 `str + bytes` 会抛 TypeError —— 而它发生在
+    **超时前有任何输出时**, 也就是现实中总是发生: 异常穿出 main(), summary 一个字节都不写。
+    """
+    if chunk is None:
+        return ""
+    if isinstance(chunk, bytes):
+        return chunk.decode("utf-8", "replace")
+    return chunk
+
+
 def run(
     argv: list[str], timeout: int | None = None, budget_truncated: bool = False
-) -> tuple[int, str]:
+) -> tuple[int, str, float]:
     # encoding 固定 utf-8: 默认按平台 locale 解码 (windows runner 是 cp1252), 而 cargo test
     # 的输出里有 UTF-8 中文断言文案 —— 会在这里抛 UnicodeDecodeError 让整步崩掉, 归因看起来
     # 像"target 红"但其实是解码失败。errors=replace 保证任何残余字节都不会中断。
     proc = _spawn(argv)
     try:
         stdout, stderr = proc.communicate(timeout=timeout)
-        return proc.returncode, ANSI.sub("", (stdout or "") + (stderr or ""))
+        return proc.returncode, ANSI.sub("", (stdout or "") + (stderr or "")), 0.0
     except subprocess.TimeoutExpired as expired:
         # 先整组杀, 再把管道里已有的输出读干净 (杀完管道会 EOF, communicate 立刻返回)。
         killed = _kill_tree(proc)
+        extra_wait = 0.0
+        wait_started = time.monotonic()
         try:
             stdout, stderr = proc.communicate(timeout=30)
         except subprocess.TimeoutExpired as still:
-            # 有后代逃出进程组时管道不会 EOF, 这一支会等满 30s。**已经收到的输出必须留下** ——
-            # 原本写 `stdout, stderr = "", ""` 把现场证据整段丢了, 而那恰恰是最需要证据的形状。
-            stdout = still.output if isinstance(still.output, str) else ""
-            stderr = ""
-        partial = ANSI.sub("", (stdout or "") + (expired.output or "") + (stderr or ""))
+            # 有后代逃出进程组时管道不会 EOF, 这一支会等满 30s。已经收到的输出必须留下。
+            stdout, stderr = _as_text(still.output), ""
+        extra_wait = time.monotonic() - wait_started
+        partial = ANSI.sub(
+            "",
+            _as_text(stdout) + _as_text(expired.output) + _as_text(stderr),
+        )
         # 只在**真的是预算把它截短**时才这么写: 调用方显式给了小 timeout 时那句话是假话。
         note = f" (上限被剩余预算截短为 {timeout}s)" if budget_truncated else ""
         return (
             124,
             partial + f"\n[timeout] 超过 {timeout}s 未结束{note}, 终止方式: {killed}\n",
+            extra_wait,
         )
 
 
@@ -352,8 +369,23 @@ def main() -> int:
     if not started_at_raw and started_at_file:
         try:
             started_at_raw = Path(started_at_file).read_text().strip()
-        except OSError:
+        except OSError as err:
             started_at_raw = ""
+            read_error = str(err)
+        else:
+            read_error = ""
+    else:
+        read_error = ""
+    # 在 CI 上起点缺失/为空/不是数字 = **预算无从计算**, 必须 fail-closed: 静默退回「本步固定
+    # 预算」会让 F3 要修的前缀重新隐形 (冷缓存 cargo-prep 几百秒, 越过 job timeout 被 cancel)。
+    if os.environ.get("GITHUB_ACTIONS") == "true" and not started_at_raw.isdigit():
+        detail = started_at_raw or read_error or "文件不存在或为空"
+        annotate(
+            "error",
+            "integration target budget",
+            f"job 起点缺失或不可解析 ({detail}); 拒绝用固定预算猜 —— 检查 job 第一个 step 是否写了 {started_at_file or '$RUNNER_TEMP/job-started-at'}",
+        )
+        return 1
     if started_at_raw.isdigit():
         deadline = float(started_at_raw) + JOB_TIMEOUT_MINUTES * 60 - JOB_RESERVE_SECONDS
         clock = time.time
@@ -382,11 +414,13 @@ def main() -> int:
             continue
         started = time.monotonic()
         target_timeout = budget_timeout()
-        code, log = run(
+        code, log, extra_wait = run(
             ["cargo", "test", "--test", target],
             timeout=target_timeout,
             budget_truncated=target_timeout < TARGET_TIMEOUT_SECONDS,
         )
+        # 超时后读管道尾巴的那 30s 也是真实耗时, 从预算里扣掉 (原本只靠 180s 余量兜着)。
+        deadline -= extra_wait
         passed, failed, ignored = summarize(log)
         elapsed = round(time.monotonic() - started)
         executed_rows.append(
@@ -403,11 +437,12 @@ def main() -> int:
         # compile-only 也要上限: `--no-run` 一样会挂 (链接/依赖解析), 没有上限时它撑到 job
         # timeout, 同样点不出名字。
         compile_timeout = budget_timeout()
-        code, log = run(
+        code, log, extra_wait = run(
             ["cargo", "test", "--no-run", "--test", target],
             timeout=compile_timeout,
             budget_truncated=compile_timeout < TARGET_TIMEOUT_SECONDS,
         )
+        deadline -= extra_wait
         compile_rows.append(f"| `{target}` | {code} |")
         if code != 0:
             failures.append(f"{target}: compile failed (exit={code})")
