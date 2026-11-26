@@ -313,11 +313,15 @@ impl TransferIdStore {
         };
         match serde_json::from_slice::<StoredTransferId>(&bytes) {
             Ok(stored) if stored.key == key => Some(stored.transfer_id),
-            // 坏文件/哈希撞车: 只作废这一个键, 文件留着给排障看。
-            Ok(_) => {
+            // 哈希撞车: 文件里存的是**另一个键**。FNV-1a 64 在真实量级上撞的概率可忽略, 但真撞了
+            // 就会让两条传输静默共用一个 id —— 那正是这一轮在消灭的那类"看起来对、其实丢了一条"。
+            // 所以读取路径校验一次: 键不一致按**缺失**处理 (fail-closed), 绝不把别人的 id 当本键返回。
+            Ok(stored) => {
                 eprintln!(
-                    "warning: {} 里记的是另一个键; 该键按无 id 处理",
-                    path.display()
+                    "warning: {} 里记的键与请求的键不同 (文件 {:?} / 请求 {:?}); 该键按无 id 处理",
+                    path.display(),
+                    stored.key,
+                    key
                 );
                 None
             }
@@ -2144,6 +2148,45 @@ mod tests {
             .collect();
         assert!(leftovers.is_empty(), "不得留下暂存残片: {leftovers:?}");
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_hash_collision_reads_as_missing_not_as_someone_elses_id() {
+        // 文件名按哈希分, 一旦两个键撞到同一个文件名, 后写的会覆盖前一个。文件内容里存了真实键,
+        // 所以读取时能看出来: 键不一致必须按**缺失**处理, 绝不把别人的 id 当本键的返回。
+        let dir =
+            std::env::temp_dir().join(format!("rdog-cli-ids-collide-{}", std::process::id()));
+        let local = std::path::PathBuf::from("/tmp/collide.bin");
+        let store = TransferIdStore::at(dir.clone());
+        store.put("t", &local, "/tmp/other.bin", "id-other");
+
+        // 手工造一个"文件名属于 A、内容里的键是 B"的文件 (模拟碰撞后的覆盖结果)。
+        let squatter = dir.join(TransferIdStore::file_name(&TransferIdStore::key(
+            "t",
+            &local,
+            "/tmp/mine.bin",
+        )));
+        std::fs::write(
+            &squatter,
+            serde_json::to_vec(&StoredTransferId {
+                key: TransferIdStore::key("t", &local, "/tmp/other.bin"),
+                transfer_id: "id-other".to_string(),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            store.get("t", &local, "/tmp/mine.bin"),
+            None,
+            "撞车必须读成缺失, 不是别人的 id"
+        );
+        assert_eq!(
+            store.get("t", &local, "/tmp/other.bin"),
+            Some("id-other".to_string()),
+            "另一边仍可读"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
