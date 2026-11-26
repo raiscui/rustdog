@@ -1,7 +1,7 @@
 ---
 title: 同进程并行测试共享全局状态必须用唯一共享锁, 锁放模块顶层
 date: 2026-08-28
-last_updated: 2026-08-28
+last_updated: 2026-11-26
 module: tests
 component: test isolation (env / tracing subscriber / observation store)
 problem_type: best_practice
@@ -17,6 +17,7 @@ tags:
 verified_by:
   - "src/zenoh_runtime/test_support.rs env_test_guard + unique_test_dir: 进程级 env/临时目录唯一锁, cargo test 全量通过 (2026-07-18 实施)"
   - "src/screenshot/tests.rs TIMEOUT_TRACE_TEST_LOCK: tracing 全局 subscriber 串行化后 cargo test screenshot::tests:: 30 passed, 0 failed (2026-08-18)"
+  - "src/test_support.rs cwd_test_guard: figment::Jail 改进程 cwd 的用例与 spawn 子进程的用例共享一把锁; cargo test --bin rdog -- --test-threads=4 连跑 10 轮 1107 passed (2026-11-26, 修前 6 轮红 3 次)"
   - "反例边界: observation 64-entry singleton 在同进程 cargo test 并行下互相驱逐, exact 单跑通过 / full 失败; nextest 进程隔离规避, 专项治理在 LATER_PLANS (2026-08-20)"
 related_solutions:
   - docs/solutions/test-failures/tty-term-dumb-environment-deterministic-failure.md
@@ -61,7 +62,19 @@ Rust 默认测试 harness 在同一进程内多线程并行跑测试。任何进
    直接使用 `with_default` 的测试入口各取锁; 修复后
    `cargo test screenshot::tests::` 30 passed, 0 failed。
 
-3. **反例 (已知未修边界)**: 64-entry observation singleton store。
+3. **进程级 cwd (`src/test_support.rs`)**:
+   `figment::Jail` 把进程 cwd 切到自己的临时目录, 退出后连目录一起删掉;
+   `script_success_should_keep_legacy_bare_stdout_response_shape` 这类 shell-lane
+   用例并行 spawn `/bin/sh` 时子进程继承到即将被删的 cwd, `getcwd` 失败:
+   `sh: 0: getcwd() failed: No such file or directory`, 于是本该"成功无 stderr"
+   的脚本变成 `shell_stderr` 结构化失败。Jail 自带的锁是私有 static
+   (`figment-0.10.19/src/jail.rs` 的 `LOCK`), 只串行化 Jail 之间, 外部拿不到,
+   所以必须另立一把共享锁: 切/删 cwd 的一方 (36 个 Jail 用例) 与 spawn 子进程
+   并断言 stderr/stdout 干净的一方 (`control_actions` 的 shell 用例) 都取
+   `cwd_test_guard()`。修前 `cargo test --bin rdog -- --test-threads=4` 6 轮红 3 次,
+   修后 10 轮全绿 (1107 passed)。
+
+4. **反例 (已知未修边界)**: 64-entry observation singleton store。
    `cargo test -j 2 --bin rdog` 同进程并行下, 长 direct-ref 测试的
    observation 被其他并行测试驱逐 (exact 单跑通过, full 复现失败)。
    处置: 项目标准 nextest 进程隔离规避, 专项 test seam 治理记于

@@ -1,42 +1,5 @@
 # WORKLOG: rustdog
 
-## [2026-11-24] RAI-178: P2-A ACL 与租约可否定实验（仅本地）
-
-- 显式注入单调时钟, 验证租约截止边界、可续租、云不可达不可续租、目标绑定、查询 ACL 和旧实例 fence；5/5 通过。
-- 提交: c4fea5f44912a1c0b1fb6cdb9ef3c63229d701b8
-- 用 18 个实际 iroh 回环进程验证可注册/续租/查询、同名竞争、旧实例注销拒绝、握手后准入拒绝、现实短租约与云失联回收。保持正式 CLI/config/协议/锁不变；既有回归通过。临时契约见 [rdog-crossnet-p2-a-probe](specs/rdog-crossnet-p2-a-probe.md)，生产凭证、政策和撤销顺序维持 HOLD。
-- 提交: a81553f32c2ee0341154240b64747c04dd4f1bce
-
-## [2026-11-24] RAI-168: 正式 CLI iroh 只读闭环（仅本地）
-
-- 同一个默认 OCR release 二进制启动只允许回环的 rendezvous（内嵌 HTTPS relay 和 QAD）、daemon 和 control。按名探活经 iroh 直连或 relay 均返回 `id:42/pong:true`; 另一临时身份在两条路径完成握手后被 daemon 明确拒绝, ping handler 均未进入。
-- 复用既有 parser、ping handler、`ControlPeerSession` 和扩展后的 `ControlTransport`。旧 TCP、WebSocket、Zenoh 的针对性集成测试、Linux unixpipe 单元和 CLI 冒烟通过。临时契约见 [rdog-crossnet-p1-readonly](specs/rdog-crossnet-p1-readonly.md); 未接入 bulk、其他业务命令或生产授权。
-- 提交: 15f3ce1f032a65be4638b328fe83ad789a77e648
-
-## [2026-11-23] RAI-137: iroh 回环准入探针（仅本地）
-
-- 用 RAI-131 实编的 iroh 1.4.1 在仅回环的网络命名空间验证三个连接。两次获准连接都收到 `@ping#42` 的结构化 pong; 不在测试 allowlist 的临时身份完成 QUIC 握手后被明确关闭, ping handler 未进入。
-- 只添加手工测试探针, 没有改动根锁、默认特性、生产命令或授权策略。探针没有调用生产 ping handler, 不代表官方 CLI 已接入 iroh。
-- 提交: 34909253345e4af4841efd4866df55dbb7418b68
-
-## [2026-11-23] RAI-131: Rust 1.95 根包默认构建（仅本地）
-
-- 从 RAI-128 私有基线建立候选, 根包保留默认 OCR, 精确 pin `iroh` 与 `iroh-relay` 为 `=1.4.1`, 后者启用 `server`。Linux x86_64 在空目标目录用 Rust 1.95.0 进行 `cargo build --release --locked --bin rdog` 成功, 编译事件确认 OCR 和两条 iroh 依赖均参与实际构建。
-- 同一 release 二进制在仅 loopback 的网络命名空间完成既有、带认证的 Zenoh `@ping#42`, 返回原 request ID 和 `pong: true`。没有执行 shell 指令或改动控制行为, 未验证 OCR 推理或跨网 P2P。
-- 提交: 77215d8cd21fdb38b5117eadd8823257c5e4c84f
-
-## [2026-11-23] RAI-128: fixed-echo 原型恢复（仅本地）
-
-- 从 Mac 仓库仍可读取的 Git 快照 `50d55eba98fecef92f08354464aeb55a14b8a5d7` 恢复四个原型源码/测试文件。逐文件核对模式、大小、Git blob 和 SHA-256。原临时工作树已不存在, 不将快照视为对其他未提交文件的完整保全。
-- 保留独立原型锁文件与 `iroh` / `iroh-relay` 的 `=1.4.1` pin。Linux x86_64 用 Rust 1.91.0 验证 release 构建、两条写失败回归、既有本地 echo 脚本和独立首流隔离场景。未改动正式控制面, 未运行跨网验证。
-- 提交: 16df4c8975fa478363157ec1623727f032b61857
-
-## [2026-11-23] RAI-128: iroh 原型本地构建基线
-
-- 从 `5588fcb75bdb77735e4e43af19234a82b822735d` 在隔离分支导入公开原型 `eaaf5a677021f1d737d58597b4696e37532c42b2`。保留两侧历史, 无冲突; 导入时原型子树与上游完全一致。
-- 提交: b2768fd31020c342a3d8b39cf44ebd61d0ab7ace
-- 原型 `Cargo.toml` 精确 pin `iroh` 和 `iroh-relay` 到 `=1.4.1`, 原型 `Cargo.lock` 未变。Linux x86_64 干净 `cargo +1.91.0 build --release --locked` 通过。主线根目录同命令在默认特性下被锁定的 `oar-ocr` 0.9.2 依赖族的 Rust 1.95 要求拦截。主线清单和锁文件未变, 尚无合并依赖图, 未取得原工作树的修复。
-- 提交: be1a9b9e80960cf97dd230f7239f7bc9ffb11e97
 
 ## [2026-11-06] Persistent coding sessions
 
@@ -344,6 +307,67 @@ cmd.exe 在 verbatim cwd 下的告警原文 (中文 Windows 版), 并用普通 c
 
 用户授权下已cargo install默认功能+稳定签名并启动mac.lab, Windows默认功能release+DirectML经原任务切换到PID63640/Session1/5555. 正式隐窗和子树取消通过, 配置/任务未变. target无占用后cargo clean回收9.9GiB, 清理后双端fresh ping通过. 详细验收与回退材料索引见WORKLOG__yino_rdog_feedback.md, 全仓/完整OCR/GUI/PTY等边界保留. 部署账本提交:
 - 提交: a80d0bebedf6675816bf23f3cd7465f082124aaf
+
+## 2026-11-26 修两处既有测试资产缺陷 (RAI-396 recording_e2e 夹具 / RAI-386 Jail cwd 竞态)
+
+cargo 1.100 的 build-dir 布局让 `recording_e2e` 的 `rdog_binary_path()` 在夹具阶段就
+退出 (1 passed; 5 failed; 0.00s), 同时 `figment::Jail` 删进程 cwd 让 shell-lane 用例
+随机翻红。两条都不是业务回归, 是测试资产没跟上工具链与并行调度。
+
+- 夹具改成先构造去重候选表再按序命中 (`target/{profile}/rdog` -> `deps/rdog` ->
+  `build/*/*/out/rdog` 扫描 -> 测试可执行文件所在目录), 全部未命中时 panic 并逐条
+  列出尝试过的路径。实测: 真 build-dir 布局 6/6, 人为只留 `target/debug/rdog` 的
+  旧布局 6/6, 两者都没有时 panic 列出 4 条候选。
+- 新增 crate 级 `src/test_support.rs` 的唯一 `cwd_test_guard()`: 36 个 `figment::Jail`
+  用例与 6 个 spawn shell 且严格断言 stderr/stdout 的用例共享。Jail 自带的锁是私有
+  static, 只串行化 Jail 之间, 挡不住外部的子进程继承到即将被删的 cwd。
+  修前 `cargo test --bin rdog -- --test-threads=4` 6 轮红 3 次 (stderr
+  `sh: 0: getcwd() failed: No such file or directory`), 修后 10 轮全绿 (1107 passed)。
+- 评审加严: 夹具首选 cargo 注入的 `CARGO_BIN_EXE_rdog`, 只有它缺失时才按布局探测,
+  且 build 目录扫描改为 mtime 新的在前 —— 避免选中旧 hash 产物里的 daemon。
+- 顺带补记 RAI-387 的合并提交 (纯账本缺口, 该 commit 无代码改动)。
+- 提交: d8cd8e8
+- 提交: 1034bb7
+- 提交: 176d191
+- 提交: 6924b82
+
+## [2026-11-24] RAI-178: P2-A ACL 与租约可否定实验（仅本地）
+
+- 显式注入单调时钟, 验证租约截止边界、可续租、云不可达不可续租、目标绑定、查询 ACL 和旧实例 fence；5/5 通过。
+- 提交: c4fea5f44912a1c0b1fb6cdb9ef3c63229d701b8
+- 用 18 个实际 iroh 回环进程验证可注册/续租/查询、同名竞争、旧实例注销拒绝、握手后准入拒绝、现实短租约与云失联回收。保持正式 CLI/config/协议/锁不变；既有回归通过。临时契约见 [rdog-crossnet-p2-a-probe](specs/rdog-crossnet-p2-a-probe.md)，生产凭证、政策和撤销顺序维持 HOLD。
+- 提交: a81553f32c2ee0341154240b64747c04dd4f1bce
+
+## [2026-11-24] RAI-168: 正式 CLI iroh 只读闭环（仅本地）
+
+- 同一个默认 OCR release 二进制启动只允许回环的 rendezvous（内嵌 HTTPS relay 和 QAD）、daemon 和 control。按名探活经 iroh 直连或 relay 均返回 `id:42/pong:true`; 另一临时身份在两条路径完成握手后被 daemon 明确拒绝, ping handler 均未进入。
+- 复用既有 parser、ping handler、`ControlPeerSession` 和扩展后的 `ControlTransport`。旧 TCP、WebSocket、Zenoh 的针对性集成测试、Linux unixpipe 单元和 CLI 冒烟通过。临时契约见 [rdog-crossnet-p1-readonly](specs/rdog-crossnet-p1-readonly.md); 未接入 bulk、其他业务命令或生产授权。
+- 提交: 15f3ce1f032a65be4638b328fe83ad789a77e648
+
+## [2026-11-23] RAI-137: iroh 回环准入探针（仅本地）
+
+- 用 RAI-131 实编的 iroh 1.4.1 在仅回环的网络命名空间验证三个连接。两次获准连接都收到 `@ping#42` 的结构化 pong; 不在测试 allowlist 的临时身份完成 QUIC 握手后被明确关闭, ping handler 未进入。
+- 只添加手工测试探针, 没有改动根锁、默认特性、生产命令或授权策略。探针没有调用生产 ping handler, 不代表官方 CLI 已接入 iroh。
+- 提交: 34909253345e4af4841efd4866df55dbb7418b68
+
+## [2026-11-23] RAI-131: Rust 1.95 根包默认构建（仅本地）
+
+- 从 RAI-128 私有基线建立候选, 根包保留默认 OCR, 精确 pin `iroh` 与 `iroh-relay` 为 `=1.4.1`, 后者启用 `server`。Linux x86_64 在空目标目录用 Rust 1.95.0 进行 `cargo build --release --locked --bin rdog` 成功, 编译事件确认 OCR 和两条 iroh 依赖均参与实际构建。
+- 同一 release 二进制在仅 loopback 的网络命名空间完成既有、带认证的 Zenoh `@ping#42`, 返回原 request ID 和 `pong: true`。没有执行 shell 指令或改动控制行为, 未验证 OCR 推理或跨网 P2P。
+- 提交: 77215d8cd21fdb38b5117eadd8823257c5e4c84f
+
+## [2026-11-23] RAI-128: fixed-echo 原型恢复（仅本地）
+
+- 从 Mac 仓库仍可读取的 Git 快照 `50d55eba98fecef92f08354464aeb55a14b8a5d7` 恢复四个原型源码/测试文件。逐文件核对模式、大小、Git blob 和 SHA-256。原临时工作树已不存在, 不将快照视为对其他未提交文件的完整保全。
+- 保留独立原型锁文件与 `iroh` / `iroh-relay` 的 `=1.4.1` pin。Linux x86_64 用 Rust 1.91.0 验证 release 构建、两条写失败回归、既有本地 echo 脚本和独立首流隔离场景。未改动正式控制面, 未运行跨网验证。
+- 提交: 16df4c8975fa478363157ec1623727f032b61857
+
+## [2026-11-23] RAI-128: iroh 原型本地构建基线
+
+- 从 `5588fcb75bdb77735e4e43af19234a82b822735d` 在隔离分支导入公开原型 `eaaf5a677021f1d737d58597b4696e37532c42b2`。保留两侧历史, 无冲突; 导入时原型子树与上游完全一致。
+- 提交: b2768fd31020c342a3d8b39cf44ebd61d0ab7ace
+- 原型 `Cargo.toml` 精确 pin `iroh` 和 `iroh-relay` 到 `=1.4.1`, 原型 `Cargo.lock` 未变。Linux x86_64 干净 `cargo +1.91.0 build --release --locked` 通过。主线根目录同命令在默认特性下被锁定的 `oar-ocr` 0.9.2 依赖族的 Rust 1.95 要求拦截。主线清单和锁文件未变, 尚无合并依赖图, 未取得原工作树的修复。
+- 提交: be1a9b9e80960cf97dd230f7239f7bc9ffb11e97
 
 ## 2026-11-25 RAI-183: PTY 桥接错误后回收当前会话
 

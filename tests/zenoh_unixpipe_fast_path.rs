@@ -17,7 +17,7 @@ mod support;
 use std::{
     fs,
     os::unix::fs::MetadataExt,
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::Command,
     thread,
     time::{Duration, Instant},
@@ -49,28 +49,47 @@ fn wait_for_fifo(path: &std::path::Path, timeout: Duration) -> bool {
     false
 }
 
-fn derive_unixpipe_base_path(namespace: &str, daemon_name: &str) -> PathBuf {
-    let tmpdir = std::env::var_os("TMPDIR")
-        .map(PathBuf::from)
-        .filter(|p| !p.as_os_str().is_empty())
-        .unwrap_or_else(|| PathBuf::from("/tmp"));
-    tmpdir.join(format!("rdog-{namespace}-{daemon_name}.pipe"))
+/// 本机 fast path 运行目录,与 `src/local_run.rs` 的 `run_dir()` 同规则。
+///
+/// e2e 是独立 crate,不能引用 bin 内部模块,所以这里必须复算。一旦生产规则漂移,
+/// 本文件的断言会先失败(FIFO 不出现 / 残留没被清理 / 目录不空),不会静默通过。
+fn local_run_dir() -> PathBuf {
+    if let Some(runtime_dir) = std::env::var_os("XDG_RUNTIME_DIR").filter(|v| !v.is_empty()) {
+        return PathBuf::from(runtime_dir).join("rdog");
+    }
+    if let Some(home) = std::env::var_os("HOME").filter(|v| !v.is_empty()) {
+        return PathBuf::from(home).join(".rdog").join("run");
+    }
+    std::env::temp_dir().join("rdog-run")
 }
 
-fn cleanup_unixpipe_artifacts(base: &PathBuf) {
-    let _ = fs::remove_file(base);
-    let _ = fs::remove_file(format!("{}_uplink", base.display()));
-    let _ = fs::remove_file(format!("{}_downlink", base.display()));
-    // Zenoh 还会创建带 suffix 的 dedicated FIFO,尽力清掉,避免跨测试污染。
-    if let Ok(entries) = fs::read_dir(
-        base.parent()
-            .unwrap_or_else(|| std::path::Path::new("/tmp")),
-    ) {
+fn derive_unixpipe_base_path(namespace: &str, daemon_name: &str) -> PathBuf {
+    let base = local_run_dir().join(format!("{namespace}__{daemon_name}.pipe"));
+    // 本文件只用短名字;超长名字的压缩路径由 `rdog local list` 与单元测试覆盖。
+    assert!(
+        base.as_os_str().as_encoded_bytes().len() <= 95,
+        "e2e daemon 名字必须落在可读名预算内: {}",
+        base.display()
+    );
+    base
+}
+
+/// 清掉一条 pipe 的全部落盘文件(FIFO + `.lock` + `.meta` 以及 client dedicated FIFO)。
+fn cleanup_unixpipe_artifacts(base: &Path) {
+    let Some(dir) = base.parent() else {
+        return;
+    };
+    let Some(stem) = base
+        .file_stem()
+        .map(|stem| stem.to_string_lossy().to_string())
+    else {
+        return;
+    };
+    let prefix = format!("{stem}.");
+    if let Ok(entries) = fs::read_dir(dir) {
         for entry in entries.flatten() {
-            if let Some(name) = entry.file_name().to_str() {
-                if name.starts_with(base.file_name().unwrap().to_str().unwrap()) {
-                    let _ = fs::remove_file(entry.path());
-                }
+            if entry.file_name().to_string_lossy().starts_with(&prefix) {
+                let _ = fs::remove_file(entry.path());
             }
         }
     }
@@ -88,21 +107,27 @@ fn create_fake_uplink_candidate(namespace: &str, daemon_name: &str) -> PathBuf {
     base
 }
 
-/// 清理 namespace 下所有 rdog-{ns}-*.pipe* 残留,避免多 test 之间的 FIFO 污染。
+/// 清理 namespace 下所有 `<ns>__*` 残留(运行目录 + 旧 `$TMPDIR/rdog-<ns>-*`)。
 /// 用途:`self` / 空 target 的 e2e 强依赖 namespace 范围内只能有 1 个 daemon,
 /// 旧 test 残留的 fifo 会让 fast path 误报"多候选"。
 fn cleanup_namespace_artifacts(namespace: &str) {
-    let tmpdir = std::env::var_os("TMPDIR")
+    let run_prefix = format!("{namespace}__");
+    let legacy_prefix = format!("rdog-{namespace}-");
+    let legacy_tmpdir = std::env::var_os("TMPDIR")
         .map(PathBuf::from)
-        .filter(|p| !p.as_os_str().is_empty())
+        .filter(|path| !path.as_os_str().is_empty())
         .unwrap_or_else(|| PathBuf::from("/tmp"));
-    let prefix = format!("rdog-{namespace}-");
-    if let Ok(entries) = fs::read_dir(&tmpdir) {
+
+    for (dir, prefix) in [
+        (local_run_dir(), run_prefix),
+        (legacy_tmpdir, legacy_prefix),
+    ] {
+        let Ok(entries) = fs::read_dir(&dir) else {
+            continue;
+        };
         for entry in entries.flatten() {
-            if let Some(name) = entry.file_name().to_str() {
-                if name.starts_with(&prefix) {
-                    let _ = fs::remove_file(entry.path());
-                }
+            if entry.file_name().to_string_lossy().starts_with(&prefix) {
+                let _ = fs::remove_file(entry.path());
             }
         }
     }
@@ -350,11 +375,17 @@ fn crashed_daemon_should_release_all_leases_for_same_identity_restart() {
         .path()
         .join("rustdog/local-default")
         .join(format!("{namespace}.json"));
-    let path_guard = PathBuf::from(format!("{}.rdog-owner.pid", base_path.display()));
+    // 本机 fast path 的生命周期文件是 `<stem>.lock` / `<stem>.meta`(与 base 同目录同 stem)。
+    let base_stem = base_path
+        .file_stem()
+        .map(|stem| stem.to_string_lossy().to_string())
+        .expect("base should have a stem");
+    let base_dir = base_path.parent().expect("base should have a parent");
+    let path_guard = base_dir.join(format!("{base_stem}.lock"));
+    let path_metadata = base_dir.join(format!("{base_stem}.meta"));
     let service_metadata = PathBuf::from(format!("{}.lease.json", service_guard.display()));
     let local_default_metadata =
         PathBuf::from(format!("{}.lease.json", local_default_guard.display()));
-    let path_metadata = PathBuf::from(format!("{}.lease.json", path_guard.display()));
     for path in [
         &service_guard,
         &service_metadata,

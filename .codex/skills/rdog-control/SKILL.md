@@ -1,6 +1,6 @@
 ---
 name: rdog-control
-version: "2.30-task-agent"
+version: "2.31-local-run"
 description: "Use for rdog control on a local or named machine: health, shell, GUI, browser, window, AX, PTY, flow, background tasks, companion agents, verification, and safety."
 ---
 
@@ -383,6 +383,7 @@ lane - see `references/agent-messaging.md` for the full loop.
 | --- | --- |
 | Health | `@ping` |
 | Permissions | `@capabilities` or `@bootstrap` |
+| 本机 fast path 落盘/残留 | `rdog local list` / `rdog local clean [--force]` |
 | Window ownership | `@window-find` |
 | One shell command | `@cmd` or `@script` |
 | Finite workflow | `@flow` |

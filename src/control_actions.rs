@@ -2217,6 +2217,7 @@ mod shell_lane_tests {
     #[cfg(unix)]
     #[test]
     fn script_success_should_keep_legacy_bare_stdout_response_shape() {
+        let _cwd_guard = crate::test_support::cwd_test_guard();
         // 兼容护栏: 成功形状是 `"<stdout>"`, 不是对象。改动会让
         // tests/control_lanes.rs 等按字符串读的集成用例全线红。
         let result = execute_script_with_timeout(
@@ -2238,6 +2239,7 @@ mod shell_lane_tests {
     #[cfg(unix)]
     #[test]
     fn shell_lane_timeout_should_release_lane_instead_of_blocking_forever() {
+        let _cwd_guard = crate::test_support::cwd_test_guard();
         let started_at = Instant::now();
         let result = execute_script_with_timeout(
             "/bin/sh",
@@ -2271,6 +2273,7 @@ mod shell_lane_tests {
     #[cfg(unix)]
     #[test]
     fn shell_lane_timeout_should_terminate_grandchildren_not_only_the_shell() {
+        let _cwd_guard = crate::test_support::cwd_test_guard();
         // 只杀组长的话, 后台 `&` 起的孙进程会活下来继续跑 —— 那正是 2026-10-05
         // Windows 真机上 `Start-Process` 残留的同构形态。
         let pid_file = std::env::temp_dir().join("rdog-shell-lane-timeout-grandchild.pid");

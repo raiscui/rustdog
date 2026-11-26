@@ -283,6 +283,13 @@ pub enum Command {
         command: ConfigCommand,
     },
 
+    /// 本机 fast path (`unixpipe` FIFO / Windows 命名管道) 的观测与残留回收
+    #[clap(alias = "loc")]
+    Local {
+        #[clap(subcommand)]
+        command: LocalCommand,
+    },
+
     /// Recording control-plane CLI dispatcher
     /// (转译 5 个子命令到 line-control `@record-*` 文本行)
     Record {
@@ -457,6 +464,19 @@ pub enum RecordSubcommand {
     Stop,
     /// `@record-cancel` - 立即停止, 不提交 Bundle
     Cancel,
+}
+
+/// `rdog local` 子命令: 看本机 fast path 落了什么、清掉死进程残留。
+#[derive(Subcommand, Debug)]
+pub enum LocalCommand {
+    /// 列出本机 fast path 的 pipe、对应 namespace/name、pid 与存活状态
+    List,
+    /// 回收死进程残留 (默认 dry-run,`--force` 才真正删除)
+    Clean {
+        /// 真正删除残留;省略时只报告会删什么
+        #[clap(long)]
+        force: bool,
+    },
 }
 
 #[derive(Subcommand, Debug)]

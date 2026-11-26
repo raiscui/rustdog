@@ -191,6 +191,7 @@ pub fn run_zenoh_router(
         crate::zenoh_control::ZenohUnixpipeStartupConfig {
             base_path,
             local_default: config.zenoh.unixpipe.local_default,
+            shared: composed_listen.unixpipe_base_explicit,
         }
     });
 
@@ -511,7 +512,7 @@ fn wait_before_retry(stop: &AtomicBool, retry_interval: Duration) -> bool {
 /// Windows 的 CTRL_CLOSE_EVENT 需要 console control handler(另走 Win32 消息泵),
 /// 这里不覆盖,Windows 侧仍用 taskkill 结束进程 —— 那种终止是硬杀,不保证收尾。
 #[cfg(unix)]
-fn install_shutdown_handlers(shutdown: Arc<AtomicBool>) -> io::Result<()> {
+pub(crate) fn install_shutdown_handlers(shutdown: Arc<AtomicBool>) -> io::Result<()> {
     use signal_hook::consts::{SIGINT, SIGTERM};
     use signal_hook::iterator::Signals;
 
@@ -531,7 +532,7 @@ fn install_shutdown_handlers(shutdown: Arc<AtomicBool>) -> io::Result<()> {
 }
 
 #[cfg(not(unix))]
-fn install_shutdown_handlers(_shutdown: Arc<AtomicBool>) -> io::Result<()> {
+pub(crate) fn install_shutdown_handlers(_shutdown: Arc<AtomicBool>) -> io::Result<()> {
     Ok(())
 }
 
