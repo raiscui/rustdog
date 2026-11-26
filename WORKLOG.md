@@ -306,3 +306,23 @@ cmd.exe 在 verbatim cwd 下的告警原文 (中文 Windows 版), 并用普通 c
 
 用户授权下已cargo install默认功能+稳定签名并启动mac.lab, Windows默认功能release+DirectML经原任务切换到PID63640/Session1/5555. 正式隐窗和子树取消通过, 配置/任务未变. target无占用后cargo clean回收9.9GiB, 清理后双端fresh ping通过. 详细验收与回退材料索引见WORKLOG__yino_rdog_feedback.md, 全仓/完整OCR/GUI/PTY等边界保留. 部署账本提交:
 - 提交: a80d0bebedf6675816bf23f3cd7465f082124aaf
+
+## 2026-11-26 修两处既有测试资产缺陷 (RAI-396 recording_e2e 夹具 / RAI-386 Jail cwd 竞态)
+
+cargo 1.100 的 build-dir 布局让 `recording_e2e` 的 `rdog_binary_path()` 在夹具阶段就
+退出 (1 passed; 5 failed; 0.00s), 同时 `figment::Jail` 删进程 cwd 让 shell-lane 用例
+随机翻红。两条都不是业务回归, 是测试资产没跟上工具链与并行调度。
+
+- 夹具改成先构造去重候选表再按序命中 (`target/{profile}/rdog` -> `deps/rdog` ->
+  `build/*/*/out/rdog` 扫描 -> 测试可执行文件所在目录), 全部未命中时 panic 并逐条
+  列出尝试过的路径。实测: 真 build-dir 布局 6/6, 人为只留 `target/debug/rdog` 的
+  旧布局 6/6, 两者都没有时 panic 列出 4 条候选。
+- 新增 crate 级 `src/test_support.rs` 的唯一 `cwd_test_guard()`: 36 个 `figment::Jail`
+  用例与 6 个 spawn shell 且严格断言 stderr/stdout 的用例共享。Jail 自带的锁是私有
+  static, 只串行化 Jail 之间, 挡不住外部的子进程继承到即将被删的 cwd。
+  修前 `cargo test --bin rdog -- --test-threads=4` 6 轮红 3 次 (stderr
+  `sh: 0: getcwd() failed: No such file or directory`), 修后 10 轮全绿 (1107 passed)。
+- 顺带补记 RAI-387 的合并提交 (纯账本缺口, 该 commit 无代码改动)。
+- 提交: d8cd8e8
+- 提交: 1034bb7
+- 提交: 176d191
