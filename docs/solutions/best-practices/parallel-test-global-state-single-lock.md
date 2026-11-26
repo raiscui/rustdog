@@ -1,7 +1,7 @@
 ---
 title: 同进程并行测试共享全局状态必须用唯一共享锁, 锁放模块顶层
 date: 2026-08-28
-last_updated: 2026-11-26
+last_updated: 2026-11-27
 module: tests
 component: test isolation (env / tracing subscriber / observation store)
 problem_type: best_practice
@@ -19,6 +19,7 @@ verified_by:
   - "src/screenshot/tests.rs TIMEOUT_TRACE_TEST_LOCK: tracing 全局 subscriber 串行化后 cargo test screenshot::tests:: 30 passed, 0 failed (2026-08-18)"
   - "src/test_support.rs cwd_test_guard: figment::Jail 改进程 cwd 的用例与 spawn 子进程的用例共享一把锁; cargo test --bin rdog -- --test-threads=4 连跑 10 轮 1107 passed (2026-11-26, 修前 6 轮红 3 次)"
   - "反例边界: observation 64-entry singleton 在同进程 cargo test 并行下互相驱逐, exact 单跑通过 / full 失败; nextest 进程隔离规避, 专项治理在 LATER_PLANS (2026-08-20)"
+  - "src/control_file_transfer.rs orphaned_partial_is_reclaimed_by_the_resume_window: 断言从全局聚合 `reaped` 改为自己的键与文件, sweep 时钟改取过去; 复现用例在旧实现下红在 `left: 2`; cargo test --bin rdog 全量并行 20 轮 0 红 (2026-11-27, RAI-594)"
 related_solutions:
   - docs/solutions/test-failures/tty-term-dumb-environment-deterministic-failure.md
 ---
@@ -43,6 +44,10 @@ Rust 默认测试 harness 在同一进程内多线程并行跑测试。任何进
 - 锁必须全局唯一。各测试各自 `static Mutex` 是各锁各的, 等于没锁。
 - 锁的取用点要覆盖**全部**访问路径: helper 封装了大部分, 但绕过 helper
   直接 `with_default` / 直接写 env 的测试也要取锁。
+- 锁只保证**串行**, 不保证**隔离**: 断言必须盯本用例自己的键与文件,
+  **不把函数的全局聚合返回值** (`reaped` / `count` / `len`) 当断言对象。
+- 用例要造假时钟时, 假时钟**不许越过真实时刻**: 未来的 `now` 会把并行用例
+  按真实时刻登记的状态一并判成过期 (见 Evidence 第 5 条)。
 - 不通过扩大容量/改默认值掩盖共享问题 (见反例边界)。
 
 ## Evidence
@@ -80,6 +85,21 @@ Rust 默认测试 harness 在同一进程内多线程并行跑测试。任何进
    处置: 项目标准 nextest 进程隔离规避, 专项 test seam 治理记于
    LATER_PLANS; 明确不通过提高 `DEFAULT_MAX_OBSERVATIONS` 掩盖,
    容量语义由显式 retention 测试验证。
+
+5. **全局聚合返回值 + 越界的假时钟** (`src/control_file_transfer.rs`,
+   `orphaned_partial_is_reclaimed_by_the_resume_window`, RAI-594):
+   `reap_idle_transfers` 一轮扫遍会话表与孤儿表, 返回的 `reaped` 是
+   "本轮**全局**回收了几条", 用例却把它当断言对象 (`assert_eq!(reaped, 0)`);
+   并行用例按真实时刻登记的会话与孤儿被一起数进去, macOS CI 上收到 2。
+   同一段代码还有方向相反的一半: 用例把锚点设在 `now_ms() + 1_000_000`,
+   于是**这一轮 sweep 反过来把别人按真实时刻登记的会话与孤儿全判成过期**,
+   既污染计数又删别人的状态 (快照 + 清空 + 还原只护住了孤儿表, 护不住会话表,
+   而且快照与插入是两次独立加锁, 中间能塞进别人的条目)。
+   锁在这条上不够 —— 它只串行化, 挡不住"返回值是全局聚合"这件事。
+   修法两条同时成立才有效: 断言只盯**本用例自己的键与文件**,
+   sweep 的时钟**不越过真实时刻** (内外两个窗口都落在过去, 别人的
+   `now - last_activity` 恒为 0)。负对照: 让回收删文件但不删键 ⇒ 红在
+   "孤儿条目必须从表里消失"; 让回收无视窗口 ⇒ 红在"窗口内必须留着"。
 
 `rg -n 'TIMEOUT_TRACE_TEST_LOCK' src/screenshot/tests.rs` 与
 `rg -n -A 6 'fn env_test_guard' src/zenoh_runtime/test_support.rs` 可复核实现。
