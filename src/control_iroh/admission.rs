@@ -15,11 +15,13 @@ use std::{
     collections::{BTreeSet, HashMap},
     fs::{self, File, OpenOptions},
     io::{self, Write},
-    os::unix::fs::OpenOptionsExt,
     path::{Path, PathBuf},
     time::Duration,
 };
 use uuid::Uuid;
+
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt;
 
 #[cfg(all(test, target_os = "linux"))]
 mod tests;
@@ -163,11 +165,13 @@ pub(crate) fn save_policy_with(
     let parent = path.parent().expect("private policy has a parent");
     let staging = parent.join(format!("policy-{}.tmp", uuid::Uuid::new_v4()));
     let replaced = (|| {
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&staging)?;
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        // The policy file names who may open a session, so it is owner-only where
+        // the platform has POSIX modes. Windows inherits the directory's ACL.
+        #[cfg(unix)]
+        options.mode(0o600);
+        let mut file = options.open(&staging)?;
         file.write_all(&serde_json::to_vec(policy)?)?;
         file.sync_all()?;
         fs::rename(&staging, path)

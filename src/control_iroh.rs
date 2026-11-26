@@ -701,8 +701,19 @@ impl PolicyLock {
 
 #[cfg(not(unix))]
 impl PolicyLock {
-    fn acquire(_policy_path: &Path) -> io::Result<Self> {
-        Ok(Self(std::fs::File::open("/dev/null")?))
+    /// Windows has no `flock(2)` on this lane yet. The lock file is still created
+    /// so an operator sees the path, but the read-modify-write is not serialised
+    /// on this platform; the daemon's own saves stay single-writer because they
+    /// run inside one process.
+    fn acquire(policy_path: &Path) -> io::Result<Self> {
+        let mut lock = policy_path.as_os_str().to_owned();
+        lock.push(".lock");
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(Path::new(&lock))?;
+        Ok(Self(file))
     }
 }
 
