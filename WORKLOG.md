@@ -13,8 +13,9 @@
 - **回执**: `cargo +1.95.0 test --bin rdog -- bulk_path` 17 passed / 0 failed / 0 ignored; `-- control_iroh` 59 passed / 0 failed / 2 ignored (两条既有 ignore: 私有 loopback+pid namespace / 真 TTY); `cargo +1.95.0 test --bin rdog` 1260 passed / 0 failed / 4 ignored; `check-carrier-assertions` OK (断言数 3 / 载体数 8)。
 - **空真补口**: 零字节块不计数 —— 一次空文件下载若把那一帧记成 `chunks=1`, §4.3 第 2 条 (本次确有字节移动) 就在没搬任何字节时成立。用例 `an_empty_transfer_is_not_evidence_of_a_clean_path` 钉住它给 `no_bulk_bytes`。
 - **未验**: 回环拓扑只有 direct, relay 读数由 `PathSampler::Script` 钉住喂进去 —— 真机上一次"确实有 relay 流量"的括号没有执行过, 正对照 (RAI-366) 仍未跑。客户端 `rdog control --put/--get` 仍恒传 `NOT_PATH_AWARE`, 它写出的那半是 `not_applicable` + 四 `null`, 所以跨端 `relay_bytes_zero` 在当前 CLI 路径上不可能为真。`bulk_path_pin` 仍是 `false`, 本票不主张 pin。
-- **回执 (补口后)**: `-- bulk_path` 17 / 0 / 0; `-- control_iroh` 60 / 0 / 2; 全量 1261 / 0 / 4。
-- 提交: 08db409、423b377
+- **join 的跨端结论改三态 (评审 F)**: 原实现把「没证出来」压成 `false` —— 空传输 (两端 `no_bulk_bytes`)、任一端 `relay_sample_unavailable`、`aborted` 都会被读成"测到了 relay 上有字节", 那是把"未采样 ≠ 0"做对之后反向漏掉的同一类谎。现在 `true` = 两端 own_half 都为真; `false` = **只在一端 `verdict() == "relay_bytes_nonzero"` 时**给; 其余全 `null` + `bulk_path_inconclusive_<verdict>` (两端不同用 `+` 串)。`status` 仍是 `joined`, 但没结论时 `run_join` 退出码落在 1, 不混进 0。规格 §4.3 补三态表与 `bulk_path_inconclusive_*` 原因码族, 并写明**空文件传输的成功由正常回执表达** (`state:"committed"` / `eof:true` / 收据), 被扣掉的只是路径结论 —— 免得"空文件拿不到结论"被读成"空文件传不了"。
+- **回执 (最终)**: `-- bulk_path` 20 / 0 / 0; `-- control_iroh` 60 / 0 / 2; 全量 1264 / 0 / 4; `check-carrier-assertions` OK; `check-bookkeeping` exit 0。
+- 提交: 08db409、423b377、536f5f8
 
 ## [2026-11-26] RAI-476 文档: 把三处「声明比机制宽」的措辞改准
 
