@@ -34,7 +34,7 @@ relay 侧另有一个 `advertise` 字段（缺省空），只改写给对端的 
   - 只拨目录的端点（rendezvous 的目录端点、client 的查找端点）用 `custom_roots(directory.relay.root_cert)`，**不引入公共根**；
   - daemon 的共享端点（lane + 目录同一个 endpoint）用 `embedded().with_extra_roots(lane 链 + directory 链)`，也就是 WebPKI 加两份链，因为公共 hop 无法用私建锚验证。
 
-  `root_cert` 因此是**必填字段**：打开 `via_relay` 却不给信任锚时 profile 直接解析失败，不存在"开关一开顺带放宽 TLS"的路径 —— 功能维度（开不开目录的 relay 承载）与安全维度（信任面）不共用一个布尔量。关掉开关时仍是 `custom_roots(lane 链)`。
+  `root_cert` 因此是**必填字段**：打开 `via_relay` 却不给信任锚时 profile 直接解析失败，不存在"开关一开顺带放宽 TLS"的路径 —— 功能维度（开不开目录的 relay 承载）与安全维度（信任面）不共用一个布尔量；用公共 relay 就必须显式给出那份 CA 链，这是"操作者知道自己信什么"的价格。关掉开关时仍是 `custom_roots(lane 链)`。
 - **地址策略不放宽**：目录 relay 的 URL 必须 https，非 `routable` profile 还必须是回环主机。三种半配置一律 fail closed：有 `relay` 没 `via_relay`、有 `via_relay` 没 `relay`、两者都没有又不给 `addr`。
 
 实测（`tests/manual/iroh_directory_relay.sh` → `iroh_directory_relay.py`，三网络栈，目录端点绑在中转机回环上、任何对端都拨不到它；回执 `handoffs/rai426/receipts/directory-relay.log`）：
