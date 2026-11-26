@@ -188,6 +188,10 @@ pub enum Command {
 
         /// 把本次尝试的本端 `rdog.bulk-path.v1` 证据快照写到这个文件
         /// (另一端有它自己的一半, 由验收工具 join)。
+        ///
+        /// 走 `--transport iroh` 时, daemon 在自己终态响应里挂的那半快照会被**原样**写到
+        /// 同目录的 `bulk-path.daemon.json`; 收不到就不写, 只在 stderr 说明, 让 join 落到
+        /// `bulk_path_endpoint_missing` 而不是被一份本端补出来的证据顶掉。
         #[clap(long = "bulk-path-json", value_name = "FILE")]
         bulk_path_json: Option<PathBuf>,
 

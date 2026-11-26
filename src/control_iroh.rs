@@ -343,7 +343,11 @@ enum DirectoryReply {
 
 fn profile<T: DeserializeOwned>(path: &Path) -> Result<T> {
     let mut bytes = Vec::new();
-    File::open(path)?.take(65537).read_to_end(&mut bytes)?;
+    // 读失败要说清是**哪个** profile: 一个 iroh 命令要同时读 profile 与 key 文件, 只说
+    // "No such file" 时调用方分不出缺的是哪一个。
+    File::open(path)
+        .and_then(|file| file.take(65537).read_to_end(&mut bytes).map(|_| ()))
+        .map_err(|err| format!("iroh profile {path:?} 读不出来: {err}"))?;
     if bytes.len() > 65536 {
         return Err("iroh profile exceeds 64 KiB".into());
     }
@@ -550,16 +554,106 @@ enum PathSampler<'a> {
 /// 消失 —— 那种读数是"少算了", 与前一次读数相减会得到一个假的零。所以在场集合对不上时整份读数作废
 /// (`None`), 不是拿剩下的 path 凑一个数。
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct RelayReading {
-    tx: u64,
-    rx: u64,
+pub(crate) struct RelayReading {
+    pub(crate) tx: u64,
+    pub(crate) rx: u64,
     /// 在场 relay path 的标识, 形如 `PathId(3)@relay:https://relay.example:443/`。
     ///
     /// **唯一性来自 `PathId`, 可读性来自地址**。只用地址是不够的: relay path 关闭后以同一
     /// `RelayUrl` 重建是 iroh 的正常事件, 新 path 是新 `PathId`、计数从 0 起, 而地址字符串一模一样 ——
     /// 只看地址会把"换了条 path"读成"同一条 path 还在", 于是 `before > after` 那两个数自己打架,
     /// 相减却得到一个漂亮的零。
-    relay_paths: Vec<String>,
+    pub(crate) relay_paths: Vec<String>,
+}
+
+/// 括号两端 → 四个计数 (§4.2)。两端共用这一份: daemon 在自己的终态响应里用, 客户端在
+/// `rdog.bulk-path.v1` 里用 —— 语义必须逐字一致, 复制第二份就会有一天两边不同。
+pub(crate) struct RelayBracket {
+    pub(crate) tx_before: Option<u64>,
+    pub(crate) tx_after: Option<u64>,
+    pub(crate) rx_before: Option<u64>,
+    pub(crate) rx_after: Option<u64>,
+}
+
+impl RelayReading {
+    /// 从一次 `Connection::paths()` 快照算本端 relay 累计字节。
+    ///
+    /// `PathList` 是调用时刻的快照; 枚举本身不会失败, 失败的是"一条 path 都没有" (连接刚关/
+    /// 还没选路) —— 那种情况没有可用的字节读数, 所以是 `None`, 不是 `Some(0)`。
+    fn read(paths: &iroh::endpoint::PathList<'_>) -> Option<Self> {
+        let mut reading = Self {
+            tx: 0,
+            rx: 0,
+            relay_paths: Vec::new(),
+        };
+        let mut seen_any = false;
+        for path in paths.iter() {
+            seen_any = true;
+            if !path.is_relay() {
+                continue;
+            }
+            let stats = path.stats();
+            reading.tx += stats.udp_tx.bytes;
+            reading.rx += stats.udp_rx.bytes;
+            reading
+                .relay_paths
+                .push(format!("{:?}@{}", path.id(), path.remote_addr()));
+        }
+        seen_any.then_some(reading)
+    }
+}
+
+/// 括号采样: 任一端读不到、或 `before` 时在场的 relay path 到 `after` 时少了一条, 整份读数
+/// 作废 (四个 `None`), **绝不写 0**。
+pub(crate) fn relay_bracket(
+    before: Option<&RelayReading>,
+    after: Option<&RelayReading>,
+) -> RelayBracket {
+    match (before, after) {
+        (Some(before), Some(after))
+            if before
+                .relay_paths
+                .iter()
+                .all(|id| after.relay_paths.contains(id)) =>
+        {
+            RelayBracket {
+                tx_before: Some(before.tx),
+                tx_after: Some(after.tx),
+                rx_before: Some(before.rx),
+                rx_after: Some(after.rx),
+            }
+        }
+        _ => RelayBracket {
+            tx_before: None,
+            tx_after: None,
+            rx_before: None,
+            rx_after: None,
+        },
+    }
+}
+
+/// 本端一条已建连接上的一次路径观测。
+///
+/// 采样面在传输上 (要 `Connection`), 判定与记账在驱动上: daemon 在自己的进程里判, 客户端的
+/// iroh 准入 lane 把观测量交给 `transfer_cli` 的门禁 —— 两边读的是同一批字段。
+#[derive(Debug, Clone)]
+pub(crate) struct PathObservation {
+    pub(crate) class: PathClass,
+    /// 只回答"当时直连到哪个地址", 不参与判定。
+    pub(crate) direct_addr: Option<String>,
+    /// 本端 relay 累计读数; `None` = 读不到 (不是 0)。
+    pub(crate) relay: Option<RelayReading>,
+}
+
+impl PathObservation {
+    /// 读不出路径类别: 判定按 `unknown` fail-closed (§3.1)。
+    pub(crate) fn unknown() -> Self {
+        Self {
+            class: PathClass::Unknown,
+            direct_addr: None,
+            relay: None,
+        }
+    }
 }
 
 impl PathSampler<'_> {
@@ -601,31 +695,7 @@ impl PathSampler<'_> {
     /// 快照与 JSON —— 中间任何一层把它当 0 处理, `relay_bytes_zero` 就会在"没接仪表"时成立。
     fn relay_read(&self) -> Option<RelayReading> {
         match self {
-            Self::Lane { conn, .. } => {
-                // `PathList` 是调用时刻的快照; 枚举本身不会失败, 失败的是"读不到任何 path"
-                // (连接刚关/还没选路), 那种情况没有可用的字节读数。
-                let paths = conn.paths();
-                let mut reading = RelayReading {
-                    tx: 0,
-                    rx: 0,
-                    relay_paths: Vec::new(),
-                };
-                let mut seen_any = false;
-                for path in paths.iter() {
-                    seen_any = true;
-                    if !path.is_relay() {
-                        continue;
-                    }
-                    let stats = path.stats();
-                    reading.tx += stats.udp_tx.bytes;
-                    reading.rx += stats.udp_rx.bytes;
-                    reading
-                        .relay_paths
-                        .push(format!("{:?}@{}", path.id(), path.remote_addr()));
-                }
-                // 一条 path 都没有: 连接此刻什么都测不到, 不是"relay 上没有字节"。
-                seen_any.then_some(reading)
-            }
+            Self::Lane { conn, .. } => RelayReading::read(&conn.paths()),
             #[cfg(test)]
             Self::Script { relay, .. } => {
                 let mut readings = relay.lock().expect("relay readings poisoned");
@@ -912,28 +982,8 @@ impl DaemonPathEvidence {
     ) -> Option<serde_json::Value> {
         let attempt = self.attempts.remove(transfer_id)?;
         let after = sampler.relay_read();
-        // 在 `before` 时在场的 relay path, `after` 时必须还在: 少了一条就说明它中途关了,
-        // 它的关闭字节不在快照里 —— 相减会得到一个假的零。宁可交白卷 (§4.3 的 `null`)。
-        let readable = match (&attempt.relay_before, &after) {
-            (Some(before), Some(after)) => before
-                .relay_paths
-                .iter()
-                .all(|id| after.relay_paths.contains(id)),
-            _ => false,
-        };
-        let (tx_before, tx_after, rx_before, rx_after) = if readable {
-            match (&attempt.relay_before, &after) {
-                (Some(before), Some(after)) => (
-                    Some(before.tx),
-                    Some(after.tx),
-                    Some(before.rx),
-                    Some(after.rx),
-                ),
-                _ => (None, None, None, None),
-            }
-        } else {
-            (None, None, None, None)
-        };
+        // 括号的两次读数怎么变成四个计数 (含"在场集合对不上就作废") 与客户端共用一份实现。
+        let bracket = relay_bracket(attempt.relay_before.as_ref(), after.as_ref());
         let snapshot = crate::bulk_path::BulkPathSnapshot {
             attempt_id: attempt.attempt_id,
             transfer_id: transfer_id.to_owned(),
@@ -947,10 +997,10 @@ impl DaemonPathEvidence {
             // daemon 也不检测同连接上的并发流量: `null`, 不是 `false` (§4.3)。
             concurrency_suspected: None,
             endpoint: "daemon".to_owned(),
-            relay_tx_before: tx_before,
-            relay_tx_after: tx_after,
-            relay_rx_before: rx_before,
-            relay_rx_after: rx_after,
+            relay_tx_before: bracket.tx_before,
+            relay_tx_after: bracket.tx_after,
+            relay_rx_before: bracket.rx_before,
+            relay_rx_after: bracket.rx_after,
             aborted,
         };
         Some(snapshot.to_json())
@@ -2140,18 +2190,7 @@ pub(crate) fn run_control(path: &Path, name: &str, line: &str) -> Result<()> {
         // A refusal closes the connection, so the reason can land after the
         // stream reports its end; wait for it briefly before treating the
         // reply as a protocol failure.
-        let mut denied = false;
-        for _ in 0..20 {
-            match conn.close_reason() {
-                Some(ConnectionError::ApplicationClosed(close)) => {
-                    denied = close.error_code.into_inner() == u64::from(DENIED_CODE)
-                        && close.reason.as_ref() == DENIED.as_bytes();
-                    break;
-                }
-                Some(_) => break,
-                None => tokio::time::sleep(Duration::from_millis(50)).await,
-            }
-        }
+        let denied = denied_close(&conn).await;
         data.close().await;
         if denied {
             return Err(DENIED.into());
@@ -2889,15 +2928,18 @@ fn one_shot_pty_line(transport: &mut ControlTransport, line: String) -> Result<(
     }
 }
 
-fn client_lane(
-    mut transport: ControlTransport,
-    key: SecretKey,
+/// 准入 lane 的手续: 交一张本机签发的租约, 读到 `admitted` 才算接上。
+///
+/// PTY 与 bulk 共用这一步 —— 准入契约只有一套 (`specs/rdog-iroh-admission-contract.md`),
+/// 两份实现迟早会有一份忘记跟着改。
+fn admit_lane(
+    transport: &mut ControlTransport,
+    key: &SecretKey,
     target: EndpointId,
+    session_id: &str,
     ttl: Duration,
-    request: IrohPtyRequest,
 ) -> Result<()> {
-    let session_id = uuid::Uuid::new_v4().to_string();
-    let grant = admission::SignedGrant::issue(&key, target, &session_id, utc_ms(), ttl)
+    let grant = admission::SignedGrant::issue(key, target, session_id, utc_ms(), ttl)
         .map_err(|_| "cannot issue an iroh session grant")?;
     transport.write_message(&serde_json::to_string(&Handshake::Admit { grant })?)?;
     log::info!("iroh handshake sent session={session_id}");
@@ -2907,10 +2949,36 @@ fn client_lane(
         .ok_or("iroh admission closed before a reply")?;
     log::info!("iroh handshake reply received");
     match serde_json::from_str::<HandshakeReply>(&reply)? {
-        HandshakeReply::Admitted => {}
-        HandshakeReply::Refused { code, reason } => return Err(format!("{reason} ({code})").into()),
-        HandshakeReply::Renewed => return Err("unexpected iroh admission reply".into()),
+        HandshakeReply::Admitted => Ok(()),
+        HandshakeReply::Refused { code, reason } => Err(format!("{reason} ({code})").into()),
+        HandshakeReply::Renewed => Err("unexpected iroh admission reply".into()),
     }
+}
+
+/// 等一小会儿看这条连接是不是被 `DENIED` 关掉的 —— 拒绝可能晚于流的 EOF 到达。
+async fn denied_close(conn: &Connection) -> bool {
+    for _ in 0..20 {
+        match conn.close_reason() {
+            Some(ConnectionError::ApplicationClosed(close)) => {
+                return close.error_code.into_inner() == u64::from(DENIED_CODE)
+                    && close.reason.as_ref() == DENIED.as_bytes();
+            }
+            Some(_) => return false,
+            None => tokio::time::sleep(Duration::from_millis(50)).await,
+        }
+    }
+    false
+}
+
+fn client_lane(
+    mut transport: ControlTransport,
+    key: SecretKey,
+    target: EndpointId,
+    ttl: Duration,
+    request: IrohPtyRequest,
+) -> Result<()> {
+    let session_id = uuid::Uuid::new_v4().to_string();
+    admit_lane(&mut transport, &key, target, &session_id, ttl)?;
     transport.set_read_timeout(None)?;
     let one_shot = matches!(
         request,
@@ -3024,6 +3092,177 @@ pub(crate) fn run_pty_control(path: &Path, name: &str, request: IrohPtyRequest) 
                 .await?;
         data.close().await;
         result
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Client bulk lane
+//
+// `rdog control --transport iroh --put/--get` 走的就是这条. 准入 lane 的长连接承载整次尝试
+// 的 bulk 请求行, 客户端在每个边界读路径与 relay 计数 —— 路径类别从 `not_applicable` 变成
+// `direct` 的唯一来源就在这里. 与 PTY 客户端的区别是请求由 `transfer_cli` 的驱动发出;
+// 连接、握手、租约续期与采样由这里提供, 驱动只见 `request` 与 `observe`.
+// ---------------------------------------------------------------------------
+
+/// 客户端一条已准入的 bulk lane。
+pub(crate) struct IrohBulkLane {
+    transport: ControlTransport,
+    conn: Connection,
+    routable: bool,
+    /// 写失败/读超时之后这条流已经接不上了 (字节流可能停在半帧上): 后续请求一律返回同一条
+    /// 错误, 不假装还能发第二条。
+    poisoned: Option<String>,
+    renewal_stop: Arc<AtomicBool>,
+    renewal: Option<std::thread::JoinHandle<()>>,
+}
+
+impl IrohBulkLane {
+    /// 一条请求 → 一条回执。失败即把这条流标记为不可再用。
+    pub(crate) fn request(
+        &mut self,
+        line: &str,
+        timeout: Duration,
+    ) -> std::result::Result<String, String> {
+        if let Some(err) = self.poisoned.clone() {
+            return Err(err);
+        }
+        if let Err(err) = self.transport.set_read_timeout(Some(timeout)) {
+            return Err(self.poison(format!("设置读超时失败: {err}")));
+        }
+        if let Err(err) = self.transport.write_message(line) {
+            return Err(self.poison(format!("发送失败: {err}")));
+        }
+        match self.transport.read_message() {
+            Ok(Some(reply)) => Ok(reply),
+            Ok(None) => Err(self.poison("对端在回执前关闭了连接".to_string())),
+            Err(err) if err.kind() == io::ErrorKind::TimedOut => {
+                Err(self.poison(format!("等待回执超时 ({}ms)", timeout.as_millis())))
+            }
+            Err(err) => Err(self.poison(format!("读回执失败: {err}"))),
+        }
+    }
+
+    /// 本端此刻的路径观测: 门禁判定与本端证据的输入, 与 daemon 侧读的是同一批字段。
+    pub(crate) fn observe(&self) -> PathObservation {
+        let sampler = PathSampler::Lane {
+            conn: &self.conn,
+            routable: self.routable,
+        };
+        PathObservation {
+            class: sampler.sample(),
+            direct_addr: sampler.selected_direct_addr(),
+            relay: sampler.relay_read(),
+        }
+    }
+
+    fn poison(&mut self, message: String) -> String {
+        self.poisoned = Some(message.clone());
+        message
+    }
+
+    /// 先停续期线程再关流: 它握着这条流的写半边, 关流之后它只会在已关的流上失败。
+    ///
+    /// 这是这条 lane 唯一的出口 (`with_bulk_lane` 在 body 返回后无条件调用)。
+    fn shutdown(mut self) {
+        self.renewal_stop.store(true, Ordering::Relaxed);
+        if let Some(renewal) = self.renewal.take() {
+            let _ = renewal.join();
+        }
+        let _ = self.transport.close();
+    }
+}
+
+/// 打开一条已准入的 bulk lane, 在它上面跑 `body`, 结束后关连接。
+///
+/// `body` 在阻塞线程上跑 (行协议是阻塞读写), 整个调用收在一个 tokio runtime 里 ——
+/// `IrohLineTransport` 的每次读写都要 `block_on`, runtime 必须活到连接关掉为止。
+pub(crate) fn with_bulk_lane<T>(
+    path: &Path,
+    name: &str,
+    body: impl FnOnce(&mut IrohBulkLane) -> T + Send + 'static,
+) -> Result<T>
+where
+    T: Send + 'static,
+{
+    if !name_valid(name) {
+        return Err("iroh target must be NAMESPACE/NAME".into());
+    }
+    let cfg: ClientConfig = profile(path)?;
+    cfg.check_frame_budget()?;
+    let key = identity(&cfg.key_file)?;
+    let ttl = Duration::from_millis(cfg.lease_ttl_ms.unwrap_or(DEFAULT_LEASE_TTL_MS));
+    if ttl < admission::MIN_SESSION_TTL || ttl > admission::MAX_SESSION_TTL {
+        return Err("iroh lease_ttl_ms is outside the supported range".into());
+    }
+    let bind = bind_addr(cfg.bind, cfg.routable)?;
+    runtime()?.block_on(async move {
+        let dial = cfg.directory.dial(cfg.routable)?;
+        let directory =
+            directory_endpoint(key.clone(), Some(bind), dial.relay.as_ref(), cfg.routable).await?;
+        let lookup = directory_call(
+            &directory,
+            &dial,
+            DirectoryRequest::Lookup {
+                name: name.to_owned(),
+            },
+            cfg.routable,
+            DIRECTORY_CONNECT,
+        )
+        .await;
+        directory.close().await;
+        let DirectoryReply::Found { addr } = lookup? else {
+            return Err("iroh directory did not find the target".into());
+        };
+        let target = addr.id;
+        let (data, conn, actual) =
+            connect_with_path(&key, Some(bind), &addr, cfg.path, &cfg.relay, cfg.routable).await?;
+        log::info!("iroh_path={}", actual.label());
+        let (send, read) = timeout(IO, conn.open_bi()).await??;
+        let mut transport =
+            ControlTransport::Iroh(IrohLineTransport::new(send, read, cfg.frame_timeout()));
+        let session = uuid::Uuid::new_v4().to_string();
+        if let Err(err) = admit_lane(&mut transport, &key, target, &session, ttl) {
+            // 未开准入策略的对端在第一条非 `@ping` 行上就拒 (`serve_ping`), 然后按 DENIED 关流:
+            // 那是"这条入口不承载 bulk"的能力事实, 与路径类别无关, 重试也没有用。
+            let refused = if denied_close(&conn).await {
+                format!(
+                    "{}: 对端没有准入 lane (没有 policy_file), 不承载 bulk: {err}",
+                    crate::bulk_path::IROH_BULK_PATH_PIN_UNAVAILABLE
+                )
+            } else {
+                err.to_string()
+            };
+            data.close().await;
+            return Err(refused.into());
+        }
+        transport.set_read_timeout(None)?;
+        let renewal_stop = Arc::new(AtomicBool::new(false));
+        let renewal = spawn_lease_renewer(
+            transport.try_clone_writer()?,
+            key.clone(),
+            target,
+            session,
+            ttl,
+            renewal_stop.clone(),
+        );
+        let lane = IrohBulkLane {
+            transport,
+            conn,
+            routable: cfg.routable,
+            poisoned: None,
+            renewal_stop,
+            renewal: Some(renewal),
+        };
+        let outcome = tokio::task::spawn_blocking(move || {
+            let mut lane = lane;
+            let value = body(&mut lane);
+            lane.shutdown();
+            value
+        })
+        .await
+        .map_err(|err| -> Box<dyn std::error::Error + Send + Sync> { err.to_string().into() })?;
+        data.close().await;
+        Ok(outcome)
     })
 }
 

@@ -717,6 +717,28 @@ rdog control <TARGET> --get <REMOTE_PATH> --local-path <LOCAL_PATH> [--resume]
 
 远端路径与本地路径**不做 shell 解析** (走 JSON 字段, 这是 10-06 规格里列出的相对 scp 的价值之一).
 
+### 5.1 iroh 出口 (`--transport iroh`) 的客户端行为 (RAI-476)
+
+`--transport iroh --iroh-config <PROFILE> <NAMESPACE/NAME> --put/--get` 走**准入 lane**: 一条长
+连接承载整次尝试的七条 bulk 请求行, 能力声明与 daemon 侧同一格 (`path_aware=true` /
+`bulk_path_pin=false` / `bulk_path_checked_per_chunk=true`, 见 §2.1)。
+
+| 项 | 客户端的规定 |
+| --- | --- |
+| 连接与握手 | 与 PTY 客户端同一套: profile → identity → directory lookup → `connect_with_path` → `open_bi` → `Handshake::Admit` (共用 `admit_lane`)。租约按 `lease_ttl_ms` 续期, 传输期间不断租 |
+| 门禁时机 | open 前判一次, **每个 chunk 边界再判一次**, 判定用边界上的即时采样 (§3.1) |
+| 括号端点 | `before` 在 open 请求发出**之前**取, `after` 在终态请求之后取; 两端都是本端这条连接上 relay path 的累计 UDP 字节, 换算与 daemon 侧共用 `relay_bracket` (§4.2) |
+| `established_direct` | 按 `transfer_id` 记"本次尝试曾观测到 direct", open 复位。它让上传方向的 `iroh_direct_path_lost` 在客户端有生产者 (与 daemon 的 `BulkPathGate` 同一形状) |
+| 中途掉 relay | 门禁在块**发出之前**判, 所以被拒的那个边界一个字节都没上线; 不走 `@file-cancel` —— 按 §2.5 B3 保留半成品供续传 |
+| daemon 半快照 | `@file-end` / `eof:true` 的 `@file-read` 响应里的 `evidence` 被**原样**写到 `--bulk-path-json` 同目录的 `bulk-path.daemon.json`。收不到就**不写**, 只在 stderr 说明, 让 join 落到 `bulk_path_endpoint_missing` |
+| 失败码 | 准入 lane 握不上手且连接按 `DENIED` 关闭 → `iroh_bulk_path_pin_unavailable` (对端没有策略文件, 该入口不承载 bulk); 路径类失败走 §2.2 的 `iroh_*` 三码 |
+| 非 iroh 传输 | 行为不变: 逐请求建链, `path_class` 恒 `not_applicable`, 不产出 daemon 半快照 |
+
+**措辞上限 (与 §4.4 正对照一并读)。** 客户端能给出的结论只到"括号两点之间读到的 relay 累计量增
+量为 0"这一层: `stats().udp_tx/rx.bytes` 是这条 path 上的**全部** UDP 字节 (含 ACK、keepalive、
+PATH_CHALLENGE), 空闲 relay path 自己也会涨, 所以在真机上"增量为 0"可能结构性不可达。写成
+"relay 字节为零"会把一个判据问题说成实现保证 —— 那是本规格明确不允许的表述。
+
 ---
 
 ## 6. 实现落点清单 (供实现票拆用, 本步不写代码)

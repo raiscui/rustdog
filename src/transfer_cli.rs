@@ -16,15 +16,22 @@
 //! 一版里是正确且最简单的形态: 不必给四种 transport 各加一套流式会话 API。代价是每块一次建链
 //! (TCP) / 一次查询 (Zenoh); 对分块传输是常数级开销, 换来的是不需要改传输层。
 //!
+//! # 两条出口
+//!
+//! - TCP / WebSocket / Zenoh: 每条请求独立建链 (`TransportExchange`), 链路上没有 relay 跳,
+//!   本端证据的 `path_class` 恒为 `not_applicable` (判定不适用, 不是"通过")。
+//! - iroh 准入 lane (`--transport iroh`): 一条长连接承载整次尝试 (`IrohExchange`), 每个边界都能
+//!   读到路径与 relay 计数, 所以 `path_class` 是真的 `direct` / `relay` / `unknown`。
+//!
 //! # 门禁位置
 //!
-//! bulk 字节从**控制端**发出, 所以"直连不可得就拒发"必须落在这里 (规格 §3.4)。当前 iroh lane
-//! 只服务 `@ping` / `@pty`, bulk 动词进不去, 因此能力的拒绝发生在 channel 层; 阶段 3 接上
-//! `path_class` 之后, 这里再加每个 chunk 发送前的复查。
+//! bulk 字节从**控制端**发出, 所以"直连不可得就拒发"必须落在这里 (规格 §3.4): open 前判一次,
+//! 每个 chunk 边界各再判一次, 判定用边界上的即时采样 —— 只在 open 判一次会漏掉中途
+//! `direct → relay` 的切换, 那正是 `iroh_direct_path_lost` 存在的理由。
 
 use std::{
     io::{Read, Seek, SeekFrom, Write},
-    path::Path,
+    path::{Path, PathBuf},
     sync::mpsc,
     time::Duration,
 };
@@ -37,6 +44,7 @@ use crate::{
     bulk_path::{decide, BulkDecision, BulkPathSnapshot, PathCapability, PathClass},
     control_file_transfer::chunk_payload_bytes,
     control_invocation::{send_control_lines_for_invocation, ControlInvocation},
+    control_iroh::{PathObservation, RelayReading},
 };
 
 /// 一行请求 → 一行结构化回执。
@@ -44,12 +52,57 @@ use crate::{
 /// 抽成 trait 的唯一理由是**可测**: 驱动是个状态机 (续传 offset、分块边界、失败即取消、下载摘要
 /// 比对), 用真的协议实现 + 假传输就能把状态机测全, 不必起 daemon 也不必绑网络。
 pub(crate) trait LineExchange {
-    fn request(&self, line: &str) -> Result<Value, String>;
+    fn request(&self, line: &str) -> Result<Reply, String>;
 
     /// 每块装载多少字节。默认取协议上限; 测试用小值才能在几条用例里跑完多块循环。
     fn chunk_bytes(&self) -> usize {
         chunk_payload_bytes()
     }
+
+    /// 本端此刻的路径观测。
+    ///
+    /// `None` = 这条链路上没有 relay 跳 (能力声明已经是 `path_aware=false`), 判定不适用;
+    /// 有 relay 跳的传输**必须**给观测, 给不出就是 `unknown` 并 fail-closed —— 两者不能混。
+    fn observe_path(&self) -> Option<PathObservation> {
+        None
+    }
+}
+
+/// 一条回执: 结构化载荷 + daemon 半快照的**原文**。
+///
+/// `evidence` 是 daemon 在终态响应里挂的那份 `rdog.bulk-path.v1` (§4.3)。存原文而不是解析后的
+/// `Value`: 跨端 join 读的是 daemon 自己那半, 重排一遍字段就等于把它换成了本端的转述。
+pub(crate) struct Reply {
+    payload: Value,
+    evidence: Option<String>,
+}
+
+impl Reply {
+    fn get(&self, key: &str) -> Option<&Value> {
+        self.payload.get(key)
+    }
+}
+
+/// `@response` 行 → 载荷 + daemon 半快照原文。
+fn parse_reply(line: &str) -> Result<Reply, String> {
+    let payload =
+        parse_response_payload(line).ok_or_else(|| format!("回执不可解析: {line:?}"))?;
+    let evidence = raw_evidence(&payload, line);
+    Ok(Reply { payload, evidence })
+}
+
+/// daemon 在响应里挂的半快照原文。
+///
+/// 只有信封确实带 `evidence` 时才取: 从 `"evidence"` 后的冒号起, 用流式反序列化量出这个值占
+/// 多少字节, 原样切出来 —— 解析再序列化会改键序与空白, 那就不再是 daemon 给我的那份。
+fn raw_evidence(payload: &Value, line: &str) -> Option<String> {
+    payload.get("value").unwrap_or(payload).get("evidence")?;
+    let at = line.find("\"evidence\"")?;
+    let colon = at + line[at..].find(':')?;
+    let rest = &line[colon + 1..];
+    let mut stream = serde_json::Deserializer::from_str(rest).into_iter::<Value>();
+    stream.next()?.ok()?;
+    Some(rest[..stream.byte_offset()].to_owned())
 }
 
 /// 走真实控制通道的交换: 每次请求独立建链 (TCP) 或独立查询 (Zenoh)。
@@ -115,11 +168,13 @@ fn response_payload_bytes() -> u64 {
 
 const DEFAULT_CHUNK_ACK_TIMEOUT_MS: u64 = 30 * 1000;
 
+/// daemon 那一半的证据文件名, 落在 `--bulk-path-json` 的同目录 (§4.3 的跨端 join 输入)。
+pub(crate) const DAEMON_HALF_FILE: &str = "bulk-path.daemon.json";
+
 /// 本端这一半的 `rdog.bulk-path.v1` 证据 (规格 §4.3: 两端各发一半, 不替对端填数)。
 ///
-/// 客户端今天只走 TCP / WebSocket / Zenoh, 这三条链路上没有 relay 跳, 所以 `path_class` 恒为
-/// `not_applicable`、`verdict` 也必须是 `not_applicable` —— 不是"通过"。等 CLI 能走 iroh 之后,
-/// 这里的采样才会变成 `direct` / `relay`。
+/// 能力由出口声明: 没有 relay 跳的链路 (`path_aware=false`) 记 `not_applicable`, 不是"通过";
+/// iroh 准入 lane 记 `PATH_AWARE_CHECKED_PER_CHUNK` —— 每个边界都采样, 但**不是**传输层 pin。
 pub(crate) struct BulkPathRecorder {
     pub(crate) attempt_id: String,
     pub(crate) capability: PathCapability,
@@ -128,6 +183,18 @@ pub(crate) struct BulkPathRecorder {
     wire_bytes: u64,
     chunks: u64,
     path_class: PathClass,
+    direct_addr: Option<String>,
+    /// 每条尝试是否**曾观测到** direct, 键是 `transfer_id` (open 复位)。
+    ///
+    /// 只有"曾直连"与"从未直连"分成两份状态, 才能把"中途掉 relay" (`iroh_direct_path_lost`)
+    /// 与"从来没有直连" (`iroh_direct_path_unavailable`) 判成两个码。daemon 侧
+    /// (`control_iroh::BulkPathGate`) 记的是同一件事。
+    established: std::collections::HashMap<String, bool>,
+    /// 括号的两端: open 执行前与终态之后各一次 relay 累计读数 (§4.2)。
+    relay_before: Option<RelayReading>,
+    relay_after: Option<RelayReading>,
+    /// daemon 那一半的原文, 从终态响应的 `evidence` 里收下来 (§4.3)。
+    daemon_half: Option<String>,
     aborted: bool,
     /// 失败路径上写快照时用的 id (成功路径用收据里的那个)。
     last_transfer_id: String,
@@ -151,29 +218,80 @@ impl BulkPathRecorder {
             } else {
                 PathClass::NotApplicable
             },
+            direct_addr: None,
+            established: std::collections::HashMap::new(),
+            relay_before: None,
+            relay_after: None,
+            daemon_half: None,
             aborted: false,
             last_transfer_id: String::new(),
         }
     }
 
-    /// 门禁 (§3.1): open 前一次。
+    /// open 前的门禁与括号左端 (§3.1 / §4.2)。
+    ///
+    /// 顺序是硬要求: 复位这条尝试的"曾直连"、采样、取 relay 基线, 然后才判 —— 基线必须早于
+    /// open 执行, 否则 open 自己的字节会被算进括号的左边; open 也必须无条件复位, 同 id 的
+    /// 幂等重试是一次**新的**尝试。
+    pub(crate) fn begin(&mut self, exchange_peer: &dyn LineExchange) -> Result<(), String> {
+        self.established
+            .insert(self.last_transfer_id.clone(), false);
+        self.relay_before = self.sample(exchange_peer).and_then(|seen| seen.relay);
+        self.admit()
+    }
+
+    /// 门禁复查: **每个 chunk 边界都要再来一次** (§3.1), 判定用这一刻的采样。
+    pub(crate) fn recheck(&mut self, exchange_peer: &dyn LineExchange) -> Result<(), String> {
+        self.sample(exchange_peer);
+        self.admit()
+    }
+
+    /// 括号右端: 终态请求**之后**才取 (§4.2)。
+    ///
+    /// 失败路径同样要取: 一次被中止的尝试也有"结束时那一刻"的 relay 读数, 那是它自己的证据。
+    pub(crate) fn close_bracket(&mut self, exchange_peer: &dyn LineExchange) {
+        if !self.capability.path_aware {
+            return;
+        }
+        self.relay_after = exchange_peer
+            .observe_path()
+            .and_then(|observation| observation.relay);
+    }
+
+    /// 门禁判定: 用当前采样与"这条尝试曾否直连"查表 (§3.1)。
     pub(crate) fn admit(&self) -> Result<(), String> {
-        // `established_direct` 今天**没有生产者**: 判"中途 direct→relay"需要适配器在读采样的同时
-        // 记住"本次是否曾观测到 direct", 而今天没有承载 bulk 数据面的适配器 (RAI-476)。所以这里
-        // 恒传 `false` —— 它是被声明的缺口, 不是被假装解决的分支。`iroh_direct_path_lost` 因此只有
-        // 单测覆盖, 不得据此主张"中途路径丢失已处理"。
-        match decide(self.capability, self.path_class, false) {
+        let established = self
+            .established
+            .get(&self.last_transfer_id)
+            .copied()
+            .unwrap_or(false);
+        match decide(self.capability, self.path_class, established) {
             BulkDecision::Allowed => Ok(()),
             BulkDecision::Refused(code) => Err(refuse_message(code)),
         }
     }
 
-    /// 门禁复查: **每个 chunk 边界都要再来一次**。
+    /// 一次边界采样: 更新路径类别与 `direct_addr`, 并把"曾直连"记到这条尝试上。
     ///
-    /// 只在 open 判一次会漏掉中途 `direct → relay` 的切换 —— 那恰好是 `iroh_direct_path_lost`
-    /// 存在的理由。少了这一处复查, 那个分支在生产里永远没有调用者。
-    pub(crate) fn recheck(&self) -> Result<(), String> {
-        self.admit()
+    /// 一条尝试只取**一次**采样, 判定与记账共用它 —— 各读一次会留下"拒了但记成 direct"这种
+    /// daemon 侧明确排除掉的自相矛盾。
+    fn sample(&mut self, exchange_peer: &dyn LineExchange) -> Option<PathObservation> {
+        if !self.capability.path_aware {
+            return None;
+        }
+        // 路径感知的传输给不出观测就是 `unknown` (fail-closed), 不是"当作没这回事"。
+        let seen = exchange_peer
+            .observe_path()
+            .unwrap_or_else(PathObservation::unknown);
+        if seen.class == PathClass::Direct {
+            if self.direct_addr.is_none() {
+                self.direct_addr = seen.direct_addr.clone();
+            }
+            self.established
+                .insert(self.last_transfer_id.clone(), true);
+        }
+        self.path_class = seen.class;
+        Some(seen)
     }
 
     /// 记一块**已被对端确认**的字节。必须在 `request` 成功之后调: 记账在发送之前会把从未被
@@ -182,6 +300,16 @@ impl BulkPathRecorder {
         self.bulk_bytes += bulk;
         self.wire_bytes += wire;
         self.chunks += 1;
+    }
+
+    /// 收下 daemon 在终态响应里挂的那半快照 (§4.3)。
+    ///
+    /// 只收原文: 跨端 join 要的是 daemon 自己那份, 本端不改一个字节。收不到时保持 `None`, 由
+    /// [`Self::write`] 明确报告 —— 伪造一份会让 join 拿到一对看起来完整的两端。
+    pub(crate) fn note_daemon_half(&mut self, evidence: Option<String>) {
+        if evidence.is_some() {
+            self.daemon_half = evidence;
+        }
     }
 
     pub(crate) fn remember_transfer(&mut self, transfer_id: &str) {
@@ -204,28 +332,59 @@ impl BulkPathRecorder {
         let Some(out) = self.out.as_ref() else {
             return;
         };
+        let bracket = crate::control_iroh::relay_bracket(
+            self.relay_before.as_ref(),
+            self.relay_after.as_ref(),
+        );
         let snapshot = BulkPathSnapshot {
             attempt_id: self.attempt_id.clone(),
             transfer_id: transfer_id.to_string(),
             direction: direction.to_owned(),
             capability: self.capability,
             path_class: self.path_class,
-            direct_addr: None,
+            direct_addr: self.direct_addr.clone(),
             bulk_bytes: self.bulk_bytes,
             wire_bytes: self.wire_bytes,
             chunks: self.chunks,
             // 客户端没有并发检测能力: `null`, 不是 `false`。
             concurrency_suspected: None,
             endpoint: "client".to_owned(),
-            // 客户端驱动没有 relay 句柄可读 —— 四个计数是 `None` (未采样), 不是 0。
-            relay_tx_before: None,
-            relay_tx_after: None,
-            relay_rx_before: None,
-            relay_rx_after: None,
+            // 括号两端都读到了才有四个数; 读不到就是 `None` (未采样), 绝不写 0。
+            relay_tx_before: bracket.tx_before,
+            relay_tx_after: bracket.tx_after,
+            relay_rx_before: bracket.rx_before,
+            relay_rx_after: bracket.rx_after,
             aborted: self.aborted,
         };
         if let Err(err) = std::fs::write(out, snapshot.to_json().to_string()) {
             eprintln!("warning: 证据快照写不进 {out:?}: {err}");
+        }
+        self.write_daemon_half();
+    }
+
+    /// daemon 那一半落到本端快照的同目录 (`bulk-path.daemon.json`)。
+    ///
+    /// 只有有 relay 跳的出口才会有 daemon 半快照 (daemon 只在准入 lane 上产出它), 所以
+    /// `path_aware=false` 的出口在这里什么都不做。
+    fn write_daemon_half(&self) {
+        if !self.capability.path_aware {
+            return;
+        }
+        let Some(own) = self.out.as_ref() else {
+            return;
+        };
+        let target = own.with_file_name(DAEMON_HALF_FILE);
+        match self.daemon_half.as_ref() {
+            Some(raw) => {
+                if let Err(err) = std::fs::write(&target, raw) {
+                    eprintln!("warning: daemon 半快照写不进 {target:?}: {err}");
+                }
+            }
+            // 不伪造: 没有这一半, join 必须落到 `bulk_path_endpoint_missing`, 而不是被一份
+            // 本端补出来的"完整证据"顶掉。
+            None => eprintln!(
+                "warning: 终态响应里没有 daemon 半快照 (evidence): 跨端 join 会因缺少 daemon 侧而失败 (bulk_path_endpoint_missing)"
+            ),
         }
     }
 }
@@ -247,12 +406,95 @@ fn new_transfer_id(tag: &str) -> String {
 /// 回执是 `@response <json>`; 缺行、不可解析、或信封里带错误都算失败 —— 静默把错误当成成功是
 /// 这条 lane 最贵的失败模式 (客户端会以为传输完成了)。
 impl LineExchange for TransportExchange {
-    fn request(&self, line: &str) -> Result<Value, String> {
+    fn request(&self, line: &str) -> Result<Reply, String> {
         exchange(self, line)
     }
 }
 
-fn exchange(options: &TransportExchange, line: &str) -> Result<Value, String> {
+/// iroh 准入 lane 上的一条长连接: 整次尝试共用它, 失败即整条流作废。
+///
+/// 与 `TransportExchange` 的差别不只是"不重建链": 它让驱动在每个边界读到路径与 relay 计数,
+/// 所以这是唯一一个本端 `path_class` 会是 `direct` 的出口。
+struct IrohExchange<'lane> {
+    /// 驱动是单线程的: 这里只需要"共用一条连接", 不需要跨线程互斥。
+    lane: std::cell::RefCell<&'lane mut crate::control_iroh::IrohBulkLane>,
+    chunk_ack_timeout_ms: u64,
+}
+
+impl<'lane> IrohExchange<'lane> {
+    fn new(lane: &'lane mut crate::control_iroh::IrohBulkLane, chunk_ack_timeout_ms: u64) -> Self {
+        Self {
+            lane: std::cell::RefCell::new(lane),
+            chunk_ack_timeout_ms,
+        }
+    }
+}
+
+impl LineExchange for IrohExchange<'_> {
+    fn request(&self, line: &str) -> Result<Reply, String> {
+        let line_read = self.lane.borrow_mut().request(
+            line,
+            Duration::from_millis(self.chunk_ack_timeout_ms.max(1)),
+        )?;
+        let reply = parse_reply(&line_read)?;
+        if let Some(error) = response_error(&reply.payload) {
+            return Err(error);
+        }
+        Ok(reply)
+    }
+
+    fn observe_path(&self) -> Option<PathObservation> {
+        Some(self.lane.borrow().observe())
+    }
+}
+
+/// `rdog control <target> --transport iroh --put/--get` 的一次尝试。
+pub(crate) enum IrohBulkRequest {
+    Put {
+        local: PathBuf,
+        remote: String,
+        restart: bool,
+    },
+    Get {
+        remote: String,
+        local: PathBuf,
+    },
+}
+
+/// iroh 准入 lane 上的 `--put` / `--get`。
+///
+/// 能力声明与准入 lane 一致: `path_aware=true` / `bulk_path_pin=false` /
+/// `bulk_path_checked_per_chunk=true`。`bulk_path_pin` 只能是 `false` —— 逐边界检查证明的是
+/// "每个边界上直连", 不是"边界之间不会改走 relay" (§3.5); 真 pin 归 RAI-501。
+pub(crate) fn run_iroh_bulk(
+    path: &Path,
+    name: &str,
+    request: IrohBulkRequest,
+    out: Option<PathBuf>,
+) -> Result<TransferReceipt, String> {
+    let chunk_ack_timeout_ms = chunk_ack_timeout_ms_from_config();
+    crate::control_iroh::with_bulk_lane(path, name, move |lane| {
+        let exchange_peer = IrohExchange::new(lane, chunk_ack_timeout_ms);
+        let mut recorder = BulkPathRecorder::new(
+            format!("cli-{}", std::process::id()),
+            PathCapability::PATH_AWARE_CHECKED_PER_CHUNK,
+            out,
+        );
+        match request {
+            IrohBulkRequest::Put {
+                local,
+                remote,
+                restart,
+            } => run_put(&exchange_peer, &mut recorder, &local, &remote, restart),
+            IrohBulkRequest::Get { remote, local } => {
+                run_get(&exchange_peer, &mut recorder, &remote, &local)
+            }
+        }
+    })
+    .map_err(|err| err.to_string())?
+}
+
+fn exchange(options: &TransportExchange, line: &str) -> Result<Reply, String> {
     let artifacts_dir = std::env::temp_dir().join("rdog-transfer-cli");
     let (sender, receiver) = mpsc::channel();
     let invocation = options.invocation.clone();
@@ -284,20 +526,16 @@ fn exchange(options: &TransportExchange, line: &str) -> Result<Value, String> {
         .into_iter()
         .next()
         .ok_or_else(|| "控制端没有返回任何回执".to_string())?;
-    let payload = first
-        .response_line
-        .as_deref()
-        .and_then(parse_response_payload)
-        .ok_or_else(|| {
-            format!(
-                "回执不可解析: {:?}",
-                first.response_line.as_deref().unwrap_or("<none>")
-            )
-        })?;
-    if let Some(error) = response_error(&payload) {
+    let reply = parse_reply(
+        first
+            .response_line
+            .as_deref()
+            .ok_or_else(|| "回执不可解析: <none>".to_string())?,
+    )?;
+    if let Some(error) = response_error(&reply.payload) {
         return Err(error);
     }
-    Ok(payload)
+    Ok(reply)
 }
 
 /// 回执行里的错误。`kind:"error"` 与 `error` / `error_code` 两种写法都要认:
@@ -375,7 +613,9 @@ pub(crate) fn run_put(
     // 任何一条失败路径都必须留下快照: 门禁拒绝、open 失败、分块失败、`@file-end` 失败。
     // 只在两条路上写会让"这次尝试到底发生了什么"在证据里缺一块 —— 而缺的那块最可能是
     // 失败原因本身。
-    match run_put_inner(exchange_peer, recorder, local, remote, restart) {
+    let outcome = run_put_inner(exchange_peer, recorder, local, remote, restart);
+    recorder.close_bracket(exchange_peer);
+    match outcome {
         Ok(receipt) => {
             recorder.write(&receipt.transfer_id, "put");
             Ok(receipt)
@@ -406,8 +646,8 @@ fn run_put_inner(
     let transfer_id = new_transfer_id("put");
     recorder.remember_transfer(&transfer_id);
     // 门禁在 transfer_id 之后就判: 被拒的尝试也要在证据里带自己的 id, 否则按 id join 时
-    // 多次被拒会并成一条。
-    recorder.admit()?;
+    // 多次被拒会并成一条。括号左端也在这里取 —— 它必须早于 open 执行 (§4.2)。
+    recorder.begin(exchange_peer)?;
 
     let open_line = serde_json::json!({
         "transfer_id": transfer_id,
@@ -451,15 +691,14 @@ fn run_put_inner(
             "offset": offset,
             "data": BASE64_STANDARD.encode(&buffer[..read]),
         });
-        // 门禁复查: 每个 chunk 边界都再来一次 (§3.1)。只在 open 判一次会漏掉中途
-        // direct → relay 的切换 —— 那正是 iroh_direct_path_lost 存在的理由。
-        recorder.recheck()?;
+        // 门禁复查: 每个 chunk 边界都再来一次 (§3.1), 用这一刻的采样。只在 open 判一次会
+        // 漏掉中途 direct → relay 的切换 —— 那正是 iroh_direct_path_lost 存在的理由。
+        recorder.recheck(exchange_peer)?;
         let accepted = match exchange_peer.request(&format!("@file-chunk:{chunk_line}")) {
             Ok(value) => value,
             Err(err) => {
-                recorder.note_aborted();
-                recorder.write(&transfer_id, "put");
                 // 失败路径必须显式取消: 否则半成品和会话都留在盘上等 TTL, 而调用方已经放弃了。
+                // 证据快照由调用方在括号右端取完之后统一写 (一处写, 不两份各写一半)。
                 let _ = exchange_peer.request(&format!(
                     "@file-cancel:{{\"transfer_id\":\"{transfer_id}\"}}"
                 ));
@@ -488,11 +727,14 @@ fn run_put_inner(
         "sha256": sha256,
     });
     let committed = exchange_peer.request(&format!("@file-end:{end_line}"))?;
+    // 上传的终态是 `@file-end`: daemon 那一半随这条响应到达 (§4.3)。
+    recorder.note_daemon_half(committed.evidence.clone());
     match committed.get("state").and_then(Value::as_str) {
         Some("committed") => {}
         other => {
             return Err(format!(
-                "@file-end 未提交: state={other:?} (回执 {committed})"
+                "@file-end 未提交: state={other:?} (回执 {})",
+                committed.payload
             ))
         }
     }
@@ -516,7 +758,9 @@ pub(crate) fn run_get(
     remote: &str,
     local: &Path,
 ) -> Result<TransferReceipt, String> {
-    match run_get_inner(exchange_peer, recorder, remote, local) {
+    let outcome = run_get_inner(exchange_peer, recorder, remote, local);
+    recorder.close_bracket(exchange_peer);
+    match outcome {
         Ok(receipt) => {
             recorder.write(&receipt.transfer_id, "get");
             Ok(receipt)
@@ -537,7 +781,7 @@ fn run_get_inner(
 ) -> Result<TransferReceipt, String> {
     let transfer_id = new_transfer_id("get");
     recorder.remember_transfer(&transfer_id);
-    recorder.admit()?;
+    recorder.begin(exchange_peer)?;
     let open_line = serde_json::json!({
         "transfer_id": transfer_id,
         // 下载方向同样要交身份: 两端快照按 `attempt_id` 对齐 (§4.3)。
@@ -589,11 +833,15 @@ fn run_get_inner(
             recorder.note_confirmed_chunk(bytes.len() as u64, data.len() as u64);
             offset += bytes.len() as u64;
             let eof = read.get("eof").and_then(Value::as_bool).unwrap_or(false);
+            if eof {
+                // 下载的终态是 `eof:true` 的那一帧 `@file-read`: daemon 那一半挂在这里 (§4.3)。
+                recorder.note_daemon_half(read.evidence.clone());
+            }
             if eof || offset >= size {
                 break;
             }
             if bytes.is_empty() {
-                return Err(format!("@{offset} 处读到空块且未到 EOF (回执 {read})"));
+                return Err(format!("@{offset} 处读到空块且未到 EOF (回执 {})", read.payload));
             }
         }
         file.flush()
@@ -604,8 +852,6 @@ fn run_get_inner(
         Ok(offset) => offset,
         Err(err) => {
             let _ = std::fs::remove_file(&staging);
-            recorder.note_aborted();
-            recorder.write(&transfer_id, "get");
             return Err(err);
         }
     };
@@ -650,6 +896,10 @@ mod tests {
         download_sha_override: Option<String>,
         /// 第 N 个 `@file-read` 之后的读取故障: `"empty"` 返回空块, `"error"` 直接失败。
         download_fault: Option<(usize, &'static str)>,
+        /// 按顺序取的本端路径观测 (用完最后一个就一直用它); 空 = 这个"传输"没有 relay 跳。
+        observations: std::sync::Mutex<std::collections::VecDeque<PathObservation>>,
+        /// 终态响应里挂上 daemon 半快照 (只有 iroh 准入 lane 会这么做)。
+        attach_evidence: Option<Value>,
     }
 
     impl LoopbackPeer {
@@ -660,6 +910,33 @@ mod tests {
                 seen_lines: std::sync::Mutex::new(Vec::new()),
                 download_sha_override: None,
                 download_fault: None,
+                observations: std::sync::Mutex::new(std::collections::VecDeque::new()),
+                attach_evidence: None,
+            }
+        }
+
+        fn with_observations(mut self, observations: Vec<PathObservation>) -> Self {
+            self.observations = std::sync::Mutex::new(observations.into());
+            self
+        }
+
+        fn with_evidence(mut self, evidence: Value) -> Self {
+            self.attach_evidence = Some(evidence);
+            self
+        }
+
+        fn reply(&self, mut value: Value) -> Reply {
+            if value.get("state").and_then(Value::as_str) == Some("committed")
+                || value.get("eof").and_then(Value::as_bool) == Some(true)
+            {
+                if let Some(evidence) = self.attach_evidence.as_ref() {
+                    value["evidence"] = evidence.clone();
+                }
+            }
+            let evidence = value.get("evidence").map(Value::to_string);
+            Reply {
+                payload: value,
+                evidence,
             }
         }
 
@@ -676,7 +953,7 @@ mod tests {
     }
 
     impl LineExchange for LoopbackPeer {
-        fn request(&self, line: &str) -> Result<Value, String> {
+        fn request(&self, line: &str) -> Result<Reply, String> {
             self.seen_lines.lock().unwrap().push(line.to_string());
             if line.starts_with("@file-chunk:") {
                 if let Some(index) = self.fail_chunk_index {
@@ -694,7 +971,7 @@ mod tests {
                         .count();
                     if reads > after {
                         return match kind {
-                            "empty" => Ok(serde_json::json!({"data": "", "eof": false})),
+                            "empty" => Ok(self.reply(serde_json::json!({"data": "", "eof": false}))),
                             _ => Err("模拟的读取故障".to_string()),
                         };
                     }
@@ -719,7 +996,16 @@ mod tests {
                     value["sha256"] = Value::String(sha.clone());
                 }
             }
-            Ok(value)
+            Ok(self.reply(value))
+        }
+
+        fn observe_path(&self) -> Option<PathObservation> {
+            let mut observations = self.observations.lock().unwrap();
+            if observations.len() > 1 {
+                observations.pop_front()
+            } else {
+                observations.front().cloned()
+            }
         }
 
         fn chunk_bytes(&self) -> usize {
@@ -1034,6 +1320,341 @@ mod tests {
         let mut recorder = test_recorder(None);
         let err = run_get(&peer, &mut recorder, &remote.to_string_lossy(), &local).unwrap_err();
         assert!(err.contains("下载摘要不符"), "必须报摘要不符: {err}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // -----------------------------------------------------------------------
+    // iroh 准入 lane 上的客户端: 能力声明、括号采样、`iroh_direct_path_lost` 的生产者,
+    // 以及 daemon 半快照落盘 (§3.1 / §4.2 / §4.3)
+    // -----------------------------------------------------------------------
+
+    fn direct() -> PathObservation {
+        PathObservation {
+            class: PathClass::Direct,
+            direct_addr: Some("192.0.2.7:51000".to_string()),
+            relay: None,
+        }
+    }
+
+    fn relay() -> PathObservation {
+        PathObservation {
+            class: PathClass::Relay,
+            direct_addr: None,
+            relay: None,
+        }
+    }
+
+    /// 一次 direct 观测 + 这一次读到的 relay 累计量。
+    fn direct_with_relay(tx: u64, rx: u64, paths: &[&str]) -> PathObservation {
+        PathObservation {
+            class: PathClass::Direct,
+            direct_addr: Some("192.0.2.7:51000".to_string()),
+            relay: Some(RelayReading {
+                tx,
+                rx,
+                relay_paths: paths.iter().map(|path| path.to_string()).collect(),
+            }),
+        }
+    }
+
+    fn iroh_recorder(out: Option<std::path::PathBuf>) -> BulkPathRecorder {
+        BulkPathRecorder::new(
+            "cli-test".to_string(),
+            PathCapability::PATH_AWARE_CHECKED_PER_CHUNK,
+            out,
+        )
+    }
+
+    #[test]
+    fn the_iroh_exit_declares_per_chunk_checks_and_no_pin() {
+        // 客户端在 iroh 准入 lane 上与 daemon 声明同一格能力: 逐 chunk 检查, **不是** pin。
+        // 把它写成 pin 就是拿"每个边界上直连"顶替"边界之间不会改路" (§3.5)。
+        let dir = scratch_dir("iroh-capability");
+        let local = dir.join("source.bin");
+        std::fs::write(&local, vec![4u8; 20]).unwrap();
+        let remote = dir.join("landed.bin");
+        let out = dir.join("bulk-path.json");
+
+        let peer = LoopbackPeer::new(7).with_observations(vec![direct()]);
+        let mut recorder = iroh_recorder(Some(out.clone()));
+        run_put(&peer, &mut recorder, &local, &remote.to_string_lossy(), false).unwrap();
+
+        let value: Value = serde_json::from_str(&std::fs::read_to_string(&out).unwrap()).unwrap();
+        assert_eq!(value["path_aware"], true);
+        assert_eq!(value["bulk_path_pin"], false);
+        assert_eq!(value["bulk_path_checked_per_chunk"], true);
+        assert_eq!(value["path_class"], "direct");
+        assert_eq!(value["endpoint"], "client");
+        assert_eq!(value["direct_addr"], "192.0.2.7:51000");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_unsampled_relay_counter_stays_null_not_zero() {
+        // 路径读到了 direct, 但 relay 计数读不到 (没有 relay 句柄 / 一条 path 都没有):
+        // 四个计数必须是 null, verdict 是 relay_sample_unavailable —— 不是"零增量"。
+        let dir = scratch_dir("iroh-unsampled");
+        let local = dir.join("source.bin");
+        std::fs::write(&local, vec![4u8; 20]).unwrap();
+        let remote = dir.join("landed.bin");
+        let out = dir.join("bulk-path.json");
+
+        let peer = LoopbackPeer::new(7).with_observations(vec![direct()]);
+        let mut recorder = iroh_recorder(Some(out.clone()));
+        run_put(&peer, &mut recorder, &local, &remote.to_string_lossy(), false).unwrap();
+
+        let value: Value = serde_json::from_str(&std::fs::read_to_string(&out).unwrap()).unwrap();
+        for key in [
+            "relay_tx_before",
+            "relay_tx_after",
+            "relay_rx_before",
+            "relay_rx_after",
+        ] {
+            assert!(value[key].is_null(), "{key} 未采样必须是 null, 不是 0");
+        }
+        assert_eq!(value["relay_sample_available"], false);
+        assert_eq!(value["verdict"], "relay_sample_unavailable");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_client_bracket_reports_the_delta_between_its_own_two_readings() {
+        // 括号两端都由**客户端**取: open 前一次、终态后一次。中间那次是 chunk 边界采样,
+        // 不改变括号的端点 —— 端点错位会让 delta 把别的区间算进来。
+        let dir = scratch_dir("iroh-bracket");
+        let local = dir.join("source.bin");
+        std::fs::write(&local, vec![9u8; 20]).unwrap();
+        let remote = dir.join("landed.bin");
+        let out = dir.join("bulk-path.json");
+
+        let peer = LoopbackPeer::new(7).with_observations(vec![
+            direct_with_relay(100, 50, &["relay:https://relay.invalid"]),
+            direct_with_relay(120, 60, &["relay:https://relay.invalid"]),
+            direct_with_relay(140, 70, &["relay:https://relay.invalid"]),
+        ]);
+        let mut recorder = iroh_recorder(Some(out.clone()));
+        run_put(&peer, &mut recorder, &local, &remote.to_string_lossy(), false).unwrap();
+
+        let value: Value = serde_json::from_str(&std::fs::read_to_string(&out).unwrap()).unwrap();
+        assert_eq!(value["relay_tx_before"], 100);
+        assert_eq!(value["relay_tx_after"], 140);
+        assert_eq!(value["relay_rx_before"], 50);
+        assert_eq!(value["relay_rx_after"], 70);
+        assert_eq!(value["relay_sample_available"], true);
+        // 40 / 20 的区间增量不为零: 判定不能落到 relay_bytes_zero。
+        assert_eq!(value["verdict"], "relay_bytes_nonzero");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_relay_path_closed_inside_the_client_bracket_yields_no_reading() {
+        // `before` 时在场的 relay path 到 `after` 时没了: 关闭字节已不在快照里, 相减会得到
+        // 一个假的零。这份读数整份作废, 与 daemon 侧逐字同一条规则 (共用 `relay_bracket`)。
+        let dir = scratch_dir("iroh-bracket-closed");
+        let local = dir.join("source.bin");
+        std::fs::write(&local, vec![9u8; 20]).unwrap();
+        let remote = dir.join("landed.bin");
+        let out = dir.join("bulk-path.json");
+
+        let peer = LoopbackPeer::new(20).with_observations(vec![
+            direct_with_relay(10, 0, &["relay:https://relay.invalid"]),
+            direct_with_relay(10, 0, &[]),
+        ]);
+        let mut recorder = iroh_recorder(Some(out.clone()));
+        run_put(&peer, &mut recorder, &local, &remote.to_string_lossy(), false).unwrap();
+
+        let value: Value = serde_json::from_str(&std::fs::read_to_string(&out).unwrap()).unwrap();
+        assert!(value["relay_tx_before"].is_null());
+        assert!(value["relay_tx_after"].is_null());
+        assert_eq!(value["relay_sample_available"], false);
+        assert_eq!(value["verdict"], "relay_sample_unavailable");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn losing_the_direct_path_mid_upload_is_reported_as_lost_not_unavailable() {
+        // 客户端"曾观测到 direct"必须按 transfer_id 记, 并在 open 复位: 只有它能把
+        // "中途掉 relay" (`iroh_direct_path_lost`) 与"从来没有直连"分成两个码。
+        let dir = scratch_dir("iroh-lost");
+        let local = dir.join("source.bin");
+        std::fs::write(&local, vec![1u8; 40]).unwrap();
+        let remote = dir.join("landed.bin");
+
+        let peer = LoopbackPeer::new(7).with_observations(vec![direct(), relay()]);
+        let mut recorder = iroh_recorder(None);
+        let err = run_put(&peer, &mut recorder, &local, &remote.to_string_lossy(), false)
+            .unwrap_err();
+        assert!(
+            err.contains(crate::bulk_path::IROH_DIRECT_PATH_LOST),
+            "中途掉 relay 必须是 lost: {err}"
+        );
+        // 门禁在块发出**之前**判: 掉 relay 的那个边界上的字节一个都没上线。
+        assert_eq!(peer.chunk_count(), 0, "被拒的边界之后不得再发块");
+        assert!(
+            peer.seen()
+                .iter()
+                .any(|line| line.starts_with("@put-file:")),
+            "open 已经发出, 失败的是随后的边界"
+        );
+        // 不走 `@file-cancel`: 中途掉 relay 按规格 §2.5 B3 保留半成品, 留给下一次续传。
+        assert!(
+            !peer.seen()
+                .iter()
+                .any(|line| line.starts_with("@file-cancel:")),
+            "中途掉路径是保留半成品重试, 不是取消这条会话"
+        );
+        assert!(!remote.exists(), "被中止的上传不得落下目标文件");
+        // 生产上这条会话要留着给续传用, 但会话表是**同进程全局**的: 别的用例会拿未来时刻扫
+        // 这张表, 留下一个活跃会话会把它们的计数吹掉。用例自己按 id 收干净。
+        let id = peer
+            .seen()
+            .iter()
+            .find_map(|line| line.strip_prefix("@put-file:"))
+            .and_then(|payload| serde_json::from_str::<Value>(payload).ok())
+            .and_then(|open| {
+                open.get("transfer_id")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+            })
+            .expect("@put-file 已经发出, open 载荷里必有 transfer_id");
+        crate::control_file_transfer::forget_sessions_for_tests(&[&id]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_relay_only_lane_refuses_the_upload_before_any_line() {
+        let dir = scratch_dir("iroh-relay-open");
+        let local = dir.join("source.bin");
+        std::fs::write(&local, vec![1u8; 40]).unwrap();
+        let remote = dir.join("landed.bin");
+
+        let peer = LoopbackPeer::new(7).with_observations(vec![relay()]);
+        let mut recorder = iroh_recorder(None);
+        let err = run_put(&peer, &mut recorder, &local, &remote.to_string_lossy(), false)
+            .unwrap_err();
+        assert!(
+            err.contains(crate::bulk_path::IROH_DIRECT_PATH_UNAVAILABLE),
+            "{err}"
+        );
+        assert!(peer.seen().is_empty(), "open 前被拒: 一条线都不得发出");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_daemon_half_lands_next_to_the_client_half_verbatim() {
+        // 跨端 join 的第二份输入: daemon 在 `@file-end` 收据里挂的 `evidence` 必须落盘,
+        // 且是 daemon 给的那份原文 (本端不补字段、不改结构)。
+        let dir = scratch_dir("daemon-half");
+        let local = dir.join("source.bin");
+        std::fs::write(&local, vec![2u8; 12]).unwrap();
+        let remote = dir.join("landed.bin");
+        let out = dir.join("bulk-path.json");
+        let evidence = serde_json::json!({
+            "schema": "rdog.bulk-path.v1",
+            "attempt_id": "cli-test",
+            "transfer_id": "daemon-side",
+            "direction": "put",
+            "path_aware": true,
+            "bulk_path_pin": false,
+            "bulk_path_checked_per_chunk": true,
+            "path_class": "direct",
+            "direct_addr": null,
+            "bulk_bytes": 12,
+            "wire_bytes": 16,
+            "chunks": 1,
+            "concurrency_suspected": null,
+            "endpoint": "daemon",
+            "relay_tx_before": 100,
+            "relay_tx_after": 100,
+            "relay_rx_before": 50,
+            "relay_rx_after": 50,
+            "relay_sample_available": true,
+            "aborted": false,
+            "verdict": "relay_bytes_zero",
+        });
+
+        let peer = LoopbackPeer::new(7)
+            .with_observations(vec![direct()])
+            .with_evidence(evidence.clone());
+        let mut recorder = iroh_recorder(Some(out.clone()));
+        run_put(&peer, &mut recorder, &local, &remote.to_string_lossy(), false).unwrap();
+
+        let daemon_half = dir.join(DAEMON_HALF_FILE);
+        let raw = std::fs::read_to_string(&daemon_half).expect("daemon 半快照必须落盘");
+        let written: Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(written, evidence, "写下的必须是 daemon 给的那份, 不改字段");
+        assert_eq!(written["endpoint"], "daemon");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_missing_daemon_half_is_not_invented() {
+        // 收不到就不写: 伪造一份会让 join 拿到一对看起来完整的两端, 而其中一半是假的。
+        let dir = scratch_dir("daemon-half-missing");
+        let local = dir.join("source.bin");
+        std::fs::write(&local, vec![2u8; 12]).unwrap();
+        let remote = dir.join("landed.bin");
+        let out = dir.join("bulk-path.json");
+
+        let peer = LoopbackPeer::new(7).with_observations(vec![direct()]);
+        let mut recorder = iroh_recorder(Some(out.clone()));
+        run_put(&peer, &mut recorder, &local, &remote.to_string_lossy(), false).unwrap();
+
+        assert!(out.exists(), "本端那一半照写");
+        assert!(
+            !dir.join(DAEMON_HALF_FILE).exists(),
+            "没有收到 daemon 半快照就不得凭空写一份"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_iroh_exit_rejects_a_bad_target_before_touching_the_network() {
+        let dir = scratch_dir("iroh-name");
+        let local = dir.join("source.bin");
+        std::fs::write(&local, vec![2u8; 4]).unwrap();
+        let profile = dir.join("client.json");
+        std::fs::write(&profile, b"{}").unwrap();
+
+        let err = run_iroh_bulk(
+            &profile,
+            "no-namespace",
+            IrohBulkRequest::Put {
+                local: local.clone(),
+                remote: "/tmp/landed.bin".to_string(),
+                restart: false,
+            },
+            None,
+        )
+        .unwrap_err();
+        assert!(err.contains("NAMESPACE/NAME"), "{err}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_iroh_exit_reports_a_missing_profile_instead_of_starting_a_transfer() {
+        // profile 缺失是最常见的"策略/身份没配好": 必须在发第一条请求前失败, 且不落半成品。
+        let dir = scratch_dir("iroh-profile");
+        let local = dir.join("source.bin");
+        std::fs::write(&local, vec![2u8; 4]).unwrap();
+        let target = dir.join("landed.bin");
+
+        let err = run_iroh_bulk(
+            &dir.join("absent.json"),
+            "lab/daemon",
+            IrohBulkRequest::Put {
+                local,
+                remote: target.to_string_lossy().into_owned(),
+                restart: false,
+            },
+            None,
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("absent.json"),
+            "错误必须指向读不出来的那个 profile: {err}"
+        );
+        assert!(!target.exists(), "失败的尝试不得落下目标文件");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
