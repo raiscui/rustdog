@@ -66,6 +66,8 @@ use crate::{
 pub struct ZenohUnixpipeStartupConfig {
     pub base_path: PathBuf,
     pub local_default: bool,
+    /// base 是否由用户显式配置(决定是否需要旧格式兼容守卫)。
+    pub shared: bool,
 }
 
 /// daemon 侧运行时所需的最小参数。
@@ -155,6 +157,7 @@ pub fn run_router_daemon(config: ZenohDaemonRuntimeConfig, shell: &str) -> io::R
             &unixpipe.base_path,
             &config.namespace,
             &config.daemon_name,
+            unixpipe.shared,
         )?;
         log::info!(
             "zenoh unixpipe fast path 启用: base={}",

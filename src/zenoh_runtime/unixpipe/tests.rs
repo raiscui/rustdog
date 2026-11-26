@@ -286,7 +286,7 @@ fn prepare_unixpipe_listener_should_reclaim_stale_lock_and_fifo_files() {
             .expect("stale unixpipe artifact should be created");
     }
 
-    let guard = prepare_unixpipe_listener(&base, "lab", "stale.lab")
+    let guard = prepare_unixpipe_listener(&base, "lab", "stale.lab", true)
         .expect("stale lock and unixpipe files should be recoverable");
     for suffix in ["", "_uplink", "_downlink"] {
         let path = PathBuf::from(format!("{}{suffix}", base.display()));
@@ -308,7 +308,7 @@ fn prepare_unixpipe_listener_should_reclaim_stale_lock_and_fifo_files() {
     assert!(!lock_path.exists(), "owner 退出后 lock 应被删除");
     assert!(!meta_path.exists(), "owner 退出后 meta 应被删除");
 
-    let next_guard = prepare_unixpipe_listener(&base, "lab", "stale.lab")
+    let next_guard = prepare_unixpipe_listener(&base, "lab", "stale.lab", true)
         .expect("released lock 不应阻止下一次接管");
     drop(next_guard);
     fs::remove_dir_all(dir).expect("test directory should be removed");

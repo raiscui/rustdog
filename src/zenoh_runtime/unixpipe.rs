@@ -77,11 +77,13 @@ pub fn prepare_unixpipe_listener(
     base: &Path,
     namespace: &str,
     daemon_name: &str,
+    shared: bool,
 ) -> io::Result<UnixpipePathGuard> {
     let mut paths = crate::local_run::paths_for_base(base)?;
-    // base 的来源只有这里能判定: 与"按身份推导出的路径"相同就是派生路径,
-    // 否则是用户显式给的(显式路径才需要旧格式兼容守卫)。
-    paths.shared = !crate::local_run::is_derived_base(base, namespace, daemon_name);
+    // 来源由 `compose_listen_endpoints` 判定后传进来: 只有显式配置的 base
+    // 才可能被旧二进制用同一路径撞上,因而需要旧格式兼容守卫。
+    // 不能按路径值判定 —— 用户可能把 `rdog local list` 打印的路径抄进 `socket_path`。
+    paths.shared = shared;
     crate::local_run::UnixpipeRunGuard::acquire(paths, namespace, daemon_name)
 }
 
@@ -141,6 +143,11 @@ fn try_unixpipe_probe(base: &Path, timeout: Duration) -> io::Result<()> {
 pub struct ComposedListenEndpoints {
     pub listen_endpoints: Vec<String>,
     pub unixpipe_base_path: Option<PathBuf>,
+    /// base 是否来自用户显式配置(`socket_path` 或显式 `unixpipe/` listen endpoint)。
+    ///
+    /// 来源只能在这里判定 —— 只看路径值无法区分"显式配的"与"按身份推导的",
+    /// 而用户完全可能把 `rdog local list` 打印的路径抄进 `socket_path`。
+    pub unixpipe_base_explicit: bool,
 }
 
 /// 把 unixpipe endpoint 自动注入到 listen_endpoints 列表里。
@@ -195,6 +202,7 @@ pub fn compose_listen_endpoints(
         return Ok(ComposedListenEndpoints {
             listen_endpoints: config.listen_endpoints.clone(),
             unixpipe_base_path: Some(explicit_base),
+            unixpipe_base_explicit: true,
         });
     }
 
@@ -202,12 +210,13 @@ pub fn compose_listen_endpoints(
         return Ok(ComposedListenEndpoints {
             listen_endpoints: config.listen_endpoints.clone(),
             unixpipe_base_path: None,
+            unixpipe_base_explicit: false,
         });
     }
 
-    let base_path = match config.unixpipe.socket_path.as_ref() {
-        Some(explicit) => explicit.clone(),
-        None => unixpipe_socket_path(namespace, daemon_name)?,
+    let (base_path, explicit) = match config.unixpipe.socket_path.as_ref() {
+        Some(explicit) => (explicit.clone(), true),
+        None => (unixpipe_socket_path(namespace, daemon_name)?, false),
     };
     validate_composed_unixpipe_base_path(&base_path, "unixpipe base path")?;
 
@@ -217,6 +226,7 @@ pub fn compose_listen_endpoints(
     Ok(ComposedListenEndpoints {
         listen_endpoints,
         unixpipe_base_path: Some(base_path),
+        unixpipe_base_explicit: explicit,
     })
 }
 
@@ -251,6 +261,7 @@ pub fn compose_listen_endpoints(
     Ok(ComposedListenEndpoints {
         listen_endpoints: config.listen_endpoints.clone(),
         unixpipe_base_path: None,
+        unixpipe_base_explicit: false,
     })
 }
 

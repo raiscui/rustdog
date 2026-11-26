@@ -191,6 +191,7 @@ pub fn run_zenoh_router(
         crate::zenoh_control::ZenohUnixpipeStartupConfig {
             base_path,
             local_default: config.zenoh.unixpipe.local_default,
+            shared: composed_listen.unixpipe_base_explicit,
         }
     });
 

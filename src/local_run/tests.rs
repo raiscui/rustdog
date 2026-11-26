@@ -644,13 +644,15 @@ fn explicit_base_inside_run_dir_should_still_take_the_legacy_guard() {
 }
 
 #[test]
-fn production_listener_entry_should_only_guard_explicit_bases() {
-    // 生产入口是 `prepare_unixpipe_listener`,它只拿到 base 路径 + 身份,
-    // 来源必须由身份反推 —— 直接用 `unixpipe_run_paths` 的用例漏掉了这一步。
+fn production_listener_entry_should_guard_only_explicit_bases() {
+    // 生产入口是 `prepare_unixpipe_listener`: 来源由 config 层
+    // (`compose_listen_endpoints`) 判定后传进来,不看路径值。
     let dirs = TestDirs::new("entry");
     let derived = unixpipe_run_paths("lab", "entry.lab").expect("derived paths");
-    let guard = crate::zenoh_runtime::prepare_unixpipe_listener(&derived.base, "lab", "entry.lab")
-        .expect("derived base should acquire");
+
+    let guard =
+        crate::zenoh_runtime::prepare_unixpipe_listener(&derived.base, "lab", "entry.lab", false)
+            .expect("derived base should acquire");
     assert!(
         !legacy_guard_path(&derived.base).exists(),
         "派生路径经生产入口也不能建兼容守卫"
@@ -662,19 +664,21 @@ fn production_listener_entry_should_only_guard_explicit_bases() {
         dir_file_names(&dirs.run)
     );
 
-    let explicit = dirs.root.join("explicit").join("control.sock");
-    fs::create_dir_all(explicit.parent().expect("parent")).expect("parent dir");
-    let guard = crate::zenoh_runtime::prepare_unixpipe_listener(&explicit, "lab", "entry.lab")
-        .expect("explicit base should acquire");
+    // 关键用例: 显式配置的路径**恰好等于**派生路径时,仍然必须持兼容守卫 ——
+    // 旧二进制用同一份显式配置会撞上同一个 base,按路径值判定会漏掉它。
+    let guard =
+        crate::zenoh_runtime::prepare_unixpipe_listener(&derived.base, "lab", "entry.lab", true)
+            .expect("explicit base equal to derived path should acquire");
     assert!(
-        legacy_guard_path(&explicit).exists(),
-        "显式 base 经生产入口必须持兼容守卫"
+        legacy_guard_path(&derived.base).exists(),
+        "显式配置就算等于派生路径,也必须持兼容守卫"
     );
     drop(guard);
     assert!(
-        !legacy_guard_path(&explicit).exists(),
-        "显式 base 退出后兼容守卫应一并清掉"
+        !legacy_guard_path(&derived.base).exists(),
+        "退出后兼容守卫应一并清掉"
     );
+    assert!(dir_file_names(&dirs.run).is_empty());
 }
 
 #[test]

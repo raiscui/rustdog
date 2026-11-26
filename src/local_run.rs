@@ -668,15 +668,6 @@ fn path_matches_locked_inode(path: &Path, file: &File) -> io::Result<bool> {
     Ok(on_disk.ino() == file.metadata()?.ino())
 }
 
-/// base 是否就是这个 (namespace, daemon_name) 自动推导出来的路径。
-///
-/// 调用方拿到的是"一个 base 路径",而**来源**(显式配置 vs 按身份推导)只有这里能判定:
-/// 显式 base 才需要旧格式兼容守卫(旧二进制可能用同一路径撞上),推导路径则不必。
-#[cfg(unix)]
-pub(crate) fn is_derived_base(base: &Path, namespace: &str, daemon_name: &str) -> bool {
-    unixpipe_run_paths(namespace, daemon_name).is_ok_and(|paths| paths.base == base)
-}
-
 /// 旧版本 daemon 的路径守卫文件名。
 #[cfg(unix)]
 fn legacy_guard_path(base: &Path) -> PathBuf {
@@ -1202,28 +1193,14 @@ fn remove_stale_entry(entry: &RunEntry) -> io::Result<Option<usize>> {
         return remove_entry_files(&entry.pipe_base).map(Some);
     }
 
-    let mut paths = paths_for_base(&entry.pipe_base)?;
-    // `paths_for_base` 只知道"给了个路径",来源要从身份反推:身份未知时保守当显式处理
-    // (多持一把锁不会伤人,漏持会让旧二进制删掉活 FIFO)。
-    paths.shared = match (entry.namespace.as_deref(), entry.daemon_name.as_deref()) {
-        (Some(namespace), Some(daemon_name)) => {
-            !is_derived_base(&entry.pipe_base, namespace, daemon_name)
-        }
-        _ => true,
-    };
+    let paths = paths_for_base(&entry.pipe_base)?;
     let Some((_owner_lock, _previous)) = acquire_owner_lock(&paths.lock)? else {
         return Ok(None);
     };
-    // 旧守卫存在就持锁删除(不凭空创建);不存在时只有显式 base 才补一把,
-    // 因为只有显式 base 可能被旧二进制用同一路径撞上。
-    let legacy_exists = legacy_guard_path(&entry.pipe_base).exists();
-    let _legacy_guard = if legacy_exists || paths.shared {
-        match acquire_flock(&legacy_guard_path(&entry.pipe_base), true)? {
-            Some(file) => Some(file),
-            None => return Ok(None),
-        }
-    } else {
-        None
+    // 删除动作本身不留东西,所以这里可以无条件持旧守卫再删(不存在就建一把,
+    // 随 `remove_entry_files` 一起消失): 宁可多持一把锁,也不能在窗口里漏持。
+    let Some(_legacy_guard) = acquire_flock(&legacy_guard_path(&entry.pipe_base), true)? else {
+        return Ok(None);
     };
 
     remove_entry_files(&entry.pipe_base).map(Some)
