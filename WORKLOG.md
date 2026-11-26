@@ -1,5 +1,18 @@
 # WORKLOG: rustdog
 
+## [2026-11-26] 测试夹具的 daemon 在 panic 路径被收掉 (RAI-423)
+
+- 现象: 夹具只在正常路径 `stop_child`; 断言 panic 后子进程被 init 收养, 一轮批次留下 27 个孤儿
+  `rdog daemon`, 放大后续用例的假红(一次 panic 污染整批)。
+- 改法: 新增 `tests/support/child_guard.rs`: `ChildGuard` 持有 Child、`Drop` 里 kill+wait,
+  `take()` 供 `wait_with_output` 用, `ChildHandle` trait 让 `stop_child(&mut impl ChildHandle)`
+  同时接受裸 `Child` 与 `ChildGuard`(调用点语义不变)。
+- 迁移: control_lanes / control_mode / control_pty / control_websocket / daemon_inbound /
+  zenoh_router_client / connect_modes; zenoh_unixpipe 自带 Drop 的 TestDaemon 未动。
+- 回执: panic 探针 → guard 那个被收、裸 Child 对照残留 1 个; 连跑三轮批次 leftover 恒为 0;
+  各 target 计数与改动前一致。
+- 提交: 8792422
+
 ## [2026-11-26] tests/ TTY 夹具改按能力探测选择 script 调用形式 (RAI-410)
 
 - 4 处夹具写 `script -q /dev/null <rdog> control ...`(BSD/macOS 尾随命令形式), util-linux 2.39.3 只认
