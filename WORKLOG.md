@@ -1294,7 +1294,7 @@ rebase 会重写分支上每个 commit 的 sha, 本票在合并前又被 rebase 
 不为它单独推提交刷 sha。
 ### 2026-11-26 RAI-411 第八个发现 (ubuntu): 连接类 e2e 是「一族」不稳定
 
-- 提交: (本条随修复提交记入下一次账本)
+- 提交: f0ebc7e
 
 `48a35f7` 的 ubuntu 又红了, 但换成了 `mtls_daemon_should_require_client_certificate_and_accept_configured_client`
 (`zenoh_router_client.rs:3482`) —— 与前两轮的 code 70 key 注入、TLS 换 CA 是**三个不同用例**,
