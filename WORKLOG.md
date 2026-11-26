@@ -1278,7 +1278,7 @@ zenoh_router_client 38/2 ignored)。
 
 ### 2026-11-26 RAI-411 第五个真缺陷 (windows): target 没有墙钟上限
 
-- 提交: (本条随修复提交记入下一次账本)
+- 提交: 0a85b3f
 
 `f9e5272` 的 windows `test` job 跑了 45 分钟仍未结束; 该步没有 per-target timeout, 所以
 一旦某个 target 挂住, 表现是整 job 被 GitHub cancel, 日志只留 `The job has been cancelled`
