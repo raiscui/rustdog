@@ -41,12 +41,34 @@ fn shell_builder_should_not_allocate_a_console() {
         "System.IntPtr GetConsoleWindow();'; ",
         "[Rdog.ConsoleProbe]::GetConsoleWindow().ToInt64()"
     );
-    let output = build_shell_command("powershell.exe", script)
-        .output()
+    // 被测对象是 builder 的建台标志, 不是 CreateProcess 本身能不能起进程。CI 上
+    // 1058 个测试并行、大量进程同时 spawn 时, Windows 会偶发返回 ERROR_FILE_NOT_FOUND
+    // 并被 Rust 映射成 NotFound/"program not found" (2026-11-26 windows job 实测:
+    // 同一份代码另一次运行里这条就是绿的)。所以对这一种错误做有界重试, 其它错误照旧直接红。
+    let output = spawn_with_transient_retry(|| build_shell_command("powershell.exe", script))
         .expect("应启动无控制台的 PowerShell probe");
 
     assert!(output.status.success(), "{:?}", output.stderr);
     assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "0");
+}
+
+/// 进程密集并行时 Windows 偶发 `ERROR_FILE_NOT_FOUND`(-> `NotFound`/`program not found`),
+/// 重试几次即可; 其它错误立刻返回, 重试耗尽也照旧返回错误。
+#[cfg(windows)]
+fn spawn_with_transient_retry(
+    mut build: impl FnMut() -> std::process::Command,
+) -> std::io::Result<std::process::Output> {
+    const ATTEMPTS: usize = 3;
+    for attempt in 1..=ATTEMPTS {
+        match build().output() {
+            Ok(output) => return Ok(output),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound && attempt < ATTEMPTS => {
+                std::thread::sleep(std::time::Duration::from_millis(250 * attempt as u64));
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    unreachable!("loop always returns on the last attempt")
 }
 
 #[test]

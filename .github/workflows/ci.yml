@@ -1,18 +1,32 @@
 name: CI
 
 # Run the full rdog test suite on every push to main and every PR.
-# Matrix covers macOS (the production target), Ubuntu (most CI runners)
-# and Windows (2026-10-06 加入: 跨平台测试修复后 bin 单测可全平台跑).
+# Matrix 覆盖 macOS (生产目标)、Ubuntu (最常见的 CI runner) 与 Windows
+# (2026-10-06 加入: 跨平台测试修复后 bin 单测可全平台跑)。
 # Windows 执行记录很重要 — `#[cfg(windows)]` 门的测试 (win_dpi /
-# zenoh_router_client_windows 等) 在 mac/ubuntu 上从不编译, 假设从未被
-# 检验过, 真机实证已经连续抓出两颗这类雷 (伪句柄判据 / json5 转义).
-# recording e2e 套件仍限 unix (POSIX-only control transport / unixpipe).
+# zenoh_router_client_windows 等) 在 mac/ubuntu 上从不编译, 假设从未被检验过,
+# 真机实证已经连续抓出两颗这类雷 (伪句柄判据 / json5 转义)。
+# recording e2e 套件仍限 unix (POSIX-only control transport / unixpipe)。
+#
+
+# 结构: 每个 OS 一对 job —— `build (<os>)` → `test (<os>)`, 后者只依赖**同一 OS**
+# 的 build (所以一个平台的外部依赖红了, 不会连带吞掉其它平台的测试证据)。
+# 同 OS 的 test 被跳过 = 测试未运行, test 红 = 测试失败。口径:
+# docs/agents/ci-merge-gate.md §3。
+#
+# **不要改用 reusable workflow (`uses:`)**: GitHub 会把被调用工作流里的检查重命名成
+# `<caller name> / <callee name>`, 与必需检查表里的 `build (os)` / `test (os)` 就对不上
+# 了 (2026-11-26 评审实测: `build (macos-latest) / build`)。三段 build / 两段 test 的
+# 步骤文本因此是复制的, 改一处要改三处。
 
 on:
   push:
     branches: [main]
   pull_request:
     branches: [main]
+    # 默认类型不含 ready_for_review, 草稿期开立的 PR 标 ready 后不会触发任何 run,
+    # 页面上却留着历史 commit 状态 —— 门会把"该 head 0 个必需检查"读成"没有失败"。
+    types: [opened, synchronize, reopened, ready_for_review]
   workflow_dispatch:
 
 env:
@@ -20,80 +34,297 @@ env:
   CARGO_NET_RETRY: 10
 
 jobs:
-  test:
-    name: test (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
-    timeout-minutes: 40
+  build-ubuntu:
+    name: build (ubuntu-latest)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # xcap 截图栈在 linux 上的原生链接依赖 (上游 xcap README 的 Ubuntu 清单):
-      # libwayland-dev / libegl-dev 供 wayland-sys build script 做 pkg-config 探测,
-      # libclang-dev 供 libwayshot bindgen, 其余为 X11/dbus/pipewire 侧构建依赖。
-      # 没有这些包时 wayland-sys v0.31.11 的 build.rs 会在 pkg-config 失败处直接
-      # panic (自仓库基线起 ubuntu job 一直因此全红, 2026-08-28 修复)。
-      - name: Install linux build deps (xcap screen-capture stack)
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            pkg-config \
-            libclang-dev \
-            libxcb1-dev \
-            libxrandr-dev \
-            libdbus-1-dev \
-            libpipewire-0.3-dev \
-            libwayland-dev \
-            libegl-dev \
-            libgbm-dev \
-            libdrm-dev
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: stable
-          # Stay aligned with the `rust-version = "1.89"` MSRV declared
-          # in Cargo.toml; bumping it must be a deliberate Cargo.toml
-          # change so this workflow keeps passing on the declared
-          # floor.
-          # components: rustfmt, clippy  # re-enable after the existing
-          # formatting / clippy debt is cleared (see follow-up).
-
-      - name: Cache cargo registry + build
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock', 'Cargo.toml') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-
+      - uses: ./.github/actions/cargo-prep
 
       - name: Build
+        shell: bash
         run: cargo build --bin rdog
 
-      # Unit tests inside the rdog binary (recording handler,
-      # lifecycle, journal, etc.). The handler-level tests in
-      # `src/control_recording/` cover the auto-stop / StopTrigger
-      # invariants; the integration tests in `tests/control_lanes.rs`
-      # etc. cover the daemon's line-control surface.
-      - name: Unit tests
-        run: cargo test --bin rdog
+      # 只编译不运行: bin 的 `#[cfg(test)]` 模块 + (非 Windows) recording_e2e。
+      # 让"这段测试代码编译不过"归到"测试没跑", 而不是在 test job 里被读成"测试失败"
+      # (那样零执行断言还会被 cargo 的编译失败直接跳过)。
+      # 注意范围: `tests/` 下其余 18 个 integration target **没有**被编译, 这是已知
+      # 覆盖缺口 (RAI-411 放量), 不要把它读成"所有测试目标都编过"。
+      - name: Compile test targets
+        shell: bash
+        run: |
+          cargo test --no-run --bin rdog
+          if [ "${{ runner.os }}" != "Windows" ]; then
+            cargo test --no-run --test recording_e2e
+          fi
 
-      # Recording e2e suite: spawn a real rdog daemon subprocess,
-      # drive it over TCP / unixpipe, and assert the auto-stop
-      # pipeline commits a bundle and stamps the right stop_trigger.
-      # The suite is `#[cfg(unix)]` and only runs on Linux / macOS.
+      # build 红了就代表这次运行对该 OS **没有测试证据** —— 把这句话写进 job summary,
+      # 免得下次又有人拿一个"红点"当"测试失败"去翻几千行日志。
+      - name: Classify the failure (coverage gap vs code)
+        if: failure()
+        shell: bash
+        run: |
+          {
+            echo "### build (ubuntu-latest) 失败 —— 本 OS 没有测试证据"
+            echo ""
+            echo "test (ubuntu-latest) 被跳过, 这次运行对该 OS 的测试覆盖为空。"
+            echo "按失败步骤的注解归因:"
+            echo ""
+            echo "| 注解 | 结论 |"
+            echo "| --- | --- |"
+            echo "| `onnxruntime dist unavailable` / `onnxruntime dist digest mismatch` | 外部依赖缺口 (基础设施), 不是本改动坏了东西 |"
+            echo "| `onnxruntime runtime DLL missing` | ort-sys 的 dylib 铺放前提变了 (见 ci-merge-gate.md §4) |"
+            echo "| `build prep failed` | 准备阶段异常 (工具链 / registry / lockfile), 同样没有测试证据 |"
+            echo "| 其它 | 编译 / 代码问题, 按真实失败处理 |"
+            echo ""
+            echo "判读口径: `docs/agents/ci-merge-gate.md` §3"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  build-macos:
+    name: build (macos-latest)
+    runs-on: macos-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - uses: ./.github/actions/cargo-prep
+
+      - name: Build
+        shell: bash
+        run: cargo build --bin rdog
+
+      # 只编译不运行: bin 的 `#[cfg(test)]` 模块 + (非 Windows) recording_e2e。
+      # 让"这段测试代码编译不过"归到"测试没跑", 而不是在 test job 里被读成"测试失败"
+      # (那样零执行断言还会被 cargo 的编译失败直接跳过)。
+      # 注意范围: `tests/` 下其余 18 个 integration target **没有**被编译, 这是已知
+      # 覆盖缺口 (RAI-411 放量), 不要把它读成"所有测试目标都编过"。
+      - name: Compile test targets
+        shell: bash
+        run: |
+          cargo test --no-run --bin rdog
+          if [ "${{ runner.os }}" != "Windows" ]; then
+            cargo test --no-run --test recording_e2e
+          fi
+
+      # build 红了就代表这次运行对该 OS **没有测试证据** —— 把这句话写进 job summary,
+      # 免得下次又有人拿一个"红点"当"测试失败"去翻几千行日志。
+      - name: Classify the failure (coverage gap vs code)
+        if: failure()
+        shell: bash
+        run: |
+          {
+            echo "### build (macos-latest) 失败 —— 本 OS 没有测试证据"
+            echo ""
+            echo "test (macos-latest) 被跳过, 这次运行对该 OS 的测试覆盖为空。"
+            echo "按失败步骤的注解归因:"
+            echo ""
+            echo "| 注解 | 结论 |"
+            echo "| --- | --- |"
+            echo "| `onnxruntime dist unavailable` / `onnxruntime dist digest mismatch` | 外部依赖缺口 (基础设施), 不是本改动坏了东西 |"
+            echo "| `onnxruntime runtime DLL missing` | ort-sys 的 dylib 铺放前提变了 (见 ci-merge-gate.md §4) |"
+            echo "| `build prep failed` | 准备阶段异常 (工具链 / registry / lockfile), 同样没有测试证据 |"
+            echo "| 其它 | 编译 / 代码问题, 按真实失败处理 |"
+            echo ""
+            echo "判读口径: `docs/agents/ci-merge-gate.md` §3"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  build-windows:
+    name: build (windows-latest)
+    runs-on: windows-latest
+    # Windows 要静态链接 341MB 的 onnxruntime.lib, 编译 + 链接 + 测试都比 unix 慢一截。
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - uses: ./.github/actions/cargo-prep
+
+      - name: Build
+        shell: bash
+        run: cargo build --bin rdog
+
+      # 只编译不运行: bin 的 `#[cfg(test)]` 模块 + (非 Windows) recording_e2e。
+      # 让"这段测试代码编译不过"归到"测试没跑", 而不是在 test job 里被读成"测试失败"
+      # (那样零执行断言还会被 cargo 的编译失败直接跳过)。
+      # 注意范围: `tests/` 下其余 18 个 integration target **没有**被编译, 这是已知
+      # 覆盖缺口 (RAI-411 放量), 不要把它读成"所有测试目标都编过"。
+      - name: Compile test targets
+        shell: bash
+        run: |
+          cargo test --no-run --bin rdog
+          if [ "${{ runner.os }}" != "Windows" ]; then
+            cargo test --no-run --test recording_e2e
+          fi
+
+      # ort-sys 会把 dist 里的 DirectML.dll 复制到可执行文件旁边; 复制不到时测试二进制
+      # 会在加载阶段失败。显式断言一次, 让"dylib 没铺到"与"测试逻辑失败"分开。
+      - name: Assert ort runtime DLL staged next to the binary
+        shell: bash
+        run: |
+          staged=$(find target/debug -maxdepth 2 -name 'DirectML.dll')
+          if [ -z "$staged" ]; then
+            echo "::error title=onnxruntime runtime DLL missing::ort-sys copy-dylibs staged no DirectML.dll under target/debug; the test binaries would fail at load time"
+            exit 1
+          fi
+          echo "$staged"
+
+      # build 红了就代表这次运行对该 OS **没有测试证据** —— 把这句话写进 job summary,
+      # 免得下次又有人拿一个"红点"当"测试失败"去翻几千行日志。
+      - name: Classify the failure (coverage gap vs code)
+        if: failure()
+        shell: bash
+        run: |
+          {
+            echo "### build (windows-latest) 失败 —— 本 OS 没有测试证据"
+            echo ""
+            echo "test (windows-latest) 被跳过, 这次运行对该 OS 的测试覆盖为空。"
+            echo "按失败步骤的注解归因:"
+            echo ""
+            echo "| 注解 | 结论 |"
+            echo "| --- | --- |"
+            echo "| `onnxruntime dist unavailable` / `onnxruntime dist digest mismatch` | 外部依赖缺口 (基础设施), 不是本改动坏了东西 |"
+            echo "| `onnxruntime runtime DLL missing` | ort-sys 的 dylib 铺放前提变了 (见 ci-merge-gate.md §4) |"
+            echo "| `build prep failed` | 准备阶段异常 (工具链 / registry / lockfile), 同样没有测试证据 |"
+            echo "| 其它 | 编译 / 代码问题, 按真实失败处理 |"
+            echo ""
+            echo "判读口径: `docs/agents/ci-merge-gate.md` §3"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  test-ubuntu:
+    name: test (ubuntu-latest)
+    needs: [build-ubuntu]
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # 与同 OS 的 build 共用同一份准备与同一份缓存 key, 所以这一步复用 build 的产物。
+      - uses: ./.github/actions/cargo-prep
+
+      # Unit tests inside the rdog binary only (recording handler, lifecycle, journal,
+      # daemon lanes...). 实际覆盖 = `src/**` 里的 `#[cfg(test)]` 模块。
+      # `tests/` 下除 recording_e2e 外的 18 个 integration target (control_lanes /
+      # control_mode / control_pty / zenoh_* ...) 在 CI 里既不编译也不运行 —— 这是
+      # 已知覆盖缺口, 由 RAI-411 放量补齐; 别把这条 job 读成"协议回归面已覆盖"。
+      # pipefail 必需: 没有它 tee 的退出码会盖掉 cargo 的失败。
+      - name: Unit tests
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo test --bin rdog 2>&1 | tee unit-tests.log
+
+      # 退出码 0 不等于跑过: filter 打错、测试全被 #[ignore]、平台门把整组编译掉
+      # (本仓库大量 `#[cfg(windows)]`) 都会静默变成"绿但零执行"。
+      - name: Assert unit tests actually ran
+        shell: bash
+        run: |
+          PY=$(command -v python3 || command -v python)
+          "$PY" scripts/ci/assert-tests-ran.py unit-tests.log --label "unit tests (ubuntu-latest)"
+
+      # Recording e2e suite: spawn a real rdog daemon subprocess, drive it over TCP /
+      # unixpipe, and assert the auto-stop pipeline commits a bundle and stamps the
+      # right stop_trigger. The suite is `#[cfg(unix)]`: Linux / macOS only.
       - name: Recording e2e tests
-        if: runner.os != 'Windows'
-        run: cargo test --test recording_e2e
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo test --test recording_e2e 2>&1 | tee recording-e2e.log
+
+      - name: Assert recording e2e tests actually ran
+        shell: bash
+        run: |
+          PY=$(command -v python3 || command -v python)
+          "$PY" scripts/ci/assert-tests-ran.py recording-e2e.log --label "recording e2e (ubuntu-latest)"
+
+  test-macos:
+    name: test (macos-latest)
+    needs: [build-macos]
+    runs-on: macos-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # 与同 OS 的 build 共用同一份准备与同一份缓存 key, 所以这一步复用 build 的产物。
+      - uses: ./.github/actions/cargo-prep
+
+      # Unit tests inside the rdog binary only (recording handler, lifecycle, journal,
+      # daemon lanes...). 实际覆盖 = `src/**` 里的 `#[cfg(test)]` 模块。
+      # `tests/` 下除 recording_e2e 外的 18 个 integration target (control_lanes /
+      # control_mode / control_pty / zenoh_* ...) 在 CI 里既不编译也不运行 —— 这是
+      # 已知覆盖缺口, 由 RAI-411 放量补齐; 别把这条 job 读成"协议回归面已覆盖"。
+      # pipefail 必需: 没有它 tee 的退出码会盖掉 cargo 的失败。
+      - name: Unit tests
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo test --bin rdog 2>&1 | tee unit-tests.log
+
+      # 退出码 0 不等于跑过: filter 打错、测试全被 #[ignore]、平台门把整组编译掉
+      # (本仓库大量 `#[cfg(windows)]`) 都会静默变成"绿但零执行"。
+      - name: Assert unit tests actually ran
+        shell: bash
+        run: |
+          PY=$(command -v python3 || command -v python)
+          "$PY" scripts/ci/assert-tests-ran.py unit-tests.log --label "unit tests (macos-latest)"
+
+      # Recording e2e suite: spawn a real rdog daemon subprocess, drive it over TCP /
+      # unixpipe, and assert the auto-stop pipeline commits a bundle and stamps the
+      # right stop_trigger. The suite is `#[cfg(unix)]`: Linux / macOS only.
+      - name: Recording e2e tests
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo test --test recording_e2e 2>&1 | tee recording-e2e.log
+
+      - name: Assert recording e2e tests actually ran
+        shell: bash
+        run: |
+          PY=$(command -v python3 || command -v python)
+          "$PY" scripts/ci/assert-tests-ran.py recording-e2e.log --label "recording e2e (macos-latest)"
+
+  test-windows:
+    name: test (windows-latest)
+    needs: [build-windows]
+    runs-on: windows-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # 与同 OS 的 build 共用同一份准备与同一份缓存 key, 所以这一步复用 build 的产物。
+      - uses: ./.github/actions/cargo-prep
+
+      # Unit tests inside the rdog binary only (recording handler, lifecycle, journal,
+      # daemon lanes...). 实际覆盖 = `src/**` 里的 `#[cfg(test)]` 模块。
+      # `tests/` 下除 recording_e2e 外的 18 个 integration target (control_lanes /
+      # control_mode / control_pty / zenoh_* ...) 在 CI 里既不编译也不运行 —— 这是
+      # 已知覆盖缺口, 由 RAI-411 放量补齐; 别把这条 job 读成"协议回归面已覆盖"。
+      # pipefail 必需: 没有它 tee 的退出码会盖掉 cargo 的失败。
+      - name: Unit tests
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo test --bin rdog 2>&1 | tee unit-tests.log
+
+      # 退出码 0 不等于跑过: filter 打错、测试全被 #[ignore]、平台门把整组编译掉
+      # (本仓库大量 `#[cfg(windows)]`) 都会静默变成"绿但零执行"。
+      - name: Assert unit tests actually ran
+        shell: bash
+        run: |
+          PY=$(command -v python3 || command -v python)
+          "$PY" scripts/ci/assert-tests-ran.py unit-tests.log --label "unit tests (windows-latest)"
 
   # 知识载体守卫 (docs/agents/knowledge-carriers.md 的约定 ① / ③)。
   # 与平台无关, 纯静态检查, 所以单独一个 job, 不进测试矩阵。
