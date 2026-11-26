@@ -148,29 +148,12 @@ fn start_fixture(binary: &Path, required_displays: usize) -> (FixtureGuard, Valu
     (guard, value)
 }
 
-fn rdog_binary_path() -> PathBuf {
-    if let Some(path) = std::env::var_os("RDOG_DISPLAY_AWARE_E2E_BINARY") {
-        let binary = PathBuf::from(path);
-        assert!(binary.exists(), "E2E binary 不存在: {}", binary.display());
-        return binary;
-    }
-    if let Some(path) = option_env!("CARGO_BIN_EXE_rdog") {
-        return PathBuf::from(path);
-    }
-    let current_exe = std::env::current_exe().expect("应该能读取当前 test binary 路径");
-    let debug_dir = current_exe
-        .parent()
-        .and_then(Path::parent)
-        .expect("integration test 应该位于 target/debug/deps");
-    let binary = debug_dir.join("rdog");
-    assert!(
-        binary.exists(),
-        "预期 rdog binary 位于 {}",
-        binary.display()
-    );
-    binary
-}
+#[path = "support/rdog_binary.rs"]
+mod rdog_binary;
 
+fn rdog_binary_path() -> PathBuf {
+    rdog_binary::rdog_binary_path_with_override(&["RDOG_DISPLAY_AWARE_E2E_BINARY"])
+}
 fn next_free_port() -> u16 {
     let listener = TcpListener::bind(("127.0.0.1", 0)).expect("应该能分配临时 TCP 端口");
     listener.local_addr().expect("listener 应该有地址").port()

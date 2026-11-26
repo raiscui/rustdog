@@ -281,38 +281,12 @@ fn next_free_port() -> u16 {
     port
 }
 
+#[path = "support/rdog_binary.rs"]
+mod rdog_binary;
+
 fn rdog_binary_path() -> PathBuf {
-    if let Some(path) = std::env::var_os(LIVE_AX_E2E_BINARY_ENV) {
-        let binary = PathBuf::from(path);
-        assert!(
-            binary.exists(),
-            "{LIVE_AX_E2E_BINARY_ENV} points to a missing binary: {}",
-            binary.display()
-        );
-        return binary;
-    }
-
-    if let Some(path) = std::env::var_os("CARGO_BIN_EXE_rdog") {
-        return PathBuf::from(path);
-    }
-
-    let current_exe = std::env::current_exe().expect("current test binary path should exist");
-    let debug_dir = current_exe
-        .parent()
-        .expect("test binary should have parent directory")
-        .parent()
-        .expect("test binary should live under target/debug/deps");
-    let binary = debug_dir.join("rdog");
-
-    assert!(
-        binary.exists(),
-        "expected rdog binary at {}",
-        binary.display()
-    );
-
-    binary
+    rdog_binary::rdog_binary_path_with_override(&[LIVE_AX_E2E_BINARY_ENV])
 }
-
 fn temp_workdir(name: &str) -> PathBuf {
     let path = std::env::temp_dir().join(format!(
         "rdog-control-ax-e2e-{name}-{}-{}",

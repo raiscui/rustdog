@@ -142,24 +142,6 @@ pub fn next_free_port() -> u16 {
     port
 }
 
-pub fn rdog_binary_path() -> PathBuf {
-    let current_exe = std::env::current_exe().expect("current test binary path should exist");
-    let debug_dir = current_exe
-        .parent()
-        .expect("test binary should have parent directory")
-        .parent()
-        .expect("test binary should live under target/debug/deps");
-    let binary = debug_dir.join("rdog");
-
-    assert!(
-        binary.exists(),
-        "expected rdog binary at {}",
-        binary.display()
-    );
-
-    binary
-}
-
 pub fn temp_workdir(name: &str) -> PathBuf {
     let path = std::env::temp_dir().join(format!(
         "rdog-control-mouse-e2e-{name}-{}-{}",
@@ -219,3 +201,8 @@ fn stop_child(child: &mut Child) {
     let _ = child.kill();
     let _ = child.wait();
 }
+
+#[path = "../support/rdog_binary.rs"]
+mod rdog_binary;
+
+pub use rdog_binary::rdog_binary_path;

@@ -5,7 +5,6 @@ use std::{
     io::{BufRead, BufReader, Read, Write},
     net::{TcpListener, TcpStream},
     os::unix::fs::PermissionsExt,
-    path::PathBuf,
     process::{Child, Command, Output, Stdio},
     sync::{Arc, Mutex},
     thread,
@@ -24,34 +23,10 @@ fn next_free_port() -> u16 {
     port
 }
 
-fn rdog_binary_path() -> PathBuf {
-    if let Some(binary) = std::env::var_os("CARGO_BIN_EXE_rdog") {
-        let binary = PathBuf::from(binary);
-        assert!(
-            binary.exists(),
-            "expected rdog binary from CARGO_BIN_EXE_rdog at {}",
-            binary.display()
-        );
-        return binary;
-    }
+#[path = "support/rdog_binary.rs"]
+mod rdog_binary;
 
-    let current_exe = std::env::current_exe().expect("current test binary path should exist");
-    let debug_dir = current_exe
-        .parent()
-        .expect("test binary should have parent directory")
-        .parent()
-        .expect("test binary should live under target/debug/deps");
-    let binary = debug_dir.join("rdog");
-
-    assert!(
-        binary.exists(),
-        "expected rdog binary at {}",
-        binary.display()
-    );
-
-    binary
-}
-
+use rdog_binary::rdog_binary_path;
 fn is_port_listening(port: u16) -> bool {
     TcpStream::connect(("127.0.0.1", port)).is_ok()
 }
