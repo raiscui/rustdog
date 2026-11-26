@@ -114,7 +114,7 @@ fn duplicate_identity_registration_should_be_rejected() {
 }
 
 #[test]
-fn port_lookup_should_match_the_registered_lane_only() {
+fn port_lookup_should_match_only_loopback_tcp_lanes() {
     let _dir = TestDir::new("by-port");
     let _daemon = register_local_daemon("lab", "win-test.lab", zenoh_lane(17480))
         .expect("registration should succeed");
@@ -143,6 +143,27 @@ fn port_lookup_should_match_the_registered_lane_only() {
             .expect("lookup should succeed")
             .is_none(),
         "unregistered port must not be claimed by any daemon"
+    );
+}
+
+#[test]
+fn port_lookup_should_not_claim_a_udp_endpoint_that_reuses_the_port_number() {
+    let _dir = TestDir::new("udp-port");
+    let _daemon = register_local_daemon(
+        "lab",
+        "udp-only.lab",
+        LocalControlLane::Zenoh {
+            // rdog_win.toml 的常见形态: 只有 udp endpoint 落在这个端口号上。
+            connect_endpoints: vec!["udp/127.0.0.1:7447".to_string()],
+        },
+    )
+    .expect("registration should succeed");
+
+    assert!(
+        find_local_daemon_by_port(7447)
+            .expect("lookup should succeed")
+            .is_none(),
+        "一个恰好监听 TCP 7447 的 line-control 服务不能被改派到 udp lane 上"
     );
 }
 

@@ -298,7 +298,8 @@ fn run(opts: input::Opts) -> Result<(), String> {
             listen(&opts).map_err(|err| err.to_string())?;
         }
         Command::Connect { shell, mode, host } => {
-            let (host, port) = match control_invocation::host_from_opts(host) {
+            // connect 语义: 未指定地址(0.0.0.0 / ::)翻回环,别拿 listen 地址去连。
+            let (host, port) = match control_invocation::connect_hosts_from_opts(host) {
                 Ok(value) => value,
                 Err(err) => return Err(err),
             };

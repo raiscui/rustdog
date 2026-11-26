@@ -6,11 +6,15 @@ use crate::{control_frames, control_transport, zenoh_control, zenoh_runtime};
 pub(crate) const LEGACY_ZENOH_PEER_TRANSPORT_ERROR: &str =
     "旧 transport `zenoh-peer` 已废弃; 请改用 `--transport zenoh`。`rdog control` 默认会自动发现 router，必要时再补 `--entry-point tcp/<router-host>:<port>`";
 
+/// 解析 `HOST [PORT]` 位置参数,保持**监听语义**:只给端口时 host 留 `0.0.0.0`,
+/// 因为 `rdog listen` 用它决定 bind 地址。
+///
+/// 需要 connect 语义(未指定地址 -> 回环)的调用方走 `connect_hosts_from_opts`。
 pub(crate) fn host_from_opts(host: Vec<String>) -> Result<(String, String), String> {
     let fixed_host = if host.len() == 1 {
-        (LOOPBACK_HOST.to_string(), host.get(0).unwrap().to_string()) // Safe to unwrap here
+        (BIND_WILDCARD_HOST.to_string(), host.get(0).unwrap().to_string()) // Safe to unwrap here
     } else if let [host, port] = &host[..] {
-        (connect_host(host).to_string(), port.to_string())
+        (host.to_string(), port.to_string())
     } else {
         return Err("Missing host".to_string());
     };
@@ -18,8 +22,17 @@ pub(crate) fn host_from_opts(host: Vec<String>) -> Result<(String, String), Stri
     Ok(fixed_host)
 }
 
+/// 同 `host_from_opts`,但按 **connect 语义**把未指定地址翻成回环。
+pub(crate) fn connect_hosts_from_opts(host: Vec<String>) -> Result<(String, String), String> {
+    let (host, port) = host_from_opts(host)?;
+    Ok((connect_host(&host).to_string(), port))
+}
+
 /// 只写端口时的默认 connect 目标。
 pub(crate) const LOOPBACK_HOST: &str = "127.0.0.1";
+
+/// 只写端口时 `rdog listen` 的默认 bind 地址。
+pub(crate) const BIND_WILDCARD_HOST: &str = "0.0.0.0";
 
 /// 把"绑定用的未指定地址"翻译成"本机能连的回环地址"。
 ///
@@ -141,7 +154,7 @@ fn resolve_explicit_tcp_control(
         return Ok(ControlInvocation::WebSocket { url });
     }
 
-    let (host, port) = host_from_opts(positional)?;
+    let (host, port) = connect_hosts_from_opts(positional)?;
     Ok(ControlInvocation::Tcp { host, port })
 }
 
@@ -207,7 +220,7 @@ fn resolve_inferred_control(
             entry_point,
         }),
         [_, _] => {
-            let (host, port) = host_from_opts(positional)?;
+            let (host, port) = connect_hosts_from_opts(positional)?;
             Ok(ControlInvocation::Tcp { host, port })
         }
         // host: num_args = 0..=3 时,3 个非 `@` 位置参数是用户错误。

@@ -15,7 +15,7 @@
 
 use std::{
     fs::{self, File, OpenOptions, TryLockError},
-    io::{self, Read, Seek, SeekFrom, Write},
+    io,
     path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -57,27 +57,42 @@ impl LocalDaemonRecord {
             && namespace_filter.is_none_or(|namespace| namespace == self.namespace)
     }
 
-    /// 这个记录是否把控制面落在给定端口上。
+    /// 这个记录是否在回环 **TCP** 上提供控制面。
     ///
-    /// 客户端只看得到"端口",看不到对端跑什么协议; 这里就是"这个端口属于我这台机器上
-    /// 哪个已登记 daemon"的唯一判据。
-    pub(crate) fn lane_uses_port(&self, port: u16) -> bool {
+    /// 客户端只看得到 "127.0.0.1:<port>" 这个 TCP 目标,看不到对端跑什么协议;
+    /// 这里就是"该端口属于我这台机器上哪个已登记 daemon"的唯一判据。
+    ///
+    /// 只认 tcp/: daemon 的 zenoh listen endpoint 里常同时有 `udp/0.0.0.0:7447`,
+    /// 若按端口号匹配,一个恰好监听 TCP 7447 的 line-control 服务会被误认领到那个
+    /// udp lane 上,请求就打到别的服务去了。
+    pub(crate) fn lane_serves_tcp_port(&self, port: u16) -> bool {
         match &self.lane {
             LocalControlLane::LineTcp { port: lane_port, .. } => *lane_port == port,
             LocalControlLane::Zenoh {
                 connect_endpoints, ..
             } => connect_endpoints
                 .iter()
-                .any(|endpoint| endpoint_port(endpoint) == Some(port)),
+                .any(|endpoint| is_loopback_tcp_endpoint(endpoint, port)),
         }
     }
 }
 
-/// 从 `tcp/127.0.0.1:17480` 这类 zenoh locator 里取端口。
-fn endpoint_port(endpoint: &str) -> Option<u16> {
-    let (_, address) = endpoint.split_once('/')?;
-    let (_, port) = address.rsplit_once(':')?;
-    port.trim_end_matches(']').parse().ok()
+/// `tcp/127.0.0.1:17480` 是否就是"回环 TCP 的 <port>"。
+fn is_loopback_tcp_endpoint(endpoint: &str, port: u16) -> bool {
+    let Some((scheme, address)) = endpoint.split_once('/') else {
+        return false;
+    };
+    if scheme != "tcp" {
+        return false;
+    }
+    let Some((host, endpoint_port)) = address.rsplit_once(':') else {
+        return false;
+    };
+    let Ok(endpoint_port) = endpoint_port.parse::<u16>() else {
+        return false;
+    };
+    endpoint_port == port
+        && matches!(host, "127.0.0.1" | "localhost" | "[::1]" | "::1")
 }
 
 /// daemon 生命周期内持有的登记 guard;drop 时撤销记录并释放 lock。
@@ -90,8 +105,9 @@ pub(crate) struct LocalDaemonGuard {
 
 impl Drop for LocalDaemonGuard {
     fn drop(&mut self) {
+        // 只撤销记录,保留 lock 路径: 删除被独占锁住的路径会让并发注册者拿到
+        // 另一个 inode 上的锁,互斥就失效了。残留 lock 文件不构成 liveness。
         let _ = fs::remove_file(&self.record_path);
-        let _ = fs::remove_file(&self.lock_path);
     }
 }
 
@@ -138,9 +154,6 @@ pub(crate) fn register_local_daemon(
         created_at_unix_ms: unix_timestamp_ms(),
     };
 
-    // lock 内容先落 pid: 客户端拿 shared lock 时用它对齐 identity,避免把
-    // "另一个进程刚接管了同名 lock" 误判成"这条记录还是活的"。
-    write_lock_pid(&mut lock, record.pid)?;
     write_json_atomically(&record_path, &record)?;
 
     Ok(LocalDaemonGuard {
@@ -186,7 +199,7 @@ pub(crate) fn find_local_daemon_by_port(port: u16) -> io::Result<Option<LocalDae
     let records = live_local_daemons(None)?;
     let mut matched = records
         .into_iter()
-        .filter(|record| record.lane_uses_port(port))
+        .filter(|record| record.lane_serves_tcp_port(port))
         .collect::<Vec<_>>();
     match matched.len() {
         0 => Ok(None),
@@ -255,13 +268,11 @@ fn live_local_daemons(namespace_filter: Option<&str>) -> io::Result<Vec<LocalDae
             continue;
         }
         let lock_path = path.with_extension("lock");
-        match owner_is_active(&lock_path, record.pid) {
-            Ok(true) => records.push(record),
-            // 记录还在但 owner 已死: 清掉残留,别让它继续干扰下一次查找。
-            Ok(false) => {
-                let _ = fs::remove_file(&path);
-                let _ = fs::remove_file(&lock_path);
-            }
+        match lock_owner_state(&lock_path) {
+            Ok(LockOwnerState::Held) => records.push(record),
+            // 记录还在但没人持锁: 清理残留,别让它继续干扰下一次查找。
+            Ok(LockOwnerState::Free) => sweep_stale_record(&path, &lock_path, &record),
+            // 探测本身失败不构成"这是残留"的证据,更不能据此删别人的记录。
             Err(_) => continue,
         }
     }
@@ -278,33 +289,57 @@ fn read_record(path: &Path) -> Option<LocalDaemonRecord> {
     serde_json::from_slice(&bytes).ok()
 }
 
-fn owner_is_active(lock_path: &Path, expected_pid: u32) -> io::Result<bool> {
-    let mut file = match OpenOptions::new().read(true).write(true).open(lock_path) {
+/// lock 文件上是否有人持有独占锁。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LockOwnerState {
+    /// 有 owner 持锁: 这就是 liveness 的真相源。
+    Held,
+    /// 拿得到 shared lock: 没有 owner,记录属于已退出的进程。
+    Free,
+}
+
+/// 只判断"锁有没有人持有",**不读被独占锁住的文件内容**。
+///
+/// Windows 上 `File::try_lock` 走 LockFileEx(强制字节范围锁): owner 持锁期间,
+/// 另一个句柄读同一范围会直接失败。若把"读不到 pid"当成"owner 已死",活着的 daemon
+/// 会被判成残留并删掉它的登记 —— 所以这里不再从 lock 里读身份,pid 只留在记录里做诊断。
+fn lock_owner_state(lock_path: &Path) -> io::Result<LockOwnerState> {
+    let file = match OpenOptions::new().read(true).write(true).open(lock_path) {
         Ok(file) => file,
-        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(LockOwnerState::Free),
         Err(err) => return Err(err),
     };
 
     match file.try_lock_shared() {
-        // 拿得到 shared lock 说明没有独占 owner: 记录属于已经退出的进程。
-        Ok(()) => Ok(false),
-        Err(TryLockError::WouldBlock) => Ok(read_lock_pid(&mut file) == Some(expected_pid)),
+        Ok(()) => Ok(LockOwnerState::Free),
+        Err(TryLockError::WouldBlock) => Ok(LockOwnerState::Held),
         Err(TryLockError::Error(err)) => Err(err),
     }
 }
 
-fn write_lock_pid(file: &mut File, pid: u32) -> io::Result<()> {
-    file.set_len(0)?;
-    file.seek(SeekFrom::Start(0))?;
-    file.write_all(pid.to_string().as_bytes())?;
-    file.sync_data()
-}
-
-fn read_lock_pid(file: &mut File) -> Option<u32> {
-    file.seek(SeekFrom::Start(0)).ok()?;
-    let mut contents = String::new();
-    file.read_to_string(&mut contents).ok()?;
-    contents.trim().parse().ok()
+/// 在独占锁的保护下撤销残留记录。
+///
+/// 观察"锁是空的"与执行删除之间,重启中的 daemon 可能已经接管这把锁并写好新记录;
+/// 拿不到独占锁就说明有人刚接手,必须放手。拿到锁后重读一次,只删与观察到的一致的那条。
+fn sweep_stale_record(record_path: &Path, lock_path: &Path, observed: &LocalDaemonRecord) {
+    // 没有 lock 文件(旧记录或手工写的记录)时也要在同一把锁上完成撤销判断,
+    // 否则"观察到空"和"真正删除"之间仍然没有互斥。
+    let Ok(file) = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(lock_path)
+    else {
+        return;
+    };
+    if !matches!(file.try_lock(), Ok(())) {
+        return;
+    }
+    if read_record(record_path).as_ref() != Some(observed) {
+        return;
+    }
+    let _ = fs::remove_file(record_path);
 }
 
 fn record_file_name(namespace: &str, daemon_name: &str) -> String {
