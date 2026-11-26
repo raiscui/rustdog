@@ -573,7 +573,8 @@ shell 46 passed、两个载体守卫 OK。
 `main`(`b227c63`) 为基，用两提交承载同一棵树——工作提交 + 本记账提交，避免 55 个历史 commit 逐个与
 `WORKLOG.md` 冲突。`tests/**`（含 #138 的 `tests/support/rdog_binary.rs`）保持 main 原样，本 lane 只新增
 `tests/manual/**`。
-- 提交: 230f9c3
+- 提交: fc17ebd
+  - Windows 编译门(同轮补): `a43cbca` —— `OpenOptionsExt::mode` 与 `libc::flock` 的 `#[cfg(unix)]` 门控
 
 ## 2026-11-26 RAI-413 #141 评审六条处置
 
@@ -592,7 +593,7 @@ shell 46 passed、两个载体守卫 OK。
 
 复跑: `--bin rdog` 1144 passed / 0 failed / 4 ignored; `control_iroh` 30 passed / 2 ignored; 回环 13/13(含新增
 的重附跨原截止用例); `control_pty` 5 passed / 3 failed 与基线逐项相同; `control_tty` 0/1 与基线相同。
-- 提交: beb64d8
+- 提交: f9543b7
 
 ## 2026-11-26 RAI-413 #141 第二轮评审两条处置
 
@@ -604,7 +605,7 @@ shell 46 passed、两个载体守卫 OK。
   (`Admission::party_permitted` + `identity_admitted`), 未知对端立即拒。
 
 复跑: `--bin rdog` 1145 passed / 0 failed / 4 ignored; `control_iroh` 31 passed / 2 ignored; 回环 13/13; 两个守卫 OK。
-- 提交: 2124bc7
+- 提交: 9a32601
 
 ## [2026-11-26] tests/ TTY 夹具改按能力探测选择 script 调用形式 (RAI-410)
 
@@ -679,7 +680,7 @@ panic 于 `dynamic_link.rs:45` (unix 分支, 同一循环); `mkdir -p target/deb
 重定基后复跑: `--bin rdog` 1145 passed / 0 failed / 4 ignored; `control_iroh` 31 passed / 2 ignored;
 回环 13/13; `control_pty` 8 passed / 1 failed(`ctrl_c`) vs 基线 7 passed / 2 failed(`ctrl_c`+`string_shorthand`);
 `control_tty` 本分支 2 passed / 0 failed, 与基线同(基线此前已转绿)。
-- 提交: 78239c4
+- 提交: 2b30395
 
 ## 2026-11-26 RAI-413 #141 第四轮评审一条(low)
 
@@ -688,7 +689,7 @@ panic 于 `dynamic_link.rs:45` (unix 分支, 同一循环); `mkdir -p target/deb
 该分支当前不可达(预检与 `attach_session` 判据同源, 租约无删除路径), 属防御性修正。
 
 复跑: `--bin rdog` 1145 passed / 0 failed / 4 ignored; `control_iroh` 31 passed / 2 ignored; 回环 13/13。
-- 提交: 0b334f1
+- 提交: 0993ff6
 
 ## [2026-11-26] 测试夹具的 daemon 在 panic 路径被收掉 (RAI-423)
 
