@@ -40,7 +40,7 @@ import sys
 from pathlib import Path
 
 # 账本文件: 六文件 + 经验收件箱。只改这些文件的提交 = 记账提交, 豁免。
-LEDGER_FILES = {
+BASE_LEDGER_FILES = {
     "WORKLOG.md",
     "notes.md",
     "LATER_PLANS.md",
@@ -50,7 +50,22 @@ LEDGER_FILES = {
     "EXPERIENCE.md",
 }
 
+# 2026-11-26 (RAI-433): 账本按票分文件 —— `ledger/<票号>.md`。原因很实在: 单文件账本让任意
+# 两张 PR 都在同一个文件尾部追加, 每次 rebase 都在同一处冲突, 而 rebase 又会重写所有 sha,
+# 于是「记账」和「冲突」互相放大。按票分文件后, 同一票的提交只碰自己那份。
+LEDGER_DIR = "ledger"
+
+
+def ledger_files(root: Path) -> set[str]:
+    names = set(BASE_LEDGER_FILES)
+    ledger_dir = root / LEDGER_DIR
+    if ledger_dir.is_dir():
+        names.update(f"{LEDGER_DIR}/{path.name}" for path in ledger_dir.glob("*.md"))
+    return names
+
 SHA_RE = re.compile(r"\b[0-9a-f]{7,40}\b")
+# 「待合入后补」的占位: PR 阶段拿不到稳定的 sha, 用提交标题占位, 合入后由纯账本提交换成 sha。
+PENDING_RE = re.compile(r"^- 提交: 待合入后补 \(标题: `?(?P<subject>.+?)`?\)$", re.MULTILINE)
 
 
 def git(root: Path, *args: str) -> str:
@@ -64,7 +79,7 @@ def git(root: Path, *args: str) -> str:
 
 def ledger_text(root: Path) -> str:
     chunks: list[str] = []
-    for name in sorted(LEDGER_FILES):
+    for name in sorted(ledger_files(root)):
         path = root / name
         if path.is_file():
             chunks.append(path.read_text(encoding="utf-8"))
@@ -91,7 +106,13 @@ def is_ledger_only(root: Path, sha: str) -> bool:
     files = changed_files(root, sha)
     if not files:
         return False
-    return all(Path(name).name in LEDGER_FILES for name in files)
+    allowed = ledger_files(root)
+    for name in files:
+        path = Path(name)
+        if str(path) in allowed or path.name in BASE_LEDGER_FILES:
+            continue
+        return False
+    return True
 
 
 def main(argv: list[str]) -> int:
@@ -103,6 +124,17 @@ def main(argv: list[str]) -> int:
         "--report-only",
         action="store_true",
         help="只报告不失败 (CI 用): 永远退出 0, 但漏账条目会发 ::warning:: 注解",
+    )
+    parser.add_argument(
+        "--main",
+        action="store_true",
+        help="main 分支模式: 除了最新 --main-grace 个 commit, 其余缺 sha 即失败 (RAI-433 时序补丁)",
+    )
+    parser.add_argument(
+        "--main-grace",
+        type=int,
+        default=3,
+        help="main 上允许的「刚合入、还没补 sha」的 commit 数, 默认 3",
     )
     parser.add_argument(
         "--ref-only",
@@ -121,6 +153,10 @@ def main(argv: list[str]) -> int:
 
     ledger = ledger_text(root)
     referenced = set(SHA_RE.findall(ledger))
+    # 占位条目按**提交标题**认领: PR 阶段的 sha 会随 rebase 变, 但标题不变。
+    pending_subjects = {
+        match.group("subject").strip() for match in PENDING_RE.finditer(ledger)
+    }
 
     shas = commit_shas(root, args.since, args.limit)
     if not shas:
@@ -147,9 +183,11 @@ def main(argv: list[str]) -> int:
         scope_note = f"{args.since}..HEAD"
 
     unaccounted: list[tuple[str, str, list[str]]] = []
+    graced: list[tuple[str, str]] = []
     accounted = 0
     exempt = 0
-    for sha in scope:
+    pending: list[tuple[str, str]] = []
+    for index, sha in enumerate(scope):
         short = sha[:7]
         subject = git(root, "log", "-1", "--format=%s", sha).strip()
         if short in referenced or sha in referenced:
@@ -158,10 +196,26 @@ def main(argv: list[str]) -> int:
         if is_ledger_only(root, sha):
             exempt += 1
             continue
+        # main 上不接受占位: 那时 sha 已经稳定, 占位留着就是漏账。
+        if subject in pending_subjects and not args.main:
+            pending.append((short, subject))
+            continue
+        # main 上「刚合入还没补 sha」是**正常时序**: sha 只有在合入后才稳定。所以最新
+        # --main-grace 个 commit 记宽限, 更早的还缺 sha 就是漏账 (RAI-433)。
+        if args.main and index < args.main_grace:
+            graced.append((short, subject))
+            continue
         unaccounted.append((short, subject, changed_files(root, sha)))
 
     print(f"检查范围: {scope_note}  共 {len(scope)} 个 commit")
-    print(f"  已记账: {accounted}  记账提交(豁免): {exempt}  漏记账: {len(unaccounted)}")
+    print(
+        f"  已记账: {accounted}  占位待补 sha: {len(pending)}  记账提交(豁免): {exempt}"
+        f"  漏记账: {len(unaccounted)}"
+        + (f"  宽限内待补 sha: {len(graced)}" if graced else "")
+    )
+    if graced and args.main:
+        for short, subject in graced:
+            print(f"  (宽限) {short} {subject} —— 合入后由纯账本提交补 `- 提交: {short}`")
 
     if unaccounted:
         mode = "只报告 (report-only)" if args.report_only else "阻断 (strict)"
@@ -176,8 +230,9 @@ def main(argv: list[str]) -> int:
                     f"{short} {subject} —— 六文件里找不到这个 commit 的条目"
                 )
         print(
-            "\n修法: 在 WORKLOG.md (或 notes/LATER_PLANS/…) 的对应条目末尾写一行\n"
+            "\n修法: 在该票的账本条目末尾写一行 (RAI-433 起账本按票分文件)\n"
             "  - 提交: <sha>\n"
+            "账本位置: ledger/<票号>.md (新票), WORKLOG.md 是索引 + 2026-11-26 前的归档。\n"
             "再提交该账本改动 (纯账本提交本身豁免)。\n"
             "取 sha: python3 scripts/check-bookkeeping.py --ref-only HEAD"
         )

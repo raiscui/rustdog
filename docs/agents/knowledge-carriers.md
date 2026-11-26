@@ -117,7 +117,11 @@ python3 scripts/check-carrier-assertions.py
 - 提交: b65680f
 ```
 
-账本文件 = 六文件 + `EXPERIENCE.md`。
+账本文件 = 六文件 + `EXPERIENCE.md` + **`ledger/<票号>.md`**。
+
+**2026-11-26 (RAI-433) 起账本按票分文件。** 新票写 `ledger/<票号>.md`；`WORKLOG.md` 退化为
+索引 + 2026-11-26 之前的归档。动机是可观测的：单文件账本让任意两张 PR 都在同一处追加，
+rebase 时必然冲突，而 rebase 又会重写所有 sha —— 冲突与记账互相放大，一天吃掉四轮 CI。
 
 **为什么**：2026-10-07 ~ 10-20 期间的产出（5 个 commit + 一次跨机实战 + 一次
 wayfinder 建图）**一条六文件记录都没有**。知识还在 git 里，不算丢失 —— 但
@@ -126,19 +130,26 @@ wayfinder 建图）**一条六文件记录都没有**。知识还在 git 里，�
 
 ### 流程
 
+**时序: sha 只在合入后才稳定, 所以写 sha 的时点挪到合入之后。**
+
 ```bash
-# 1. 干活 → 提交
-git commit -m "..."
+# PR 阶段 (分支上): 条目写票号 + 提交标题, 不写 sha
+#   ledger/RAI-433.md
+#   ### 2026-11-26 RAI-433: ...
+#   - 提交: 待合入后补 (标题: ci: 账本按票分文件)
+git commit -m "ci: 账本按票分文件 (RAI-433)"
 
-# 2. 在对应的 WORKLOG / notes / LATER_PLANS 条目末尾写一行
-#    - 提交: <sha>          (取 sha: python3 scripts/check-bookkeeping.py --ref-only HEAD)
+# 合入 main 之后: 用纯账本提交把 sha 补齐 (纯账本提交豁免, 不会自我递归)
+python3 scripts/check-bookkeeping.py --ref-only <merge 后的工作 commit>
+#   → 把 `- 提交: <sha>` 填进 ledger/<票号>.md, 再提交
 
-# 3. 把这个账本改动提交掉 (纯账本提交本身豁免, 不会自我递归)
-git commit -m "chore(bookkeeping): 记账 <sha>"
-
-# 4. 验证
-python3 scripts/check-bookkeeping.py
+# 验证
+python3 scripts/check-bookkeeping.py            # 本地 strict
+python3 scripts/check-bookkeeping.py --main     # main 上: 最新 3 个之外缺 sha 即失败
 ```
+
+在 PR 里写 sha 等于每次都写一个马上过期的值: 任何一次 rebase 都会重写它, 于是「记账」变成了
+「追着 sha 跑」。不变量没变 (每个工作 commit 仍要有条目), 变的只是写 sha 的时点。
 
 ### 判定规则（`scripts/check-bookkeeping.py`）
 
@@ -152,13 +163,14 @@ python3 scripts/check-bookkeeping.py
 
 | 模式 | 触发 | 漏账时的行为 | 用在哪 |
 | --- | --- | --- | --- |
-| `--report-only` | 显式加该参数 | 打印报告 + 发 `::warning::` 注解，**退出码永远 0** | **CI**（push 到 main 时） |
+| `--report-only` | 显式加该参数 | 打印报告 + 发 `::warning::` 注解，**退出码永远 0** | CI 的 `pull_request` |
+| `--main [--main-grace N]` | 显式加该参数 | 最新 N 个 commit 记宽限，其余缺 sha → **退出码 1** | CI 的 `push` 到 main |
 | 默认（strict） | 不加参数 | 打印报告，退出码 1 | 本地 pre-flight |
 
-**为什么 CI 不阻断**：账本滞后是**流程债**，不是代码缺陷。为了让一条流程债把别人
-的推送卡住（还可能在 PR 阶段误报，因为工作 commit 的记账条目通常在**后续**的
-提交里才落盘），不值得。改成只报告 + `::warning::` 注解后，漏账条目会显示在提交
-/PR 视图里 —— 看得见，但不挡路。
+**为什么 PR 只报告、main 才阻断**：PR 阶段工作 commit 的条目通常还没落盘 (它在同一张 PR 的
+后续提交里), 而且 sha 会随 rebase 变 —— 在这里阻断只会逼人写马上过期的 sha。合入之后 sha 稳定,
+再缺就没有借口: main 上用 `--main` 硬门禁, 只给最新 3 个 commit 宽限 (它们刚合入、账本补记还没
+提交)。
 
 **要硬门禁就在本地跑**：
 

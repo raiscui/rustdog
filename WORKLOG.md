@@ -1,3 +1,19 @@
+# RAI-433 之后的账本布局
+
+- **新票写 `ledger/<票号>.md`** —— 一票一文件, 只碰自己那份, rebase 不再和别人在同一处冲突。
+- `WORKLOG.md` 退化为**索引 + 2026-11-26 之前的归档**: 历史条目留在下面, 不再往后追加新票。
+- 约定 ③ 的时序: PR 内的条目写「票号 + 提交标题」, **`- 提交: <sha>` 在合入后由纯账本提交补齐**
+  (纯账本提交本来就豁免)。sha 只有在合入后才稳定, 在 PR 里写它等于每次都写一个马上过期的值。
+- 守卫: `python3 scripts/check-bookkeeping.py` (本地 strict) /
+  `--report-only` (PR, warning) / `--main` (main 上除最新 3 个 commit 外缺 sha 即报错)。
+
+| 票 | 账本文件 |
+| --- | --- |
+| RAI-411 | `ledger/RAI-411.md` |
+| RAI-397 / RAI-429 | 见下文归档 (WORKLOG.md 内) |
+
+---
+
 # WORKLOG: rustdog
 
 ## [2026-11-26] routable profile 可表达公共 relay 的默认端口 (RAI-475)
@@ -1262,158 +1278,3 @@ CLI 重跑得到 `resume=honored`。教训: 之前 CLI 挂住不是 CLI 的 bug,
 - 提交: 9e9fbec (正对照判读)
 - 提交: 566b017 (评审 F5/F6)
 - 提交: 1c7064a (评审 F5 收口)
-### 2026-11-26 RAI-411: integration target 放量
-
-`tests/` 19 个 target 里此前只有 `recording_e2e` 在 CI 执行。新增
-`scripts/ci/run-integration-targets.py` 按平台清单执行 (ubuntu/macos 各 11 个, macos 多
-`zenoh_unixpipe_fast_path`, windows 跑 `zenoh_router_client_windows`), **passed == 0 即判红**;
-build 阶段改成 `cargo test --no-run` 全 target 编译。
-5 个 macOS GUI 面 (`control_ax_e2e` / `control_display_aware_e2e` / `control_mouse_e2e` /
-`control_ocr_e2e` / `control_window_e2e`) 需要真实桌面会话, 处置是 **compiled, not executed**:
-job summary 单列、**不计入 ran 集合**, 真机 lane 的 5 条命令与权限前置写在
-`ci-merge-gate.md` §3b。
-本地 linux 回执: 11 个 target 全部执行且 passed > 0 (control_lanes 15/1 ignored,
-zenoh_router_client 38/2 ignored)。
-- 提交: f3b3502
-
-### 2026-11-26 RAI-411 rebase 后的 sha 对照 (至 RAI-433 落地前的权宜记账)
-
-- 提交: 1d70df3 ci: 放量 integration target (RAI-411), 每个 target 的实际执行计数 > 0 变成硬判据
-- 提交: 0ce5a58 docs+ci: compile-only 明示为 compiled, not executed 并不计入 ran, 补齐真机 lane 跑法
-- 提交: 1300eb0 ci: target 归属改成显式分类表 + 双向对账, 修 6 处过期注释, 失败日志留全文
-- 提交: a45f1fa test(e2e): 隔离 HOME 改用短根目录, 修 macOS runner 上 unixpipe pipe 名超限
-- 提交: 9dbf80f test(e2e): 两条 ubuntu CI 连不上 daemon 的用例显式 ignore 并挂 RAI-464
-- 提交: e61bf76 fix(ci): windows 按 utf-8 解码 cargo 输出 + 三条 ubuntu 连不上 daemon 的用例按平台收窄
-- 提交: b6a44c7 fix(ci): 给 integration target 加 1500s 墙钟上限并输出 elapsed
-- 提交: 41ea26c test(e2e): unixpipe 候选用例先建 ~/.rdog/run 目录
-- 提交: 38ec425 test(e2e): stale unixpipe 用例也不假设运行目录已存在
-- 提交: dffd49b ci: windows 上 2 个 e2e target 显式豁免并挂 issue #162
-
-rebase 会重写分支上每个 commit 的 sha, 本票在合并前又被 rebase 了两次, 所以这里补一张对照表;
-按 `docs/agents/ci-merge-gate.md` §2 的口径, 这类 sha 漂移属于流程设计问题, 由 RAI-433 统一治 (合入后纯账本提交补记),
-不为它单独推提交刷 sha。
-### 2026-11-26 RAI-411 评审必修: 载体自相矛盾 + 空 executed 集合 = 绿
-
-- 提交: 41049fa
-
-① `ci-merge-gate.md` §3b 里「ubuntu 侧 3 条已知红用逐条 `#[ignore]` 收窄」是上一轮处置的残留,
-与改成的 target 级豁免打架 (而且 `zenoh_router_client` 是 `unix`, 从不进 windows), 重写成
-「逐条 ignore 只剩 `control_lanes` 那 1 条, `zenoh_router_client` 一条都没有」; 顺手去重了
-windows 豁免段、`5 个 target`→`6`、指向不存在的 `COMPILE_ONLY` 符号改成 `CLASSIFICATION`,
-并把 windows-only 那个 target「此刻只编译不执行」写明。
-② 脚本加一条守卫: `if not executed_rows: return 1` —— 豁免把某平台的 executed 集合变成空时,
-空表格 + 退出码 0 仍然是绿, 与「一条测试都没跑」在分支保护上长得一样。今天不可达 (每平台至少
-1 个), 但正是 RAI-397 要消灭的形态。
-### 2026-11-26 RAI-411 口径补充: macos 那条先按产品缺陷假设验, 脚本编码两端固定
-
-- 提交: 2469d33
-
-① issue #164 的第 1 步改成**干净 HOME 上的手动三步复现** (起 daemon A → 再起同名 B → 用 A 的
-FIFO 连 client), 并写明「若复现 → 转产品缺陷票, 不按 compile-only 长期挂着」—— 重复起 daemon
-是常见操作, 原 daemon 就此不可达会直接伤用户, 不能用「环境差」压下去。
-② §3b 记一条纪律: 跑批脚本的编码要在**两个方向**上固定 utf-8 (解码 + 输出), 只修撞到的那一侧
-会让下一步换个地方崩, 而归因看起来仍然是「target 红」。
-### 2026-11-26 RAI-411 第九个真缺陷 (windows 脚本) + 第十个发现 (macos 接力红)
-
-- 提交: 0cd2444
-
-① windows `test` job 又崩在脚本里: 修好解码后**输出**这一端同样按 cp1252 编码, summary 表格与
-失败详情里的中文抛 `UnicodeEncodeError`。`main()` 开头把 stdout/stderr 都 `reconfigure(
-encoding="utf-8", errors="replace")` —— 解码与编码两端都固定 utf-8 才算修完。
-② macos `zenoh_unixpipe_fast_path` 是**逐个接力**红: 我修掉 `~/.rdog/run` 不存在那两条之后,
-`duplicate_daemon_start_should_not_break_running_local_default_unixpipe` 露出来 —— 重复 daemon
-启动后原 daemon 拒绝新 client 的专用 FIFO (`Received a close message (reason GENERIC) in response
-to an OpenSyn`)。这条开发机绿、runner 红, 属 runner 与真机的环境差, 盲改不了。处置: 分类从
-`macos`(执行) 降为 `compile-only:macos` (只证明能编译, 不计入 ran), 真机 lane 命令写进 §3b,
-根因与两个区分实验写进 issue #164。覆盖数随之变成 ubuntu 10 / macos 11 / windows 1。
-### 2026-11-26 RAI-411 覆盖数进载体 + 票面改成可 actionable
-
-- 提交: 4ea8c37
-
-两件事: ① `ci-merge-gate.md` §3b 增加固定位置的「各平台实际执行 target 数」表 (ubuntu 10 /
-macos 12 / windows 1) 与判读口径 —— 「三平台绿」在 windows 上只代表 1 个 integration target,
-不能读成 windows 覆盖, 加/撤豁免就要改这张表; ② issue #163 从「这两个 target 不稳」改写成
-两候选假设 (启动就绪竞态 / runner 环境差异) + 两个区分实验 (@ping 先行 / 单跑该 target),
-并写明豁免不是结案。
-### 2026-11-26 RAI-411 第八个发现 (ubuntu): 连接类 e2e 是「一族」不稳定
-
-- 提交: f0ebc7e
-
-`48a35f7` 的 ubuntu 又红了, 但换成了 `mtls_daemon_should_require_client_certificate_and_accept_configured_client`
-(`zenoh_router_client.rs:3482`) —— 与前两轮的 code 70 key 注入、TLS 换 CA 是**三个不同用例**,
-全停在「client 连不上刚启动的 daemon」。同代码在 macos runner 全绿, 本地含 `taskset -c 0,1`
-压到 2 核也全绿。结论: 这不是单个用例的缺陷, 是一族不稳定; 逐条 `#[ignore]` 只会让下一轮换个
-用例继续红。
-处置: 撤掉 `tests/zenoh_router_client.rs` 里那两处 per-test 收窄 (恢复用例语义), 改成
-`PLATFORM_EXEMPTIONS` 的 target 级豁免 (`zenoh_router_client` 在 ubuntu 不跑, macos 照跑),
-证据与收回条件写进 issue #163 / RAI-464。**代价说清楚: ubuntu 的 integration 面从 11 个 target
-降到 10 个**, 这是这一轮的真实覆盖。
-### 2026-11-26 RAI-411 第七个发现 (windows): e2e 不隔离 HOME, 两个 target 无法在 windows 执行
-
-- 提交: 7d96da8
-
-跑通 timeout 修复后两个 windows 红都点得出名字了: `control_websocket` 整 target 挂死后被
-1500s 上限终止 (`[timeout] 超过 1500s 未结束`), `zenoh_router_client_windows` 的 daemon 因
-残留 `service_name` 守卫拒启动 (`local_guard=C:\Users\runneradmin\AppData\Local\rustdog\zenoh-guards\...`)。
-共同点: 两者都没隔离 HOME, 在 runner 真实 HOME 上与前序用例共用 `.rdog` / `zenoh-guards`;
-unix 侧早有 `test_isolated_home()`, 所以同一份用例在 ubuntu/macos 稳定绿。
-处置: 开出 issue #162 承接隔离修复, 期间用新增的 `PLATFORM_EXEMPTIONS` 把这 2 个 target 在
-windows 显式豁免 (理由 + 票号进 job summary 的 `exempt on this platform` 表, 不计入 ran),
-ubuntu/macos 照常执行。**本 PR 之后 windows 的 integration 面只有 `computer_use_density`**
-—— 这是真实覆盖, 不写成 windows 也跑了 e2e。
-### 2026-11-26 RAI-411 第六个真缺陷 (macos): unixpipe e2e 假设 ~/.rdog/run 已存在
-
-- 提交: e26b885 (候选用例) + 726c0da (stale 用例, 同一个假设)
-
-`zenoh_unixpipe_fast_path::empty_target_should_use_local_default_even_when_extra_fifo_candidate_exists`
-在 macos runner 上 `mkfifo /Users/runner/.rdog/run/lde50254__x.lde50254.pipe_uplink 失败` ——
-新 HOME 里 `~/.rdog/run` 还没被任何 daemon 建出来, 而本地开发机通常早就有了, 所以本地一直绿。
-用例自己造候选就得自己保证目录在: `create_fake_uplink_candidate` 先 `create_dir_all(parent)`。
-本地 linux 上该 target 被 `cfg(target_os = "macos")` 门掉 (0 tests 可跑), 所以这条只有
-macos runner 能验证 —— 编译证据是 `cargo test --no-run --test zenoh_unixpipe_fast_path` 通过。
-同文件的 `stale_unixpipe_socket_files_should_be_cleaned_on_daemon_start` 有一模一样的假设
-(mkfifo 进同一个目录), 它此前是「别的用例先建好了目录」才通过, 顺序一变就红, 一并修掉。
-### 2026-11-26 RAI-411 第五个真缺陷 (windows): target 没有墙钟上限
-
-- 提交: 0a85b3f
-
-`f9e5272` 的 windows `test` job 跑了 45 分钟仍未结束; 该步没有 per-target timeout, 所以
-一旦某个 target 挂住, 表现是整 job 被 GitHub cancel, 日志只留 `The job has been cancelled`
-—— 分不清哪个 target、也分不清慢与死等。加 `TARGET_TIMEOUT_SECONDS = 1500`, 超时判该
-target 红并保留它已有的输出 (`exit=124`), summary 增 `elapsed` 列; 超时路径本地以
-`bash -c 'echo hello; sleep 5'` + `timeout=1` 验证过 (拿到部分输出 `hello`)。
-### 2026-11-26 RAI-411 评审意见落地 (M1/M2/M3/low)
-
-- 提交: 898a1b3
-
-`CLASSIFICATION` 从「按平台列举」改成显式分类表 + `tests/*.rs` 双向对账 (未登记即红),
-六处自相矛盾的过期注释改掉, 失败时把 target 日志留全文到 `target/ci-logs/`。
-另: compile-only 与 executed 在 job summary 里分成两张表, 前者标注 `compiled, not executed`
-且不进 ran 集合。
-- 提交: 0f93b58
-
-- 2026-11-26 放量首个真缺陷 (macOS): `zenoh_router_client` 的 3 条 `agent_*` 用例在
-  macos runner 上假失败 —— 隔离 HOME 建在 `$TMPDIR`(`/var/folders/q2/<32位>/T`) 下,
-  `.rdog/run` 的 unixpipe pipe 名超出 95 字节上限, daemon 拒启动。`test_isolated_home()`
-  改用 `short_temp_root()` (优先 `/tmp`)。本地 linux 复跑 38 passed / 2 ignored。
-- 提交: 8642401
-
-- 2026-11-26 放量第二个真缺陷 (ubuntu): `control_lanes::daemon_control_lane_should_accept_key_object_payload_with_request_id`
-  与 `zenoh_router_client::control_should_publish_key_event_after_successful_key_request` 在
-  ubuntu runner 上拿到 `@response {"code":70,"error":"no connection could be established"}`
-  —— 是 daemon/control 的连接前提 (端口/回环/fast path) 而非消息语义; 本地稳定通过。
-  按「显式 ignore + 理由」处置并开 RAI-464 跟进, 不删用例。
-- 提交: 435b3f9
-
-- 2026-11-26 放量第三个真缺陷 (ubuntu) + 第四个真缺陷 (windows):
-  ① `zenoh_router_client::tls_enabled_daemon_should_serve_ca_client_and_reject_wrong_ca` 在
-  ubuntu runner 上「换正确 CA 后仍连不上」(空输出); 本地单跑 0.85s 绿, `taskset -c 0,1`
-  压到 2 核也不复现 —— 与上面两条同形态 (client 建不上连到 daemon)。三条统一按平台收窄成
-  `#[cfg_attr(target_os = "linux", ignore = …)]`: **macos/windows 照常执行**, 只在 ubuntu
-  跳过, 并按 `ci-merge-gate.md` §6 四列登记 (负责人 RAI-464, 到期 2026-12-03)。
-  ② windows `test` job 直接崩在脚本里而非测试里: `subprocess.run(text=True)` 按 cp1252
-  解码 cargo 输出里的 UTF-8 中文, 抛 `UnicodeDecodeError` 后 `stdout` 为 None, 拼接处
-  `TypeError`。改成 `encoding="utf-8", errors="replace"`。
-  本地 linux 回执: `zenoh_router_client` 36 passed / 4 ignored, `control_lanes` 14 passed /
-  2 ignored, 均 0 failed。
-- 提交: 9b48340
