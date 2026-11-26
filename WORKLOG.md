@@ -1274,20 +1274,30 @@ job summary 单列、**不计入 ran 集合**, 真机 lane 的 5 条命令与权
 `ci-merge-gate.md` §3b。
 本地 linux 回执: 11 个 target 全部执行且 passed > 0 (control_lanes 15/1 ignored,
 zenoh_router_client 38/2 ignored)。
-- 提交: a329b49
+- 提交: f3b3502
+
+### 2026-11-26 RAI-411 评审意见落地 (M1/M2/M3/low)
+
+- 提交: 898a1b3
+
+`CLASSIFICATION` 从「按平台列举」改成显式分类表 + `tests/*.rs` 双向对账 (未登记即红),
+六处自相矛盾的过期注释改掉, 失败时把 target 日志留全文到 `target/ci-logs/`。
+另: compile-only 与 executed 在 job summary 里分成两张表, 前者标注 `compiled, not executed`
+且不进 ran 集合。
+- 提交: 0f93b58
 
 - 2026-11-26 放量首个真缺陷 (macOS): `zenoh_router_client` 的 3 条 `agent_*` 用例在
   macos runner 上假失败 —— 隔离 HOME 建在 `$TMPDIR`(`/var/folders/q2/<32位>/T`) 下,
   `.rdog/run` 的 unixpipe pipe 名超出 95 字节上限, daemon 拒启动。`test_isolated_home()`
   改用 `short_temp_root()` (优先 `/tmp`)。本地 linux 复跑 38 passed / 2 ignored。
-- 提交: (本条随修复提交记入下一次账本)
+- 提交: 8642401
 
 - 2026-11-26 放量第二个真缺陷 (ubuntu): `control_lanes::daemon_control_lane_should_accept_key_object_payload_with_request_id`
   与 `zenoh_router_client::control_should_publish_key_event_after_successful_key_request` 在
   ubuntu runner 上拿到 `@response {"code":70,"error":"no connection could be established"}`
   —— 是 daemon/control 的连接前提 (端口/回环/fast path) 而非消息语义; 本地稳定通过。
   按「显式 ignore + 理由」处置并开 RAI-464 跟进, 不删用例。
-- 提交: (随本条修复记入下一次账本)
+- 提交: 435b3f9
 
 - 2026-11-26 放量第三个真缺陷 (ubuntu) + 第四个真缺陷 (windows):
   ① `zenoh_router_client::tls_enabled_daemon_should_serve_ca_client_and_reject_wrong_ca` 在
@@ -1300,4 +1310,4 @@ zenoh_router_client 38/2 ignored)。
   `TypeError`。改成 `encoding="utf-8", errors="replace"`。
   本地 linux 回执: `zenoh_router_client` 36 passed / 4 ignored, `control_lanes` 14 passed /
   2 ignored, 均 0 failed。
-- 提交: 42cb4f3
+- 提交: 9b48340
