@@ -2,6 +2,15 @@
 
 ## [2026-11-26] iroh 目录的 relay 承载 `directory.via_relay` (RAI-426)
 
+## [2026-11-26] 知识沉淀: 分片控制行被读超时丢弃 (RAI-415 knowledge capture)
+
+- 新增 `docs/solutions/logic-errors/fragmented-control-line-dropped-on-read-timeout.md`:
+  根因 (`read_line_limited` 入口 `buf.clear()` + `write_message` 两次 `write_all` + 25ms 读超时)、
+  四条 verified_by 回执 (纯 kernel 对照 / 直连 daemon 单发 / 分片复现前后 / 双侧 strace 对拍)、
+  三条读行契约与 `LineReadState` 解法。
+- 根 `AGENTS.md` 粗索引同提交补条目; `check-carrier-assertions.py` OK。
+- 提交: 685d0a8
+
 - 目录端点原本只能按 `id + SocketAddr` 拨,两端都在 NAT 后时连「去哪儿查这个 daemon」都发不出去。
   `directory` 新增 `via_relay: bool` 与 `relay: {url, root_cert?}`(给了 `via_relay` 就不再有 `addr`),
   拨号目标变成唯一的 `TransportAddr::Relay(url)`,预算从 `CONNECT` 换成 `RELAY_CONNECT`,并**关掉这一跳的 QAD**
