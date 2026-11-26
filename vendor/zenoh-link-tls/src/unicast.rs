@@ -101,6 +101,16 @@ mod rai524_short {
         OUTSIDE_WAITS.fetch_add(1, Ordering::Relaxed);
     }
 
+    /// 100ms 兜底路径真的生效的次数 —— 正常路径必须为 0, 否则 waker 转发错了。
+    pub static FALLBACK_WAKEUPS: AtomicUsize = AtomicUsize::new(0);
+
+    pub fn note_fallback() {
+        let n = FALLBACK_WAKEUPS.fetch_add(1, Ordering::SeqCst) + 1;
+        if n <= 5 {
+            tracing::warn!("RAI524 fallback: 100ms 兜底唤醒触发 (#{n}) —— 正常路径不该走到这里");
+        }
+    }
+
     pub fn note_violation() {
         let n = LOCK_HELD_ACROSS_AWAIT.fetch_add(1, Ordering::SeqCst) + 1;
         tracing::warn!("RAI524 short: lock held across await detected (#{n})");
@@ -236,8 +246,11 @@ impl LinkUnicastTls {
                 }
                 // 锁外等可写: waker 唤醒, 或 100ms 兜底重试 (链路关闭时不会永远挂住)。
                 tokio::select! {
+                    biased;
                     _ = self.write_wake.permits.acquire() => {}
-                    _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {}
+                    _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {
+                        rai524_short::note_fallback();
+                    }
                 }
             }
         }
@@ -282,8 +295,11 @@ impl LinkUnicastTls {
                 // 锁外等: 要么 waker 被唤醒 (socket 可读), 要么 100ms 后重试 —— 后者保证链路
                 // 关闭时读任务不会永远挂在这把信号量上。
                 tokio::select! {
+                    biased;
                     _ = self.read_wake.permits.acquire() => {}
-                    _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {}
+                    _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {
+                        rai524_short::note_fallback();
+                    }
                 }
                 if allow_partial && filled > 0 {
                     return Ok(filled);
@@ -332,16 +348,18 @@ impl LinkUnicastTls {
 
     async fn close(&self) -> ZResult<()> {
         tracing::trace!("Closing TLS link: {}", self);
-        // Flush the TLS stream
+        // 锁内只做**非阻塞**的 flush/shutdown 各一次, 不跨 await 持锁 (否则关闭期间读会被挡住)。
+        // 一次性 poll 足以把已缓冲的 TLS 记录推出去; 推不完就由底层 TCP 关闭代劳 —— 关闭路径
+        // 本来就是 best effort, 这里不接受"为了 flush 完整而挂住整条 lane"。
         let _guard = zasynclock!(self.write_mtx);
+        let waker = std::task::Waker::from(self.write_wake.clone());
+        let mut cx = std::task::Context::from_waker(&waker);
         let tls_stream = self.get_mut_socket();
-        let res = tls_stream.flush().await;
-        tracing::trace!("TLS link flush {}: {:?}", self, res);
-        // Close the underlying TCP stream
+        let flush = std::pin::Pin::new(&mut *tls_stream).poll_flush(&mut cx);
         let (tcp_stream, _) = tls_stream.get_mut();
-        let res = tcp_stream.shutdown().await;
-        tracing::trace!("TLS link shutdown {}: {:?}", self, res);
-        res.map_err(|e| zerror!(e).into())
+        let shutdown = std::pin::Pin::new(tcp_stream).poll_shutdown(&mut cx);
+        tracing::trace!("TLS link flush {:?} / shutdown {:?}: {}", flush, shutdown, self);
+        Ok(())
     }
 }
 
