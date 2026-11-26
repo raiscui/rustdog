@@ -172,7 +172,13 @@ def main(argv: list[str]) -> int:
             baseline_index = index
             break
 
-    if baseline_index is None:
+    if args.main:
+        # main 上**不用基线**裁剪: 基线的定义是「最新的已被引用 commit」, 于是一个漏账 commit
+        # 只要后面有一个 commit 被记账, 它就会永远落在基线之外 —— 再也不会被判红。窗口改成
+        # 固定看最近 --limit 个, 漏账只能靠被推出窗口逃掉, 那是个有界且写明了的代价。
+        scope = shas
+        scope_note = f"最近 {args.limit} 个 commit (main 模式: 按窗口而不是按基线)"
+    elif baseline_index is None:
         scope = shas
         scope_note = f"最近 {args.limit} 个 commit (无已记账基线)"
     else:
