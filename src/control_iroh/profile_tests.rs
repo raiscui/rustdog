@@ -179,7 +179,7 @@ fn relay_policy_follows_the_profile() {
     for (url, qad) in [(&plaintext, 7002u16), (&routable_relay, 0)] {
         assert_eq!(
             relay_allowed(url, qad, true).unwrap_err().to_string(),
-            "iroh routable profile requires an explicit HTTPS relay and QAD port"
+            "iroh routable profile requires an HTTPS relay host and a non-zero QAD port"
         );
     }
     println!("relay policy follows the profile without weakening the default");
@@ -497,6 +497,13 @@ fn a_public_relay_spelled_with_the_default_port_is_accepted_where_it_matters() {
     );
     let err = relay_allowed(&public, 7842, false)
         .expect_err("the loopback profile still pins an explicit loopback relay");
+    assert!(err.to_string().contains("loopback"), "{err}");
+    // The port rule itself has to be covered on its own: a loopback host that only
+    // lacks the port would pass if that branch had lost the explicit-port check.
+    let loopback_without_port: RelayUrl = "https://127.0.0.1".parse().unwrap();
+    assert_eq!(loopback_without_port.port(), None);
+    let err = relay_allowed(&loopback_without_port, 7842, false)
+        .expect_err("the loopback profile still requires an explicit port");
     assert!(err.to_string().contains("loopback"), "{err}");
     let plaintext: RelayUrl = "http://relay.example.".parse().unwrap();
     let err = relay_allowed(&plaintext, 7842, true).expect_err("plaintext stays refused");

@@ -337,7 +337,7 @@ fn relay_allowed(url: &RelayUrl, qad_port: u16, routable: bool) -> Result<()> {
         return Ok(());
     }
     if !https || url.host_str().is_none() {
-        return Err("iroh routable profile requires an explicit HTTPS relay and QAD port".into());
+        return Err("iroh routable profile requires an HTTPS relay host and a non-zero QAD port".into());
     }
     Ok(())
 }
