@@ -25,15 +25,31 @@ agent 高频跑 `@web-find` / `@screenshot` / `@click` 时,这段延迟会肉眼
 
 ## 3. 设计契约
 
-### 3.1 路径推导
+### 3.1 路径推导(2026-11-26 修订: 固定目录 + 名字派生 + 死进程回收)
 
-- FIFO base 路径: `{tmpdir}/rdog-{namespace}-{daemon_name}.pipe`
-  - `tmpdir` 解析优先级: `$TMPDIR` 环境变量 > `/tmp`
-  - macOS 上 `$TMPDIR` 是 per-user(例如 `/var/folders/xx/yy/T/`),自然提供权限隔离
-  - Linux 上 `$TMPDIR` 不一定存在,直接 `/tmp` 兜底
-- 路径总长必须 ≤ 95 字节(macOS `sun_path` 限制 104,Zenoh 派生 `_downlink` 需要 9 字节),超过时 daemon 启动 fail-fast。
+> 上一版用 `{tmpdir}/rdog-{ns}-{name}.pipe`。实测问题: macOS `$TMPDIR` 按会话生成,
+> 重启即换路径,旧 pipe 永不回收;daemon 被 `kill -9` 后 FIFO 越堆越多;`namespace` /
+> `daemon_name` 各允许 64 字符,长名字直接撞 95 字节上限。现已改为固定目录。
+
+- FIFO base 路径: `{run_dir}/{stem}.pipe`
+  - `run_dir` 解析优先级: `$XDG_RUNTIME_DIR/rdog`(Linux 设置时) > `$HOME/.rdog/run` > `$TMPDIR/rdog-run`(无 HOME 兜底)
+  - 目录权限 0700,FIFO 权限 0600(Zenoh 建完 FIFO 后由 daemon 收紧)
+- `stem` 派生:
+  - 短名: `<namespace>__<daemon_name>`,人可读且与身份一一对应
+  - 整条 base 超过 95 字节预算(macOS `sun_path` 104 − Zenoh 派生的 `_uplink` 7 字节)时,
+    压缩成 `<slug>-<8位哈希>.pipe`(`slug` 是可读前缀,哈希取 `sha256(namespace \0 daemon_name)` 前 8 位十六进制)
+  - 名字含非 ASCII 字符时同样走压缩形态
+- 生命周期文件(与 base 同目录、同 stem):
+  - `<stem>.lock`:daemon 持 flock,内容为 `{pid, started_at_unix_ms}`;liveness 的真相源是 flock,
+    不是 PID(进程怎么死内核都会释放 lock,而 PID 会被复用)
+  - `<stem>.meta`:完整身份 `{namespace, daemon_name, pipe_base, pid, created_at_unix_ms}`,
+    压缩名场景下这是唯一能还原完整名字的地方,`rdog local list` 据此显示全名
 - 默认路径由 `(namespace, daemon_name)` 稳定推导。若配置显式 unixpipe listen endpoint,
-  该 endpoint 的 base path 是 listener、cleanup、registry 与 ownership guard 的唯一真相源。
+  该 endpoint 的 base path 是 listener、cleanup、registry 与 ownership guard 的唯一真相源;
+  lock/meta 由 base 的目录与 stem 反推,因此显式路径也进同一套生命周期。
+- 观测与回收入口: `rdog local list`(pipe / namespace / daemon_name / pid / 存活)与
+  `rdog local clean`(默认 dry-run,`--force` 才删死进程残留;活 daemon 的 pipe 一律不动)。
+  旧版本留在 `$TMPDIR/rdog-*.pipe*` 的残留也列出来并可清理。
 
 ### 3.2 daemon 端行为
 
@@ -44,8 +60,12 @@ agent 高频跑 `@web-find` / `@screenshot` / `@click` 时,这段延迟会肉眼
   1. 统一解析最终 endpoint 列表和 unixpipe base;显式 listen endpoint 优先,与 `socket_path` 同时存在时必须一致
   2. 如果 unixpipe enabled 且没有显式 unixpipe endpoint,把 `unixpipe/{socket_path 或推导路径}` 注入到 `listen_endpoints` 最前
   3. 先获取 `(namespace, daemon_name)` 的 service-name process lease;同名活跃 daemon 存在时直接退出,不得触碰现有 FIFO
-  4. 再获取 canonical base path 的 process lease;不同 daemon name 共用显式 path 时,后启动者直接退出
-  5. 两把 ownership lease 都成功后,才 `unlink` 旧 FIFO 文件(stale cleanup)
+  4. 再获取 canonical base path 的 ownership(flock `<stem>.lock` + 写 `<stem>.meta`);
+     不同 daemon name 共用显式 path 时,后启动者直接退出且不做任何 destructive 操作
+  5. 拿到 lock 说明上一个 owner 已经死了(哪怕 `kill -9`),此时才 `unlink` 旧 FIFO 并在日志打出
+     `回收 unixpipe 残留: base=..., previous_pid=..., previous_pid_alive=...` 的判定依据
+  5b. 正常退出(SIGINT/SIGTERM 或主循环返回)由 guard 的 Drop 删除 FIFO + `<stem>.lock` + `<stem>.meta`;
+     SIGTERM 走 signal-hook 唤醒轮询主循环,不再按默认处置被信号打死
   6. 如果 `local_default = true`,获取namespace process lease并原子发布本机 local-default registry
   7. 把最终 FIFO base 路径通过启动日志打出来,便于排错
 
@@ -70,16 +90,17 @@ agent 高频跑 `@web-find` / `@screenshot` / `@click` 时,这段延迟会肉眼
   - 有且只有一个active managed daemon → 使用registry中的daemon_name
   - 多个active managed daemon → `AlreadyExists`,提示用`--namespace`或显式target消除歧义
   - 纯v1 PID记录、部分managed记录、identity不匹配、lease已释放或FIFO超出启动宽限仍不存在 → 忽略,但client不得删除稳定lease/registry状态
-  - 没有active managed registry → 扫描`$TMPDIR/rdog-{ns}-*.pipe_uplink`生成诊断,不把FIFO当作owner身份
+  - 没有active managed registry → 扫描本机运行目录(`~/.rdog/run` 或 `$XDG_RUNTIME_DIR/rdog`)与旧 `$TMPDIR` 残留生成诊断,不把FIFO当作owner身份
   - FIFO 0个 → `NotFound`,提示启用`local_default = true`并启动daemon,或显式指定target
   - FIFO 1个或多个 → `NotFound`,列出候选并说明自动选择已退役;升级期可显式指定target
   - PTY 不支持,one-shot 多 line 支持(复用单 session 串行发)
   - 关键实现: Zenoh 1.8.0 实际只创建 `<base>_uplink` 和 `<base>_downlink` 两个 FIFO,
-    `<base>` 本身不一定存在,所以扫描必须按 `*.pipe_uplink` 而不是 `*.pipe`
+    `<base>` 本身不一定存在,所以判据是"派生 FIFO 还在";身份来自同目录 `<stem>.meta`
 
 ### 3.4 错误处理契约
 
-- FIFO base 路径超过 95 字节: daemon 启动 fail-fast,明确报错让用户改短 namespace / daemon_name。
+- FIFO base 路径超预算: 先压缩成 `<slug>-<8位哈希>`;只有当运行目录本身长到连压缩名都放不下时,
+  daemon 才 fail-fast,报错提示改短 `XDG_RUNTIME_DIR` / `HOME`,或显式给 `socket_path`。
 - 多个显式 unixpipe endpoint,或显式 endpoint 与 `socket_path` 不一致:daemon 启动 fail-fast,避免 cleanup/registry 操作错误路径。
 - canonical base path 的process lease已被活跃owner持有:daemon启动失败,不得unlink现有FIFO。
 - stale FIFO 文件存在: daemon 启动时 unlink 掉,不报 `Address already in use`。
@@ -234,8 +255,8 @@ flowchart LR
 - `AGENTS.md`:`specs/` 索引里加本文件条目。
 - `EXPERIENCE.md`:沉淀 2 条经验
 - "Zenoh 本机 fast path 优先用 unixpipe transport 而不是新增独立 UDS 控制面:保留 Zenoh 协议层语义,只是 link 层换本机 FIFO"
-- "同机 IPC 路径用 `$TMPDIR/rdog-{ns}-{name}.pipe` 而不是 `/var/run/...`:macOS 的 $TMPDIR 已经 per-user,自然有权限隔离"
-- "空target/self只接受active managed local-default registry;`$TMPDIR`中的FIFO只提供升级诊断,不能成为owner身份"
+- "同机 IPC 路径用固定 `~/.rdog/run/`(Linux 优先 `$XDG_RUNTIME_DIR/rdog`)而不是 `$TMPDIR`:macOS 的 $TMPDIR 按会话生成,重启即换路径,旧 pipe 永不回收"
+- "空target/self只接受active managed local-default registry;运行目录中的FIFO只提供升级诊断,不能成为owner身份"
 - `.codex/skills/rdog-control/SKILL.md`:troubleshooting 段加入"同机 ping 慢? 确认 unixpipe 是否 enabled"的诊断路径。
 
 ## 7. ADR(摘要)
