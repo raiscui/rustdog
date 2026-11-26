@@ -147,10 +147,15 @@ pub fn run_router_daemon(config: ZenohDaemonRuntimeConfig, shell: &str) -> io::R
     )?;
 
     // service-name 之外再锁定 canonical FIFO path,覆盖不同 daemon name 共用显式路径。
-    // prepare 只有在 path guard 成功后才会执行 stale cleanup。
+    // prepare 只有在 path guard 成功后才会执行 stale cleanup;guard 同时写
+    // `<stem>.lock`/`<stem>.meta`,是 `rdog local list|clean` 的观测与回收依据。
     #[cfg(unix)]
-    let _unixpipe_path_guard = if let Some(unixpipe) = config.unixpipe_startup.as_ref() {
-        let guard = zenoh_runtime::prepare_unixpipe_listener(&unixpipe.base_path)?;
+    let unixpipe_path_guard = if let Some(unixpipe) = config.unixpipe_startup.as_ref() {
+        let guard = zenoh_runtime::prepare_unixpipe_listener(
+            &unixpipe.base_path,
+            &config.namespace,
+            &config.daemon_name,
+        )?;
         log::info!(
             "zenoh unixpipe fast path 启用: base={}",
             unixpipe.base_path.display()
@@ -237,6 +242,13 @@ pub fn run_router_daemon(config: ZenohDaemonRuntimeConfig, shell: &str) -> io::R
         auth_users_file.as_deref(),
         tls_listen.as_ref(),
     )?;
+
+    // FIFO 由 Zenoh 的 unixpipe link 创建,mode 受 umask 影响(常见 0644)。
+    // 运行目录已经是 0700,这里把 FIFO 本身再收到 0600,作为第二道门。
+    #[cfg(unix)]
+    if let Some(guard) = unixpipe_path_guard.as_ref() {
+        guard.restrict_fifo_permissions()?;
+    }
     ensure_unique_daemon_name(
         &session,
         &config.namespace,
@@ -394,21 +406,44 @@ pub fn run_router_daemon(config: ZenohDaemonRuntimeConfig, shell: &str) -> io::R
         }
     });
 
-    while let Ok(query) = queryable.recv() {
-        handle_daemon_control_query(
-            &session,
-            KEYEXPR_ROOT,
-            &config.namespace,
-            shell,
-            &control_key,
-            &executor,
-            &active_session_bridges,
-            query.dequeue(),
-        )?;
+    // SIGINT/SIGTERM 必须走优雅退出: 直接按默认处置被信号打死时,Rust 不会跑 Drop,
+    // `<stem>.lock`/`<stem>.meta` 与 FIFO 就会留在运行目录里,只能等下次启动或
+    // `rdog local clean` 回收。轮询式 recv 让停止信号能把主循环唤回并正常返回。
+    let shutdown = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    crate::daemon::install_shutdown_handlers(std::sync::Arc::clone(&shutdown))?;
+
+    let mut channel_closed = false;
+    while !shutdown.load(std::sync::atomic::Ordering::Relaxed) {
+        match queryable.recv_timeout(SHUTDOWN_POLL_INTERVAL) {
+            Ok(Some(query)) => handle_daemon_control_query(
+                &session,
+                KEYEXPR_ROOT,
+                &config.namespace,
+                shell,
+                &control_key,
+                &executor,
+                &active_session_bridges,
+                query.dequeue(),
+            )?,
+            // 只是空转一轮,回去看停止标志。
+            Ok(None) => continue,
+            Err(_) => {
+                channel_closed = true;
+                break;
+            }
+        }
     }
 
-    Err(io::Error::other("Zenoh control queryable channel closed"))
+    if channel_closed {
+        return Err(io::Error::other("Zenoh control queryable channel closed"));
+    }
+
+    log::info!("zenoh router daemon 收到停止信号,回收本机 fast path 生命周期文件");
+    Ok(())
 }
+
+/// 停止信号轮询间隔: 决定 SIGTERM 到进程退出的最长时间(不影响请求处理延迟)。
+const SHUTDOWN_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(200);
 
 /// 独立探活和新观察连接不排在长命令后面; 业务请求仍走原来的串行 FIFO.
 fn control_query_handler(
@@ -1312,25 +1347,48 @@ mod tests {
         {
             // 真正的新观察连接也必须能在旧 query worker 忙时建立并完成探活.
             let observer_id = format!("observer-{}", uuid::Uuid::new_v4());
-            let to_control = build_session_to_control_key_with_root(
-                KEYEXPR_ROOT, "isolated-test", &observer_id,
-            );
+            let to_control =
+                build_session_to_control_key_with_root(KEYEXPR_ROOT, "isolated-test", &observer_id);
             let replies = session.declare_subscriber(to_control).wait().unwrap();
-            let open = session.get(key.clone())
-                .payload(self::session_payload::render_session_open_payload(&observer_id))
-                .timeout(Duration::from_secs(2)).wait().unwrap();
-            open.recv_timeout(Duration::from_secs(2)).unwrap().unwrap().result().unwrap();
+            let open = session
+                .get(key.clone())
+                .payload(self::session_payload::render_session_open_payload(
+                    &observer_id,
+                ))
+                .timeout(Duration::from_secs(2))
+                .wait()
+                .unwrap();
+            open.recv_timeout(Duration::from_secs(2))
+                .unwrap()
+                .unwrap()
+                .result()
+                .unwrap();
             assert!(bridges.lock().unwrap().contains(&observer_id));
             let to_daemon = crate::zenoh_identity::build_session_to_daemon_key_with_root(
-                KEYEXPR_ROOT, "isolated-test", &observer_id,
+                KEYEXPR_ROOT,
+                "isolated-test",
+                &observer_id,
             );
             session.put(to_daemon.clone(), "@ping#4").wait().unwrap();
-            let response = replies.recv_timeout(Duration::from_secs(2)).unwrap().unwrap();
+            let response = replies
+                .recv_timeout(Duration::from_secs(2))
+                .unwrap()
+                .unwrap();
             let text = response.payload().try_to_string().unwrap();
-            let observer: serde_json::Value = serde_json::from_str(text.strip_prefix("@response ").unwrap()).unwrap();
+            let observer: serde_json::Value =
+                serde_json::from_str(text.strip_prefix("@response ").unwrap()).unwrap();
             assert_eq!(observer["id"], 4);
-            session.put(to_daemon, self::session_payload::render_session_close_payload(&observer_id)).wait().unwrap();
-            replies.recv_timeout(Duration::from_secs(2)).unwrap().unwrap();
+            session
+                .put(
+                    to_daemon,
+                    self::session_payload::render_session_close_payload(&observer_id),
+                )
+                .wait()
+                .unwrap();
+            replies
+                .recv_timeout(Duration::from_secs(2))
+                .unwrap()
+                .unwrap();
             assert!(!bridges.lock().unwrap().contains(&observer_id));
         }
         // 先恢复本测试的 worker, 再断言结果, 失败也不留下长等待.

@@ -9,7 +9,9 @@ use std::{
 use tracing_subscriber::{filter::LevelFilter as TracingLevelFilter, fmt::writer::BoxMakeWriter};
 
 use crate::control_recording::cli::{self as record_cli, RecordCommand};
-use crate::input::{Command, ConfigCommand, RecordCommandShared, RecordSubcommand, Transport};
+use crate::input::{
+    Command, ConfigCommand, LocalCommand, RecordCommandShared, RecordSubcommand, Transport,
+};
 use crate::listener::{listen, Mode, Opts};
 
 mod agent_messaging;
@@ -25,8 +27,8 @@ mod config;
 mod control_actions;
 mod control_ax;
 mod control_bootstrap;
-mod control_cdp;
 mod control_capabilities;
+mod control_cdp;
 mod control_client_input;
 mod control_computer_act;
 mod control_core;
@@ -53,14 +55,15 @@ mod control_web;
 mod control_window;
 mod daemon;
 mod hidden_mode;
-mod win_dpi;
 mod input;
 mod listener;
+mod local_run;
 mod pty_control;
 mod screenshot;
 mod shell;
 mod task_control;
 mod tls_material;
+mod win_dpi;
 // UI script runner 复用现有 line-control transport。
 // 这里保持 CLI-side orchestration,不新增 daemon-side UI 协议。
 mod ui_script;
@@ -712,6 +715,10 @@ fn run(opts: input::Opts) -> Result<(), String> {
         Command::Overlay => {
             control_overlay::run_overlay_main().map_err(|err| err.to_string())?;
         }
+        Command::Local { command } => match command {
+            LocalCommand::List => local_run::print_list()?,
+            LocalCommand::Clean { force } => local_run::print_clean(force)?,
+        },
         Command::Config { command } => match command {
             ConfigCommand::Init { force } => {
                 let paths =
@@ -1207,8 +1214,11 @@ mod tests {
             ..DaemonConfig::default()
         };
 
-        let banner =
-            zenoh_daemon_banner(&config_without_namespace, Some("other"), Some("override.other"));
+        let banner = zenoh_daemon_banner(
+            &config_without_namespace,
+            Some("other"),
+            Some("override.other"),
+        );
         assert!(banner.contains("name=override.other"), "{banner}");
         assert!(banner.contains("namespace=other"), "{banner}");
 
@@ -1219,8 +1229,11 @@ mod tests {
             },
             ..DaemonConfig::default()
         };
-        let banner =
-            zenoh_daemon_banner(&config_with_namespace, Some("other"), Some("override.other"));
+        let banner = zenoh_daemon_banner(
+            &config_with_namespace,
+            Some("other"),
+            Some("override.other"),
+        );
         assert!(
             banner.contains("namespace=<解析失败") && banner.contains("同时给出"),
             "配置与 CLI 同给要显示冲突报错: {banner}"
