@@ -407,8 +407,9 @@ panic 于 `dynamic_link.rs:45` (unix 分支, 同一循环); `mkdir -p target/deb
 
 ### 2026-11-26 覆盖缺口演练抓到自己门代码的洞 (RAI-397 追加)
 
-drill 分支 poison 预取 URL 后第一次真的跑到 failure 分支, 发现分类步骤里
-onnxruntime dist unavailable\ 的反引号被 bash 当命令替换
-(), 摘要表变坏行。改成
- + 三个 job 各自 , 文字不再过 shell。
+drill 分支 poison 预取 URL 后, 第一次真的跑到 failure 分支, 发现分类步骤里的反引号写在
+`echo "..."` 双引号内被 bash 当命令替换 (`line 9: onnxruntime: command not found`),
+摘要表变成坏行 —— 也就是"红点说得出结论"这件事本身没做到。改成
+`scripts/ci/coverage-gap-summary.md` + 三个 job 各自 `cat`, 文字不再经过 shell 解析,
+同一份文字也不再在三处各抄一遍。本地用同一条命令回放, 摘要内容已验证完整。
 - 提交: 4a3069a
