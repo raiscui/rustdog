@@ -169,7 +169,7 @@ fn validate_transfer_path(raw: &str, verb: &str) -> Result<PathBuf, std::io::Err
     });
     if hits_staging_dir {
         return Err(std::io::Error::other(format!(
-            "@{verb} 路径不得包含保留目录 {STAGING_DIR} (该目录是暂存区专用): {raw}"
+            "file_transfer_staging_path_reserved: @{verb} 路径不得包含保留目录 {STAGING_DIR} (该目录是暂存区专用): {raw}"
         )));
     }
     Ok(path.to_path_buf())
@@ -1407,7 +1407,7 @@ mod tests {
             ))
             .unwrap_err();
             assert!(
-                err.to_string().contains("保留目录"),
+                err.to_string().contains("file_transfer_staging_path_reserved"),
                 "{} 应被拒: {err}",
                 target.display()
             );
