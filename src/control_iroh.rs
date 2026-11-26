@@ -42,6 +42,9 @@ mod lifecycle_tests;
 mod profile_tests;
 
 #[cfg(test)]
+mod registry_tests;
+
+#[cfg(test)]
 mod frame_tests;
 
 #[cfg(test)]
@@ -250,7 +253,27 @@ fn relay_allowed(url: &RelayUrl, qad_port: u16, routable: bool) -> Result<()> {
     Ok(())
 }
 
+/// Binds may name the wildcard address under a routable profile: the socket is
+/// this machine's own and is never published, so it can follow whatever address
+/// the machine currently has. Published addresses still go through `network`,
+/// which keeps a registration's candidates real.
+fn bindable(addr: SocketAddr, routable: bool) -> Result<SocketAddr> {
+    if routable && addr.ip().is_unspecified() {
+        return Ok(addr);
+    }
+    network(addr, routable)
+}
+
+/// Resolve a profile's `bind`. Under a routable profile an omitted bind — or the
+/// explicit `0.0.0.0:0` — means the wildcard socket, so a machine that changes
+/// networks does not need a new profile. A wildcard with a fixed port stays
+/// refused instead of quietly dropping the port, and the loopback profile keeps
+/// its P1 loopback socket.
 fn bind_addr(bind: Option<SocketAddr>, routable: bool) -> Result<SocketAddr> {
+    let wildcard = bind.map_or(true, |addr| addr.ip().is_unspecified() && addr.port() == 0);
+    if routable && wildcard {
+        return Ok(SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED), 0));
+    }
     network(bind.unwrap_or_else(|| "127.0.0.1:0".parse().unwrap()), routable)
 }
 
@@ -313,7 +336,7 @@ async fn endpoint_with_network(
         .portmapper_config(PortmapperConfig::Disabled)
         .relay_mode(RelayMode::Disabled);
     if let Some(bind) = bind {
-        builder = builder.bind_addr(network(bind, routable)?)?;
+        builder = builder.bind_addr(bindable(bind, routable)?)?;
     }
     if let Some(r) = relay {
         relay_allowed(&r.url, r.qad_port, routable)?;
@@ -376,14 +399,19 @@ impl Registry {
         };
         match request {
             DirectoryRequest::Register { name, addr } => {
+                // One name, one owner, one relay; the IP candidates are whatever
+                // interfaces the daemon currently has. A wildcard bind advertises
+                // the enumerated addresses, never a literal unspecified one, and
+                // the container is a set, so a repeat cannot survive either.
+                let ip_candidates = addr.ip_addrs().count();
                 if self.owners.get(&name) != Some(&peer)
                     || addr.id != peer
-                    || addr.addrs.len() != 2
-                    || addr.ip_addrs().count() != 1
+                    || ip_candidates == 0
                     || addr
                         .ip_addrs()
                         .any(|a| network(*a, self.routable).is_err() || a.port() == 0)
-                    || addr.relay_urls().collect::<Vec<_>>() != [&self.relay]
+                    || addr.relay_urls().count() != 1
+                    || addr.relay_urls().next() != Some(&self.relay)
                 {
                     return reject("iroh_registration_denied");
                 }
@@ -449,7 +477,8 @@ pub(crate) fn run_rendezvous(path: &Path) -> Result<()> {
     config.quic = Some(server::QuicConfig::new(network(cfg.qad, cfg.routable)?));
     runtime()?.block_on(async {
         let directory =
-            endpoint_with_network(key, Some(cfg.bind), DIRECTORY_ALPN, None, cfg.routable).await?;
+            endpoint_with_network(key, Some(network(cfg.bind, cfg.routable)?), DIRECTORY_ALPN,
+                                  None, cfg.routable).await?;
         let relay = server::Server::spawn(config).await?;
         let tls_addr = relay.https_addr().ok_or("missing P1 HTTPS relay")?;
         let qad = relay.quic_addr().ok_or("missing P1 QAD listener")?;
@@ -488,17 +517,19 @@ pub(crate) fn run_rendezvous(path: &Path) -> Result<()> {
 }
 
 async fn register(ep: &Endpoint, cfg: &DaemonConfig, data: &Endpoint) -> Result<Instant> {
-    let ip = *data
-        .bound_sockets()
-        .first()
-        .ok_or("missing daemon IP candidate")?;
-    let addr = EndpointAddr::from_parts(
-        data.id(),
-        [
-            TransportAddr::Ip(ip),
-            TransportAddr::Relay(cfg.relay.url.clone()),
-        ],
-    );
+    // Every interface the endpoint actually has, not just the first bound socket:
+    // a wildcard bind covers several, and a peer may not reach the first one.
+    let mut addrs: Vec<TransportAddr> = data
+        .addr()
+        .ip_addrs()
+        .filter(|ip| ip.port() != 0 && network(**ip, cfg.routable).is_ok())
+        .map(|ip| TransportAddr::Ip(*ip))
+        .collect();
+    if addrs.is_empty() {
+        return Err("missing daemon IP candidate".into());
+    }
+    addrs.push(TransportAddr::Relay(cfg.relay.url.clone()));
+    let addr = EndpointAddr::from_parts(data.id(), addrs);
     let expires = Instant::now() + LEASE;
     match directory_call(
         ep,
@@ -1360,10 +1391,16 @@ fn connect_route(
     routable: bool,
 ) -> Result<EndpointAddr> {
     let addrs = match path {
-        Route::Direct | Route::Auto => vec![TransportAddr::Ip(network(
-            *addr.ip_addrs().next().ok_or("no iroh direct candidate")?,
-            routable,
-        )?)],
+        Route::Direct | Route::Auto => {
+            let candidates = addr
+                .ip_addrs()
+                .map(|ip| network(*ip, routable).map(TransportAddr::Ip))
+                .collect::<Result<Vec<_>>>()?;
+            if candidates.is_empty() {
+                return Err("no iroh direct candidate".into());
+            }
+            candidates
+        }
         Route::Relay if addr.relay_urls().any(|url| *url == relay.url) => {
             vec![TransportAddr::Relay(relay.url.clone())]
         }

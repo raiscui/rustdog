@@ -248,3 +248,49 @@ fn frame_timeout_profile_refuses_a_budget_below_the_floor() {
         "the refusal has to name the field: {err}"
     );
 }
+
+#[test]
+fn a_routable_profile_may_bind_the_wildcard_socket() {
+    let wildcard: SocketAddr = "0.0.0.0:0".parse().unwrap();
+    assert_eq!(
+        bind_addr(None, true).expect("an omitted bind is the wildcard"),
+        wildcard,
+        "an omitted bind lets the socket follow the machine's current addresses"
+    );
+    assert_eq!(
+        bind_addr(Some(wildcard), true).expect("an explicit wildcard is accepted"),
+        wildcard
+    );
+    assert_eq!(
+        bind_addr(Some("10.22.0.2:0".parse().unwrap()), true).expect("an explicit address stays valid"),
+        "10.22.0.2:0".parse().unwrap()
+    );
+}
+
+#[test]
+fn a_bind_never_widens_what_is_refused() {
+    assert_eq!(
+        bind_addr(None, false).expect("a loopback profile keeps its default"),
+        "127.0.0.1:0".parse().unwrap()
+    );
+    let ported: SocketAddr = "0.0.0.0:5000".parse().unwrap();
+    let err = bind_addr(Some(ported), true)
+        .expect_err("a wildcard with a fixed port must be refused, not silently dropped");
+    assert!(err.to_string().contains("explicit address"), "{err}");
+    let foreign: SocketAddr = "10.22.0.2:0".parse().unwrap();
+    let err = bind_addr(Some(foreign), false)
+        .expect_err("a loopback profile still refuses a routable bind");
+    assert!(err.to_string().contains("loopback"), "{err}");
+}
+
+#[test]
+fn a_published_address_stays_explicit() {
+    let wildcard: SocketAddr = "0.0.0.0:0".parse().unwrap();
+    assert_eq!(
+        bindable(wildcard, true).expect("a routable bind may be the wildcard"),
+        wildcard
+    );
+    let err = network(wildcard, true)
+        .expect_err("a registration candidate cannot be the wildcard itself");
+    assert!(err.to_string().contains("explicit address"), "{err}");
+}

@@ -303,11 +303,18 @@ with tempfile.TemporaryDirectory(prefix="iroh-pty-", dir=scratch) as dirname:
                         **({"routable": True} if from_lan else {}))
     frame_budget = os.environ.get("RAI305_FRAME_MS")
     budget = {"frame_timeout_ms": int(frame_budget)} if frame_budget else {}
+    # RAI305_WILDCARD=1 leaves the daemon's bind out, so it binds the wildcard
+    # socket and registers every interface the network stack has.
+    wildcard_bind = from_lan and os.environ.get("RAI305_WILDCARD") == "1"
+    daemon_scope = ({} if not from_lan else
+                    {"routable": True} if wildcard_bind else
+                    {"routable": True, "bind": addr(routable["daemon"], 0)})
     daemon = config("daemon", key_file=daemon_key, directory=dict(id=rendezvous_id,
                                                                  addr=directory_addr),
                     relay=relay, name=target, allow=[owner_id, stranger_id],
-                    policy_file=str(policy), **budget,
-                    **({"routable": True, "bind": addr(routable["daemon"], 0)} if from_lan else {}))
+                    policy_file=str(policy), **budget, **daemon_scope)
+    if wildcard_bind:
+        print("daemon: wildcard bind (profile names no address)", flush=True)
 
     def client_profile(label, key_path, path="direct", lease_ttl_ms=None):
         values = dict(key_file=key_path, directory=dict(id=rendezvous_id, addr=directory_addr),
@@ -420,6 +427,32 @@ with tempfile.TemporaryDirectory(prefix="iroh-pty-", dir=scratch) as dirname:
         response = json.loads(result.stdout.strip().removeprefix("@response "))
         assert response["id"] == 7 and response["value"]["pong"] is True, result.stdout
         print(f"ping: id=7 pong=true exit=0", flush=True)
+
+        if from_lan:
+            case("a client with no bind follows the address the machine has")
+            named = client_profile("wildcard", owner_key)
+            wildcard = json.loads(Path(named).read_text())
+            wildcard.pop("bind", None)
+            wildcard_path = home / "wildcard-client.json"
+            wildcard_path.write_text(json.dumps(wildcard))
+            result = control(wildcard_path, "@ping#9")
+            combined = result.stdout + result.stderr
+            assert result.returncode == 0, combined
+            response = json.loads(result.stdout.strip().removeprefix("@response "))
+            assert response["id"] == 9 and response["value"]["pong"] is True, result.stdout
+            print("bind: omitted bind reached the daemon from a non-loopback interface", flush=True)
+
+            case("a bind the machine does not have is still refused")
+            absent = json.loads(Path(named).read_text())
+            absent["bind"] = "10.99.99.99:0"
+            absent_path = home / "absent-client.json"
+            absent_path.write_text(json.dumps(absent))
+            result = control(absent_path, "@ping#10")
+            combined = result.stdout + result.stderr
+            assert result.returncode != 0, f"a nonexistent bind address was accepted: {combined}"
+            assert "Failed to bind sockets" in combined or "bind" in combined, combined
+            print(f"bind: an address the machine lacks still fails (exit={result.returncode})",
+                  flush=True)
 
         case("a stranger is refused before any process exists")
         result = control(client_profile("stranger", stranger_key), "--pty", "--", "/bin/sh", "-c",

@@ -20,10 +20,18 @@ relay 侧另有一个 `advertise` 字段（缺省空），只改写给对端的 
 
 运维事实（真机跨网两轮后补，别当 bug 查）：
 
-- **客户端 `bind` 必须跟本机当前地址走。** [`bind_addr`](../src/control_iroh.rs) 把 `bind` 交给 [`network`](../src/control_iroh.rs) 直接绑，所以换网（家宽 → 手机热点）后**已在跑的会话不受影响**（走已建立的连接），但**新建**连接仍用旧地址会 `EADDRNOTAVAIL`，CLI 表面是 `Failed to bind sockets`，看起来像链路故障。实测家宽 `192.168.50.143` 切热点 `172.20.10.2`：沿用旧值报该错，改成新值立刻 `iroh_path=relay` + `pong:true`。排障顺序是先重填 `bind`，不是先怀疑 relay 或 daemon。
+- **`bind` 可以整条不写。** [`bind_addr`](../src/control_iroh.rs) 在 `routable` 下把"省略"和 `0.0.0.0:0` 都解析成通配绑定 `0.0.0.0:0`（[`bindable`](../src/control_iroh.rs) 让绑定面接受未指定地址），daemon 与 client 都适用：换网（家宽 → 手机热点）、换 IP 都不用改配置。只有这两种写法被放宽——通配地址 + 固定端口仍按 `iroh routable profile requires an explicit address` 拒，不静默丢掉端口；loopback profile 仍要回环 socket。**被通告/被拨的地址永远具体**：daemon 注册时用 [`register`](../src/control_iroh.rs) 枚举端点实际拥有的接口地址（通配绑定下是逐接口展开，不会出现 `0.0.0.0` 字面值），client 侧 [`connect_route`](../src/control_iroh.rs) 把**所有**候选 IP 一起拨，不再只用第一个。若主动钉了具体地址，它仍须跟本机当前地址走：旧地址不在网卡上时新建连接 `EADDRNOTAVAIL`，CLI 表面是 `Failed to bind sockets`（实测 `192.168.50.143` 切 `172.20.10.2` 沿用旧值即报该错），这时先重填 `bind`。
 - **relay 主机的运行库**：本地 glibc 2.39 构建在 glibc 2.38 的宿主上 `GLIBC_2.39 not found`，用 `rust:1-slim-bookworm` 容器构建可解。用 `LD_LIBRARY_PATH` 外带依赖库时只能带 GUI 那几个（`libgbm`/`wayland`/`xcb`/`drm`/`expat`/`Xau`/`Xdmcp`/`bsd`/`md`/`ffi`/`stdc++`），把 `ld-linux`/`libc`/`libm`/`libpthread`/`libgcc_s` 混进去会让进程直接 `Floating point exception (core dumped)`。
 
+注册契约的形状（[`Registry::request`](../src/control_iroh.rs) 的 `Register` 分支）：
+- **至少 1 个 IP 候选 + 恰好 1 个 relay，且该 relay 等于配置值**；每个 IP 候选单独过 [`network`](../src/control_iroh.rs) 且端口非 0。通配绑定朝多网卡展开，所以候选数不设上限——这是"多候选"的唯一合法来源。
+- **去重不需要单独代码**：`EndpointAddr.addrs` 是 `BTreeSet<TransportAddr>`，重复地址在容器层就不存在。
+- **一个名字只有一个 owner**：`owners[name] == Some(peer)` 与 `addr.id == peer` 两条保留不动。名字是别人拨的地址索引，允许改绑或抢占等于允许冒名注册；这条与候选数量无关，放宽候选数不动它。
+- 拒绝仍只报一个 `iroh_registration_denied`：0 个 IP、未指定地址（`0.0.0.0` 字面值或端口 0）、relay 不匹配、非 owner 注册，四种都走这一个码。
+
 实测（模拟 1:1 NAT 的三个网络栈，`tests/manual/iroh_pty_advertise.sh` → `iroh_pty_lane.py --advertise`，回执 `receipts/u10/advertise.log`）：绑私网通告公网时 daemon 的 relay home 是通告值、注册被接受、ping 通过；不写 `advertise` 时注册被拒；通告一个没人持有的地址时 daemon 非零退出且从未注册。公网真机由 RAI-302 侧另判。
+
+通配绑定的实测（`receipts/u11/`）：daemon 通配绑定（netns 双接口）注册成功、client 省略 `bind` 后从非回环接口 ping 通过（`routable-wildcard.log` 17/17，`routable.log` 17/17，显式与通配两侧都不回归）；`bind` 填本机没有的地址仍非零退出；注册契约的四个负例与多候选正例由 `src/control_iroh/registry_tests.rs` 覆盖。
 
 写帧失败即作废该流：[`FrameGuard`](../src/control_iroh.rs) 在帧被完整写入之前不放行下一帧，任何一次写失败或写超时都把这条流标记成不可用，之后的所有写直接返回 [`FRAME_BROKEN`](../src/control_iroh.rs)，lane 随之结束并用同一 reason 关闭会话（[`abort_broken_frame`](../src/control_iroh.rs)）。理由是残留半帧会让后续帧错位解析，宁可断开也不继续发。
 
