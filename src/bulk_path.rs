@@ -30,18 +30,18 @@ impl PathCapability {
         bulk_path_pin: false,
     };
 
-    /// 有 relay 跳但**钉不住** bulk 连接: 该传输不得承载 bulk。
+    /// 有 relay 跳但**钉不住** bulk 连接: 该传输不得承载 bulk (该拒绝, 而不是"大致直连")。
     ///
-    /// 这是 iroh lane 今天的形态 —— 它只服务 `@ping` / `@pty`, 没有 bulk 的数据面, 也就谈不上
-    /// 把 bulk 钉在直连上。宁可不接受 bulk, 也不接受一个"大致直连"。
+    /// 今天**没有任何适配器处于这个状态** —— iroh lane 补上路径采样之后已翻到 `PATH_AWARE_PINNED`
+    /// (RAI-476 步骤 2), 其余传输没有 relay 跳。它只作为判定表的一格留在测试里。
+    #[cfg(test)]
     pub(crate) const PATH_AWARE_UNPINNED: Self = Self {
         path_aware: true,
         bulk_path_pin: false,
     };
 
-    /// 有 relay 跳且能钉住 —— **今天没有任何适配器处于这个状态**, 所以它只在测试里构造。
-    /// 适配器补上 pin 的那天 (RAI-476) 去掉这行 `cfg`, 它就会成为生产路径上的第三种能力。
-    #[cfg(test)]
+    /// 有 relay 跳且能钉住 —— iroh lane 的形态 (RAI-476 步骤 2): open 与每个 chunk 边界
+    /// 读当前连接路径, 只放行 `direct`。
     pub(crate) const PATH_AWARE_PINNED: Self = Self {
         path_aware: true,
         bulk_path_pin: true,
@@ -52,10 +52,7 @@ impl PathCapability {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PathClass {
     Direct,
-    /// **今天没有生产者**: 生产路径上没有任何东西能产出 `relay` —— iroh lane 不承载 bulk 数据面
-    /// (RAI-476), 其余传输没有 relay 跳。编译器报 `never constructed` 正是这个事实的指纹。
-    /// 等适配器读采样之后撤掉这行 allow, 它会成为门禁里真正会走到的分支。
-    #[allow(dead_code)]
+    /// 生产者是 iroh lane 的路径采样 (`PathSampler::Lane`); 其余传输没有 relay 跳。
     Relay,
     /// 读不出 / 采样缺失 / 解析失败 —— 与"读到了但不是直连"同等对待, 一律 fail-closed。
     Unknown,

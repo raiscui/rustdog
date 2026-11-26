@@ -404,15 +404,24 @@ daemon 都会把 178 MB 从 relay 推出去. 所以两端都要, 且两端都要
 
 把后者当成前者, 就得到一条"看起来有门禁、其实没有"的路径, 而那正是本规格要否掉的东西.
 
-**今天这条不变量的落地形态要说准 (2026-11-26 实现阶段回填).** iroh lane 的准入面只有 `@ping` 与
-`@pty` (`ping_only` / `LANE_REFUSED`, 见 `specs/rdog-iroh-admission-contract.md`), bulk 动词在那条
-通道上根本不被接受; 也就是说"relay 上 bulk 字节为 0"今天由**能力拒绝**保证, 而不是由**路径判定**
-保证. 这不是权宜之计 —— 反过来"放行 bulk 再靠路径采样兜"会让这条不变量空真: 一次压根没发出字节的
-尝试当然记 0, 而空真的不变量在验收里和成立长得一模一样.
+**当前落地形态 (2026-11-26 RAI-476 步骤 1+2 回填).** iroh lane 现在承载 bulk 数据面: 七个 bulk 动词
+与 `@ping` 共用同一条连接, 每条 chunk 是一条独立请求行 (`serve_readonly` / `serve_admitted`, 见
+`specs/rdog-iroh-admission-contract.md`). 适配器的声明随之翻到 `path_aware=true` /
+`bulk_path_pin=true` (`src/control_iroh.rs` 的 `BulkPathGate`), 判定落在 §3.1 的第一至第五行:
 
-因此适配器今天的声明是 `path_aware=true` / `bulk_path_pin=false`, 落到 §3.1 的最后一行: 该 lane 上的
-bulk 一律以 `iroh_bulk_path_pin_unavailable` 拒绝. **适配器补上路径 pin 之后, 必须回来重写这一段的
-理由** —— 否则下一个读到 `bulk_path_pin=false` 的人会以为门禁坏了, 而不是"这条通道还没开 bulk".
+- open 与每个 chunk 边界各采样一次当前连接路径 (`route(&conn, routable)` → `PathClass`);
+- `direct` 放行; `relay` 拒 `iroh_direct_path_unavailable`; 读不出拒 `iroh_path_unknown`;
+- 本次尝试**曾**观测到 `direct`、之后掉成 `relay` ⇒ 拒 `iroh_direct_path_lost` (「曾直连」由
+  `established_direct` 记录, 换 `transfer_id` 即复位 —— 上一次尝试的直连不是这一次的证据);
+- `@file-list` / `@file-cancel` 不搬字节, 不过路径门禁: 拒一条 cancel 只会把半成品留在盘上。
+
+上一版这一段写的是"bulk 在 lane 上根本不被接受, 不变量由**能力拒绝**保证". 那句话现在不成立, 而它
+当时是对的设计: 在路径判定接上之前, 能力拒绝是唯一不空真的保证. 现在门禁真的会拒字节, 所以
+"relay 上 bulk 字节为 0" 第一次可以靠**判定**而不是靠"没发字节"来主张.
+
+**验收边界 (别读过头)**: 上述事实的运行时证据只有**回环** (§8 的用例与 `src/control_iroh/bulk_tests.rs`)
+—— 回环拓扑只会给出 `direct`, 所以 `relay` / 读不出 / 中途掉路径三种读数由测试钉住喂进门禁, 不是
+真拓扑采样. 真机 (RAI-476 步骤 3+4) 的采样与两端快照 join 都还没做.
 
 
 ---
@@ -513,23 +522,24 @@ relay 计数还没接线, 见 RAI-476):
 
 断言必须是**严格不等式** `> 0`. `>= 0` 的断言在计数器坏掉时照样通过, 等于没有正对照.
 
-> 实现状态 (2026-11-26): 判定表、三格语义与快照格式已落地在 `src/bulk_path.rs`, iroh lane 上的
-> bulk 动词已经按能力表以 `iroh_bulk_path_pin_unavailable` 拒绝。**正对照仍未执行** —— 它需要一条
-> 真的走 relay 的拓扑 (RAI-366), 在那之前"relay 上 bulk 字节为 0"这条不做结论。
+> 实现状态 (2026-11-26 更新): 判定表、三格语义与快照格式在 `src/bulk_path.rs`; iroh lane 已按
+> `path_aware=true` / `bulk_path_pin=true` 承载 bulk, 并在 open 与每个 chunk 边界读路径 (RAI-476
+> 步骤 1+2). **正对照仍未执行** —— 它需要一条真的走 relay 的拓扑 (RAI-366), 在那之前
+> "relay 上 bulk 字节为 0"这条不做结论。
 >
-> **客户端门禁恒传 `established_direct = false`**, 所以 §2.5 D1 的「中途 direct → relay」
-> (`iroh_direct_path_lost`) **今天不可产生**: 判定表里那个分支的语义已定义、门禁也按它分支, 但
-> 没有适配器能在读采样的同时记录「本次是否曾观测到 direct」。它只有单测覆盖, **不得据此主张
-> "中途路径丢失已处理"**; 生产者随 RAI-476 的数据面适配器一起到来。
+> **`established_direct` 现在有了生产者, 但只在 daemon 侧**: `BulkPathGate` 在读采样的同时记录
+> 「本次尝试是否曾观测到 direct」, 所以 §2.5 D1 的「中途 direct → relay」(`iroh_direct_path_lost`)
+> 在 lane 上真的会走到, 并有回环用例 (钉住读数) 与门禁单测覆盖. **客户端门禁仍恒传
+> `established_direct = false`** (`src/transfer_cli.rs`), 因为客户端还没有采样源 —— 所以
+> "上传方向的中途路径丢失已处理"**不得主张**: 上传字节由客户端发出, 那一侧的记录还没接上.
 >
-> 另有一处**带撤除条件的** `#[allow(dead_code)]`: `PathClass::Relay` 在生产路径上没有生产者 (同上,
-> 要等 RAI-476 的适配器读采样), 编译器报 `never constructed` 正是这个事实的指纹。**RAI-476 落地后
-> 撤掉那行 allow**, 它就会成为门禁里真正会走到的分支。一条带理由和到期条件的 `allow` 是文档,
-> 不带的才是债。
+> `PathClass::Relay` 上那行带撤除条件的 `#[allow(dead_code)]` 已按约定撤掉: 采样生产者到位后,
+> 它是门禁里会走到并有用例覆盖的分支.
 >
-> 跑批单 (`handoffs/rai367/positive-control-runsheet.md`) 已写好并写清了三件边界: iroh lane 今天
-> 不承载 bulk 数据面, 所以单子执行的是**仪表验证 + 门禁验证**而不是 A 类验收; daemon 侧 relay 计数
-> 尚未接线, 所以快照今天只有客户端那一半; **拿不到正对照计数时, 门禁那个"零"不得用于任何结论**。
+> 跑批单 (`handoffs/rai367/positive-control-runsheet.md`) 是 RAI-367 当时的形态记录 (那时 lane
+> 不承载 bulk), 不再是当前行为的描述; 新的回环用例在 `src/control_iroh/bulk_tests.rs`. daemon 侧
+> relay 计数尚未接线, 所以快照里仍然只有客户端那一半; **拿不到正对照计数时, 门禁那个"零"不得
+> 用于任何结论**。
 
 ---
 
