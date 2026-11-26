@@ -13,6 +13,9 @@ use std::{
 
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 
+#[path = "support/tty_script.rs"]
+mod tty_script;
+
 fn next_free_port() -> u16 {
     let listener = TcpListener::bind(("127.0.0.1", 0)).expect("ephemeral listener should bind");
     let port = listener
@@ -331,15 +334,7 @@ fn control_pty_string_shorthand_should_forward_enter_as_carriage_return_in_tty()
     );
 
     let binary = rdog_binary_path();
-    let mut child = Command::new("script")
-        .args([
-            "-q",
-            "/dev/null",
-            &binary.to_string_lossy(),
-            "control",
-            "127.0.0.1",
-            &port.to_string(),
-        ])
+    let mut child = tty_script::scripted(&binary, &["control", "127.0.0.1", &port.to_string()])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -413,15 +408,7 @@ fn control_pty_ctrl_c_should_exit_remote_program_and_return_to_control_prompt() 
     );
 
     let binary = rdog_binary_path();
-    let mut child = Command::new("script")
-        .args([
-            "-q",
-            "/dev/null",
-            &binary.to_string_lossy(),
-            "control",
-            "127.0.0.1",
-            &port.to_string(),
-        ])
+    let mut child = tty_script::scripted(&binary, &["control", "127.0.0.1", &port.to_string()])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -503,8 +490,9 @@ fn control_pty_should_treat_control_words_as_remote_input() {
         "daemon control lane never started listening on port {port}",
     );
 
-    let mut child = Command::new(rdog_binary_path())
-        .args([
+    let mut child = tty_script::scripted(
+        &rdog_binary_path(),
+        &[
             "control",
             "127.0.0.1",
             &port.to_string(),
@@ -513,12 +501,13 @@ fn control_pty_should_treat_control_words_as_remote_input() {
             "/bin/sh",
             "-c",
             r#"IFS= read -r line; printf 'GOT:%s' "$line""#,
-        ])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("pty control cli should start");
+        ],
+    )
+    .stdin(Stdio::piped())
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped())
+    .spawn()
+    .expect("pty control cli should start");
 
     child
         .stdin
