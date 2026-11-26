@@ -1741,6 +1741,11 @@ mod tests {
     /// parallel-test-global-state-single-lock.md 的四例收敛纪律)。
     static TRANSFER_TABLE_TEST_LOCK: Mutex<()> = Mutex::new(());
 
+    /// 回收是**全局**动作: 一次 `reap_idle_transfers` 会扫遍所有会话与所有孤儿, 所以两个并行用例
+    /// 即使各自只断言自己的文件, 也会互相把对方的条目回收掉 (CI 上实测: 一个用例的 `reaped`
+    /// 从 1 变成 2, 另一个的孤儿先被删)。凡是调用回收或往孤儿表里塞条目的用例都必须先拿这把锁。
+    static SWEEP_TEST_LOCK: Mutex<()> = Mutex::new(());
+
     /// 只在"我这条用例的 id"上做断言, 不断言整表条数 —— 同进程并行跑的其他用例
     /// 随时可能在表里放着它们的会话, 整表计数必然 flaky。
     fn active_ids() -> Vec<String> {
@@ -1935,7 +1940,10 @@ mod tests {
     }
 
     #[test]
-    fn restored_index_lets_the_sweep_reclaim_after_restart() {
+    fn restored_index_lets_the_sweep_reclaim_after_restart() {        let _sweep_guard = SWEEP_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
         // 验收 1: 重启后 TTL 仍能回收遗留半成品 (盘上无残留)。
         let _guard = TRANSFER_TABLE_TEST_LOCK
             .lock()
@@ -2138,7 +2146,10 @@ mod tests {
     }
 
     #[test]
-    fn orphaned_partial_is_reclaimed_by_the_resume_window() {
+    fn orphaned_partial_is_reclaimed_by_the_resume_window() {        let _sweep_guard = SWEEP_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
         // 孤儿按**续传窗口**回收 (规格 C3), 不是按空闲阈值: 空闲只说明"没人来了",
         // 那些字节仍然有效, 要留到客户端还能回来的最后一刻。
         let dir = std::env::temp_dir().join(format!("rdog-ft-orphan-{}", std::process::id()));
@@ -2169,7 +2180,10 @@ mod tests {
     }
 
     #[test]
-    fn orphan_survives_restart_through_the_index() {
+    fn orphan_survives_restart_through_the_index() {        let _sweep_guard = SWEEP_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
         // 孤儿不落盘的话, 重启后既没人认领也没人回收 —— 正是 RAI-424 要消灭的永久残留。
         let _guard = TRANSFER_TABLE_TEST_LOCK
             .lock()
@@ -2211,7 +2225,10 @@ mod tests {
     }
 
     #[test]
-    fn partial_outside_the_resume_window_is_discarded_and_reported() {
+    fn partial_outside_the_resume_window_is_discarded_and_reported() {        let _sweep_guard = SWEEP_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
         // A5: 窗口外的半成品删掉并回报, 不能静默 —— "过期被丢、从 0 开始"与"续上了"在回执上
         // 必须分得开, 否则就是另一个版本的静默重传。
         set_limits_for_tests(TransferLimits {
