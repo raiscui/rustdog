@@ -42,6 +42,7 @@ daemon_name = "mac.lab"
 listen_endpoints = [
   "tcp/0.0.0.0:17447",
 ]
+# 这个值是**等待答复的地板**, 不是总预算: 见下面「超时: 60s 地板」一节。
 request_timeout_ms = 3000
 startup_guard_window_ms = 1000
 ```
@@ -63,6 +64,34 @@ rdog control --transport zenoh --target-name mac.lab
 ```bash
 rdog control mac.lab --entry-point tcp/192.168.1.20:17447
 ```
+
+## 超时: line-control 的响应等待有 60s 地板
+
+**`request_timeout_ms` 只能把 line-control 的响应等待抬高, 永远压不到 60s 以下。**
+
+源码是唯一真相: `src/zenoh_control/client_pty.rs` 的
+`LINE_CONTROL_RESPONSE_TIMEOUT = 60s`, 等待期限取 `LINE_CONTROL_RESPONSE_TIMEOUT.max(timeout)`。
+这个函数被 unixpipe / tcp / websocket 各条 transport 共用, 所以**行为与 transport 无关** ——
+本机 fast path 和跨网 tcp 是同一个地板。
+
+实测 (2026-11-27, RAI-592, `request_timeout_ms = 3000`):
+
+| 命令 | 结果 |
+| --- | --- |
+| `@cmd:"sleep 5; printf SLOW5"` | **成功**, 5046ms (5s > 3s 照样过) |
+| `@cmd:"sleep 62; printf LATE"` | **失败**, exit 1, 60050ms, `Zenoh session bridge 在 60000ms 内未收到 final @response` |
+
+**同一个参数有两副语义** (写在这里, 比两处各解释一次有用):
+
+- **生效**: 解析目标 (`resolve_target`)、建立 session bridge (`ensure_daemon_session_bridge_open`) ——
+  这几步超过 `request_timeout_ms` 就会失败;
+- **不生效**: 等待 `@response` 的那一段 —— 它走 60s 地板。
+
+**本地长命令靠什么保证不挂住**: 60s 地板本身就是保护 (到点返回
+`Zenoh session bridge 在 60000ms 内未收到 final @response`), 但它**不切断已在跑的命令**。
+要让慢命令早收手, 用命令自己的超时 (如 `@spawn` 的 task 生命周期、或 `@cmd` 里的 `timeout(1)`)
+而不是调小 `request_timeout_ms`。注意 `rdog control` 多行 one-shot 中途失败时不会重跑整段脚本
+(已执行的行的副作用可能已发生) —— 见失败文案里的「不要盲目重跑整段脚本」。
 
 ## code agent 心智模型
 
