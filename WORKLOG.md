@@ -22,14 +22,14 @@
 - 定位链: 远端 pty termios 正常 → helper 即前台 pgrp → python `pty.fork` 纯 kernel 对照正常 →
   直连 daemon TCP 发同一帧正常 → strace 双侧发现 daemon 收到帧却只写出过 `\4` 没写出 `\3`。
 - 改法: 入口不清 buf, `total` 从 `buf.len()` 起算, 只在整行交出/超限丢弃/干净 EOF 时清空。
-- 评审修复 41c4108: 状态收进 `LineReadState`(半行 + 丢弃标记 + 已丢弃字节数), 修 CRLF 边界
+- 评审修复 e884f71: 状态收进 `LineReadState`(半行 + 丢弃标记 + 已丢弃字节数), 修 CRLF 边界
   (尾部 `\r` 不计入内容长度) 与丢弃计数跨读超时丢失(4097 报成 1537); 三个调用方共用同一状态。
-- 评审修复 8c7f922: 跨调用保留的半行会绕过 8 MiB 上限(错误分支在长度检查前返回);
+- 评审修复 6a009ae: 跨调用保留的半行会绕过 8 MiB 上限(错误分支在长度检查前返回);
   改成进入时先判 limit、丢弃状态用 buf 留 `limit+1` 字节跨调用传递(截断而非清空),
   否则下一轮会忘记状态把剩余数据当成新行。回归测试覆盖 8 块超限分片。
 - 回执: `control_pty` 9 passed(断言零改动) / 全量单测 1110 passed / control_tty·shell_pty·control_lanes·
   control_websocket·connect_modes 全绿; 分片复现命令修复后 3/3 成功。
-- 提交: 67f8600 (评审修复 8c7f922 / 41c4108; rebase 到 03ff36e 后这三条即当前 head 上的工作提交)
+- 提交: 49ea862 (评审修复 6a009ae / e884f71; 均为 rebase 到当前 main 后的工作提交)
 
 ## [2026-11-26] tests/ TTY 夹具改按能力探测选择 script 调用形式 (RAI-410)
 
