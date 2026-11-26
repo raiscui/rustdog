@@ -74,3 +74,29 @@ fn the_frame_budget_never_undercuts_the_profile() {
         "空帧同样按 profile"
     );
 }
+
+#[test]
+#[should_panic(expected = "Cannot start a runtime from within a runtime")]
+fn blocking_on_a_handle_inside_an_async_task_is_the_panic_we_hit_on_the_lane() {
+    // 真机现场: `with_bulk_lane` 的握手留在 async 块里, 而 `IrohLineTransport` 每次读写都是
+    // `handle.block_on` —— 在 async 上下文里再 block_on 自己必然 panic, 且这个 panic 与 handle
+    // 是不是同一个运行时无关 (这里就是同一个)。
+    let rt = super::runtime().unwrap();
+    rt.block_on(async {
+        let handle = super::Handle::current();
+        let _ = handle.block_on(async { 1 });
+    });
+}
+
+#[test]
+fn the_same_block_on_on_a_blocking_thread_is_fine() {
+    // 修法的形状与 PTY 客户端一致: 行 I/O 整段放进 `spawn_blocking`, 在那里 block_on 是合法的。
+    let rt = super::runtime().unwrap();
+    let value = rt.block_on(async {
+        let handle = super::Handle::current();
+        tokio::task::spawn_blocking(move || handle.block_on(async { 7u64 }))
+            .await
+            .expect("blocking task joined")
+    });
+    assert_eq!(value, 7, "阻塞线程上 block_on 同一个 runtime 是合法的");
+}

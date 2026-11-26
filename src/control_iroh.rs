@@ -52,6 +52,9 @@ mod frame_tests;
 mod bulk_tests;
 
 #[cfg(test)]
+mod lane_runtime_tests;
+
+#[cfg(test)]
 mod readonly_tests {
     #[test]
     fn default_iroh_gate_admits_only_ping() {
@@ -3281,192 +3284,74 @@ where
         let (send, read) = timeout(IO, conn.open_bi()).await??;
         let mut transport =
             ControlTransport::Iroh(IrohLineTransport::new(send, read, cfg.frame_timeout()));
-        let session = uuid::Uuid::new_v4().to_string();
-        if let Err(err) = admit_lane(&mut transport, &key, target, &session, ttl) {
-            // 未开准入策略的对端在第一条非 `@ping` 行上就拒 (`serve_ping`), 然后按 DENIED 关流:
-            // 那是"这条入口不承载 bulk"的能力事实, 与路径类别无关, 重试也没有用。
-            let refused = if denied_close(&conn).await {
-                format!(
-                    "{}: 对端没有准入 lane (没有 policy_file), 不承载 bulk: {err}",
-                    crate::bulk_path::IROH_BULK_PATH_PIN_UNAVAILABLE
-                )
-            } else {
-                err.to_string()
-            };
-            data.close().await;
-            return Err(refused.into());
-        }
-        transport.set_read_timeout(None)?;
-        let renewal_stop = Arc::new(AtomicBool::new(false));
-        let renewal = spawn_lease_renewer(
-            transport.try_clone_writer()?,
-            key.clone(),
-            target,
-            session,
-            ttl,
-            renewal_stop.clone(),
-        );
-        let lane = IrohBulkLane {
-            transport,
-            conn,
-            routable: cfg.routable,
-            poisoned: None,
-            renewal_stop,
-            renewal: Some(renewal),
-        };
+        // 握手与 body 都必须跑在**阻塞线程**上。
+        //
+        // `IrohLineTransport` 的每次读写都是 `handle.block_on(...)` (它要在一个同步接口后面驱动
+        // 异步流); 而这里的外层已经是 `runtime().block_on(...)`, 在 async 上下文里再 block_on 自己
+        // 会 panic: "Cannot start a runtime from within a runtime"。PTY 客户端一直是把整段行 I/O
+        // 放进 `spawn_blocking` 的 (`client_lane`), 这里之前把握手留在了 async 块里 —— 回环集成测试
+        // 用的是一次性 TCP 替身, 照不到这一格, 所以真机第一次跑 `--put` 就炸。
+        let probe = conn.clone();
+        let routable = cfg.routable;
         let outcome = tokio::task::spawn_blocking(move || {
-            let mut lane = lane;
+            let session = uuid::Uuid::new_v4().to_string();
+            if let Err(err) = admit_lane(&mut transport, &key, target, &session, ttl) {
+                // "是不是被 DENIED 关的"要 conn 与 runtime 才判得出来, 交回 async 侧。
+                return Err((err.to_string(), true));
+            }
+            if let Err(err) = transport.set_read_timeout(None) {
+                return Err((format!("清不掉握手读超时: {err}"), false));
+            }
+            let renewal_stop = Arc::new(AtomicBool::new(false));
+            let renewal = match transport.try_clone_writer() {
+                Ok(writer) => spawn_lease_renewer(
+                    writer,
+                    key.clone(),
+                    target,
+                    session,
+                    ttl,
+                    renewal_stop.clone(),
+                ),
+                Err(err) => return Err((format!("续期写半边拿不到: {err}"), false)),
+            };
+            let mut lane = IrohBulkLane {
+                transport,
+                conn,
+                routable,
+                poisoned: None,
+                renewal_stop,
+                renewal: Some(renewal),
+            };
             let value = body(&mut lane);
             lane.shutdown();
-            value
+            Ok(value)
         })
         .await
         .map_err(|err| -> Box<dyn std::error::Error + Send + Sync> { err.to_string().into() })?;
+        let outcome = match outcome {
+            Ok(value) => value,
+            Err((message, true)) => {
+                // 未开准入策略的对端在第一条非 `@ping` 行上就拒 (`serve_ping`), 然后按 DENIED 关流:
+                // 那是"这条入口不承载 bulk"的能力事实, 与路径类别无关, 重试也没有用。
+                let refused = if denied_close(&probe).await {
+                    format!(
+                        "{}: 对端没有准入 lane (没有 policy_file), 不承载 bulk: {message}",
+                        crate::bulk_path::IROH_BULK_PATH_PIN_UNAVAILABLE
+                    )
+                } else {
+                    message
+                };
+                data.close().await;
+                return Err(refused.into());
+            }
+            Err((message, false)) => {
+                data.close().await;
+                return Err(message.into());
+            }
+        };
         data.close().await;
         Ok(outcome)
     })
-}
-
-// ---------------------------------------------------------------------------
-// F8 用的临时探头: 空闲 relay path 上 iroh 累计字节的增量速率
-//
-// **这是诊断探头, 不用于出货验收**: 它不进产品 help (`hide = true`), 也不承担任何传输能力.
-// 它存在的唯一理由: `--put/--get` 在 relay 上会在 open 就被门禁拒 (括号建立之后立刻终态),
-// 拿不到一段安静的空闲窗口, 于是 `relay_bytes_zero` 这个结论没有分母.
-//
-// 计数面与产品**同一处**: `RelayReading::read` (下面每行 JSON 里的 tx/rx/paths 就是它读出来的),
-// 所以这里的数与快照里的数可比.
-// ---------------------------------------------------------------------------
-
-/// 每行一个 JSON, 最后一行是 `{"summary": …}`。
-pub(crate) fn run_relay_baseline(
-    path: &Path,
-    peer: &str,
-    seconds: u64,
-    interval_ms: u64,
-) -> Result<()> {
-    if seconds == 0 {
-        return Err("--seconds 必须大于 0".into());
-    }
-    if interval_ms == 0 {
-        return Err("--interval-ms 必须大于 0".into());
-    }
-    let measure = move |lane: &mut IrohBulkLane| measure_relay_idle(lane, seconds, interval_ms);
-    if peer.contains('/') {
-        return with_bulk_lane(path, peer, measure)?;
-    }
-    // 一个裸 endpoint id: 没有目录可查, 就按 profile 的 relay 直连 —— 测量场景本来就要 relay.
-    let id: EndpointId = peer
-        .parse()
-        .map_err(|_| "peer 既不是 NAMESPACE/NAME 也不是 endpoint id")?;
-    let cfg: ClientConfig = profile(path)?;
-    let addr = EndpointAddr::from_parts(id, [TransportAddr::Relay(cfg.relay.url.clone())]);
-    with_bulk_lane_at(cfg, addr, measure)?
-}
-
-/// 连上之后的测量: 一条 `@ping` 拿 pong, 然后什么都不发, 按间隔采 relay 累计字节。
-fn measure_relay_idle(lane: &mut IrohBulkLane, seconds: u64, interval_ms: u64) -> Result<()> {
-    let started = Instant::now();
-    let pong = lane
-        .request("@ping", CONNECT)
-        .map_err(|err| format!("@ping 失败: {err}"))?;
-    println!(
-        "{}",
-        serde_json::json!({ "kind": "pong", "reply": pong })
-    );
-
-    // 测量的是"relay 上什么都不传"的噪声: 落成 direct 就不是同一个量, 直接退出而不是继续数。
-    let first = lane.observe();
-    if first.class != PathClass::Relay {
-        return Err(format!(
-            "连接落成了 {:?}, 不是 relay: 这不是空闲 relay 噪声的测量场景 (profile 的 path 用 relay)",
-            first.class
-        )
-        .into());
-    }
-
-    let interval = Duration::from_millis(interval_ms);
-    let window = Duration::from_secs(seconds);
-    let mut previous: Option<RelayReading> = None;
-    let mut first_reading: Option<RelayReading> = None;
-    let mut samples = 0u64;
-    let mut last: Option<RelayReading> = None;
-    let mut interval_elapsed = Duration::ZERO;
-
-    while interval_elapsed < window {
-        std::thread::sleep(interval.min(window - interval_elapsed));
-        interval_elapsed += interval;
-        samples += 1;
-        let observation = lane.observe();
-        if observation.class != PathClass::Relay {
-            return Err(format!(
-                "第 {samples} 次采样时路径变成 {:?}: 空闲窗口不再落在 relay 上, 读数不可用",
-                observation.class
-            )
-            .into());
-        }
-        let Some(reading) = observation.relay else {
-            // 读不到不是 0: 这一行照实说读不到, 不填数。
-            println!(
-                "{}",
-                serde_json::json!({
-                    "kind": "sample",
-                    "t_ms": started.elapsed().as_millis() as u64,
-                    "relay_read": null,
-                })
-            );
-            continue;
-        };
-        let (delta_tx, delta_rx) = match previous.as_ref() {
-            Some(previous) => (reading.tx.saturating_sub(previous.tx), reading.rx.saturating_sub(previous.rx)),
-            None => (0, 0),
-        };
-        println!(
-            "{}",
-            serde_json::json!({
-                "kind": "sample",
-                "t_ms": started.elapsed().as_millis() as u64,
-                "class": observation.class.as_str(),
-                "tx": reading.tx,
-                "rx": reading.rx,
-                "delta_tx": delta_tx,
-                "delta_rx": delta_rx,
-                "paths": reading.relay_paths,
-            })
-        );
-        if first_reading.is_none() {
-            first_reading = Some(reading.clone());
-        }
-        previous = Some(reading.clone());
-        last = Some(reading);
-    }
-
-    let elapsed = started.elapsed().as_secs_f64();
-    let (tx_total, rx_total) = match (first_reading.as_ref(), last.as_ref()) {
-        (Some(first), Some(last)) => (last.tx.saturating_sub(first.tx), last.rx.saturating_sub(first.rx)),
-        _ => (0, 0),
-    };
-    let paths: Vec<String> = last
-        .as_ref()
-        .map(|reading| reading.relay_paths.clone())
-        .unwrap_or_default();
-    println!(
-        "{}",
-        serde_json::json!({
-            "summary": {
-                "seconds": elapsed,
-                "samples": samples,
-                "relay_paths": paths,
-                "relay_path_count": paths.len(),
-                "tx_total": tx_total,
-                "rx_total": rx_total,
-                "tx_per_sec": tx_total as f64 / elapsed.max(f64::MIN_POSITIVE),
-                "rx_per_sec": rx_total as f64 / elapsed.max(f64::MIN_POSITIVE),
-                "path_class": "relay",
-            }
-        })
-    );
-    Ok(())
 }
 
 pub(crate) struct IrohLineTransport {
