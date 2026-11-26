@@ -1160,3 +1160,8 @@ M2 是同一类前提错误: 索引原本每用户一份而每个 daemon 整张�
 iroh lane 的准入面只有 `@ping` / `@pty`, bulk 动词在 `LANE_REFUSED` 之外进不来 —— 所以"relay 上 bulk
 字节为 0"今天由**能力拒绝**保证, 不是由路径采样保证。写进规格 §3.5 并注明: 适配器补上 bulk_path_pin
 后必须回来重写这段理由, 否则下一个读到 `bulk_path_pin=false` 的人会以为门禁坏了。
+
+### RAI-367 rebase 到 `34bec37` (#152 合并) 之后的 sha 对照
+
+- 提交: 499e966 (阶段 1a/1b: `[file_transfer]` 四项配置、`resume` 必填、大小/并发门禁、A5 回报)
+- 提交: 455cd92 (bulk 规格 §3.5: 门禁今天由能力拒绝保证)
