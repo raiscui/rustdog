@@ -160,6 +160,10 @@ Issues 和 Wayfinder maps 使用 GitHub Issues。详见 `docs/agents/issue-track
   - 用途: 固定 TERM=dumb 等 harness 环境差异导致的确定性相反失败的诊断入口 (显式固定假设环境, 而非调时序)
   - 何时阅读: TTY/TERM/环境依赖测试在 agent shell 或 CI 稳定失败而本地交互终端通过, 或要给测试加环境固定前
 
+- `docs/solutions/best-practices/guard-must-see-its-objects.md`
+  - 主题: CI 守卫必须看见它要判的对象; 任何「读不出来」的分支默认要倒向红
+  - 用途: 固定一天内三次假绿的三条形态 (看不见对象 / 位置数当「多久算忘」/ 读不出日期当「还很新」)、七条判据与负对照纪律
+  - 何时阅读: 新写或修改 CI 守卫、合并门脚本、账本时序规则、任何「按时间/数量判超期」的检查前
 - `docs/solutions/best-practices/parallel-test-global-state-single-lock.md`
   - 主题: 同进程并行测试共享全局状态 (env / cwd / tracing subscriber / singleton store) 必须用模块顶层唯一共享锁
   - 用途: 固定四例踩坑收敛的锁纪律 (env_test_guard / TIMEOUT_TRACE_TEST_LOCK / cwd_test_guard / observation singleton 反例边界)
