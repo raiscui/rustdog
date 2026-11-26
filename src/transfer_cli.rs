@@ -102,6 +102,15 @@ pub(crate) fn chunk_ack_timeout_ms_from_config() -> u64 {
         .unwrap_or(DEFAULT_CHUNK_ACK_TIMEOUT_MS)
 }
 
+/// 单个响应里能装下的**载荷字节**上限。
+///
+/// 从 `CONTROL_RESPONSE_MAX_BYTES` 推导 (不手抄数值): 载荷经 base64 膨胀 4/3, 再留 1 KiB 给
+/// JSON 字段与转义。超过它的请求会被包成 `output_budget_exceeded`, 拿不到数据。
+fn response_payload_bytes() -> u64 {
+    let budget = crate::control_frames::CONTROL_RESPONSE_MAX_BYTES.saturating_sub(1024) as u64;
+    budget / 4 * 3
+}
+
 const DEFAULT_CHUNK_ACK_TIMEOUT_MS: u64 = 30 * 1000;
 
 fn new_transfer_id(tag: &str) -> String {
@@ -147,9 +156,7 @@ fn exchange(options: &TransportExchange, line: &str) -> Result<Value, String> {
                 redact_payload(&line)
             ))
         }
-        Err(mpsc::RecvTimeoutError::Disconnected) => {
-            return Err("控制通道提前关闭".to_string())
-        }
+        Err(mpsc::RecvTimeoutError::Disconnected) => return Err("控制通道提前关闭".to_string()),
     };
 
     let first = exchanges
@@ -175,14 +182,29 @@ fn exchange(options: &TransportExchange, line: &str) -> Result<Value, String> {
 /// 回执行里的错误。`kind:"error"` 与 `error` / `error_code` 两种写法都要认:
 /// 稳定码走 `error`, 通用失败走 `kind`.
 fn response_error(payload: &Value) -> Option<String> {
-    let kind = payload.get("kind").and_then(Value::as_str);
-    let error = payload
+    // 三种信封都要认: `{"kind":"error","error":…}` (动作失败)、`{"error_code":…}` (稳定码)、
+    // 以及 `{"value":{"error_code":"output_budget_exceeded",…}}` —— 最后那种是**响应超出统一
+    // model-visible 预算**时的包法, 认不出来就会被当成"这一块数据是空的", 把一个明确的
+    // 预算错误伪装成内容错。
+    let envelope = payload.get("value").unwrap_or(payload);
+    if envelope.get("ok").and_then(Value::as_bool) == Some(false) {
+        let code = envelope.get("error_code").and_then(Value::as_str);
+        let message = envelope.get("error_message").and_then(Value::as_str);
+        return Some(match (code, message) {
+            (Some(code), Some(message)) => format!("{code}: {message}"),
+            (Some(code), None) => code.to_string(),
+            (None, Some(message)) => message.to_string(),
+            (None, None) => envelope.to_string(),
+        });
+    }
+    let kind = envelope.get("kind").and_then(Value::as_str);
+    let error = envelope
         .get("error")
         .and_then(Value::as_str)
-        .or_else(|| payload.get("error_code").and_then(Value::as_str));
+        .or_else(|| envelope.get("error_code").and_then(Value::as_str));
     match (kind, error) {
         (Some("error"), Some(error)) => Some(error.to_string()),
-        (Some("error"), None) => Some(payload.to_string()),
+        (Some("error"), None) => Some(envelope.to_string()),
         (_, Some(error)) if kind != Some("file-transfer") => Some(error.to_string()),
         _ => None,
     }
@@ -281,8 +303,9 @@ pub(crate) fn run_put(
             Ok(value) => value,
             Err(err) => {
                 // 失败路径必须显式取消: 否则半成品和会话都留在盘上等 TTL, 而调用方已经放弃了。
-                let _ = exchange_peer
-                    .request(&format!("@file-cancel:{{\"transfer_id\":\"{transfer_id}\"}}"));
+                let _ = exchange_peer.request(&format!(
+                    "@file-cancel:{{\"transfer_id\":\"{transfer_id}\"}}"
+                ));
                 return Err(format!("@{offset} 处发送分块失败: {err}"));
             }
         };
@@ -335,9 +358,21 @@ pub(crate) fn run_get(
         .map(str::to_owned)
         .unwrap_or_default();
 
-    let mut file = std::fs::File::create(local)
-        .map_err(|err| format!("创建 {local:?} 失败: {err}"))?;
-    let chunk_bytes = exchange_peer.chunk_bytes() as u64;
+    // 先写临时名, 摘要校验通过后再 rename 到目标: 中途任何失败都不能毁掉本地原有文件,
+    // 也不能在目标路径上留一个没有标记的残片 (上传侧对半成品做了那么多隔离, 下载侧直接覆盖
+    // 真文件是同一个错误的反面)。
+    let staging = local.with_file_name(format!(
+        "{}.rdog-partial-download",
+        local
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "download".to_string())
+    ));
+    let mut file =
+        std::fs::File::create(&staging).map_err(|err| format!("创建 {staging:?} 失败: {err}"))?;
+    // 下载方向的上限不是行长度而是**响应预算**: 一个 `@file-read` 的回执超预算时会被包成
+    // `output_budget_exceeded` 而拿不到数据。所以每块按响应预算切, 比上传块小一个量级。
+    let chunk_bytes = (exchange_peer.chunk_bytes() as u64).min(response_payload_bytes());
     let mut offset = 0u64;
     loop {
         let want = (size - offset).min(chunk_bytes).max(1);
@@ -347,10 +382,7 @@ pub(crate) fn run_get(
             "length": want,
         });
         let read = exchange_peer.request(&format!("@file-read:{read_line}"))?;
-        let data = read
-            .get("data")
-            .and_then(Value::as_str)
-            .unwrap_or_default();
+        let data = read.get("data").and_then(Value::as_str).unwrap_or_default();
         let bytes = BASE64_STANDARD
             .decode(data)
             .map_err(|err| format!("分块解码失败: {err}"))?;
@@ -362,18 +394,24 @@ pub(crate) fn run_get(
             break;
         }
         if bytes.is_empty() {
-            return Err(format!("@{offset} 处读到空块且未到 EOF"));
+            return Err(format!("@{offset} 处读到空块且未到 EOF (回执 {read})"));
         }
     }
-    file.flush().map_err(|err| format!("写入 {local:?} 失败: {err}"))?;
+    file.flush()
+        .map_err(|err| format!("写入 {staging:?} 失败: {err}"))?;
     drop(file);
 
-    let actual = sha256_of_file(local)?;
+    let actual = sha256_of_file(&staging)?;
     if !declared_sha256.is_empty() && !actual.eq_ignore_ascii_case(&declared_sha256) {
+        let _ = std::fs::remove_file(&staging);
         return Err(format!(
-            "下载摘要不符: 声明 {declared_sha256}, 实际 {actual} — 落地文件不可信"
+            "下载摘要不符: 声明 {declared_sha256}, 实际 {actual} — 未落到 {local:?}, 临时文件已删"
         ));
     }
+    std::fs::rename(&staging, local).map_err(|err| {
+        let _ = std::fs::remove_file(&staging);
+        format!("落盘 {local:?} 失败: {err}")
+    })?;
     Ok(TransferReceipt {
         direction: "get",
         bytes: offset,
@@ -461,10 +499,8 @@ mod tests {
     }
 
     fn scratch_dir(tag: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "rdog-transfer-cli-{tag}-{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("rdog-transfer-cli-{tag}-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         dir
     }
@@ -478,8 +514,7 @@ mod tests {
         let remote = dir.join("landed.bin");
 
         let peer = LoopbackPeer::new(7);
-        let receipt =
-            run_put(&peer, &local, &remote.to_string_lossy(), false).unwrap();
+        let receipt = run_put(&peer, &local, &remote.to_string_lossy(), false).unwrap();
 
         assert_eq!(receipt.bytes, payload.len() as u64);
         assert_eq!(receipt.resume_honored, Some(false));
@@ -512,9 +547,7 @@ mod tests {
             "size": payload.len(),
             "resume": false,
         });
-        partial_peer
-            .request(&format!("@put-file:{open}"))
-            .unwrap();
+        partial_peer.request(&format!("@put-file:{open}")).unwrap();
         for (index, block) in payload[..21].chunks(7).enumerate() {
             let chunk = serde_json::json!({
                 "transfer_id": "cli-resume-seed",
@@ -529,7 +562,11 @@ mod tests {
 
         let peer = LoopbackPeer::new(7);
         let receipt = run_put(&peer, &local, &remote.to_string_lossy(), false).unwrap();
-        assert_eq!(receipt.resume_honored, Some(true), "窗口内的半成品必须接着传");
+        assert_eq!(
+            receipt.resume_honored,
+            Some(true),
+            "窗口内的半成品必须接着传"
+        );
         assert_eq!(std::fs::read(&remote).unwrap(), payload);
         // 续传不该从 0 重发: 21 字节已收, 剩下 19 字节按 7 切 = 3 块
         assert_eq!(peer.chunk_count(), 3, "只该发剩下的块");
@@ -548,7 +585,9 @@ mod tests {
         let err = run_put(&peer, &local, &remote.to_string_lossy(), false).unwrap_err();
         assert!(err.contains("模拟的对端故障"), "错误必须带原因: {err}");
         assert!(
-            peer.seen().iter().any(|line| line.starts_with("@file-cancel:")),
+            peer.seen()
+                .iter()
+                .any(|line| line.starts_with("@file-cancel:")),
             "失败路径必须显式取消, 不能把半成品留给 TTL"
         );
         assert!(!remote.exists(), "失败不得留下目标文件");
@@ -568,6 +607,32 @@ mod tests {
         assert_eq!(receipt.bytes, payload.len() as u64);
         assert_eq!(std::fs::read(&local).unwrap(), payload);
         assert_eq!(receipt.sha256, format!("{:x}", Sha256::digest(&payload)));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn get_failure_leaves_an_existing_local_file_untouched() {
+        // 上传侧对半成品做了那么多隔离, 下载侧若一开始就 File::create 目标路径, 中途失败就会
+        // 既毁掉本地原文件、又在目标位置留一个没有标记的残片。
+        let dir = scratch_dir("get-keep");
+        let remote = dir.join("remote.bin");
+        std::fs::write(&remote, vec![1u8; 32]).unwrap();
+        let local = dir.join("existing.bin");
+        std::fs::write(&local, b"original").unwrap();
+
+        let mut peer = LoopbackPeer::new(8);
+        peer.download_sha_override = Some("0".repeat(64));
+        let err = run_get(&peer, &remote.to_string_lossy(), &local).unwrap_err();
+        assert!(err.contains("下载摘要不符"), "{err}");
+        assert_eq!(
+            std::fs::read(&local).unwrap(),
+            b"original",
+            "失败的下载不得改动本地原有文件"
+        );
+        assert!(
+            !dir.join("existing.bin.rdog-partial-download").exists(),
+            "临时文件必须删掉, 不留在目标目录里"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

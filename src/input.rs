@@ -160,7 +160,7 @@ pub enum Command {
         put: Option<PathBuf>,
 
         /// `--put` 的远端目标路径。
-        #[clap(long = "remote-path", value_name = "REMOTE")]
+        #[clap(long = "remote-path", value_name = "REMOTE", requires = "put")]
         remote_path: Option<String>,
 
         /// 从被控端下载文件到本地 (`@get-file` → `@file-read*`), 拉取式逐块落盘。

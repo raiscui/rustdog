@@ -117,7 +117,8 @@ agent 场景下带宽不是瓶颈，正确性与可恢复才是 —— 33% 膨�
 ## 建议的协议形态
 
 ```
-@put-file:{path, size, sha256?, resume?}   控制端 → 被控端：宣告"我要写这个文件"
+# @put-file 的 resume 是**必填**字段, 见 specs/rdog-bulk-direct-only-spec.md §2.5 D1
+@put-file:{path, size, sha256?, resume}   控制端 → 被控端：宣告"我要写这个文件"
 @get-file:{path, offset?}                  控制端 → 被控端：请求读取（可带断点）
 @file-chunk:{transfer_id, offset, data}    双向复用
 @file-progress:{transfer_id, sent, total}  任一方向
