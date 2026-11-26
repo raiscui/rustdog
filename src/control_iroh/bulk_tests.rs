@@ -666,3 +666,31 @@ fn a_gate_refusal_still_carries_its_own_evidence() {
     assert_eq!(evidence["chunks"], 0);
     assert!(!target.exists());
 }
+
+#[test]
+fn an_empty_transfer_is_not_evidence_of_a_clean_path() {
+    // 0 字节的下载: 读数再干净也不构成"bulk 没走 relay"的证据 (§4.3 第 2 条)。
+    let dir = TempRoot::new("evidence-empty");
+    let source = dir.0.join("empty.bin");
+    fs::write(&source, []).expect("write empty source file");
+    let id = transfer_id("ev-empty");
+    let mut lane = start_admitted_with_relay(
+        vec![PathClass::Direct],
+        vec![Some(RelayReading::at(0, 0)), Some(RelayReading::at(0, 0))],
+    );
+
+    lane.send(&format!(
+        r#"@get-file:{{"transfer_id":"{id}","path":"{}"}}"#,
+        escape_json(&source.display().to_string())
+    ));
+    assert_eq!(lane.reply()["state"], "reading");
+    lane.send(&format!(
+        r#"@file-read:{{"transfer_id":"{id}","offset":0,"length":4096}}"#
+    ));
+    let frame = lane.reply();
+    assert_eq!(frame["eof"], true);
+    let evidence = &frame["evidence"];
+    assert_eq!(evidence["chunks"], 0);
+    assert_eq!(evidence["bulk_bytes"], 0);
+    assert_eq!(evidence["verdict"], "no_bulk_bytes");
+}

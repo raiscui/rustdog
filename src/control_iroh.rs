@@ -881,7 +881,13 @@ impl DaemonPathEvidence {
     }
 
     /// 记一块**已被 daemon 确认**的字节。
+    ///
+    /// 零字节块不计数: 一次空文件传输的 `chunks > 0` 会让 §4.3 的第 2 条 (本次确有字节移动)
+    /// 在没搬任何字节时成立 —— 那正是它要挡的空真。
     fn note_confirmed(&mut self, transfer_id: &str, bulk: u64, wire: u64) {
+        if bulk == 0 && wire == 0 {
+            return;
+        }
         if let Some(attempt) = self.attempts.get_mut(transfer_id) {
             attempt.bulk_bytes += bulk;
             attempt.wire_bytes += wire;
