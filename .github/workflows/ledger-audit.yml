@@ -1,0 +1,31 @@
+name: ledger audit
+
+# 安静的 main 也要被判一次 (RAI-433)。
+#
+# `--main` 的宽限是「范围内最新 N 个工作 commit」: 只要没有人往 main 推东西, 就没有 push 事件,
+# 那个排在宽限外的漏账 commit 永远等不到判红 (周末、冻结期就是这样)。这条定时任务只跑守卫本身,
+# 不跑 3 平台的 build/test —— 它是审计, 不是回归。
+#
+# 它不产生 PR 检查, 所以不影响 `.github/` 的必需检查表; 手动触发同一个入口。
+
+on:
+  schedule:
+    - cron: '0 3 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  ledger-audit:
+    name: ledger audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Commits accounted in the ledger (main requires sha beyond grace)
+        run: python3 scripts/check-bookkeeping.py --main --main-grace 3 --limit 50

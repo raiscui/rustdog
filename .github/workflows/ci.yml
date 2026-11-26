@@ -318,7 +318,9 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          # 记账检查要读 git 历史 (判定 commit 是否进账本), shallow clone 不够
+          # 记账检查要读 git 历史 (判定 commit 是否进账本), shallow clone 不够。
+          # PR 上取 head sha 而不是 GitHub 造的 merge commit, 否则 --since base 的口径会飘。
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
           fetch-depth: 0
 
       # 约定 ①: 载体 (skill / README / specs) 里的断言必须与 src/ 真相源一致。
@@ -335,7 +337,9 @@ jobs:
       #   就是漏账。合入之后 sha 已经稳定, 这时候再缺就没有借口了。
       - name: Commits accounted in the ledger - PR report only
         if: github.event_name == 'pull_request'
-        run: python3 scripts/check-bookkeeping.py --report-only --limit 50
+        run: |
+          git fetch --no-tags origin "+refs/heads/${{ github.base_ref }}:refs/remotes/origin/${{ github.base_ref }}"
+          python3 scripts/check-bookkeeping.py --report-only --since "origin/${{ github.base_ref }}"
 
       - name: Commits accounted in the ledger - main requires sha beyond grace
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'

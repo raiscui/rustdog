@@ -88,8 +88,26 @@ def ledger_text(root: Path) -> str:
     return "\n".join(chunks)
 
 
-def commit_shas(root: Path, since: str | None, limit: int) -> list[str]:
-    args = ["log", "--format=%H", "--first-parent"]
+def commit_shas(
+    root: Path,
+    since: str | None,
+    limit: int,
+    first_parent: bool = True,
+    exclude_merges: bool = False,
+) -> list[str]:
+    """范围内的 commit。
+
+    `first_parent` 默认开着 (分支上只看本分支), 但 **main 上必须关掉**: main 落的是
+    `Merge pull request #N`, PR 的工作 commit 在 merge commit 的第二父线上, `--first-parent`
+    永远走不到它们 —— 于是「main 上漏账即失败」这句承诺会变成「一个都看不见」(2026-11-26
+    评审实测: 范围恒为 1 个 merge commit, 而它恰好落进「只改账本」豁免)。
+    main 模式同时 `exclude_merges`: merge commit 本身不承载工作, 不该要求它进账本。
+    """
+    args = ["log", "--format=%H"]
+    if first_parent:
+        args.append("--first-parent")
+    if exclude_merges:
+        args.append("--no-merges")
     if since:
         args.append(f"{since}..HEAD")
     else:
@@ -128,13 +146,16 @@ def main(argv: list[str]) -> int:
     parser.add_argument(
         "--main",
         action="store_true",
-        help="main 分支模式: 除了最新 --main-grace 个 commit, 其余缺 sha 即失败 (RAI-433 时序补丁)",
+        help=(
+            "main 分支模式: 关掉 --first-parent (否则只看得到 merge commit)、排除 merge 本身, "
+            "范围内最新 --main-grace 个工作 commit 记宽限, 其余缺 sha 即失败 (RAI-433)"
+        ),
     )
     parser.add_argument(
         "--main-grace",
         type=int,
         default=3,
-        help="main 上允许的「刚合入、还没补 sha」的 commit 数, 默认 3",
+        help="main 上允许的「刚合入、还没补 sha」的工作 commit 数 (范围内最新的若干个), 默认 3",
     )
     parser.add_argument(
         "--ref-only",
@@ -158,7 +179,13 @@ def main(argv: list[str]) -> int:
         match.group("subject").strip() for match in PENDING_RE.finditer(ledger)
     }
 
-    shas = commit_shas(root, args.since, args.limit)
+    shas = commit_shas(
+        root,
+        args.since,
+        args.limit,
+        first_parent=not args.main,
+        exclude_merges=args.main,
+    )
     if not shas:
         print("范围内没有 commit")
         return 0
@@ -188,6 +215,12 @@ def main(argv: list[str]) -> int:
     if args.since:
         scope_note = f"{args.since}..HEAD"
 
+    subject_counts: dict[str, int] = {}
+    for sha in scope:
+        subject_counts[git(root, "log", "-1", "--format=%s", sha).strip()] = (
+            subject_counts.get(git(root, "log", "-1", "--format=%s", sha).strip(), 0) + 1
+        )
+
     unaccounted: list[tuple[str, str, list[str]]] = []
     graced: list[tuple[str, str]] = []
     accounted = 0
@@ -204,6 +237,20 @@ def main(argv: list[str]) -> int:
             continue
         # main 上不接受占位: 那时 sha 已经稳定, 占位留着就是漏账。
         if subject in pending_subjects and not args.main:
+            # 占位按标题认领, 所以标题必须唯一: 否则一条 `fix: typo` 这类通用占位能吞掉
+            # 同标题的任意多个 commit, 一个占位放行一片。
+            if subject_counts.get(subject, 0) > 1:
+                unaccounted.append(
+                    (
+                        short,
+                        subject,
+                        [
+                            f"占位标题不唯一: 范围内有 {subject_counts[subject]} 个 commit 用同一标题, "
+                            "占位只能认领一个"
+                        ],
+                    )
+                )
+                continue
             pending.append((short, subject))
             continue
         # main 上「刚合入还没补 sha」是**正常时序**: sha 只有在合入后才稳定。所以最新
