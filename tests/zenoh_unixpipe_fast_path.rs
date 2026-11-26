@@ -98,6 +98,11 @@ fn cleanup_unixpipe_artifacts(base: &Path) {
 fn create_fake_uplink_candidate(namespace: &str, daemon_name: &str) -> PathBuf {
     let base = derive_unixpipe_base_path(namespace, daemon_name);
     cleanup_unixpipe_artifacts(&base);
+    // 新鲜的 runner HOME 里 ~/.rdog/run 还不存在 (本地开发机上通常早被别的 daemon 建好了),
+    // mkfifo 会因此直接失败 —— 这个用例自己造候选, 就得自己保证目录在。
+    if let Some(dir) = base.parent() {
+        fs::create_dir_all(dir).expect("unixpipe 运行目录应可创建");
+    }
     let uplink = format!("{}_uplink", base.display());
     let status = Command::new("mkfifo")
         .arg(&uplink)
@@ -216,6 +221,9 @@ fn stale_unixpipe_socket_files_should_be_cleaned_on_daemon_start() {
     cleanup_unixpipe_artifacts(&base_path);
 
     // 模拟上次崩溃残留的 3 个文件:base / base_uplink / base_downlink。
+    // 同样不能假设运行目录已存在 (否则这个用例要靠别的用例先建目录, 顺序一变就红)。
+    fs::create_dir_all(base_path.parent().expect("运行目录"))
+        .expect("unixpipe 运行目录应可创建");
     for suffix in ["", "_uplink", "_downlink"] {
         let path = format!("{}{suffix}", base_path.display());
         let status = Command::new("mkfifo")

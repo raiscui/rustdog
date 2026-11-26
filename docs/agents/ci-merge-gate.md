@@ -78,10 +78,100 @@ on:
   (非 Windows 的) `recording_e2e`。否则"测试代码编译不过"会落在 test 阶段, 把 cargo
   的编译失败与测试失败混成一个红点, 零执行断言还会被跳过。
 
-**已知覆盖缺口 (不属于"绿", 故不进 §6 的已知红表)**: `tests/` 下 19 个 integration target 里, CI 只
-编译并运行 `recording_e2e`; `control_lanes` / `control_mode` / `control_pty` /
-`zenoh_*` 等其余 18 个既没编译也没运行。放量由 RAI-411 承接 (排在 RAI-410 的 `script`
-夹具修复之后), 在它落地前, 本门的绿**不覆盖**协议回归面。
+### 3b. integration target 的覆盖范围 (RAI-411 之后)
+
+`tests/` 下 19 个 target 现在由 `scripts/ci/run-integration-targets.py` 按平台执行, **每个
+target 的 `passed` 必须 > 0**, 否则判红 —— 「退出码 0 但零执行」在 CI 上同样算失败。
+
+按平台清单的真相源是 `scripts/ci/run-integration-targets.py` 的 `CLASSIFICATION`:
+每个 target 标 `all` (三平台) / `unix` (ubuntu + macos) / `macos` / `windows` /
+`compile-only:macos` / `exempt:<理由>`。**`tests/` 下新增文件而没登记 = 红** (脚本会枚举
+`tests/*.rs` 双向对账), 所以「新增的 target 悄悄没人跑」这条不可达。
+
+| 平台 | 执行的 target |
+| --- | --- |
+| ubuntu | `connect_modes`、`control_lanes`、`control_mode`、`control_pty`、`control_tty`、`shell_pty`、`daemon_inbound`、`listen_suspend`、`computer_use_density`、`control_websocket` (另有 1 个 target 在 ubuntu 显式豁免, 见下) |
+| macos | ubuntu 那 10 个 + `zenoh_router_client` (ubuntu 上豁免) |
+| windows | `computer_use_density` (另有 2 个 target 在 windows 显式豁免, 见下) |
+| 全平台 (build 阶段) | `cargo test --no-run` 编译**全部** target, 含下面的 compile-only 面 |
+| compile-only (macos) | `zenoh_unixpipe_fast_path` (issue #164)、`control_ax_e2e`、`control_display_aware_e2e`、`control_mouse_e2e`、`control_ocr_e2e`、`control_window_e2e` |
+
+**各平台实际执行 target 数 (每次放量或豁免变更都更新这张表)**:
+
+| 平台 | 实际执行的 integration target 数 | 豁免/只编译 |
+| --- | --- | --- |
+| ubuntu | **10** | `zenoh_router_client` (issue #163) |
+| macos | **11** | 6 个 compile-only (`zenoh_unixpipe_fast_path` 见 issue #164; 5 个 GUI 面需真实桌面会话) |
+| windows | **1** (`computer_use_density`) | `control_websocket`、`zenoh_router_client_windows` (issue #162) |
+
+**判读口径: 「三平台绿」在 windows 上只代表 1 个 integration target, 不能读成「windows 的 e2e 面
+在跑」; 读绿点必须连着这三个数字一起读。** 数字与 `PLATFORM_EXEMPTIONS` 是同一次改动的东西:
+加/撤一条豁免就要改这里, 否则下一份报告会拿旧的覆盖数去说新的绿。
+
+`recording_e2e` 仍由它自己那一步执行 (unix)。
+
+**跑批脚本的编码要在两个方向上都固定 utf-8。** windows runner 的控制台是 cp1252: 只修解码
+(`subprocess.run(..., encoding="utf-8")`) 会让下一步在**输出**端撞上 `UnicodeEncodeError`
+(summary 表格与失败详情里有中文), 归因看起来却是「target 红」。2026-11-26 为这件事连修两轮。
+现在 `main()` 开头把 `stdout` / `stderr` 一起 `reconfigure(encoding="utf-8", errors="replace")`。
+
+**单个 target 有 1500s 墙钟上限** (`TARGET_TIMEOUT_SECONDS`), 超时判该 target 红并把它
+已有的输出留进失败详情, summary 里同时给出每个 target 的 `elapsed`。原因是反过来的:
+挂住的 target 会一路撑到 GitHub 的 job timeout 被 cancel, 日志只剩一句
+`The job has been cancelled` —— 既指不出是哪个 target, 也分不清「慢」与「死等」。
+
+**ubuntu 侧 1 个 target 显式豁免** (`PLATFORM_EXEMPTIONS`): `zenoh_router_client`。连续三轮
+ubuntu 各挂一个**不同**的用例 (`control_lanes` 的 key 注入 / TLS 换 CA / mTLS client cert),
+全部停在「client 建不上到刚启动 daemon 的连接」这一段, 而同一份代码在 macos runner 上全绿、
+本地 (含 `taskset -c 0,1` 压到 2 核) 也全绿 —— 这是**一族**不稳定, 不是一个用例的缺陷, 所以
+不按用例 `#[ignore]` 逐条裱糊 (那样下一轮换个用例照样红), 而是整 target 在 ubuntu 豁免、
+macos 照常执行, job summary 单列 `exempt on this platform`、**不计入 ran 集合**。
+`control_lanes` 里那 1 条仍在 ubuntu 上按 `#[cfg_attr(target_os = "linux", ignore = …)]`
+跳过 (其余 14 条照常跑)。归因与收回条件见 issue #163 / RAI-464, 到期 2026-12-03。
+
+**windows 侧 2 个 target 显式豁免** (`PLATFORM_EXEMPTIONS`): `control_websocket` (整 target 挂死,
+1500s 上限才终止) 与 `zenoh_router_client_windows` (daemon 因遗留 `service_name` 守卫拒启动) ——
+两者都没隔离 HOME, 在 runner 的真实 `C:\Users\runneradmin` 上与前序用例共用 `.rdog` 与
+`zenoh-guards`。`control_websocket` 在 ubuntu / macos 照常执行; `zenoh_router_client_windows`
+是 windows-only, 所以**此刻在 CI 里只编译不执行**。两者在 job summary 里单列
+**exempt on this platform** 一行、**不计入 ran 集合**; 收回条件是 issue #162 的隔离修复通过
+windows 连续 3 轮, 随后删掉这两条豁免。所以本 PR 之后 windows 的 integration 面只有
+`computer_use_density` 一个 —— 这是这一轮的真实覆盖, 不写成"windows 也跑了 e2e"。
+
+逐条 `#[ignore]` 只在**单个用例**确有平台不兼容时用, 且必须挂理由与到期日 (见 §6)。今天只剩
+一处: `control_lanes::daemon_control_lane_should_accept_key_object_payload_with_request_id` 在
+ubuntu 上按 `#[cfg_attr(target_os = "linux", ignore = …)]` 跳过, 同 target 其余 14 条照常跑。
+**`zenoh_router_client` 里一条 `#[ignore]` 都没有** —— 那个 target 是整片在 ubuntu 豁免 (见上),
+不要在这里再写它, 否则 §3b 会和 §6 给出两份互相打架的口径 (`zenoh_router_client` 是 `unix`,
+本来也从不进 windows)。
+
+**compile-only 是显式的, 不是静默 skip —— 但它也不计入「ran」。** 这 6 个 target 里, 5 个
+需要真实桌面会话 (已登录的 GUI 用户 + Accessibility 与 Screen Recording 授权, GitHub runner
+没有这些条件), 1 个是 `zenoh_unixpipe_fast_path` (issue #164, runner 上连接类用例接力红)。
+它们的处置是:
+
+| 位置 | 处置 |
+| --- | --- |
+| build 阶段 | `cargo test --no-run` 编译 (编译回归照样能抓到) |
+| test 阶段 | job summary 里单列一行 **`compiled, not executed`**, 与 `passed/failed/ignored` 的已执行行分开 |
+| ran 集合 | **不计入** —— `assert-tests-ran.py` 的口径与 §3 的零执行断言都不把它们当「跑过」 |
+
+真机 lane 的跑法与前置 (不写下来的话, 「compile-only」三个月后会变成「没人知道怎么跑」):
+
+```bash
+# 真机 (macOS) 仓库根, 且已登录 GUI 会话
+# 前置: 系统设置 → 隐私与安全性 → 辅助功能 / 屏幕录制, 给终端 (或 rdog 二进制) 授权
+cargo test --test zenoh_unixpipe_fast_path   # issue #164: runner 上连接类用例逐个接力红, 真机可跑
+cargo test --test control_ax_e2e
+cargo test --test control_display_aware_e2e
+cargo test --test control_mouse_e2e
+cargo test --test control_ocr_e2e
+cargo test --test control_window_e2e
+```
+
+**一个只能编译、没有任何可执行路径的测试等价于注释。** 上面这 6 条命令就是它们的可执行路径;
+改动其中任何一个 target 的名字或前置时, 同票更新本表与 `run-integration-targets.py` 的
+`CLASSIFICATION` (标成 `compile-only:macos`)。
 
 ## 4. `ort-sys` / onnxruntime 的获取契约
 
@@ -127,6 +217,9 @@ cargo clean -p ort-sys && cargo build --bin rdog    # 走一遍 build script
 | 现象 | 归因 | 负责人 | 到期日 |
 | --- | --- | --- | --- |
 | `zenoh_control::tests::diagnostic_ping_should_bypass_busy_query_worker_and_preserve_queue` 间歇红 (28 轮 2 次, panic 文案 `worker 未进入执行`, 疑 TMPDIR 进程级改写) | 单跑 5/5 绿, 只在并行/全量时出现 (`src/zenoh_control.rs` 的 panic 行) | RAI-405 承接线程 | 2026-11-30 |
+| ubuntu runner 上 `zenoh_router_client` 的跨进程连接 e2e 不稳定: 连续三轮各挂一个**不同**用例 (`control_lanes::daemon_control_lane_should_accept_key_object_payload_with_request_id` code 70、`zenoh_router_client::tls_enabled_daemon_should_serve_ca_client_and_reject_wrong_ca` 空输出、`zenoh_router_client::mtls_daemon_should_require_client_certificate_and_accept_configured_client`), 全部停在「client 连不上刚启动的 daemon」 | 同代码在 macos runner 全绿、本地含 `taskset -c 0,1` 压 2 核也全绿; 是**一族**不稳定而非单个用例缺陷, 所以按 target 级豁免 (`PLATFORM_EXEMPTIONS`) 而不是逐条 `#[ignore]`; 入口=豁免理由 + issue #163 | issue #163 / RAI-464 | 2026-12-03 |
+| windows runner 上 `control_websocket` 整 target 挂死、`zenoh_router_client_windows` daemon 因遗留 `service_name` 守卫拒启动 | 两者都不隔离 HOME, 与同 job 前序用例共用 `.rdog` / `zenoh-guards`; 入口=`PLATFORM_EXEMPTIONS` 两条理由 + `tests/` 无 `HOME` 注入 | issue #162 承接 | 2026-12-03 |
+| macos runner 上 `zenoh_unixpipe_fast_path` 的连接类用例逐个接力红, 最后一个卡在「运行中的 daemon 拒绝新 client 的专用 FIFO」(`Received a close message (reason GENERIC) in response to an OpenSyn`) | 前两条是用例假设 `~/.rdog/run` 已存在 (已修); 第三条开发机绿、runner 红, 是 runner 与真机在这条链路上的环境差; 处置=分类降为 `compile-only:macos` 并给真机 lane 命令; 入口=CLASSIFICATION + issue #164 | issue #164 承接 | 2026-12-03 |
 
 规则:
 

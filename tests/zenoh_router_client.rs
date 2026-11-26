@@ -81,11 +81,27 @@ fn test_zenoh_credentials() -> Option<(String, String)> {
 /// 测试隔离 HOME (进程级一次): daemon/control 子进程的 HOME 都指向它,
 /// 凭证 (~/.rdog/auth.toml) 与 TLS 材料在测试目录内自持,
 /// 不再触碰真实用户目录。auth_wrong 等 env 覆盖用例优先于文件。
+/// 隔离 HOME 的根目录: 优先 `/tmp`。
+///
+/// macOS runner 的 `$TMPDIR` 是 `/var/folders/q2/<32 位随机>/T` (约 50 字符), 在它下面
+/// 建 `.rdog/run` 后, zenoh unixpipe 的 pipe 名会超出 95 字节上限, daemon 直接拒启动:
+/// `本机 fast path 运行目录太长,压缩后的 pipe 名仍超出 95 字节上限 ... 请把 XDG_RUNTIME_DIR
+/// 指向更短的目录` (2026-11-26 macOS runner 实测, 3 条 agent_* 用例因此假失败)。
+/// `/tmp` 在 macOS 上是 `/private/tmp` 的短路径, 足够容纳 pipe 名。
+fn short_temp_root() -> std::path::PathBuf {
+    let short = std::path::PathBuf::from("/tmp");
+    if short.is_dir() {
+        short
+    } else {
+        std::env::temp_dir()
+    }
+}
+
 fn test_isolated_home() -> std::path::PathBuf {
     use std::sync::OnceLock;
     static HOME: OnceLock<std::path::PathBuf> = OnceLock::new();
     HOME.get_or_init(|| {
-        let dir = std::env::temp_dir().join(format!("rdog-e2e-home-{}", std::process::id()));
+        let dir = short_temp_root().join(format!("rdog-e2e-home-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("test home should create");
         dir
