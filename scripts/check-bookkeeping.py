@@ -116,6 +116,37 @@ def commit_shas(
     return [line.strip() for line in git(root, *args).splitlines() if line.strip()]
 
 
+def commit_landed_epoch(root: Path, sha: str) -> float | None:
+    """commit **首次成为 HEAD 可达**的那个合并的时间 (epoch 秒)。
+
+    超期必须从「落进 main 的那一刻」起算, 不是从它被写出来的那一刻: 否则一张活了一周才合的分支,
+    它的占位 commit 年龄是 7 天, **合入当天 main 就红** —— 那正是要消灭的假阳性换了个方向回来。
+
+    实现: 在 `sha..HEAD` 的 ancestry-path 里找最早的 merge (即把它带进来的那个合并), 取它的
+    committer date。找不到 merge (直接推到 main 的 commit) 就退回 commit 自己的时间。
+    """
+    try:
+        out = git(
+            root,
+            "log",
+            "--ancestry-path",
+            "--merges",
+            "--reverse",
+            "--format=%ct",
+            f"{sha}..HEAD",
+        )
+    except SystemExit:
+        out = ""
+    for line in out.splitlines():
+        value = line.strip()
+        if value:
+            try:
+                return float(value)
+            except ValueError:
+                continue
+    return commit_epoch(root, sha)
+
+
 def commit_epoch(root: Path, sha: str) -> float | None:
     """commit 的提交时间 (epoch 秒); **读不出来返回 None, 绝不兜底成"现在"**。
 
@@ -273,7 +304,7 @@ def main(argv: list[str]) -> int:
                     "占位只能认领一个"
                 )
             if args.main:
-                epoch = commit_epoch(root, sha)
+                epoch = commit_landed_epoch(root, sha)
                 if epoch is None:
                     reasons.append(
                         "占位日期不可解析: 读不出该 commit 的提交时间, 无法判断是否超期 "
@@ -296,6 +327,13 @@ def main(argv: list[str]) -> int:
                 unaccounted.append((short, subject, changed_files(root, sha), "; ".join(reasons)))
                 continue
             pending.append((short, subject))
+            if args.main:
+                landed = commit_landed_epoch(root, sha)
+                if landed is not None:
+                    pending[-1] = (
+                        short,
+                        f"{subject} (落 main 已 {(time.time() - landed) / 86400.0:.1f} 天)",
+                    )
             continue
         # 数量宽限只给**完全没有账本条目**的 commit: 刚合入的提交可能还在等记账提交落盘。
         if args.main and index < args.main_grace:
