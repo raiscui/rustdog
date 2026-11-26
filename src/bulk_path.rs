@@ -52,6 +52,10 @@ impl PathCapability {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PathClass {
     Direct,
+    /// **今天没有生产者**: 生产路径上没有任何东西能产出 `relay` —— iroh lane 不承载 bulk 数据面
+    /// (RAI-476), 其余传输没有 relay 跳。编译器报 `never constructed` 正是这个事实的指纹。
+    /// 等适配器读采样之后撤掉这行 allow, 它会成为门禁里真正会走到的分支。
+    #[allow(dead_code)]
     Relay,
     /// 读不出 / 采样缺失 / 解析失败 —— 与"读到了但不是直连"同等对待, 一律 fail-closed。
     Unknown,

@@ -434,7 +434,9 @@ fn bulk_refusal_code() -> &'static str {
         false,
     ) {
         crate::bulk_path::BulkDecision::Refused(code) => code,
-        // 这条 lane 的能力固定为"有 relay 跳但钉不住", 表里必然是拒; 走到这里说明表被改坏了。
+        // 走到这里只可能是判决表把"有 relay 跳但钉不住"改成了放行；但这条 lane **无论如何都不承载
+        // bulk 数据面**, 所以仍然拒。这个兜底是 **lane 的能力事实** (没有 bulk 数据面), 不是判决
+        // 结果 —— 两者今天恰好给出同一个码, 但说的不是同一件事。
         crate::bulk_path::BulkDecision::Allowed => crate::bulk_path::IROH_BULK_PATH_PIN_UNAVAILABLE,
     }
 }

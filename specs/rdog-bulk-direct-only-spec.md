@@ -517,6 +517,16 @@ relay 计数还没接线, 见 RAI-476):
 > bulk 动词已经按能力表以 `iroh_bulk_path_pin_unavailable` 拒绝。**正对照仍未执行** —— 它需要一条
 > 真的走 relay 的拓扑 (RAI-366), 在那之前"relay 上 bulk 字节为 0"这条不做结论。
 >
+> **客户端门禁恒传 `established_direct = false`**, 所以 §2.5 D1 的「中途 direct → relay」
+> (`iroh_direct_path_lost`) **今天不可产生**: 判定表里那个分支的语义已定义、门禁也按它分支, 但
+> 没有适配器能在读采样的同时记录「本次是否曾观测到 direct」。它只有单测覆盖, **不得据此主张
+> "中途路径丢失已处理"**; 生产者随 RAI-476 的数据面适配器一起到来。
+>
+> 另有一处**带撤除条件的** `#[allow(dead_code)]`: `PathClass::Relay` 在生产路径上没有生产者 (同上,
+> 要等 RAI-476 的适配器读采样), 编译器报 `never constructed` 正是这个事实的指纹。**RAI-476 落地后
+> 撤掉那行 allow**, 它就会成为门禁里真正会走到的分支。一条带理由和到期条件的 `allow` 是文档,
+> 不带的才是债。
+>
 > 跑批单 (`handoffs/rai367/positive-control-runsheet.md`) 已写好并写清了三件边界: iroh lane 今天
 > 不承载 bulk 数据面, 所以单子执行的是**仪表验证 + 门禁验证**而不是 A 类验收; daemon 侧 relay 计数
 > 尚未接线, 所以快照今天只有客户端那一半; **拿不到正对照计数时, 门禁那个"零"不得用于任何结论**。
