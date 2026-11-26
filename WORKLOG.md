@@ -19,7 +19,7 @@
 - **评审 F3**: 三处三态陈述对齐 (结构体注释 / 规格 join 段 / 本条 WORKLOG), 删掉结构体注释里紧跟三态表的旧句 "只在 `status==joined` 时非 `null`"。
 - **退出码可读性 (评审收口)**: `exit 0` 的语义是"每组都得出过结论"—— `relay_bytes_zero: false` 同样退 0, 所以它不是"通过"。这层语义写进三处: `src/input.rs` 的 help、规格 §4.3 的退出码段、以及新增的人读摘要 (逐组往 **stderr** 打 `transfer/attempt/status/relay_bytes_zero: true|false|null/得出或未得出结论/原因码`)。**stdout 仍是那一份 JSON, 一字不动**。用例 `the_summary_line_says_whether_there_is_a_conclusion_and_what_it_is` 断言三种情形的关键子串。
 - **回执 (最终)**: `-- bulk_path` 23 / 0 / 0; `-- control_iroh` 62 / 0 / 2; 全量 1269 / 0 / 4; `check-carrier-assertions` OK; `check-bookkeeping` exit 0。
-- 提交: 08db409、423b377、536f5f8、24e2183、本条下一提交
+- 提交: 08db409、423b377、536f5f8、24e2183、9d0a049
 
 ## [2026-11-26] RAI-476 文档: 把三处「声明比机制宽」的措辞改准
 
