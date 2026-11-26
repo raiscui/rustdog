@@ -322,7 +322,10 @@ cargo 1.100 的 build-dir 布局让 `recording_e2e` 的 `rdog_binary_path()` 在
   static, 只串行化 Jail 之间, 挡不住外部的子进程继承到即将被删的 cwd。
   修前 `cargo test --bin rdog -- --test-threads=4` 6 轮红 3 次 (stderr
   `sh: 0: getcwd() failed: No such file or directory`), 修后 10 轮全绿 (1107 passed)。
+- 评审加严: 夹具首选 cargo 注入的 `CARGO_BIN_EXE_rdog`, 只有它缺失时才按布局探测,
+  且 build 目录扫描改为 mtime 新的在前 —— 避免选中旧 hash 产物里的 daemon。
 - 顺带补记 RAI-387 的合并提交 (纯账本缺口, 该 commit 无代码改动)。
 - 提交: d8cd8e8
 - 提交: 1034bb7
 - 提交: 176d191
+- 提交: 6924b82
