@@ -50,8 +50,12 @@ jobs:
 
       - uses: ./.github/actions/cargo-prep
 
+      # 构建身份显式注入: 读数要能回答"这是哪个提交量的", 而 `build.rs` 的探测会受缓存语义
+      # (共享 target、跨 checkout) 影响 —— CI 不依赖它, 直接用 GitHub 给的 sha。
       - name: Build
         shell: bash
+        env:
+          GIT_SHA: ${{ github.sha }}
         run: cargo build --bin rdog
 
       # 只编译不运行: 编译期错误归到"测试没跑", 而不是在 test job 里被读成"测试失败"
@@ -86,8 +90,12 @@ jobs:
 
       - uses: ./.github/actions/cargo-prep
 
+      # 构建身份显式注入: 读数要能回答"这是哪个提交量的", 而 `build.rs` 的探测会受缓存语义
+      # (共享 target、跨 checkout) 影响 —— CI 不依赖它, 直接用 GitHub 给的 sha。
       - name: Build
         shell: bash
+        env:
+          GIT_SHA: ${{ github.sha }}
         run: cargo build --bin rdog
 
       # 只编译不运行: 编译期错误归到"测试没跑", 而不是在 test job 里被读成"测试失败"
@@ -123,8 +131,12 @@ jobs:
 
       - uses: ./.github/actions/cargo-prep
 
+      # 构建身份显式注入: 读数要能回答"这是哪个提交量的", 而 `build.rs` 的探测会受缓存语义
+      # (共享 target、跨 checkout) 影响 —— CI 不依赖它, 直接用 GitHub 给的 sha。
       - name: Build
         shell: bash
+        env:
+          GIT_SHA: ${{ github.sha }}
         run: cargo build --bin rdog
 
       # 只编译不运行: 编译期错误归到"测试没跑", 而不是在 test job 里被读成"测试失败"

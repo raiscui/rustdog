@@ -43,7 +43,10 @@ fn workspace_head() -> Option<String> {
     if !output.status.success() {
         return None;
     }
-    let sha = String::from_utf8(output.stdout).ok()?.trim().to_string();
+    let sha = String::from_utf8(output.stdout)
+        .ok()?
+        .trim_end_matches(['\n', '\r'])
+        .to_string();
     if sha.is_empty() {
         None
     } else {
@@ -59,7 +62,9 @@ fn toplevel_is(root: &std::path::Path) -> bool {
     let Ok(text) = String::from_utf8(output.stdout) else {
         return false;
     };
-    let Ok(top) = std::fs::canonicalize(text.trim()) else {
+    // 只去尾部换行: `.trim()` 会把合法目录名里的**尾空格**也去掉, 那样
+    // `valid trailing-space ` 这种目录会被判成"不是本仓库" 而写出 `unknown`。
+    let Ok(top) = std::fs::canonicalize(text.trim_end_matches(['\n', '\r'])) else {
         return false;
     };
     let Ok(expected) = std::fs::canonicalize(root) else {

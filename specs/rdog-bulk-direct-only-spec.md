@@ -923,5 +923,12 @@ sha256、拓扑描述 (哪些段跨网)、脱敏后的地址、判定式计算�
 
 **构建身份不是可选元数据, 是这条读数成立的前提**: 两个 sha 不相同即整条读数作废 —— 跨版本的
 "直连/relay" 差异可能只是两端行为不同造成的, 那种数不能进任何结论. 两个 sha 分别抄自两份快照的
-`build` 字段 (客户端那一半 `endpoint:"client"`, daemon 那一半 `endpoint:"daemon"`), 由编译期注入的
-git 提交号 (7 位) 提供; 没有 git 可查时是 `unknown` —— 写 `unknown` 也要写, 不许留空.
+`build` 字段 (客户端那一半 `endpoint:"client"`, daemon 那一半 `endpoint:"daemon"`). 取值来自编译期
+注入的 git 提交号: CI 由 `GIT_SHA=${{ github.sha }}` 注入 (完整 sha), 本地构建退回本仓库的 7 位短 sha;
+探测**只认 `CARGO_MANIFEST_DIR` 自己的仓库** (顶层目录必须等于该目录), 没有可查时就写 `unknown` ——
+写 `unknown` 也要写, 不许留空.
+
+**已知限制 (共享 target)**: 共享 `CARGO_TARGET_DIR` 且**跨 checkout** 构建时, Cargo 在包指纹相同时根本
+不会重跑 build script, 构建身份可能沿用上一次的值. 这不能靠 `rerun-if-changed` 修. 处置: CI 显式注入
+`GIT_SHA`; 本地需要可信读数时**显式设 `GIT_SHA`** 或用独立 target. **判据**: 同一 target 依次构建两份
+只差账本的 checkout, 若第二次 `Fresh` 且 ELF 沿用旧 sha, 那次读数不得用于跨版本对比.
