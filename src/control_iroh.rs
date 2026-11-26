@@ -3246,8 +3246,22 @@ where
         return Err("iroh target must be NAMESPACE/NAME".into());
     }
     let cfg: ClientConfig = profile(path)?;
+    // 配置校验必须**早于任何网络动作**: 坏配置先表现成"目录查不到 / 连不上", 归因就跑偏了。
+    check_client_config(&cfg)?;
     let addr = resolve_by_name(&cfg, name)?;
     with_bulk_lane_at(cfg, addr, body)
+}
+
+/// profile 里那些与网络无关的约束: 帧预算与租约 TTL 范围。
+///
+/// 两条都只读 profile, 所以可以在 dial 之前判 —— 坏配置不该先表现成一个网络错误。
+fn check_client_config(cfg: &ClientConfig) -> Result<()> {
+    cfg.check_frame_budget()?;
+    let ttl = Duration::from_millis(cfg.lease_ttl_ms.unwrap_or(DEFAULT_LEASE_TTL_MS));
+    if ttl < admission::MIN_SESSION_TTL || ttl > admission::MAX_SESSION_TTL {
+        return Err("iroh lease_ttl_ms is outside the supported range".into());
+    }
+    Ok(())
 }
 
 /// 目录查找: NAMESPACE/NAME → 对端地址。与 `with_bulk_lane` 同一套手续, 只是单独拿出来,
@@ -3286,12 +3300,9 @@ pub(crate) fn with_bulk_lane_at<T>(
 where
     T: Send + 'static,
 {
-    cfg.check_frame_budget()?;
+    check_client_config(&cfg)?;
     let key = identity(&cfg.key_file)?;
     let ttl = Duration::from_millis(cfg.lease_ttl_ms.unwrap_or(DEFAULT_LEASE_TTL_MS));
-    if ttl < admission::MIN_SESSION_TTL || ttl > admission::MAX_SESSION_TTL {
-        return Err("iroh lease_ttl_ms is outside the supported range".into());
-    }
     let bind = bind_addr(cfg.bind, cfg.routable)?;
     runtime()?.block_on(async move {
         let target = addr.id;

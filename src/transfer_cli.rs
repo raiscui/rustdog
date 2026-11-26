@@ -115,6 +115,17 @@ impl std::fmt::Display for ExchangeError {
     }
 }
 
+/// 给 `control_iroh` 的真流回归用例用的构造器: 把一条真 lane 包成驱动能吃的交换器。
+///
+/// 只给测试: 生产路径由 `run_iroh_bulk` 自己建 lane 与交换器。
+#[cfg(test)]
+pub(crate) fn iroh_exchange(
+    lane: &mut crate::control_iroh::IrohBulkLane,
+    chunk_ack_timeout_ms: u64,
+) -> impl LineExchange + '_ {
+    IrohExchange::new(lane, chunk_ack_timeout_ms)
+}
+
 /// 一条回执: 结构化载荷 + daemon 半快照的**原文**。
 ///
 /// `evidence` 是 daemon 在终态响应里挂的那份 `rdog.bulk-path.v1` (§4.3)。存原文而不是解析后的
@@ -667,6 +678,23 @@ fn note_error(
     }
 }
 
+/// 进度步长: 最多 20 条报进度行 (至少 1 MiB 一条)。
+///
+/// 规格 §5 要求 stderr 有进度行, 而它同时也是**"慢"与"卡住"的唯一区分手段**: 没有它, 一次被外层
+/// `timeout` 杀掉的传输在日志里和一个死锁长得一模一样。
+fn progress_step(size: u64) -> u64 {
+    (size / 20).max(1024 * 1024)
+}
+
+fn report_progress(direction: &str, offset: u64, size: u64) {
+    let percent = if size == 0 {
+        100
+    } else {
+        offset.saturating_mul(100) / size
+    };
+    eprintln!("{direction} {offset}/{size} ({percent}%)");
+}
+
 fn refuse_message(code: &str) -> String {
     format!("{code}: 当前传输不能承载 bulk 直连传输")
 }
@@ -1024,6 +1052,9 @@ fn run_put_inner(
     let chunk_bytes = exchange_peer.chunk_bytes();
     let mut buffer = vec![0u8; chunk_bytes];
     let mut offset = written;
+    let step = progress_step(size);
+    let mut next_report = offset + step;
+    report_progress("put", offset, size);
     while offset < size {
         let want = (size - offset).min(chunk_bytes as u64) as usize;
         let read = file
@@ -1067,6 +1098,10 @@ fn run_put_inner(
             .get("written")
             .and_then(Value::as_u64)
             .unwrap_or(offset + read as u64);
+        if offset >= next_report || offset >= size {
+            report_progress("put", offset, size);
+            next_report = offset + step;
+        }
     }
 
     let end_line = serde_json::json!({
@@ -1173,6 +1208,9 @@ fn run_get_inner(
         // 这是"每块一往返"这个设计的上限, 不是实测值。
         let chunk_bytes = (exchange_peer.chunk_bytes() as u64).min(response_payload_bytes());
         let mut offset = 0u64;
+        let step = progress_step(size);
+        let mut next_report = step;
+        report_progress("get", 0, size);
         loop {
             let want = (size - offset).min(chunk_bytes).max(1);
             let read_line = serde_json::json!({
@@ -1193,6 +1231,10 @@ fn run_get_inner(
                 .map_err(|err| format!("写入 {staging:?} 失败: {err}"))?;
             recorder.note_confirmed_chunk(bytes.len() as u64, data.len() as u64);
             offset += bytes.len() as u64;
+            if offset >= next_report || offset >= size {
+                report_progress("get", offset, size);
+                next_report = offset + step;
+            }
             let eof = read.get("eof").and_then(Value::as_bool).unwrap_or(false);
             if eof {
                 // 下载的终态是 `eof:true` 的那一帧 `@file-read`: daemon 那一半挂在这里 (§4.3)。
@@ -2215,6 +2257,13 @@ mod tests {
         );
         assert!(broken.exists(), "坏文件不删, 留给排障");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn progress_is_reported_at_most_twenty_times() {
+        assert_eq!(progress_step(20 * 1024 * 1024), 1024 * 1024);
+        assert_eq!(progress_step(200 * 1024 * 1024), 10 * 1024 * 1024);
+        assert_eq!(progress_step(1_000), 1024 * 1024, "下限 1 MiB, 小文件只报首尾");
     }
 
     #[test]

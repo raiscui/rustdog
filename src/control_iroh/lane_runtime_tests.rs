@@ -188,3 +188,123 @@ fn a_bulk_sized_chunk_line_is_read_and_answered() {
     rt.shutdown_background();
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// 下载方向的真流回归: 客户端 `run_get` 跑在一条真 quinn 流上, 对端按 daemon 的形状回
+/// `@get-file` / `@file-read` (末帧带 `evidence`)。
+///
+/// 真机 `--get` 出现过"握手成功但一块回执都没有、被外层 timeout 杀掉"的现场; 这条用例覆盖同一
+/// 传输路径, 用来把"客户端读循环 / 帧尺寸"与"网络慢"分开。
+#[test]
+fn a_download_runs_over_the_real_line_transport() {
+    use crate::transfer_cli::{iroh_exchange, run_get, BulkPathRecorder};
+    use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+    use sha2::{Digest, Sha256};
+
+    let dir = std::env::temp_dir().join(format!("rdog-lane-get-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("scratch dir");
+    let cfg = client_config_for(&dir.join("client.key"));
+
+    let payload: Vec<u8> = (0..300_000u32).map(|byte| (byte % 251) as u8).collect();
+    let sha = format!("{:x}", Sha256::digest(&payload));
+
+    let rt = runtime().expect("runtime");
+    let server_key = SecretKey::generate();
+    let (server, addr) = rt.block_on(async {
+        let server = endpoint(server_key, Some("127.0.0.1:0".parse().unwrap()), TEST_ALPN, None)
+            .await
+            .expect("fixture endpoint");
+        let addr = server.addr();
+        (server, addr)
+    });
+    let served = payload.clone();
+    let served_sha = sha.clone();
+    let acceptor = {
+        let server = server.clone();
+        rt.spawn(async move {
+            let Ok(Some(incoming)) = timeout(CONNECT, server.accept()).await else {
+                return;
+            };
+            let Ok(conn) = incoming.await else { return };
+            let Ok((mut send, mut recv)) = conn.accept_bi().await else {
+                return;
+            };
+            let _ = read_line(&mut recv).await;
+            let _ = send.write_all(b"{\"status\":\"admitted\"}\n").await;
+            while let Ok(line) = read_line(&mut recv).await {
+                let reply = if line.starts_with("@get-file") {
+                    format!(
+                        "@response {{\"kind\":\"file-transfer\",\"state\":\"reading\",\"size\":{},\"sha256\":\"{served_sha}\"}}\n",
+                        served.len()
+                    )
+                } else if line.starts_with("@file-read") {
+                    let request: serde_json::Value = serde_json::from_str(
+                        line.split_once(':').map(|(_, payload)| payload).unwrap_or("{}"),
+                    )
+                    .unwrap_or_default();
+                    let offset = request["offset"].as_u64().unwrap_or(0) as usize;
+                    let length = request["length"].as_u64().unwrap_or(0) as usize;
+                    let end = (offset + length).min(served.len());
+                    let block = &served[offset.min(served.len())..end];
+                    let eof = end >= served.len();
+                    let evidence = if eof {
+                        // 与 daemon 半快照同尺寸: 末帧因此最容易撞上响应行预算。
+                        ", \"evidence\":{\"schema\":\"rdog.bulk-path.v1\",\"attempt_id\":\"a\",\"transfer_id\":\"t\",\"direction\":\"get\",\"path_aware\":true,\"bulk_path_pin\":false,\"bulk_path_checked_per_chunk\":true,\"path_class\":\"direct\",\"direct_addr\":null,\"bulk_bytes\":300000,\"wire_bytes\":400000,\"chunks\":9,\"concurrency_suspected\":null,\"endpoint\":\"daemon\",\"relay_tx_before\":null,\"relay_tx_after\":null,\"relay_rx_before\":null,\"relay_rx_after\":null,\"relay_sample_available\":false,\"aborted\":false,\"verdict\":\"relay_sample_unavailable\"}"
+                    } else {
+                        ""
+                    };
+                    let line = format!(
+                        "@response {{\"kind\":\"file-transfer\",\"offset\":{offset},\"length\":{},\"data\":\"{}\",\"eof\":{eof}{evidence}}}",
+                        block.len(),
+                        BASE64.encode(block)
+                    );
+                    // daemon 的响应行有统一上限 (`crate::control_frames::CONTROL_RESPONSE_MAX_BYTES`), 超了会被包成
+                    // `output_budget_exceeded` 或截断 —— 末帧还带着 `evidence`, 最容易撞上这条。
+                    assert!(
+                        line.len() < crate::control_frames::CONTROL_RESPONSE_MAX_BYTES,
+                        "回执行 {} 字节, 撞上响应预算 {}",
+                        line.len(),
+                        crate::control_frames::CONTROL_RESPONSE_MAX_BYTES
+                    );
+                    format!("{line}\n")
+                } else {
+                    "@response {\"pong\":true}\n".to_string()
+                };
+                if send.write_all(reply.as_bytes()).await.is_err() {
+                    break;
+                }
+                if line.starts_with("@file-read") && reply.contains("\"eof\":true") {
+                    // 与 daemon 的收尾同形: 先把写半边 finish 掉, 再等对端关连接 —— 直接丢连接
+                    // 会把末帧连同回执一起丢在地上 (客户端就报 connection lost)。
+                    let _ = send.finish();
+                    let _ = timeout(CONNECT, conn.closed()).await;
+                    return;
+                }
+            }
+        })
+    };
+
+    let target = dir.join("landed.bin");
+    let target_for_lane = target.clone();
+    let receipt = with_bulk_lane_at(cfg, addr, move |lane| {
+        let exchange_peer = iroh_exchange(lane, 5_000);
+        let mut recorder = BulkPathRecorder::new(
+            "lane-get-test".to_string(),
+            crate::bulk_path::PathCapability::PATH_AWARE_CHECKED_PER_CHUNK,
+            target_for_lane.with_file_name("bulk-path.json").into(),
+        );
+        run_get(&exchange_peer, &mut recorder, "/remote/file.bin", &target_for_lane)
+    })
+    .map_err(|err| err.to_string())
+    .expect("the lane ran")
+    .expect("the download must finish over the real transport");
+
+    assert_eq!(receipt.bytes, payload.len() as u64);
+    assert_eq!(std::fs::read(&target).expect("landed file"), payload);
+
+    rt.block_on(async {
+        let _ = timeout(CONNECT, server.close()).await;
+    });
+    acceptor.abort();
+    rt.shutdown_background();
+    let _ = std::fs::remove_dir_all(&dir);
+}
