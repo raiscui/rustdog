@@ -595,21 +595,42 @@ async fn directory_call(
     // stops short of its own budget.
     let call = async {
         let conn = timeout(budget, ep.connect(dial.addr.clone(), DIRECTORY_ALPN)).await??;
-        if dial.relay.is_some() {
-            // The lane logs `iroh_path=` for its own dial; the directory hop has to
-            // report what carried it too, or a relay lookup looks assumed.
-            match route(&conn, routable) {
-                Ok(actual) => log::info!("iroh_directory_path={}", actual.label()),
-                Err(err) => log::info!("iroh_directory_path=pending ({err})"),
-            }
-        }
         let (mut send, mut read) = timeout(IO, conn.open_bi()).await??;
         frame_put(&mut send, &request).await?;
-        frame_get(&mut read).await
+        let reply = frame_get(&mut read).await?;
+        // The lane logs `iroh_path=` for its own dial; the directory hop reports
+        // what carried it too — but only once the reply is in hand, because a path
+        // printed ahead of the result would leave a `relay` reading behind for a
+        // lookup that then failed.
+        if dial.relay.is_some() {
+            match route(&conn, routable) {
+                Ok(actual) => log_directory_path(actual),
+                Err(err) => log::debug!("iroh_directory_path=unknown ({err})"),
+            }
+        }
+        Ok::<_, Box<dyn std::error::Error + Send + Sync>>(reply)
     };
     match timeout(LEASE - RENEW, call).await?? {
         DirectoryReply::Rejected { reason } => Err(reason.into()),
         reply => Ok(reply),
+    }
+}
+
+/// What carried the last successful directory hop. A `via_relay` daemon renews
+/// every five seconds, so the path is logged at `info` only when it changes and at
+/// `debug` otherwise: a steady daemon must not add a line per renewal.
+static DIRECTORY_PATH: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+fn log_directory_path(actual: Route) {
+    let seen = match actual {
+        Route::Relay => 1,
+        _ => 2,
+    };
+    let previous = DIRECTORY_PATH.swap(seen, Ordering::Relaxed);
+    if previous == seen {
+        log::debug!("iroh_directory_path={}", actual.label());
+    } else {
+        log::info!("iroh_directory_path={}", actual.label());
     }
 }
 
@@ -1042,8 +1063,9 @@ pub(crate) fn run_daemon(path: &Path) -> Result<()> {
         };
         // `online()` means "at least one relay's home connection is up", not "the
         // relay this lane publishes is up": with a directory relay in the map that
-        // can be the other one. A successful registration is the only evidence
-        // that the published relay carries this daemon.
+        // can be the other one. A successful registration proves the directory hop
+        // is reachable; whether the lane relay carries this daemon is a separate
+        // question, answered by that relay's own connection state.
         timeout(CONNECT, data.online()).await?;
         let deadline = register(&directory, &dial, &cfg, &data).await?;
         let allow = Arc::new(cfg.allow.clone());

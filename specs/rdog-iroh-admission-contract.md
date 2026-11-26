@@ -27,7 +27,7 @@ relay 侧另有一个 `advertise` 字段（缺省空），只改写给对端的 
 
 数据路径可以走 relay，目录原本不行：目录端点只能按 `id + SocketAddr` 拨，两端都没有入站地址时连"去哪儿查这个 daemon"都发不出去。拨号目标由 [`Directory::dial`](../src/control_iroh.rs) 决定，`directory` 写 `via_relay: true` 配 `relay: {url, root_cert?}` 时改走 relay：
 
-- **拨号目标只有 `TransportAddr::Relay(url)`**，不带任何 IP 候选——地址在配置里本来就不存在，不是查出来的。这一跳用独立预算 `DIRECTORY_CONNECT`，并**按整次调用限时** `timeout(LEASE - RENEW, ...)`：connect、open、写帧、读帧四步任一慢，都不会让这次续期越过它要刷新的租约；同时**关掉 QAD**（`RelayConfig::new(url, None)`），目录请求因此不会漂到直连路径。成功查询后落 `iroh_directory_path=<relay|direct>`（拿不到选中路径时 `pending (<err>)`），所以「目录跳走的是 relay」是实测行而不是配置推断。
+- **拨号目标只有 `TransportAddr::Relay(url)`**，不带任何 IP 候选——地址在配置里本来就不存在，不是查出来的。这一跳用独立预算 `DIRECTORY_CONNECT`，并**按整次调用限时** `timeout(LEASE - RENEW, ...)`：connect、open、写帧、读帧四步任一慢，都不会让这次续期越过它要刷新的租约；同时**关掉 QAD**（`RelayConfig::new(url, None)`），目录请求因此不会漂到直连路径。**查询成功拿到回复之后**才落 `iroh_directory_path=<relay|direct>`（取不到选中路径时 `debug` 级 `unknown (<err>)`），所以「目录跳走的是 relay」是实测行而不是配置推断，也不会出现「先打路径、后失败」的假读数；这一行在稳态下按**状态变化**才进 `info`（daemon 每 5s 续期一次，不该每次加一行），其余走 `debug`。
 - **目录侧**（rendezvous profile 的 `directory_relay: {url, root_cert?}`）把自己的目录端点挂到该 relay 上（同一个 key，id 不变），并把自身 id 加进自建 relay 的准入表，否则它自己会被自己的 ACL 拒掉；ready 行随之多出 `directory_relay=<url>`。
 - **daemon 侧不能有第二个端点**：一条对端身份在一个 relay 上只有一条连接，目录端点与服务端点同时挂同一个 relay 会互相顶掉（实测原文 `Relay server reports problem: Another endpoint connected with the same endpoint id`，随后注册超时、daemon 非零退出）。所以打开开关时 daemon 复用服务端点本身（ALPN 同时带 `CONTROL` 与 `DIRECTORY`，relay map 是 lane relay ∪ directory relay）；关掉开关时仍是"目录端点无 relay + 服务端点挂 lane relay"两个端点。服务端点上的 `DIRECTORY_ALPN` **不对内服务**：它只是为了从该端点拨出目录请求；对端若用该 ALPN 拨进来，daemon 记 `iroh directory alpn not served peer=<id>` 并按 `DENIED_CODE` 关闭，不留一个"看起来支持"的空洞。
 - **宽化只挂在显式的信任锚上**：一个 endpoint 只有一份 TLS 配置，根集合由 [`relay_roots`](../src/control_iroh.rs) 一处决定：
@@ -46,7 +46,7 @@ relay 侧另有一个 `advertise` 字段（缺省空），只改写给对端的 
 | 打开开关，`path:"relay"` | 应答，`iroh_path=relay` |
 | 打开开关，`path:"auto"` + 黑洞掉 daemon 地址 | 先 `iroh_path=direct unavailable`，再 `iroh_path=relay` 应答 |
 
-`data.online()` 的语义要读准：它只表示「relay map 里**至少一条** home 连接已建立」，当 endpoint 同时挂着 lane relay 与目录 relay 时，先通的可能是后者。**注册成功才是「发布的 lane relay 承载了这个 daemon」的证据**，`online()` 不是。
+`data.online()` 的语义要读准：它只表示「relay map 里**至少一条** home 连接已建立」，当 endpoint 同时挂着 lane relay 与目录 relay 时，先通的可能是后者。**注册成功证明的是「目录这一跳可达」**；lane relay 是否承载这个 daemon 要另看该 relay 自己的连接状态 —— Registry 的 `Register` 只做形状校验（id、IP 候选、恰好 1 个等于配置值的 relay），不做任何可达性探测，而注册本身走的是目录 relay。
 
 注册契约的形状（[`Registry::request`](../src/control_iroh.rs) 的 `Register` 分支）：
 - **至少 1 个 IP 候选 + 恰好 1 个 relay，且该 relay 等于配置值**；每个 IP 候选单独过 [`candidate_ok`](../src/control_iroh.rs)（`network` + 端口非 0）且端口非 0。通配绑定朝多网卡展开，所以候选数不设上限——这是"多候选"的唯一合法来源。
