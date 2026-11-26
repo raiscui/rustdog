@@ -1278,7 +1278,7 @@ zenoh_router_client 38/2 ignored)。
 
 ### 2026-11-26 RAI-411 第六个真缺陷 (macos): unixpipe e2e 假设 ~/.rdog/run 已存在
 
-- 提交: (本条随修复提交记入下一次账本)
+- 提交: e26b885
 
 `zenoh_unixpipe_fast_path::empty_target_should_use_local_default_even_when_extra_fifo_candidate_exists`
 在 macos runner 上 `mkfifo /Users/runner/.rdog/run/lde50254__x.lde50254.pipe_uplink 失败` ——

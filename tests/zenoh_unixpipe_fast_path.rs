@@ -221,6 +221,9 @@ fn stale_unixpipe_socket_files_should_be_cleaned_on_daemon_start() {
     cleanup_unixpipe_artifacts(&base_path);
 
     // 模拟上次崩溃残留的 3 个文件:base / base_uplink / base_downlink。
+    // 同样不能假设运行目录已存在 (否则这个用例要靠别的用例先建目录, 顺序一变就红)。
+    fs::create_dir_all(base_path.parent().expect("运行目录"))
+        .expect("unixpipe 运行目录应可创建");
     for suffix in ["", "_uplink", "_downlink"] {
         let path = format!("{}{suffix}", base_path.display());
         let status = Command::new("mkfifo")
