@@ -397,6 +397,16 @@ daemon 都会把 178 MB 从 relay 推出去. 所以两端都要, 且两端都要
 
 把后者当成前者, 就得到一条"看起来有门禁、其实没有"的路径, 而那正是本规格要否掉的东西.
 
+**今天这条不变量的落地形态要说准 (2026-11-26 实现阶段回填).** iroh lane 的准入面只有 `@ping` 与
+`@pty` (`ping_only` / `LANE_REFUSED`, 见 `specs/rdog-iroh-admission-contract.md`), bulk 动词在那条
+通道上根本不被接受; 也就是说"relay 上 bulk 字节为 0"今天由**能力拒绝**保证, 而不是由**路径判定**
+保证. 这不是权宜之计 —— 反过来"放行 bulk 再靠路径采样兜"会让这条不变量空真: 一次压根没发出字节的
+尝试当然记 0, 而空真的不变量在验收里和成立长得一模一样.
+
+因此适配器今天的声明是 `path_aware=true` / `bulk_path_pin=false`, 落到 §3.1 的最后一行: 该 lane 上的
+bulk 一律以 `iroh_bulk_path_pin_unavailable` 拒绝. **适配器补上路径 pin 之后, 必须回来重写这一段的
+理由** —— 否则下一个读到 `bulk_path_pin=false` 的人会以为门禁坏了, 而不是"这条通道还没开 bulk".
+
 
 ---
 

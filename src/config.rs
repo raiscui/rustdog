@@ -184,10 +184,12 @@ pub struct ObservationConfig {
     pub write_ref_cache: bool,
 }
 
-/// 双向分块文件传输 lane 的回收参数 (specs/file-transfer-control-spec.md)。
+/// 双向分块文件传输 lane 的回收参数与 bulk 门禁
+/// (specs/file-transfer-control-spec.md, specs/rdog-bulk-direct-only-spec.md §2.4)。
 ///
-/// 只控制"没有进展的会话什么时候被回收", 不控制传输本体的大小与并发 ——
-/// 那两项属于 bulk 原语的门禁 (specs/rdog-bulk-direct-only-spec.md §2.4), 尚未落地。
+/// 回收三项是"没有进展的会话什么时候被回收", 门禁三项是"什么能进来":
+/// 大小上限、并发上限、可续传窗口。后者不是可选的优化 —— 没有它, 一次被拒的
+/// 178 MB 上传照样会先落满盘再失败。
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct FileTransferConfig {
@@ -196,6 +198,17 @@ pub struct FileTransferConfig {
     pub idle_timeout_ms: u64,
     /// 后台回收线程的扫描间隔。
     pub sweep_interval_ms: u64,
+    /// 单文件大小上限。在 `@put-file` 按声明 size 拒一次, 在 `@file-chunk` 按累计写入**再**拒一次
+    /// (声明可以撒谎)。
+    pub max_bytes: u64,
+    /// daemon 侧并发会话上限, 超出返回稳定码 `bulk_session_limit_reached`。
+    pub max_concurrent_sessions: usize,
+    /// 可续传半成品的保留窗口, 必须**大于** `idle_timeout_ms`: 空闲回收先把会话移出注册表,
+    /// 半成品按本窗口留到能续传为止。两个值倒过来就是"移出即删", 续传窗口形同不存在。
+    pub resume_window_ms: u64,
+    /// 客户端侧单块应答超时, 超时即 `@file-cancel` 并失败。daemon 不读它, 但只有在这里
+    /// 才能让"客户端怎么等"和"服务端留多久"共用一份配置。
+    pub chunk_ack_timeout_ms: u64,
 }
 
 /// 主动连出端点的配置。
@@ -318,6 +331,14 @@ impl Default for FileTransferConfig {
         Self {
             idle_timeout_ms: 15 * 60 * 1000,
             sweep_interval_ms: 60 * 1000,
+            // 1 GiB: 容得下 2026-10-06 规格里记录的 178 MB 模型件, 同时不让"把整个库传过去"
+            // 这类误用在没有任何门禁的情况下发生。
+            max_bytes: 1024 * 1024 * 1024,
+            max_concurrent_sessions: 8,
+            // 24h: 远大于 idle_timeout 的 15min —— 空闲回收只说明"没人来了", 不说明"数据无效",
+            // 半成品要留到客户端第二天回来还能接上。
+            resume_window_ms: 24 * 60 * 60 * 1000,
+            chunk_ack_timeout_ms: 30 * 1000,
         }
     }
 }
@@ -752,6 +773,39 @@ fn validate_file_transfer_config(config: &FileTransferConfig) -> io::Result<()> 
         return Err(io::Error::new(
             ErrorKind::InvalidInput,
             "file_transfer.sweep_interval_ms 必须大于 0",
+        ));
+    }
+
+    if config.max_bytes == 0 {
+        return Err(io::Error::new(
+            ErrorKind::InvalidInput,
+            "file_transfer.max_bytes 必须大于 0 (0 会让所有传输都被拒, 不是\"不限制\")",
+        ));
+    }
+
+    if config.max_concurrent_sessions == 0 {
+        return Err(io::Error::new(
+            ErrorKind::InvalidInput,
+            "file_transfer.max_concurrent_sessions 必须大于 0",
+        ));
+    }
+
+    // 跨字段: 窗口必须严格大于空闲阈值. 相等或更小时, 会话被 sweep 移出的那一刻半成品就到期,
+    // 续传窗口等于不存在 —— 而配置表面上看是给了窗口的, 这种"看起来有"最难排查。
+    if config.resume_window_ms <= config.idle_timeout_ms {
+        return Err(io::Error::new(
+            ErrorKind::InvalidInput,
+            format!(
+                "file_transfer.resume_window_ms ({}) 必须大于 idle_timeout_ms ({}): 否则半成品在会话被回收时立即过期, 续传窗口不存在",
+                config.resume_window_ms, config.idle_timeout_ms
+            ),
+        ));
+    }
+
+    if config.chunk_ack_timeout_ms == 0 {
+        return Err(io::Error::new(
+            ErrorKind::InvalidInput,
+            "file_transfer.chunk_ack_timeout_ms 必须大于 0",
         ));
     }
 
@@ -1608,6 +1662,41 @@ shell = "/bin/bash"
                 let err = load_daemon_config(None).unwrap_err();
                 assert_eq!(err.kind(), ErrorKind::InvalidInput);
                 assert!(err.to_string().contains("sweep_interval_ms"));
+
+                // 跨字段: 续传窗口不大于空闲阈值时, 会话被回收的那一刻半成品就到期,
+                // 窗口形同不存在 —— 而配置表面上看是给了窗口的。
+                jail.create_file(
+                    default_platform_config_file_name(),
+                    r#"[file_transfer]
+idle_timeout_ms = 60000
+resume_window_ms = 60000
+
+[inbound]
+enabled = true
+host = "127.0.0.1"
+port = 4444
+shell = "/bin/bash"
+"#,
+                )?;
+                let err = load_daemon_config(None).unwrap_err();
+                assert_eq!(err.kind(), ErrorKind::InvalidInput);
+                assert!(err.to_string().contains("resume_window_ms"));
+
+                jail.create_file(
+                    default_platform_config_file_name(),
+                    r#"[file_transfer]
+max_bytes = 0
+
+[inbound]
+enabled = true
+host = "127.0.0.1"
+port = 4444
+shell = "/bin/bash"
+"#,
+                )?;
+                let err = load_daemon_config(None).unwrap_err();
+                assert_eq!(err.kind(), ErrorKind::InvalidInput);
+                assert!(err.to_string().contains("max_bytes"));
                 Ok(())
             });
         }

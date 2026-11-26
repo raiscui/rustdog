@@ -149,6 +149,43 @@ pub enum Command {
         )]
         ui_script: Option<PathBuf>,
 
+        /// 上传本地文件到被控端 (`@put-file` → `@file-chunk*` → `@file-end`), 逐块流式发送,
+        /// 不在内存里拼整文件 (specs/rdog-bulk-direct-only-spec.md §1.3 G1)。
+        #[clap(
+            long = "put",
+            value_name = "LOCAL",
+            requires = "remote_path",
+            conflicts_with_all = ["ui_script", "pty", "pty_close", "pty_detach", "pty_attach"]
+        )]
+        put: Option<PathBuf>,
+
+        /// `--put` 的远端目标路径。
+        #[clap(long = "remote-path", value_name = "REMOTE", requires = "put")]
+        remote_path: Option<String>,
+
+        /// 从被控端下载文件到本地 (`@get-file` → `@file-read*`), 拉取式逐块落盘。
+        #[clap(
+            long = "get",
+            value_name = "REMOTE",
+            conflicts_with_all = [
+                "put",
+                "ui_script",
+                "pty",
+                "pty_close",
+                "pty_detach",
+                "pty_attach"
+            ]
+        )]
+        get: Option<String>,
+
+        /// `--get` 的本地落地路径。
+        #[clap(long = "local-path", value_name = "LOCAL", requires = "get")]
+        local_path: Option<PathBuf>,
+
+        /// `--put` 时显式从 0 重来 (并要求被控端删掉既有半成品), 不续传。
+        #[clap(long = "restart", requires = "put")]
+        restart: bool,
+
         /// Only parse and compile `--ui-script`, then print the generated control lines.
         #[clap(long = "dry-run", requires = "ui_script")]
         dry_run: bool,
