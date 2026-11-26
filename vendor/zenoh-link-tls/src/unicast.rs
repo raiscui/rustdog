@@ -319,8 +319,13 @@ impl LinkUnicastTls {
         }
     }
 
-    /// 关闭: 先把 rustls 已受理、尚未落到 TCP 的记录推完 (锁内非阻塞 poll, 锁外等可写, 有界
-    /// 5s), 再做 TCP 半关闭, 最后取消 `closed` 唤醒所有仍在等唤醒的任务。
+    /// 关闭: 先把 rustls 已受理、尚未落到 TCP 的记录推完 (锁内非阻塞 poll, 锁外等可写), 再做
+    /// TCP 半关闭, 最后取消 `closed` 唤醒所有仍在等唤醒的任务。
+    ///
+    /// **期限只覆盖拿到 `write_gate` 之后的 flush/shutdown 循环** (5s)。等待 gate 本身没有上界:
+    /// 若另一个 `write_all` 正卡在背压里, 它一直持有 `write_gate`, `close()` 会一直等下去。
+    /// 该形状在 stock 1.8.0 上同样存在 (那一版在锁内 `flush().await`), 不是本地改动引入的,
+    /// 修它属于「背压下的关闭语义」另一个改动面。
     ///
     /// 推不完或 shutdown 出错**都回报错误**: `tokio-rustls` 的 `poll_write` 只是写进 rustls 的
     /// 发送缓冲, 不 flush 就不保证落到 TcpStream。一版"poll 一次 flush 就 `Ok(())`"会在背压时
