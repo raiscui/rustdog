@@ -36,6 +36,7 @@ import argparse
 import os
 import re
 import subprocess
+import time
 import sys
 from pathlib import Path
 
@@ -115,6 +116,14 @@ def commit_shas(
     return [line.strip() for line in git(root, *args).splitlines() if line.strip()]
 
 
+def commit_epoch(root: Path, sha: str) -> float:
+    """commit 的提交时间 (epoch 秒)。占位是否该判超期看它, 不看位置。"""
+    try:
+        return float(git(root, "log", "-1", "--format=%ct", sha).strip())
+    except ValueError:
+        return time.time()
+
+
 def changed_files(root: Path, sha: str) -> list[str]:
     out = git(root, "show", "--name-only", "--format=", sha)
     return [line.strip() for line in out.splitlines() if line.strip()]
@@ -149,6 +158,16 @@ def main(argv: list[str]) -> int:
         help=(
             "main 分支模式: 关掉 --first-parent (否则只看得到 merge commit)、排除 merge 本身, "
             "范围内最新 --main-grace 个工作 commit 记宽限, 其余缺 sha 即失败 (RAI-433)"
+        ),
+    )
+    parser.add_argument(
+        "--max-placeholder-age-days",
+        type=float,
+        default=3.0,
+        help=(
+            "main 上占位多久算「忘了补 sha」, 默认 3 天。**按时间而不是按位置**: 位置口径要一直追着"
+            "最大的合并跑 (实测 main 最近 12 次合并的工作 commit 数 1–26 不等), 抬到 10 也只是把阈值"
+            "挪了个位置 —— 下次 12 个 commit 的 PR 一合入照样红。"
         ),
     )
     parser.add_argument(
@@ -221,7 +240,7 @@ def main(argv: list[str]) -> int:
             subject_counts.get(git(root, "log", "-1", "--format=%s", sha).strip(), 0) + 1
         )
 
-    unaccounted: list[tuple[str, str, list[str]]] = []
+    unaccounted: list[tuple[str, str, list[str], str | None]] = []
     graced: list[tuple[str, str]] = []
     accounted = 0
     exempt = 0
@@ -235,44 +254,43 @@ def main(argv: list[str]) -> int:
         if is_ledger_only(root, sha):
             exempt += 1
             continue
-        # 占位在**宽限窗口内**算「待补」而不是漏账 —— 否则一次合并的提交数超过宽限时, main 会在
-        # sha 补齐提交合入之前就变红 (2026-11-26 实测: 5 个提交的 PR 合入后 main 立刻红)。
-        # 超出宽限还留着占位才是漏账: 那时 sha 早已稳定。
-        if subject in pending_subjects and (not args.main or index < args.main_grace):
-            # 占位按标题认领, 所以标题必须唯一: 否则一条 `fix: typo` 这类通用占位能吞掉
-            # 同标题的任意多个 commit, 一个占位放行一片。
+        if subject in pending_subjects:
+            # 占位 (账本里有条目、只差 sha) 的判据是**时间**, 不是位置:
+            #   - 刚合入时年龄 ~0 → 任何规模的合并都不会让 main 当天变红;
+            #   - 超过 --max-placeholder-age-days 还没补 → 「占位超期」判红。
+            # 非 main 模式 (本地 strict / PR) 永不判占位超期: sha 在 PR 阶段本来就不稳定。
             if subject_counts.get(subject, 0) > 1:
                 unaccounted.append(
                     (
                         short,
                         subject,
-                        [
-                            f"占位标题不唯一: 范围内有 {subject_counts[subject]} 个 commit 用同一标题, "
-                            "占位只能认领一个"
-                        ],
+                        changed_files(root, sha),
+                        f"占位标题不唯一: 范围内有 {subject_counts[subject]} 个 commit 用同一标题, "
+                        "占位只能认领一个",
                     )
                 )
                 continue
+            if args.main:
+                age_days = (time.time() - commit_epoch(root, sha)) / 86400.0
+                if age_days >= args.max_placeholder_age_days:
+                    unaccounted.append(
+                        (
+                            short,
+                            subject,
+                            changed_files(root, sha),
+                            f"占位超期 {age_days:.1f} 天 (上限 "
+                            f"{args.max_placeholder_age_days:g} 天): 账本里还写着「待合入后补」, "
+                            "sha 早已稳定",
+                        )
+                    )
+                    continue
             pending.append((short, subject))
             continue
-        # main 上「刚合入还没补 sha」是**正常时序**: sha 只有在合入后才稳定。所以最新
-        # --main-grace 个 commit 记宽限, 更早的还缺 sha 就是漏账 (RAI-433)。
+        # 数量宽限只给**完全没有账本条目**的 commit: 刚合入的提交可能还在等记账提交落盘。
         if args.main and index < args.main_grace:
             graced.append((short, subject))
             continue
-        if subject in pending_subjects:
-            unaccounted.append(
-                (
-                    short,
-                    subject,
-                    [
-                        f"占位超期: 账本里还写着「待合入后补」, 但该 commit 已在宽限 ({args.main_grace}) "
-                        "之外 —— sha 早已稳定, 该补了"
-                    ],
-                )
-            )
-            continue
-        unaccounted.append((short, subject, changed_files(root, sha)))
+        unaccounted.append((short, subject, changed_files(root, sha), None))
 
     print(f"检查范围: {scope_note}  共 {len(scope)} 个 commit")
     print(
@@ -283,12 +301,16 @@ def main(argv: list[str]) -> int:
     if graced and args.main:
         for short, subject in graced:
             print(f"  (宽限) {short} {subject} —— 合入后由纯账本提交补 `- 提交: {short}`")
+    for short, subject in pending:
+        print(f"  (占位待补) {short} {subject} —— 账本里已有占位, 合入后把标题换成 sha")
 
     if unaccounted:
         mode = "只报告 (report-only)" if args.report_only else "阻断 (strict)"
         print(f"\n{'⚠️' if args.report_only else '❌'} {len(unaccounted)} 个 commit 没有进账本 [{mode}]")
-        for short, subject, files in unaccounted:
+        for short, subject, files, reason in unaccounted:
             print(f"  {short} {subject}")
+            if reason:
+                print(f"      原因: {reason}")
             print(f"      改了: {', '.join(files[:6])}")
             # GitHub Actions 注解: 漏账条目会显示在提交/PR 视图, 而不是只埋进日志
             if os.environ.get("GITHUB_ACTIONS"):

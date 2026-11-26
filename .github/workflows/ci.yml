@@ -365,8 +365,10 @@ jobs:
       # 两档, 按分支分而不是按心情分:
       # - **PR**: 只报告 (::warning::)。账本滞后是流程债, 不该卡住别人推送; 而且 PR 的 sha
       #   会随 rebase 变, 在 PR 阶段要求 sha 等于强制每人写一个马上过期的值。
-      # - **main**: `--main` 硬门禁 —— 最新 10 个工作 commit 记宽限 (一次合并自带的提交量),
-      #   更早的缺 sha 或还留着占位就是漏账。宽限内占位算「待补」, 否则 PR 一合入 main 就先红。
+      # - **main**: `--main` 硬门禁, 两件事两个判据:
+      #   · 完全没有账本条目的 commit → 最新 10 个位置内宽限;
+      #   · 有占位只差 sha → 按**时间**判 (--max-placeholder-age-days, 默认 3 天) 超期即红,
+      #     这样任何规模的合并合入当天 main 必绿, 忘补在 3 天后被抓。
       - name: Commits accounted in the ledger - PR report only
         if: github.event_name == 'pull_request'
         run: |
