@@ -1202,3 +1202,10 @@ resume_window), 孤儿也进索引跨重启恢复, 恢复时只认暂存区里�
 真机冒烟补上了之前缺的那一段: TCP line-control daemon 上 20 MB 上传/下载 sha 一致, 中断后
 CLI 重跑得到 `resume=honored`。教训: 之前 CLI 挂住不是 CLI 的 bug, 是 daemon 跑在 zenoh router
 模式 (`--transport tcp` 才是 line-control), 我把它当成"CLI 未验"记了一条不准确的边界。
+
+### RAI-367 评审 M2 收尾: 下载失败的清理点与残片生命周期
+
+- 提交: ce34e6b
+
+上一版只有两条失败路径删临时名, 其余 (超时/解码/写盘/空块) 会留残片。改成闭包 + 单一清理点。
+规格同时把"下载残片由谁清"写死, 免得三个月后没人知道该不该清。
