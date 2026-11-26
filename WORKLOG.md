@@ -1288,3 +1288,15 @@ zenoh_router_client 38/2 ignored)。
   —— 是 daemon/control 的连接前提 (端口/回环/fast path) 而非消息语义; 本地稳定通过。
   按「显式 ignore + 理由」处置并开 RAI-464 跟进, 不删用例。
 - 提交: (随本条修复记入下一次账本)
+
+- 2026-11-26 放量第三个真缺陷 (ubuntu) + 第四个真缺陷 (windows):
+  ① `zenoh_router_client::tls_enabled_daemon_should_serve_ca_client_and_reject_wrong_ca` 在
+  ubuntu runner 上「换正确 CA 后仍连不上」(空输出); 本地单跑 0.85s 绿, `taskset -c 0,1`
+  压到 2 核也不复现 —— 与上面两条同形态 (client 建不上连到 daemon)。三条统一按平台收窄成
+  `#[cfg_attr(target_os = "linux", ignore = …)]`: **macos/windows 照常执行**, 只在 ubuntu
+  跳过, 并按 `ci-merge-gate.md` §6 四列登记 (负责人 RAI-464, 到期 2026-12-03)。
+  ② windows `test` job 直接崩在脚本里而非测试里: `subprocess.run(text=True)` 按 cp1252
+  解码 cargo 输出里的 UTF-8 中文, 抛 `UnicodeDecodeError` 后 `stdout` 为 None, 拼接处
+  `TypeError`。改成 `encoding="utf-8", errors="replace"`。
+  本地 linux 回执: `zenoh_router_client` 36 passed / 4 ignored, `control_lanes` 14 passed /
+  2 ignored, 均 0 failed。

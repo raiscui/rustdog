@@ -136,7 +136,12 @@ def failure_detail(target: str, log: str) -> str:
 
 
 def run(argv: list[str]) -> tuple[int, str]:
-    completed = subprocess.run(argv, capture_output=True, text=True)
+    # encoding 固定 utf-8: 默认按平台 locale 解码 (windows runner 是 cp1252), 而 cargo test
+    # 的输出里有 UTF-8 中文断言文案 —— 会在这里抛 UnicodeDecodeError 让整步崩掉, 归因看起来
+    # 像"target 红"但其实是解码失败。errors=replace 保证任何残余字节都不会中断。
+    completed = subprocess.run(
+        argv, capture_output=True, text=True, encoding="utf-8", errors="replace"
+    )
     return completed.returncode, ANSI.sub("", completed.stdout + completed.stderr)
 
 

@@ -294,7 +294,10 @@ fn daemon_control_lane_should_roundtrip_request_id_in_response() {
 //   @response {"id":7,"code":70,"error":"no connection could be established: (no successful connection)"}
 // 本地 (linux/macos 开发机) 稳定通过, 说明是 CI runner 上的连接前提 (端口/回环/fast path)
 // 而不是消息语义。显式 ignore 而不是删用例: 归因与复现条件见 RAI-464。
-#[ignore = "ubuntu CI: control client 无法连上刚启动的 daemon (code 70); 见 RAI-464"]
+#[cfg_attr(
+    target_os = "linux",
+    ignore = "ubuntu CI: control client 无法连上刚启动的 daemon (code 70); 见 RAI-464"
+)]
 #[test]
 fn daemon_control_lane_should_accept_key_object_payload_with_request_id() {
     let port = next_free_port();
