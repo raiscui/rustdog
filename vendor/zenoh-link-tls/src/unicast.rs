@@ -23,7 +23,7 @@ use std::{
 use async_trait::async_trait;
 use time::OffsetDateTime;
 use tokio::{
-    io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
+    io::{AsyncRead, AsyncWrite, AsyncWriteExt},
     net::{TcpListener, TcpStream},
     sync::Mutex as AsyncMutex,
 };
@@ -67,16 +67,21 @@ pub struct LinkUnicastTls {
     // The destination socket address of this link (address used on the local host)
     dst_addr: SocketAddr,
     dst_locator: Locator,
-    // Make sure there are no concurrent read or writes
-    write_mtx: AsyncMutex<()>,
-    read_mtx: AsyncMutex<()>,
+    // rustls 的 Connection 必须独占两个方向的所有访问 (读、写、flush、shutdown), 否则状态机
+    // 会被并发推进 (RAI-524: 写被以 HandshakeNotComplete 拒绝)。读与写因此共用这一把锁,
+    // 而且**没有一次持锁跨 await** —— 临界区里只做一次非阻塞 poll, Pending 就放到锁外等唤醒。
+    tls_mtx: AsyncMutex<()>,
     auth_identifier: LinkAuthId,
     rai524_seq: std::sync::atomic::AtomicUsize,
     /// 同向整调用 gate (可跨 await): 保证一次 read_exact / write_all 不被同向的另一个调用插队。
     read_gate: AsyncMutex<()>,
     write_gate: AsyncMutex<()>,
-    read_wake: std::sync::Arc<ReadWake>,
-    write_wake: std::sync::Arc<ReadWake>,
+    /// poll 用的 waker。信号量实现: 唤醒发生在等待方注册之前也不会丢。
+    read_wake: std::sync::Arc<Wake>,
+    write_wake: std::sync::Arc<Wake>,
+    /// 关闭信号。close() 推完待发字节后取消, 让仍在等唤醒的任务立刻醒来看到终止, 而不是
+    /// 靠定时重试捱到下一次 poll。
+    closed: CancellationToken,
     mtu: BatchSize,
     expiration_manager: Option<LinkCertExpirationManager>,
 }
@@ -85,54 +90,12 @@ unsafe impl Send for LinkUnicastTls {}
 unsafe impl Sync for LinkUnicastTls {}
 
 
-// ---- RAI-524 修法: 读路径改成「锁内非阻塞 poll + 锁外自持 waker 等待」 ----
-mod rai524_short {
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
-    /// 短临界区里完成 poll 的次数 (证明读确实只在锁内做非阻塞轮询)。
-    pub static POLLS_IN_LOCK: AtomicUsize = AtomicUsize::new(0);
-    /// 持锁跨 await 的次数 —— 必须恒为 0 (结构上保证, 这里是自检)。
-    pub static LOCK_HELD_ACROSS_AWAIT: AtomicUsize = AtomicUsize::new(0);
-    /// 因为无数据而放锁去等唤醒的次数。
-    pub static OUTSIDE_WAITS: AtomicUsize = AtomicUsize::new(0);
-    /// 连续「poll 到 Pending 后没有拿到新事件又立刻重 poll」的次数。
-    /// 正确实现上应与连接数同量级; permit 泄漏那种空转会把它顶高 (见评审 severe 1)。
-    pub static NO_PROGRESS_REPOLLS: AtomicUsize = AtomicUsize::new(0);
-
-    pub fn note_poll() {
-        POLLS_IN_LOCK.fetch_add(1, Ordering::Relaxed);
-    }
-
-    pub fn note_no_progress_repoll() {
-        NO_PROGRESS_REPOLLS.fetch_add(1, Ordering::Relaxed);
-    }
-
-    pub fn note_wait() {
-        OUTSIDE_WAITS.fetch_add(1, Ordering::Relaxed);
-    }
-
-    /// 100ms 兜底路径真的生效的次数 —— 正常路径必须为 0, 否则 waker 转发错了。
-    pub static FALLBACK_WAKEUPS: AtomicUsize = AtomicUsize::new(0);
-
-    pub fn note_fallback() {
-        let n = FALLBACK_WAKEUPS.fetch_add(1, Ordering::SeqCst) + 1;
-        if n <= 5 {
-            tracing::warn!("RAI524 fallback: 100ms 兜底唤醒触发 (#{n}) —— 正常路径不该走到这里");
-        }
-    }
-
-    pub fn note_violation() {
-        let n = LOCK_HELD_ACROSS_AWAIT.fetch_add(1, Ordering::SeqCst) + 1;
-        tracing::warn!("RAI524 short: lock held across await detected (#{n})");
-    }
-}
-
-/// 读路径的唤醒器: rustls/tokio 在 Pending 时注册它, 可读后在锁外被唤醒。
-struct ReadWake {
+/// poll 的唤醒器: rustls/tokio 在 Pending 时注册它, 可读/可写后在锁外被唤醒。
+struct Wake {
     permits: tokio::sync::Semaphore,
 }
 
-impl std::task::Wake for ReadWake {
+impl std::task::Wake for Wake {
     fn wake(self: std::sync::Arc<Self>) {
         self.permits.add_permits(1);
     }
@@ -203,71 +166,64 @@ impl LinkUnicastTls {
             src_locator: Locator::new(TLS_LOCATOR_PREFIX, src_addr.to_string(), "").unwrap(),
             dst_addr,
             dst_locator: Locator::new(TLS_LOCATOR_PREFIX, dst_addr.to_string(), "").unwrap(),
-            write_mtx: AsyncMutex::new(()),
-            read_mtx: AsyncMutex::new(()),
+            tls_mtx: AsyncMutex::new(()),
             auth_identifier,
             rai524_seq: std::sync::atomic::AtomicUsize::new(0),
             read_gate: AsyncMutex::new(()),
             write_gate: AsyncMutex::new(()),
-            read_wake: std::sync::Arc::new(ReadWake {
+            read_wake: std::sync::Arc::new(Wake {
                 permits: tokio::sync::Semaphore::new(0),
             }),
-            write_wake: std::sync::Arc::new(ReadWake {
+            write_wake: std::sync::Arc::new(Wake {
                 permits: tokio::sync::Semaphore::new(0),
             }),
+            closed: CancellationToken::new(),
             mtu,
             expiration_manager,
         }
     }
 
-    // NOTE: It is safe to suppress Clippy warning since no concurrent reads
-    //       or concurrent writes will ever happen. The read_mtx and write_mtx
-    //       are respectively acquired in any read and write operation.
+    // NOTE: It is safe to suppress Clippy warning because every caller below takes
+    //       `tls_mtx` first and never awaits while holding it, so no two tasks are
+    //       ever inside the TlsStream at the same time.
     #[allow(clippy::mut_from_ref)]
     fn get_mut_socket(&self) -> &mut TlsStream<TcpStream> {
         unsafe { &mut *self.inner.get() }
     }
 
-    /// 读的短临界区实现: **锁内只做非阻塞 poll, 绝不跨 await 持锁**。
+    /// 写的一次尝试: **锁内只做一次非阻塞 poll_write, 绝不跨 await 持锁**。
     ///
-    /// 旧实现 `read_exact(...).await` 会一直持着 `read_mtx` 等到数据; 由于写路径拿的是另一把
-    /// 锁, 读写两个任务可以同时进入同一个 rustls `Connection` (由 `UnsafeCell` 允许)。实测
-    /// 失败写 15/15 都伴随并发读在场、成功写的对照只有 42% —— 状态被并发推进后 rustls 报
-    /// `HandshakeNotComplete`, zenoh 当致命错误关链路。
+    /// 旧实现持着 `write_mtx` 等整个 `write_all`, 而读路径拿的是另一把锁 —— 读写两个任务
+    /// 可以同时进入同一个 rustls `Connection` (由 `UnsafeCell` 允许)。实测失败写 15/15 都伴随
+    /// 并发读在场、成功写的对照只有 42%: 状态被并发推进后 rustls 报 `HandshakeNotComplete`,
+    /// zenoh 当致命错误关链路。
     ///
-    /// 现在: 锁内循环 poll 到 Pending (把 rustls 已缓冲的明文读干净), 然后**放锁**在这个
-    /// link 自持的 waker 上等可读; 醒来再取锁 poll。`allow_partial` 时读到一个完整结果就返回。
-    /// 写的短临界区实现: 与读对称 —— **锁内只做非阻塞 poll_write, 绝不跨 await 持锁**。
-    ///
-    /// 读与写共用同一把锁 (`write_mtx`), 所以两个任务不可能同时进入同一个 rustls 连接
-    /// (这正是 `HandshakeNotComplete` 的来源); 而两侧都不跨 await 持锁, 所以谁也不会把对方饿死。
-    async fn write_short_critical_section(&self, buffer: &[u8]) -> ZResult<usize> {
-        // 同向整调用 gate: 一次 write 调用期间不让同向的另一个调用插入, 否则帧会交错。
-        let _gate = zasynclock!(self.write_gate);
+    /// 现在读写共用 `tls_mtx`, 临界区里没有 await, 所以既不并发进入连接, 也不会互相饿死。
+    async fn write_bytes(&self, buffer: &[u8]) -> ZResult<usize> {
+        if buffer.is_empty() {
+            return Ok(0);
+        }
         loop {
-            let mut pending = false;
             {
-                let _guard = zasynclock!(self.write_mtx);
+                let _guard = zasynclock!(self.tls_mtx);
                 match self.try_write_locked(buffer) {
                     Ok(Some(written)) => return Ok(written),
-                    Ok(None) => pending = true,
-                    Err(err) => return Err(err),
+                    Ok(None) => {}
+                    Err(err) => {
+                        self.closed.cancel();
+                        return Err(err);
+                    }
                 }
             }
-            if pending {
-                if buffer.is_empty() {
-                    return Ok(0);
+            // 锁外等可写。信号量保证唤醒不会丢; 链路已关闭时立刻结束等待而不是重试。
+            tokio::select! {
+                biased;
+                _ = self.closed.cancelled() => {
+                    return Err(zerror!("TLS link {} is closed", self).into())
                 }
-                // 锁外等可写: waker 唤醒, 或 100ms 兜底重试 (链路关闭时不会永远挂住)。
-                tokio::select! {
-                    biased;
-                    permit = self.write_wake.permits.acquire() => {
-                        if let Ok(permit) = permit {
-                            permit.forget();
-                        }
-                    }
-                    _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {
-                        rai524_short::note_fallback();
+                permit = self.write_wake.permits.acquire() => {
+                    if let Ok(permit) = permit {
+                        permit.forget();
                     }
                 }
             }
@@ -285,60 +241,51 @@ impl LinkUnicastTls {
                 tracing::trace!("Write error on TLS link {}: {}", self, err);
                 Err(zerror!(err).into())
             }
-            std::task::Poll::Pending => {
-                rai524_short::note_no_progress_repoll();
-                Ok(None)
-            }
+            std::task::Poll::Pending => Ok(None),
         }
     }
 
-    async fn read_short_critical_section(
-        &self,
-        buffer: &mut [u8],
-        allow_partial: bool,
-    ) -> ZResult<usize> {
-        let _gate = zasynclock!(self.read_gate);
+    /// 读的一次尝试: **锁内循环 poll 到 Pending (把 rustls 已缓冲的明文读干净), 绝不跨 await
+    /// 持锁**; 没数据就把锁交还出去, 在这个 link 自持的 waker 上等可读, 醒来再取锁 poll。
+    /// `allow_partial` 时读到任意字节就返回。
+    async fn read_bytes(&self, buffer: &mut [u8], allow_partial: bool) -> ZResult<usize> {
         let mut filled = 0usize;
         loop {
-            let mut pending = false;
             {
-                // 读写共用同一把锁 —— 但都没有跨 await 持有, 所以不会互相饿死。
-                let _guard = zasynclock!(self.write_mtx);
+                // 读写共用 `tls_mtx`, 但两侧都不跨 await 持有, 所以不会互相饿死。
                 // 这个块里没有 .await; poll 的 waker/context 也只活在 try_read_locked 内部,
                 // 不让 !Send 的 Context 跨越 await。
+                let _guard = zasynclock!(self.tls_mtx);
                 match self.try_read_locked(&mut filled, buffer, allow_partial) {
                     Ok(Some(done)) => return Ok(done),
-                    Ok(None) => pending = true,
-                    Err(err) => return Err(err),
+                    Ok(None) => {}
+                    Err(err) => {
+                        self.closed.cancel();
+                        return Err(err);
+                    }
                 }
             }
-            if pending {
-                rai524_short::note_wait();
-                // 锁外等: 要么 waker 被唤醒 (socket 可读), 要么 100ms 后重试 —— 后者保证链路
-                // 关闭时读任务不会永远挂在这把信号量上。
-                tokio::select! {
-                    biased;
-                    permit = self.read_wake.permits.acquire() => {
-                        // 必须消费许可: 否则一次通知会让这一分支永久就绪, 变成高频重 poll。
-                        if let Ok(permit) = permit {
-                            permit.forget();
-                        }
-                    }
-                    _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {
-                        rai524_short::note_fallback();
-                    }
-                }
-                if allow_partial && filled > 0 {
-                    return Ok(filled);
-                }
-            } else {
+            if allow_partial && filled > 0 {
                 return Ok(filled);
+            }
+            // 锁外等可读。信号量保证唤醒不会丢; 链路已关闭时立刻结束等待而不是重试。
+            tokio::select! {
+                biased;
+                _ = self.closed.cancelled() => {
+                    return Err(zerror!("TLS link {} is closed", self).into())
+                }
+                permit = self.read_wake.permits.acquire() => {
+                    if let Ok(permit) = permit {
+                        permit.forget();
+                    }
+                }
             }
         }
     }
 
-    /// 同步的「非阻塞读一次」: 返回 `Ok(Some(n))` 表示这一轮读到了 n 字节, `Ok(None)` 表示
-    /// 无数据 (调用方放锁去等唤醒)。必须由调用方在持有 `read_mtx` 时调用。
+    /// 同步的「非阻塞读一次」: 返回 `Ok(Some(n))` 表示这一轮读到了完整的 n 字节 (或按
+    /// `allow_partial` 读到任意字节), `Ok(None)` 表示暂时无数据 (调用方放锁去等唤醒)。
+    /// 必须由调用方在持有 `tls_mtx` 时调用。
     fn try_read_locked(
         &self,
         filled: &mut usize,
@@ -348,7 +295,6 @@ impl LinkUnicastTls {
         let waker = std::task::Waker::from(self.read_wake.clone());
         let mut cx = std::task::Context::from_waker(&waker);
         loop {
-            rai524_short::note_poll();
             let stream = self.get_mut_socket();
             let before = *filled;
             let mut read_buf = tokio::io::ReadBuf::new(&mut buffer[before..]);
@@ -368,69 +314,94 @@ impl LinkUnicastTls {
                     tracing::trace!("Read error on TLS link {}: {}", self, err);
                     return Err(zerror!(err).into());
                 }
-                std::task::Poll::Pending => {
-                    // 每次「poll 到无数据」计一次: 正确实现上与等待次数同量级,
-                    // permit 泄漏导致的空转会让它相对连接数暴涨。
-                    rai524_short::note_no_progress_repoll();
-                    return Ok(None);
-                }
+                std::task::Poll::Pending => return Ok(None),
             }
         }
     }
 
+    /// 关闭: 先把 rustls 已受理、尚未落到 TCP 的记录推完 (锁内非阻塞 poll, 锁外等可写, 有界
+    /// 5s), 再做 TCP 半关闭, 最后取消 `closed` 唤醒所有仍在等唤醒的任务。
+    ///
+    /// 推不完或 shutdown 出错**都回报错误**: `tokio-rustls` 的 `poll_write` 只是写进 rustls 的
+    /// 发送缓冲, 不 flush 就不保证落到 TcpStream。一版"poll 一次 flush 就 `Ok(())`"会在背压时
+    /// 丢掉尾部已受理的字节却报成功 (RAI-524 评审 severe)。
     async fn close(&self) -> ZResult<()> {
         tracing::trace!("Closing TLS link: {}", self);
-        // 先把 rustls 里待发的记录推完 (有界): 锁内一次非阻塞 poll, Pending 就放锁等可写,
-        // 最多等到握手超时。推不完就按 abortive close 处理并**回报错误**, 不再"关掉就报 Ok"。
-        const CLOSE_FLUSH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
-        let deadline = tokio::time::Instant::now() + CLOSE_FLUSH_TIMEOUT;
+        const CLOSE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+        let deadline = tokio::time::Instant::now() + CLOSE_TIMEOUT;
+        // 同向整调用 gate: 关闭期间不再让新的 write 插到 flush 之后。
+        let _gate = zasynclock!(self.write_gate);
         loop {
-            let mut flush_now = true;
+            let mut pending = false;
             {
-                let _guard = zasynclock!(self.write_mtx);
+                let _guard = zasynclock!(self.tls_mtx);
                 let waker = std::task::Waker::from(self.write_wake.clone());
                 let mut cx = std::task::Context::from_waker(&waker);
                 match std::pin::Pin::new(self.get_mut_socket()).poll_flush(&mut cx) {
                     std::task::Poll::Ready(Ok(())) => {}
                     std::task::Poll::Ready(Err(err)) => {
+                        self.closed.cancel();
                         tracing::trace!("TLS flush on close failed for {}: {}", self, err);
-                        return Err(zerror!(err).into());
+                        return Err(zerror!("TLS link {} flush on close failed: {err}", self).into());
                     }
-                    std::task::Poll::Pending => flush_now = false,
+                    std::task::Poll::Pending => pending = true,
                 }
             }
-            if flush_now {
+            if !pending {
                 break;
             }
             if tokio::time::Instant::now() >= deadline {
+                self.closed.cancel();
                 return Err(zerror!(
-                    "TLS link {} could not flush pending records before close",
+                    "TLS link {} could not flush accepted records within {CLOSE_TIMEOUT:?}",
                     self
                 )
                 .into());
             }
-            tokio::select! {
-                biased;
-                permit = self.write_wake.permits.acquire() => {
-                    if let Ok(permit) = permit {
-                        permit.forget();
-                    }
-                }
-                _ = tokio::time::sleep(std::time::Duration::from_millis(50)) => {}
+            if !self.await_writable().await {
+                return Err(zerror!("TLS link {} is closed", self).into());
             }
         }
-        // 锁内只做**非阻塞**的 flush/shutdown 各一次, 不跨 await 持锁 (否则关闭期间读会被挡住)。
-        // 一次性 poll 足以把已缓冲的 TLS 记录推出去; 推不完就由底层 TCP 关闭代劳 —— 关闭路径
-        // 本来就是 best effort, 这里不接受"为了 flush 完整而挂住整条 lane"。
-        let _guard = zasynclock!(self.write_mtx);
-        let waker = std::task::Waker::from(self.write_wake.clone());
-        let mut cx = std::task::Context::from_waker(&waker);
-        let tls_stream = self.get_mut_socket();
-        let flush = std::pin::Pin::new(&mut *tls_stream).poll_flush(&mut cx);
-        let (tcp_stream, _) = tls_stream.get_mut();
-        let shutdown = std::pin::Pin::new(tcp_stream).poll_shutdown(&mut cx);
-        tracing::trace!("TLS link flush {:?} / shutdown {:?}: {}", flush, shutdown, self);
-        Ok(())
+        while tokio::time::Instant::now() < deadline {
+            let mut pending = false;
+            {
+                let _guard = zasynclock!(self.tls_mtx);
+                let waker = std::task::Waker::from(self.write_wake.clone());
+                let mut cx = std::task::Context::from_waker(&waker);
+                let (tcp_stream, _) = self.get_mut_socket().get_mut();
+                match std::pin::Pin::new(tcp_stream).poll_shutdown(&mut cx) {
+                    std::task::Poll::Ready(Ok(())) => {}
+                    std::task::Poll::Ready(Err(err)) => {
+                        self.closed.cancel();
+                        return Err(zerror!("TLS link {} shutdown failed: {err}", self).into());
+                    }
+                    std::task::Poll::Pending => pending = true,
+                }
+            }
+            if !pending {
+                self.closed.cancel();
+                return Ok(());
+            }
+            if !self.await_writable().await {
+                return Err(zerror!("TLS link {} is closed", self).into());
+            }
+        }
+        self.closed.cancel();
+        Err(zerror!("TLS link {} could not finish shutdown", self).into())
+    }
+
+    /// 锁外等可写。返回 false 表示链路已被别处判死 (关闭信号已取消), 调用方应当立刻收手。
+    async fn await_writable(&self) -> bool {
+        tokio::select! {
+            biased;
+            _ = self.closed.cancelled() => false,
+            permit = self.write_wake.permits.acquire() => {
+                if let Ok(permit) = permit {
+                    permit.forget();
+                }
+                true
+            }
+        }
     }
 }
 
@@ -452,14 +423,17 @@ impl LinkUnicastTrait for LinkUnicastTls {
     }
 
     async fn write(&self, buffer: &[u8]) -> ZResult<usize> {
-        self.write_short_critical_section(buffer).await
+        // 同向整调用 gate: 一次调用期间的每个分片都算同一次写, 不然两路写会交错帧。
+        let _gate = zasynclock!(self.write_gate);
+        self.write_bytes(buffer).await
     }
 
     async fn write_all(&self, buffer: &[u8]) -> ZResult<()> {
+        let _gate = zasynclock!(self.write_gate);
         let seq = self.rai524_seq.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
         let mut written = 0usize;
         while written < buffer.len() {
-            match self.write_short_critical_section(&buffer[written..]).await {
+            match self.write_bytes(&buffer[written..]).await {
                 Ok(0) => {
                     return Err(zerror!(
                         "TLS link {} accepted 0 bytes of a {} byte write",
@@ -483,16 +457,16 @@ impl LinkUnicastTrait for LinkUnicastTls {
     }
 
     async fn read(&self, buffer: &mut [u8]) -> ZResult<usize> {
-        self.read_short_critical_section(buffer, true).await
+        let _gate = zasynclock!(self.read_gate);
+        self.read_bytes(buffer, true).await
     }
 
     async fn read_exact(&self, buffer: &mut [u8]) -> ZResult<()> {
+        // 同向整调用 gate: 一次 read_exact 期间不让另一个读插进来。
+        let _gate = zasynclock!(self.read_gate);
         let mut filled = 0;
         while filled < buffer.len() {
-            let read = self
-                .read_short_critical_section(&mut buffer[filled..], false)
-                .await?;
-            filled += read;
+            filled += self.read_bytes(&mut buffer[filled..], false).await?;
         }
         Ok(())
     }
