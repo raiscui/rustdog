@@ -529,7 +529,11 @@ chunk in flight**: 每个被拒的边界保证的是"这一 chunk 之后不再�
 
 1. 不是中止 (`aborted == false`);
 2. **本次确有字节移动** (`chunks > 0 || bulk_bytes > 0`) —— 一次"续传时半成品已经完整"的尝试
-   一个字节都不用发, 它的零与"没走 relay"数值上完全一样, 这是最纯的空真;
+   一个字节都不用发, 它的零与"没走 relay"数值上完全一样, 这是最纯的空真。
+   **这条扣掉的只是路径结论, 不是传输结论**: 空文件 / 无需搬字节的尝试**成功了**这件事由正常回执
+   表达 (`@file-end` 的 `state:"committed"`、`@file-read` 的 `eof:true`、客户端 `transfer` 收据),
+   它只是拿不到"relay 字节为 0"这句话。两份都这样的快照 join 起来是 `joined` + `relay_bytes_zero:null`
+   (`bulk_path_inconclusive_no_bulk_bytes`), 不会被读成"传输失败"或"relay 上有字节";
 3. `path_class == "direct"`;
 4. 四个计数**都采到了** (`relay_sample_available == true`) 且本端 `relay_tx` 与 `relay_rx` 的
    `after - before` **都为 0**。计数为 `null` 表示未采样, 不是零.
@@ -588,10 +592,23 @@ schema 完全一致 (`endpoint:"daemon"`). 三个终态各挂一处, 除此之�
 }
 ```
 
-`relay_bytes_zero` 是**唯一允许的跨端结论**, 只在 `status:"joined"` 时非 `null`: 两端
-`relay_bytes_zero_own_half()` 都为真是 `true`, 否则 `false`. 没组成结论时它是 `null` —— **不是
-`false`**, 否则"缺一半"会被读成"测到了非零". 退出码: `0` 每组都组成结论, `1` 至少一组没有结论,
-`2` 参数 / IO 错误.
+`relay_bytes_zero` 是**唯一允许的跨端结论**, 并且是**三态**, 不是布尔:
+
+| 值 | 什么时候 | 读法 |
+| --- | --- | --- |
+| `true` | 两端 `relay_bytes_zero_own_half()` 都为真 | 两端各证了自己那一半 |
+| `false` | **至少一端** `verdict() == "relay_bytes_nonzero"` | 真的测到了 relay 上有字节 |
+| `null` | 其余全部: 任一端 `no_bulk_bytes` / `relay_sample_unavailable` / `not_applicable` / `aborted`, 或任一端 `concurrency_suspected:true` | **没证出来**, 不是证否 |
+
+把第三格压成 `false` 是把"未采样 ≠ 0"做对之后**反向**漏掉的同一类谎: 读到 `false` 的人会以为
+"测到了 relay 流量", 真相却是"这次没有结论". 退出码: `0` 每组都给得出结论 (`true` 或 `false`),
+`1` 至少一组配上了但没结论、或根本没配上, `2` 参数 / IO 错误. "配上了但没结论"必须落在 `1`,
+不能混进 `0`.
+
+`joined` 但 `relay_bytes_zero` 为 `null` 时, `reason` 给 `bulk_path_inconclusive_<verdict>`
+(两端 verdict 不同且都不是零时按本端 → 对端用 `+` 串起来, 如
+`bulk_path_inconclusive_no_bulk_bytes+relay_sample_unavailable`). 这一族**不复用**下面 `unknown`
+那套码 —— "没配上"与"配上了没结论"是两件事, 混用会让排障的人先去找缺失的文件.
 
 | 原因码 | 触发 |
 | --- | --- |
@@ -600,8 +617,11 @@ schema 完全一致 (`endpoint:"daemon"`). 三个终态各挂一处, 除此之�
 | `bulk_path_attempt_mismatch` | 两端的 `attempt_id` 不一致 |
 | `bulk_path_schema_mismatch` | `schema` 不是本版 / 缺键 / 计数与 `relay_sample_available` 互相矛盾 |
 | `bulk_path_concurrency_suspected` | 任一端 `concurrency_suspected:true` (§4.2: 该证据不得单独用于结论) |
+| `bulk_path_inconclusive_<verdict>` | `joined` 但没有可用结论: 任一端 `no_bulk_bytes` / `relay_sample_unavailable` / `not_applicable` / `aborted` |
 
 这些**不是**控制面稳定码, 不进 §2.2 的码表: 只有验收工具与人在读, 命名空间仍是 `bulk_path_*`.
+前五个描述"这两半为什么没有组成报告", `bulk_path_inconclusive_*` 描述"报告组成了但没有结论" ——
+后者不改变 `status` (仍是 `joined`).
 
 `attempt_id` 由客户端在 `@put-file` / `@get-file` 载荷里交给 daemon (§2.2 的可选字段); 缺省时
 daemon 按 `<transfer_id>#<该 id 被 open 的序号>` 派生. 派生的那个与客户端自选的值不会相等, 所以

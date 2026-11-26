@@ -123,6 +123,8 @@ pub(crate) const BULK_PATH_ENDPOINT_DUPLICATED: &str = "bulk_path_endpoint_dupli
 pub(crate) const BULK_PATH_ATTEMPT_MISMATCH: &str = "bulk_path_attempt_mismatch";
 /// §4.2: `concurrency_suspected:true` 的那一半**不得单独用于**"relay 字节为 0"的结论。
 pub(crate) const BULK_PATH_CONCURRENCY_SUSPECTED: &str = "bulk_path_concurrency_suspected";
+/// 两端配上了、但没有任何一端给出可用结论时的前缀 (后面接 `<verdict>[+<verdict>]`)。
+pub(crate) const BULK_PATH_INCONCLUSIVE: &str = "bulk_path_inconclusive";
 
 /// 判定表 (§3.1 的穷举实现)。
 ///
@@ -437,14 +439,24 @@ impl HalfReport {
 /// 同一个 `transfer_id` 上两端快照的合订本 (`rdog.bulk-path-join.v1`)。
 ///
 /// `relay_bytes_zero` 是**唯一允许的跨端结论**, 且只在 `status == "joined"` 时非 `null`:
-/// 两端各自 `relay_bytes_zero_own_half()` 都为真才是 `true`, 其余一律 `null` —— 不是 `false`。
-/// "没组成结论"与"结论是否"是两件事, 用 `false` 顶替 `null` 会让人把"缺一半"读成"测到了非零"。
+/// `relay_bytes_zero` 是**三态**, 不是布尔:
+///
+/// | 值 | 什么时候 | 读法 |
+/// | --- | --- | --- |
+/// | `true` | 两端 `relay_bytes_zero_own_half()` 都为真 | 两端各证了自己那一半 |
+/// | `false` | **至少一端** `verdict() == "relay_bytes_nonzero"` | 真的测到了 relay 上有字节 |
+/// | `null` | 其余全部 (任一端 `no_bulk_bytes` / `relay_sample_unavailable` / `not_applicable` / `aborted`) | **没证出来**, 不是证否 |
+///
+/// 把第三格压成 `false` 是我们把"未采样 ≠ 0"做对之后**反向**漏掉的同一类谎: 读到 `false` 的人会以为
+/// "测到了 relay 流量", 而真相是"这次没有结论"。没组成结论 (缺一端 / schema 不符) 同样是 `null`,
+/// 但那种情况另有 `status:"unknown"` 区分 —— 两种 `null` 不是一件事。
 #[derive(Debug, Clone)]
 pub(crate) struct JoinReport {
     pub(crate) transfer_id: Option<String>,
     pub(crate) attempt_id: Option<String>,
     pub(crate) status: &'static str,
-    pub(crate) reason: Option<&'static str>,
+    /// 固定码 (`bulk_path_*`) 或 `joined` 且无结论时拼出来的 `bulk_path_inconclusive_<verdict>[+<verdict>]`。
+    pub(crate) reason: Option<String>,
     pub(crate) client: Option<HalfReport>,
     pub(crate) daemon: Option<HalfReport>,
     pub(crate) relay_bytes_zero: Option<bool>,
@@ -456,7 +468,7 @@ impl JoinReport {
             transfer_id,
             attempt_id: None,
             status: "unknown",
-            reason: Some(reason),
+            reason: Some(reason.to_owned()),
             client: None,
             daemon: None,
             relay_bytes_zero: None,
@@ -549,21 +561,42 @@ fn join_group(transfer_id: String, halves: Vec<BulkPathSnapshot>) -> JoinReport 
 
     let suspect = client.concurrency_suspected == Some(true)
         || daemon.concurrency_suspected == Some(true);
-    let relay_bytes_zero = if suspect {
-        None
-    } else {
+    let (relay_bytes_zero, reason) = if suspect {
+        // §4.2: 有并发嫌疑的那条证据不得单独用于结论。
+        (None, Some(BULK_PATH_CONCURRENCY_SUSPECTED.to_owned()))
+    } else if client.relay_bytes_zero_own_half() && daemon.relay_bytes_zero_own_half() {
         // §4.3 的判定式, 逐字: 两端各自的 `relay_bytes_zero_own_half()` 都为真。
-        Some(client.relay_bytes_zero_own_half() && daemon.relay_bytes_zero_own_half())
+        (Some(true), None)
+    } else if client.verdict() == "relay_bytes_nonzero" || daemon.verdict() == "relay_bytes_nonzero" {
+        // 只有"真的量到非零"才是 `false`。其余一律没结论 —— 见 `JoinReport` 的三态表。
+        (Some(false), None)
+    } else {
+        (None, Some(inconclusive_reason(&client, &daemon)))
     };
     JoinReport {
         transfer_id: Some(transfer_id),
         attempt_id: Some(client.attempt_id.clone()),
         status: "joined",
-        reason: suspect.then_some(BULK_PATH_CONCURRENCY_SUSPECTED),
+        reason,
         client: Some(HalfReport::of(&client)),
         daemon: Some(HalfReport::of(&daemon)),
         relay_bytes_zero,
     }
+}
+
+/// "配上了但没有结论"的原因码: `bulk_path_inconclusive_<verdict>`, 两端都给时按本端 → 对端用
+/// `+` 串起来 (两端的 verdict 不同才需要)。它是**新的命名空间**, 不复用 `unknown` 那套码 ——
+/// "没配上"和"配上了没结论"是两件事, 混用会让排障的人先去找缺失的文件。
+fn inconclusive_reason(client: &BulkPathSnapshot, daemon: &BulkPathSnapshot) -> String {
+    let mut verdicts: Vec<&'static str> = Vec::new();
+    for verdict in [client.verdict(), daemon.verdict()] {
+        // 自己那一半已经证到零的, 不构成"这条 join 没结论"的理由。
+        if verdict == "relay_bytes_zero" || verdicts.contains(&verdict) {
+            continue;
+        }
+        verdicts.push(verdict);
+    }
+    format!("{BULK_PATH_INCONCLUSIVE}_{}", verdicts.join("+"))
 }
 
 /// 读一组快照文件/目录, 按 `transfer_id` join, 打印报告并返回退出码。
@@ -867,7 +900,7 @@ mod tests {
         assert_eq!(reports.len(), 1);
         let report = &reports[0];
         assert_eq!(report.status, "unknown");
-        assert_eq!(report.reason, Some(BULK_PATH_ENDPOINT_MISSING));
+        assert_eq!(report.reason.as_deref(), Some(BULK_PATH_ENDPOINT_MISSING));
         assert_eq!(report.relay_bytes_zero, None);
         assert!(report.client.is_some(), "给了的那一半要照实列出来");
         assert!(report.daemon.is_none(), "没给的那一半必须是 null");
@@ -885,7 +918,10 @@ mod tests {
 
         let reports = join_inputs(&[client, daemon]);
         assert_eq!(reports[0].status, "unknown");
-        assert_eq!(reports[0].reason, Some(BULK_PATH_ATTEMPT_MISMATCH));
+        assert_eq!(
+            reports[0].reason.as_deref(),
+            Some(BULK_PATH_ATTEMPT_MISMATCH)
+        );
         assert_eq!(reports[0].relay_bytes_zero, None);
         // 两半仍然各自列出: 它们确实存在, 只是不能组成一个结论。
         assert!(reports[0].client.is_some() && reports[0].daemon.is_some());
@@ -910,15 +946,78 @@ mod tests {
 
     #[test]
     fn one_half_with_unsampled_counters_voids_the_cross_end_conclusion() {
-        // daemon 一半没采到计数: 它自己的 verdict 是 `relay_sample_unavailable`, 于是跨端结论
-        // 只能是 `false` —— "两端都证了零"不成立, 而"一端没采样"不是"测到非零"。
+        // daemon 一半没采到计数: 它自己的 verdict 是 `relay_sample_unavailable`。跨端结论必须是
+        // **`null`** —— "两端都证了零"不成立, 而"一端没采样"不是"测到非零"。
         let reports = join_inputs(&[half("client", Some(0)), half("daemon", None)]);
         let report = &reports[0];
         assert_eq!(report.status, "joined");
-        assert_eq!(report.relay_bytes_zero, Some(false));
+        assert_eq!(report.relay_bytes_zero, None);
+        assert_eq!(
+            report.reason.as_deref(),
+            Some("bulk_path_inconclusive_relay_sample_unavailable")
+        );
         let daemon = report.daemon.as_ref().expect("daemon half");
         assert_eq!(daemon.verdict, "relay_sample_unavailable");
         assert!(!daemon.relay_sample_available);
+    }
+
+    #[test]
+    fn two_empty_halves_are_a_pair_without_a_conclusion() {
+        // 两端都是空传输: 传输本身成功 (由正常回执表达), 但路径结论被扣掉 —— `null`, 不是 `false`。
+        let empty = |endpoint: &str| {
+            let mut value = snapshot(PathCapability::PATH_AWARE_CHECKED_PER_CHUNK, PathClass::Direct);
+            value.endpoint = endpoint.to_owned();
+            value.chunks = 0;
+            value.bulk_bytes = 0;
+            value.wire_bytes = 0;
+            value.to_json()
+        };
+        let reports = join_inputs(&[empty("client"), empty("daemon")]);
+        let report = &reports[0];
+        assert_eq!(report.status, "joined");
+        assert_eq!(report.relay_bytes_zero, None);
+        assert_eq!(
+            report.reason.as_deref(),
+            Some("bulk_path_inconclusive_no_bulk_bytes")
+        );
+        // 两端的 verdict 相同, 原因码里就不重复列两次。
+        assert_eq!(report.reason.as_deref().expect("reason").matches('+').count(), 0);
+    }
+
+    #[test]
+    fn an_aborted_half_makes_the_join_inconclusive_not_negative() {
+        let mut aborted = snapshot(PathCapability::PATH_AWARE_CHECKED_PER_CHUNK, PathClass::Direct);
+        aborted.endpoint = "daemon".to_owned();
+        aborted.aborted = true;
+        let reports = join_inputs(&[half("client", Some(0)), aborted.to_json()]);
+        let report = &reports[0];
+        assert_eq!(report.status, "joined");
+        assert_eq!(report.relay_bytes_zero, None, "中止不是证否");
+        assert_eq!(
+            report.reason.as_deref(),
+            Some("bulk_path_inconclusive_aborted")
+        );
+    }
+
+    #[test]
+    fn two_different_inconclusive_verdicts_are_both_named() {
+        // 客户端那半没搬字节, daemon 那半没采到计数: 两个原因都要出现在码里, 别只报一个。
+        let mut client = snapshot(PathCapability::PATH_AWARE_CHECKED_PER_CHUNK, PathClass::Direct);
+        client.chunks = 0;
+        client.bulk_bytes = 0;
+        client.wire_bytes = 0;
+        let daemon = {
+            let mut value = snapshot(PathCapability::PATH_AWARE_CHECKED_PER_CHUNK, PathClass::Direct);
+            value.endpoint = "daemon".to_owned();
+            value.relay_tx_after = None;
+            value
+        };
+        let reports = join_inputs(&[client.to_json(), daemon.to_json()]);
+        assert_eq!(reports[0].relay_bytes_zero, None);
+        assert_eq!(
+            reports[0].reason.as_deref(),
+            Some("bulk_path_inconclusive_no_bulk_bytes+relay_sample_unavailable")
+        );
     }
 
     #[test]
@@ -949,7 +1048,7 @@ mod tests {
         assert_eq!(joined.relay_bytes_zero, Some(true));
         let unknown = reports
             .iter()
-            .find(|report| report.reason == Some(BULK_PATH_SCHEMA_MISMATCH))
+            .find(|report| report.reason.as_deref() == Some(BULK_PATH_SCHEMA_MISMATCH))
             .expect("坏文件要单独报");
         assert_eq!(unknown.status, "unknown");
     }
@@ -959,7 +1058,10 @@ mod tests {
         // 两份都是 client: 左右配不上, 不能"按顺序"凑成两端。
         let reports = join_inputs(&[half("client", Some(0)), half("client", Some(0))]);
         assert_eq!(reports[0].status, "unknown");
-        assert_eq!(reports[0].reason, Some(BULK_PATH_ENDPOINT_DUPLICATED));
+        assert_eq!(
+            reports[0].reason.as_deref(),
+            Some(BULK_PATH_ENDPOINT_DUPLICATED)
+        );
         assert_eq!(reports[0].relay_bytes_zero, None);
     }
 
@@ -971,7 +1073,10 @@ mod tests {
         daemon["concurrency_suspected"] = json!(true);
         let reports = join_inputs(&[client, daemon]);
         assert_eq!(reports[0].status, "joined");
-        assert_eq!(reports[0].reason, Some(BULK_PATH_CONCURRENCY_SUSPECTED));
+        assert_eq!(
+            reports[0].reason.as_deref(),
+            Some(BULK_PATH_CONCURRENCY_SUSPECTED)
+        );
         assert_eq!(reports[0].relay_bytes_zero, None);
     }
 
