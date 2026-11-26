@@ -957,6 +957,7 @@ mod tests {
 
         #[test]
         fn should_use_defaults_when_no_file_or_env_present() {
+            let _cwd_guard = crate::test_support::cwd_test_guard();
             Jail::expect_with(|jail| {
                 jail.clear_env();
                 let config = load_daemon_config(None).unwrap_err();
@@ -968,6 +969,7 @@ mod tests {
 
         #[test]
         fn should_override_toml_values_with_environment_variables() {
+            let _cwd_guard = crate::test_support::cwd_test_guard();
             Jail::expect_with(|jail| {
                 jail.clear_env();
                 jail.create_file(
@@ -993,6 +995,7 @@ shell = "/bin/bash"
 
         #[test]
         fn should_accept_legacy_environment_variables_as_fallback() {
+            let _cwd_guard = crate::test_support::cwd_test_guard();
             Jail::expect_with(|jail| {
                 jail.clear_env();
                 jail.set_env("RCAT_OUTBOUND__ENABLED", "true");
@@ -1010,6 +1013,7 @@ shell = "/bin/bash"
 
         #[test]
         fn should_prefer_new_environment_variables_over_legacy_fallback() {
+            let _cwd_guard = crate::test_support::cwd_test_guard();
             Jail::expect_with(|jail| {
                 jail.clear_env();
                 jail.set_env("RCAT_OUTBOUND__ENABLED", "true");
@@ -1027,6 +1031,7 @@ shell = "/bin/bash"
 
         #[test]
         fn should_fail_when_explicit_config_file_is_missing() {
+            let _cwd_guard = crate::test_support::cwd_test_guard();
             Jail::expect_with(|jail| {
                 jail.clear_env();
                 let err = load_daemon_config(Some(Path::new("missing.toml"))).unwrap_err();
@@ -1059,6 +1064,7 @@ shell = "/bin/bash"
 
         #[test]
         fn should_load_user_config_dir_when_cwd_has_no_platform_file() {
+            let _cwd_guard = crate::test_support::cwd_test_guard();
             Jail::expect_with(|jail| {
                 jail.clear_env();
                 write_user_config(jail, &valid_inbound_config(7777));
@@ -1072,6 +1078,7 @@ shell = "/bin/bash"
 
         #[test]
         fn should_prefer_cwd_platform_file_over_user_config_dir() {
+            let _cwd_guard = crate::test_support::cwd_test_guard();
             Jail::expect_with(|jail| {
                 jail.clear_env();
                 write_user_config(jail, &valid_inbound_config(7777));
@@ -1089,6 +1096,7 @@ shell = "/bin/bash"
 
         #[test]
         fn should_let_environment_override_user_config_dir() {
+            let _cwd_guard = crate::test_support::cwd_test_guard();
             Jail::expect_with(|jail| {
                 jail.clear_env();
                 write_user_config(jail, &valid_inbound_config(7777));
@@ -1103,6 +1111,7 @@ shell = "/bin/bash"
 
         #[test]
         fn should_skip_user_config_dir_when_home_is_unset() {
+            let _cwd_guard = crate::test_support::cwd_test_guard();
             Jail::expect_with(|jail| {
                 jail.clear_env();
                 jail.create_file(
@@ -1119,6 +1128,7 @@ shell = "/bin/bash"
 
         #[test]
         fn should_ignore_user_config_dir_when_explicit_config_is_given() {
+            let _cwd_guard = crate::test_support::cwd_test_guard();
             Jail::expect_with(|jail| {
                 jail.clear_env();
                 write_user_config(jail, &valid_inbound_config(7777));
@@ -1134,6 +1144,7 @@ shell = "/bin/bash"
 
         #[test]
         fn should_fail_when_enabled_outbound_is_missing_host() {
+            let _cwd_guard = crate::test_support::cwd_test_guard();
             Jail::expect_with(|jail| {
                 jail.clear_env();
                 jail.create_file(
@@ -1154,6 +1165,7 @@ shell = "/bin/bash"
 
         #[test]
         fn should_default_key_backend_to_platform_default() {
+            let _cwd_guard = crate::test_support::cwd_test_guard();
             Jail::expect_with(|jail| {
                 jail.clear_env();
                 jail.create_file(
@@ -1176,6 +1188,7 @@ shell = "/bin/bash"
 
         #[test]
         fn should_override_key_backend_from_toml() {
+            let _cwd_guard = crate::test_support::cwd_test_guard();
             Jail::expect_with(|jail| {
                 jail.clear_env();
                 jail.create_file(
@@ -1203,6 +1216,7 @@ delivery_backend = "simulated"
 
         #[test]
         fn should_reject_unknown_key_backend() {
+            let _cwd_guard = crate::test_support::cwd_test_guard();
             Jail::expect_with(|jail| {
                 jail.clear_env();
                 jail.create_file(
@@ -1237,6 +1251,7 @@ delivery_backend = "invalid-backend"
 
         #[test]
         fn should_reject_websocket_transport_when_inbound_mode_is_interactive() {
+            let _cwd_guard = crate::test_support::cwd_test_guard();
             Jail::expect_with(|jail| {
                 jail.clear_env();
                 jail.create_file(
@@ -1268,6 +1283,7 @@ transport = "websocket"
 
         #[test]
         fn should_load_hidden_log_file_from_toml() {
+            let _cwd_guard = crate::test_support::cwd_test_guard();
             Jail::expect_with(|jail| {
                 jail.clear_env();
                 jail.create_file(
@@ -1292,6 +1308,7 @@ shell = "/bin/bash"
 
         #[test]
         fn should_load_observation_config_from_toml_and_env() {
+            let _cwd_guard = crate::test_support::cwd_test_guard();
             Jail::expect_with(|jail| {
                 jail.clear_env();
                 jail.create_file(
@@ -1336,6 +1353,7 @@ shell = "/bin/bash"
 
         #[test]
         fn should_reject_invalid_observation_retention() {
+            let _cwd_guard = crate::test_support::cwd_test_guard();
             Jail::expect_with(|jail| {
                 jail.clear_env();
                 jail.create_file(
@@ -1362,6 +1380,7 @@ shell = "/bin/bash"
 
         #[test]
         fn should_reject_too_small_observation_retention_bytes() {
+            let _cwd_guard = crate::test_support::cwd_test_guard();
             Jail::expect_with(|jail| {
                 jail.clear_env();
                 jail.create_file(
@@ -1387,6 +1406,7 @@ shell = "/bin/bash"
 
         #[test]
         fn should_reject_zero_observation_cleanup_limits() {
+            let _cwd_guard = crate::test_support::cwd_test_guard();
             Jail::expect_with(|jail| {
                 jail.clear_env();
                 jail.create_file(
@@ -1413,6 +1433,7 @@ shell = "/bin/bash"
 
         #[test]
         fn should_fallback_to_default_rdog_toml_when_platform_file_is_missing() {
+            let _cwd_guard = crate::test_support::cwd_test_guard();
             Jail::expect_with(|jail| {
                 jail.clear_env();
                 jail.create_file(
@@ -1434,6 +1455,7 @@ shell = "/bin/bash"
 
         #[test]
         fn should_fallback_to_legacy_platform_config_when_new_platform_file_is_missing() {
+            let _cwd_guard = crate::test_support::cwd_test_guard();
             Jail::expect_with(|jail| {
                 jail.clear_env();
                 jail.create_file(
@@ -1455,6 +1477,7 @@ shell = "/bin/bash"
 
         #[test]
         fn should_prefer_new_platform_config_over_legacy_platform_config() {
+            let _cwd_guard = crate::test_support::cwd_test_guard();
             Jail::expect_with(|jail| {
                 jail.clear_env();
                 jail.create_file(
@@ -1485,6 +1508,7 @@ shell = "/bin/bash"
 
         #[test]
         fn should_fallback_to_legacy_rdog_toml_when_new_default_file_is_missing() {
+            let _cwd_guard = crate::test_support::cwd_test_guard();
             Jail::expect_with(|jail| {
                 jail.clear_env();
                 jail.create_file(
@@ -1506,6 +1530,7 @@ shell = "/bin/bash"
 
         #[test]
         fn should_load_zenoh_profile_from_environment() {
+            let _cwd_guard = crate::test_support::cwd_test_guard();
             Jail::expect_with(|jail| {
                 jail.clear_env();
                 jail.set_env("RDOG_ZENOH__ENABLED", "true");
@@ -1538,6 +1563,7 @@ shell = "/bin/bash"
 
         #[test]
         fn should_infer_namespace_from_daemon_name_when_not_explicitly_set() {
+            let _cwd_guard = crate::test_support::cwd_test_guard();
             Jail::expect_with(|jail| {
                 jail.clear_env();
                 jail.set_env("RDOG_ZENOH__ENABLED", "true");
@@ -1553,6 +1579,7 @@ shell = "/bin/bash"
 
         #[test]
         fn should_fail_when_legacy_peer_mode_is_requested() {
+            let _cwd_guard = crate::test_support::cwd_test_guard();
             Jail::expect_with(|jail| {
                 jail.clear_env();
                 jail.set_env("RDOG_ZENOH__ENABLED", "true");
@@ -1570,6 +1597,7 @@ shell = "/bin/bash"
 
         #[test]
         fn should_fail_when_zenoh_profile_only_has_serial_endpoint() {
+            let _cwd_guard = crate::test_support::cwd_test_guard();
             Jail::expect_with(|jail| {
                 jail.clear_env();
                 jail.set_env("RDOG_ZENOH__ENABLED", "true");
@@ -1591,6 +1619,7 @@ shell = "/bin/bash"
 
         #[test]
         fn should_fail_when_zenoh_name_is_invalid() {
+            let _cwd_guard = crate::test_support::cwd_test_guard();
             Jail::expect_with(|jail| {
                 jail.clear_env();
                 jail.set_env("RDOG_ZENOH__ENABLED", "true");
@@ -1607,6 +1636,7 @@ shell = "/bin/bash"
 
         #[test]
         fn should_fail_when_zenoh_listen_endpoints_contains_empty_string() {
+            let _cwd_guard = crate::test_support::cwd_test_guard();
             Jail::expect_with(|jail| {
                 jail.clear_env();
                 jail.set_env("RDOG_ZENOH__ENABLED", "true");
@@ -1624,6 +1654,7 @@ shell = "/bin/bash"
 
         #[test]
         fn should_fail_when_key_input_events_are_enabled_without_keyexpr() {
+            let _cwd_guard = crate::test_support::cwd_test_guard();
             Jail::expect_with(|jail| {
                 jail.clear_env();
                 jail.set_env("RDOG_ZENOH__ENABLED", "true");
@@ -1642,6 +1673,7 @@ shell = "/bin/bash"
 
         #[test]
         fn should_fail_when_key_input_event_keyexpr_is_invalid() {
+            let _cwd_guard = crate::test_support::cwd_test_guard();
             Jail::expect_with(|jail| {
                 jail.clear_env();
                 jail.set_env("RDOG_ZENOH__ENABLED", "true");
@@ -1771,6 +1803,7 @@ shell = "/bin/bash"
 
         #[test]
         fn should_create_all_platform_config_templates_in_user_dir_when_files_are_missing() {
+            let _cwd_guard = crate::test_support::cwd_test_guard();
             Jail::expect_with(|jail| {
                 jail.clear_env();
                 let home = point_home_at_jail(jail);
@@ -1807,6 +1840,7 @@ shell = "/bin/bash"
 
         #[test]
         fn should_reject_existing_platform_config_file_without_force() {
+            let _cwd_guard = crate::test_support::cwd_test_guard();
             Jail::expect_with(|jail| {
                 jail.clear_env();
                 let home = point_home_at_jail(jail);
@@ -1825,6 +1859,7 @@ shell = "/bin/bash"
 
         #[test]
         fn should_overwrite_existing_platform_config_files_when_force_enabled() {
+            let _cwd_guard = crate::test_support::cwd_test_guard();
             Jail::expect_with(|jail| {
                 jail.clear_env();
                 let home = point_home_at_jail(jail);
@@ -1862,6 +1897,7 @@ shell = "/bin/bash"
 
         #[test]
         fn should_fail_when_home_is_unset() {
+            let _cwd_guard = crate::test_support::cwd_test_guard();
             Jail::expect_with(|jail| {
                 jail.clear_env();
 

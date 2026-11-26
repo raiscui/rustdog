@@ -140,9 +140,9 @@ Issues 和 Wayfinder maps 使用 GitHub Issues。详见 `docs/agents/issue-track
   - 何时阅读: TTY/TERM/环境依赖测试在 agent shell 或 CI 稳定失败而本地交互终端通过, 或要给测试加环境固定前
 
 - `docs/solutions/best-practices/parallel-test-global-state-single-lock.md`
-  - 主题: 同进程并行测试共享全局状态 (env / tracing subscriber / singleton store) 必须用模块顶层唯一共享锁
-  - 用途: 固定三例踩坑收敛的锁纪律 (env_test_guard / TIMEOUT_TRACE_TEST_LOCK / observation singleton 反例边界)
-  - 何时阅读: 新写或修改触碰进程级 env、全局 tracing subscriber 或进程内 singleton 的测试, 或排查 "单跑通过 / 全量并行失败" 的串台断言前
+  - 主题: 同进程并行测试共享全局状态 (env / cwd / tracing subscriber / singleton store) 必须用模块顶层唯一共享锁
+  - 用途: 固定四例踩坑收敛的锁纪律 (env_test_guard / TIMEOUT_TRACE_TEST_LOCK / cwd_test_guard / observation singleton 反例边界)
+  - 何时阅读: 新写或修改触碰进程级 env、cwd、全局 tracing subscriber 或进程内 singleton 的测试, 或排查 "单跑通过 / 全量并行失败" 的串台断言前
 
 - `docs/solutions/best-practices/eval-carrier-drift-vs-model-regression.md`
   - 主题: 评测载体差异 (runner/case/prompt/binary) 会被误判成 "模型退步"

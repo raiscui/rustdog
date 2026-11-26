@@ -67,6 +67,7 @@ fn shell_builder_preserves_non_powershell_command_text() {
 
 #[test]
 fn shell_stderr_is_not_reported_as_nonzero_exit() {
+    let _cwd_guard = crate::test_support::cwd_test_guard();
     #[cfg(windows)]
     let (shell, script) = ("cmd.exe", "echo diagnostic 1>&2 & exit /b 0");
     #[cfg(not(windows))]
@@ -84,6 +85,7 @@ fn shell_stderr_is_not_reported_as_nonzero_exit() {
 #[cfg(windows)]
 #[test]
 fn powershell_progress_should_be_silent_but_real_errors_preserved() {
+    let _cwd_guard = crate::test_support::cwd_test_guard();
     // Windows PowerShell 的重定向 progress 会生成 CLIXML, 不能作为脚本失败依据.
     let result = execute_script(
         "powershell.exe",
@@ -485,6 +487,7 @@ fn execute_control_command_should_delegate_builtins_to_executor() {
 
 #[test]
 fn execute_control_command_should_run_script_via_shell() {
+    let _cwd_guard = crate::test_support::cwd_test_guard();
     let executor = SystemControlActionExecutor::default();
     let (shell, script, expected_stdout) = script_test_case();
     let output = executor

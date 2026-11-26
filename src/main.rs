@@ -64,6 +64,9 @@ mod shell;
 mod task_control;
 mod tls_material;
 mod win_dpi;
+
+#[cfg(test)]
+mod test_support;
 // UI script runner 复用现有 line-control transport。
 // 这里保持 CLI-side orchestration,不新增 daemon-side UI 协议。
 mod ui_script;
