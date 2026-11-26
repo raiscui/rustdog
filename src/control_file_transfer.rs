@@ -142,10 +142,17 @@ fn validate_transfer_path(raw: &str, verb: &str) -> Result<PathBuf, std::io::Err
     // - 这里是**命名策略**: 拒绝一个 `x.bin.YINO-PARTIAL` 目标在任何平台都不冤枉人, 而 Windows
     //   NTFS 与 macOS 默认的 APFS 都是大小写不敏感的卷 —— 不折叠就等于在那两个平台上留一条
     //   "目标名恰好是别人暂存路径"的路. 过拒无害, 漏拒会毁数据.
+    //
+    // 还要先剥掉结尾的点和空格: Win32 会把它们从文件名里忽略掉, 于是 `model.yino-partial.`
+    // 与 `model.yino-partial` 是同一个目录项, 而检查会因多一个点和空格放行.
     if path
         .file_name()
         .and_then(|name| name.to_str())
-        .is_some_and(|name| name.to_lowercase().ends_with(PARTIAL_SUFFIX))
+        .is_some_and(|name| {
+            name.trim_end_matches(['.', ' '])
+                .to_lowercase()
+                .ends_with(PARTIAL_SUFFIX)
+        })
     {
         return Err(std::io::Error::other(format!(
             "@{verb} 路径不得以保留后缀 {PARTIAL_SUFFIX} 结尾 (该后缀是暂存文件专用): {raw}"
@@ -1299,6 +1306,30 @@ mod tests {
 
         // 收尾: 把 fresh 也回收掉, 别把会话留在表里影响后续用例
         execute_file_cancel(&format!(r#"{{"transfer_id":"{fresh}"}}"#)).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn reserved_suffix_rejection_strips_windows_trailing_dot_and_space() {
+        // Win32 忽略文件名结尾的点和空格, 于是 model.yino-partial. 与 model.yino-partial 是同一个
+        // 目录项. 检查必须先把它们剥掉, 否则多一个点就能绕过保留后缀.
+        let _guard = TRANSFER_TABLE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let dir = std::env::temp_dir().join(format!("rdog-ft-traildot-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let tid = unique_id("traildot");
+        for name in ["dot.yino-partial.", "space.yino-partial "] {
+            let err = execute_put_file(&format!(
+                r#"{{"transfer_id":"{tid}","path":"{}","size":5}}"#,
+                escape_json(&dir.join(name).display().to_string())
+            ))
+            .unwrap_err();
+            assert!(
+                err.to_string().contains("保留后缀"),
+                "{name:?} 应被拒: {err}"
+            );
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 
