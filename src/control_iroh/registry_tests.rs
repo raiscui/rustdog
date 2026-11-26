@@ -48,7 +48,7 @@ fn a_registration_carries_every_interface_the_daemon_binds() {
         owner,
         vec![
             ip("10.42.0.2:7000"),
-            ip("127.0.0.1:7000"),
+            ip("10.43.0.2:7000"),
             TransportAddr::Relay(relay_url()),
         ],
     );
@@ -61,8 +61,39 @@ fn a_registration_carries_every_interface_the_daemon_binds() {
         panic!("a registered daemon has to resolve");
     };
     let ips = addr.ip_addrs().count();
-    assert_eq!(ips, 2, "both bound interfaces survive the round trip");
+    assert_eq!(ips, 2, "every advertised interface survives the round trip");
     assert_eq!(addr.relay_urls().count(), 1);
+}
+
+#[test]
+fn a_routable_registration_never_carries_loopback() {
+    let owner = endpoint_id(2);
+    let mut loopback = registry(owner);
+    let denied = register(
+        &mut loopback,
+        owner,
+        vec![
+            ip("10.42.0.2:7000"),
+            ip("127.0.0.1:7000"),
+            TransportAddr::Relay(relay_url()),
+        ],
+    );
+    assert!(
+        matches!(denied, DirectoryReply::Rejected { ref reason } if reason == "iroh_registration_denied"),
+        "a peer dialling 127.0.0.1 only reaches itself"
+    );
+
+    let mut loopback_profile = registry(owner);
+    loopback_profile.routable = false;
+    let accepted = register(
+        &mut loopback_profile,
+        owner,
+        vec![ip("127.0.0.1:7000"), TransportAddr::Relay(relay_url())],
+    );
+    assert!(
+        matches!(accepted, DirectoryReply::Registered),
+        "a loopback profile still registers its loopback socket"
+    );
 }
 
 #[test]

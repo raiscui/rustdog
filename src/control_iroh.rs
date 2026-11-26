@@ -253,6 +253,17 @@ fn relay_allowed(url: &RelayUrl, qad_port: u16, routable: bool) -> Result<()> {
     Ok(())
 }
 
+/// A candidate a remote peer can dial. Routable profiles never publish loopback:
+/// a peer dialling `127.0.0.1` only reaches itself, so the attempt is wasted and
+/// the failure it produces misleads whoever reads the log.
+fn candidate_ok(addr: SocketAddr, routable: bool) -> Result<SocketAddr> {
+    let addr = network(addr, routable)?;
+    if routable && addr.ip().is_loopback() {
+        return Err("iroh routable profile never publishes a loopback candidate".into());
+    }
+    Ok(addr)
+}
+
 /// Binds may name the wildcard address under a routable profile: the socket is
 /// this machine's own and is never published, so it can follow whatever address
 /// the machine currently has. Published addresses still go through `network`,
@@ -409,12 +420,16 @@ impl Registry {
                     || ip_candidates == 0
                     || addr
                         .ip_addrs()
-                        .any(|a| network(*a, self.routable).is_err() || a.port() == 0)
+                        .any(|a| a.port() == 0 || candidate_ok(*a, self.routable).is_err())
                     || addr.relay_urls().count() != 1
                     || addr.relay_urls().next() != Some(&self.relay)
                 {
                     return reject("iroh_registration_denied");
                 }
+                log::info!(
+                    "iroh directory registered name={name} candidates={}",
+                    addr.ip_addrs().map(|ip| ip.to_string()).collect::<Vec<_>>().join(",")
+                );
                 self.leases.insert(name, (addr, Instant::now() + LEASE));
                 DirectoryReply::Registered
             }
@@ -522,7 +537,7 @@ async fn register(ep: &Endpoint, cfg: &DaemonConfig, data: &Endpoint) -> Result<
     let mut addrs: Vec<TransportAddr> = data
         .addr()
         .ip_addrs()
-        .filter(|ip| ip.port() != 0 && network(**ip, cfg.routable).is_ok())
+        .filter(|ip| ip.port() != 0 && candidate_ok(**ip, cfg.routable).is_ok())
         .map(|ip| TransportAddr::Ip(*ip))
         .collect();
     if addrs.is_empty() {

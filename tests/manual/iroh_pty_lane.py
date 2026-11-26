@@ -429,6 +429,13 @@ with tempfile.TemporaryDirectory(prefix="iroh-pty-", dir=scratch) as dirname:
         print(f"ping: id=7 pong=true exit=0", flush=True)
 
         if from_lan:
+            case("a routable registration advertises no loopback candidate")
+            registered = [line for line in rendezvous_log.read_text(errors="replace").splitlines()
+                          if "iroh directory registered" in line]
+            assert registered, "the daemon never registered"
+            assert "127.0.0.1" not in registered[-1], registered[-1]
+            print(f"registration: {registered[-1].split('info')[-1].strip()}", flush=True)
+
             case("a client with no bind follows the address the machine has")
             named = client_profile("wildcard", owner_key)
             wildcard = json.loads(Path(named).read_text())
