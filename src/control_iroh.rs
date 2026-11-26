@@ -146,7 +146,10 @@ struct DirectoryDial {
 impl Directory {
     fn dial(&self, routable: bool) -> Result<DirectoryDial> {
         match (self.via_relay, &self.relay, self.addr) {
-            (true, Some(relay), _) => Ok(DirectoryDial {
+            (true, Some(_), Some(_)) => Err(
+                "iroh directory profile names both `addr` and `via_relay`; dial one of them".into(),
+            ),
+            (true, Some(relay), None) => Ok(DirectoryDial {
                 addr: EndpointAddr::from_parts(
                     self.id,
                     [TransportAddr::Relay(relay.url.clone())],
@@ -421,7 +424,7 @@ async fn endpoint_with_network(
 fn lane_relay(relay: &Relay, routable: bool) -> Result<RelayTransport> {
     relay_allowed(&relay.url, relay.qad_port, routable)?;
     Ok((
-        CaTlsConfig::custom_roots(certificates(&relay.root_cert)?),
+        RelayRoots::Lane(relay.root_cert.clone()).config()?,
         RelayMode::Custom(RelayMap::from_iter([RelayConfig::new(
             relay.url.clone(),
             Some(RelayQuicConfig::new(relay.qad_port)),
@@ -461,6 +464,8 @@ fn directory_relay(relay: &DirectoryRelay, routable: bool) -> Result<RelayTransp
 /// `via_relay` alone.
 #[derive(Debug, PartialEq, Eq)]
 enum RelayRoots {
+    /// The lane's own chain, and nothing else.
+    Lane(PathBuf),
     /// Only this chain, for a directory endpoint that dials one relay and nothing
     /// else.
     Pinned(PathBuf),
@@ -488,7 +493,9 @@ fn relay_roots(lane: Option<&Relay>, directory: &DirectoryRelay) -> RelayRoots {
 impl RelayRoots {
     fn config(&self) -> io::Result<CaTlsConfig> {
         Ok(match self {
-            Self::Pinned(chain) => CaTlsConfig::custom_roots(certificates(chain)?),
+            Self::Lane(chain) | Self::Pinned(chain) => {
+                CaTlsConfig::custom_roots(certificates(chain)?)
+            }
             Self::LaneAndDirectory(lane, directory) => {
                 CaTlsConfig::custom_roots(certificates(lane)?)
                     .with_extra_roots(certificates(directory)?)
@@ -576,17 +583,54 @@ async fn directory_call(
     ep: &Endpoint,
     dial: &DirectoryDial,
     request: DirectoryRequest,
+    routable: bool,
 ) -> Result<DirectoryReply> {
     let budget = match dial.relay {
         Some(_) => DIRECTORY_CONNECT,
         None => CONNECT,
     };
-    let conn = timeout(budget, ep.connect(dial.addr.clone(), DIRECTORY_ALPN)).await??;
-    let (mut send, mut read) = timeout(IO, conn.open_bi()).await??;
-    frame_put(&mut send, &request).await?;
-    match frame_get(&mut read).await? {
+    // One call touches several steps (connect, open, write, read), and a daemon
+    // renews every `RENEW` against a `LEASE`: bounding the call as a whole is what
+    // keeps it inside the lease, instead of adding up the steps and hoping each one
+    // stops short of its own budget.
+    let call = async {
+        let conn = timeout(budget, ep.connect(dial.addr.clone(), DIRECTORY_ALPN)).await??;
+        let (mut send, mut read) = timeout(IO, conn.open_bi()).await??;
+        frame_put(&mut send, &request).await?;
+        let reply = frame_get(&mut read).await?;
+        // The lane logs `iroh_path=` for its own dial; the directory hop reports
+        // what carried it too — but only once the reply is in hand, because a path
+        // printed ahead of the result would leave a `relay` reading behind for a
+        // lookup that then failed.
+        if dial.relay.is_some() {
+            match route(&conn, routable) {
+                Ok(actual) => log_directory_path(actual),
+                Err(err) => log::debug!("iroh_directory_path=unknown ({err})"),
+            }
+        }
+        Ok::<_, Box<dyn std::error::Error + Send + Sync>>(reply)
+    };
+    match timeout(LEASE - RENEW, call).await?? {
         DirectoryReply::Rejected { reason } => Err(reason.into()),
         reply => Ok(reply),
+    }
+}
+
+/// What carried the last successful directory hop. A `via_relay` daemon renews
+/// every five seconds, so the path is logged at `info` only when it changes and at
+/// `debug` otherwise: a steady daemon must not add a line per renewal.
+static DIRECTORY_PATH: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+fn log_directory_path(actual: Route) {
+    let seen = match actual {
+        Route::Relay => 1,
+        _ => 2,
+    };
+    let previous = DIRECTORY_PATH.swap(seen, Ordering::Relaxed);
+    if previous == seen {
+        log::debug!("iroh_directory_path={}", actual.label());
+    } else {
+        log::info!("iroh_directory_path={}", actual.label());
     }
 }
 
@@ -769,6 +813,7 @@ async fn register(
             name: cfg.name.clone(),
             addr,
         },
+        cfg.routable,
     )
     .await?
     {
@@ -1016,6 +1061,11 @@ pub(crate) fn run_daemon(path: &Path) -> Result<()> {
                 (directory, data)
             }
         };
+        // `online()` means "at least one relay's home connection is up", not "the
+        // relay this lane publishes is up": with a directory relay in the map that
+        // can be the other one. A successful registration proves the directory hop
+        // is reachable; whether the lane relay carries this daemon is a separate
+        // question, answered by that relay's own connection state.
         timeout(CONNECT, data.online()).await?;
         let deadline = register(&directory, &dial, &cfg, &data).await?;
         let allow = Arc::new(cfg.allow.clone());
@@ -1060,6 +1110,17 @@ pub(crate) fn run_daemon(path: &Path) -> Result<()> {
                     tasks.spawn(async move {
                         let outcome = async {
                             let conn = timeout(IO, incoming).await??;
+                            if conn.alpn() == DIRECTORY_ALPN {
+                                // This endpoint carries the directory client, not a
+                                // directory server: say so instead of serving a line
+                                // the peer's lookup would drift into.
+                                log::info!(
+                                    "iroh directory alpn not served peer={}",
+                                    conn.remote_id()
+                                );
+                                conn.close(DENIED_CODE.into(), DENIED.as_bytes());
+                                return Ok(());
+                            }
                             log::info!("iroh connection accepted peer={}", conn.remote_id());
                             let (send, read) = timeout(IO, conn.accept_bi()).await??;
                             let route = route(&conn, routable);
@@ -1155,6 +1216,7 @@ pub(crate) fn run_control(path: &Path, name: &str, line: &str) -> Result<()> {
             &directory,
             &dial,
             DirectoryRequest::Lookup { name: name.to_owned() },
+            cfg.routable,
         )
         .await;
         directory.close().await;
@@ -1986,6 +2048,7 @@ pub(crate) fn run_pty_control(path: &Path, name: &str, request: IrohPtyRequest) 
             DirectoryRequest::Lookup {
                 name: name.to_owned(),
             },
+            cfg.routable,
         )
         .await;
         directory.close().await;

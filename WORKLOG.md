@@ -1,5 +1,15 @@
 # WORKLOG: rustdog
 
+## [2026-11-26] #150 评审残项清理 (RAI-450)
+
+- **F3**:`directory` 同时给 `addr` 与 `via_relay` 现在明确报错(`names both \`addr\` and \`via_relay\``),不再静默保留其一;半配置矩阵扩到四种。
+- **F4**:服务端点上的 `DIRECTORY_ALPN` 不再"看起来支持"——对端若用该 ALPN 拨进来,daemon 记 `iroh directory alpn not served peer=<id>` 并按 `DENIED_CODE` 关闭。
+- **F5**:目录跳自己报告路径。relay 承载的查询成功落 `iroh_directory_path=<relay|direct>`,取不到选中路径时 `pending (<err>)`;隔离四例里三例的 `directory_hop=iroh_directory_path=relay` 是实测行,不再是配置推断。
+- **F6**:`data.online()` 的语义写进规格——只表示 relay map 里至少一条 home 已建立(可能是目录 relay),**注册成功才是发布的 lane relay 承载证据**。
+- **F2 残窗**:`directory_call` 整次包一层 `timeout(LEASE - RENEW, ...)`,不再靠 connect/open/write/read 串行相加估算;`lane_relay` 内联的 `custom_roots` 收进 `relay_roots`(新增 `Lane` 变体),信任策略只剩一个构造点。
+- 回执:`cargo test --bin rdog -- control_iroh` **36 passed / 0 failed / 2 ignored**;`tests/manual/iroh_directory_relay.sh` 四例全过(每例额外打印 `directory_hop=`);`check-carrier-assertions` OK;`handoffs/rai450/receipts/directory-relay.log`。
+- 提交: 827e494(五条残留)、2ad1c9a(评审后三处改动:F5 路径行改到查询成功后发、稳态按状态变化才打 `info`、F6 就绪判据改写)、3c2a861(规格记号:`directory.relay` 与 `directory_relay` 两处的 `root_cert?` 去掉,两项都必填)
+
 ## [2026-11-26] iroh 目录的 relay 承载 `directory.via_relay` (RAI-426)
 
 - 目录端点原本只能按 `id + SocketAddr` 拨,两端都在 NAT 后时连「去哪儿查这个 daemon」都发不出去。

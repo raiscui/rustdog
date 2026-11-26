@@ -358,6 +358,14 @@ fn the_directory_switch_never_invents_a_dial_target() {
             "`via_relay` requires a `relay`",
         ),
         (
+            "both a dial target and the switch",
+            format!(
+                r#"{{"id": "{}", "addr": "127.0.0.1:7100", "via_relay": true, "relay": {{"url": "https://127.0.0.1:7100", "root_cert": "/tmp/directory.pem"}}}}"#,
+                endpoint_id(2)
+            ),
+            "names both `addr` and `via_relay`",
+        ),
+        (
             "relay without the switch",
             format!(
                 r#"{{"id": "{}", "relay": {{"url": "https://127.0.0.1:7100", "root_cert": "/tmp/directory.pem"}}}}"#,
@@ -436,7 +444,7 @@ fn only_a_named_directory_anchor_widens_the_roots() {
 }
 
 #[test]
-fn a_directory_relay_follows_the_profile_without_weakening_it() {
+fn a_directory_relay_url_follows_the_profile_without_weakening_it() {
     let loopback: RelayUrl = "https://127.0.0.1:7100".parse().unwrap();
     let routable: RelayUrl = "https://10.21.0.1:7100".parse().unwrap();
     let plaintext: RelayUrl = "http://127.0.0.1:7100".parse().unwrap();
