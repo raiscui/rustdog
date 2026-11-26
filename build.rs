@@ -32,15 +32,14 @@ fn workspace_head() -> Option<String> {
         return None;
     }
 
+    // 有 `.git` 还不够: 一个**空的** `.git` 目录会让 `git` 继续向上找, 于是又贴成外层仓库的 sha。
+    // 所以先要顶层目录, 且它必须**就是这个 manifest 根**; 不等就 `unknown`。
+    if !toplevel_is(&root) {
+        return None;
+    }
+
     // 继承来的 `GIT_DIR` / `GIT_WORK_TREE` 会把探测指回**外层**仓库: 显式清掉, 只认 `-C root`。
-    let output = Command::new("git")
-        .env_remove("GIT_DIR")
-        .env_remove("GIT_WORK_TREE")
-        .arg("-C")
-        .arg(&root)
-        .args(["rev-parse", "--short=7", "HEAD"])
-        .output()
-        .ok()?;
+    let output = git(&root, &["rev-parse", "--short=7", "HEAD"])?;
     if !output.status.success() {
         return None;
     }
@@ -49,5 +48,39 @@ fn workspace_head() -> Option<String> {
         None
     } else {
         Some(sha)
+    }
+}
+
+/// `git -C <root> rev-parse --show-toplevel` 是否**恰好**是这个根 (而不是外层的某个仓库)。
+fn toplevel_is(root: &std::path::Path) -> bool {
+    let Some(output) = git(root, &["rev-parse", "--show-toplevel"]) else {
+        return false;
+    };
+    let Ok(text) = String::from_utf8(output.stdout) else {
+        return false;
+    };
+    let Ok(top) = std::fs::canonicalize(text.trim()) else {
+        return false;
+    };
+    let Ok(expected) = std::fs::canonicalize(root) else {
+        return false;
+    };
+    top == expected
+}
+
+/// 在 `root` 下跑 git, 且**清掉继承的环境指针** —— 否则 `GIT_DIR=外仓/.git` 会让探测读到外层仓库。
+fn git(root: &std::path::Path, args: &[&str]) -> Option<std::process::Output> {
+    let output = Command::new("git")
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .arg("-C")
+        .arg(root)
+        .args(args)
+        .output()
+        .ok()?;
+    if output.status.success() {
+        Some(output)
+    } else {
+        None
     }
 }

@@ -352,7 +352,8 @@ impl BulkPathSnapshot {
             "not_applicable" => PathClass::NotApplicable,
             _ => return Err(BULK_PATH_SCHEMA_MISMATCH),
         };
-        // 老快照没有这一栏: 读回 `unknown` 而不是报错 —— 但它会被 join 判成"两端不同源"。
+        // 老快照没有这一栏: 读回 `unknown` 而不是报错 —— join 由此判成 `build_unverified`
+        // (无法证明同源), **不是** "两端不同源": 缺字段与"确实是两个构建"是两件事。
         let build = value
             .get("build")
             .and_then(Value::as_str)
