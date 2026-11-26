@@ -41,32 +41,60 @@ fn shell_builder_should_not_allocate_a_console() {
         "System.IntPtr GetConsoleWindow();'; ",
         "[Rdog.ConsoleProbe]::GetConsoleWindow().ToInt64()"
     );
-    // 被测对象是 builder 的建台标志, 不是 CreateProcess 本身能不能起进程。CI 上
-    // 1058 个测试并行、大量进程同时 spawn 时, Windows 会偶发返回 ERROR_FILE_NOT_FOUND
-    // 并被 Rust 映射成 NotFound/"program not found" (2026-11-26 windows job 实测:
-    // 同一份代码另一次运行里这条就是绿的)。所以对这一种错误做有界重试, 其它错误照旧直接红。
-    let output = spawn_with_transient_retry(|| build_shell_command("powershell.exe", script))
-        .expect("应启动无控制台的 PowerShell probe");
+    // 被测对象是 builder 的建台标志, 不是 PowerShell 自己能不能起来 —— 见
+    // run_powershell_probe 里对两种环境性失败的说明。
+    let output = run_powershell_probe(script).expect("应启动无控制台的 PowerShell probe");
 
     assert!(output.status.success(), "{:?}", output.stderr);
     assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "0");
 }
 
-/// 进程密集并行时 Windows 偶发 `ERROR_FILE_NOT_FOUND`(-> `NotFound`/`program not found`),
-/// 重试几次即可; 其它错误立刻返回, 重试耗尽也照旧返回错误。
+/// 起一次 PowerShell probe, 对**环境性**启动失败做有界重试。
+///
+/// CI 上 1000+ 测试在 2 核 runner 上并行, 大量进程同时 spawn 时实测到两种与被测对象无关
+/// 的失败 (2026-11-26 两次 windows job, 同一份代码一次绿一次红):
+///   1. `CreateProcess` 返回 `ERROR_FILE_NOT_FOUND` -> Rust `NotFound`/"program not found";
+///   2. PowerShell 起来了但托管运行时装载失败: stderr 里
+///      `Internal Windows PowerShell error ... failed with error 8009001d`。
+///
+/// 只对这两种重试; 其它错误、以及 probe 正常结束但断言不成立 (退出码非 0 且不是启动失败、
+/// stdout 不是 "0") 都照旧直接红 —— 建台标志一旦回退, 断言仍然会抓到。
 #[cfg(windows)]
-fn spawn_with_transient_retry(
-    mut build: impl FnMut() -> std::process::Command,
-) -> std::io::Result<std::process::Output> {
+fn run_powershell_probe(script: &str) -> std::io::Result<std::process::Output> {
     const ATTEMPTS: usize = 3;
-    for attempt in 1..=ATTEMPTS {
-        match build().output() {
-            Ok(output) => return Ok(output),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound && attempt < ATTEMPTS => {
-                std::thread::sleep(std::time::Duration::from_millis(250 * attempt as u64));
-            }
-            Err(error) => return Err(error),
+
+    fn startup_failed(output: &std::process::Output) -> bool {
+        if output.status.success() {
+            return false;
         }
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let is_utf16 = output.stderr.len() > 1
+            && output.stderr.len() % 2 == 0
+            && output.stderr.chunks(2).take(8).all(|pair| pair[1] == 0);
+        let stderr = if is_utf16 {
+            String::from_utf16_lossy(
+                &output
+                    .stderr
+                    .chunks(2)
+                    .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+                    .collect::<Vec<_>>(),
+            )
+        } else {
+            stderr.into_owned()
+        };
+        stderr.contains("Internal Windows PowerShell error") || stderr.contains("8009001d")
+    }
+
+    for attempt in 1..=ATTEMPTS {
+        let outcome = build_shell_command("powershell.exe", script).output();
+        let retryable = match &outcome {
+            Ok(output) => startup_failed(output),
+            Err(error) => error.kind() == std::io::ErrorKind::NotFound,
+        };
+        if !retryable || attempt == ATTEMPTS {
+            return outcome;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(250 * attempt as u64));
     }
     unreachable!("loop always returns on the last attempt")
 }

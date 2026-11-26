@@ -668,6 +668,22 @@ panic 于 `dynamic_link.rs:45` (unix 分支, 同一循环); `mkdir -p target/deb
 - 提交: 80ddfc3 (windows 首次跑到本组测试抓到的 ConnectionReset: 12 处读响应改成 EOF/reset 皆终止)
 - 提交: 00bb079 (windows 并行 spawn 偶发 ERROR_FILE_NOT_FOUND: 对 NotFound 有界重试)
 
+### 2026-11-26 覆盖缺口演练抓到自己门代码的洞 (RAI-397 追加)
+
+drill 分支 poison 预取 URL 后, 第一次真的跑到 failure 分支, 发现分类步骤里的反引号写在
+`echo "..."` 双引号内被 bash 当命令替换 (`line 9: onnxruntime: command not found`),
+摘要表变成坏行 —— 也就是"红点说得出结论"这件事本身没做到。改成
+`scripts/ci/coverage-gap-summary.md` + 三个 job 各自 `cat`, 文字不再经过 shell 解析,
+同一份文字也不再在三处各抄一遍。本地用同一条命令回放, 摘要内容已验证完整。
+- 提交: 4a3069a
+
+### 2026-11-26 Windows PowerShell 启动失败也纳入有界重试 (RAI-429)
+
+run 45777540822 的 `tests.rs:51` 红是第二种环境性失败: PowerShell 起来了但托管运行时装载失败
+(`Internal Windows PowerShell error ... 8009001d`)。`run_powershell_probe()` 只对
+`NotFound` 与这种启动失败重试, 其它错误与断言不成立照旧直接红。
+- 提交: aa68f95
+- 提交: 8db8a35
 ## 2026-11-26 RAI-413 #141 第三轮评审一条 + 重定基到 03ff36e
 
 - **被拒的重复附上会把目标会话留在"已附"状态**: attach 分支先 `attach_active_pty_session`(运行时会标记 attached
