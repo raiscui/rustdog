@@ -768,3 +768,25 @@ endpoint 记进 locator 集合), 于是打不开的串口也会出现在 `Zenoh 
 - 提交: 413182d
 
 本轮 Linux 验证：构建通过，config 单测 46/46，session 单测 6/6；未跑真机或网络 e2e。
+
+## 2026-11-26 RAI-385 Windows 本机自连:端口简写映射、回环会话关闭、缺失的 fast path
+
+实测钉死根因(不是推断): zenoh 模式的 daemon 强制 `inbound.enabled=false`,配置里的
+`tcp/...` 端口只跑 zenoh link 层 —— 原始 TCP 握手成功, 发 line-control 字节被 zenoh
+丢弃链路, 客户端读 EOF, 于是报「在收到 UI script 结果前就关闭了」。另一条更早的坏路:
+只写端口时 host 被解析成 `0.0.0.0`, 拿 listen 地址当 connect 目标, Windows 上 os error 10049。
+
+- `connect_host`: 未指定地址 (0.0.0.0 / ::) 统一映射回环, 端口简写与 host+port 共用出口。
+- `src/local_daemon_registry.rs`: daemon 路由就绪后登记本机控制 lane (zenoh + 回环
+  connect endpoint), liveness 用 lock 上的 OS advisory lock; unix 仍独占 unixpipe。
+- `resolve_local_control_target` / `promote_loopback_tcp`: `self` 与 `control <回环端口>`
+  按登记解析协议; 显式 `--transport tcp` 不改写。
+- 对端一帧未回就断开时给出可行动错误 + `RDOG_LOG_LEVEL=debug` 的 `control link:` 回执。
+
+验证: `cargo test --bin rdog` 三轮全量并行各 1116 passed / 0 failed / 2 ignored;
+Linux 同构现场复现 + 修复后三条本机路径都回 `@response`(回执见
+handoffs/rai385/receipts/, reports/RAI-385.md); Windows 真机回执由总控代跑。
+`tests/control_lanes` 15/15 卡在 `rdog_binary_path` 的 target 布局(RAI-396 只修了
+recording_e2e), 属既有测试资产缺陷, 冻结基线同款红; `tests/zenoh_unixpipe_fast_path`
+是 `cfg(target_os = "macos")`, Linux 上 0 用例不是回归。
+- 提交: 268e50f
