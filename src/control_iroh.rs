@@ -359,7 +359,9 @@ fn relay_allowed(url: &RelayUrl, qad_port: u16, routable: bool) -> Result<()> {
         return Ok(());
     }
     if !https || url.host_str().is_none() {
-        return Err("iroh routable profile requires an HTTPS relay host and a non-zero QAD port".into());
+        return Err(
+            "iroh routable profile requires an HTTPS relay host and a non-zero QAD port".into(),
+        );
     }
     Ok(())
 }
@@ -422,7 +424,20 @@ fn name_valid(name: &str) -> bool {
 /// 用 §2.2 的稳定码 `iroh_bulk_path_pin_unavailable` 而不是通用的 `iroh_readonly_ping_required`:
 /// 前者告诉调用方"换一条支持钉住路径的传输", 后者只说"这条通道不许"。两者对排查的意义不同 ——
 /// 前者是能力事实, 后者是准入策略。
-const BULK_REFUSED: &str = crate::bulk_path::IROH_BULK_PATH_PIN_UNAVAILABLE;
+/// bulk 在这条通道上的拒绝码**由判定表给出**, 不在这里手写字符串:
+/// 这条 lane 的能力是 `path_aware=true / bulk_path_pin=false`, 按 §3.1 它连采样都不必做,
+/// 直接就是 `iroh_bulk_path_pin_unavailable`。查表让"拒绝码"与"能力声明"只有一个真相源。
+fn bulk_refusal_code() -> &'static str {
+    match crate::bulk_path::decide(
+        crate::bulk_path::PathCapability::PATH_AWARE_UNPINNED,
+        crate::bulk_path::PathClass::Unknown,
+        false,
+    ) {
+        crate::bulk_path::BulkDecision::Refused(code) => code,
+        // 这条 lane 的能力固定为"有 relay 跳但钉不住", 表里必然是拒; 走到这里说明表被改坏了。
+        crate::bulk_path::BulkDecision::Allowed => crate::bulk_path::IROH_BULK_PATH_PIN_UNAVAILABLE,
+    }
+}
 
 fn is_bulk_command(command: &ControlCommand) -> bool {
     matches!(
@@ -443,7 +458,7 @@ fn ping_only(line: &str) -> io::Result<ControlRequest> {
             Ok(request)
         }
         ControlParseResult::Control(request) if is_bulk_command(&request.command) => Err(
-            io::Error::new(io::ErrorKind::PermissionDenied, BULK_REFUSED),
+            io::Error::new(io::ErrorKind::PermissionDenied, bulk_refusal_code()),
         ),
         _ => Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
@@ -1928,7 +1943,7 @@ fn serve_lane(
                 }
             }
             other if is_bulk_command(&other) => {
-                refuse_frame(transport, None, LANE_REFUSED_CODE, BULK_REFUSED)?
+                refuse_frame(transport, None, LANE_REFUSED_CODE, bulk_refusal_code())?
             }
             _ => refuse_frame(transport, None, LANE_REFUSED_CODE, LANE_REFUSED)?,
         }

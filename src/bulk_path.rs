@@ -39,7 +39,9 @@ impl PathCapability {
         bulk_path_pin: false,
     };
 
-    /// 有 relay 跳且能钉住 (适配器补上 pin 之后的形态)。
+    /// 有 relay 跳且能钉住 —— **今天没有任何适配器处于这个状态**, 所以它只在测试里构造。
+    /// 适配器补上 pin 的那天 (RAI-476) 去掉这行 `cfg`, 它就会成为生产路径上的第三种能力。
+    #[cfg(test)]
     pub(crate) const PATH_AWARE_PINNED: Self = Self {
         path_aware: true,
         bulk_path_pin: true,
@@ -210,6 +212,11 @@ impl BulkPathSnapshot {
     /// 正对照是否成立 (§4.4): 同链路控制面请求的 relay delta 必须**严格大于 0**。
     ///
     /// 严格不等式是刻意的: `>= 0` 在计数器根本没接上时照样通过, 等于没有正对照。
+    ///
+    /// **今天没有生产消费者**: 正对照由验收脚本 (与跑批单) 执行, 仓库里只有它的判据与用例。
+    /// 所以这里 `cfg(test)`: 一个只有测试能走到的"能力"会让读者以为它已经接上了 —— 等 RAI-476
+    /// 的计数接线之后去掉这行, 它会成为验收工具的一部分。
+    #[cfg(test)]
     pub(crate) fn positive_control_holds(control_probe: &BulkPathSnapshot) -> bool {
         control_probe.relay_tx_delta().unwrap_or(0) > 0
             || control_probe.relay_rx_delta().unwrap_or(0) > 0

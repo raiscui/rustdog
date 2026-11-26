@@ -482,13 +482,24 @@ bulk 一律以 `iroh_bulk_path_pin_unavailable` 拒绝. **适配器补上路径 
 `BulkPathSnapshot::verdict()`, 它今天会给出 `aborted` / `not_applicable` / `relay_sample_unavailable` /
 `no_bulk_bytes` / `relay_bytes_zero` / `relay_bytes_nonzero` 之一. 其中前四个都**不是结论**.
 
-**判定式** (可执行实现: `BulkPathSnapshot::relay_bytes_zero_own_half()` / `positive_control_holds()`,
-`src/bulk_path.rs`; 验收脚本按此逐字实现, 不做主观解读):
+**判定式** (可执行实现: `BulkPathSnapshot::relay_bytes_zero_own_half()`, `src/bulk_path.rs`;
+验收脚本按此逐字实现, 不做主观解读. 正对照那一条的判据在 §4.4 的表里, 仓库内的可执行参考是
+`bulk_path::tests::positive_control_uses_a_strict_inequality` —— 它今天**没有生产消费者**, 因为
+relay 计数还没接线, 见 RAI-476):
 
-- `relay_bytes_zero` 当且仅当 `path_class == "direct"` 且**两端各自**满足
-  `relay_tx_after - relay_tx_before == 0` 且 `relay_rx_after - relay_rx_before == 0`.
-- `path_class == "not_applicable"` 时判定式不适用, 该条不得用于"relay 字节为 0"的结论 (空真).
-- 其余情况一律 `relay_bytes_nonzero` 或 `aborted`.
+**本端**构成 `relay_bytes_zero` 的四个必要条件 (缺一即是别的 verdict):
+
+1. 不是中止 (`aborted == false`);
+2. **本次确有字节移动** (`chunks > 0 || bulk_bytes > 0`) —— 一次"续传时半成品已经完整"的尝试
+   一个字节都不用发, 它的零与"没走 relay"数值上完全一样, 这是最纯的空真;
+3. `path_class == "direct"`;
+4. 四个计数**都采到了** (`relay_sample_available == true`) 且本端 `relay_tx` 与 `relay_rx` 的
+   `after - before` **都为 0**。计数为 `null` 表示未采样, 不是零.
+
+不满足时按 `BulkPathSnapshot::verdict()` 的顺序给出 `aborted` / `not_applicable` /
+`relay_sample_unavailable` / `no_bulk_bytes` / `relay_bytes_nonzero` 之一 —— **前四个都不是结论**,
+尤其 `not_applicable` (没有 relay 跳, 空真) 与 `relay_sample_unavailable` (采不到计数) 不得被读成
+"relay 字节为 0". 跨端结论必须两端各自的 `relay_bytes_zero_own_half()` 都为真 (`§4.3` 的 join).
 
 ### 4.4 正对照 (本规格最容易被做坏的地方)
 

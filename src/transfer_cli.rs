@@ -128,7 +128,6 @@ pub(crate) struct BulkPathRecorder {
     wire_bytes: u64,
     chunks: u64,
     path_class: PathClass,
-    established_direct: bool,
     aborted: bool,
     /// 失败路径上写快照时用的 id (成功路径用收据里的那个)。
     last_transfer_id: String,
@@ -152,24 +151,18 @@ impl BulkPathRecorder {
             } else {
                 PathClass::NotApplicable
             },
-            established_direct: false,
             aborted: false,
             last_transfer_id: String::new(),
         }
     }
 
-    /// 记下此刻观测到的路径类别。真实适配器每读一次采样就调一次; 今天的客户端驱动没有采样源,
-    /// 所以它永远保持构造时的类别 (`not_applicable`)。
-    pub(crate) fn observe(&mut self, path_class: PathClass) {
-        if path_class == PathClass::Direct {
-            self.established_direct = true;
-        }
-        self.path_class = path_class;
-    }
-
     /// 门禁 (§3.1): open 前一次。
     pub(crate) fn admit(&self) -> Result<(), String> {
-        match decide(self.capability, self.path_class, self.established_direct) {
+        // `established_direct` 今天**没有生产者**: 判"中途 direct→relay"需要适配器在读采样的同时
+        // 记住"本次是否曾观测到 direct", 而今天没有承载 bulk 数据面的适配器 (RAI-476)。所以这里
+        // 恒传 `false` —— 它是被声明的缺口, 不是被假装解决的分支。`iroh_direct_path_lost` 因此只有
+        // 单测覆盖, 不得据此主张"中途路径丢失已处理"。
+        match decide(self.capability, self.path_class, false) {
             BulkDecision::Allowed => Ok(()),
             BulkDecision::Refused(code) => Err(refuse_message(code)),
         }
@@ -402,7 +395,6 @@ fn run_put_inner(
     remote: &str,
     restart: bool,
 ) -> Result<TransferReceipt, String> {
-    recorder.admit()?;
     let metadata = std::fs::metadata(local).map_err(|err| format!("读取 {local:?} 失败: {err}"))?;
     if metadata.is_dir() {
         return Err(format!(
@@ -413,6 +405,9 @@ fn run_put_inner(
     let sha256 = sha256_of_file(local)?;
     let transfer_id = new_transfer_id("put");
     recorder.remember_transfer(&transfer_id);
+    // 门禁在 transfer_id 之后就判: 被拒的尝试也要在证据里带自己的 id, 否则按 id join 时
+    // 多次被拒会并成一条。
+    recorder.admit()?;
 
     let open_line = serde_json::json!({
         "transfer_id": transfer_id,
@@ -537,9 +532,9 @@ fn run_get_inner(
     remote: &str,
     local: &Path,
 ) -> Result<TransferReceipt, String> {
-    recorder.admit()?;
     let transfer_id = new_transfer_id("get");
     recorder.remember_transfer(&transfer_id);
+    recorder.admit()?;
     let open_line = serde_json::json!({
         "transfer_id": transfer_id,
         "path": remote,
