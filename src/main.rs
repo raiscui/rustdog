@@ -913,6 +913,15 @@ fn run(opts: input::Opts) -> Result<(), String> {
                 }
             }
         },
+        Command::Iroh { command } => match command {
+            input::IrohCommand::RelayBaseline {
+                profile,
+                peer,
+                seconds,
+                interval_ms,
+            } => control_iroh::run_relay_baseline(&profile, &peer, seconds, interval_ms)
+                .map_err(|err| err.to_string())?,
+        },
         Command::AxDiff {
             before,
             after,

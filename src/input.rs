@@ -366,6 +366,13 @@ pub enum Command {
         command: BulkPathCommand,
     },
 
+    /// iroh lane 的诊断探头 (隐藏; 不是出货特性, 不用于验收)
+    #[clap(hide = true)]
+    Iroh {
+        #[clap(subcommand)]
+        command: IrohCommand,
+    },
+
     /// Structured diff of two AxSnapshot JSON files
     AxDiff {
         /// Path to the "before" AxSnapshot JSON
@@ -426,6 +433,37 @@ pub enum BulkPathCommand {
         /// 快照文件或目录 (目录里取 `*.json`), 可给多个
         #[clap(value_name = "PATH", required = true, num_args = 1..)]
         inputs: Vec<PathBuf>,
+    },
+}
+
+/// iroh 的诊断子命令。**不是产品特性**: 它只做测量, 不进常规 help, 也不承担任何传输能力。
+#[derive(Subcommand, Debug)]
+pub enum IrohCommand {
+    /// 量「空闲 relay path 上 iroh 累计字节的增量速率」(F8 的分母)
+    ///
+    /// 连上对端准入 lane, 发一条 `@ping` 拿 pong, 然后**什么都不发**, 按间隔采 relay 累计字节。
+    /// 每行一个 JSON (`{"kind":"sample",…}`), 最后一行是 `{"summary":…}`。计数面与
+    /// `rdog.bulk-path.v1` 快照里的 tx/rx 是同一处 (`RelayReading::read`)。
+    ///
+    /// 退出条件: `--seconds` 到点, 或路径不再是 relay (那就不是"空闲 relay 噪声"了, 直接失败)。
+    ///
+    /// **诊断探头, 不用于出货验收。**
+    RelayBaseline {
+        /// 客户端 profile (与 `rdog control --iroh-config` 同一格式; `path` 用 `relay`)
+        #[clap(long, value_name = "PROFILE")]
+        profile: PathBuf,
+
+        /// 对端: NAMESPACE/NAME (走目录查找) 或一个裸 endpoint id (按 profile 的 relay 直连)
+        #[clap(long, value_name = "NAME_OR_ID")]
+        peer: String,
+
+        /// 测量窗口 (秒)
+        #[clap(long, default_value_t = 30)]
+        seconds: u64,
+
+        /// 采样间隔 (毫秒)
+        #[clap(long = "interval-ms", default_value_t = 5000)]
+        interval_ms: u64,
     },
 }
 
