@@ -24,14 +24,20 @@ fn main() {
 /// 早先直接用 `git rev-parse` 会向上找 —— 把源码包解到别的 checkout 里构建时, 烘进去的是**外层
 /// 仓库**的 sha。那正是这一格要消灭的错: 一个贴错标签的读数比 `unknown` 更坏。
 fn workspace_head() -> Option<String> {
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    // **运行时**读, 不用 `env!`: 编译期常量会把路径烘进 build-script 二进制, Cargo 在另一个目录
+    // 构建时会复用那个旧脚本, 于是又贴成别的仓库的 sha (复核实测过)。
+    let root = std::path::PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR")?);
     // `.git` 可以是目录 (普通 checkout) 或文件 (worktree / submodule)。
     if !root.join(".git").exists() {
         return None;
     }
+
+    // 继承来的 `GIT_DIR` / `GIT_WORK_TREE` 会把探测指回**外层**仓库: 显式清掉, 只认 `-C root`。
     let output = Command::new("git")
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
         .arg("-C")
-        .arg(root)
+        .arg(&root)
         .args(["rev-parse", "--short=7", "HEAD"])
         .output()
         .ok()?;

@@ -653,12 +653,13 @@ fn join_group(transfer_id: String, halves: Vec<BulkPathSnapshot>) -> JoinReport 
     }
 
     // 构建身份先判: 两端不是同一次构建时, 后面所有路径判定都不成立 (§8 的固定字段)。
-    let build_reason = if client.build != daemon.build {
-        Some(BULK_PATH_BUILD_MISMATCH.to_owned())
-    } else if client.build == "unknown" {
-        Some(BULK_PATH_BUILD_UNVERIFIED.to_owned())
-    } else {
-        None
+    //
+    // 只有"两端都是能当身份用的值、且不相等"才说 mismatch; 缺一端、空串、`unknown`、不像 sha 的值
+    // 一律是 unverified —— 把"无法证明"说成"不同源"是另一种假话。
+    let build_reason = match (build_id(&client.build), build_id(&daemon.build)) {
+        (Some(left), Some(right)) if left == right => None,
+        (Some(_), Some(_)) => Some(BULK_PATH_BUILD_MISMATCH.to_owned()),
+        _ => Some(BULK_PATH_BUILD_UNVERIFIED.to_owned()),
     };
     let suspect = client.concurrency_suspected == Some(true)
         || daemon.concurrency_suspected == Some(true);
@@ -685,6 +686,16 @@ fn join_group(transfer_id: String, halves: Vec<BulkPathSnapshot>) -> JoinReport 
         daemon: Some(HalfReport::of(&daemon)),
         relay_bytes_zero,
     }
+}
+
+/// `build` 值能不能当身份用: 7–40 位十六进制 (与 `build.rs` 写出的 7 位短 sha 一致)。
+///
+/// 空串、`unknown`、别的字符串都不算 —— 它们不能证明同源, 也不能证明不同源。
+fn build_id(build: &str) -> Option<&str> {
+    let trimmed = build.trim();
+    let plausible = (7..=40).contains(&trimmed.len())
+        && trimmed.bytes().all(|byte| byte.is_ascii_hexdigit());
+    plausible.then_some(trimmed)
 }
 
 /// "配上了但没有结论"的原因码: `bulk_path_inconclusive_<verdict>`, 两端都给时按本端 → 对端用
@@ -797,7 +808,7 @@ mod tests {
             chunks: 1,
             concurrency_suspected: None,
             endpoint: "client".into(),
-            build: "test".into(),
+            build: "0123abc".into(),
             relay_tx_before: Some(0),
             relay_tx_after: Some(0),
             relay_rx_before: Some(0),
@@ -1302,23 +1313,57 @@ mod tests {
     }
 
     #[test]
-    fn halves_without_a_build_identity_cannot_prove_they_match() {
+    fn halves_without_a_usable_build_identity_cannot_prove_they_match() {
+        // 「无法证明同源」的四种形状, 每一种都必须落到 unverified 而不是 mismatch:
+        // 双 unknown / 双空串 / 双非法值 / 一端缺字段 (读回 unknown)。
+        for (label, left, right) in [
+            ("双 unknown", Some("unknown"), Some("unknown")),
+            ("双空串", Some(""), Some("")),
+            ("双非法值", Some("not-a-sha"), Some("not-a-sha")),
+            ("一端缺字段", Some("0123abc"), None),
+        ] {
+            let mut client = half("client", Some(0));
+            let mut daemon = half("daemon", Some(0));
+            match left {
+                Some(value) => client["build"] = json!(value),
+                None => {
+                    client.as_object_mut().unwrap().remove("build");
+                }
+            }
+            match right {
+                Some(value) => daemon["build"] = json!(value),
+                None => {
+                    daemon.as_object_mut().unwrap().remove("build");
+                }
+            }
+            let reports = join_inputs(&[client, daemon]);
+            assert_eq!(reports[0].relay_bytes_zero, None, "{label}");
+            assert_eq!(
+                reports[0].reason.as_deref(),
+                Some(BULK_PATH_BUILD_UNVERIFIED),
+                "{label}: 无法证明同源不能说成不同源"
+            );
+        }
+    }
+
+    #[test]
+    fn the_same_build_on_both_halves_still_reaches_a_conclusion() {
         let mut client = half("client", Some(0));
         let mut daemon = half("daemon", Some(0));
-        client["build"] = json!("unknown");
-        daemon["build"] = json!("unknown");
+        client["build"] = json!("dea4be7");
+        daemon["build"] = json!("dea4be7");
         let reports = join_inputs(&[client, daemon]);
-        assert_eq!(reports[0].relay_bytes_zero, None);
-        assert_eq!(reports[0].reason.as_deref(), Some(BULK_PATH_BUILD_UNVERIFIED));
+        assert_eq!(reports[0].relay_bytes_zero, Some(true));
+        assert_eq!(reports[0].reason, None);
     }
 
     #[test]
     fn the_snapshot_carries_its_build_identity() {
         // 两端 build 不同即整条读数作废 (§8): 这一格必须在快照里, 且老快照读回 `unknown` 而不是报错。
         let value = snapshot(PathCapability::NOT_PATH_AWARE, PathClass::NotApplicable).to_json();
-        assert_eq!(value["build"], "test");
+        assert_eq!(value["build"], "0123abc");
         let read_back = BulkPathSnapshot::from_json(&value).unwrap();
-        assert_eq!(read_back.build, "test");
+        assert_eq!(read_back.build, "0123abc");
 
         let mut legacy = value;
         legacy.as_object_mut().unwrap().remove("build");

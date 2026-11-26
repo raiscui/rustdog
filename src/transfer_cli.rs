@@ -205,14 +205,14 @@ impl TransferReceipt {
             Some(false) => " resume=restarted",
             None => "",
         };
-        // `resume=` / `sha256=` 保持在最后: 依赖最后一列的调用方不该被一个新字段打断,
-        // 所以 `build=` 插在它们前面。
+        // 尾列不能被新字段打断: put 的最后一列仍是 `resume=…`, get 的最后一列仍是 `sha256=…`,
+        // 所以 `build=` 插在 `sha256=` **之前**。
         format!(
-            "{} ok bytes={} sha256={} {}{}",
+            "{} ok bytes={} {} sha256={}{}",
             self.direction,
             self.bytes,
-            self.sha256,
             crate::build_info::build_tag(),
+            self.sha256,
             resume
         )
     }
@@ -2270,31 +2270,33 @@ mod tests {
     }
 
     #[test]
-    fn the_receipt_keeps_its_trailing_resume_column() {
-        // 成功回执是 stdout 的契约行: `resume=` 必须仍是最后一列, 新加的 `build=` 只能插在它前面。
-        let receipt = TransferReceipt {
+    fn the_receipt_keeps_its_trailing_columns() {
+        // 成功回执是 stdout 的契约行, 尾列不能被新字段打断:
+        //   put 的最后一列是 `resume=…`, get 的最后一列是 `sha256=…`。
+        let put = TransferReceipt {
             transfer_id: "t".into(),
             direction: "put",
             bytes: 10,
             sha256: "abc".into(),
             resume_honored: Some(true),
-        };
-        let line = receipt.render();
-        assert!(line.ends_with("resume=honored"), "{line}");
-        assert!(line.contains(" build="), "{line}");
+        }
+        .render();
+        assert!(put.ends_with("resume=honored"), "put 尾列必须是 resume: {put}");
+        assert!(put.contains(" build="), "{put}");
 
-        let plain = TransferReceipt {
+        let get = TransferReceipt {
             transfer_id: "t".into(),
             direction: "get",
             bytes: 10,
             sha256: "abc".into(),
             resume_honored: None,
-        };
-        let plain = plain.render();
+        }
+        .render();
         assert!(
-            plain.ends_with(&format!("build={}", crate::build_info::BUILD_SHA)),
-            "get 没有 resume 列时 build 落在最后: {plain}"
+            get.ends_with("sha256=abc"),
+            "get 尾列必须是 sha256: {get}"
         );
+        assert!(get.contains(" build="), "{get}");
     }
 
     #[test]
