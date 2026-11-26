@@ -116,46 +116,41 @@ def commit_shas(
     return [line.strip() for line in git(root, *args).splitlines() if line.strip()]
 
 
-def commit_landed_epoch(root: Path, sha: str) -> tuple[float | None, str]:
-    """它什么时候**落到 HEAD 所在的这条 main 历史里**, 以及这个时间是哪种参照。
+def landed_info(root: Path, sha: str, chain: list[str]) -> tuple[float | None, str | None]:
+    """它什么时候落到 HEAD 这条 main 历史里, 以及**参照的是哪个 commit**。
 
-    超期必须从「落进 main 的那一刻」起算, 不是从它被写出来的那一刻 (长寿命分支会假阳性), 也不是
-    从「分支里某次同步 main 的 merge」起算 —— **一个 commit 在分支里被 merge 过多少次, 和它什么时候
-    落到 main 上, 是两件事**。所以只认 HEAD 的**一线父链**: 链上「最早的、以 sha 为祖先的那个
-    commit」就是它的落点 (同步 merge 不在一线父链上, 自然被排除; 直推 main 的 commit 本身就在链上)。
+    只认 HEAD 的**一线父链**: 链上「最早的、以 sha 为祖先的那个 commit」就是落点。一个 commit 在
+    分支里被 merge 过多少次, 和它什么时候落到 main 上, 是两件事 —— 分支内的同步 merge 不在父链上,
+    所以不会被误当成落点。
 
-    「包含 sha」在一线父链上是单调的 (一旦为真, 更新的都真), 所以二分查找就够, 不必逐个 merge-base。
-    返回 `(epoch, "landed"|"commit")`: 后者表示 sha 还没落进这条历史, 退回用 commit 自己的时间。
+    返回 `(epoch, 参照 commit 短 sha)`; 找不到落点时返回 `(commit 自己的时间, None)`。**参照 sha 要
+    出现在输出里**: 只写「落 main 已 N 天」时, 一旦挑错了 merge, 读日志的人无从发现。
     """
-    try:
-        chain = git(root, "rev-list", "--first-parent", "HEAD").split()
-    except SystemExit:
-        return commit_epoch(root, sha), "commit"
-    ordered = list(reversed(chain))  # 旧 -> 新
-
     def contains(candidate: str) -> bool:
-        result = subprocess.run(
-            ["git", "merge-base", "--is-ancestor", sha, candidate],
-            cwd=root,
-            capture_output=True,
+        return (
+            subprocess.run(
+                ["git", "merge-base", "--is-ancestor", sha, candidate],
+                cwd=root,
+                capture_output=True,
+            ).returncode
+            == 0
         )
-        return result.returncode == 0
 
     landed: str | None = None
-    low, high = 0, len(ordered) - 1
+    low, high = 0, len(chain) - 1
     while low <= high:
         mid = (low + high) // 2
-        if contains(ordered[mid]):
-            landed = ordered[mid]
+        if contains(chain[mid]):
+            landed = chain[mid]
             high = mid - 1
         else:
             low = mid + 1
     if landed is None:
-        return commit_epoch(root, sha), "commit"
+        return commit_epoch(root, sha), None
     try:
-        return float(git(root, "log", "-1", "--format=%ct", landed).strip()), "landed"
+        return float(git(root, "log", "-1", "--format=%ct", landed).strip()), landed[:7]
     except (ValueError, SystemExit):
-        return None, "landed"
+        return None, landed[:7]
 
 
 def commit_epoch(root: Path, sha: str) -> float | None:
@@ -203,7 +198,8 @@ def main(argv: list[str]) -> int:
         "--main",
         action="store_true",
         help=(
-            "main 分支模式: 关掉 --first-parent (否则只看得到 merge commit)、排除 merge 本身。"
+            "main 分支模式: 关掉 --first-parent (否则只看得到 merge commit)。merge commit 本身在所有"
+            "模式下都不要求记账 (它的 sha 在创建前不可能进账本)。"
             "两件事两个判据: 完全没有账本条目的 commit 在最新 --main-grace 个位置内宽限, 出宽限即漏账;"
             " 有占位只差 sha 的按时间判 (--max-placeholder-age-days), 参照点 = HEAD **一线父链**上最早的"
             "、以该 sha 为祖先的 commit (即它真正落到 main 的那一刻), 不是 commit date"
@@ -223,7 +219,7 @@ def main(argv: list[str]) -> int:
         "--main-grace",
         type=int,
         default=10,
-        help=("main 上「账本里完全没有条目」的 commit 的**位置**宽限, 默认 10 (只对一线父链上的工作 commit 计)。占位 (有条目只差 sha) 不看位置, 按 --max-placeholder-age-days 的时间判"),
+        help=("main 上「账本里完全没有条目」的 commit 的**位置**宽限, 默认 10 (对范围内已排除 merge 的全部工作 commit 按位置计, 不看父链)。占位 (有条目只差 sha) 不看位置, 按 --max-placeholder-age-days 的时间判"),
     )
     parser.add_argument(
         "--ref-only",
@@ -285,6 +281,23 @@ def main(argv: list[str]) -> int:
     if args.since:
         scope_note = f"{args.since}..HEAD"
 
+    # 一线父链只取一次, 每个 sha 只算一次 landed: 否则每占位两次调用 × 两次 rev-list,
+    # 实测 +140~180ms/占位 (旧 1.13s → 新 1.77s)。
+    fp_chain: list[str] | None = None
+    landed_cache: dict[str, tuple[float | None, str | None]] = {}
+
+    def landed_for(sha: str) -> tuple[float | None, str | None]:
+        nonlocal fp_chain
+        if sha in landed_cache:
+            return landed_cache[sha]
+        if fp_chain is None:
+            try:
+                fp_chain = list(reversed(git(root, "rev-list", "--first-parent", "HEAD").split()))
+            except SystemExit:
+                fp_chain = []
+        landed_cache[sha] = landed_info(root, sha, fp_chain)
+        return landed_cache[sha]
+
     subject_counts: dict[str, int] = {}
     for sha in scope:
         subject_counts[git(root, "log", "-1", "--format=%s", sha).strip()] = (
@@ -318,7 +331,7 @@ def main(argv: list[str]) -> int:
                     "占位只能认领一个"
                 )
             if args.main:
-                epoch, reference = commit_landed_epoch(root, sha)
+                epoch, reference = landed_for(sha)
                 if epoch is None:
                     reasons.append(
                         "占位日期不可解析: 读不出该 commit 的提交时间, 无法判断是否超期 "
@@ -332,19 +345,27 @@ def main(argv: list[str]) -> int:
                             "无法用它判断超期 (fail-closed)"
                         )
                     elif age_days >= args.max_placeholder_age_days:
+                        where = (
+                            f"参照 {reference}" if reference else "未在一线父链上找到落点, 按 commit date"
+                        )
                         reasons.append(
                             f"占位超期 {age_days:.1f} 天 (上限 "
-                            f"{args.max_placeholder_age_days:g} 天): 账本里还写着「待合入后补」, "
+                            f"{args.max_placeholder_age_days:g} 天, {where}): 账本里还写着「待合入后补」, "
                             "sha 早已稳定"
                         )
             if reasons:
                 unaccounted.append((short, subject, changed_files(root, sha), "; ".join(reasons)))
                 continue
             if args.main:
-                epoch, reference = commit_landed_epoch(root, sha)
+                epoch, reference = landed_for(sha)
                 if epoch is not None:
-                    label = "落 main 已" if reference == "landed" else "按 commit date"
-                    subject = f"{subject} ({label} {(time.time() - epoch) / 86400.0:.1f} 天)"
+                    days = (time.time() - epoch) / 86400.0
+                    if reference:
+                        subject = f"{subject} (落 main 已 {days:.1f} 天, 参照 {reference})"
+                    else:
+                        subject = (
+                            f"{subject} (未在一线父链上找到落点, 按 commit date {days:.1f} 天)"
+                        )
             pending.append((short, subject))
             continue
         # 数量宽限只给**完全没有账本条目**的 commit: 刚合入的提交可能还在等记账提交落盘。
