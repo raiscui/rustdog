@@ -2342,21 +2342,24 @@ mod tests {
             .join(STAGING_DIR)
             .join("orphan.bin.0123456789abcdef.partial");
         std::fs::write(&partial, b"keepme").unwrap();
-        // 会话表与孤儿表都是进程级单例, 而 `reap_idle_transfers` 一轮会扫遍两者: 返回的 `reaped`
-        // 是「本轮全局一共回收了几条」, 里面既有本用例的孤儿, 也有并行用例按真实时刻登记的会话
-        // 与孤儿。所以两轮 sweep 的时钟都压在**真实时刻之前**: 别的条目 `now - last_activity`
-        // 恒为 0, 只有本用例自己的锚点落在窗口两侧; 反过来若用未来时刻扫, 别人的会话和孤儿会被
-        // 本用例的假时钟判成过期而一起删掉 (2026-11-26 macos CI 上 `reaped` 收到 2 就是这个形态)。
-        // 断言只盯本用例自己的对象 —— 文件是否还在、自己那条键是否还在; `reaped` 不参与断言。
+        // 会话表与孤儿表都是进程级单例, `reap_idle_transfers` 一轮扫遍两者, 返回的 `reaped` 是
+        // 「本轮**全局**回收了几条」—— 并行用例按真实时刻登记的条目会一起被数进来 (一条外来
+        // 上传就够: 会话 +1, 同轮转出的孤儿再 +1; macOS CI 上收到的 2 就是这个量级)。所以断言
+        // 只盯本用例自己的文件与键, `reaped` 只当读数。
+        // 时钟用小数值假值 (同 `restored_index_lets_the_sweep_reclaim_after_restart`): 按真实
+        // epoch ms 登记的会话与孤儿对这两轮的 `now - last_activity` 恒为 0, 本用例的 sweep 扫
+        // 不到它们; 反过来「真实时钟 + 偏移」或未来时刻会把它们判成过期, 连键带文件一起删掉。
+        // 反方向靠的是 `SWEEP_TEST_LOCK` (测试内 sweep 都持它, 单元测试进程里也不起生产
+        // worker), 不是靠这个时间戳: 真实时钟的 sweep 一样会立刻回收 `1_000`。
+        const ANCHOR_MS: u64 = 1_000;
         const WINDOW_MS: u64 = 10_000;
-        let anchor_ms = now_ms().saturating_sub(20_000);
         orphan_partials()
             .lock()
             .unwrap()
-            .insert(partial.clone(), anchor_ms);
+            .insert(partial.clone(), ANCHOR_MS);
 
-        // 空闲阈值早已过, 但续传窗口还没到 → 不许删
-        let (reaped, _) = reap_idle_transfers(anchor_ms + 1_000, 1_000, WINDOW_MS);
+        // 空闲阈值早已过 (9_999 远大于 1_000), 但续传窗口还差 1ms → 不许删
+        let (reaped, _) = reap_idle_transfers(ANCHOR_MS + WINDOW_MS - 1, 1_000, WINDOW_MS);
         assert!(partial.exists(), "孤儿在窗口内必须留着可续 (reaped={reaped})");
         assert!(
             orphan_partials().lock().unwrap().contains_key(&partial),
@@ -2364,7 +2367,7 @@ mod tests {
         );
 
         // 窗口也过了 → 回收
-        let (reaped, _) = reap_idle_transfers(anchor_ms + WINDOW_MS + 1, 1_000, WINDOW_MS);
+        let (reaped, _) = reap_idle_transfers(ANCHOR_MS + WINDOW_MS + 1, 1_000, WINDOW_MS);
         assert!(!partial.exists(), "窗口过了必须回收, 不留残留 (reaped={reaped})");
         assert!(
             !orphan_partials().lock().unwrap().contains_key(&partial),
