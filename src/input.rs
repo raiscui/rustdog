@@ -350,6 +350,13 @@ pub enum Command {
         host: Vec<String>,
     },
 
+    /// bulk 直连证据 (`rdog.bulk-path.*`) 的验收工具
+    #[clap(alias = "bulk")]
+    BulkPath {
+        #[clap(subcommand)]
+        command: BulkPathCommand,
+    },
+
     /// Structured diff of two AxSnapshot JSON files
     AxDiff {
         /// Path to the "before" AxSnapshot JSON
@@ -390,6 +397,27 @@ pub struct RecordCommandShared {
     pub entry_point: Vec<String>,
     /// target / host / port 位置参数, 跟 `Command::Control` 同源。
     pub host: Vec<String>,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum BulkPathCommand {
+    /// 把两端快照 join 成一份判读 (`rdog.bulk-path.v1` → `rdog.bulk-path-join.v1`)
+    ///
+    /// 按 `transfer_id` 分桶、桶内按 `attempt_id` 分, 左右由每份快照自己的 `endpoint` 决定.
+    /// 缺一端 / 两端 `attempt_id` 不一致 / schema 不符一律给 `unknown` + 原因码, **绝不拿一端的数
+    /// 替另一端填** (specs/rdog-bulk-direct-only-spec.md §4.3).
+    ///
+    /// **退出码只回答"有没有得出结论", 不是"通过没有"**: 0 = 每组都得出过结论 (结论本身看输出里的
+    /// `relay_bytes_zero` 是 `true` / `false` / `null`; `false` 同样退 0), 1 = 有分组没得出结论,
+    /// 2 = 参数或 IO 错误.
+    ///
+    /// stdout 只有那一份 `rdog.bulk-path-join.v1` JSON; 人读摘要 (逐组打印 `relay_bytes_zero` 与
+    /// 是否构成结论) 走 stderr, 不掺进 stdout.
+    Join {
+        /// 快照文件或目录 (目录里取 `*.json`), 可给多个
+        #[clap(value_name = "PATH", required = true, num_args = 1..)]
+        inputs: Vec<PathBuf>,
+    },
 }
 
 #[derive(Subcommand, Debug)]

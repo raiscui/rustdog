@@ -110,6 +110,22 @@ pub(crate) const IROH_BULK_PATH_PIN_UNAVAILABLE: &str = "iroh_bulk_path_pin_unav
 #[cfg(test)]
 pub(crate) const IROH_BULK_PATH_PIN_UNPINNED_ALIAS: &str = IROH_BULK_PATH_PIN_UNAVAILABLE;
 
+/// 单端证据快照的 schema 名 (§4.3)。写与读共用这一个常量。
+pub(crate) const BULK_PATH_SCHEMA: &str = "rdog.bulk-path.v1";
+/// 两端 join 之后的报告 schema 名 (§4.3 的 join 段)。
+pub(crate) const BULK_PATH_JOIN_SCHEMA: &str = "rdog.bulk-path-join.v1";
+
+// join 的原因码 (§4.3 join 段)。它们**不是**控制面稳定码: 只有验收工具与人在读,
+// 不进 §2.2 的码表。命名空间仍是 `bulk_path_*`, 语义是"这两半为什么没有组成结论"。
+pub(crate) const BULK_PATH_SCHEMA_MISMATCH: &str = "bulk_path_schema_mismatch";
+pub(crate) const BULK_PATH_ENDPOINT_MISSING: &str = "bulk_path_endpoint_missing";
+pub(crate) const BULK_PATH_ENDPOINT_DUPLICATED: &str = "bulk_path_endpoint_duplicated";
+pub(crate) const BULK_PATH_ATTEMPT_MISMATCH: &str = "bulk_path_attempt_mismatch";
+/// §4.2: `concurrency_suspected:true` 的那一半**不得单独用于**"relay 字节为 0"的结论。
+pub(crate) const BULK_PATH_CONCURRENCY_SUSPECTED: &str = "bulk_path_concurrency_suspected";
+/// 两端配上了、但没有任何一端给出可用结论时的前缀 (后面接 `<verdict>[+<verdict>]`)。
+pub(crate) const BULK_PATH_INCONCLUSIVE: &str = "bulk_path_inconclusive";
+
 /// 判定表 (§3.1 的穷举实现)。
 ///
 /// 第一道判据必须**先于**路径类别判: 既钉不住、又不逐 chunk 检查的传输上, 采样到 `direct`
@@ -153,7 +169,9 @@ pub(crate) fn decide(
 pub(crate) struct BulkPathSnapshot {
     pub(crate) attempt_id: String,
     pub(crate) transfer_id: String,
-    pub(crate) direction: &'static str,
+    /// `put | get`。**类型是 `String` 而不是 `&'static str`**: join 要从 JSON 读回对端的快照,
+    /// 而"写出去的形状"和"读回来的形状"是同一个结构才不会各自漂移 (见 `from_json`)。
+    pub(crate) direction: String,
     pub(crate) capability: PathCapability,
     pub(crate) path_class: PathClass,
     pub(crate) direct_addr: Option<String>,
@@ -162,7 +180,8 @@ pub(crate) struct BulkPathSnapshot {
     pub(crate) chunks: u64,
     /// `null` = 本端没有检测并发流量的能力 (今天所有端都是), 不是"没有并发"。
     pub(crate) concurrency_suspected: Option<bool>,
-    pub(crate) endpoint: &'static str,
+    /// `client | daemon` —— 这一半是谁测的。join 靠它分左右, 不靠文件顺序。
+    pub(crate) endpoint: String,
     /// 四个计数都是 `Option`: `None` = **本端没有 relay 句柄可读**, `Some(0)` = 真的读到了 0。
     ///
     /// 这一层类型区分是刻意的。用 `u64` 加一个 `relay_sample_available: bool` 也"能表达",
@@ -179,12 +198,17 @@ impl BulkPathSnapshot {
     /// 本端的 relay 字节归属 = `after - before` (括号采样, §4.2)。
     ///
     /// 任一端计数缺失就是 `None` —— "不知道", 不是 0。
+    ///
+    /// **用 `checked_sub` 而不是 `saturating_sub`**: 计数变小说明括号里那条 path 被换掉了
+    /// (relay path 关闭后以同一 `RelayUrl` 重建是 iroh 的正常事件 —— 新 `PathId`、计数从 0 起)。
+    /// `1000 → 100` 相减得到的是一个漂亮的 0, 而那个 0 会被读成"测到了零": 这正是"看起来更安全"
+    /// 的函数把矛盾藏起来的样子。计数倒退 = 这份读数作废, 不是 0。
     pub(crate) fn relay_tx_delta(&self) -> Option<u64> {
-        Some(self.relay_tx_after?.saturating_sub(self.relay_tx_before?))
+        self.relay_tx_after?.checked_sub(self.relay_tx_before?)
     }
 
     pub(crate) fn relay_rx_delta(&self) -> Option<u64> {
-        Some(self.relay_rx_after?.saturating_sub(self.relay_rx_before?))
+        self.relay_rx_after?.checked_sub(self.relay_rx_before?)
     }
 
     /// 本次尝试到底搬没搬字节。
@@ -251,7 +275,7 @@ impl BulkPathSnapshot {
 
     pub(crate) fn to_json(&self) -> Value {
         json!({
-            "schema": "rdog.bulk-path.v1",
+            "schema": BULK_PATH_SCHEMA,
             "attempt_id": self.attempt_id,
             "transfer_id": self.transfer_id,
             "direction": self.direction,
@@ -270,11 +294,459 @@ impl BulkPathSnapshot {
             "relay_rx_before": self.relay_rx_before,
             "relay_rx_after": self.relay_rx_after,
             // null = 未采样。四个计数缺一端就是 null, 验收工具必须把它读成"不知道"。
-            "relay_sample_available": self.relay_tx_delta().is_some() && self.relay_rx_delta().is_some(),
+            "relay_sample_available": self.relay_sample_available(),
             "aborted": self.aborted,
             "verdict": self.verdict(),
         })
     }
+
+    /// 从一份 `rdog.bulk-path.v1` JSON 读回快照 (join 用)。
+    ///
+    /// 严格读: `schema` 必须是本版, 数字字段必须是整数, **四个计数可以缺失为 `null`, 但不能缺键**
+    /// —— "没有这一栏"和"这一栏写着不知道"是两件事, 前者是别人写的另一份格式。
+    /// 读不出就是 `Err(原因码)`, 不许用默认值把它凑成一份看起来正常的快照。
+    pub(crate) fn from_json(value: &Value) -> Result<Self, &'static str> {
+        if value.get("schema").and_then(Value::as_str) != Some(BULK_PATH_SCHEMA) {
+            return Err(BULK_PATH_SCHEMA_MISMATCH);
+        }
+        let text = |key: &str| -> Result<String, &'static str> {
+            value
+                .get(key)
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+                .ok_or(BULK_PATH_SCHEMA_MISMATCH)
+        };
+        let flag = |key: &str| -> Result<bool, &'static str> {
+            value
+                .get(key)
+                .and_then(Value::as_bool)
+                .ok_or(BULK_PATH_SCHEMA_MISMATCH)
+        };
+        let count = |key: &str| -> Result<u64, &'static str> {
+            value
+                .get(key)
+                .and_then(Value::as_u64)
+                .ok_or(BULK_PATH_SCHEMA_MISMATCH)
+        };
+        // 键必须在, 值可以是 null —— 那是"未采样", 不是缺失。
+        let optional_count = |key: &str| -> Result<Option<u64>, &'static str> {
+            match value.get(key) {
+                None => Err(BULK_PATH_SCHEMA_MISMATCH),
+                Some(Value::Null) => Ok(None),
+                Some(number) => number.as_u64().map(Some).ok_or(BULK_PATH_SCHEMA_MISMATCH),
+            }
+        };
+        let path_class = match text("path_class")?.as_str() {            "direct" => PathClass::Direct,
+            "relay" => PathClass::Relay,
+            "unknown" => PathClass::Unknown,
+            "not_applicable" => PathClass::NotApplicable,
+            _ => return Err(BULK_PATH_SCHEMA_MISMATCH),
+        };
+        let endpoint = text("endpoint")?;
+        if !matches!(endpoint.as_str(), "client" | "daemon") {
+            return Err(BULK_PATH_SCHEMA_MISMATCH);
+        }
+        let direction = text("direction")?;
+        if !matches!(direction.as_str(), "put" | "get") {
+            return Err(BULK_PATH_SCHEMA_MISMATCH);
+        }
+        let snapshot = Self {
+            attempt_id: text("attempt_id")?,
+            transfer_id: text("transfer_id")?,
+            direction,
+            capability: PathCapability {
+                path_aware: flag("path_aware")?,
+                bulk_path_pin: flag("bulk_path_pin")?,
+                bulk_path_checked_per_chunk: flag("bulk_path_checked_per_chunk")?,
+            },
+            path_class,
+            direct_addr: match value.get("direct_addr") {
+                None => return Err(BULK_PATH_SCHEMA_MISMATCH),
+                Some(Value::Null) => None,
+                Some(address) => Some(
+                    address
+                        .as_str()
+                        .ok_or(BULK_PATH_SCHEMA_MISMATCH)?
+                        .to_owned(),
+                ),
+            },
+            bulk_bytes: count("bulk_bytes")?,
+            wire_bytes: count("wire_bytes")?,
+            chunks: count("chunks")?,
+            concurrency_suspected: match value.get("concurrency_suspected") {
+                None => return Err(BULK_PATH_SCHEMA_MISMATCH),
+                Some(Value::Null) => None,
+                Some(flag) => Some(flag.as_bool().ok_or(BULK_PATH_SCHEMA_MISMATCH)?),
+            },
+            endpoint,
+            relay_tx_before: optional_count("relay_tx_before")?,
+            relay_tx_after: optional_count("relay_tx_after")?,
+            relay_rx_before: optional_count("relay_rx_before")?,
+            relay_rx_after: optional_count("relay_rx_after")?,
+            aborted: flag("aborted")?,
+        };
+        // `relay_sample_available` 是派生字段, 但被写进了文件 —— 它与四个计数不一致时,
+        // 这份快照是被人改过的 (或由另一版写出来的), 不是"读不出来", 也不是"零"。
+        let declared_available = flag("relay_sample_available")?;
+        if declared_available != snapshot.relay_sample_available() {
+            return Err(BULK_PATH_SCHEMA_MISMATCH);
+        }
+        Ok(snapshot)
+    }
+
+    /// 四个计数是否都采到了 —— JSON 里 `relay_sample_available` 的真相源。
+    pub(crate) fn relay_sample_available(&self) -> bool {
+        self.relay_tx_delta().is_some() && self.relay_rx_delta().is_some()
+    }
+}
+
+/// join 报告里的一端: **只讲这一端自己测到的**, 不带对端的任何数字。
+///
+/// `verdict` 与 `relay_bytes_zero_own_half` 都直接取对这一半调用的结果 —— 报告不重新判一遍,
+/// 否则 join 与单端判定会出现两套口径。
+#[derive(Debug, Clone)]
+pub(crate) struct HalfReport {
+    pub(crate) endpoint: String,
+    pub(crate) verdict: &'static str,
+    pub(crate) relay_bytes_zero_own_half: bool,
+    pub(crate) relay_sample_available: bool,
+    pub(crate) path_class: &'static str,
+    pub(crate) aborted: bool,
+    pub(crate) concurrency_suspected: Option<bool>,
+}
+
+impl HalfReport {
+    fn of(snapshot: &BulkPathSnapshot) -> Self {
+        Self {
+            endpoint: snapshot.endpoint.clone(),
+            verdict: snapshot.verdict(),
+            relay_bytes_zero_own_half: snapshot.relay_bytes_zero_own_half(),
+            relay_sample_available: snapshot.relay_sample_available(),
+            path_class: snapshot.path_class.as_str(),
+            aborted: snapshot.aborted,
+            concurrency_suspected: snapshot.concurrency_suspected,
+        }
+    }
+
+    fn to_json(&self) -> Value {
+        json!({
+            "endpoint": self.endpoint,
+            "verdict": self.verdict,
+            "relay_bytes_zero_own_half": self.relay_bytes_zero_own_half,
+            "relay_sample_available": self.relay_sample_available,
+            "path_class": self.path_class,
+            "aborted": self.aborted,
+            "concurrency_suspected": self.concurrency_suspected,
+        })
+    }
+}
+
+/// 同一个 `(transfer_id, attempt_id)` 上两端快照的合订本 (`rdog.bulk-path-join.v1`)。
+///
+/// `relay_bytes_zero` 是**唯一允许的跨端结论**, 而且是**三态**, 不是布尔:
+///
+/// | 值 | 什么时候 | 读法 |
+/// | --- | --- | --- |
+/// | `true` | 两端 `relay_bytes_zero_own_half()` 都为真 | 两端各证了自己那一半 |
+/// | `false` | **至少一端** `verdict() == "relay_bytes_nonzero"` | 真的测到了 relay 上有字节 |
+/// | `null` | 其余全部 (任一端 `no_bulk_bytes` / `relay_sample_unavailable` / `not_applicable` / `aborted`) | **没证出来**, 不是证否 |
+///
+/// 把第三格压成 `false` 是我们把"未采样 ≠ 0"做对之后**反向**漏掉的同一类谎: 读到 `false` 的人会以为
+/// "测到了 relay 流量", 而真相是"这次没有结论"。没组成结论 (缺一端 / schema 不符) 同样是 `null`,
+/// 但那种情况另有 `status:"unknown"` 区分 —— 两种 `null` 不是一件事。
+#[derive(Debug, Clone)]
+pub(crate) struct JoinReport {
+    pub(crate) transfer_id: Option<String>,
+    pub(crate) attempt_id: Option<String>,
+    pub(crate) status: &'static str,
+    /// 固定码 (`bulk_path_*`) 或 `joined` 且无结论时拼出来的 `bulk_path_inconclusive_<verdict>[+<verdict>]`。
+    pub(crate) reason: Option<String>,
+    pub(crate) client: Option<HalfReport>,
+    pub(crate) daemon: Option<HalfReport>,
+    pub(crate) relay_bytes_zero: Option<bool>,
+}
+
+impl JoinReport {
+    fn unknown(transfer_id: Option<String>, reason: &'static str) -> Self {
+        Self {
+            transfer_id,
+            attempt_id: None,
+            status: "unknown",
+            reason: Some(reason.to_owned()),
+            client: None,
+            daemon: None,
+            relay_bytes_zero: None,
+        }
+    }
+
+    pub(crate) fn to_json(&self) -> Value {
+        json!({
+            "schema": BULK_PATH_JOIN_SCHEMA,
+            "transfer_id": self.transfer_id,
+            "attempt_id": self.attempt_id,
+            "status": self.status,
+            "reason": self.reason,
+            "client": self.client.as_ref().map(HalfReport::to_json),
+            "daemon": self.daemon.as_ref().map(HalfReport::to_json),
+            "relay_bytes_zero": self.relay_bytes_zero,
+        })
+    }
+}
+
+/// 把一组 `rdog.bulk-path.v1` 快照按 `(transfer_id, attempt_id)` 配对。
+///
+/// 一次尝试的身份是这两者合起来: `transfer_id` 由客户端自选且可复用, 同一个 id 上的第二次尝试
+/// (续传重开) 必须与第一次分开算, 否则两轮的快照会在一组里互相冒充"对端"。
+///
+/// 左右由每一半自己的 `endpoint` 决定, 不看文件顺序、不看文件名 —— 按顺序配会在"某人少给一个
+/// 文件"时把两份客户端快照当成两端, 而那种错配恰好能凑出一个看起来完整的结论。
+///
+/// 任一端缺失、`attempt_id` 不一致、schema 不符、两端自称同一 `endpoint`, 都写 `unknown` + 原因码;
+/// **绝不拿一端的数替另一端填** —— 只有 `status == "joined"` 的报告里才会出现跨端结论。
+pub(crate) fn join_inputs(values: &[Value]) -> Vec<JoinReport> {
+    let mut reports: Vec<JoinReport> = Vec::new();
+    // 分组键是 **(transfer_id, attempt_id)**, 不是 transfer_id 单独一个: 同一个 id 上的两次尝试
+    // (续传重开、同 id 幂等重试) 是两次尝试, 不是"重复端"。只按 id 分组会把它们塞进一组, 报
+    // `bulk_path_endpoint_duplicated` 并整组作废 —— 连那次完整尝试也读不出来, 而原因码还指错了方向。
+    // 外层按 `transfer_id` 分桶, 桶内再按 `attempt_id` 分: 光按 `(transfer_id, attempt_id)` 分组
+    // 会让"两端交了不同的 attempt_id"退化成两条 `endpoint_missing`, 而真因是"这两半对不上号";
+    // 分桶以后这条仍能被认出来 (`attempt_mismatch`), 同时同 id 的两次完整尝试各成一条报告。
+    let mut buckets: Vec<(String, Vec<(String, Vec<BulkPathSnapshot>)>)> = Vec::new();
+    for value in values {
+        match BulkPathSnapshot::from_json(value) {
+            Ok(snapshot) => {
+                let bucket = match buckets.iter_mut().find(|(id, _)| *id == snapshot.transfer_id) {
+                    Some((_, bucket)) => bucket,
+                    None => {
+                        buckets.push((snapshot.transfer_id.clone(), Vec::new()));
+                        &mut buckets.last_mut().expect("just pushed").1
+                    }
+                };
+                match bucket.iter_mut().find(|(attempt, _)| *attempt == snapshot.attempt_id) {
+                    Some((_, halves)) => halves.push(snapshot),
+                    None => bucket.push((snapshot.attempt_id.clone(), vec![snapshot])),
+                }
+            }
+            Err(reason) => {
+                // 读不出 schema 就不知道它属于哪一次尝试: 单独立一条 unknown, 用它自己声明的
+                // `transfer_id` (若有) 标身份, 但**不并进**那个 id 的正常分组 —— 一份坏文件
+                // 不能改变另两份的配对结果。
+                reports.push(JoinReport::unknown(
+                    value
+                        .get("transfer_id")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned),
+                    reason,
+                ));
+            }
+        }
+    }
+
+    for (transfer_id, attempts) in buckets {
+        // 一次尝试被交成了两个 `attempt_id` 各一半: 这不是"缺一端", 是"两端对不上号"。
+        if let Some((client, daemon)) = split_attempt(&attempts) {
+            let mut report =
+                JoinReport::unknown(Some(transfer_id), BULK_PATH_ATTEMPT_MISMATCH);
+            report.client = Some(HalfReport::of(&client));
+            report.daemon = Some(HalfReport::of(&daemon));
+            reports.push(report);
+            continue;
+        }
+        for (_, halves) in attempts {
+            reports.push(join_group(transfer_id.clone(), halves));
+        }
+    }
+    reports
+}
+
+/// 同一个 `transfer_id` 下**恰好两组各只有一端、且两端互补** = 一次尝试被交成了两个 `attempt_id`。
+///
+/// 只认这一种形状: 组数更多 (两次完整尝试 + 一次半截) 时按组各报各的, 不去猜哪两半本该是一对。
+fn split_attempt(
+    attempts: &[(String, Vec<BulkPathSnapshot>)],
+) -> Option<(BulkPathSnapshot, BulkPathSnapshot)> {
+    if attempts.len() != 2 {
+        return None;
+    }
+    let mut client = None;
+    let mut daemon = None;
+    for (_, halves) in attempts {
+        let [half] = halves.as_slice() else {
+            return None;
+        };
+        let slot = if half.endpoint == "client" {
+            &mut client
+        } else {
+            &mut daemon
+        };
+        if slot.replace(half.clone()).is_some() {
+            return None;
+        }
+    }
+    Some((client?, daemon?))
+}
+
+fn join_group(transfer_id: String, halves: Vec<BulkPathSnapshot>) -> JoinReport {
+    let mut client: Option<BulkPathSnapshot> = None;
+    let mut daemon: Option<BulkPathSnapshot> = None;
+    for half in halves {
+        let slot = if half.endpoint == "client" {
+            &mut client
+        } else {
+            &mut daemon
+        };
+        if slot.is_some() {
+            // 照实列出两半 (与 missing / attempt_mismatch 一致): 它们确实存在, 只是配不成对。
+            // 丢成 `null` 会让"为什么没配上"在证据里没有着落。
+            let existing = slot.as_ref().expect("just checked");
+            let mut report =
+                JoinReport::unknown(Some(transfer_id), BULK_PATH_ENDPOINT_DUPLICATED);
+            match existing.endpoint.as_str() {
+                "client" => {
+                    report.client = Some(HalfReport::of(existing));
+                    report.daemon = Some(HalfReport::of(&half));
+                }
+                _ => {
+                    report.daemon = Some(HalfReport::of(existing));
+                    report.client = Some(HalfReport::of(&half));
+                }
+            }
+            return report;
+        }
+        *slot = Some(half);
+    }
+    let (client, daemon) = match (client, daemon) {
+        (Some(client), Some(daemon)) => (client, daemon),
+        (client, daemon) => {
+            let mut report = JoinReport::unknown(Some(transfer_id), BULK_PATH_ENDPOINT_MISSING);
+            report.client = client.as_ref().map(HalfReport::of);
+            report.daemon = daemon.as_ref().map(HalfReport::of);
+            return report;
+        }
+    };
+    if client.attempt_id != daemon.attempt_id {
+        let mut report = JoinReport::unknown(Some(transfer_id), BULK_PATH_ATTEMPT_MISMATCH);
+        report.client = Some(HalfReport::of(&client));
+        report.daemon = Some(HalfReport::of(&daemon));
+        return report;
+    }
+
+    let suspect = client.concurrency_suspected == Some(true)
+        || daemon.concurrency_suspected == Some(true);
+    let (relay_bytes_zero, reason) = if suspect {
+        // §4.2: 有并发嫌疑的那条证据不得单独用于结论。
+        (None, Some(BULK_PATH_CONCURRENCY_SUSPECTED.to_owned()))
+    } else if client.relay_bytes_zero_own_half() && daemon.relay_bytes_zero_own_half() {
+        // §4.3 的判定式, 逐字: 两端各自的 `relay_bytes_zero_own_half()` 都为真。
+        (Some(true), None)
+    } else if client.verdict() == "relay_bytes_nonzero" || daemon.verdict() == "relay_bytes_nonzero" {
+        // 只有"真的量到非零"才是 `false`。其余一律没结论 —— 见 `JoinReport` 的三态表。
+        (Some(false), None)
+    } else {
+        (None, Some(inconclusive_reason(&client, &daemon)))
+    };
+    JoinReport {
+        transfer_id: Some(transfer_id),
+        attempt_id: Some(client.attempt_id.clone()),
+        status: "joined",
+        reason,
+        client: Some(HalfReport::of(&client)),
+        daemon: Some(HalfReport::of(&daemon)),
+        relay_bytes_zero,
+    }
+}
+
+/// "配上了但没有结论"的原因码: `bulk_path_inconclusive_<verdict>`, 两端都给时按本端 → 对端用
+/// `+` 串起来 (两端的 verdict 不同才需要)。它是**新的命名空间**, 不复用 `unknown` 那套码 ——
+/// "没配上"和"配上了没结论"是两件事, 混用会让排障的人先去找缺失的文件。
+fn inconclusive_reason(client: &BulkPathSnapshot, daemon: &BulkPathSnapshot) -> String {
+    let mut verdicts: Vec<&'static str> = Vec::new();
+    for verdict in [client.verdict(), daemon.verdict()] {
+        // 自己那一半已经证到零的, 不构成"这条 join 没结论"的理由。
+        if verdict == "relay_bytes_zero" || verdicts.contains(&verdict) {
+            continue;
+        }
+        verdicts.push(verdict);
+    }
+    format!("{BULK_PATH_INCONCLUSIVE}_{}", verdicts.join("+"))
+}
+
+/// 读一组快照文件/目录, 按 `transfer_id` join, 打印报告并返回退出码。
+///
+/// 退出码: 0 = 每个分组都组成了结论 (joined 且 `relay_bytes_zero` 非 `null`); 1 = 至少一组没有结论
+/// (缺一端 / schema 不符 / attempt 不一致 / 并发可疑); 2 由调用方在参数或 IO 错误时用。
+pub(crate) fn run_join(inputs: &[std::path::PathBuf]) -> Result<i32, String> {
+    let files = collect_snapshot_files(inputs)?;
+    if files.is_empty() {
+        return Err("没有找到任何 .json 快照".to_owned());
+    }
+    let mut values = Vec::with_capacity(files.len());
+    for file in &files {
+        let text = std::fs::read_to_string(file)
+            .map_err(|err| format!("读 {} 失败: {err}", file.display()))?;
+        let value = serde_json::from_str::<Value>(&text)
+            .map_err(|err| format!("{} 不是 JSON: {err}", file.display()))?;
+        values.push(value);
+    }
+    let reports = join_inputs(&values);
+    let conclusive = reports
+        .iter()
+        .all(|report| report.status == "joined" && report.relay_bytes_zero.is_some());
+    let rendered = json!({
+        "schema": BULK_PATH_JOIN_SCHEMA,
+        "reports": reports.iter().map(JoinReport::to_json).collect::<Vec<_>>(),
+    });
+    // stdout 只有那一份 JSON (机器读的那份不许掺行); 摘要走 stderr。
+    println!("{rendered}");
+    for report in &reports {
+        eprintln!("{}", summary_line(report));
+    }
+    Ok(if conclusive { 0 } else { 1 })
+}
+
+/// 人读摘要的一行: 把「有没有得出结论」与「结论是什么」分开写清。
+///
+/// 退出码只回答前一半 —— `relay_bytes_zero: false` 同样是一次"得到了结论", 也照样退 0。所以
+/// 摘要必须**逐组**把三态值写出来: 少了这一行, `exit 0` 会被读成"通过"。
+fn summary_line(report: &JoinReport) -> String {
+    let transfer = report.transfer_id.as_deref().unwrap_or("<unknown-transfer>");
+    let attempt = report.attempt_id.as_deref().unwrap_or("-");
+    let reason = report.reason.as_deref().unwrap_or("-");
+    let (zero, conclusion) = match report.relay_bytes_zero {
+        Some(true) => ("true", "得出了结论: 两端各自测到 relay 字节增量为零"),
+        Some(false) => ("false", "得出了结论: 至少一端测到 relay 字节增量为非零"),
+        None => ("null", "未得出结论"),
+    };
+    format!(
+        "{transfer} attempt={attempt} status={} relay_bytes_zero: {zero} — {conclusion} ({reason})",
+        report.status
+    )
+}
+
+/// 输入可以是文件, 也可以是目录; 目录只取 `*.json` (按名字排序, 让输出可重现)。
+fn collect_snapshot_files(
+    inputs: &[std::path::PathBuf],
+) -> Result<Vec<std::path::PathBuf>, String> {
+    let mut files = Vec::new();
+    for input in inputs {
+        let metadata = std::fs::metadata(input)
+            .map_err(|err| format!("{} 不存在或不可读: {err}", input.display()))?;
+        if metadata.is_dir() {
+            let mut entries = std::fs::read_dir(input)
+                .map_err(|err| format!("读目录 {} 失败: {err}", input.display()))?
+                .filter_map(Result::ok)
+                .map(|entry| entry.path())
+                .filter(|path| path.extension().is_some_and(|ext| ext == "json"))
+                .collect::<Vec<_>>();
+            entries.sort();
+            files.extend(entries);
+        } else {
+            files.push(input.clone());
+        }
+    }
+    files.sort();
+    files.dedup();
+    Ok(files)
 }
 
 #[cfg(test)]
@@ -285,7 +757,7 @@ mod tests {
         BulkPathSnapshot {
             attempt_id: "attempt".into(),
             transfer_id: "transfer".into(),
-            direction: "put",
+            direction: "put".into(),
             capability,
             path_class,
             direct_addr: None,
@@ -293,7 +765,7 @@ mod tests {
             wire_bytes: 16,
             chunks: 1,
             concurrency_suspected: None,
-            endpoint: "client",
+            endpoint: "client".into(),
             relay_tx_before: Some(0),
             relay_tx_after: Some(0),
             relay_rx_before: Some(0),
@@ -426,6 +898,25 @@ mod tests {
     }
 
     #[test]
+    fn a_counter_that_went_backwards_voids_the_reading() {
+        // relay path 关闭后又以同一 RelayUrl 重建: 新 path 计数从 0 起, 于是 after < before。
+        // `saturating_sub` 会把 1000 → 100 算成一个漂亮的 0, verdict 就成了"测得零" —— 那是
+        // 把矛盾藏起来。倒退 = 这份读数作废。
+        let mut value = snapshot(PathCapability::PATH_AWARE_CHECKED_PER_CHUNK, PathClass::Direct);
+        value.relay_tx_before = Some(1000);
+        value.relay_tx_after = Some(100);
+        assert_eq!(value.relay_tx_delta(), None);
+        assert_eq!(value.verdict(), "relay_sample_unavailable");
+        assert!(!value.relay_bytes_zero_own_half());
+        assert_eq!(value.to_json()["relay_sample_available"], false);
+
+        // 单调增长照旧给正确增量 —— 别把"防止倒退"做成"永远不可用"。
+        value.relay_tx_after = Some(1060);
+        assert_eq!(value.relay_tx_delta(), Some(60));
+        assert_eq!(value.verdict(), "relay_bytes_nonzero");
+    }
+
+    #[test]
     fn a_transfer_that_moved_nothing_is_not_evidence() {
         // 一次"续传时半成品已经完整"的尝试一个字节都不用发 —— 它的 relay 计数当然是零, 而这
         // 与"bulk 没走 relay"在数值上完全一样。这条不依赖任何失败路径, 是最纯的空真。
@@ -456,6 +947,311 @@ mod tests {
         let mut healthy_rx = snapshot(PathCapability::PATH_AWARE_CHECKED_PER_CHUNK, PathClass::Relay);
         healthy_rx.relay_rx_after = Some(7);
         assert!(BulkPathSnapshot::positive_control_holds(&healthy_rx));
+    }
+
+    /// 一份可以改成"另外一端"的快照: 客户端与 daemon 的差别只有 `endpoint` 与计数。
+    fn half(endpoint: &str, relay_tx_after: Option<u64>) -> Value {
+        let mut value = snapshot(PathCapability::PATH_AWARE_CHECKED_PER_CHUNK, PathClass::Direct);
+        value.endpoint = endpoint.to_owned();
+        value.relay_tx_after = relay_tx_after;
+        value.to_json()
+    }
+
+    #[test]
+    fn snapshot_json_round_trips_through_from_json() {
+        let mut original = snapshot(PathCapability::PATH_AWARE_CHECKED_PER_CHUNK, PathClass::Direct);
+        original.direct_addr = Some("10.0.0.2:4242".into());
+        original.endpoint = "daemon".to_owned();
+        let read_back = BulkPathSnapshot::from_json(&original.to_json())
+            .expect("自己写出去的快照必须能读回来");
+        assert_eq!(read_back.verdict(), original.verdict());
+        assert_eq!(read_back.endpoint, "daemon");
+        assert_eq!(read_back.direct_addr.as_deref(), Some("10.0.0.2:4242"));
+        assert_eq!(read_back.transfer_id, original.transfer_id);
+    }
+
+    #[test]
+    fn a_snapshot_of_another_shape_is_not_read_as_evidence() {
+        // schema 不对 -> 不是本版; 计数缺键 -> 不是"未采样"而是"另一份格式"。
+        let mut wrong_schema = half("client", Some(0));
+        wrong_schema["schema"] = json!("rdog.bulk-path.v0");
+        assert_eq!(
+            BulkPathSnapshot::from_json(&wrong_schema).err(),
+            Some(BULK_PATH_SCHEMA_MISMATCH)
+        );
+
+        let mut missing_counter = half("client", Some(0));
+        missing_counter
+            .as_object_mut()
+            .expect("object")
+            .remove("relay_rx_after");
+        assert_eq!(
+            BulkPathSnapshot::from_json(&missing_counter).err(),
+            Some(BULK_PATH_SCHEMA_MISMATCH)
+        );
+
+        // `relay_sample_available` 与四个计数不一致: 被人改过, 不是零。
+        let mut edited = half("client", None);
+        edited["relay_sample_available"] = json!(true);
+        assert_eq!(
+            BulkPathSnapshot::from_json(&edited).err(),
+            Some(BULK_PATH_SCHEMA_MISMATCH)
+        );
+
+        // 端点只认 client / daemon: 拿它当左右键, 就不能有第三种拼写。
+        let mut foreign = half("middlebox", Some(0));
+        foreign["endpoint"] = json!("middlebox");
+        assert_eq!(
+            BulkPathSnapshot::from_json(&foreign).err(),
+            Some(BULK_PATH_SCHEMA_MISMATCH)
+        );
+    }
+
+    #[test]
+    fn join_needs_both_halves_and_never_fills_one_from_the_other() {
+        // 只有客户端一半: 结论是 unknown, 且 daemon 那一栏是 null —— 不是拿客户端的数填过去。
+        let reports = join_inputs(&[half("client", Some(0))]);
+        assert_eq!(reports.len(), 1);
+        let report = &reports[0];
+        assert_eq!(report.status, "unknown");
+        assert_eq!(report.reason.as_deref(), Some(BULK_PATH_ENDPOINT_MISSING));
+        assert_eq!(report.relay_bytes_zero, None);
+        assert!(report.client.is_some(), "给了的那一半要照实列出来");
+        assert!(report.daemon.is_none(), "没给的那一半必须是 null");
+        let rendered = report.to_json();
+        assert_eq!(rendered["schema"], BULK_PATH_JOIN_SCHEMA);
+        assert_eq!(rendered["daemon"], Value::Null);
+        assert_eq!(rendered["relay_bytes_zero"], Value::Null);
+    }
+
+    #[test]
+    fn join_requires_the_same_attempt_id_on_both_ends() {
+        let client = half("client", Some(0));
+        let mut daemon = half("daemon", Some(0));
+        daemon["attempt_id"] = json!("another-attempt");
+
+        let reports = join_inputs(&[client, daemon]);
+        assert_eq!(reports[0].status, "unknown");
+        assert_eq!(
+            reports[0].reason.as_deref(),
+            Some(BULK_PATH_ATTEMPT_MISMATCH)
+        );
+        assert_eq!(reports[0].relay_bytes_zero, None);
+        // 两半仍然各自列出: 它们确实存在, 只是不能组成一个结论。
+        assert!(reports[0].client.is_some() && reports[0].daemon.is_some());
+    }
+
+    #[test]
+    fn the_summary_line_says_whether_there_is_a_conclusion_and_what_it_is() {
+        // 退出码只回答"有没有结论", 所以摘要必须把三态值与"是否构成结论"分开写。
+        let zero = join_inputs(&[half("client", Some(0)), half("daemon", Some(0))]);
+        let line = summary_line(&zero[0]);
+        assert!(line.contains("relay_bytes_zero: true"), "line={line}");
+        assert!(line.contains("得出了结论"), "line={line}");
+
+        // 结论是非零 —— 同样退 0, 摘要必须让人看见"结论是 false", 不是"通过"。
+        let nonzero = join_inputs(&[half("client", Some(0)), half("daemon", Some(9))]);
+        let line = summary_line(&nonzero[0]);
+        assert!(line.contains("relay_bytes_zero: false"), "line={line}");
+        assert!(line.contains("得出了结论"), "line={line}");
+        assert!(!line.contains("未得出结论"), "line={line}");
+
+        // 没结论: 三态是 null, 措辞也必须说"未得出结论"。
+        let empty = join_inputs(&[half("client", None), half("daemon", None)]);
+        let line = summary_line(&empty[0]);
+        assert!(line.contains("relay_bytes_zero: null"), "line={line}");
+        assert!(line.contains("未得出结论"), "line={line}");
+        assert!(line.contains("relay_sample_unavailable"), "line={line}");
+    }
+
+    #[test]
+    fn join_concludes_zero_only_when_both_halves_carry_their_own_zero() {
+        let reports = join_inputs(&[half("client", Some(0)), half("daemon", Some(0))]);
+        let report = &reports[0];
+        assert_eq!(report.status, "joined");
+        assert_eq!(report.reason, None);
+        assert_eq!(report.relay_bytes_zero, Some(true));
+        assert!(report
+            .client
+            .as_ref()
+            .is_some_and(|half| half.relay_bytes_zero_own_half));
+        assert!(report
+            .daemon
+            .as_ref()
+            .is_some_and(|half| half.relay_bytes_zero_own_half));
+    }
+
+    #[test]
+    fn one_half_with_unsampled_counters_voids_the_cross_end_conclusion() {
+        // daemon 一半没采到计数: 它自己的 verdict 是 `relay_sample_unavailable`。跨端结论必须是
+        // **`null`** —— "两端都证了零"不成立, 而"一端没采样"不是"测到非零"。
+        let reports = join_inputs(&[half("client", Some(0)), half("daemon", None)]);
+        let report = &reports[0];
+        assert_eq!(report.status, "joined");
+        assert_eq!(report.relay_bytes_zero, None);
+        assert_eq!(
+            report.reason.as_deref(),
+            Some("bulk_path_inconclusive_relay_sample_unavailable")
+        );
+        let daemon = report.daemon.as_ref().expect("daemon half");
+        assert_eq!(daemon.verdict, "relay_sample_unavailable");
+        assert!(!daemon.relay_sample_available);
+    }
+
+    #[test]
+    fn two_empty_halves_are_a_pair_without_a_conclusion() {
+        // 两端都是空传输: 传输本身成功 (由正常回执表达), 但路径结论被扣掉 —— `null`, 不是 `false`。
+        let empty = |endpoint: &str| {
+            let mut value = snapshot(PathCapability::PATH_AWARE_CHECKED_PER_CHUNK, PathClass::Direct);
+            value.endpoint = endpoint.to_owned();
+            value.chunks = 0;
+            value.bulk_bytes = 0;
+            value.wire_bytes = 0;
+            value.to_json()
+        };
+        let reports = join_inputs(&[empty("client"), empty("daemon")]);
+        let report = &reports[0];
+        assert_eq!(report.status, "joined");
+        assert_eq!(report.relay_bytes_zero, None);
+        assert_eq!(
+            report.reason.as_deref(),
+            Some("bulk_path_inconclusive_no_bulk_bytes")
+        );
+        // 两端的 verdict 相同, 原因码里就不重复列两次。
+        assert_eq!(report.reason.as_deref().expect("reason").matches('+').count(), 0);
+    }
+
+    #[test]
+    fn an_aborted_half_makes_the_join_inconclusive_not_negative() {
+        let mut aborted = snapshot(PathCapability::PATH_AWARE_CHECKED_PER_CHUNK, PathClass::Direct);
+        aborted.endpoint = "daemon".to_owned();
+        aborted.aborted = true;
+        let reports = join_inputs(&[half("client", Some(0)), aborted.to_json()]);
+        let report = &reports[0];
+        assert_eq!(report.status, "joined");
+        assert_eq!(report.relay_bytes_zero, None, "中止不是证否");
+        assert_eq!(
+            report.reason.as_deref(),
+            Some("bulk_path_inconclusive_aborted")
+        );
+    }
+
+    #[test]
+    fn two_different_inconclusive_verdicts_are_both_named() {
+        // 客户端那半没搬字节, daemon 那半没采到计数: 两个原因都要出现在码里, 别只报一个。
+        let mut client = snapshot(PathCapability::PATH_AWARE_CHECKED_PER_CHUNK, PathClass::Direct);
+        client.chunks = 0;
+        client.bulk_bytes = 0;
+        client.wire_bytes = 0;
+        let daemon = {
+            let mut value = snapshot(PathCapability::PATH_AWARE_CHECKED_PER_CHUNK, PathClass::Direct);
+            value.endpoint = "daemon".to_owned();
+            value.relay_tx_after = None;
+            value
+        };
+        let reports = join_inputs(&[client.to_json(), daemon.to_json()]);
+        assert_eq!(reports[0].relay_bytes_zero, None);
+        assert_eq!(
+            reports[0].reason.as_deref(),
+            Some("bulk_path_inconclusive_no_bulk_bytes+relay_sample_unavailable")
+        );
+    }
+
+    #[test]
+    fn a_relay_hit_on_either_end_is_not_a_zero() {
+        let reports = join_inputs(&[half("client", Some(0)), half("daemon", Some(9))]);
+        assert_eq!(reports[0].relay_bytes_zero, Some(false));
+        assert_eq!(
+            reports[0].daemon.as_ref().expect("daemon half").verdict,
+            "relay_bytes_nonzero"
+        );
+    }
+
+    #[test]
+    fn join_groups_by_transfer_id_and_keeps_bad_files_out_of_good_groups() {
+        let mut other = half("client", Some(0));
+        other["transfer_id"] = json!("another-transfer");
+        let mut broken = half("daemon", Some(0));
+        broken["schema"] = json!("rdog.bulk-path.v0");
+        broken["transfer_id"] = json!("transfer");
+
+        let reports = join_inputs(&[half("client", Some(0)), half("daemon", Some(0)), other, broken]);
+        // 两条分组各一条, 坏文件单独立一条 —— 它不能把 "transfer" 那组的配对结果改坏。
+        assert_eq!(reports.len(), 3);
+        let joined = reports
+            .iter()
+            .find(|report| report.transfer_id.as_deref() == Some("transfer") && report.status == "joined")
+            .expect("正常的那一组必须组成结论");
+        assert_eq!(joined.relay_bytes_zero, Some(true));
+        let unknown = reports
+            .iter()
+            .find(|report| report.reason.as_deref() == Some(BULK_PATH_SCHEMA_MISMATCH))
+            .expect("坏文件要单独报");
+        assert_eq!(unknown.status, "unknown");
+    }
+
+    #[test]
+    fn two_halves_claiming_the_same_endpoint_are_not_a_pair() {
+        // 同一 (transfer_id, attempt_id) 上两份都是 client: 左右配不上, 不能"按顺序"凑成两端。
+        // 但两半都要照实列出来 —— 它们确实存在, 只是配不成对。
+        let reports = join_inputs(&[half("client", Some(0)), half("client", Some(0))]);
+        assert_eq!(reports[0].status, "unknown");
+        assert_eq!(
+            reports[0].reason.as_deref(),
+            Some(BULK_PATH_ENDPOINT_DUPLICATED)
+        );
+        assert_eq!(reports[0].relay_bytes_zero, None);
+        let rendered = reports[0].to_json();
+        assert!(rendered["client"].is_object(), "重复的那一端要照实列出");
+        assert!(rendered["daemon"].is_object(), "另一端同样要照实列出");
+    }
+
+    #[test]
+    fn two_attempts_on_one_transfer_id_are_two_groups() {
+        // 同一个 transfer_id 上的两次尝试 (续传重开) 是两次尝试, 不是"重复端": 只按 id 分组会把
+        // 它们塞进一组、整组 `unknown`, 连那次完整尝试都读不出来。
+        let first = |endpoint: &str, after: Option<u64>| {
+            let mut value = half(endpoint, after);
+            value["attempt_id"] = json!("attempt-1");
+            value
+        };
+        let second = |endpoint: &str, after: Option<u64>| {
+            let mut value = half(endpoint, after);
+            value["attempt_id"] = json!("attempt-2");
+            value
+        };
+        let reports = join_inputs(&[
+            first("client", Some(0)),
+            first("daemon", Some(0)),
+            second("client", Some(0)),
+            second("daemon", Some(0)),
+        ]);
+        assert_eq!(reports.len(), 2, "两次尝试各一条报告");
+        let mut attempts = reports
+            .iter()
+            .map(|report| {
+                assert_eq!(report.status, "joined", "两次尝试都必须能组成结论");
+                assert_eq!(report.relay_bytes_zero, Some(true));
+                report.attempt_id.clone().expect("attempt id")
+            })
+            .collect::<Vec<_>>();
+        attempts.sort();
+        assert_eq!(attempts, vec!["attempt-1".to_owned(), "attempt-2".to_owned()]);
+    }
+
+    #[test]
+    fn suspect_concurrency_voids_the_conclusion_but_keeps_the_halves() {
+        // §4.2: `concurrency_suspected:true` 的那条证据不得单独用于结论。
+        let client = half("client", Some(0));
+        let mut daemon = half("daemon", Some(0));
+        daemon["concurrency_suspected"] = json!(true);
+        let reports = join_inputs(&[client, daemon]);
+        assert_eq!(reports[0].status, "joined");
+        assert_eq!(
+            reports[0].reason.as_deref(),
+            Some(BULK_PATH_CONCURRENCY_SUSPECTED)
+        );
+        assert_eq!(reports[0].relay_bytes_zero, None);
     }
 
     #[test]

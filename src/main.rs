@@ -854,6 +854,23 @@ fn run(opts: input::Opts) -> Result<(), String> {
                 }
             }
         },
+        Command::BulkPath { command } => match command {
+            input::BulkPathCommand::Join { inputs } => {
+                // 退出码约定跟 ax-diff 同形: 0=全部组成了结论, 1=有分组没有结论, 2=参数/IO 错误。
+                // 不走 main 的通用 Err 出口, 否则 1/2 会被统一成 1。
+                match bulk_path::run_join(&inputs) {
+                    Ok(code) => {
+                        if code != 0 {
+                            std::process::exit(code);
+                        }
+                    }
+                    Err(err) => {
+                        eprintln!("rdog bulk-path join 失败: {err}");
+                        std::process::exit(2);
+                    }
+                }
+            }
+        },
         Command::AxDiff {
             before,
             after,

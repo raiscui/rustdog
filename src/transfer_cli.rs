@@ -207,7 +207,7 @@ impl BulkPathRecorder {
         let snapshot = BulkPathSnapshot {
             attempt_id: self.attempt_id.clone(),
             transfer_id: transfer_id.to_string(),
-            direction,
+            direction: direction.to_owned(),
             capability: self.capability,
             path_class: self.path_class,
             direct_addr: None,
@@ -216,7 +216,7 @@ impl BulkPathRecorder {
             chunks: self.chunks,
             // 客户端没有并发检测能力: `null`, 不是 `false`。
             concurrency_suspected: None,
-            endpoint: "client",
+            endpoint: "client".to_owned(),
             // 客户端驱动没有 relay 句柄可读 —— 四个计数是 `None` (未采样), 不是 0。
             relay_tx_before: None,
             relay_tx_after: None,
@@ -411,6 +411,9 @@ fn run_put_inner(
 
     let open_line = serde_json::json!({
         "transfer_id": transfer_id,
+        // 两端快照要按 `attempt_id` 对齐 (§4.3): 客户端把自己这一半的身份交给 daemon,
+        // 否则 daemon 只能按 `transfer_id` 派生一个, join 会永远是 `attempt_mismatch`。
+        "attempt_id": recorder.attempt_id,
         "path": remote,
         "size": size,
         "sha256": sha256,
@@ -537,6 +540,8 @@ fn run_get_inner(
     recorder.admit()?;
     let open_line = serde_json::json!({
         "transfer_id": transfer_id,
+        // 下载方向同样要交身份: 两端快照按 `attempt_id` 对齐 (§4.3)。
+        "attempt_id": recorder.attempt_id,
         "path": remote,
     });
     let opened = exchange_peer.request(&format!("@get-file:{open_line}"))?;

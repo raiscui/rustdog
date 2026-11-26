@@ -24,7 +24,7 @@ use iroh::{EndpointId, SecretKey};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-use super::{admission, BulkPathGate, BulkStep, PathSampler};
+use super::{admission, BulkPathGate, BulkStep, PathSampler, RelayReading};
 use crate::{
     bulk_path::{
         BulkDecision, PathClass, IROH_DIRECT_PATH_LOST, IROH_DIRECT_PATH_UNAVAILABLE,
@@ -116,7 +116,12 @@ fn pair() -> (TcpStream, TcpStream) {
 }
 
 /// 生产形态: daemon profile 给了 `policy_file`, 走 `serve_admitted`。bulk 只在这条 lane 上。
-fn start_admitted(readings: Vec<PathClass>) -> Lane {
+///
+/// `relay` 钉住括号两端各取一次的 relay 读数 (空 = 一次都读不到, 门禁之外的证据一律 `null`)。
+fn start_admitted_with_relay(
+    readings: Vec<PathClass>,
+    relay: Vec<Option<RelayReading>>,
+) -> Lane {
     let root = TempRoot::new("admitted");
     let target = SecretKey::generate();
     let client = SecretKey::generate();
@@ -152,7 +157,7 @@ fn start_admitted(readings: Vec<PathClass>) -> Lane {
     let (server, client_stream) = pair();
     let handle = thread::spawn(move || {
         let transport = ControlTransport::from_tcp_stream(server)?;
-        let sampler = PathSampler::Script(Mutex::new(readings));
+        let sampler = PathSampler::script_with_relay(readings, relay);
         let mut gate = BulkPathGate::new(super::ADMITTED_LANE_PATH_CAPABILITY);
         super::serve_admitted(transport, peer, "test", state, &sampler, &mut gate)
     });
@@ -161,6 +166,10 @@ fn start_admitted(readings: Vec<PathClass>) -> Lane {
     lane.send(&handshake);
     assert_eq!(lane.reply()["status"], "admitted");
     lane
+}
+
+fn start_admitted(readings: Vec<PathClass>) -> Lane {
+    start_admitted_with_relay(readings, Vec::new())
 }
 
 fn escape_json(input: &str) -> String {
@@ -470,4 +479,273 @@ fn cancel_and_list_stay_out_of_the_path_gate() {
     assert_eq!(lane.reply()["state"], "listed");
     lane.send(&format!(r#"@file-cancel:{{"transfer_id":"{id}"}}"#));
     assert_eq!(lane.reply()["state"], "cancelled");
+}
+
+// ---------------------------------------------------------------------------
+// 步骤 3: daemon 侧 relay 字节括号采样, 以及半快照落在哪条响应里 (§4.2/§4.3)
+// ---------------------------------------------------------------------------
+
+/// `@file-end` 的收据是上传方向的终态: daemon 半快照必须挂在这里, 字段形状与
+/// `BulkPathSnapshot::to_json()` 同 schema, `endpoint:"daemon"`。
+#[test]
+fn upload_delivers_the_daemon_half_on_the_file_end_receipt() {
+    let dir = TempRoot::new("evidence-put");
+    let target = dir.0.join("landed.bin");
+    let payload = b"bracket me";
+    let sha = sha256_hex(payload);
+    let id = transfer_id("ev-put");
+    // 门槛: open、chunk、end 三次采样都是 direct; 括号两端各一次 relay 读数。
+    let mut lane = start_admitted_with_relay(
+        vec![PathClass::Direct],
+        vec![Some(RelayReading::at(100, 50)), Some(RelayReading::at(100, 50))],
+    );
+
+    put_file(&mut lane, &id, &target, payload.len(), &sha);
+    put_chunk(&mut lane, &id, 0, payload);
+    lane.send(&format!(r#"@file-end:{{"transfer_id":"{id}","sha256":"{sha}"}}"#));
+    let end = lane.reply();
+    assert_eq!(end["state"], "committed");
+
+    let evidence = &end["evidence"];
+    assert_eq!(evidence["schema"], "rdog.bulk-path.v1");
+    assert_eq!(evidence["endpoint"], "daemon");
+    assert_eq!(evidence["transfer_id"], id.as_str());
+    // 括号: before 与 after 都是 (100, 50), 所以两个 delta 都是 0 —— 那是**测到**的零。
+    assert_eq!(evidence["relay_tx_before"], 100);
+    assert_eq!(evidence["relay_tx_after"], 100);
+    assert_eq!(evidence["relay_sample_available"], true);
+    assert_eq!(evidence["verdict"], "relay_bytes_zero");
+    // 载荷字节与压上控制行的 base64 字节是两件事, 两个都要有。
+    assert_eq!(evidence["bulk_bytes"], payload.len() as u64);
+    assert!(
+        evidence["wire_bytes"].as_u64().expect("wire_bytes") > payload.len() as u64,
+        "base64 编码后的字节数必须大于载荷字节数"
+    );
+    assert_eq!(evidence["chunks"], 1);
+    assert_eq!(fs::read(&target).expect("read committed file"), payload);
+}
+
+#[test]
+fn bracket_sampling_reports_the_delta_of_relay_bytes() {
+    // 括号两端不同: delta 必须反映这段区间里 relay path 上真的走过的字节。
+    let dir = TempRoot::new("evidence-delta");
+    let target = dir.0.join("landed.bin");
+    let payload = b"delta";
+    let sha = sha256_hex(payload);
+    let id = transfer_id("ev-delta");
+    let mut lane = start_admitted_with_relay(
+        vec![PathClass::Direct],
+        vec![Some(RelayReading::at(100, 50)), Some(RelayReading::at(160, 90))],
+    );
+
+    put_file(&mut lane, &id, &target, payload.len(), &sha);
+    put_chunk(&mut lane, &id, 0, payload);
+    lane.send(&format!(r#"@file-end:{{"transfer_id":"{id}","sha256":"{sha}"}}"#));
+    let evidence = lane.reply()["evidence"].clone();
+
+    assert_eq!(evidence["relay_tx_before"], 100);
+    assert_eq!(evidence["relay_tx_after"], 160);
+    assert_eq!(evidence["relay_rx_after"], 90);
+    assert_eq!(evidence["relay_sample_available"], true);
+    // 60 / 40 的增量就是"本次尝试归属的 relay 字节": 它不为零, 判定就不能是 relay_bytes_zero。
+    assert_eq!(evidence["verdict"], "relay_bytes_nonzero");
+    assert_eq!(evidence["path_class"], "direct");
+}
+
+#[test]
+fn unsampled_relay_counters_land_as_null_not_zero() {
+    // #158 的语义在 lane 上也要成立: 读不到 = 四个 null + relay_sample_available:false,
+    // 且 verdict 是 relay_sample_unavailable —— 不是 0。
+    let dir = TempRoot::new("evidence-unsampled");
+    let target = dir.0.join("landed.bin");
+    let payload = b"nobody watched";
+    let sha = sha256_hex(payload);
+    let id = transfer_id("ev-none");
+    let mut lane = start_admitted_with_relay(vec![PathClass::Direct], vec![None]);
+
+    put_file(&mut lane, &id, &target, payload.len(), &sha);
+    put_chunk(&mut lane, &id, 0, payload);
+    lane.send(&format!(r#"@file-end:{{"transfer_id":"{id}","sha256":"{sha}"}}"#));
+    let receipt = lane.reply();
+    assert_eq!(receipt["state"], "committed");
+    let evidence = &receipt["evidence"];
+
+    for key in [
+        "relay_tx_before",
+        "relay_tx_after",
+        "relay_rx_before",
+        "relay_rx_after",
+    ] {
+        assert_eq!(evidence[key], Value::Null, "{key} 未采样必须是 null");
+    }
+    assert_eq!(evidence["relay_sample_available"], false);
+    assert_eq!(evidence["verdict"], "relay_sample_unavailable");
+    assert_eq!(evidence["bulk_bytes"], payload.len() as u64, "字节数照记");
+}
+
+#[test]
+fn a_relay_path_that_closed_inside_the_bracket_is_not_a_zero() {
+    // `before` 时在场的 relay path 在 `after` 没了: 它的关闭字节已经不在快照里, 相减会得到
+    // 一个假的零。这种情况整份读数作废 (null), 不是拿剩下的 path 凑一个数。
+    let dir = TempRoot::new("evidence-closed");
+    let target = dir.0.join("landed.bin");
+    let payload = b"closed mid-flight";
+    let sha = sha256_hex(payload);
+    let id = transfer_id("ev-closed");
+    let before = RelayReading {
+        tx: 10,
+        rx: 0,
+        relay_paths: vec!["PathId(7)@relay:https://relay.invalid".to_owned()],
+    };
+    let mut lane = start_admitted_with_relay(
+        vec![PathClass::Direct],
+        vec![Some(before), Some(RelayReading::at(10, 0))],
+    );
+
+    put_file(&mut lane, &id, &target, payload.len(), &sha);
+    put_chunk(&mut lane, &id, 0, payload);
+    lane.send(&format!(r#"@file-end:{{"transfer_id":"{id}","sha256":"{sha}"}}"#));
+    let evidence = lane.reply()["evidence"].clone();
+    assert_eq!(evidence["relay_tx_before"], Value::Null);
+    assert_eq!(evidence["relay_sample_available"], false);
+    assert_eq!(evidence["verdict"], "relay_sample_unavailable");
+}
+
+#[test]
+fn download_delivers_the_daemon_half_on_the_eof_frame() {
+    // 下载方向的终态是 `eof:true` 的那一帧 `@file-read` (§4.3 写清的那一条)。
+    let dir = TempRoot::new("evidence-get");
+    let source = dir.0.join("source.bin");
+    let payload: Vec<u8> = (0..=120u8).collect();
+    fs::write(&source, &payload).expect("write source file");
+    let id = transfer_id("ev-get");
+    let mut lane = start_admitted_with_relay(
+        vec![PathClass::Direct],
+        vec![Some(RelayReading::at(0, 0)), Some(RelayReading::at(0, 0))],
+    );
+
+    lane.send(&format!(
+        r#"@get-file:{{"transfer_id":"{id}","path":"{}"}}"#,
+        escape_json(&source.display().to_string())
+    ));
+    assert_eq!(lane.reply()["state"], "reading");
+
+    lane.send(&format!(
+        r#"@file-read:{{"transfer_id":"{id}","offset":0,"length":4096}}"#
+    ));
+    let frame = lane.reply();
+    assert_eq!(frame["eof"], true);
+    let evidence = &frame["evidence"];
+    assert_eq!(evidence["endpoint"], "daemon");
+    assert_eq!(evidence["direction"], "get");
+    assert_eq!(evidence["bulk_bytes"], payload.len() as u64);
+    assert_eq!(evidence["verdict"], "relay_bytes_zero");
+}
+
+#[test]
+fn a_gate_refusal_still_carries_its_own_evidence() {
+    // 被门禁拒掉的尝试也要有证据: 它不是结论 (aborted), 但"那一刻读到的路径"正是要留下的东西。
+    let dir = TempRoot::new("evidence-refused");
+    let target = dir.0.join("never.bin");
+    let id = transfer_id("ev-refused");
+    let mut lane = start_admitted_with_relay(
+        vec![PathClass::Relay],
+        vec![Some(RelayReading::at(7, 0))],
+    );
+
+    lane.send(&format!(
+        r#"@put-file:{{"transfer_id":"{id}","path":"{}","size":4,"resume":false}}"#,
+        escape_json(&target.display().to_string())
+    ));
+    let refused = lane.reply();
+    assert_eq!(refused["error"], IROH_DIRECT_PATH_UNAVAILABLE);
+    let evidence = &refused["evidence"];
+    assert_eq!(evidence["aborted"], true);
+    assert_eq!(evidence["verdict"], "aborted");
+    assert_eq!(evidence["path_class"], "relay");
+    assert_eq!(evidence["chunks"], 0);
+    assert!(!target.exists());
+}
+
+#[test]
+fn an_empty_transfer_is_not_evidence_of_a_clean_path() {
+    // 0 字节的下载: 读数再干净也不构成"bulk 没走 relay"的证据 (§4.3 第 2 条)。
+    let dir = TempRoot::new("evidence-empty");
+    let source = dir.0.join("empty.bin");
+    fs::write(&source, []).expect("write empty source file");
+    let id = transfer_id("ev-empty");
+    let mut lane = start_admitted_with_relay(
+        vec![PathClass::Direct],
+        vec![Some(RelayReading::at(0, 0)), Some(RelayReading::at(0, 0))],
+    );
+
+    lane.send(&format!(
+        r#"@get-file:{{"transfer_id":"{id}","path":"{}"}}"#,
+        escape_json(&source.display().to_string())
+    ));
+    assert_eq!(lane.reply()["state"], "reading");
+    lane.send(&format!(
+        r#"@file-read:{{"transfer_id":"{id}","offset":0,"length":4096}}"#
+    ));
+    let frame = lane.reply();
+    assert_eq!(frame["eof"], true);
+    let evidence = &frame["evidence"];
+    assert_eq!(evidence["chunks"], 0);
+    assert_eq!(evidence["bulk_bytes"], 0);
+    assert_eq!(evidence["verdict"], "no_bulk_bytes");
+}
+
+#[test]
+fn a_relay_path_rebuilt_inside_the_bracket_is_not_a_zero() {
+    // relay path 关闭后以同一 RelayUrl 重建, 新 PathId、计数从 0 起 —— 这是 iroh 的正常事件。
+    // 只按地址比对的在场集合会认为"同一条 path 还在", 于是 1000 → 100 相减得到一个漂亮的零,
+    // verdict 就成了"测得零"。键必须带 PathId, 而且相减必须 checked。
+    let dir = TempRoot::new("evidence-rebuilt");
+    let target = dir.0.join("landed.bin");
+    let payload = b"rebuilt path";
+    let sha = sha256_hex(payload);
+    let id = transfer_id("ev-rebuilt");
+    let before = RelayReading {
+        tx: 1000,
+        rx: 0,
+        relay_paths: vec!["PathId(1)@relay:https://relay.example/".to_owned()],
+    };
+    let after = RelayReading {
+        tx: 100,
+        rx: 0,
+        relay_paths: vec!["PathId(2)@relay:https://relay.example/".to_owned()],
+    };
+    let mut lane = start_admitted_with_relay(vec![PathClass::Direct], vec![Some(before), Some(after)]);
+
+    put_file(&mut lane, &id, &target, payload.len(), &sha);
+    put_chunk(&mut lane, &id, 0, payload);
+    lane.send(&format!(r#"@file-end:{{"transfer_id":"{id}","sha256":"{sha}"}}"#));
+    let evidence = lane.reply()["evidence"].clone();
+    assert_eq!(evidence["relay_tx_before"], Value::Null);
+    assert_eq!(evidence["relay_tx_after"], Value::Null);
+    assert_eq!(evidence["relay_sample_available"], false);
+    assert_eq!(evidence["verdict"], "relay_sample_unavailable");
+}
+
+#[test]
+fn a_counter_that_went_backwards_on_the_same_path_is_not_a_zero() {
+    // 同一条 path 的计数倒退 (不该发生, 但真发生了) 也必须是"没结论", 不是"零"。
+    let dir = TempRoot::new("evidence-backwards");
+    let target = dir.0.join("landed.bin");
+    let payload = b"backwards";
+    let sha = sha256_hex(payload);
+    let id = transfer_id("ev-backwards");
+    let key = "PathId(3)@relay:https://relay.example/".to_owned();
+    let before = RelayReading { tx: 500, rx: 0, relay_paths: vec![key.clone()] };
+    let after = RelayReading { tx: 20, rx: 0, relay_paths: vec![key] };
+    let mut lane = start_admitted_with_relay(vec![PathClass::Direct], vec![Some(before), Some(after)]);
+
+    put_file(&mut lane, &id, &target, payload.len(), &sha);
+    put_chunk(&mut lane, &id, 0, payload);
+    lane.send(&format!(r#"@file-end:{{"transfer_id":"{id}","sha256":"{sha}"}}"#));
+    let evidence = lane.reply()["evidence"].clone();
+    assert_eq!(evidence["relay_tx_before"], 500);
+    assert_eq!(evidence["relay_tx_after"], 20);
+    assert_eq!(evidence["relay_sample_available"], false, "倒退不是零");
+    assert_eq!(evidence["verdict"], "relay_sample_unavailable");
 }
