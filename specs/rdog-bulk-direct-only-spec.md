@@ -932,9 +932,12 @@ sha256、拓扑描述 (哪些段跨网)、脱敏后的地址、判定式计算�
 重跑 build script, 构建身份可能沿用上一次的值. **判据**: 同一 target 依次构建两份只差账本的 checkout,
 若第二次报 `Fresh` 且 ELF 沿用旧 sha, 那次读数不得用于跨版本对比. 处置: 用独立 target 或重编.
 
-显式设 `GIT_SHA` 是**有效**的: `build.rs` 声明了 `rerun-if-env-changed=GIT_SHA`, 改环境变量会触发脚本
-重跑 (2026-11-26 实测: `GIT_SHA=aaaaaaa` → ELF 里 `client aaaaaaa`/`daemon aaaaaaa`; 换成
-`GIT_SHA=bbbbbbb` 后是 `bbbbbbb`; 去掉后回到当前 HEAD 的短 sha).
+**改构建命令上的 `GIT_SHA` 会自动重编**: `build.rs` 声明了 `rerun-if-env-changed=GIT_SHA`, Cargo 会报
+`the env variable GIT_SHA changed` 并重跑 build script (2026-11-26 实测: `GIT_SHA=aaaaaaa cargo build`
+→ ELF 里 `client aaaaaaa`/`daemon aaaaaaa`; 换 `bbbbbbb` 再建 → `bbbbbbb`; 去掉再建 → 当前 HEAD 短 sha).
+**仅改启动环境无效**: `GIT_SHA=aaa ./rdog` 不会重编, 仍读上次烘进二进制的值 (负对照: 用 `aaaaaaa`
+启动一个 `bbbbbbb` 的二进制, 输出仍是 `bbbbbbb`). 取值来自 `src/build_info.rs:10` 的 `env!("GIT_SHA")`
+—— build.rs 每次都以 `cargo:rustc-env` 注入, 取不到 git 时注入 `unknown`, 所以编译期 `env!` 是安全的.
 
 CI 不受这条影响: `.github/workflows/ci.yml` 在**全部六个 job** (三段 `build` + 三段 `test`, 后者也会在
 缓存未命中时编译) 注入了 `GIT_SHA=${{ github.sha }}`, 所以 CI 里同一份代码在任何 job 中身份一致.
