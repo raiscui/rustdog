@@ -45,10 +45,6 @@ jobs:
     timeout-minutes: &job-timeout-minutes 60
 
     steps:
-      - name: Record job start (integration budget baseline)
-        shell: bash
-        run: date +%s > "$RUNNER_TEMP/job-started-at"
-
       - name: Checkout
         uses: actions/checkout@v4
 
@@ -85,10 +81,6 @@ jobs:
     timeout-minutes: *job-timeout-minutes
 
     steps:
-      - name: Record job start (integration budget baseline)
-        shell: bash
-        run: date +%s > "$RUNNER_TEMP/job-started-at"
-
       - name: Checkout
         uses: actions/checkout@v4
 
@@ -126,10 +118,6 @@ jobs:
     timeout-minutes: *job-timeout-minutes
 
     steps:
-      - name: Record job start (integration budget baseline)
-        shell: bash
-        run: date +%s > "$RUNNER_TEMP/job-started-at"
-
       - name: Checkout
         uses: actions/checkout@v4
 
@@ -359,10 +347,6 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - name: Record job start (integration budget baseline)
-        shell: bash
-        run: date +%s > "$RUNNER_TEMP/job-started-at"
-
       - name: Checkout
         uses: actions/checkout@v4
         with:

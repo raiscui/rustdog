@@ -288,7 +288,7 @@ def _kill_tree(proc: subprocess.Popen) -> str:
     survivors = _group_survivors(pgid)
     if survivors:
         return f"killpg {pgid}, 组内仍存活 {len(survivors)} 个: {', '.join(survivors[:5])}"
-    return f"killpg {pgid}, 回读 0 存活"
+    return f"killpg {pgid}, 组内回读 0 存活"
 
 
 def _as_text(chunk) -> str:
@@ -321,13 +321,13 @@ def run(
         try:
             stdout, stderr = proc.communicate(timeout=30)
         except subprocess.TimeoutExpired as still:
-            # 有后代逃出进程组时管道不会 EOF, 这一支会等满 30s。已经收到的输出必须留下。
-            stdout, stderr = _as_text(still.output), ""
+            # 有后代逃出进程组时管道不会 EOF, 这一支会等满 30s。已经收到的输出必须留下 (两段都要)。
+            stdout, stderr = _as_text(still.output), _as_text(still.stderr)
         extra_wait = time.monotonic() - wait_started
-        partial = ANSI.sub(
-            "",
-            _as_text(stdout) + _as_text(expired.output) + _as_text(stderr),
-        )
+        # 超时后再次 communicate() 返回的是**从进程启动起累积的全量**, 已经包含 expired.output;
+        # 再把 expired.output 拼一次会让每一行出现两遍 —— `summarize()` 于是把 `test result:`
+        # 数两遍, 超时 target 的 passed/failed/ignored 变成真实值的 2 倍。
+        partial = ANSI.sub("", _as_text(stdout) + _as_text(stderr))
         # 只在**真的是预算把它截短**时才这么写: 调用方显式给了小 timeout 时那句话是假话。
         note = f" (上限被剩余预算截短为 {timeout}s)" if budget_truncated else ""
         return (
@@ -490,6 +490,18 @@ def main() -> int:
             "| --- | --- |",
             *exempt_rows,
         ]
+    if budget_skipped:
+        # 判红只说"失败了", 读 summary 的人还要知道**是谁没跑**。所以正文里单独列出来。
+        summary += [
+            "",
+            f"**not executed — job 预算不足** ({budget_note}); 这些 target 没有被验过, "
+            "**不计入 ran 集合**, 且本次运行判红:",
+            "",
+            "| target | 原因 |",
+            "| --- | --- |",
+            *[f"| `{target}` | job 预算不足, 未执行 |" for target in budget_skipped],
+        ]
+
     if compile_rows:
         summary += [
             "",
