@@ -425,4 +425,19 @@ endpoint 记进 locator 集合), 于是打不开的串口也会出现在 `Zenoh 
   可用串口时该 endpoint 正常进入通告集合。`cargo test --bin rdog` 1111 passed /
   0 failed / 2 ignored (新增 4 条 listen_plan 单测)。
 - 未验: Windows 侧只落到代码与语义 (试开 `\\.\COMxx`), 本机无 Windows 环境实跑。
-- 提交: e42b15f
+- 提交: 564fc4a
+
+## 2026-11-26 RAI-383 评审修复与知识 Capture
+
+- 评审抓到 windows 探测缺陷: `std::fs::OpenOptions` 默认共享模式与 Windows 通信设备
+  不兼容 (`serialport-4.9.0/src/windows/com.rs:62` 用 `share_mode 0`), 会让可用串口在
+  探测阶段被判死并永久剔除。已改成读写 + `share_mode(0)`, 与 zenoh 底层同一打开语义。
+  本机无 windows 环境, 该修复的编译与 `COM255` 负例由 windows-latest job 给出证据;
+  Linux 侧重跑 `cargo test --bin rdog` 1111 passed / 0 failed / 2 ignored, 两份真机
+  回执 (不可用剔除 + socat pty 可用保留) 在新二进制上复跑一致。
+- 知识 Capture: `docs/solutions/conventions/zenoh-serial-listener-lazy-locator.md`,
+  根 `AGENTS.md` 粗索引与 capture 记录同提交更新。仓库里没有
+  `docs/solutions/AGENTS.md` 细索引, 也没有 `scripts/check-solutions-index.mjs`,
+  故只跑现存的两份守卫 (`check-carrier-assertions.py` / `check-bookkeeping.py`)。
+- 提交: ddf32fb
+- 提交: d226320
