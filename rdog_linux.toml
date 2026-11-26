@@ -92,8 +92,10 @@ daemon_name = "mini-a.lab"
 listen_endpoints = [
     # TCP endpoint for control/client join.
     "tcp/0.0.0.0:7447",
-    # Serial endpoint for ESP32/MCU access.
-    "serial//dev/ttyACM1#baudrate=112500",
+    # Serial endpoint for ESP32/MCU access. Off by default: an endpoint whose
+    # device does not exist is dropped from the advertised locator set at
+    # startup (RAI-383). Uncomment and point it at a real port to enable it.
+    # "serial//dev/ttyACM1#baudrate=112500",
 ]
 request_timeout_ms = 3000
 startup_guard_window_ms = 1000

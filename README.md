@@ -505,6 +505,7 @@ The current canonical profile is:
 - `daemon_name` is the stable human target name
 - after the Zenoh session-open bootstrap, line-control requests and results flow through session channels
 - line-control `@bootstrap` itself is also a session-channel command, not a legacy queryable request
+- `serial/...` listen endpoints are optional: at startup rdog probes the device and, when it cannot be used, drops that endpoint from the advertised locator set with an explicit warn instead of advertising a dead address (RAI-383)
 
 Minimal config:
 
@@ -515,8 +516,7 @@ mode = "router"
 namespace = "lab"
 daemon_name = "mini-a.lab"
 listen_endpoints = [
-  "tcp/0.0.0.0:7447",
-  "serial//dev/ttyACM1#baudrate=112500"
+  "tcp/0.0.0.0:7447"
 ]
 request_timeout_ms = 3000
 startup_guard_window_ms = 1000
