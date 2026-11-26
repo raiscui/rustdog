@@ -1,5 +1,6 @@
 name: CI
 
+
 # Run the full rdog test suite on every push to main and every PR.
 # Matrix 覆盖 macOS (生产目标)、Ubuntu (最常见的 CI runner) 与 Windows
 # (2026-10-06 加入: 跨平台测试修复后 bin 单测可全平台跑)。
@@ -34,10 +35,14 @@ env:
   CARGO_NET_RETRY: 10
 
 jobs:
+  # `&job-timeout-minutes` 是 job 墙钟上限的**单一定义**: 下面每个 job 的 `timeout-minutes`
+  # 与 integration 预算 (`RDOG_JOB_TIMEOUT_MINUTES`) 都引用它。改一处漏一处 = 下一次
+  # 「预算算出剩余 3299s 却被 cancel」。(GitHub Actions 不接受自定义顶层键, 所以 anchor 挂在
+  # 第一个 job 上而不是文件头。)
   build-ubuntu:
     name: build (ubuntu-latest)
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: &job-timeout-minutes 60
 
     steps:
       - name: Checkout
@@ -73,7 +78,7 @@ jobs:
   build-macos:
     name: build (macos-latest)
     runs-on: macos-latest
-    timeout-minutes: 60
+    timeout-minutes: *job-timeout-minutes
 
     steps:
       - name: Checkout
@@ -110,7 +115,7 @@ jobs:
     name: build (windows-latest)
     runs-on: windows-latest
     # Windows 要静态链接 341MB 的 onnxruntime.lib, 编译 + 链接 + 测试都比 unix 慢一截。
-    timeout-minutes: 60
+    timeout-minutes: *job-timeout-minutes
 
     steps:
       - name: Checkout
@@ -159,9 +164,13 @@ jobs:
     name: test (ubuntu-latest)
     needs: [build-ubuntu]
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: *job-timeout-minutes
 
     steps:
+      - name: Record job start (integration budget baseline)
+        shell: bash
+        run: date +%s > "$RUNNER_TEMP/job-started-at"
+
       - name: Checkout
         uses: actions/checkout@v4
 
@@ -192,6 +201,11 @@ jobs:
       # target 在该脚本里标为 compile-only 并写进 job summary, 不做静默 skip。
       - name: Integration targets
         shell: bash
+        env:
+          # 预算按**job 真实剩余时间**算: 起点写在 job 第一个 step, 时间上限由下面传入。
+          # 常数预算 + 前缀 (checkout/cargo-prep/unit tests) 会越过 job timeout 被 cancel。
+          RDOG_JOB_STARTED_AT_FILE: ${{ runner.temp }}/job-started-at
+          RDOG_JOB_TIMEOUT_MINUTES: *job-timeout-minutes
         run: |
           PY=$(command -v python3 || command -v python)
           "$PY" scripts/ci/run-integration-targets.py --os ubuntu-latest
@@ -215,9 +229,13 @@ jobs:
     name: test (macos-latest)
     needs: [build-macos]
     runs-on: macos-latest
-    timeout-minutes: 60
+    timeout-minutes: *job-timeout-minutes
 
     steps:
+      - name: Record job start (integration budget baseline)
+        shell: bash
+        run: date +%s > "$RUNNER_TEMP/job-started-at"
+
       - name: Checkout
         uses: actions/checkout@v4
 
@@ -248,6 +266,11 @@ jobs:
       # target 在该脚本里标为 compile-only 并写进 job summary, 不做静默 skip。
       - name: Integration targets
         shell: bash
+        env:
+          # 预算按**job 真实剩余时间**算: 起点写在 job 第一个 step, 时间上限由下面传入。
+          # 常数预算 + 前缀 (checkout/cargo-prep/unit tests) 会越过 job timeout 被 cancel。
+          RDOG_JOB_STARTED_AT_FILE: ${{ runner.temp }}/job-started-at
+          RDOG_JOB_TIMEOUT_MINUTES: *job-timeout-minutes
         run: |
           PY=$(command -v python3 || command -v python)
           "$PY" scripts/ci/run-integration-targets.py --os macos-latest
@@ -271,9 +294,13 @@ jobs:
     name: test (windows-latest)
     needs: [build-windows]
     runs-on: windows-latest
-    timeout-minutes: 60
+    timeout-minutes: *job-timeout-minutes
 
     steps:
+      - name: Record job start (integration budget baseline)
+        shell: bash
+        run: date +%s > "$RUNNER_TEMP/job-started-at"
+
       - name: Checkout
         uses: actions/checkout@v4
 
@@ -304,6 +331,11 @@ jobs:
       # target 在该脚本里标为 compile-only 并写进 job summary, 不做静默 skip。
       - name: Integration targets
         shell: bash
+        env:
+          # 预算按**job 真实剩余时间**算: 起点写在 job 第一个 step, 时间上限由下面传入。
+          # 常数预算 + 前缀 (checkout/cargo-prep/unit tests) 会越过 job timeout 被 cancel。
+          RDOG_JOB_STARTED_AT_FILE: ${{ runner.temp }}/job-started-at
+          RDOG_JOB_TIMEOUT_MINUTES: *job-timeout-minutes
         run: |
           PY=$(command -v python3 || command -v python)
           "$PY" scripts/ci/run-integration-targets.py --os windows-latest

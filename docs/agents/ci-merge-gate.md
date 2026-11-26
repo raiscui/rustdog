@@ -115,10 +115,47 @@ target 的 `passed` 必须 > 0**, 否则判红 —— 「退出码 0 但零执�
 (summary 表格与失败详情里有中文), 归因看起来却是「target 红」。2026-11-26 为这件事连修两轮。
 现在 `main()` 开头把 `stdout` / `stderr` 一起 `reconfigure(encoding="utf-8", errors="replace")`。
 
-**单个 target 有 1500s 墙钟上限** (`TARGET_TIMEOUT_SECONDS`), 超时判该 target 红并把它
-已有的输出留进失败详情, summary 里同时给出每个 target 的 `elapsed`。原因是反过来的:
-挂住的 target 会一路撑到 GitHub 的 job timeout 被 cancel, 日志只剩一句
-`The job has been cancelled` —— 既指不出是哪个 target, 也分不清「慢」与「死等」。
+**墙钟上限分三层, 缺一层就漏一类对象** (RAI-510):
+
+| 层 | 值 | 缺了会怎样 |
+| --- | --- | --- |
+| 单 target | `TARGET_TIMEOUT_SECONDS` = 1500s | 挂住的 target 撑到 job timeout 被 cancel, 日志只剩 `The job has been cancelled` |
+| 整 job 预算 | `job_timeout(60) − 已用 − JOB_RESERVE_SECONDS(180s)`; 起点由 **job 的第一个 step** 写 `$RUNNER_TEMP/job-started-at` (必须排在 Checkout / cargo-prep 之前, 否则前缀不计入) | 两次 1500s 挂起就把 60 分钟的 job 撑爆, 「点不出是哪个」原样复现 |
+| 编译期 (`--no-run`, compile-only) | 同上两个 | `--no-run` 也会挂 (链接/依赖解析), 没有上限同样无名 |
+
+`timeout-minutes` 与 `RDOG_JOB_TIMEOUT_MINUTES` **共用一个 YAML anchor** (`&job-timeout-minutes`, 定义在 `ci.yml` 第一个 job 的 `timeout-minutes` 上; **不能放文件头的自定义顶层键 —— GitHub Actions 只接受已知顶层键, `x-` 开头的键会让整份 workflow 判非法、run 直接 failure 且没有 job**),
+不许散落字面量 —— 抄三遍、改一处漏两处, 就是下一次「预算算出剩余 3299s 却仍被 cancel」。
+
+**CI 上起点缺失/为空/不可解析 = 判红, 不退回固定预算。** 静默退化会让 job 前缀重新隐形
+(冷缓存 `cargo-prep` 几百秒), 于是「预算充足」这个结论变成猜的。本地跑 (无 `GITHUB_ACTIONS`)
+才允许退回本步固定预算。
+
+预算耗尽**不是跳过而是失败**: 未执行的 target 会被点名并判红 (`job 预算耗尽: …` 未执行),
+因为「没跑」不能报成「通过」。
+
+**超时按进程组整组终止, 不是只 kill 直接子进程。** `cargo test` 会把测试二进制和 daemon 派生
+出去; 只 kill 直接子进程时它们变成孤儿留在 runner 上, 污染同一个 job 里后续 target (实测: 一个
+挂死的 target 让后面 target 的全局状态断言连带变红, 看起来像另一个用例的问题)。POSIX 用
+`start_new_session` + `killpg`, windows 用 `taskkill /F /T /PID` (按 PID 带 `/T`, 绝不按映像名)。
+
+**kill 之后要回读, 不是「代码里加了 kill」**:
+
+- POSIX: 按进程序号扫 `/proc`, 把该 pgid 下仍存活 (排除僵尸 `Z`) 的进程数写进日志
+  (`killpg <pgid>, 回读 0 存活` / `组内仍存活 N 个: …`); 
+- windows: **没有回读**, 只能看 `taskkill` 的返回码, 非 0 时把 stderr 写进日志并判该 target 失败;
+- **不能因直接子进程已退出就跳过整组回收**: 「中间进程退出、后代还活着」正是孤儿的定义
+  (2026-11-26 评审用本函数实测: 跳过形状下存活后代 1, 只有无条件 `killpg` 才是 0)。pgid 在
+  spawn 时就固定 (`start_new_session` 保证 pgid == pid), 不由 `getpgid` 现查。
+- **两条已知边界 (写下来, 因为它们让「回读 0」不等于「没有孤儿」)**:
+  1. **POSIX**: 后代若自己 `setsid` 逃出进程组, `killpg` 打不到它; 日志只声明「**组内**回读」
+     (`组内回读 0 存活`), 不声明「没有孤儿」。判定孤儿要看进程启动时间/父链, 不是看这句。
+  2. **windows**: leader 已经退出时, `taskkill /T /PID <dead pid>` 只能报 not found, 后代不被回收
+     —— 这种形状下 F1 的语义是「**诚实判红、孤儿仍在**」, 不是「杀干净了」。
+- **windows 上 daemon 会主动脱离进程树**: `rdog daemon` 默认把自己重开成 `hidden-daemon --child`
+  (`CREATE_NO_WINDOW | DETACHED_PROCESS`), `taskkill /T` 也够不着。所以跑 integration target 时
+  统一注入 `RDOG_DAEMON_FOREGROUND=1`, 把 daemon 留在 job 的进程树里。
+
+附带产物: 失败详情里写明终止方式与回读结果, summary 同时给出每个 target 的 `elapsed`。
 
 **ubuntu 侧 1 个 target 显式豁免** (`PLATFORM_EXEMPTIONS`): `zenoh_router_client`。连续三轮
 ubuntu 各挂一个**不同**的用例 (`control_lanes` 的 key 注入 / TLS 换 CA / mTLS client cert),
