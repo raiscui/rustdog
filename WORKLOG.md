@@ -1,5 +1,13 @@
 # WORKLOG: rustdog
 
+## [2026-11-26] RAI-450 合后三条残项 (F4 原因码 / F2 零余量 / F1 注释)
+
+- **F4**:`DIRECTORY_ALPN` 被拒不再复用 `iroh_target_denied` —— 新增 `iroh_directory_alpn_unserved`(code 44),对端拿到的码说的就是真实原因。
+- **F2**:续期预算改为 `renewal_budget(remaining) = min(DIRECTORY_CONNECT, remaining)`,按**距租约到期的剩余时间**给预算,晚到的续期不可能跑过它要刷新的租约(原 `RENEW + (LEASE - RENEW) = LEASE` 零余量,打满后有约 5s 拒服窗口);整次调用仍由同一份预算统一限时。用例 `a_renewal_never_outlives_the_lease_it_refreshes` 断言两种取值。
+- **F1**:`125`、`481` 两处注释改成「`root_cert` 必填,这里没有公共 WebPKI 回退」。
+- 回执:`control_iroh` 37 passed / 0 failed / 2 ignored;`tests/manual/iroh_directory_relay.sh` 四例全过(三例 `directory_hop=iroh_directory_path=relay`);`handoffs/rai450/receipts/directory-relay-residuals.log`。
+- 提交: 17d55ad
+
 ## [2026-11-26] #150 评审残项清理 (RAI-450)
 
 - **F3**:`directory` 同时给 `addr` 与 `via_relay` 现在明确报错(`names both \`addr\` and \`via_relay\``),不再静默保留其一;半配置矩阵扩到四种。
