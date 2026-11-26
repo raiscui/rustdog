@@ -1324,6 +1324,22 @@ fn serve_lane(
                     continue;
                 }
             }
+            // A lease holds one session, and the runtime marks a PTY attached the
+            // moment it is claimed. Both checks therefore have to run before the
+            // claim, or a refusal would strand the target as attached to a stream
+            // that is already gone.
+            let held = admission
+                .lock()
+                .map_err(|_| io::Error::other("admission lock poisoned"))?
+                .session_of(lease);
+            if let Some(held) = held.filter(|held| {
+                *held != request.session_id && crate::pty_control::pty_session_registered(held)
+            }) {
+                log::info!("iroh pty attach refused: lease already holds session={held}");
+                let (code, reason) = LEASE_BUSY;
+                refuse_frame(transport, None, code, reason)?;
+                continue;
+            }
             let Some(mut session) = crate::pty_control::attach_active_pty_session(request)? else {
                 refuse_frame(transport, None, 64, "PTY session not found")?;
                 continue;
@@ -1334,6 +1350,9 @@ fn serve_lane(
                 .map_err(|_| io::Error::other("admission lock poisoned"))?
                 .attach_session(lease, &attached, crate::pty_control::pty_session_registered)
             {
+                // Belt and braces: the claim above already marked the session as
+                // attached, so let it go before the connection moves on.
+                let _ = session.disconnect();
                 let (code, reason) = rejection.code_reason();
                 refuse_frame(transport, None, code as i32, reason)?;
                 continue;

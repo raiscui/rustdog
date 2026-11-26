@@ -667,6 +667,20 @@ panic 于 `dynamic_link.rs:45` (unix 分支, 同一循环); `mkdir -p target/deb
 - 提交: 80ddfc3 (windows 首次跑到本组测试抓到的 ConnectionReset: 12 处读响应改成 EOF/reset 皆终止)
 - 提交: 00bb079 (windows 并行 spawn 偶发 ERROR_FILE_NOT_FOUND: 对 NotFound 有界重试)
 
+## 2026-11-26 RAI-413 #141 第三轮评审一条 + 重定基到 03ff36e
+
+- **被拒的重复附上会把目标会话留在"已附"状态**: attach 分支先 `attach_active_pty_session`(运行时会标记 attached
+  并装帧发送器) 才做准入检查, 拒绝时 `AttachedPtySession` 被直接丢弃、没 disconnect, 目标会话便挂在一个已消失的
+  控制会话上(输出线程下一次 send 失败即停, 后续 attach 报 already attached)。改为**先查后占**: 用
+  `session_of(lease)` + `pty_session_registered` 预检(与 open 分支同形), 再 claim; 防御性地在 `attach_session`
+  拒绝分支补 `session.disconnect()`。
+- 分支重定基到 `main`(`03ff36e`, #137 落地后)。`tests/**`(含 #138 的 `tests/support/rdog_binary.rs`)保持 main 原样。
+
+重定基后复跑: `--bin rdog` 1145 passed / 0 failed / 4 ignored; `control_iroh` 31 passed / 2 ignored;
+回环 13/13; `control_pty` 8 passed / 1 failed(`ctrl_c`) vs 基线 7 passed / 2 failed(`ctrl_c`+`string_shorthand`);
+`control_tty` 本分支 2 passed / 0 failed, 与基线同(基线此前已转绿)。
+- 提交: 5c9a6c8
+
 ## [2026-11-26] 测试夹具的 daemon 在 panic 路径被收掉 (RAI-423)
 
 - 现象: 夹具只在正常路径 `stop_child`; 断言 panic 后子进程被 init 收养, 一轮批次留下 27 个孤儿
