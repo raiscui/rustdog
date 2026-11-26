@@ -36,6 +36,7 @@ import argparse
 import os
 import re
 import subprocess
+import time
 import sys
 from pathlib import Path
 
@@ -115,6 +116,56 @@ def commit_shas(
     return [line.strip() for line in git(root, *args).splitlines() if line.strip()]
 
 
+def landed_info(root: Path, sha: str, chain: list[str]) -> tuple[float | None, str | None]:
+    """它什么时候落到 HEAD 这条 main 历史里, 以及**参照的是哪个 commit**。
+
+    只认 HEAD 的**一线父链**: 链上「最早的、以 sha 为祖先的那个 commit」就是落点。一个 commit 在
+    分支里被 merge 过多少次, 和它什么时候落到 main 上, 是两件事 —— 分支内的同步 merge 不在父链上,
+    所以不会被误当成落点。
+
+    返回 `(epoch, 参照 commit 短 sha)`; 找不到落点时返回 `(commit 自己的时间, None)`。**参照 sha 要
+    出现在输出里**: 只写「落 main 已 N 天」时, 一旦挑错了 merge, 读日志的人无从发现。
+    """
+    def contains(candidate: str) -> bool:
+        return (
+            subprocess.run(
+                ["git", "merge-base", "--is-ancestor", sha, candidate],
+                cwd=root,
+                capture_output=True,
+            ).returncode
+            == 0
+        )
+
+    landed: str | None = None
+    low, high = 0, len(chain) - 1
+    while low <= high:
+        mid = (low + high) // 2
+        if contains(chain[mid]):
+            landed = chain[mid]
+            high = mid - 1
+        else:
+            low = mid + 1
+    if landed is None:
+        return commit_epoch(root, sha), None
+    try:
+        return float(git(root, "log", "-1", "--format=%ct", landed).strip()), landed[:7]
+    except (ValueError, SystemExit):
+        return None, landed[:7]
+
+
+def commit_epoch(root: Path, sha: str) -> float | None:
+    """commit 的提交时间 (epoch 秒); **读不出来返回 None, 绝不兜底成"现在"**。
+
+    兜底成 `time.time()` 等于「读不出日期 = 还很新 = 放行」—— 一个日期非法/缺失/在未来的占位就此
+    永久绿, 时间口径的全部价值被这一行抵消。所以这里 fail-closed: 由调用方判红。
+    """
+    try:
+        value = git(root, "log", "-1", "--format=%ct", sha).strip()
+        return float(value) if value else None
+    except (ValueError, SystemExit):
+        return None
+
+
 def changed_files(root: Path, sha: str) -> list[str]:
     out = git(root, "show", "--name-only", "--format=", sha)
     return [line.strip() for line in out.splitlines() if line.strip()]
@@ -147,15 +198,28 @@ def main(argv: list[str]) -> int:
         "--main",
         action="store_true",
         help=(
-            "main 分支模式: 关掉 --first-parent (否则只看得到 merge commit)、排除 merge 本身, "
-            "范围内最新 --main-grace 个工作 commit 记宽限, 其余缺 sha 即失败 (RAI-433)"
+            "main 分支模式: 关掉 --first-parent (否则只看得到 merge commit)。merge commit 本身在所有"
+            "模式下都不要求记账 (它的 sha 在创建前不可能进账本)。"
+            "两件事两个判据: 完全没有账本条目的 commit 在最新 --main-grace 个位置内宽限, 出宽限即漏账;"
+            " 有占位只差 sha 的按时间判 (--max-placeholder-age-days), 参照点 = HEAD **一线父链**上最早的"
+            "、以该 sha 为祖先的 commit (即它真正落到 main 的那一刻), 不是 commit date"
+        ),
+    )
+    parser.add_argument(
+        "--max-placeholder-age-days",
+        type=float,
+        default=3.0,
+        help=(
+            "main 上占位多久算「忘了补 sha」, 默认 3 天。**按时间而不是按位置**: 位置口径要一直追着"
+            "最大的合并跑 (实测 main 最近 12 次合并的工作 commit 数 1–26 不等), 抬到 10 也只是把阈值"
+            "挪了个位置 —— 下次 12 个 commit 的 PR 一合入照样红。"
         ),
     )
     parser.add_argument(
         "--main-grace",
         type=int,
-        default=3,
-        help="main 上允许的「刚合入、还没补 sha」的工作 commit 数 (范围内最新的若干个), 默认 3",
+        default=10,
+        help=("main 上「账本里完全没有条目」的 commit 的**位置**宽限, 默认 10 (对范围内已排除 merge 的全部工作 commit 按位置计, 不看父链)。占位 (有条目只差 sha) 不看位置, 按 --max-placeholder-age-days 的时间判"),
     )
     parser.add_argument(
         "--ref-only",
@@ -184,7 +248,9 @@ def main(argv: list[str]) -> int:
         args.since,
         args.limit,
         first_parent=not args.main,
-        exclude_merges=args.main,
+        # merge commit 在**所有模式**下都排除: 它的 sha 在它被创建之前不可能出现在账本里, 要求它
+        # 记账是逻辑上做不到的事。本地 strict 在 main 上默认红, 训练出来的只是「反正它红着」。
+        exclude_merges=True,
     )
     if not shas:
         print("范围内没有 commit")
@@ -215,13 +281,30 @@ def main(argv: list[str]) -> int:
     if args.since:
         scope_note = f"{args.since}..HEAD"
 
+    # 一线父链只取一次, 每个 sha 只算一次 landed: 否则每占位两次调用 × 两次 rev-list,
+    # 实测 +140~180ms/占位 (旧 1.13s → 新 1.77s)。
+    fp_chain: list[str] | None = None
+    landed_cache: dict[str, tuple[float | None, str | None]] = {}
+
+    def landed_for(sha: str) -> tuple[float | None, str | None]:
+        nonlocal fp_chain
+        if sha in landed_cache:
+            return landed_cache[sha]
+        if fp_chain is None:
+            try:
+                fp_chain = list(reversed(git(root, "rev-list", "--first-parent", "HEAD").split()))
+            except SystemExit:
+                fp_chain = []
+        landed_cache[sha] = landed_info(root, sha, fp_chain)
+        return landed_cache[sha]
+
     subject_counts: dict[str, int] = {}
     for sha in scope:
         subject_counts[git(root, "log", "-1", "--format=%s", sha).strip()] = (
             subject_counts.get(git(root, "log", "-1", "--format=%s", sha).strip(), 0) + 1
         )
 
-    unaccounted: list[tuple[str, str, list[str]]] = []
+    unaccounted: list[tuple[str, str, list[str], str | None]] = []
     graced: list[tuple[str, str]] = []
     accounted = 0
     exempt = 0
@@ -235,30 +318,63 @@ def main(argv: list[str]) -> int:
         if is_ledger_only(root, sha):
             exempt += 1
             continue
-        # main 上不接受占位: 那时 sha 已经稳定, 占位留着就是漏账。
-        if subject in pending_subjects and not args.main:
-            # 占位按标题认领, 所以标题必须唯一: 否则一条 `fix: typo` 这类通用占位能吞掉
-            # 同标题的任意多个 commit, 一个占位放行一片。
+        if subject in pending_subjects:
+            # 占位 (账本里有条目、只差 sha) 的判据是**时间**, 不是位置:
+            #   - 刚合入时年龄 ~0 → 任何规模的合并都不会让 main 当天变红;
+            #   - 超过 --max-placeholder-age-days 还没补 → 「占位超期」判红。
+            # 非 main 模式 (本地 strict / PR) 永不判占位超期: sha 在 PR 阶段本来就不稳定。
+            # 多次违规要**都列出来** —— 只报一类会让人以为修掉那类就够了。
+            reasons: list[str] = []
             if subject_counts.get(subject, 0) > 1:
-                unaccounted.append(
-                    (
-                        short,
-                        subject,
-                        [
-                            f"占位标题不唯一: 范围内有 {subject_counts[subject]} 个 commit 用同一标题, "
-                            "占位只能认领一个"
-                        ],
-                    )
+                reasons.append(
+                    f"占位标题不唯一: 范围内有 {subject_counts[subject]} 个 commit 用同一标题, "
+                    "占位只能认领一个"
                 )
+            if args.main:
+                epoch, reference = landed_for(sha)
+                if epoch is None:
+                    reasons.append(
+                        "占位日期不可解析: 读不出该 commit 的提交时间, 无法判断是否超期 "
+                        "(fail-closed, 不按「还很新」放行)"
+                    )
+                else:
+                    age_days = (time.time() - epoch) / 86400.0
+                    if age_days < 0:
+                        reasons.append(
+                            f"占位日期在未来 ({age_days:.1f} 天): 提交时间晚于当前时间, "
+                            "无法用它判断超期 (fail-closed)"
+                        )
+                    elif age_days >= args.max_placeholder_age_days:
+                        where = (
+                            f"参照 {reference}" if reference else "未在一线父链上找到落点, 按 commit date"
+                        )
+                        reasons.append(
+                            f"占位超期 {age_days:.1f} 天 (上限 "
+                            f"{args.max_placeholder_age_days:g} 天, {where}): 账本里还写着「待合入后补」, "
+                            "sha 早已稳定"
+                        )
+            if reasons:
+                unaccounted.append((short, subject, changed_files(root, sha), "; ".join(reasons)))
                 continue
+            if args.main:
+                epoch, reference = landed_for(sha)
+                if epoch is not None:
+                    days = (time.time() - epoch) / 86400.0
+                    if reference:
+                        # 「落 main」是守卫没校验过的事实 (--main 也可能跑在非 main 的 tip 上), 所以只写
+                        # 「落点」—— 参照 sha 在, 谁都能去核它到底落在哪。
+                        subject = f"{subject} (落点 {days:.1f} 天, 参照 {reference})"
+                    else:
+                        subject = (
+                            f"{subject} (未在一线父链上找到落点, 按 commit date {days:.1f} 天, 防御性分支)"
+                        )
             pending.append((short, subject))
             continue
-        # main 上「刚合入还没补 sha」是**正常时序**: sha 只有在合入后才稳定。所以最新
-        # --main-grace 个 commit 记宽限, 更早的还缺 sha 就是漏账 (RAI-433)。
+        # 数量宽限只给**完全没有账本条目**的 commit: 刚合入的提交可能还在等记账提交落盘。
         if args.main and index < args.main_grace:
             graced.append((short, subject))
             continue
-        unaccounted.append((short, subject, changed_files(root, sha)))
+        unaccounted.append((short, subject, changed_files(root, sha), None))
 
     print(f"检查范围: {scope_note}  共 {len(scope)} 个 commit")
     print(
@@ -269,12 +385,16 @@ def main(argv: list[str]) -> int:
     if graced and args.main:
         for short, subject in graced:
             print(f"  (宽限) {short} {subject} —— 合入后由纯账本提交补 `- 提交: {short}`")
+    for short, subject in pending:
+        print(f"  (占位待补) {short} {subject} —— 账本里已有占位, 合入后把标题换成 sha")
 
     if unaccounted:
         mode = "只报告 (report-only)" if args.report_only else "阻断 (strict)"
         print(f"\n{'⚠️' if args.report_only else '❌'} {len(unaccounted)} 个 commit 没有进账本 [{mode}]")
-        for short, subject, files in unaccounted:
+        for short, subject, files, reason in unaccounted:
             print(f"  {short} {subject}")
+            if reason:
+                print(f"      原因: {reason}")
             print(f"      改了: {', '.join(files[:6])}")
             # GitHub Actions 注解: 漏账条目会显示在提交/PR 视图, 而不是只埋进日志
             if os.environ.get("GITHUB_ACTIONS"):

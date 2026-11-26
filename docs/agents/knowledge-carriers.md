@@ -145,7 +145,7 @@ python3 scripts/check-bookkeeping.py --ref-only <merge 后的工作 commit>
 
 # 验证
 python3 scripts/check-bookkeeping.py            # 本地 strict
-python3 scripts/check-bookkeeping.py --main     # main 上: 最新 3 个之外缺 sha 即失败
+python3 scripts/check-bookkeeping.py --main     # main 上: 无条目出宽限即失败; 占位超 3 天即失败
 ```
 
 在 PR 里写 sha 等于每次都写一个马上过期的值: 任何一次 rebase 都会重写它, 于是「记账」变成了
@@ -164,13 +164,27 @@ python3 scripts/check-bookkeeping.py --main     # main 上: 最新 3 个之外�
 | 模式 | 触发 | 漏账时的行为 | 用在哪 |
 | --- | --- | --- | --- |
 | `--report-only` | 显式加该参数 | 打印报告 + 发 `::warning::` 注解，**退出码永远 0** | CI 的 `pull_request` |
-| `--main [--main-grace N]` | 显式加该参数 | 最新 N 个 commit 记宽限，其余缺 sha → **退出码 1** | CI 的 `push` 到 main |
+| `--main [--main-grace N]` | 显式加该参数 | 按下方「两件事两个判据」表判：无条目出宽限 → 漏账；占位超 `--max-placeholder-age-days` → 占位超期；两者都 **退出码 1** | CI 的 `push` 到 main |
 | 默认（strict） | 不加参数 | 打印报告，退出码 1 | 本地 pre-flight |
 
 **为什么 PR 只报告、main 才阻断**：PR 阶段工作 commit 的条目通常还没落盘 (它在同一张 PR 的
 后续提交里), 而且 sha 会随 rebase 变 —— 在这里阻断只会逼人写马上过期的 sha。合入之后 sha 稳定,
-再缺就没有借口: main 上用 `--main` 硬门禁, 只给最新 3 个 commit 宽限 (它们刚合入、账本补记还没
-提交)。
+再缺就没有借口: main 上用 `--main` 硬门禁。**两件事分别有判据, 别混成一个数**:
+
+| 情形 | 判据 |
+| --- | --- |
+| 账本里**完全没有**这条 commit 的条目 | `--main-grace N` (默认 10) 个位置内的宽限; 出宽限还缺 → 漏账 |
+| 账本里有条目、只差 sha (**占位**) | **时间**: 从该 commit **落到这条 main 历史的那一刻**起算 —— 参照点是 **HEAD 一线父链上最早的、以它为先祖的 commit** (不是 commit date, 也不是分支里某次同步 main 的 merge), 超过 `--max-placeholder-age-days` (默认 3 天) → 「占位超期」 |
+
+为什么占位不按位置判: 位置口径要一直追着最大的合并跑 (实测 main 最近 12 次合并的工作 commit 数
+1–26 不等), 无论阈值抬到几, 下一张更大的 PR 一合入就让 main 当天变红。按时间判则与合并规模解耦:
+**年龄的参照点必须在 HEAD 的一线父链上找** —— 不是 commit date, 也不是分支里任何一次同步 main 的
+merge。否则一张活了一周才合的分支, 合入当天 main 就红 (假阳性换了个方向回来)。输出里**带参照 commit
+的短 sha**: `(落点 N 天, 参照 <sha>)` / `(未在一线父链上找到落点, 按 commit date N 天)` ——
+只写天数时, 一旦挑错了 merge, 读日志的人无从发现。其中「未在一线父链上找到落点」是**防御性**分支 ——
+`--main` 下范围恒为 HEAD 的祖先、父链首元素恒为 HEAD, 所以实际不会出现, 只在读不出父链时兜底。
+**非 main 模式 (本地 strict / PR) 永不判占位超期** ——
+sha 在 PR 阶段本来就不稳定。
 
 **要硬门禁就在本地跑**：
 
