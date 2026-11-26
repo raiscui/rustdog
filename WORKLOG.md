@@ -681,6 +681,15 @@ panic 于 `dynamic_link.rs:45` (unix 分支, 同一循环); `mkdir -p target/deb
 `control_tty` 本分支 2 passed / 0 failed, 与基线同(基线此前已转绿)。
 - 提交: 78239c4
 
+## 2026-11-26 RAI-413 #141 第四轮评审一条(low)
+
+被拒的重复附上原用 `session.disconnect()` 释放占位, 但 Disconnect 是**关闭**语义(运行时 Killer 该子进程),
+而目标是别的租约的会话 —— 拒绝不该毁掉它。改为 `session.detach("attach_refused")`: 清 owner、会话继续存活。
+该分支当前不可达(预检与 `attach_session` 判据同源, 租约无删除路径), 属防御性修正。
+
+复跑: `--bin rdog` 1145 passed / 0 failed / 4 ignored; `control_iroh` 31 passed / 2 ignored; 回环 13/13。
+- 提交: 0f4e2c3
+
 ## [2026-11-26] 测试夹具的 daemon 在 panic 路径被收掉 (RAI-423)
 
 - 现象: 夹具只在正常路径 `stop_child`; 断言 panic 后子进程被 init 收养, 一轮批次留下 27 个孤儿

@@ -1351,8 +1351,9 @@ fn serve_lane(
                 .attach_session(lease, &attached, crate::pty_control::pty_session_registered)
             {
                 // Belt and braces: the claim above already marked the session as
-                // attached, so let it go before the connection moves on.
-                let _ = session.disconnect();
+                // attached. Release it as a detach, not a disconnect — the target
+                // belongs to another lease, so it must survive this refusal.
+                let _ = session.detach("attach_refused");
                 let (code, reason) = rejection.code_reason();
                 refuse_frame(transport, None, code as i32, reason)?;
                 continue;
