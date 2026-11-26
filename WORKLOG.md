@@ -404,3 +404,11 @@ panic 于 `dynamic_link.rs:45` (unix 分支, 同一循环); `mkdir -p target/deb
 - 提交: 403fb9a (评审第四轮: 覆盖缺口 18 个 + 从已知红表移入 §3 披露)
 - 提交: 80ddfc3 (windows 首次跑到本组测试抓到的 ConnectionReset: 12 处读响应改成 EOF/reset 皆终止)
 - 提交: 00bb079 (windows 并行 spawn 偶发 ERROR_FILE_NOT_FOUND: 对 NotFound 有界重试)
+
+### 2026-11-26 覆盖缺口演练抓到自己门代码的洞 (RAI-397 追加)
+
+drill 分支 poison 预取 URL 后第一次真的跑到 failure 分支, 发现分类步骤里
+onnxruntime dist unavailable\ 的反引号被 bash 当命令替换
+(), 摘要表变坏行。改成
+ + 三个 job 各自 , 文字不再过 shell。
+- 提交: 4a3069a
