@@ -840,3 +840,157 @@ daemon + 主张量 profile 的客户端 = 凭证不同源, zenoh 在 OpenSyn 阶
 表象像网络问题。该门槛写进 docs/solutions/conventions/e2e-isolated-home-credentials.md
 Guidance 第 0 条 (不只 e2e, 人工跨机验收同样适用)。
 - 提交: a06f59f
+
+## 2026-11-26 RAI-367 bulk 原语的直连强制语义与请求级 relay 字节口径 (设计票)
+
+P7 第 3 项「bulk 只允许直连」从未执行, 原因不是没测, 而是候选没有 bulk 传输入口 ——
+所以「relay 上 bulk 字节为 0」既不可验证也不可证伪。本步只写设计, 不动 `src/`.
+
+- **现状判定**: 数据面复用 `src/control_file_transfer.rs` (协议解析 `control_protocol.rs:692-696`、
+  daemon 派发 `control_core.rs:274-286`、sha256 双校验、续传、chunk 有界、穿越拒绝都在 main
+  且有单测), 网关扩展, `SaveFileFrame` 不复用也不扩展 —— 给单帧截图帧加分块属于改写而非扩展。
+- **两个缺口都不是协议**: 客户端流式驱动缺位 (`send_control_lines_for_invocation` 收预构造
+  `&[String]`, 整文件驻留内存), 以及路径门禁缺位 (两端都不知道路径类别, bulk 可静默骑 relay)。
+- **直连强制**: 穷举判定表 (`direct`/`relay`/`unknown`/`not_applicable`)、三个原因码
+  (`iroh_direct_path_unavailable` / `iroh_direct_path_lost` / `iroh_path_unknown`)、
+  `unknown` 一律 fail-closed、无任何 relay 放行开关、门禁落在每个方向产生字节的那一端并逐 chunk 复查。
+- **观测口径**: 计数落在传输适配器的 relay 句柄上, 括号采样归属到单次尝试 (`attempt_id`),
+  `rdog.bulk-path.v1` 快照由两端各发一半 (任一端不得替对端填数), `relay_bytes_zero` 判定式
+  逐字可执行; 正对照要求 delta **严格 > 0** —— `>= 0` 在计数器坏掉时照样通过。
+- **验收矩阵**四类 + 两处对票面字面的修正: D2 不能写成「中途 relay→direct」(relay 开头已在
+  open 被拒, 零字节), 只有「拒 → 重试成功」可观测; B 与 C 结果必须相同, 区别只在可归因性。
+- **顺带记一个既有缺陷**: `TRANSFERS` 无 TTL 也无 `@file-cancel`, 被拒或中断的 178 MB 上传会
+  永久留 `.yino-partial` 与表项 —— 对被门禁拒绝的传输尤其致命, 拒绝本该什么都不留下。
+- A 类验收阻塞于 RAI-366 (直连在任何拓扑上都还没打通); `path_class` 与 relay 计数的接口
+  阻塞于 RAI-413 (`src/control_iroh/` 目前不在 main、不在任何远程分支, 已逐分支核过)。
+- 提交: ddd8d27
+
+账本补记: 以下两个合并提交为纯账本缺口 (无代码改动), 与本轮无关, 一并补记 ——
+- 提交: b227c63
+- 提交: 718eb8c
+
+## 2026-11-26 RAI-367 规格评审收口 (三条 finding 全部成立)
+
+评审对 #143 提了三条, 全部成立, 按性质分别处置:
+
+1. **(medium, investigate) 应用层采样不是直连强制的充分条件.** 一个 chunk 通过检查后可能仍排在发送
+   队列里或需要重传, 路径此时切到 relay, 那批已放行的字节就会从 relay 走, 而下一个 chunk 边界只是
+   「知道得太晚」. 新增 §3.5: bulk 连接必须由**传输层** pin 在直连上 (`bulk_path_pin`), 排队与重传字节
+   也计入 relay 累计量; `path_aware=true` 但 pin 不了的传输**拒绝**承载 bulk, 新增原因码
+   `iroh_bulk_path_pin_unavailable`. 并写明 `bulk_path_pin` 与 `path_aware` 是两个独立事实, 不得互相
+   顶替 —— 把「钉不住」当成「没有 relay 跳」, 就得到一条看起来有门禁其实没有的路径. D1 的证据项加上
+   「在途字节归属」, 用来验证 pin 真生效而不是查得太晚.
+2. **(medium, confirmed) 判定表与 D1 自相矛盾.** §3.1 写「删 partial 后可续传」, §8 D1 写「partial 保留」;
+   而 `execute_put_file` 的 resume offset 正是从 partial 大小推导 —— 删了就等于从头重传. 改为「保留」.
+3. **(low, confirmed) 报告两张表缺「最后复核」列** (AGENTS.md 规则 ②), 已补并逐行填 2026-11-26.
+
+守卫: `check-carrier-assertions.py` OK (3 断言 / 8 载体).
+- 提交: fe29d8f
+
+## 2026-11-26 RAI-367 规格再收三轮评审 (暂存名单射 / 码表 / 续传判定)
+
+评审在 #143 上提出的九条 (第三至第七轮) 全部成立, 其中两条是根因级别:
+
+- **暂存名推导必须单射**: 实现用 `path.with_extension(...)` **替换**扩展名, `model` (无扩展名) 与
+  `model.bin` 都落到 `model.bin.yino-partial` —— 两个**不同**目标共用一份半成品. 后果是对 `model`
+  中断后留着的续传字节, 会被对 `model.bin` 的非续传重开删掉, 而 `model` 本身没被碰过. 我原先给
+  A2b 写的理由是错的因果 ("两个 id 指向同一目标才共用"); 真正的条件是推导单射. 规格改为要求**追加**
+  后缀, 并把"单射"与"比较口径"拆成两条独立硬要求.
+- **路径比较口径必须统一**: 直接比路径值是文本相等, `a.bin` 与 `./a.bin` 在 `Path` 组件层面就不
+  相等 (`./` 是 `CurDir`), 门禁与续传判定会各说一套. 规定词法规范化 + Windows 折叠大小写、不用
+  `canonicalize`. 回归用例必须打**前导** `.` —— 内部 `.` 会被 `Path::components` 自己归一, 那种
+  用例在修复前就是绿的.
+- **阶段必须穷举**: §2.5 一度按"中止原因"排表, 整个 open 阶段没定义 (同 id 活会话 / 同 id 换路径 /
+  半成品已过期). 重构成四块各自穷举后, 又补了"提交成功"这第五个阶段 —— 已提交的条目若留在注册表
+  仍算活跃, 同目标的下一次上传会被路径占用检查挡住, 一条早该消失的记录把正常重传挡在门外.
+- **码的登记处只能有一处**: §3.2 曾与 §2.2 各攥一份码表, 下次改一处必留旧合同. 收成 §2.2 唯一
+  总表, §3.2 只留理由.
+- **续传判定口径要稳**: `stale_partial_discarded` 的取值依赖 sweep 与 open 谁先跑, 改用
+  `resume_honored` (当且仅当 `resume:true` 且起始 offset > 0) 作唯一判定位, 并要求 `state` 与它一致.
+
+守卫: `check-carrier-assertions.py` OK (3 断言 / 8 载体).
+- 提交: 476d066
+- 提交: a89ac5e
+- 提交: caee5f2
+- 提交: 8745adc
+
+### 关于本分支的 `- 提交:` sha (2026-11-26)
+
+`capy/rai-367-bulk-direct-only-spec` 在交付过程中两次 rebase (`03ff36e` → `d0386c4e`), 每次都重写了
+全部 sha, 所以上面各条目里记的 sha 是**当时**的提交, 现在已经不对应任何现存对象。内容没有变, 与提交
+信息一一对应; 要按内容核账用 `git log origin/main..HEAD` 对提交标题即可。
+
+这里不再维护逐条映射表: 每次 rebase 都会让它整块过期, 而一张过期的对照表比没有更误导人。
+本条之后的条目记的是 rebase 后的真 sha。
+
+### 本分支 rebase 后的 sha 清单 (2026-11-26, `d0386c4e` 之上)
+
+rebase 重写了全部 sha, 下面是现存对象。条目内容与提交标题一一对应, 逐条核账用 `git log --oneline` 对照即可。
+
+- 提交: 6dce0ea
+- 提交: 009f728
+- 提交: a2afbb2
+- 提交: 3a8bcfb
+- 提交: 11244a2
+- 提交: 582a0ec
+- 提交: 94ea583
+- 提交: 02c93fe
+- 提交: 890e66a
+- 提交: 8657906
+- 提交: 418c1a7
+- 提交: 527cf91
+- 提交: c9aa67d
+- 提交: 62402d3
+- 提交: bb05432
+- 提交: 5cd5f09
+- 提交: 4633c44
+- 提交: 3a78447
+- 提交: 3df7e75
+- 提交: 4dd7a6b
+- 提交: 0d9a040
+- 提交: 84c666e
+- 提交: 71fbaf1
+- 提交: fbc7409
+- 提交: 1783012
+- 提交: 5caaede
+- 提交: 4341400
+- 提交: d53d61f
+- 提交: a756c96
+
+### rebase 到 `0ba5684` 之后的 sha 清单 (2026-11-26)
+
+#141 合并后 main 前进, 本分支按合并门契约再 rebase 一次, sha 全部重写。下面是现存对象:
+
+- 提交: 25d18d0
+- 提交: d834688
+- 提交: b4be562
+- 提交: 2801802
+- 提交: c7ed5a7
+- 提交: 62bab73
+- 提交: d8defa4
+- 提交: 333f021
+- 提交: d9c67c3
+- 提交: c29a56f
+- 提交: f134f92
+- 提交: 034a2d7
+- 提交: 49f5886
+- 提交: 83c54c8
+- 提交: 5c094cb
+- 提交: f19172f
+- 提交: bff7a6f
+- 提交: c616c0e
+- 提交: d686245
+- 提交: 28b1bcd
+- 提交: 142de41
+- 提交: 654beed
+- 提交: c75f5a0
+- 提交: c9c0156
+- 提交: c3bd455
+- 提交: 249f78d
+- 提交: 6fd83fe
+- 提交: 6e39dfe
+- 提交: e57bdda
+- 提交: 9acc3f9
+- 提交: fbeeb9d
+- 提交: 0f30ab1
+- 提交: e5a926b
