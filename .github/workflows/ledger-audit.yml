@@ -28,4 +28,4 @@ jobs:
           fetch-depth: 0
 
       - name: Commits accounted in the ledger (main requires sha beyond grace)
-        run: python3 scripts/check-bookkeeping.py --main --main-grace 3 --limit 50
+        run: python3 scripts/check-bookkeeping.py --main --main-grace 10 --limit 50

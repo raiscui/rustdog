@@ -145,7 +145,7 @@ python3 scripts/check-bookkeeping.py --ref-only <merge 后的工作 commit>
 
 # 验证
 python3 scripts/check-bookkeeping.py            # 本地 strict
-python3 scripts/check-bookkeeping.py --main     # main 上: 最新 3 个之外缺 sha 即失败
+python3 scripts/check-bookkeeping.py --main     # main 上: 最新 10 个之外缺 sha (或还留着占位) 即失败
 ```
 
 在 PR 里写 sha 等于每次都写一个马上过期的值: 任何一次 rebase 都会重写它, 于是「记账」变成了
@@ -169,8 +169,9 @@ python3 scripts/check-bookkeeping.py --main     # main 上: 最新 3 个之外�
 
 **为什么 PR 只报告、main 才阻断**：PR 阶段工作 commit 的条目通常还没落盘 (它在同一张 PR 的
 后续提交里), 而且 sha 会随 rebase 变 —— 在这里阻断只会逼人写马上过期的 sha。合入之后 sha 稳定,
-再缺就没有借口: main 上用 `--main` 硬门禁, 只给最新 3 个 commit 宽限 (它们刚合入、账本补记还没
-提交)。
+再缺就没有借口: main 上用 `--main` 硬门禁, 给最新 10 个工作 commit 宽限 (一次合并自带的提交量)。
+**宽限窗口内的占位算「待补」而不是漏账** —— 否则一个 5 个提交的 PR 一合入, main 会在 sha 补齐
+提交到达之前就变红 (2026-11-26 实测)。超出宽限还留着占位 → 「占位超期」判红。
 
 **要硬门禁就在本地跑**：
 

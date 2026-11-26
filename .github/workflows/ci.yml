@@ -365,8 +365,8 @@ jobs:
       # 两档, 按分支分而不是按心情分:
       # - **PR**: 只报告 (::warning::)。账本滞后是流程债, 不该卡住别人推送; 而且 PR 的 sha
       #   会随 rebase 变, 在 PR 阶段要求 sha 等于强制每人写一个马上过期的值。
-      # - **main**: `--main` 硬门禁 —— 除最新 3 个 commit (刚合入、sha 还没补) 之外, 缺 sha
-      #   就是漏账。合入之后 sha 已经稳定, 这时候再缺就没有借口了。
+      # - **main**: `--main` 硬门禁 —— 最新 10 个工作 commit 记宽限 (一次合并自带的提交量),
+      #   更早的缺 sha 或还留着占位就是漏账。宽限内占位算「待补」, 否则 PR 一合入 main 就先红。
       - name: Commits accounted in the ledger - PR report only
         if: github.event_name == 'pull_request'
         run: |
@@ -375,4 +375,4 @@ jobs:
 
       - name: Commits accounted in the ledger - main requires sha beyond grace
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-        run: python3 scripts/check-bookkeeping.py --main --main-grace 3 --limit 50
+        run: python3 scripts/check-bookkeeping.py --main --main-grace 10 --limit 50

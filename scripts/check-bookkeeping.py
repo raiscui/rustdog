@@ -154,8 +154,8 @@ def main(argv: list[str]) -> int:
     parser.add_argument(
         "--main-grace",
         type=int,
-        default=3,
-        help="main 上允许的「刚合入、还没补 sha」的工作 commit 数 (范围内最新的若干个), 默认 3",
+        default=10,
+        help="main 上允许的「刚合入、还没补 sha / 还留着占位」的工作 commit 数, 默认 10 (一次合并的提交量)",
     )
     parser.add_argument(
         "--ref-only",
@@ -235,8 +235,10 @@ def main(argv: list[str]) -> int:
         if is_ledger_only(root, sha):
             exempt += 1
             continue
-        # main 上不接受占位: 那时 sha 已经稳定, 占位留着就是漏账。
-        if subject in pending_subjects and not args.main:
+        # 占位在**宽限窗口内**算「待补」而不是漏账 —— 否则一次合并的提交数超过宽限时, main 会在
+        # sha 补齐提交合入之前就变红 (2026-11-26 实测: 5 个提交的 PR 合入后 main 立刻红)。
+        # 超出宽限还留着占位才是漏账: 那时 sha 早已稳定。
+        if subject in pending_subjects and (not args.main or index < args.main_grace):
             # 占位按标题认领, 所以标题必须唯一: 否则一条 `fix: typo` 这类通用占位能吞掉
             # 同标题的任意多个 commit, 一个占位放行一片。
             if subject_counts.get(subject, 0) > 1:
@@ -257,6 +259,18 @@ def main(argv: list[str]) -> int:
         # --main-grace 个 commit 记宽限, 更早的还缺 sha 就是漏账 (RAI-433)。
         if args.main and index < args.main_grace:
             graced.append((short, subject))
+            continue
+        if subject in pending_subjects:
+            unaccounted.append(
+                (
+                    short,
+                    subject,
+                    [
+                        f"占位超期: 账本里还写着「待合入后补」, 但该 commit 已在宽限 ({args.main_grace}) "
+                        "之外 —— sha 早已稳定, 该补了"
+                    ],
+                )
+            )
             continue
         unaccounted.append((short, subject, changed_files(root, sha)))
 
