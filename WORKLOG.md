@@ -1300,3 +1300,4 @@ zenoh_router_client 38/2 ignored)。
   `TypeError`。改成 `encoding="utf-8", errors="replace"`。
   本地 linux 回执: `zenoh_router_client` 36 passed / 4 ignored, `control_lanes` 14 passed /
   2 ignored, 均 0 failed。
+- 提交: 42cb4f3
