@@ -54,8 +54,10 @@ pub fn read_line_limited<R: BufRead>(
     sink: &mut Vec<u8>,
     limit: usize,
 ) -> io::Result<LineOutcome> {
-    buf.clear();
-    let mut total = 0usize;
+    // 不清 buf: 上一次调用可能因读超时/中断返回错误, 而半个行已经攒在里面。
+    // 清掉它就是把对端「先发正文、后发换行」的分片消息丢掉 —— 25ms 读超时的
+    // PTY 桥接最容易踩到 (RAI-415: @pty-stdin 帧被吞, 远端收不到 ^C)。
+    let mut total = buf.len();
     let mut over_limit = false;
 
     loop {
@@ -76,6 +78,7 @@ pub fn read_line_limited<R: BufRead>(
         if n == 0 {
             // 对端关闭且本行未收到任何字节
             if total == 0 {
+                buf.clear();
                 return Ok(LineOutcome::Eof);
             }
             break;
@@ -115,6 +118,7 @@ pub fn read_line_limited<R: BufRead>(
     }
 
     if over_limit {
+        buf.clear();
         return Ok(LineOutcome::TooLong {
             consumed_bytes: total,
         });
@@ -123,13 +127,16 @@ pub fn read_line_limited<R: BufRead>(
     // 去掉行尾 \r / \n（兼容 CRLF）
     let line = buf.strip_suffix(b"\n").unwrap_or(&buf[..]);
     let line = line.strip_suffix(b"\r").unwrap_or(line);
-    match String::from_utf8(line.to_vec()) {
-        Ok(text) => Ok(LineOutcome::Line(text)),
+    let outcome = match String::from_utf8(line.to_vec()) {
+        Ok(text) => LineOutcome::Line(text),
         // 无效 UTF-8：当作坏行处理（流已对齐到行尾, 不影响后续消息）
-        Err(_) => Ok(LineOutcome::TooLong {
+        Err(_) => LineOutcome::TooLong {
             consumed_bytes: total,
-        }),
-    }
+        },
+    };
+    // 行已消费完, 这里才清 —— 交给下一次调用一个干净的起点。
+    buf.clear();
+    Ok(outcome)
 }
 
 #[cfg(test)]
@@ -168,6 +175,57 @@ mod tests {
         assert_eq!(got, vec![LineOutcome::Line("@ping".into())]);
     }
 
+    /// 按脚本吐出数据块 / 读超时的假 reader: 复现「正文与换行分两次到达,
+    /// 中间被读超时打断」的分片消息 (RAI-415)。
+    struct ChunkedReader {
+        steps: std::collections::VecDeque<Result<Vec<u8>, io::ErrorKind>>,
+    }
+
+    impl std::io::Read for ChunkedReader {
+        fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
+            match self.steps.pop_front() {
+                Some(Ok(chunk)) => {
+                    out[..chunk.len()].copy_from_slice(&chunk);
+                    Ok(chunk.len())
+                }
+                Some(Err(kind)) => Err(io::Error::new(kind, "scripted read error")),
+                None => Ok(0),
+            }
+        }
+    }
+
+    #[test]
+    fn partial_line_survives_read_timeout_between_chunks() {
+        let mut reader = std::io::BufReader::new(ChunkedReader {
+            steps: std::collections::VecDeque::from(vec![
+                Ok(b"@pty-stdin {\"session_id\":\"a\"".to_vec()),
+                Err(io::ErrorKind::WouldBlock),
+                Ok(b",\"data\":\"Aw==\"}\n".to_vec()),
+            ]),
+        });
+        let mut buf = Vec::new();
+        let mut sink = Vec::new();
+
+        let err = read_line_limited(&mut reader, &mut buf, &mut sink, MAX_CONTROL_MESSAGE_BYTES)
+            .expect_err("首块没有换行, 应把读超时原样上抛");
+        assert_eq!(err.kind(), io::ErrorKind::WouldBlock);
+        assert_eq!(
+            String::from_utf8_lossy(&buf),
+            "@pty-stdin {\"session_id\":\"a\"",
+            "已收到的半行必须留在 buf 里"
+        );
+
+        let outcome =
+            read_line_limited(&mut reader, &mut buf, &mut sink, MAX_CONTROL_MESSAGE_BYTES)
+                .expect("超时后的续读应成功");
+        assert_eq!(
+            outcome,
+            LineOutcome::Line("@pty-stdin {\"session_id\":\"a\",\"data\":\"Aw==\"}".to_owned()),
+            "续读必须拼上后半截, 而不是只剩后半截"
+        );
+        assert!(buf.is_empty(), "整行交出后 buf 应被清空");
+    }
+
     #[test]
     fn empty_input_is_eof() {
         assert!(read_all(b"", 1024).is_empty());
@@ -194,7 +252,12 @@ mod tests {
         input.push(b'\n');
         input.extend_from_slice(b"@ping\n");
         let got = read_all(&input, 1_024);
-        assert_eq!(got[0], LineOutcome::TooLong { consumed_bytes: 100_001 });
+        assert_eq!(
+            got[0],
+            LineOutcome::TooLong {
+                consumed_bytes: 100_001
+            }
+        );
         assert_eq!(got[1], LineOutcome::Line("@ping".into()));
     }
 
