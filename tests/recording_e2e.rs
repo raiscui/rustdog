@@ -13,7 +13,7 @@ use std::{
     fs,
     io::{Read, Write},
     net::{TcpListener, TcpStream},
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     thread,
     time::{Duration, Instant},
@@ -45,20 +45,88 @@ fn next_free_port() -> u16 {
     port
 }
 
+/// 按优先级列出 `rdog` 可能所在的位置 (相对测试可执行文件的位置推导)。
+///
+/// cargo 1.100 起本 crate 的产物落在 `target/{profile}/build/rustdog/<hash>/out/`
+/// (连 `target/{profile}/deps/` 都不再创建), 所以"测试二进制上两级 + `/rdog`"
+/// 只对旧布局成立, 不能作为唯一假设。这里把已知布局全部列成候选。
+fn rdog_binary_candidates(current_exe: &Path) -> Vec<PathBuf> {
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    let mut push = |path: PathBuf| {
+        if !candidates.contains(&path) {
+            candidates.push(path);
+        }
+    };
+
+    // 布局无关的基准: 向上回溯到 `target` 目录, 再拼 `{profile}/rdog`。
+    if let Some(profile_dir) = target_profile_dir(current_exe) {
+        // 旧布局 (`target/{profile}/deps/<test>-<hash>`) 与 cargo 1.100 的
+        // bin uplift 都解析到这里。
+        push(profile_dir.join("rdog"));
+        push(profile_dir.join("deps").join("rdog"));
+        // build-dir 布局: bin 的 out 目录与测试可执行文件的 hash 目录是兄弟。
+        for candidate in build_dir_rdog_candidates(&profile_dir) {
+            push(candidate);
+        }
+    }
+
+    // 直接从测试可执行文件所在目录推导 (布局假设失效时的兜底)。
+    if let Some(exe_dir) = current_exe.parent() {
+        push(exe_dir.join("rdog"));
+        if let Some(ancestor) = exe_dir.parent() {
+            push(ancestor.join("rdog"));
+        }
+    }
+
+    candidates
+}
+
+/// `.../target/{profile}/...` 里的 `target/{profile}` 目录; 路径中没有 `target`
+/// 组成部分 (例如从别处拷出来的测试二进制) 时返回 `None`。
+fn target_profile_dir(current_exe: &Path) -> Option<PathBuf> {
+    let components: Vec<_> = current_exe.components().collect();
+    let target_index = components
+        .iter()
+        .rposition(|component| component.as_os_str() == "target")?;
+    let profile = components.get(target_index + 1)?;
+    let target_dir: PathBuf = components[..=target_index].iter().collect();
+    Some(target_dir.join(profile.as_os_str()))
+}
+
+/// `target/{profile}/build/<package>/<hash>/out/rdog` 的全部命中 (无命中时为空)。
+fn build_dir_rdog_candidates(profile_dir: &Path) -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    let Ok(packages) = fs::read_dir(profile_dir.join("build")) else {
+        return candidates;
+    };
+    for package in packages.flatten() {
+        let Ok(hashes) = fs::read_dir(package.path()) else {
+            continue;
+        };
+        for hash in hashes.flatten() {
+            candidates.push(hash.path().join("out").join("rdog"));
+        }
+    }
+    candidates.sort();
+    candidates
+}
+
 fn rdog_binary_path() -> PathBuf {
     let current_exe = std::env::current_exe().expect("current test binary path should exist");
-    let debug_dir = current_exe
-        .parent()
-        .expect("test binary should have parent directory")
-        .parent()
-        .expect("test binary should live under target/debug/deps");
-    let binary = debug_dir.join("rdog");
-    assert!(
-        binary.exists(),
-        "expected rdog binary at {}",
-        binary.display()
-    );
-    binary
+    let candidates = rdog_binary_candidates(&current_exe);
+    match candidates.iter().find(|path| path.is_file()) {
+        Some(binary) => binary.clone(),
+        None => {
+            let tried = candidates
+                .iter()
+                .map(|path| format!("\n  - {}", path.display()))
+                .collect::<String>();
+            panic!(
+                "expected the rdog binary beside the test executable ({}); tried:{tried}",
+                current_exe.display()
+            )
+        }
+    }
 }
 
 fn is_port_listening(port: u16) -> bool {
