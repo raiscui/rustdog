@@ -154,22 +154,41 @@ pub fn execute_put_file(payload: &str) -> std::io::Result<Value> {
     // 准入必须早于任何落盘动作. 放在 remove_file 之后就是"拒绝带副作用" ——
     // 一次被拒的重试会把上一次收到的字节抹掉, 而那正是本模块要消除的行为.
     //
-    // 两条互斥, 合起来保证"一个暂存文件最多被一条活跃会话写":
-    // - 同 id 还有活跃会话: 拒绝. 否则这次 open 会替换掉它, 而 resume:false 会把它正在写的
-    //   文件删掉 —— 换个 id 干同样的事只是把问题藏起来.
-    // - 别的 id 已持有同一暂存路径: 拒绝. 暂存文件名从**目标路径**推导, 两个 id 指向同一目标
-    //   就共用一个文件, 交错写会让先到的 @file-end 把混合字节的哈希算过、把损坏的文件 rename
-    //   到目标上, 全程没有一处报错.
-    if let Some(existing) = sessions.get(&transfer_id) {
+    // 同 id 的情况分两种, 不能一拒了之: 断线重连后客户端就是拿同一个 id + resume:true 回来的
+    // (specs/file-transfer-control-spec.md 的"传输 SHALL 可续传"就是这条), 拒掉它等于把续传
+    // 这个能力本身拒掉 —— 而且错误信息让人去 @file-cancel, cancel 又会删半成品, 等于绕一圈
+    // 回到从 0 开始.
+    if let Some(existing) = sessions.get_mut(&transfer_id) {
+        let same_target = existing.temp_path.as_deref() == Some(temp_path.as_path());
+        if resume && same_target {
+            // 续传式重开: 会话继续用, 只刷新声明与活跃时刻, 已收字节(真相源是半成品长度)不动
+            existing.size = size;
+            existing.expected_sha256 = expected_sha256;
+            existing.last_activity_ms = now_ms();
+            let written = existing.written;
+            return Ok(json!({
+                "kind": "file-transfer",
+                "state": "resumed",
+                "transfer_id": transfer_id,
+                "written": written,
+                "next_offset": written,
+            }));
+        }
         return Err(std::io::Error::other(format!(
-            "file_transfer_id_in_use: transfer_id {transfer_id} 已有活跃会话 (已收 {} 字节); 要重传先 @file-cancel 再重开",
-            existing.written
+            "file_transfer_id_in_use: transfer_id {transfer_id} 已有活跃会话 (已收 {} 字节, 目标 {}{}); 续传请用 resume:true, 换目标请先 @file-cancel",
+            existing.written,
+            existing.path.display(),
+            if same_target { "" } else { ", 与本次请求不同" }
         )));
     }
-    let path_holder = sessions.iter().find_map(|(other_id, other)| {
-        (other.temp_path.as_deref() == Some(temp_path.as_path())).then(|| other_id.clone())
-    });
-    if let Some(holder) = path_holder {
+    // 别的 id 已持有同一暂存路径: 拒绝. 暂存文件名从**目标路径**推导, 两个 id 指向同一目标
+    // 就共用一个文件, 交错写会让先到的 @file-end 把混合字节的哈希算过、把损坏的文件 rename
+    // 到目标上, 全程没有一处报错.
+    if let Some(holder) = sessions
+        .iter()
+        .find(|(_, other)| temp_path_matches(other.temp_path.as_deref(), &temp_path))
+        .map(|(other_id, _)| other_id.clone())
+    {
         return Err(std::io::Error::other(format!(
             "file_transfer_path_in_use: 暂存路径 {} 已被活跃会话 {holder} 持有; 等它完成或先 @file-cancel 它",
             temp_path.display()
@@ -269,32 +288,31 @@ pub fn execute_file_end(payload: &str) -> std::io::Result<Value> {
     let transfer_id = require_string(&value, "transfer_id", VERB)?.to_owned();
     let declared_sha256 = require_string(&value, "sha256", VERB)?.to_owned();
 
-    let (final_path, temp_path, size, written, declared_in_put) = {
-        let mut sessions = transfers().lock().expect("transfer table poisoned");
-        let Some(session) = sessions.get_mut(&transfer_id) else {
-            return Err(std::io::Error::other(format!(
-                "@file-end 未知 transfer_id: {transfer_id}"
-            )));
-        };
-        if !session.is_upload {
-            return Err(std::io::Error::other("@file-end 只用于上传会话"));
-        }
-        (
-            session.path.clone(),
-            session.temp_path.clone().expect("upload 会话必有暂存路径"),
-            session.size,
-            session.written,
-            session.expected_sha256.clone(),
-        )
+    // 整个提交过程都持着会话表锁: 校验、哈希、rename、退役必须在同一个临界区里.
+    // 中间放锁会留下一条真实的错配路径 —— 客户端在 @file-end 超时后重试, 并发发现是
+    // 取消 + 立即以同 id 同目标重开: 取消把暂存文件 unlink, 重开在同一条暂存路径上建新文件,
+    // 然后本次 @file-end 继续跑, 把**新会话的半成品** rename 到目标上, 最后按 id 退役掉新会话.
+    // 结果是: 第一个请求回 state:"committed" 且带着旧内容的 sha, 而盘上是第二次上传的前缀.
+    // 代价是哈希期间其他传输的 chunk 写入会排队 —— 用一次串行换掉一条无损却错得很安静的路径.
+    let mut sessions = transfers().lock().expect("transfer table poisoned");
+    let Some(session) = sessions.get(&transfer_id) else {
+        return Err(std::io::Error::other(format!(
+            "@file-end 未知 transfer_id: {transfer_id}"
+        )));
     };
+    if !session.is_upload {
+        return Err(std::io::Error::other("@file-end 只用于上传会话"));
+    }
+    let final_path = session.path.clone();
+    let temp_path = session.temp_path.clone().expect("upload 会话必有暂存路径");
+    let size = session.size;
+    let written = session.written;
+    let declared_in_put = session.expected_sha256.clone();
 
     // 双校验: 字节数先查 (便宜), 摘要后算 (贵)
     if written != size {
         let _ = std::fs::remove_file(&temp_path);
-        transfers()
-            .lock()
-            .expect("transfer table poisoned")
-            .remove(&transfer_id);
+        sessions.remove(&transfer_id);
         return Err(std::io::Error::other(format!(
             "@file-end 字节数不符: 已写 {written}, 声明 {size} — 半成品已清理"
         )));
@@ -302,10 +320,7 @@ pub fn execute_file_end(payload: &str) -> std::io::Result<Value> {
     let actual_sha256 = sha256_file(&temp_path)?;
     if !actual_sha256.eq_ignore_ascii_case(&declared_sha256) {
         let _ = std::fs::remove_file(&temp_path);
-        transfers()
-            .lock()
-            .expect("transfer table poisoned")
-            .remove(&transfer_id);
+        sessions.remove(&transfer_id);
         return Err(std::io::Error::other(format!(
             "@file-end 摘要不符: 声明 {declared_sha256}, 实际 {actual_sha256} — 半成品已清理"
         )));
@@ -314,10 +329,7 @@ pub fn execute_file_end(payload: &str) -> std::io::Result<Value> {
     if let Some(expected) = &declared_in_put {
         if !actual_sha256.eq_ignore_ascii_case(expected) {
             let _ = std::fs::remove_file(&temp_path);
-            transfers()
-                .lock()
-                .expect("transfer table poisoned")
-                .remove(&transfer_id);
+            sessions.remove(&transfer_id);
             return Err(std::io::Error::other(
                 "@file-end 与 @put-file 声明摘要不一致 — 半成品已清理",
             ));
@@ -326,20 +338,16 @@ pub fn execute_file_end(payload: &str) -> std::io::Result<Value> {
 
     // 提交: 原子改名到目标 (同目录 rename, 失败回退为复制)
     if std::fs::rename(&temp_path, &final_path).is_err() {
-        std::fs::copy(&temp_path, &final_path)
-            .map_err(|e| {
-                let _ = std::fs::remove_file(&temp_path);
-                std::io::Error::other(format!("提交文件失败 (rename 与 copy 均失败): {e}"))
-            })?;
+        std::fs::copy(&temp_path, &final_path).map_err(|e| {
+            let _ = std::fs::remove_file(&temp_path);
+            sessions.remove(&transfer_id);
+            std::io::Error::other(format!("提交文件失败 (rename 与 copy 均失败): {e}"))
+        })?;
         let _ = std::fs::remove_file(&temp_path);
     }
     // 提交成功即退役会话. 不退的话, 这条已完成的条目会在 TTL 到期时被 sweep 拿去"回收"它的
-    // 暂存路径 —— 而那个路径是按目标文件推导的, 同一目标的**下一次**上传正用着它, 于是
-    // 一次无关的过期会把别人正在推进的 178 MB 删掉.
-    transfers()
-        .lock()
-        .expect("transfer table poisoned")
-        .remove(&transfer_id);
+    // 暂存路径 —— 而那个路径是按目标文件推导的, 同一目标的**下一次**上传正用着它.
+    sessions.remove(&transfer_id);
     Ok(json!({
         "kind": "file-transfer",
         "state": "committed",
@@ -442,6 +450,34 @@ pub fn execute_file_read(payload: &str) -> std::io::Result<Value> {
         "eof": eof,
         "sha256": expected_sha256,
     }))
+}
+
+/// 暂存路径是否指同一个文件。
+///
+/// 直接比 `PathBuf` 是**文本相等**, 挡不住 `a.bin` 与 `./a.bin` 这类同义写法; 在 Windows
+/// (大小写不敏感卷) 上也挡不住 `Report.pdf` 与 `report.pdf`. 这里先做词法规范化, 再按平台
+/// 决定是否折叠大小写 —— 与 `validate_transfer_path` 的口径一致: 词法层面尽力, 不做
+/// `canonicalize` (它要求路径存在, 而暂存文件此刻可能还没创建).
+///
+/// 已知未覆盖: macOS 默认的 APFS 也是大小写不敏感, 但 `cfg!(windows)` 判不出来 —— 那一侧
+/// 残留一个"同目标、仅字母大小写不同、并发上传"的窗口. 触发它需要客户端自己制造这种请求,
+/// 本规格把它记为已知边界而不是假装已解决.
+fn temp_path_matches(a: Option<&Path>, b: &Path) -> bool {
+    let Some(a) = a else {
+        return false;
+    };
+    let normalize = |path: &Path| {
+        let joined = path
+            .components()
+            .filter(|component| !matches!(component, std::path::Component::CurDir))
+            .collect::<PathBuf>();
+        if cfg!(windows) {
+            joined.to_string_lossy().to_lowercase()
+        } else {
+            joined.to_string_lossy().into_owned()
+        }
+    };
+    normalize(a) == normalize(b)
 }
 
 /// 删一个暂存文件。NotFound 视为已删 (幂等), 其他错误记 warn 但不算失败 ——
@@ -1222,6 +1258,72 @@ mod tests {
 
         // 收尾: 把 fresh 也回收掉, 别把会话留在表里影响后续用例
         execute_file_cancel(&format!(r#"{{"transfer_id":"{fresh}"}}"#)).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn resume_reuses_the_live_session_instead_of_being_refused() {
+        // 断线重连后客户端就是拿同一个 id + resume:true 回来的 —— 这是
+        // specs/file-transfer-control-spec.md 的"传输 SHALL 可续传"本身. 准入若把它一并拒掉,
+        // 续传这个能力就等于不存在.
+        let _guard = TRANSFER_TABLE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let dir = std::env::temp_dir().join(format!("rdog-ft-attach-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("attach.bin");
+        let target_json = escape_json(&target.display().to_string());
+        let tid = unique_id("attach");
+        let first = BASE64_STANDARD.encode(b"AAAAA");
+        let second = BASE64_STANDARD.encode(b"BBBBB");
+
+        execute_put_file(&format!(
+            r#"{{"transfer_id":"{tid}","path":"{target_json}","size":10}}"#
+        ))
+        .unwrap();
+        execute_file_chunk(&format!(
+            r#"{{"transfer_id":"{tid}","offset":0,"data":"{first}"}}"#
+        ))
+        .unwrap();
+
+        // 重连: 同一个 id + resume:true → 接着用, 不从 0 重来, 也不报错
+        let resumed = execute_put_file(&format!(
+            r#"{{"transfer_id":"{tid}","path":"{target_json}","size":10,"resume":true}}"#
+        ))
+        .unwrap();
+        assert_eq!(resumed["state"], "resumed");
+        assert_eq!(resumed["written"], 5);
+        assert_eq!(resumed["next_offset"], 5);
+
+        // 续传之后继续写, 并正常提交
+        execute_file_chunk(&format!(
+            r#"{{"transfer_id":"{tid}","offset":5,"data":"{second}"}}"#
+        ))
+        .unwrap();
+        let sha = format!("{:x}", Sha256::digest(b"AAAAABBBBB"));
+        let done = execute_file_end(&format!(
+            r#"{{"transfer_id":"{tid}","sha256":"{sha}"}}"#
+        ))
+        .unwrap();
+        assert_eq!(done["state"], "committed");
+        assert_eq!(std::fs::read(&target).unwrap(), b"AAAAABBBBB");
+
+        // 活跃会话上换目标路径仍必须拒绝: 复用 id 去写另一个文件是错误, 不是续传
+        let other = dir.join("other.bin");
+        execute_put_file(&format!(
+            r#"{{"transfer_id":"{tid}","path":"{target_json}","size":10}}"#
+        ))
+        .unwrap();
+        let err = execute_put_file(&format!(
+            r#"{{"transfer_id":"{tid}","path":"{}","size":10,"resume":true}}"#,
+            escape_json(&other.display().to_string())
+        ))
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("file_transfer_id_in_use"),
+            "换目标不应被当成续传: {err}"
+        );
+        execute_file_cancel(&format!(r#"{{"transfer_id":"{tid}"}}"#)).unwrap();
         let _ = std::fs::remove_dir_all(&dir);
     }
 
