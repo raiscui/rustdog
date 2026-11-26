@@ -493,6 +493,10 @@ bulk 一律以 `iroh_bulk_path_pin_unavailable` 拒绝. **适配器补上路径 
 > 实现状态 (2026-11-26): 判定表、三格语义与快照格式已落地在 `src/bulk_path.rs`, iroh lane 上的
 > bulk 动词已经按能力表以 `iroh_bulk_path_pin_unavailable` 拒绝。**正对照仍未执行** —— 它需要一条
 > 真的走 relay 的拓扑 (RAI-366), 在那之前"relay 上 bulk 字节为 0"这条不做结论。
+>
+> 跑批单 (`handoffs/rai367/positive-control-runsheet.md`) 已写好并写清了三件边界: iroh lane 今天
+> 不承载 bulk 数据面, 所以单子执行的是**仪表验证 + 门禁验证**而不是 A 类验收; daemon 侧 relay 计数
+> 尚未接线, 所以快照今天只有客户端那一半; **拿不到正对照计数时, 门禁那个"零"不得用于任何结论**。
 
 ---
 
