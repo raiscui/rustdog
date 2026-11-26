@@ -27,6 +27,8 @@ script 在 `copy-dylibs` 里 panic。同一时期 `main` 上还有 `recording_e2
 | `test (windows-latest)` | 跑 `cargo test --bin rdog` (Windows 上无 e2e, 见 §4) | 测试失败 |
 | `knowledge carriers` | 载体断言 + 记账报告 | 载体与 `src/` 分叉 |
 
+**检查名的真相源是 `.github/workflows/ci.yml` 里的 job 名**, 不是本表 —— 而且**不要改用 reusable workflow (`uses:`)** : GitHub 会把被调用工作流里的检查重命名成 `<caller name> / <callee name>` (实测 `build (macos-latest) / build`), 必需表里这些名字就永远不报到了。三个 OS 的 build / test 步骤因此是复制的, 改一处要改三处。
+
 **检查名的真相源是 `.github/workflows/ci.yml` 里的 job 名**, 不是本表。改 job 名必须同票
 改本表 **和** 仓库设置里的必需检查列表 —— 后者只有仓库管理员能改, 改 workflow 的人拿不到
 这个权限时, 在 PR 里写明"需要在 Settings → Branches 里换名字", 不要静默放行。

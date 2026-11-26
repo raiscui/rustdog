@@ -131,7 +131,7 @@ def ort_sys_version(repo_root: Path) -> str:
             in_pkg = True
         elif in_pkg and line.startswith("version = "):
             return line.split('"')[1]
-    die(f"Cargo.lock has no {ORT_SYS_CRATE} package entry")
+    raise RuntimeError(f"Cargo.lock has no {ORT_SYS_CRATE} package entry")
 
 
 def dist_table_text(version: str) -> str:
