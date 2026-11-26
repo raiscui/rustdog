@@ -932,43 +932,97 @@ pub fn run_client_pty_attach(
 /// `rdog control <target> @<line>` 和 `rdog ui-script run` 都需要拿到
 /// `@response` / `@savefile` 等 frames。调用方再决定打印到 stdout、
 /// 保存到 `rdog_downloads` 还是写入 UI script run 目录。
+/// 多行 one-shot 的一次执行结果。
+///
+/// 失败不再折叠成一个 `Err`: 超时发生在第几条、此前已经收到几帧, 是读日志的人唯一能
+/// 用来区分「daemon 回了空结果」与「客户端在第 N 条上没等到应答」的依据 (RAI-579)。
+pub struct ControlLinesOutcome {
+    /// 已经完整收到的每一行的帧 (顺序与输入一致, 只到失败那条之前)。
+    pub line_frames: Vec<Vec<ControlFrame>>,
+    /// `None` = 全部成功。
+    pub failure: Option<ControlLinesFailure>,
+}
+
+pub struct ControlLinesFailure {
+    /// 失败发生在第几条 (从 0 起); 还没发出第一条时也是 0。
+    pub line_index: usize,
+    /// 这一组一共几条。
+    pub total_lines: usize,
+    /// 是否已经发出过至少一条请求 —— 区分「连不上/解析不到目标」与「中途超时」。
+    pub dispatched_any: bool,
+    pub cause: io::Error,
+}
+
+fn failed_before_any_line(total_lines: usize, cause: io::Error) -> ControlLinesOutcome {
+    ControlLinesOutcome {
+        line_frames: Vec::new(),
+        failure: Some(ControlLinesFailure {
+            line_index: 0,
+            total_lines,
+            dispatched_any: false,
+            cause,
+        }),
+    }
+}
+
 pub fn send_control_lines_collect_frames(
     namespace: Option<String>,
     target_name: Option<String>,
     router_entrypoints: Vec<String>,
     request_timeout_ms: u64,
     lines: &[String],
-) -> io::Result<Vec<Vec<ControlFrame>>> {
+) -> ControlLinesOutcome {
     if lines.is_empty() {
-        return Ok(Vec::new());
+        return ControlLinesOutcome {
+            line_frames: Vec::new(),
+            failure: None,
+        };
     }
-    let namespace =
-        crate::zenoh_identity::resolve_namespace(namespace.as_deref(), target_name.as_deref())?;
-    let router_entrypoints = zenoh_runtime::resolve_client_connect_endpoints(
+    let total_lines = lines.len();
+    let namespace = match crate::zenoh_identity::resolve_namespace(
+        namespace.as_deref(),
+        target_name.as_deref(),
+    ) {
+        Ok(namespace) => namespace,
+        Err(err) => return failed_before_any_line(total_lines, err),
+    };
+    let router_entrypoints = match zenoh_runtime::resolve_client_connect_endpoints(
         &router_entrypoints,
         Duration::from_millis(request_timeout_ms),
         zenoh_runtime::UnixpipeClientProbe::new(Some(&namespace), target_name.as_deref()),
-    )?;
-    let session = zenoh_runtime::open_client_session(&router_entrypoints)?;
-    let current_target = resolve_target(
+    ) {
+        Ok(endpoints) => endpoints,
+        Err(err) => return failed_before_any_line(total_lines, err),
+    };
+    let session = match zenoh_runtime::open_client_session(&router_entrypoints) {
+        Ok(session) => session,
+        Err(err) => return failed_before_any_line(total_lines, err),
+    };
+    let current_target = match resolve_target(
         &session,
         &namespace,
         target_name.as_deref(),
         Duration::from_millis(request_timeout_ms),
-    )?;
-    let mut session_bridge = build_client_session_bridge(
+    ) {
+        Ok(target) => target,
+        Err(err) => return failed_before_any_line(total_lines, err),
+    };
+    let mut session_bridge = match build_client_session_bridge(
         &session,
         &current_target.keyexpr_root,
         &namespace,
         &current_target.control_key,
         Duration::from_millis(request_timeout_ms),
-    )?;
+    ) {
+        Ok(bridge) => bridge,
+        Err(err) => return failed_before_any_line(total_lines, err),
+    };
     let timeout = Duration::from_millis(request_timeout_ms);
-    let mut line_frames = Vec::with_capacity(lines.len());
+    let mut line_frames: Vec<Vec<ControlFrame>> = Vec::with_capacity(total_lines);
+    let mut failure = None;
 
-    let mut result: io::Result<Vec<Vec<ControlFrame>>> = Ok(Vec::new());
     for (idx, line) in lines.iter().enumerate() {
-        match execute_remote_request(
+        let failure_reason = match execute_remote_request(
             &session,
             &current_target.control_key,
             line,
@@ -976,26 +1030,34 @@ pub fn send_control_lines_collect_frames(
             &mut session_bridge,
         ) {
             Ok(response) => match ControlFrame::parse_inbound_result_payload(response.as_str()) {
-                Ok(frames) => line_frames.push(frames),
-                Err(err) => {
-                    result = Err(err);
-                    break;
+                Ok(frames) => {
+                    line_frames.push(frames);
+                    None
                 }
+                Err(err) => Some(err),
             },
             Err(err) => {
                 log::warn!("zenoh control multi-line request failed at line index {idx}: {err}");
-                result = Err(err);
-                break;
+                Some(err)
             }
+        };
+        if let Some(cause) = failure_reason {
+            failure = Some(ControlLinesFailure {
+                line_index: idx,
+                total_lines,
+                dispatched_any: true,
+                cause,
+            });
+            break;
         }
     }
 
-    // best-effort close: 上面 `result` 已经是请求侧结果,关闭失败不掩盖它
+    // best-effort close: 上面 `failure` 已经是请求侧结果,关闭失败不掩盖它
     let _ = close_client_session_bridge(&mut session_bridge);
 
-    match result {
-        Ok(_) => Ok(line_frames),
-        Err(err) => Err(err),
+    ControlLinesOutcome {
+        line_frames,
+        failure,
     }
 }
 

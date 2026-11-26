@@ -2393,37 +2393,135 @@ fn run_control_multi_one_shot(
         full_args.push((*line).to_string());
     }
 
-    let run_once = || {
-        Command::new(rdog_binary_path())
+    // 每次尝试都带**真实预算**: `Command::output()` 没有超时, 客户端一旦挂住
+    // (daemon 卡死/应答不到) 就会把整条用例拖到 job 级超时, 日志只剩
+    // "has been running for over N seconds" —— 那是 RAI-579 记录的第二种形状。
+    // 预算到点就杀掉并在 stderr 留下可分辨的标记, 让失败自证是「客户端被预算杀了」
+    // 而不是「daemon 回了空结果」。
+    const KILLED_MARKER: &str = "<control 超时被杀>";
+    let run_once = |budget: Duration| {
+        let mut child = Command::new(rdog_binary_path())
             .env("HOME", test_isolated_home())
             .args(&full_args)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .output()
-            .expect("control should run to completion")
+            .spawn()
+            .expect("control should spawn");
+        let attempt_deadline = Instant::now() + budget;
+        loop {
+            match child.try_wait() {
+                Ok(Some(_)) => break,
+                Ok(None) if Instant::now() >= attempt_deadline => {
+                    let _ = child.kill();
+                    break;
+                }
+                Ok(None) => thread::sleep(Duration::from_millis(20)),
+                Err(err) => panic!("control 子进程状态读取失败: {err}"),
+            }
+        }
+        let output = child
+            .wait_with_output()
+            .expect("control should run to completion");
+        let mut stdout = String::from_utf8_lossy(&output.stdout).to_string();
+        let mut stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        if !output.status.success() && Instant::now() >= attempt_deadline {
+            stderr.push_str(KILLED_MARKER);
+        }
+        (output.status, stdout, stderr)
     };
 
     let deadline = Instant::now() + timeout;
-    let mut output = run_once();
-    let mut stdout = String::from_utf8_lossy(&output.stdout).to_string();
-    let mut stderr = String::from_utf8_lossy(&output.stderr).to_string();
-    let mut status = output.status;
+    let mut output = run_once(timeout);
+    let mut stdout = output.1.clone();
+    let mut stderr = output.2.clone();
+    let mut status = output.0;
     loop {
         let combined = format!("{stdout}\n{stderr}");
-        let should_retry = (combined.contains("未找到目标 service")
-            || combined.contains("Unable to connect to any of"))
-            && Instant::now() < deadline;
-        if !should_retry {
+        let missing_target = combined.contains("未找到目标 service")
+            || combined.contains("Unable to connect to any of");
+        if !missing_target {
             return (status, stdout, stderr);
         }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            // 重试窗口用尽后**再给一次足够长的预算**, 让客户端把错误说完:
+            // 否则最后一次尝试只剩窗口残留, 客户端会先被预算杀掉, stderr 只剩
+            // `<control 超时被杀>`, 它自己那句「第几条失败」永远说不出口
+            // (macOS 的 discovery 比 Linux 慢, CI 实测踩到)。
+            const FINAL_ATTEMPT_BUDGET: Duration = Duration::from_secs(20);
+            return run_once(FINAL_ATTEMPT_BUDGET);
+        }
         thread::sleep(Duration::from_millis(150));
-        output = run_once();
-        stdout = String::from_utf8_lossy(&output.stdout).to_string();
-        stderr = String::from_utf8_lossy(&output.stderr).to_string();
-        status = output.status;
+        output = run_once(remaining);
+        stdout = output.1.clone();
+        stderr = output.2.clone();
+        status = output.0;
     }
 }
+
+/// RAI-579 负对照: 客户端挂住时, helper 必须按预算收手并在 stderr 点名。
+///
+/// 形状是确定性的: 冻住 daemon (`kill -STOP`) 之后 TCP 仍能连上、zenoh 应答永远不到 ——
+/// 客户端因此会一直等。修前 helper 用 `Command::output()`, 没有超时也没有 kill,
+/// 这条用例会挂到 job 级超时 (本机实测 >20s 不返回); 修后它在预算附近杀掉客户端并留下
+/// `<control 超时被杀>`。
+#[cfg(unix)]
+#[test]
+fn multi_one_shot_helper_must_not_hang_past_its_budget() {
+    let daemon_name = unique_name("multi-hang");
+    let listen_port = allocate_tcp_port();
+    let (mut daemon, config_path, _entrypoint, buffer) =
+        start_zenoh_daemon_with_combined_output(&daemon_name, listen_port);
+    wait_until_output_contains(
+        &mut daemon,
+        &buffer,
+        "zenoh router daemon ready",
+        Duration::from_secs(8),
+    )
+    .expect("daemon should report ready");
+
+    let daemon_pid = daemon.id().to_string();
+    let signal = |name: &str| {
+        let _ = Command::new("kill")
+            .args([name, daemon_pid.as_str()])
+            .status();
+    };
+    signal("-STOP");
+
+    let budget = Duration::from_secs(2);
+    let started = Instant::now();
+    let (status, stdout, stderr) = run_control_multi_one_shot(
+        &["--transport", "zenoh", "--target-name", &daemon_name],
+        &["@ping"],
+        budget,
+    );
+    let elapsed = started.elapsed();
+
+    // 无论断言结果如何都要把 daemon 放开, 否则 `stop_child` 收不掉它。
+    signal("-CONT");
+    stop_child(&mut daemon);
+    let _ = fs::remove_file(&config_path);
+
+    assert!(
+        !status.success(),
+        "冻住的 daemon 不应成功; stdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("<control 超时被杀>"),
+        "失败文本必须点名「客户端被预算杀掉」, 否则读日志的人分不出是挂住还是空应答; stderr:\n{stderr}"
+    );
+    assert!(
+        elapsed < Duration::from_secs(15),
+        "helper 必须在预算附近收手, 实测 {elapsed:?}"
+    );
+}
+
+// 说明 (RAI-579): 「多行 one-shot 失败时 CLI 打出第几条 / 共几条 / 已收到几帧」这条
+// 只保留**纯单测** (src/control_invocation.rs 的 `multi_one_shot_failure_message_*`)。
+// 曾经想用「目标 daemon 不存在」做端到端, 但它依赖 discovery 耗时: macOS 上 3s 窗口内
+// 客户端还没开口就被预算杀掉, 只剩 `<control 超时被杀>`; 把窗口抬到 20s+20s 收尾, 就变成
+// 一个 40s 的用例, 不值得。端到端读数改为人工一次性取证 (见账本/PR)。
 
 #[test]
 fn control_multi_one_shot_should_run_lines_in_order_for_zenoh_profile() {

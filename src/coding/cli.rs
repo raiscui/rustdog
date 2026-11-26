@@ -301,19 +301,20 @@ fn run_inner(options: CodingCli) -> Result<CodingReply, CodingError> {
         ));
     }
     let line = format!("@coding:{payload}");
-    let frames = crate::zenoh_control::send_control_lines_collect_frames(
+    let outcome = crate::zenoh_control::send_control_lines_collect_frames(
         namespace,
         target,
         endpoints,
         5000,
         &[line],
-    )
-    .map_err(|err| {
-        CodingError::new(
+    );
+    if let Some(failure) = outcome.failure {
+        return Err(CodingError::new(
             ErrorCode::UnknownOutcome,
-            format!("control transport failed: {err}"),
-        )
-    })?;
+            format!("control transport failed: {}", failure.cause),
+        ));
+    }
+    let frames = outcome.line_frames;
     let mut responses = frames
         .into_iter()
         .flatten()
