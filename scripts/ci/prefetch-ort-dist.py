@@ -158,7 +158,8 @@ def resolve_dist(version: str, target: str) -> tuple[str, str]:
     ]
     for row in rows:
         if len(row) == 4 and row[0] == target:
-            return row[2], row[3]
+            # DRILL (RAI-397 验收判据 2): 故意指向一个不存在的 dist, 模拟"外部依赖拉不到"。
+            return row[2].replace(".tar.lzma2", "-missing.tar.lzma2"), row[3]
     die(
         f"{ORT_SYS_CRATE} {version} ships no prebuilt binaries for {target} "
         f"(no row in {DIST_TABLE_MEMBER})"
