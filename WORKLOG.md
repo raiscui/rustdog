@@ -1276,6 +1276,22 @@ job summary 单列、**不计入 ran 集合**, 真机 lane 的 5 条命令与权
 zenoh_router_client 38/2 ignored)。
 - 提交: f3b3502
 
+### 2026-11-26 RAI-411 rebase 后的 sha 对照 (至 RAI-433 落地前的权宜记账)
+
+- 提交: 1d70df3 ci: 放量 integration target (RAI-411), 每个 target 的实际执行计数 > 0 变成硬判据
+- 提交: 0ce5a58 docs+ci: compile-only 明示为 compiled, not executed 并不计入 ran, 补齐真机 lane 跑法
+- 提交: 1300eb0 ci: target 归属改成显式分类表 + 双向对账, 修 6 处过期注释, 失败日志留全文
+- 提交: a45f1fa test(e2e): 隔离 HOME 改用短根目录, 修 macOS runner 上 unixpipe pipe 名超限
+- 提交: 9dbf80f test(e2e): 两条 ubuntu CI 连不上 daemon 的用例显式 ignore 并挂 RAI-464
+- 提交: e61bf76 fix(ci): windows 按 utf-8 解码 cargo 输出 + 三条 ubuntu 连不上 daemon 的用例按平台收窄
+- 提交: b6a44c7 fix(ci): 给 integration target 加 1500s 墙钟上限并输出 elapsed
+- 提交: 41ea26c test(e2e): unixpipe 候选用例先建 ~/.rdog/run 目录
+- 提交: 38ec425 test(e2e): stale unixpipe 用例也不假设运行目录已存在
+- 提交: dffd49b ci: windows 上 2 个 e2e target 显式豁免并挂 issue #162
+
+rebase 会重写分支上每个 commit 的 sha, 本票在合并前又被 rebase 了两次, 所以这里补一张对照表;
+按 `docs/agents/ci-merge-gate.md` §2 的口径, 这类 sha 漂移属于流程设计问题, 由 RAI-433 统一治 (合入后纯账本提交补记),
+不为它单独推提交刷 sha。
 ### 2026-11-26 RAI-411 第七个发现 (windows): e2e 不隔离 HOME, 两个 target 无法在 windows 执行
 
 - 提交: 7d96da8
