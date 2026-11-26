@@ -1160,10 +1160,12 @@ fn serve_bulk_request(
         GateVerdict::Ungated => {}
     }
 
+    log::info!("iroh bulk executing request_id={request_id:?}");
     let Some(outcome) = crate::control_core::execute_file_transfer_request(request_id, command)
     else {
         return refuse_frame(transport, request_id, LANE_REFUSED_CODE, LANE_REFUSED);
     };
+    log::info!("iroh bulk executed request_id={request_id:?}");
 
     let payload = response_payload(&outcome);
     let failed = payload
@@ -2544,8 +2546,17 @@ fn serve_lane(
     let subject = peer.to_string();
     loop {
         let Some(line) = transport.read_message()? else {
+            // 对端把写半边关了: 这是"没有回执"最常见的真相, 必须落日志而不是静默返回。
+            log::info!("iroh lane saw end of stream");
             return Ok(());
         };
+        // 诊断: 每条都记 verb + 字节数 —— 真机上"卡在第一块"到底是没收到、还是收到了没回,
+        // 这两行日志能分开。
+        log::info!(
+            "iroh lane line bytes={} verb={}",
+            line.len(),
+            line.split_once(':').map(|(verb, _)| verb).unwrap_or(line.as_str())
+        );
         if line.starts_with('{') {
             match serde_json::from_str::<Handshake>(&line) {
                 Ok(Handshake::Renew { grant }) => {
@@ -3177,7 +3188,16 @@ impl IrohBulkLane {
             Ok(Some(reply)) => Ok(reply),
             Ok(None) => Err(self.poison("对端在回执前关闭了连接".to_string())),
             Err(err) if err.kind() == io::ErrorKind::TimedOut => {
-                Err(self.poison(format!("等待回执超时 ({}ms)", timeout.as_millis())))
+                // 超时时把对端连接此刻的状态一起带出来: "对端已关 (原因 X)" 与 "对端还开着但没回"
+                // 是两条完全不同的线索, 只报"超时"就分不开。
+                let peer = match self.conn.close_reason() {
+                    Some(reason) => format!("对端已关: {reason:?}"),
+                    None => "对端连接仍开着".to_string(),
+                };
+                Err(self.poison(format!(
+                    "等待回执超时 ({}ms; {peer})",
+                    timeout.as_millis()
+                )))
             }
             Err(err) => Err(self.poison(format!("读回执失败: {err}"))),
         }

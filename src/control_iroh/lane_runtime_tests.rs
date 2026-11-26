@@ -33,6 +33,28 @@ async fn serve_admitted_fixture(conn: Connection) -> Result<()> {
     Ok(())
 }
 
+/// 客户端的 256 KiB 块 → base64 之后约 341 KiB 一行。daemon 的读循环必须能收下并回一行。
+async fn serve_echo_fixture(conn: Connection) -> Result<()> {
+    let (mut send, mut recv) = conn.accept_bi().await?;
+    let handshake = read_line(&mut recv).await?;
+    assert!(handshake.contains("\"op\":\"admit\""), "{handshake}");
+    send.write_all(b"{\"status\":\"admitted\"}\n").await?;
+    loop {
+        let Ok(line) = read_line(&mut recv).await else {
+            break;
+        };
+        if line.starts_with("@ping") {
+            send.write_all(b"@response {\"pong\":true}\n").await?;
+        } else {
+            // 回一行带长度的回执: 只有整行都被 daemon 侧读进来才会到达这里。
+            send.write_all(format!("@response {{\"len\":{}}}\n", line.len()).as_bytes())
+                .await?;
+        }
+    }
+    let _ = send.finish();
+    Ok(())
+}
+
 async fn read_line(recv: &mut RecvStream) -> Result<String> {
     let mut buffer = Vec::new();
     loop {
@@ -109,6 +131,55 @@ fn a_ping_over_the_real_line_transport_survives_the_single_runtime() {
         .expect("the lane handshake and one request must run without nesting block_on")
         .expect("@ping must be answered");
     assert!(reply.contains("\"pong\":true"), "{reply}");
+
+    rt.block_on(async {
+        let _ = timeout(CONNECT, server.close()).await;
+    });
+    acceptor.abort();
+    rt.shutdown_background();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_bulk_sized_chunk_line_is_read_and_answered() {
+    // 真机现场: 握手通过、`@put-file` 也回了, 但第一块 (256 KiB 载荷 → base64 后约 341 KiB 一行)
+    // 等不到回执。这里用同尺寸的一行直接压同一条传输路径, 把"帧太大 / 行读取卡住"与"别的状态"
+    // 分开。
+    let dir = std::env::temp_dir().join(format!("rdog-lane-bigline-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("scratch dir");
+    let cfg = client_config_for(&dir.join("client.key"));
+
+    let rt = runtime().expect("runtime");
+    let server_key = SecretKey::generate();
+    let (server, addr) = rt.block_on(async {
+        let server = endpoint(server_key, Some("127.0.0.1:0".parse().unwrap()), TEST_ALPN, None)
+            .await
+            .expect("fixture endpoint");
+        let addr = server.addr();
+        (server, addr)
+    });
+    let acceptor = {
+        let server = server.clone();
+        rt.spawn(async move {
+            if let Ok(Some(incoming)) = timeout(CONNECT, server.accept()).await {
+                if let Ok(conn) = incoming.await {
+                    let _ = serve_echo_fixture(conn).await;
+                }
+            }
+        })
+    };
+
+    let payload = "A".repeat(256 * 1024);
+    let line = format!("@file-chunk:{{\"transfer_id\":\"t\",\"offset\":0,\"data\":\"{payload}\"}}");
+    let expected = line.len();
+    let reply = with_bulk_lane_at(cfg, addr, move |lane| lane.request(&line, CONNECT))
+        .map_err(|err| err.to_string())
+        .expect("the lane must hand a bulk-sized line through")
+        .expect("a bulk-sized line must be answered");
+    assert!(
+        reply.contains(&format!("\"len\":{expected}")),
+        "回执里的长度必须与整行一致: {reply}"
+    );
 
     rt.block_on(async {
         let _ = timeout(CONNECT, server.close()).await;
