@@ -1276,6 +1276,16 @@ job summary 单列、**不计入 ran 集合**, 真机 lane 的 5 条命令与权
 zenoh_router_client 38/2 ignored)。
 - 提交: f3b3502
 
+### 2026-11-26 RAI-411 第六个真缺陷 (macos): unixpipe e2e 假设 ~/.rdog/run 已存在
+
+- 提交: (本条随修复提交记入下一次账本)
+
+`zenoh_unixpipe_fast_path::empty_target_should_use_local_default_even_when_extra_fifo_candidate_exists`
+在 macos runner 上 `mkfifo /Users/runner/.rdog/run/lde50254__x.lde50254.pipe_uplink 失败` ——
+新 HOME 里 `~/.rdog/run` 还没被任何 daemon 建出来, 而本地开发机通常早就有了, 所以本地一直绿。
+用例自己造候选就得自己保证目录在: `create_fake_uplink_candidate` 先 `create_dir_all(parent)`。
+本地 linux 上该 target 被 `cfg(target_os = "macos")` 门掉 (0 tests 可跑), 所以这条只有
+macos runner 能验证 —— 编译证据是 `cargo test --no-run --test zenoh_unixpipe_fast_path` 通过。
 ### 2026-11-26 RAI-411 第五个真缺陷 (windows): target 没有墙钟上限
 
 - 提交: 0a85b3f
