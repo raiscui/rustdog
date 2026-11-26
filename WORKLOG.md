@@ -1111,3 +1111,18 @@ RAI-417 的会话表只在内存里: daemon 重启后, 盘上留着的半成品�
 索引缺失不凭空创建) 加 `forget_sessions_for_tests(&[ids])`。macOS / Windows 的默认索引路径只经编译期
 验证, 真实重启续传只在 Linux 上跑过。
 - 提交: 89ace73
+
+### RAI-424 rebase 到 `f9e67da` 之后的 sha 对照, 以及评审 M1/M2 修复
+
+- 提交: 192ab12 (索引持久化本体)
+- 提交: c09ad28 (评审 M1/M2: 恢复路径按不可信输入校验 + 索引按 daemon 实例分文件)
+
+M1 是评审抓出的**本地提权面**, 不是风格问题: `restore_index()` 把索引里的 `target_path` /
+`temp_path` 原样当真相, 而 sweep 会按 `temp_path` `remove_file`、`@file-end` 会按它 `rename`、
+`@file-chunk` 会向它追加 —— 于是能写 `partials.json` 的本地主体可以让 daemon 操作任意路径,
+本模块"请求路径不可信"的决策在恢复路径上被整个绕过。修法是恢复时对目标跑
+`validate_transfer_path` 并要求 `temp_path == staging_path(target)` (归一后相等), 不符即丢条;
+规格纪律表补上第四行「账本是用户可写的输入」。
+M2 是同一类前提错误: 索引原本每用户一份而每个 daemon 整张覆写, 同用户两个 daemon 会互相抹条目、
+互相把幽灵条目写回。改成 `<state>/rdog/file-transfer/<namespace>/<daemon_name>/partials.json`,
+两段名字归一成安全单段。
