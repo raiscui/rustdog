@@ -290,14 +290,11 @@ fn daemon_control_lane_should_roundtrip_request_id_in_response() {
     let _ = daemon.wait();
 }
 
-// 在 ubuntu CI runner 上, control client 连不上刚起的 daemon:
-//   @response {"id":7,"code":70,"error":"no connection could be established: (no successful connection)"}
-// 本地 (linux/macos 开发机) 稳定通过, 说明是 CI runner 上的连接前提 (端口/回环/fast path)
-// 而不是消息语义。显式 ignore 而不是删用例: 归因与复现条件见 RAI-464。
-#[cfg_attr(
-    target_os = "linux",
-    ignore = "ubuntu CI: control client 无法连上刚启动的 daemon (code 70); 见 RAI-464"
-)]
+// `@key` 的真实注入走 enigo: linux 后端必须先连上 X11 / Wayland display, 否则
+// `Enigo::new` 返回 `no connection could be established` (code 70), 与 control
+// client 到 daemon 的连接无关 (RAI-464 归因订正)。因此本用例的机器前提是
+// "有一个可用的显示会话", CI 的 ubuntu job 由 `xvfb-run` 提供 (见 ci.yml
+// "Integration targets" 步骤); runner 上没有 display 时这条会确定性失败。
 #[test]
 fn daemon_control_lane_should_accept_key_object_payload_with_request_id() {
     let port = next_free_port();

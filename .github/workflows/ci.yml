@@ -199,6 +199,13 @@ jobs:
       # RAI-411: `tests/` 下的 integration target 以前一个都没在 CI 跑过。
       # 清单与每个 target 的「实际执行计数 > 0」判据都在脚本里; 需要真实桌面的
       # target 在该脚本里标为 compile-only 并写进 job summary, 不做静默 skip。
+      #
+      # RAI-464: `@key` / `@type` 的真实注入走 enigo, 而 linux 后端必须先连上
+      # X11 或 Wayland display。runner 两者都没有时 `Enigo::new` 直接报
+      # `no connection could be established: (no successful connection)` (code 70),
+      # 于是「注入成功」类断言在无显示会话的机器上确定性失败 —— 这是环境前提,
+      # 不是时序或连接竞态。因此本步在虚拟 X display 下执行: 断言保持原样,
+      # 环境按测试的假设显式提供 (同 TERM 那条 solution 的口径)。
       - name: Integration targets
         shell: bash
         env:
@@ -207,8 +214,11 @@ jobs:
           RDOG_JOB_STARTED_AT_FILE: ${{ runner.temp }}/job-started-at
           RDOG_JOB_TIMEOUT_MINUTES: *job-timeout-minutes
         run: |
+          command -v xvfb-run >/dev/null && command -v xauth >/dev/null || \
+            sudo apt-get install -y xvfb xauth
           PY=$(command -v python3 || command -v python)
-          "$PY" scripts/ci/run-integration-targets.py --os ubuntu-latest
+          xvfb-run -a --server-args="-screen 0 1280x1024x24" \
+            "$PY" scripts/ci/run-integration-targets.py --os ubuntu-latest
 
       # Recording e2e suite: spawn a real rdog daemon subprocess, drive it over TCP /
       # unixpipe, and assert the auto-stop pipeline commits a bundle and stamps the

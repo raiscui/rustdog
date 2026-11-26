@@ -68,12 +68,6 @@ CLASSIFICATION: dict[str, str] = {
 # 这是「平台不兼容 / 稳定红」的显式出口 —— 理由必须写明并挂 follow-up 票, 且会在 job summary
 # 里单列一行 "exempt on this platform", 所以它既不是静默 skip, 也不会被当成"跑过了"。
 PLATFORM_EXEMPTIONS: dict[str, dict[str, str]] = {
-    "zenoh_router_client": {
-        "ubuntu-latest": (
-            "跨进程连接 e2e 在 ubuntu runner 上不稳定 (连续三轮各挂一个不同用例, 全是 client "
-            "连不上刚启动的 daemon; macos 同用例全绿); 见 issue #163 / RAI-464"
-        )
-    },
     "control_websocket": {
         "windows-latest": (
             "windows runner 上整 target 挂死 (1500s 墙钟上限才终止), 用例未隔离 HOME; "
@@ -84,6 +78,29 @@ PLATFORM_EXEMPTIONS: dict[str, dict[str, str]] = {
         "windows-latest": (
             "windows runner 上 daemon 因遗留 service_name 守卫拒启动 (用例未隔离 HOME); "
             "见 issue #162"
+        )
+    },
+}
+
+# target -> {os: (理由, (用例名, ...))}: 该 target 在这个平台上**照常执行**, 但按名字跳过列出的
+# 用例。这是比 `PLATFORM_EXEMPTIONS` 细一档的出口 —— 整片不跑时「这个 target 有没有覆盖」无从判读,
+# 而具名跳过仍然计入 ran 集合 (passed 必须 > 0), 跳过的名字进 job summary, 并且脚本会验证这些
+# 名字在 target 里真实存在 (`-- --list`), 打错名字不会变成静默全跑。
+#
+# 用它而不是逐条 `#[ignore]` 的条件是**根因已定位**: 跳过的是同一族已知缺陷的全部用例,
+# 不是「下一轮换个用例继续红」。
+TARGET_TEST_SKIPS: dict[str, dict[str, tuple[str, tuple[str, ...]]]] = {
+    "zenoh_router_client": {
+        "ubuntu-latest": (
+            "zenoh-link-tls 1.8.0 首帧竞态: TLS/mTLS 用例偶发丢首条请求 —— daemon 侧 "
+            "`TX task failed: handshake not complete` (链路已 New transport opened), client 侧 "
+            "`peer closed connection without sending TLS close_notify`; `--test-threads=1` 串行跑"
+            "同样复现, 与 runner 和测试并发无关。生产侧的 TLS 正确性缺陷按 high 票承接, "
+            "见 issue #163",
+            (
+                "tls_enabled_daemon_should_serve_ca_client_and_reject_wrong_ca",
+                "mtls_daemon_should_require_client_certificate_and_accept_configured_client",
+            ),
         )
     },
 }
@@ -116,6 +133,25 @@ def platform_exempt_targets(os_name: str) -> list[tuple[str, str]]:
     ]
 
 
+def skipped_tests(target: str, os_name: str) -> tuple[str, tuple[str, ...]] | None:
+    """本平台该 target 的具名跳过 (理由, 用例名); 没有则 None。"""
+    entry = TARGET_TEST_SKIPS.get(target, {}).get(os_name)
+    return (entry[0], entry[1]) if entry else None
+
+
+def listed_tests(target: str) -> set[str]:
+    """`cargo test --test <target> -- --list` 拿到的用例名集合。"""
+    code, log, _ = run(["cargo", "test", "--test", target, "--", "--list"])
+    if code != 0:
+        return set()
+    names = {
+        line.rsplit(":", 1)[0].strip()
+        for line in log.splitlines()
+        if line.rstrip().endswith(": test")
+    }
+    return names
+
+
 def compile_only_targets(os_name: str) -> list[str]:
     return [
         target
@@ -135,6 +171,16 @@ def verify_inventory(repo_root: Path) -> list[str]:
     for target in CLASSIFICATION:
         if not (repo_root / "tests" / f"{target}.rs").exists():
             problems.append(f"CLASSIFICATION 里的 `{target}` 在 tests/ 下没有对应文件")
+    for target, os_entries in TARGET_TEST_SKIPS.items():
+        if target not in CLASSIFICATION:
+            problems.append(f"TARGET_TEST_SKIPS 里的 `{target}` 没有在 CLASSIFICATION 登记")
+        for os_name in os_entries:
+            if os_name not in ALL_OS:
+                problems.append(f"TARGET_TEST_SKIPS 里的 `{target}` 写了未知平台 `{os_name}`")
+            if os_name in PLATFORM_EXEMPTIONS.get(target, {}):
+                problems.append(
+                    f"`{target}` 在 {os_name} 同时被整片豁免与具名跳过 (两种口径打架)"
+                )
     for target, os_reasons in PLATFORM_EXEMPTIONS.items():
         if target not in CLASSIFICATION:
             problems.append(f"PLATFORM_EXEMPTIONS 里的 `{target}` 没有在 CLASSIFICATION 登记")
@@ -356,6 +402,7 @@ def main() -> int:
         return 1
 
     executed_rows: list[str] = []
+    skipped_rows: list[str] = []
     compile_rows: list[str] = []
     failures: list[str] = []
     budget_skipped: list[str] = []
@@ -412,10 +459,29 @@ def main() -> int:
         if out_of_budget():
             budget_skipped.append(target)
             continue
+        argv = ["cargo", "test", "--test", target]
+        skip = skipped_tests(target, args.os)
+        if skip:
+            reason, names = skip
+            known = listed_tests(target)
+            unknown = [name for name in names if name not in known]
+            if unknown:
+                # 名字打错 = 那条用例照旧跑, 但 summary 会写"已跳过" —— 这正是要防的静默漂移。
+                failures.append(f"{target}: 具名跳过的用例在 target 里不存在: {unknown}")
+                print(
+                    f"--- {target} skip list is stale ---\n跳过的名字在 `-- --list` 里找不到: "
+                    f"{unknown}\n",
+                    file=sys.stderr,
+                )
+                continue
+            skipped_rows.append(
+                f"| `{target}` | {', '.join(f'`{name}`' for name in names)} | {reason} |"
+            )
+            argv += ["--"] + [flag for name in names for flag in ("--skip", name)]
         started = time.monotonic()
         target_timeout = budget_timeout()
         code, log, extra_wait = run(
-            ["cargo", "test", "--test", target],
+            argv,
             timeout=target_timeout,
             budget_truncated=target_timeout < TARGET_TIMEOUT_SECONDS,
         )
@@ -477,6 +543,16 @@ def main() -> int:
         "| --- | --- | --- | --- | --- | --- |",
         *executed_rows,
     ]
+    if skipped_rows:
+        summary += [
+            "",
+            "**named skip on this platform** — target 照常执行并计入 ran 集合, 下列用例按名字跳过"
+            "(根因已定位的同一族缺陷, 不是「不跑当通过」):",
+            "",
+            "| target | 跳过的用例 | 理由 |",
+            "| --- | --- | --- |",
+            *skipped_rows,
+        ]
     exempt_rows = [
         f"| `{target}` | {reason} |" for target, reason in platform_exempt_targets(args.os)
     ]

@@ -27,7 +27,8 @@ tcp transport 启用 zenoh TLS: 传输层加密 + 服务器证书验证; mTLS �
 
 - **cargo feature**: zenoh `transport_tls` 加入主依赖 features (rdog 目前 default-features=false 未含)。
 - **配置键** (zenoh 原生, rdog 只做包装): `transport/link/tls/{root_ca_certificate, listen_private_key, listen_certificate, enable_mtls, connect_private_key, connect_certificate}`。
-- **证书布局**: `~/.rdog/tls/`: ca.pem + ca-key.pem (init 机器持有), daemon: {cert,key}.pem, mTLS 客户端: client-{cert,key}.pem。
+- **证书布局**: `~/.rdog/tls/`: ca.pem + ca-key.pem (init 机器持有), daemon: {cert,key}.pem, mTLS 客户端: client/{cert,key}.pem。
+- **初始化发布契约 (RAI-464)**: `tls-init` 先在**同目录**的 `<tls>.staging-<pid>-<n>` 里写完六件, 再整目录 `rename` 到 `~/.rdog/tls/` —— 所以 `tls/` 出现即等价于材料完整, 两个并发 `tls-init` 只可能有一方 rename 成功、落败方按已初始化跳过 (边建目录边写文件会让两套 CA 的材料交错落盘, TLS 握手必失败)。已存在的目录若六件不齐, `tls-init` **fail closed** 并点名缺失项 (不覆盖用户材料, 也不把半套材料当成已初始化)。
 - **endpoint 切换**: [tls] enabled 时 listen/connect endpoints 前缀 tcp/ → tls/; scout protocols 约束为 ["tls"] (避免明文 scout 混入)。
 - **与 Phase A 关系**: 叠加不替代 — usrpwd 留在 session 层 (serial 也靠它), TLS 管传输加密; mTLS 开启后 usrpwd 冗余但无害。
 - **rcgen 而非外部 minica**: 对齐零配置哲学与单二进制分发。
