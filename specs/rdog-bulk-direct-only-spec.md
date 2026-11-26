@@ -76,6 +76,13 @@ P7 第 3 项今天**既不可验证也不可证伪**: 候选没有任何 bulk �
 
 路径类别是**传输的属性**, 不是控制协议的属性. 现有四个传输适配器里只有一个有路径概念:
 
+**三格的定义与读者 (唯一登记处是 `src/bulk_path.rs` 的模块文档, 这里只引用)**: `path_aware` 是
+**传输适配器**的拓扑属性 (这条链路上有没有 relay 跳), `bulk_path_pin` 是适配器能否把 bulk 连接钉在
+直连上 (禁止迁移、排队与重传不得改走 relay), 两者由门禁 `decide()` 读; `path_class` 是**本次尝试
+此刻**观测到的类别, 由传输入口在 open 与每个 chunk 边界读。读到 `path_aware=false` ⇒ 放行并记
+`not_applicable`; 读到 `path_aware=true && bulk_path_pin=false` ⇒ **拒绝** (不采样也不放行);
+读到 `unknown` ⇒ **拒绝** (fail-closed, 永不强转 `direct`)。
+
 | 传输 | `path_aware` | `bulk_path_pin` | 说明 |
 | --- | --- | --- | --- |
 | TCP (`ControlInvocation::Tcp`) | false | — | 单跳 socket, 无 relay 概念 |
@@ -463,7 +470,8 @@ bulk 一律以 `iroh_bulk_path_pin_unavailable` 拒绝. **适配器补上路径 
 `bulk_bytes` 是载荷字节 (base64 解码后), `wire_bytes` 是实际压上控制行的 base64 字节 ——
 两者都要, 因为"relay 上为 0"证的是后者, 而用户关心的是前者.
 
-**判定式** (验收脚本按此逐字实现, 不做主观解读):
+**判定式** (可执行实现: `BulkPathSnapshot::relay_bytes_zero_own_half()` / `positive_control_holds()`,
+`src/bulk_path.rs`; 验收脚本按此逐字实现, 不做主观解读):
 
 - `relay_bytes_zero` 当且仅当 `path_class == "direct"` 且**两端各自**满足
   `relay_tx_after - relay_tx_before == 0` 且 `relay_rx_after - relay_rx_before == 0`.
@@ -481,6 +489,10 @@ bulk 一律以 `iroh_bulk_path_pin_unavailable` 拒绝. **适配器补上路径 
 | 负 | 同一条直连路径上的一次 bulk 尝试 | 两端 delta **== 0** |
 
 断言必须是**严格不等式** `> 0`. `>= 0` 的断言在计数器坏掉时照样通过, 等于没有正对照.
+
+> 实现状态 (2026-11-26): 判定表、三格语义与快照格式已落地在 `src/bulk_path.rs`, iroh lane 上的
+> bulk 动词已经按能力表以 `iroh_bulk_path_pin_unavailable` 拒绝。**正对照仍未执行** —— 它需要一条
+> 真的走 relay 的拓扑 (RAI-366), 在那之前"relay 上 bulk 字节为 0"这条不做结论。
 
 ---
 

@@ -71,6 +71,7 @@ mod win_dpi;
 mod test_support;
 // UI script runner 复用现有 line-control transport。
 // 这里保持 CLI-side orchestration,不新增 daemon-side UI 协议。
+mod bulk_path;
 mod transfer_cli;
 mod ui_script;
 mod ui_script_runner;
@@ -326,6 +327,7 @@ fn run(opts: input::Opts) -> Result<(), String> {
             get,
             local_path,
             restart,
+            bulk_path_json,
             dry_run,
             trace_dir,
             host,
@@ -496,16 +498,23 @@ fn run(opts: input::Opts) -> Result<(), String> {
                     invocation.clone(),
                     transfer_cli::chunk_ack_timeout_ms_from_config(),
                 );
+                // 客户端今天只走 TCP / WebSocket / Zenoh: 这三条链路上没有 relay 跳,
+                // 所以本端证据的 path_class 恒为 not_applicable (判定不适用, 不是"通过")。
+                let mut recorder = transfer_cli::BulkPathRecorder::new(
+                    format!("cli-{}", std::process::id()),
+                    crate::bulk_path::PathCapability::NOT_PATH_AWARE,
+                    bulk_path_json,
+                );
                 let receipt = match (put, get) {
                     (Some(local), None) => {
                         let remote = remote_path
                             .ok_or("`--put` 需要 `--remote-path <REMOTE>`".to_string())?;
-                        transfer_cli::run_put(&peer, &local, &remote, restart)?
+                        transfer_cli::run_put(&peer, &mut recorder, &local, &remote, restart)?
                     }
                     (None, Some(remote)) => {
                         let local = local_path
                             .ok_or("`--get` 需要 `--local-path <LOCAL>`".to_string())?;
-                        transfer_cli::run_get(&peer, &remote, &local)?
+                        transfer_cli::run_get(&peer, &mut recorder, &remote, &local)?
                     }
                     _ => return Err("`--put` 与 `--get` 互斥".to_string()),
                 };

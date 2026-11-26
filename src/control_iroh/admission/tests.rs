@@ -356,7 +356,11 @@ fn an_attached_session_survives_the_lease_that_detached_it() {
     admission
         .attach_session(&second, "reattached-session", |_| true)
         .unwrap();
-    assert_eq!(admission.session_of(&first), None, "the detached lease lets go");
+    assert_eq!(
+        admission.session_of(&first),
+        None,
+        "the detached lease lets go"
+    );
     assert_eq!(
         admission.session_of(&second),
         Some("reattached-session".into()),

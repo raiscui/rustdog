@@ -52,11 +52,9 @@ async fn exchange<T: Serialize + DeserializeOwned, U: Serialize + DeserializeOwn
         super::frame_put(&mut send, &response).await.unwrap();
         send.stopped().await.unwrap();
     };
-    timeout(super::CONNECT, async {
-        tokio::join!(outbound, inbound).0
-    })
-    .await
-    .expect("fixed fixture Iroh exchange within budget")
+    timeout(super::CONNECT, async { tokio::join!(outbound, inbound).0 })
+        .await
+        .expect("fixed fixture Iroh exchange within budget")
 }
 
 #[derive(Serialize, Deserialize)]
