@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     fs,
     io::{self, ErrorKind},
+    net::SocketAddr,
     path::{Path, PathBuf},
     time::Duration,
 };
@@ -790,10 +791,15 @@ fn validate_zenoh_config(config: &ZenohConfig, tcp_endpoints_enabled: bool) -> i
     }
 
     let mut has_client_reachable_endpoint = false;
+    let mut all_tcp_udp_loopback = None;
     for endpoint in &config.listen_endpoints {
-        validate_zenoh_endpoint(endpoint)?;
+        let parsed = parse_zenoh_endpoint(endpoint)?;
         if !is_serial_endpoint(endpoint) {
             has_client_reachable_endpoint = true;
+        }
+        if matches!(parsed.protocol().as_str(), "tcp" | "udp") {
+            *all_tcp_udp_loopback.get_or_insert(true) &=
+                is_loopback_listener(parsed.address().as_str());
         }
     }
 
@@ -805,6 +811,12 @@ fn validate_zenoh_config(config: &ZenohConfig, tcp_endpoints_enabled: bool) -> i
     }
 
     validate_unixpipe_config(&config.unixpipe)?;
+
+    if all_tcp_udp_loopback == Some(true) {
+        log::warn!(
+            "Zenoh 的 TCP/UDP 入口仅监听回环地址，外部主机无法经这些入口接入；跨机请改用具体网卡地址或 0.0.0.0。"
+        );
+    }
 
     Ok(())
 }
@@ -888,14 +900,26 @@ fn validate_key_input_events_config(config: &KeyInputEventsConfig) -> io::Result
     Ok(())
 }
 
-fn validate_zenoh_endpoint(endpoint: &str) -> io::Result<()> {
+fn parse_zenoh_endpoint(endpoint: &str) -> io::Result<EndPoint> {
     endpoint.parse::<EndPoint>().map_err(|err| {
         io::Error::new(
             ErrorKind::InvalidInput,
             format!("无法解析 zenoh endpoint `{endpoint}`: {err}"),
         )
-    })?;
-    Ok(())
+    })
+}
+
+fn is_loopback_listener(address: &str) -> bool {
+    address.parse::<SocketAddr>().map_or_else(
+        |_| {
+            address.rsplit_once(':').is_some_and(|(host, _)| {
+                host.strip_suffix('.')
+                    .unwrap_or(host)
+                    .eq_ignore_ascii_case("localhost")
+            })
+        },
+        |addr| addr.ip().to_canonical().is_loopback(),
+    )
 }
 
 fn is_serial_endpoint(endpoint: &str) -> bool {
