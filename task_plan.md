@@ -214,3 +214,12 @@ RAI-387: unixpipe 本机 fast path 从 `$TMPDIR` 迁到固定运行目录,补名
       base 原样保留、退出全清
 - [x] 补用例走生产入口(上一轮用例绕过了它);`cargo test --bin rdog` 1107 passed
 - 提交: 9c3fd43
+
+### [2026-11-26 06:45:00] 六轮评审 1 条 low 修复
+- [x] 上一轮用 `is_derived_base`(路径相等)推断来源 ⇒ "显式 socket_path 恰等于派生路径"会漏建兼容守卫
+- [x] 改为 config 层透传: `ComposedListenEndpoints.unixpipe_base_explicit` → `ZenohUnixpipeStartupConfig.shared`
+      → `prepare_unixpipe_listener(_, _, _, shared)`;删除路径值推断
+- [x] `remove_stale_entry` 简化为无条件持旧守卫再删(随删除一起消失,不留状态)
+- [x] 真机实测: 派生 3 文件 / 显式等于派生 4 文件(含守卫),两者退出后均为空;20 轮启停 20/20
+- [x] `cargo test --bin rdog` 1107 passed;补生产入口用例
+- 提交: 7bfb8ae
