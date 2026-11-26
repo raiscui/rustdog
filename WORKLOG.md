@@ -437,3 +437,4 @@ RAI-367 设计期间查出的既有缺陷: 被拒绝或中途中断的传输永�
 #143, 已用 `revert` 提交从 #143 撤出并转到 `capy/rai-417-transfer-residue` 单独评审。教训是
 跨线程切分支前先 `git stash`, 不要依赖 `git add -A` 的范围直觉。
 - 提交: 4b585b4
+- 提交: 4b585b4 (RAI-417 报告 reports/RAI-417.md 见同分支)
