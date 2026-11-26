@@ -69,19 +69,9 @@ jobs:
         shell: bash
         run: |
           {
-            echo "### build (ubuntu-latest) 失败 —— 本 OS 没有测试证据"
+            echo "### build (ubuntu-latest) failed — no test evidence for this OS"
             echo ""
-            echo "test (ubuntu-latest) 被跳过, 这次运行对该 OS 的测试覆盖为空。"
-            echo "按失败步骤的注解归因:"
-            echo ""
-            echo "| 注解 | 结论 |"
-            echo "| --- | --- |"
-            echo "| `onnxruntime dist unavailable` / `onnxruntime dist digest mismatch` | 外部依赖缺口 (基础设施), 不是本改动坏了东西 |"
-            echo "| `onnxruntime runtime DLL missing` | ort-sys 的 dylib 铺放前提变了 (见 ci-merge-gate.md §4) |"
-            echo "| `build prep failed` | 准备阶段异常 (工具链 / registry / lockfile), 同样没有测试证据 |"
-            echo "| 其它 | 编译 / 代码问题, 按真实失败处理 |"
-            echo ""
-            echo "判读口径: `docs/agents/ci-merge-gate.md` §3"
+            cat scripts/ci/coverage-gap-summary.md
           } >> "$GITHUB_STEP_SUMMARY"
 
   build-macos:
@@ -119,19 +109,9 @@ jobs:
         shell: bash
         run: |
           {
-            echo "### build (macos-latest) 失败 —— 本 OS 没有测试证据"
+            echo "### build (macos-latest) failed — no test evidence for this OS"
             echo ""
-            echo "test (macos-latest) 被跳过, 这次运行对该 OS 的测试覆盖为空。"
-            echo "按失败步骤的注解归因:"
-            echo ""
-            echo "| 注解 | 结论 |"
-            echo "| --- | --- |"
-            echo "| `onnxruntime dist unavailable` / `onnxruntime dist digest mismatch` | 外部依赖缺口 (基础设施), 不是本改动坏了东西 |"
-            echo "| `onnxruntime runtime DLL missing` | ort-sys 的 dylib 铺放前提变了 (见 ci-merge-gate.md §4) |"
-            echo "| `build prep failed` | 准备阶段异常 (工具链 / registry / lockfile), 同样没有测试证据 |"
-            echo "| 其它 | 编译 / 代码问题, 按真实失败处理 |"
-            echo ""
-            echo "判读口径: `docs/agents/ci-merge-gate.md` §3"
+            cat scripts/ci/coverage-gap-summary.md
           } >> "$GITHUB_STEP_SUMMARY"
 
   build-windows:
@@ -182,19 +162,9 @@ jobs:
         shell: bash
         run: |
           {
-            echo "### build (windows-latest) 失败 —— 本 OS 没有测试证据"
+            echo "### build (windows-latest) failed — no test evidence for this OS"
             echo ""
-            echo "test (windows-latest) 被跳过, 这次运行对该 OS 的测试覆盖为空。"
-            echo "按失败步骤的注解归因:"
-            echo ""
-            echo "| 注解 | 结论 |"
-            echo "| --- | --- |"
-            echo "| `onnxruntime dist unavailable` / `onnxruntime dist digest mismatch` | 外部依赖缺口 (基础设施), 不是本改动坏了东西 |"
-            echo "| `onnxruntime runtime DLL missing` | ort-sys 的 dylib 铺放前提变了 (见 ci-merge-gate.md §4) |"
-            echo "| `build prep failed` | 准备阶段异常 (工具链 / registry / lockfile), 同样没有测试证据 |"
-            echo "| 其它 | 编译 / 代码问题, 按真实失败处理 |"
-            echo ""
-            echo "判读口径: `docs/agents/ci-merge-gate.md` §3"
+            cat scripts/ci/coverage-gap-summary.md
           } >> "$GITHUB_STEP_SUMMARY"
 
   test-ubuntu:
