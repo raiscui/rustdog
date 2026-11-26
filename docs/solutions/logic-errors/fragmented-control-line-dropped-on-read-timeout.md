@@ -33,7 +33,11 @@ related_solutions:
 ## Problem
 
 line-control 协议按行收发(`@verb` / `{json}` 一条一行),读取入口是
-`src/control_line_read.rs::read_line_limited`,由 TCP/WebSocket 传输、控制端 stdin 和 shell listener 共用。
+`src/control_line_read.rs::read_line_limited`,由 **TCP 传输**、**控制端 stdin** 和 **shell listener** 共用。
+
+> WebSocket 传输**不走**这个读行器:`ControlTransport::read_message` 把它分派给
+> `WebSocketTextTransport::read_message`,后者用 `WebSocketFrame::read_from` 读帧。
+> 本文的诊断与修复只覆盖上面三条路径。
 
 旧实现每次调用开头 `buf.clear()`,隐含假设「一次调用就能读完整行」。但两侧的写法都不满足这个假设:
 
@@ -74,7 +78,10 @@ daemon(fd7): recvfrom(7, "@pty-stdin {...}", 98) = 98
 daemon pty master(fd9): write(9, "\4", 1)           # 只写出过 ^D, 从没写出 ^C
 ```
 
-帧确实到了 daemon、也确实被解析,但 pty master 上没有对应的写出 —— 说明它在「接收」与「动作」之间被丢了。
+帧确实到了 daemon 的 socket、也确实被 `recvfrom` 读进了缓冲,但 pty master 上没有对应的写出。
+注意它**没有走到解析**:旧实现里 `read_line_limited` 以 `Err` 返回,`TcpLineTransport::read_message` 直接把错误
+上抛,`PtyStdinFrame::parse_wire_message` 从未被调用 —— 帧是在「收进缓冲」与「交给解析」之间被丢的,
+这正好指向读行器的缓冲语义,而不是协议解析或 pty 转发。
 最小复现(直连 daemon,`@pty` 后把帧与 `"\n"` 分两次 `sendall`,间隔 30ms):
 
 ```
@@ -105,6 +112,9 @@ split=True   REMOTE_INT=True   exit=True    # 分片但偶发成功 (取决于�
 **「分片是常态」不是风格建议,而是写者实现决定的事实。** 只要 `write_message` 分两次写,
 任何「入口清缓冲 + 可中断读」的读取实现都会丢消息,而且丢得完全静默 —— 它不会让流错位,
 后续消息照常成功,现场看起来像「偶发的业务无响应」。
+
+同样值得记住的是**丢在哪一层**决定了排查方向:这一例丢在「收进缓冲」与「解析」之间,所以协议解析和
+pty 转发都是干净的;若只验证到「帧发了」和「远端没反应」,任何一层看起来都可能是嫌疑人。
 
 诊断上最值钱的动作是**双侧系统调用对拍**:单看任意一侧都说不清「消息没发」还是「消息丢了」;
 同时抓 CLI 与 daemon 的 `sendto` / `recvfrom` / `write`,才能看到「收到了但没写出」这个中间状态。

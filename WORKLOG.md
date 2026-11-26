@@ -9,7 +9,7 @@
   四条 verified_by 回执 (纯 kernel 对照 / 直连 daemon 单发 / 分片复现前后 / 双侧 strace 对拍)、
   三条读行契约与 `LineReadState` 解法。
 - 根 `AGENTS.md` 粗索引同提交补条目; `check-carrier-assertions.py` OK。
-- 提交: 685d0a8
+- 提交: d0eb293
 
 - 目录端点原本只能按 `id + SocketAddr` 拨,两端都在 NAT 后时连「去哪儿查这个 daemon」都发不出去。
   `directory` 新增 `via_relay: bool` 与 `relay: {url, root_cert?}`(给了 `via_relay` 就不再有 `addr`),
