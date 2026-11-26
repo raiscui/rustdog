@@ -223,3 +223,33 @@ RAI-387: unixpipe 本机 fast path 从 `$TMPDIR` 迁到固定运行目录,补名
 - [x] 真机实测: 派生 3 文件 / 显式等于派生 4 文件(含守卫),两者退出后均为空;20 轮启停 20/20
 - [x] `cargo test --bin rdog` 1107 passed;补生产入口用例
 - 提交: 7bfb8ae
+
+## [2026-11-26] RAI-367 实现阶段 (bulk 原语 + 直连门禁 + 请求级 relay 计数)
+
+前置核实 (Captain 更正后): iroh lane 已在 main (`0ba56845` #141, `8ca3363b` #150),
+`src/control_iroh.rs` 存在; 但该 lane 的准入面**只有 ping 与 PTY**, `ping_only` 明说
+"bulk 传输不在这条通道上, P4 保持关闭". 因此"直连门禁"今天可实现的形态是: 能力表声明
+`path_aware=true / bulk_path_pin=false` → 该 lane 上的 bulk 一律以稳定码拒绝,
+而不是放行后再靠采样"尽力而为".
+
+### 阶段 1 — 协议准入与生命周期 (不依赖 iroh, 可独立验收)
+- [ ] 1a `[file_transfer]` 四项配置 + 跨字段校验: `max_bytes` / `max_concurrent_sessions`
+      (`bulk_session_limit_reached`) / `resume_window_ms` (> `idle_timeout_ms`) / `chunk_ack_timeout_ms`
+- [ ] 1b `resume` 改必填 (无默认值); A5 `stale_partial_discarded` 回报
+- [ ] 1c 注册表按**暂存路径**键 (C1), 支持 A3/C2 同 id 换路径时保留旧半成品; `is_upload` 布尔退役
+- [ ] 1d `attempt_id` 可选字段透传 (阶段 3 的括号采样用它归属)
+
+### 阶段 2 — CLI 流式驱动 (G1)
+- [ ] `rdog control <target> --put <local> --remote-path <remote>` / `--get <remote> --local-path <local>`
+- [ ] 逐块流式发送, 不在内存里拼整文件; `chunk_ack_timeout_ms` 超时即 `@file-cancel`
+- [ ] 检测到窗口内半成品时默认 `resume:true`
+
+### 阶段 3 — 直连门禁与证据 (G2)
+- [ ] 传输能力表 (`path_aware` / `bulk_path_pin`); iroh lane 声明 `pin=false`
+- [ ] 两端门禁: 上传由客户端拒发, 下载由 daemon 拒读; open + 每个 chunk 边界复查
+- [ ] `rdog.bulk-path.v1` 快照: 两端各发一半, 禁替对端填数; `relay_bytes_zero` 判定式
+- [ ] 正对照: 同路径 `@ping` 的 relay delta **严格 > 0**
+
+### 验收边界 (不许越界宣称)
+- A 类 (直连可用) 等 RAI-366 的拓扑结论; B/C/D 可在 A 之前取证
+- 未跑 B/C/D 前不得宣称 bulk 可用
