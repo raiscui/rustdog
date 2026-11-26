@@ -74,9 +74,14 @@ on:
 
 - **每个 OS 的 `test` 只依赖自己 OS 的 `build`** (六个独立 job, 不是一对 matrix),
   所以 Windows 的外部依赖红了不会连带吞掉 ubuntu / macOS 的测试证据;
-- **测试目标 (`#[cfg(test)]` 模块与 `tests/`) 在 build 阶段用 `--no-run` 编译**。
-  否则"测试代码编译不过"会落在 test 阶段, 把 cargo 的编译失败与测试失败混成一个红点,
-  零执行断言还会被跳过。
+- **测试目标在 build 阶段用 `--no-run` 编译** —— 范围是 bin 的 `#[cfg(test)]` 模块与
+  (非 Windows 的) `recording_e2e`。否则"测试代码编译不过"会落在 test 阶段, 把 cargo
+  的编译失败与测试失败混成一个红点, 零执行断言还会被跳过。
+
+**已知覆盖缺口 (不属于"绿", 见 §6)**: `tests/` 下 19 个 integration target 里, CI 只
+编译并运行 `recording_e2e`; `control_lanes` / `control_mode` / `control_pty` /
+`zenoh_*` 等其余 17 个既没编译也没运行。放量由 RAI-411 承接 (排在 RAI-410 的 `script`
+夹具修复之后), 在它落地前, 本门的绿**不覆盖**协议回归面。
 
 ## 4. `ort-sys` / onnxruntime 的获取契约
 
@@ -121,7 +126,7 @@ cargo clean -p ort-sys && cargo build --bin rdog    # 走一遍 build script
 
 | 现象 | 归因 | 负责人 | 到期日 |
 | --- | --- | --- | --- |
-| (当前无未清的已知红) | — | — | — |
+| `tests/` 下 17 个 integration target 从未在 CI 编译/运行 (覆盖缺口, 假绿风险) | RAI-411 放量; 门报告见 `.github/workflows/ci.yml` 的 test job 注释 | RAI-397 执行线程 | 2026-11-30 |
 
 规则:
 
