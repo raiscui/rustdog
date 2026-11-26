@@ -49,11 +49,13 @@ pub enum ControlTransportKind {
 pub(crate) enum ControlTransport {
     Tcp(TcpLineTransport),
     WebSocket(WebSocketTextTransport),
+    Iroh(crate::control_iroh::IrohLineTransport),
 }
 
 pub(crate) enum ControlTransportWriter {
     Tcp(TcpLineWriter),
     WebSocket(WebSocketTextWriter),
+    Iroh(crate::control_iroh::IrohLineWriter),
 }
 
 impl ControlTransport {
@@ -108,6 +110,7 @@ impl ControlTransport {
         match self {
             Self::Tcp(transport) => transport.read_message(),
             Self::WebSocket(transport) => transport.read_message(),
+            Self::Iroh(transport) => transport.read_message(),
         }
     }
 
@@ -115,6 +118,7 @@ impl ControlTransport {
         match self {
             Self::Tcp(transport) => transport.write_message(message),
             Self::WebSocket(transport) => transport.write_message(message),
+            Self::Iroh(transport) => transport.write_message(message),
         }
     }
 
@@ -126,6 +130,7 @@ impl ControlTransport {
             Self::WebSocket(transport) => transport
                 .try_clone_writer()
                 .map(ControlTransportWriter::WebSocket),
+            Self::Iroh(transport) => Ok(ControlTransportWriter::Iroh(transport.try_clone_writer())),
         }
     }
 
@@ -133,6 +138,10 @@ impl ControlTransport {
         match self {
             Self::Tcp(transport) => transport.set_read_timeout(timeout),
             Self::WebSocket(transport) => transport.set_read_timeout(timeout),
+            Self::Iroh(transport) => {
+                transport.set_read_timeout(timeout);
+                Ok(())
+            }
         }
     }
 
@@ -140,6 +149,7 @@ impl ControlTransport {
         match self {
             Self::Tcp(transport) => transport.close(),
             Self::WebSocket(transport) => transport.close(),
+            Self::Iroh(transport) => transport.close(),
         }
     }
 }
@@ -149,6 +159,7 @@ impl ControlTransportWriter {
         match self {
             Self::Tcp(writer) => writer.write_message(message),
             Self::WebSocket(writer) => writer.write_message(message),
+            Self::Iroh(writer) => writer.write_message(message),
         }
     }
 }

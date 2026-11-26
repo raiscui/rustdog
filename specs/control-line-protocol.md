@@ -694,6 +694,11 @@ Windows builder-created shell 使用 `CREATE_NO_WINDOW`, 避免非交互执行�
 这是 out-of-band 控制请求,不是 PTY stdin 里的 escape。
 `session_id` 来自对应会话的 `@pty-ready` frame。
 
+关闭授权按通道分层, 两者不是同一件事:
+
+- **准入 lane(iroh)按主体判定**: 会话在打开时登记一个主体([`bind_pty_session_subject`](../src/pty_control.rs)), 之后只有同一主体可以 close / detach / attach 它([`authorize_pty_subject`](../src/pty_control.rs))。同主体跨连接可以关闭自己的会话, 异主体返回 `43 / iroh_subject_denied`, 目标会话继续运行。
+- **旧 TCP / WebSocket / Zenoh lane 按 id 关闭**: 能到达 daemon 的连接即可关闭任意 id([`close_active_pty_session`](../src/pty_control.rs))。这是"可达即全权", 不是 owner 授权; 这些 lane 的会话没有主体, 准入 lane 对它们一律 fail-closed。
+
 示例:
 
 ```text
