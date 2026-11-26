@@ -1,6 +1,50 @@
 use super::*;
 
 #[test]
+fn scout_interfaces_should_leave_auto_when_no_candidates_exist() {
+    assert_eq!(select_scout_interfaces(None, Vec::new), None);
+    let mut config = Config::default();
+    let key = "scouting/multicast/interface";
+    let original = config.get_json(key).ok();
+    insert_scout_interfaces(&mut config, Some("  "), Vec::new).unwrap();
+    assert_eq!(config.get_json(key).ok(), original);
+}
+
+#[test]
+fn scout_interfaces_should_sort_and_deduplicate_non_loopback_unicast_ipv4() {
+    let candidates = [
+        "192.168.1.10",
+        "127.0.0.1",
+        "224.0.0.224",
+        "10.0.0.2",
+        "0.0.0.0",
+        "255.255.255.255",
+        "::1",
+        "192.168.1.10",
+    ]
+    .map(|ip| ip.parse().unwrap());
+    let expected = Some("10.0.0.2,192.168.1.10".to_owned());
+    assert_eq!(
+        select_scout_interfaces(None, || candidates.to_vec()),
+        expected
+    );
+    assert_eq!(
+        select_scout_interfaces(None, || candidates.into_iter().rev().collect()),
+        expected
+    );
+}
+
+#[test]
+fn scout_interfaces_should_use_explicit_override_without_enumerating() {
+    for configured in ["Ethernet 2,192.168.1.10", "auto"] {
+        assert_eq!(
+            select_scout_interfaces(Some(configured), || panic!("must not enumerate")),
+            Some(configured.to_owned())
+        );
+    }
+}
+
+#[test]
 fn open_session_error_should_upgrade_windows_listen_access_denied() {
     let err = to_open_session_error(
         "拒绝访问。 (os error 5)",

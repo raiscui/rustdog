@@ -216,6 +216,7 @@ pub struct ZenohConfig {
     /// Legacy peer-era field kept only to produce explicit migration errors.
     pub connect_endpoints: Vec<String>,
     pub listen_endpoints: Vec<String>,
+    pub scout_interfaces: Option<String>,
     pub request_timeout_ms: u64,
     pub startup_guard_window_ms: u64,
     pub key_input_events: KeyInputEventsConfig,
@@ -321,6 +322,7 @@ impl Default for ZenohConfig {
             daemon_name: None,
             connect_endpoints: Vec::new(),
             listen_endpoints: Vec::new(),
+            scout_interfaces: None,
             request_timeout_ms: 3_000,
             startup_guard_window_ms: 1_000,
             key_input_events: KeyInputEventsConfig::default(),
@@ -390,6 +392,23 @@ pub fn load_daemon_config_unvalidated(config_path: Option<&Path>) -> io::Result<
     })?;
 
     Ok(config)
+}
+
+pub(crate) fn load_client_scout_interfaces() -> io::Result<Option<String>> {
+    build_figment(None)?
+        .extract_inner("zenoh.scout_interfaces")
+        .map_err(|err| io::Error::new(ErrorKind::InvalidData, err))
+}
+
+pub(crate) fn validate_scout_interfaces(value: Option<&str>) -> io::Result<Option<&str>> {
+    let value = value.map(str::trim).filter(|value| !value.is_empty());
+    if value.is_some_and(|value| value.split(',').any(|item| item.trim().is_empty())) {
+        return Err(io::Error::new(
+            ErrorKind::InvalidInput,
+            "zenoh.scout_interfaces 不能包含空的 IP 或接口名",
+        ));
+    }
+    Ok(value)
 }
 
 /// 在当前目录生成三份平台配置模版。
@@ -732,6 +751,7 @@ fn validate_zenoh_config(config: &ZenohConfig, tcp_endpoints_enabled: bool) -> i
     }
 
     validate_key_input_events_config(&config.key_input_events)?;
+    validate_scout_interfaces(config.scout_interfaces.as_deref())?;
 
     if config
         .connect_endpoints
@@ -923,6 +943,21 @@ mod tests {
     use figment::Jail;
 
     #[test]
+    fn scout_interfaces_require_nonempty_list_items() {
+        assert_eq!(validate_scout_interfaces(Some("  ")).unwrap(), None);
+        assert_eq!(
+            validate_scout_interfaces(Some(" Ethernet 2, 192.168.1.10 ")).unwrap(),
+            Some("Ethernet 2, 192.168.1.10")
+        );
+        for value in [",192.168.1.10", "Ethernet 2,", "en0, ,en1"] {
+            assert_eq!(
+                validate_scout_interfaces(Some(value)).unwrap_err().kind(),
+                ErrorKind::InvalidInput
+            );
+        }
+    }
+
+    #[test]
     fn coding_requires_authentication() {
         let mut config = DaemonConfig::default();
         assert!(!config.coding.enabled);
@@ -954,6 +989,37 @@ mod tests {
 
     mod load_daemon_config {
         use super::*;
+
+        #[test]
+        fn client_scout_interfaces_should_read_only_the_scout_override() {
+            let _cwd_guard = crate::test_support::cwd_test_guard();
+            Jail::expect_with(|jail| {
+                jail.clear_env();
+                assert_eq!(
+                    load_client_scout_interfaces().map_err(to_figment_error)?,
+                    None
+                );
+
+                jail.create_file(
+                    default_platform_config_file_name(),
+                    "[zenoh]\nscout_interfaces = \"Ethernet 2,192.168.1.10\"\nrequest_timeout_ms = \"invalid\"\n",
+                )?;
+                assert_eq!(
+                    load_client_scout_interfaces()
+                        .map_err(to_figment_error)?
+                        .as_deref(),
+                    Some("Ethernet 2,192.168.1.10")
+                );
+                jail.set_env("RDOG_ZENOH__SCOUT_INTERFACES", "auto");
+                assert_eq!(
+                    load_client_scout_interfaces()
+                        .map_err(to_figment_error)?
+                        .as_deref(),
+                    Some("auto")
+                );
+                Ok(())
+            });
+        }
 
         #[test]
         fn should_use_defaults_when_no_file_or_env_present() {
