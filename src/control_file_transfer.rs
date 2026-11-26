@@ -2545,6 +2545,11 @@ mod tests {
         // 两支刻意各自只有**一个**可能被拒的理由, 否则用例证明不了谁在承重:
         //   甲 目标合法但 temp 不是该目标的暂存路径 → 只能由 "temp == staging_path(target)" 拒;
         //   乙 temp 恰好就是该目标推导出来的暂存路径且文件存在 → 只能由目标校验 (拒 `..`) 拒。
+        // 同 `restored_index_resumes_from_the_partial_length`: 这里也调 `restore_index()`,
+        // 会写全局孤儿表, 必须连回收锁一起拿。
+        let _sweep_guard = SWEEP_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let _guard = TRANSFER_TABLE_TEST_LOCK
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
