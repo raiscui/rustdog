@@ -36,6 +36,7 @@ Issues 和 Wayfinder maps 使用 GitHub Issues。详见 `docs/agents/issue-track
 - 需要理解当前协议为什么会同时保留显式协议请求和裸 shell 行时,先看项目经验沉淀。
 - 修改 UI script runner、GUI 自动化 JSON DSL、control-flow 脚本编译或后续 `@ui-flow` 前,先看 UI script 控制计划。
 - 设计或实现 macOS Recorder capture backend、权限 lane、Secure Input 脱敏或自身注入过滤前,先看 macOS operation capture 调研。
+- 修改 `.github/workflows/ci.yml`、`.github/actions/`、合并门必需检查或 onnxruntime 获取路径前,先看 CI 合并门契约 (`docs/agents/ci-merge-gate.md`)。
 
 ## 长期文件索引
 
@@ -53,6 +54,11 @@ Issues 和 Wayfinder maps 使用 GitHub Issues。详见 `docs/agents/issue-track
   - 主题: `@pty` / `@pty-close` 远程 PTY 会话规格
   - 用途: 固定 `rdog control TARGET --pty -- COMMAND ...`、PTY frame、透明输入、out-of-band close、Zenoh session channel 映射与验证边界
   - 何时阅读: 修改远程 PTY、control transport streaming、Zenoh session channel、`--pty-close` 或 TTY 交互行为前
+
+- `docs/agents/ci-merge-gate.md`
+  - 主题: CI 合并门契约 —— 必需检查表、触发面, 以及「测试未运行」与「测试失败」的判读口径
+  - 用途: 固定 build (os) / test (os) 拆分语义、`ready_for_review` 触发面、零执行断言, 以及 ort-sys / onnxruntime dist 的预取与 `copy-dylibs` 目录前提
+  - 何时阅读: 改 `.github/workflows/ci.yml`、`.github/actions/cargo-prep/`、改 job 名、新增或退役检查项、提 Merge-Ready 报告、或排查 main 上的 Windows 红点前
 
 - `docs/solutions/`
   - 主题: 正式、分类化、可验证的长期知识库 (Bug track + Knowledge track, 按 problem_type 分类)

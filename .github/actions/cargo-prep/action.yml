@@ -1,0 +1,91 @@
+name: cargo prep
+description: |
+  build 与 test 两个 job 共用的准备步骤 (原生依赖 / 工具链 / 缓存 / 锁文件 / onnxruntime 预取 /
+  ort-sys 复制 dylib 需要的目录)。两边必须走同一份准备, 否则"build 绿、test 因环境不同红"
+  会让合并门的红点又一次无法归因。
+
+runs:
+  using: composite
+  steps:
+    # xcap 截图栈在 linux 上的原生链接依赖 (上游 xcap README 的 Ubuntu 清单):
+    # libwayland-dev / libegl-dev 供 wayland-sys build script 做 pkg-config 探测,
+    # libclang-dev 供 libwayshot bindgen, 其余为 X11/dbus/pipewire 侧构建依赖。
+    # 没有这些包时 wayland-sys v0.31.11 的 build.rs 会在 pkg-config 失败处直接
+    # panic (自仓库基线起 ubuntu job 一直因此全红, 2026-08-28 修复)。
+    - name: Install linux build deps (xcap screen-capture stack)
+      if: runner.os == 'Linux'
+      shell: bash
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y \
+          pkg-config \
+          libclang-dev \
+          libxcb1-dev \
+          libxrandr-dev \
+          libdbus-1-dev \
+          libpipewire-0.3-dev \
+          libwayland-dev \
+          libegl-dev \
+          libgbm-dev \
+          libdrm-dev
+
+    - name: Install Rust toolchain
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        toolchain: stable
+        # Stay aligned with the `rust-version = "1.89"` MSRV declared
+        # in Cargo.toml; bumping it must be a deliberate Cargo.toml
+        # change so this workflow keeps passing on the declared floor.
+
+    - name: Cache cargo registry + build
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cargo/registry
+          ~/.cargo/git
+          target
+        key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock', 'Cargo.toml') }}
+        restore-keys: |
+          ${{ runner.os }}-cargo-
+
+    # onnxruntime 预编译包单独一个缓存项: 它是脚本按 sha256 校验后放进去的**制品**,
+    # 不该跟着 3GB 的 target 缓存一起失效/一起挤配额。key 里带 Cargo.lock 是因为
+    # ort-sys 版本决定 dist 表 (见 scripts/ci/prefetch-ort-dist.py)。
+    - name: Cache prefetched onnxruntime dist
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cache/ort.pyke.io
+          ~/Library/Caches/ort.pyke.io
+          ~/AppData/Local/ort.pyke.io
+        key: ${{ runner.os }}-ort-dist-${{ hashFiles('Cargo.lock') }}
+
+    # 锁文件对账 + 让 ort-sys crate 落到 registry 里, 供下面的预取脚本读取它内嵌的
+    # dist 表 (真相源随 crate 版本走, 不在仓库里手抄 sha256)。
+    - name: Fetch lockfile-pinned crates
+      shell: bash
+      run: cargo fetch --locked
+
+    # 预取 ort-sys 要链接的 onnxruntime 预编译包并按 pyke 的缓存布局落盘, 校验 sha256。
+    # 命中时 ort-sys build script 直接跳过下载 (2026-11-26 前每次运行都依赖 CDN)。
+    - name: Prefetch pinned onnxruntime dist (ort-sys)
+      shell: bash
+      run: |
+        PY=$(command -v python3 || command -v python)
+        "$PY" scripts/ci/prefetch-ort-dist.py
+
+    # ort-sys 0.2x 的 build/dynamic_link.rs (copy-dylibs) 会把 dist 里的 DLL 复制到
+    # `<OUT_DIR 的第 3 个祖先>` 以及它的 examples/ deps/ 子目录, 而 `cargo build --bin rdog`
+    # 从不创建 examples/。Windows 的 dist 带 DirectML.dll, 于是 build script 在
+    # dynamic_link.rs:42 panic (`Os { code: 3, kind: NotFound }`) —— main 上 windows
+    # job 一次测试都没跑到就是这个 (2026-11-26 RAI-397 实证), 不是下载失败。
+    # 第 3 个祖先在 Windows 上是 `<profile>/`, 在 Linux 上是 `<profile>/build/`,
+    # 所以两个层级都铺好; 目标是幂等且与平台无关。
+    - name: Create the dylib copy targets ort-sys expects
+      shell: bash
+      run: |
+        target_dir="${CARGO_TARGET_DIR:-target}"
+        for dir in "$target_dir/debug" "$target_dir/debug/build"; do
+          mkdir -p "$dir/examples" "$dir/deps"
+        done
+        ls -d "$target_dir"/debug/examples "$target_dir"/debug/deps "$target_dir"/debug/build/examples "$target_dir"/debug/build/deps
