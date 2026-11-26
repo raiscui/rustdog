@@ -1294,7 +1294,7 @@ rebase 会重写分支上每个 commit 的 sha, 本票在合并前又被 rebase 
 不为它单独推提交刷 sha。
 ### 2026-11-26 RAI-411 覆盖数进载体 + 票面改成可 actionable
 
-- 提交: (本条随修复提交记入下一次账本)
+- 提交: 4ea8c37
 
 两件事: ① `ci-merge-gate.md` §3b 增加固定位置的「各平台实际执行 target 数」表 (ubuntu 10 /
 macos 12 / windows 1) 与判读口径 —— 「三平台绿」在 windows 上只代表 1 个 integration target,
