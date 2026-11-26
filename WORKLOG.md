@@ -1292,6 +1292,19 @@ zenoh_router_client 38/2 ignored)。
 rebase 会重写分支上每个 commit 的 sha, 本票在合并前又被 rebase 了两次, 所以这里补一张对照表;
 按 `docs/agents/ci-merge-gate.md` §2 的口径, 这类 sha 漂移属于流程设计问题, 由 RAI-433 统一治 (合入后纯账本提交补记),
 不为它单独推提交刷 sha。
+### 2026-11-26 RAI-411 第八个发现 (ubuntu): 连接类 e2e 是「一族」不稳定
+
+- 提交: (本条随修复提交记入下一次账本)
+
+`48a35f7` 的 ubuntu 又红了, 但换成了 `mtls_daemon_should_require_client_certificate_and_accept_configured_client`
+(`zenoh_router_client.rs:3482`) —— 与前两轮的 code 70 key 注入、TLS 换 CA 是**三个不同用例**,
+全停在「client 连不上刚启动的 daemon」。同代码在 macos runner 全绿, 本地含 `taskset -c 0,1`
+压到 2 核也全绿。结论: 这不是单个用例的缺陷, 是一族不稳定; 逐条 `#[ignore]` 只会让下一轮换个
+用例继续红。
+处置: 撤掉 `tests/zenoh_router_client.rs` 里那两处 per-test 收窄 (恢复用例语义), 改成
+`PLATFORM_EXEMPTIONS` 的 target 级豁免 (`zenoh_router_client` 在 ubuntu 不跑, macos 照跑),
+证据与收回条件写进 issue #163 / RAI-464。**代价说清楚: ubuntu 的 integration 面从 11 个 target
+降到 10 个**, 这是这一轮的真实覆盖。
 ### 2026-11-26 RAI-411 第七个发现 (windows): e2e 不隔离 HOME, 两个 target 无法在 windows 执行
 
 - 提交: 7d96da8

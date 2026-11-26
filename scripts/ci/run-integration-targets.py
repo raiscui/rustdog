@@ -67,6 +67,12 @@ CLASSIFICATION: dict[str, str] = {
 # 这是「平台不兼容 / 稳定红」的显式出口 —— 理由必须写明并挂 follow-up 票, 且会在 job summary
 # 里单列一行 "exempt on this platform", 所以它既不是静默 skip, 也不会被当成"跑过了"。
 PLATFORM_EXEMPTIONS: dict[str, dict[str, str]] = {
+    "zenoh_router_client": {
+        "ubuntu-latest": (
+            "跨进程连接 e2e 在 ubuntu runner 上不稳定 (连续三轮各挂一个不同用例, 全是 client "
+            "连不上刚启动的 daemon; macos 同用例全绿); 见 issue #163 / RAI-464"
+        )
+    },
     "control_websocket": {
         "windows-latest": (
             "windows runner 上整 target 挂死 (1500s 墙钟上限才终止), 用例未隔离 HOME; "

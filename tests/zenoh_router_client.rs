@@ -875,12 +875,6 @@ fn control_should_execute_safe_mouse_move_in_zenoh_profile() {
     assert!(combined.contains(r#""dy":0"#));
 }
 
-// 同 control_lanes 那条: ubuntu CI 上 daemon/control 的连接前提不成立, 与 key 注入语义无关。
-// 显式 ignore 而不是删用例: 归因与复现条件见 RAI-464。
-#[cfg_attr(
-    target_os = "linux",
-    ignore = "ubuntu CI: daemon/control 连接前提不成立 (code 70); 见 RAI-464"
-)]
 #[test]
 fn control_should_publish_key_event_after_successful_key_request() {
     let daemon_name = unique_name("keyevent");
@@ -3216,13 +3210,6 @@ enabled = true
     path
 }
 
-// ubuntu CI 上同一形态: 换成正确 CA 后 client 仍然连不上 (本地单跑 0.85s 绿,
-// taskset 压到 2 核也不复现), 本地失败与握手超时无法区分。显式 ignore 而不是
-// 删用例: 归因与复现条件见 RAI-464。
-#[cfg_attr(
-    target_os = "linux",
-    ignore = "ubuntu CI: TLS 客户端连不上 daemon (本地绿); 见 RAI-464"
-)]
 #[test]
 fn tls_enabled_daemon_should_serve_ca_client_and_reject_wrong_ca() {
     ensure_test_home_credentials();

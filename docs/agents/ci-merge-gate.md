@@ -90,8 +90,8 @@ target 的 `passed` 必须 > 0**, 否则判红 —— 「退出码 0 但零执�
 
 | 平台 | 执行的 target |
 | --- | --- |
-| ubuntu | `connect_modes`、`control_lanes`、`control_mode`、`control_pty`、`control_tty`、`shell_pty`、`daemon_inbound`、`listen_suspend`、`zenoh_router_client`、`computer_use_density`、`control_websocket` |
-| macos | 同上 + `zenoh_unixpipe_fast_path` |
+| ubuntu | `connect_modes`、`control_lanes`、`control_mode`、`control_pty`、`control_tty`、`shell_pty`、`daemon_inbound`、`listen_suspend`、`computer_use_density`、`control_websocket` (另有 1 个 target 在 ubuntu 显式豁免, 见下) |
+| macos | ubuntu 那 10 个 + `zenoh_router_client` (ubuntu 上豁免) + `zenoh_unixpipe_fast_path` |
 | windows | `computer_use_density` (另有 2 个 target 在 windows 显式豁免, 见下) |
 | 全平台 (build 阶段) | `cargo test --no-run` 编译**全部** target, 含下面的 compile-only 面 |
 | compile-only (macos) | `control_ax_e2e`、`control_display_aware_e2e`、`control_mouse_e2e`、`control_ocr_e2e`、`control_window_e2e` |
@@ -102,6 +102,23 @@ target 的 `passed` 必须 > 0**, 否则判红 —— 「退出码 0 但零执�
 已有的输出留进失败详情, summary 里同时给出每个 target 的 `elapsed`。原因是反过来的:
 挂住的 target 会一路撑到 GitHub 的 job timeout 被 cancel, 日志只剩一句
 `The job has been cancelled` —— 既指不出是哪个 target, 也分不清「慢」与「死等」。
+
+**windows 侧 2 个 target 显式豁免** (`PLATFORM_EXEMPTIONS`): `control_websocket` (整 target 挂死,
+1500s 上限才终止) 与 `zenoh_router_client_windows` (daemon 因遗留 `service_name` 守卫拒启动) ——
+两者都没隔离 HOME, 在 runner 的真实 `C:\Users\runneradmin` 上与前序用例共用 `.rdog` 与
+`zenoh-guards`。它们照常在没有平台豁免的那一侧执行 (前者 ubuntu/macos), job summary 里单列
+**exempt on this platform** 一行、**不计入 ran 集合**; 收回条件是 issue #162 的隔离修复通过
+windows 连续 3 轮, 随后删掉这两条豁免。所以本 PR 之后 windows 的 integration 面只有
+`computer_use_density` 一个 —— 这是这一轮的真实覆盖, 不写成"windows 也跑了 e2e"。
+
+**ubuntu 侧 1 个 target 显式豁免** (`PLATFORM_EXEMPTIONS`): `zenoh_router_client`。连续三轮
+ubuntu 各挂一个**不同**的用例 (`control_lanes` 的 key 注入 / TLS 换 CA / mTLS client cert),
+全部停在「client 建不上到刚启动 daemon 的连接」这一段, 而同一份代码在 macos runner 上全绿、
+本地 (含 `taskset -c 0,1` 压到 2 核) 也全绿 —— 这是**一族**不稳定, 不是一个用例的缺陷, 所以
+不按用例 `#[ignore]` 逐条裱糊 (那样下一轮换个用例照样红), 而是整 target 在 ubuntu 豁免、
+macos 照常执行, job summary 单列 `exempt on this platform`、**不计入 ran 集合**。
+`control_lanes` 里那 1 条仍在 ubuntu 上按 `#[cfg_attr(target_os = "linux", ignore = …)]`
+跳过 (其余 14 条照常跑)。归因与收回条件见 issue #163 / RAI-464, 到期 2026-12-03。
 
 **windows 侧 2 个 target 显式豁免** (`PLATFORM_EXEMPTIONS`): `control_websocket` (整 target 挂死,
 1500s 上限才终止) 与 `zenoh_router_client_windows` (daemon 因遗留 `service_name` 守卫拒启动) ——
@@ -186,7 +203,7 @@ cargo clean -p ort-sys && cargo build --bin rdog    # 走一遍 build script
 | 现象 | 归因 | 负责人 | 到期日 |
 | --- | --- | --- | --- |
 | `zenoh_control::tests::diagnostic_ping_should_bypass_busy_query_worker_and_preserve_queue` 间歇红 (28 轮 2 次, panic 文案 `worker 未进入执行`, 疑 TMPDIR 进程级改写) | 单跑 5/5 绿, 只在并行/全量时出现 (`src/zenoh_control.rs` 的 panic 行) | RAI-405 承接线程 | 2026-11-30 |
-| ubuntu runner 上 3 条 control/TLS e2e 连不上 daemon: `control_lanes::daemon_control_lane_should_accept_key_object_payload_with_request_id`、`zenoh_router_client::control_should_publish_key_event_after_successful_key_request` (两者 code 70 `no successful connection`)、`zenoh_router_client::tls_enabled_daemon_should_serve_ca_client_and_reject_wrong_ca` (换正确 CA 后仍连不上, 空输出) | 本地单跑与 `taskset -c 0,1` 压到 2 核均绿, 只在 ubuntu GHA runner 红; 处置=按平台收窄成 `#[cfg_attr(target_os = "linux", ignore = …)]`, macos/windows 照常执行; 入口=三处 `#[cfg_attr]` 注记 | RAI-464 承接线程 | 2026-12-03 |
+| ubuntu runner 上 `zenoh_router_client` 的跨进程连接 e2e 不稳定: 连续三轮各挂一个**不同**用例 (`control_lanes::daemon_control_lane_should_accept_key_object_payload_with_request_id` code 70、`zenoh_router_client::tls_enabled_daemon_should_serve_ca_client_and_reject_wrong_ca` 空输出、`zenoh_router_client::mtls_daemon_should_require_client_certificate_and_accept_configured_client`), 全部停在「client 连不上刚启动的 daemon」 | 同代码在 macos runner 全绿、本地含 `taskset -c 0,1` 压 2 核也全绿; 是**一族**不稳定而非单个用例缺陷, 所以按 target 级豁免 (`PLATFORM_EXEMPTIONS`) 而不是逐条 `#[ignore]`; 入口=豁免理由 + issue #163 | issue #163 / RAI-464 | 2026-12-03 |
 | windows runner 上 `control_websocket` 整 target 挂死、`zenoh_router_client_windows` daemon 因遗留 `service_name` 守卫拒启动 | 两者都不隔离 HOME, 与同 job 前序用例共用 `.rdog` / `zenoh-guards`; 入口=`PLATFORM_EXEMPTIONS` 两条理由 + `tests/` 无 `HOME` 注入 | issue #162 承接 | 2026-12-03 |
 
 规则:
