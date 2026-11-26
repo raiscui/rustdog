@@ -89,7 +89,7 @@ P7 第 3 项今天**既不可验证也不可证伪**: 候选没有任何 bulk �
 
 ### 2.2 请求 / 响应字段 (相对今天的最小增量)
 
-现有五个动词的形状不变 (见 `src/control_file_transfer.rs` 模块头注), 只加以下字段:
+现有五个动词 (`@put-file` / `@get-file` / `@file-chunk` / `@file-end` / `@file-read`) 的形状不变 (见 `src/control_file_transfer.rs` 模块头注), 只加以下字段:
 
 `@put-file` 新增可选字段:
 
@@ -98,7 +98,29 @@ P7 第 3 项今天**既不可验证也不可证伪**: 候选没有任何 bulk �
 | `attempt_id` | string, 可选 | 本次尝试的身份. 缺省时 daemon 按 `transfer_id` + 打开序号派生. 用于把"续传的第二次尝试"与"第一次尝试"在证据里分开 (§4.2) |
 | `resume` | bool, **必填** | 语义见 §2.5 的 A4/A5/A6 与 D1. 不给默认值: 默认 `false` 会静默抹掉进度, 默认 `true` 会在调用方想重来时静默续上, 两个都错. 今天没有不兼容代价 —— 这条 lane 尚无正式客户端 |
 
-响应 (五个动词的 `ok` 信封) 新增 `evidence` 子对象, 由 §5.4 定义.
+响应 (五个动词的 `ok` 信封):
+
+| 字段 | 语义 |
+| --- | --- |
+| `evidence` | 见 §4.3 的快照子对象 |
+| `stale_partial_discarded` | 只有 `@put-file` 会出现. `true` 表示存在一份已超过 `file_transfer.resume_window_ms` 的半成品, 本次 open 把它删掉并从 0 开始 (§2.5 A5). **必须回报**, 否则"续上了"与"过期重来"在回执上分不开 |
+
+#### 稳定码总表 (唯一登记处)
+
+所有稳定码在这一张表登记, 别处只引用不重复定义.
+
+| 码 | 命名空间 | 触发 | 终态 | 可重试 |
+| --- | --- | --- | --- | --- |
+| `iroh_direct_path_unavailable` | 路径 (`iroh_*`) | open 时观测到没有直连, 当前走 relay (§3.1) | 是 | 路径变直连后可 (D2) |
+| `iroh_direct_path_lost` | 路径 | 直连曾建立, 中途丢失 (§3.1) | 是 (本次尝试) | 可, 半成品按 §2.5 B3 保留到窗口末 |
+| `iroh_path_unknown` | 路径 | 路径类别读不出 (§3.1) | 是 | 可, 但先修路径可观测性 |
+| `iroh_bulk_path_pin_unavailable` | 路径 | 传输是路径感知的, 但钉不住 bulk 连接 (§3.5) | 是 | 不可, 除非传输侧补上路径 pin |
+| `file_transfer_id_in_use` | 会话 | open 时该 `transfer_id` 已有活跃会话 (§2.5 A2) | 是 | 可, 先 `@file-cancel` 再重开 |
+| `file_transfer_path_in_use` | 会话 | open 时另一条活跃会话已持有同一暂存路径 (§2.5 A2b) | 是 | 可, 等那条完成或取消它 |
+| `bulk_session_limit_reached` | 会话 | 活跃会话数超过 `file_transfer.max_concurrent_sessions` (§2.4) | 是 | 可, 等已有会话收尾 |
+
+两个命名空间的分界是**事实类型**, 不是严重程度: `iroh_*` 只回答"路径是什么", 其余一律用
+`file_transfer_*` / `bulk_*`. 混着放会让"见到 `iroh_*` 就是路径问题"这条排查直觉失效.
 
 新增动词:
 
@@ -153,7 +175,8 @@ P7 第 3 项今天**既不可验证也不可证伪**: 候选没有任何 bulk �
 | # | 情形 | 判定 | 稳定码 / 报告字段 |
 | --- | --- | --- | --- |
 | A1 | 门禁不通过 (`iroh_direct_path_unavailable` / `iroh_path_unknown` / `iroh_bulk_path_pin_unavailable`) | **拒绝**, 不建会话, 不碰任何半成品 | 见 §3.2 |
-| A2 | `transfer_id` 与一条**活跃**会话相同 (未过期、未中止) | **拒绝**. 两条会话写同一个暂存文件会互相踩字节 | `file_transfer_id_in_use` |
+| A2 | `transfer_id` 与一条**活跃**会话相同 (未过期、未中止) | **拒绝**. 否则这次 open 会替换掉那条会话, 而 `resume:false` 会把它正在写的文件删掉 | `file_transfer_id_in_use` |
+| A2b | 另一条**活跃**会话已持有同一暂存路径 (不同 id) | **拒绝**. 暂存文件名从目标路径推导, 两个 id 指向同一目标就共用一个文件: 交错写会让先到的 `@file-end` 把混合字节的哈希算过、把损坏的文件 rename 到目标上 | `file_transfer_path_in_use` |
 | A3 | `transfer_id` 与一条**已中止或已过期**的会话相同 | 允许: 旧条目已被移出, id 复用合法 | — |
 | A4 | `resume:true`, 半成品存在且 **mtime 在窗口内** | 允许: offset = 文件长度 | — |
 | A5 | `resume:true`, 半成品存在但 **mtime 超过窗口** | 允许, 但**删**该过期半成品, offset = 0, 并在响应里回报 | `stale_partial_discarded: true` |
@@ -233,7 +256,8 @@ B3 写成"唯一可续传的中止"是错的 —— 客户端被杀、断网、�
 
 ### 3.2 原因码命名空间
 
-原因码走既有 `iroh_*` 前缀, 与父票措辞对齐 (`direct_path_unavailable` / `direct_path_lost`):
+原因码走既有 `iroh_*` 前缀, 与父票措辞对齐 (`direct_path_unavailable` / `direct_path_lost`).
+**码的登记处是 §2.2 的稳定码总表**, 这里只解释路径族四个码为什么这样分:
 
 | 码 | 触发条件 | 终态 | 可重试 |
 | --- | --- | --- | --- |
