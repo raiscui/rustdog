@@ -604,7 +604,7 @@ shell 46 passed、两个载体守卫 OK。
   (`Admission::party_permitted` + `identity_admitted`), 未知对端立即拒。
 
 复跑: `--bin rdog` 1145 passed / 0 failed / 4 ignored; `control_iroh` 31 passed / 2 ignored; 回环 13/13; 两个守卫 OK。
-- 提交: 700a1be
+- 提交: 2124bc7
 
 ## [2026-11-26] tests/ TTY 夹具改按能力探测选择 script 调用形式 (RAI-410)
 
