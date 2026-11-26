@@ -78,10 +78,26 @@ on:
   (非 Windows 的) `recording_e2e`。否则"测试代码编译不过"会落在 test 阶段, 把 cargo
   的编译失败与测试失败混成一个红点, 零执行断言还会被跳过。
 
-**已知覆盖缺口 (不属于"绿", 故不进 §6 的已知红表)**: `tests/` 下 19 个 integration target 里, CI 只
-编译并运行 `recording_e2e`; `control_lanes` / `control_mode` / `control_pty` /
-`zenoh_*` 等其余 18 个既没编译也没运行。放量由 RAI-411 承接 (排在 RAI-410 的 `script`
-夹具修复之后), 在它落地前, 本门的绿**不覆盖**协议回归面。
+### 3b. integration target 的覆盖范围 (RAI-411 之后)
+
+`tests/` 下 19 个 target 现在由 `scripts/ci/run-integration-targets.py` 按平台执行, **每个
+target 的 `passed` 必须 > 0**, 否则判红 —— 「退出码 0 但零执行」在 CI 上同样算失败。
+
+| 平台 | 执行的 target |
+| --- | --- |
+| ubuntu | `connect_modes`、`control_lanes`、`control_mode`、`control_pty`、`control_tty`、`shell_pty`、`daemon_inbound`、`listen_suspend`、`zenoh_router_client`、`computer_use_density`、`control_websocket` |
+| macos | 同上 + `zenoh_unixpipe_fast_path` |
+| windows | `zenoh_router_client_windows` |
+| 全平台 (build 阶段) | `cargo test --no-run` 编译**全部** target, 含下面的 compile-only 面 |
+| compile-only (macos) | `control_ax_e2e`、`control_display_aware_e2e`、`control_mouse_e2e`、`control_ocr_e2e`、`control_window_e2e` |
+
+`recording_e2e` 仍由它自己那一步执行 (unix)。
+
+**compile-only 是显式的, 不是静默 skip**: 这 5 个 target 需要真实桌面会话 (AX 权限 /
+屏幕捕获 / TCC), GitHub runner 没有这些条件; 它们在 build 阶段被编译 (编译回归照样能抓到),
+在 test 阶段的 job summary 里以 `compile-only` 行列出。真机 lane 用
+`cargo test --test <target>` 直接执行它们。**任何把 target 从清单里删掉、或让它的执行计数
+掉到 0 的改动, 都要先改这张表并说明理由**, 不能只改脚本。
 
 ## 4. `ort-sys` / onnxruntime 的获取契约
 
