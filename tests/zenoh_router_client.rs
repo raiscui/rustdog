@@ -199,6 +199,15 @@ fn spawn_output_collector<R: Read + Send + 'static>(
     (buffer, handle)
 }
 
+/// 失败自证: 断言失败时把 daemon 的 stdout+stderr 一起打进 panic 文案。
+/// 没有这一行, TLS/连接类失败在 CI 上只剩空 stdout, 下一次还是只能猜 (issue #163 验收 3)。
+fn daemon_output(buffer: &Arc<Mutex<String>>) -> String {
+    buffer
+        .lock()
+        .map(|collected| collected.clone())
+        .unwrap_or_default()
+}
+
 fn wait_until_output_contains(
     child: &mut Child,
     output: &Arc<Mutex<String>>,
@@ -875,6 +884,11 @@ fn control_should_execute_safe_mouse_move_in_zenoh_profile() {
     assert!(combined.contains(r#""dy":0"#));
 }
 
+// `@key` 的真实注入走 enigo: linux 后端必须先连上 X11 / Wayland display, 否则
+// `Enigo::new` 直接报 `no connection could be established` (code 70) —— 与 control
+// client 到 daemon 的连接无关 (RAI-464 归因订正)。CI 的 ubuntu job 在 xvfb-run 下
+// 执行 integration target, 所以这条不再是平台级阻塞; ubuntu 上该 target 仍因
+// zenoh-link-tls 的首帧握手竞态整体豁免 (issue #163), 与本用例无关。
 #[test]
 fn control_should_publish_key_event_after_successful_key_request() {
     let daemon_name = unique_name("keyevent");
@@ -3349,7 +3363,9 @@ fn tls_enabled_daemon_should_serve_ca_client_and_reject_wrong_ca() {
     let corrected_stderr = String::from_utf8_lossy(&corrected.stderr);
     assert!(
         corrected.status.success() && corrected_stdout.contains(r#""pong":true"#),
-        "相同客户端换成正确 CA 后应连通\nstdout:\n{corrected_stdout}\nstderr:\n{corrected_stderr}"
+        "相同客户端换成正确 CA 后应连通\nstdout:\n{corrected_stdout}\nstderr:\n{corrected_stderr}\n\
+         daemon:\n{}",
+        daemon_output(&buffer)
     );
 
     stop_child(&mut daemon);
@@ -3469,8 +3485,9 @@ fn mtls_daemon_should_require_client_certificate_and_accept_configured_client() 
     assert!(
         accepted.status.success()
             && String::from_utf8_lossy(&accepted.stdout).contains(r#""pong":true"#),
-        "持有客户端证书时应连接成功: {}",
-        String::from_utf8_lossy(&accepted.stderr)
+        "持有客户端证书时应连接成功: {}\ndaemon:\n{}",
+        String::from_utf8_lossy(&accepted.stderr),
+        daemon_output(&buffer)
     );
     let rejected = rejected
         .expect("CA-only client should run")

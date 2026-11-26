@@ -70,8 +70,10 @@ CLASSIFICATION: dict[str, str] = {
 PLATFORM_EXEMPTIONS: dict[str, dict[str, str]] = {
     "zenoh_router_client": {
         "ubuntu-latest": (
-            "跨进程连接 e2e 在 ubuntu runner 上不稳定 (连续三轮各挂一个不同用例, 全是 client "
-            "连不上刚启动的 daemon; macos 同用例全绿); 见 issue #163 / RAI-464"
+            "TLS/mTLS 用例偶发丢首条请求: zenoh-link-tls 1.8.0 在 rustls 握手完成前就把"
+            "链路交给 transport, 首帧写入报 `handshake not complete` 并关链路 (daemon 侧), "
+            "client 侧看到 `peer closed connection without sending TLS close_notify`; "
+            "与 RAI-464 修掉的 display/tls_init 两个根因无关, 见 issue #163"
         )
     },
     "control_websocket": {

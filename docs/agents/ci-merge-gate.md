@@ -108,6 +108,15 @@ target 的 `passed` 必须 > 0**, 否则判红 —— 「退出码 0 但零执�
 在跑」; 读绿点必须连着这三个数字一起读。** 数字与 `PLATFORM_EXEMPTIONS` 是同一次改动的东西:
 加/撤一条豁免就要改这里, 否则下一份报告会拿旧的覆盖数去说新的绿。
 
+**ubuntu 的 integration 步骤必须在虚拟 X display 下执行** (RAI-464): `@key` / `@type` 的真实注入
+走 enigo, 而 linux 后端要先连上 X11 或 Wayland display; runner 两样都没有时 `Enigo::new` 直接返回
+`no connection could be established: (no successful connection)` (code 70), 「注入成功」类断言在
+无显示会话的机器上**确定性**失败。`ci.yml` 的 `test-ubuntu` 用 `xvfb-run -a` 包住这一步, 断言保持
+原样、环境按测试的假设显式提供 (同 `docs/solutions/test-failures/tty-term-dumb-environment-deterministic-failure.md`
+对 `TERM` 的口径: 固定假设的环境, 而不是改断言或延长时间)。反向判据: 去掉 `xvfb-run` 后
+`control_lanes::daemon_control_lane_should_accept_key_object_payload_with_request_id` 会在
+0.1s 内以同一句 code 70 失败 —— 这是环境前提, 不是时序。
+
 `recording_e2e` 仍由它自己那一步执行 (unix)。
 
 **跑批脚本的编码要在两个方向上都固定 utf-8。** windows runner 的控制台是 cp1252: 只修解码
@@ -157,14 +166,17 @@ target 的 `passed` 必须 > 0**, 否则判红 —— 「退出码 0 但零执�
 
 附带产物: 失败详情里写明终止方式与回读结果, summary 同时给出每个 target 的 `elapsed`。
 
-**ubuntu 侧 1 个 target 显式豁免** (`PLATFORM_EXEMPTIONS`): `zenoh_router_client`。连续三轮
-ubuntu 各挂一个**不同**的用例 (`control_lanes` 的 key 注入 / TLS 换 CA / mTLS client cert),
-全部停在「client 建不上到刚启动 daemon 的连接」这一段, 而同一份代码在 macos runner 上全绿、
-本地 (含 `taskset -c 0,1` 压到 2 核) 也全绿 —— 这是**一族**不稳定, 不是一个用例的缺陷, 所以
-不按用例 `#[ignore]` 逐条裱糊 (那样下一轮换个用例照样红), 而是整 target 在 ubuntu 豁免、
-macos 照常执行, job summary 单列 `exempt on this platform`、**不计入 ran 集合**。
-`control_lanes` 里那 1 条仍在 ubuntu 上按 `#[cfg_attr(target_os = "linux", ignore = …)]`
-跳过 (其余 14 条照常跑)。归因与收回条件见 issue #163 / RAI-464, 到期 2026-12-03。
+**ubuntu 侧 1 个 target 显式豁免** (`PLATFORM_EXEMPTIONS`): `zenoh_router_client`。它是**两族**
+不稳定叠在一起, 2026-11-26 (RAI-464) 已按证据拆开:
+
+| 家族 | 机制 | 现状 |
+| --- | --- | --- |
+| `@key` 注入类 (`control_lanes` 的对象载荷用例 + 本 target 的 key 事件用例) | linux 输入后端要先连 X11/Wayland display; runner 没有时 enigo 直接报 `no connection could be established: (no successful connection)` (code 70), 与 control client 到 daemon 的连接**无关** | **已修**: ubuntu 的 integration 步骤改在 `xvfb-run` 下执行 (`ci.yml`), `control_lanes` 那条已撤 `#[ignore]` 并在 ubuntu 执行 |
+| TLS/mTLS 两例 | `zenoh-link-tls` 1.8.0 在 rustls 握手完成前就把链路交给 transport: 首帧写入报 `handshake not complete` 并关链路 (daemon 侧), client 侧看到 `peer closed connection without sending TLS close_notify`; 同族还有 `tls_init` 并发写坏材料 (两个 `tls-init` 交错落盘 → TLS 握手必失败), 后者已修为「整目录 rename 原子落地」 | **未收回**: 首帧竞态在风味机与 2 核本地都能复现 (全 target 一轮约 1/3), 需要 zenoh 链路层或 rdog 链路启动时序的修复, 见 issue #163 |
+
+整 target 在 ubuntu 豁免、macos 照常执行, job summary 单列 `exempt on this platform`、
+**不计入 ran 集合**; 收回条件 (issue #163 / RAI-464, 到期 2026-12-03) 是上面的首帧竞态有结论、
+ubuntu 连续三轮通过。
 
 **windows 侧 2 个 target 显式豁免** (`PLATFORM_EXEMPTIONS`): `control_websocket` (整 target 挂死,
 1500s 上限才终止) 与 `zenoh_router_client_windows` (daemon 因遗留 `service_name` 守卫拒启动) ——
@@ -176,11 +188,11 @@ windows 连续 3 轮, 随后删掉这两条豁免。所以本 PR 之后 windows 
 `computer_use_density` 一个 —— 这是这一轮的真实覆盖, 不写成"windows 也跑了 e2e"。
 
 逐条 `#[ignore]` 只在**单个用例**确有平台不兼容时用, 且必须挂理由与到期日 (见 §6)。今天只剩
-一处: `control_lanes::daemon_control_lane_should_accept_key_object_payload_with_request_id` 在
-ubuntu 上按 `#[cfg_attr(target_os = "linux", ignore = …)]` 跳过, 同 target 其余 14 条照常跑。
-**`zenoh_router_client` 里一条 `#[ignore]` 都没有** —— 那个 target 是整片在 ubuntu 豁免 (见上),
-不要在这里再写它, 否则 §3b 会和 §6 给出两份互相打架的口径 (`zenoh_router_client` 是 `unix`,
-本来也从不进 windows)。
+三处, 全是「需要真实输入后端 / 截图后端」的机器前提, 与消息语义无关:
+`control_lanes` 的截图用例、`zenoh_router_client` 的真实输入模拟与截图用例。
+**`zenoh_router_client` 的 key 注入用例已经不带 `#[ignore]`** —— 它曾经的 platform ignore 与
+`control_lanes` 那条同源 (enigo 连不上 display), 已由 ubuntu job 的 `xvfb-run` 前提解决;
+在该 target 整片豁免撤销前, ubuntu 上它仍随 target 一起不执行, 但不再是「用例级跳过」。
 
 **compile-only 是显式的, 不是静默 skip —— 但它也不计入「ran」。** 这 6 个 target 里, 5 个
 需要真实桌面会话 (已登录的 GUI 用户 + Accessibility 与 Screen Recording 授权, GitHub runner
