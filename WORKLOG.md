@@ -592,7 +592,7 @@ shell 46 passed、两个载体守卫 OK。
 
 复跑: `--bin rdog` 1144 passed / 0 failed / 4 ignored; `control_iroh` 30 passed / 2 ignored; 回环 13/13(含新增
 的重附跨原截止用例); `control_pty` 5 passed / 3 failed 与基线逐项相同; `control_tty` 0/1 与基线相同。
-- 提交: 7f3f5c1
+- 提交: beb64d8
 
 ## [2026-11-26] tests/ TTY 夹具改按能力探测选择 script 调用形式 (RAI-410)
 
