@@ -177,7 +177,7 @@ fn validate_transfer_path(raw: &str, verb: &str) -> Result<PathBuf, std::io::Err
 
 /// 暂存文件名里由目标名截断后保留的最大字节数。
 ///
-/// 暂存名 = 截断后的目标名 + `.` + 16 位哈希 + `.partial`, 约 33 字节额外开销。加上它还要留出
+/// 暂存名 = 截断后的目标名 + `.` + 16 位哈希 + `.partial`, 额外开销 1 + 16 + 8 = 25 字节。加上它还要留出
 /// 余量给 `NAME_MAX` (常见 255 字节) —— 不截断的话, 原本能传的 239~247 字节长文件名会在第一次
 /// `@file-chunk` 上撞 `ENAMETOOLONG`, 而传输在 open 阶段看起来是成功的。
 const STAGING_BASENAME_MAX_BYTES: usize = 200;
