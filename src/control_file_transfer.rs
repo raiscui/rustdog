@@ -57,6 +57,14 @@ const STAGING_SUFFIX: &str = ".partial";
 const INDEX_DIR: &str = "file-transfer";
 const INDEX_FILE: &str = "partials.json";
 
+/// 单个 `@file-chunk` / `@file-read` 的**载荷字节**上限 (客户端按它切块)。
+///
+/// 从 `CHUNK_BASE64_LIMIT` 推导, 不另立常量: 编码后长度 `4*ceil(n/3)`, 留出取整的余量即可保证
+/// 每一块都塞得进一行。
+pub(crate) fn chunk_payload_bytes() -> usize {
+    (CHUNK_BASE64_LIMIT - 4) / 4 * 3
+}
+
 /// 单个 @file-chunk data 载荷的字节上限 (解码前 base64 文本的字符数上限)。
 /// 取帧上限 8MiB 的 80% — 决策 2 的落地: chunk 永远塞得进一行。
 const CHUNK_BASE64_LIMIT: usize = (MAX_CONTROL_MESSAGE_BYTES * 4) / 5;
@@ -825,7 +833,7 @@ pub(crate) fn reap_idle_transfers(
 ///
 /// 与 `reap_file` 的区别就是这一点: 重启不是取消, 半成品必须留在盘上等索引来认领。
 #[cfg(test)]
-fn forget_sessions_for_tests(transfer_ids: &[&str]) {
+pub(crate) fn forget_sessions_for_tests(transfer_ids: &[&str]) {
     // 只丢自己那几条: 会话表是同进程全局的, 清整张表会踩到并行运行的其它用例
     // (同 docs/solutions/best-practices/parallel-test-global-state-single-lock.md 的纪律)。
     let mut sessions = transfers().lock().expect("transfer table poisoned");
@@ -2182,8 +2190,10 @@ mod tests {
             persist_index(&sessions);
         }
 
-        // 重启: 清掉内存里的孤儿, 再从索引恢复
-        orphan_partials().lock().unwrap().clear();
+        // 重启: 丢掉内存里这一条孤儿, 再从索引恢复。
+        // 只删自己那条 —— 孤儿表与会话表一样是同进程全局的, `clear()` 会把并行用例的条目
+        // 一起抹掉 (本轮 CI 上真的踩到了: 另一个用例的 `reaped == 1` 断言因此变红)。
+        orphan_partials().lock().unwrap().remove(&partial);
         let restored = restore_index();
         assert_eq!(restored, 0, "这一份索引里没有会话条目");
         assert!(

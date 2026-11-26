@@ -78,7 +78,7 @@ pub(crate) fn extract_one_shot_lines(host: Vec<String>) -> (Vec<String>, Vec<Str
     (host, lines)
 }
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Debug, Clone, Eq, PartialEq)]
 pub(crate) enum ControlInvocation {
     Tcp {
         host: String,

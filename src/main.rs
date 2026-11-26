@@ -71,6 +71,7 @@ mod win_dpi;
 mod test_support;
 // UI script runner 复用现有 line-control transport。
 // 这里保持 CLI-side orchestration,不新增 daemon-side UI 协议。
+mod transfer_cli;
 mod ui_script;
 mod ui_script_runner;
 mod zenoh_control;
@@ -320,6 +321,11 @@ fn run(opts: input::Opts) -> Result<(), String> {
             pty_detach,
             pty_attach,
             ui_script,
+            put,
+            remote_path,
+            get,
+            local_path,
+            restart,
             dry_run,
             trace_dir,
             host,
@@ -473,6 +479,39 @@ fn run(opts: input::Opts) -> Result<(), String> {
                 Some(_) => invocation,
                 None => control_invocation::promote_loopback_tcp(invocation),
             };
+
+            if put.is_some() || get.is_some() {
+                if !one_shot_lines.is_empty() {
+                    return Err(
+                        "`--put` / `--get` 不能和尾部 `@<line>` one-shot 同时使用".to_string()
+                    );
+                }
+                if pty || pty_close.is_some() || pty_detach.is_some() || pty_attach.is_some() {
+                    return Err("`--put` / `--get` 不能和 PTY 操作同时使用".to_string());
+                }
+                if !pty_command.is_empty() {
+                    return Err("`--put` / `--get` 不接受 `--` 后的远端 PTY 命令".to_string());
+                }
+                let peer = transfer_cli::TransportExchange::new(
+                    invocation.clone(),
+                    transfer_cli::chunk_ack_timeout_ms_from_config(),
+                );
+                let receipt = match (put, get) {
+                    (Some(local), None) => {
+                        let remote = remote_path
+                            .ok_or("`--put` 需要 `--remote-path <REMOTE>`".to_string())?;
+                        transfer_cli::run_put(&peer, &local, &remote, restart)?
+                    }
+                    (None, Some(remote)) => {
+                        let local = local_path
+                            .ok_or("`--get` 需要 `--local-path <LOCAL>`".to_string())?;
+                        transfer_cli::run_get(&peer, &remote, &local)?
+                    }
+                    _ => return Err("`--put` 与 `--get` 互斥".to_string()),
+                };
+                println!("{}", receipt.render());
+                return Ok(());
+            }
 
             if !one_shot_lines.is_empty() {
                 control_invocation::send_control_lines_for_invocation(
