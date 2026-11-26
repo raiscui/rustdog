@@ -494,13 +494,13 @@ fn run_pty_attach_receiver_with_transport(
     bridge_attached_pty_session(transport, &mut session)
 }
 
-fn bridge_attached_pty_session(
-    transport: &mut ControlTransport,
+pub(crate) fn bridge_attached_pty_session(
+    transport: &mut impl PtyBridgeTransport,
     session: &mut crate::pty_control::AttachedPtySession,
 ) -> io::Result<()> {
-    transport.set_read_timeout(Some(std::time::Duration::from_millis(25)))?;
+    transport.set_bridge_read_timeout(Some(std::time::Duration::from_millis(25)))?;
     let result = bridge_attached_pty_session_inner(transport, session);
-    let restore_result = transport.set_read_timeout(None);
+    let restore_result = transport.set_bridge_read_timeout(None);
     match (result, restore_result) {
         (Ok(()), Ok(())) => Ok(()),
         (Err(err), _) => Err(err),
@@ -508,13 +508,51 @@ fn bridge_attached_pty_session(
     }
 }
 
+pub(crate) trait PtyBridgeIo {
+    fn read_message(&mut self) -> io::Result<Option<String>>;
+    fn write_message(&mut self, message: &str) -> io::Result<()>;
+}
+
+/// A bridge transport that also carries the read timeout the bridge polls on.
+pub(crate) trait PtyBridgeTransport: PtyBridgeIo {
+    fn set_bridge_read_timeout(&mut self, timeout: Option<std::time::Duration>) -> io::Result<()>;
+}
+
+impl PtyBridgeIo for ControlTransport {
+    fn read_message(&mut self) -> io::Result<Option<String>> {
+        self.read_message()
+    }
+
+    fn write_message(&mut self, message: &str) -> io::Result<()> {
+        self.write_message(message)
+    }
+}
+
+impl PtyBridgeTransport for ControlTransport {
+    fn set_bridge_read_timeout(&mut self, timeout: Option<std::time::Duration>) -> io::Result<()> {
+        self.set_read_timeout(timeout)
+    }
+}
+
 fn bridge_attached_pty_session_inner(
-    transport: &mut ControlTransport,
+    transport: &mut impl PtyBridgeIo,
     session: &mut crate::pty_control::AttachedPtySession,
 ) -> io::Result<()> {
+    // Drain a bounded batch, then always look at the wire. An unbounded drain lets a
+    // sustained output backlog starve the lease renewals that arrive on the read
+    // side, and the sweeper would then reclaim a session its client is renewing.
+    const OUTPUT_BATCH: usize = 64;
     loop {
-        while let Ok(frame) = session.try_recv_frame() {
-            transport.write_message(frame.to_wire_message().as_str())?;
+        let mut budget = OUTPUT_BATCH;
+        while budget > 0 {
+            let Ok(frame) = session.try_recv_frame() else {
+                break;
+            };
+            budget -= 1;
+            if let Err(err) = transport.write_message(frame.to_wire_message().as_str()) {
+                session.disconnect();
+                return Err(err);
+            }
             if matches!(
                 ControlPeerSession::lifecycle_decision_for_frame(&frame),
                 ControlPeerLifecycleDecision::TerminalComplete { .. }
@@ -539,6 +577,7 @@ fn bridge_attached_pty_session_inner(
                                         format!("@pty-stdin base64 数据无法解码: {err}"),
                                     )
                                 })?;
+                        log::debug!("pty bridge stdin frame bytes={}", bytes.len());
                         session.send_stdin_bytes(bytes)?;
                         continue;
                     }
@@ -571,6 +610,7 @@ fn bridge_attached_pty_session_inner(
                     continue;
                 }
 
+                log::debug!("pty bridge forwards an unrecognized message to stdin bytes={}", message.len());
                 session.send_stdin_bytes({
                     let mut bytes = message.into_bytes();
                     bytes.push(b'\n');
@@ -586,7 +626,10 @@ fn bridge_attached_pty_session_inner(
                     err.kind(),
                     io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock
                 ) => {}
-            Err(err) => return Err(err),
+            Err(err) => {
+                session.disconnect();
+                return Err(err);
+            }
         }
     }
 }
@@ -979,3 +1022,6 @@ fn parse_json_string(bytes: &[u8], index: &mut usize) -> io::Result<String> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(all(test, target_os = "linux"))]
+mod pty_bridge_tests;

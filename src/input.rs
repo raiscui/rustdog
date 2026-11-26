@@ -15,6 +15,7 @@ pub struct Opts {
 pub enum Transport {
     Tcp,
     Zenoh,
+    Iroh,
     #[value(name = "zenoh-peer", hide = true)]
     ZenohPeerLegacy,
 }
@@ -107,6 +108,10 @@ pub enum Command {
         /// 避免 clap 默认值吞掉“用户没有显式选择”的语义。
         #[clap(long, value_enum)]
         transport: Option<Transport>,
+
+        /// Loopback-only iroh control profile (JSON).
+        #[clap(long)]
+        iroh_config: Option<PathBuf>,
 
         /// Namespace used by the Zenoh router/client control profile.
         #[clap(long)]
@@ -215,6 +220,22 @@ pub enum Command {
         /// Explicit Zenoh entry point(s) of the daemon router
         #[clap(long = "entry-point")]
         entry_point: Vec<String>,
+    },
+
+    /// Manage the local admission policy of an iroh daemon.
+    Policy {
+        #[clap(subcommand)]
+        action: PolicyAction,
+
+        /// Daemon profile that names the policy file to change.
+        #[clap(short, long)]
+        config: PathBuf,
+    },
+
+    /// Start the provisional loopback iroh directory and relay.
+    Rendezvous {
+        #[clap(short, long)]
+        config: PathBuf,
     },
 
     Daemon {
@@ -327,6 +348,48 @@ pub struct RecordCommandShared {
     pub entry_point: Vec<String>,
     /// target / host / port 位置参数, 跟 `Command::Control` 同源。
     pub host: Vec<String>,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum PolicyAction {
+    /// List the admitted parties with their fingerprint, note and registration time.
+    List,
+    /// Admit a party and record who it is.
+    Admit {
+        /// Endpoint id in hex, as the daemon prints it.
+        #[clap(long)]
+        subject: Option<String>,
+
+        /// Key file whose public half is the party to admit.
+        #[clap(long = "subject-key")]
+        subject_key: Option<PathBuf>,
+
+        /// Free-form note kept beside the party.
+        #[clap(long, default_value = "")]
+        note: String,
+    },
+    /// Refuse new sessions and renewals; live sessions run to their own lease end.
+    Revoke {
+        #[clap(long)]
+        subject: Option<String>,
+
+        #[clap(long = "subject-key")]
+        subject_key: Option<PathBuf>,
+
+        #[clap(long, default_value = "")]
+        note: String,
+    },
+    /// Revoke and then terminate the live sessions of that party.
+    Emergency {
+        #[clap(long)]
+        subject: Option<String>,
+
+        #[clap(long = "subject-key")]
+        subject_key: Option<PathBuf>,
+
+        #[clap(long, default_value = "")]
+        note: String,
+    },
 }
 
 #[derive(Subcommand, Debug)]

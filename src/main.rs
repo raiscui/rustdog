@@ -40,6 +40,7 @@ mod control_flow;
 mod control_frames;
 mod control_gui_bench;
 mod control_invocation;
+mod control_iroh;
 mod control_line_read;
 mod control_mouse;
 mod control_observation;
@@ -308,6 +309,7 @@ fn run(opts: input::Opts) -> Result<(), String> {
         Command::Control {
             url,
             transport,
+            iroh_config,
             namespace,
             target_name,
             entry_point,
@@ -330,6 +332,63 @@ fn run(opts: input::Opts) -> Result<(), String> {
             // 共享同一条 transport(TCP / WebSocket / Zenoh session bridge)。
             // ------------------------------------------------------------
             let (host, one_shot_lines) = control_invocation::extract_one_shot_lines(host);
+            if transport == Some(Transport::Iroh) {
+                let [name] = host.as_slice() else {
+                    return Err("iroh control requires one NAMESPACE/NAME target".into());
+                };
+                if url.is_some() || namespace.is_some() || target_name.is_some()
+                    || !entry_point.is_empty() || ui_script.is_some()
+                {
+                    return Err("iroh control only serves NAMESPACE/NAME targets".into());
+                }
+                let path = iroh_config.as_deref().ok_or("iroh control requires --iroh-config")?;
+                let lifecycle = [pty_close.is_some(), pty_detach.is_some(), pty_attach.is_some()]
+                    .into_iter()
+                    .filter(|set| *set)
+                    .count();
+                if lifecycle > 1 {
+                    return Err("iroh PTY 生命周期请求之间互斥".to_string());
+                }
+                if (pty || !pty_command.is_empty()) && lifecycle > 0 {
+                    return Err("`--pty` 与 iroh PTY 生命周期请求互斥".to_string());
+                }
+                let request = if pty || !pty_command.is_empty() {
+                    if pty_command.is_empty() {
+                        return Err("`rdog control --pty` 需要在 `--` 后提供远端命令".to_string());
+                    }
+                    if !one_shot_lines.is_empty() {
+                        return Err("`--pty` 与 one-shot 请求互斥".to_string());
+                    }
+                    let (cols, rows) = pty_control::default_terminal_size();
+                    control_iroh::IrohPtyRequest::Open {
+                        argv: pty_command.clone(),
+                        cols,
+                        rows,
+                    }
+                } else if let Some(session_id) = pty_attach {
+                    let (cols, rows) = pty_control::default_terminal_size();
+                    control_iroh::IrohPtyRequest::Attach {
+                        session_id,
+                        cols,
+                        rows,
+                    }
+                } else if let Some(session_id) = pty_detach {
+                    control_iroh::IrohPtyRequest::Detach { session_id }
+                } else if let Some(session_id) = pty_close {
+                    control_iroh::IrohPtyRequest::Close { session_id }
+                } else {
+                    let [line] = one_shot_lines.as_slice() else {
+                        return Err("iroh control requires one @ping request".to_string());
+                    };
+                    return control_iroh::run_control(path, name, line)
+                        .map_err(|err| err.to_string());
+                };
+                return control_iroh::run_pty_control(path, name, request)
+                    .map_err(|err| err.to_string());
+            }
+            if iroh_config.is_some() {
+                return Err("--iroh-config requires --transport iroh".into());
+            }
             if !one_shot_lines.is_empty() {
                 if one_shot_lines.iter().any(|line| line.is_empty()) {
                     return Err("one-shot line 不能为空".to_string());
@@ -644,6 +703,12 @@ fn run(opts: input::Opts) -> Result<(), String> {
             println!("agent starting: name={name}, namespace={namespace}, daemon={daemon_name}");
             agent_runtime::run_agent(&session, &config).map_err(|err| err.to_string())?;
         }
+        Command::Policy { action, config } => {
+            control_iroh::run_policy(action, &config).map_err(|err| err.to_string())?;
+        }
+        Command::Rendezvous { config } => {
+            control_iroh::run_rendezvous(&config).map_err(|err| err.to_string())?;
+        }
         Command::Daemon {
             config,
             transport,
@@ -651,6 +716,13 @@ fn run(opts: input::Opts) -> Result<(), String> {
             daemon_name,
             entry_point,
         } => {
+            if transport == Some(Transport::Iroh) {
+                if namespace.is_some() || daemon_name.is_some() || !entry_point.is_empty() {
+                    return Err("iroh daemon identity and target name come from its profile".into());
+                }
+                let path = config.as_deref().ok_or("iroh daemon requires --config")?;
+                return control_iroh::run_daemon(path).map_err(|err| err.to_string());
+            }
             let daemon_config = config::load_daemon_config_unvalidated(config.as_deref())
                 .map_err(|err| err.to_string())?;
             // CDP lane 开关随配置初始化 (默认 false; spec 安全模型: 默认关闭)
@@ -706,6 +778,7 @@ fn run(opts: input::Opts) -> Result<(), String> {
                 Transport::ZenohPeerLegacy => {
                     return Err(control_invocation::LEGACY_ZENOH_PEER_TRANSPORT_ERROR.to_string())
                 }
+                Transport::Iroh => unreachable!("iroh daemon is dispatched before legacy config"),
             }
         }
         Command::HiddenDaemon {

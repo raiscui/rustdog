@@ -1,56 +1,5 @@
 # WORKLOG: rustdog
 
-## [2026-11-26] 测试夹具的 daemon 在 panic 路径被收掉 (RAI-423)
-
-- 现象: 夹具只在正常路径 `stop_child`; 断言 panic 后子进程被 init 收养, 一轮批次留下 27 个孤儿
-  `rdog daemon`, 放大后续用例的假红(一次 panic 污染整批)。
-- 改法: 新增 `tests/support/child_guard.rs`: `ChildGuard` 持有 Child、`Drop` 里 kill+wait,
-  `take()` 供 `wait_with_output` 用, `ChildHandle` trait 让 `stop_child(&mut impl ChildHandle)`
-  同时接受裸 `Child` 与 `ChildGuard`(调用点语义不变)。
-- 迁移: control_lanes / control_mode / control_pty / control_websocket / daemon_inbound /
-  zenoh_router_client / connect_modes; zenoh_unixpipe 自带 Drop 的 TestDaemon 未动。
-- 回执: panic 探针 → guard 那个被收、裸 Child 对照残留 1 个; 连跑三轮批次 leftover 恒为 0;
-  各 target 计数与改动前一致。
-- 提交: 8792422
-
-## [2026-11-26] 控制行分片到达时被读超时丢弃, PTY 的 ^C 因此失效 (RAI-415)
-
-- 根因: `src/control_line_read.rs::read_line_limited` 入口 `buf.clear()`; `read_until` 在
-  「正文已到、换行未到」时被读超时打断返回 WouldBlock, 下一轮调用把半行清掉 → 整条消息静默丢失。
-- 触发面: `transport.write_message` 是 `write_all(message)` + `write_all("\n")` 两次写, 25ms 读超时的
-  PTY 桥接最容易在两次读之间撞超时。表现: `@pty-stdin`(含 ^C) 帧被吞, 远端收不到 SIGINT。
-- 定位链: 远端 pty termios 正常 → helper 即前台 pgrp → python `pty.fork` 纯 kernel 对照正常 →
-  直连 daemon TCP 发同一帧正常 → strace 双侧发现 daemon 收到帧却只写出过 `\4` 没写出 `\3`。
-- 改法: 入口不清 buf, `total` 从 `buf.len()` 起算, 只在整行交出/超限丢弃/干净 EOF 时清空。
-- 评审修复 e884f71: 状态收进 `LineReadState`(半行 + 丢弃标记 + 已丢弃字节数), 修 CRLF 边界
-  (尾部 `\r` 不计入内容长度) 与丢弃计数跨读超时丢失(4097 报成 1537); 三个调用方共用同一状态。
-- 评审修复 6a009ae: 跨调用保留的半行会绕过 8 MiB 上限(错误分支在长度检查前返回);
-  改成进入时先判 limit、丢弃状态用 buf 留 `limit+1` 字节跨调用传递(截断而非清空),
-  否则下一轮会忘记状态把剩余数据当成新行。回归测试覆盖 8 块超限分片。
-- 回执: `control_pty` 9 passed(断言零改动) / 全量单测 1110 passed / control_tty·shell_pty·control_lanes·
-  control_websocket·connect_modes 全绿; 分片复现命令修复后 3/3 成功。
-- 提交: 49ea862 (评审修复 6a009ae / e884f71; 均为 rebase 到当前 main 后的工作提交)
-
-## [2026-11-26] tests/ TTY 夹具改按能力探测选择 script 调用形式 (RAI-410)
-
-- 4 处夹具写 `script -q /dev/null <rdog> control ...`(BSD/macOS 尾随命令形式), util-linux 2.39.3 只认
-  `script -q -c "<CMD>" /dev/null`, 直接报 `unexpected number of arguments` 退出 -> 子进程 stdin BrokenPipe,
-  这 4 个 TTY 用例在 Linux 上从未跑起来。
-- 新增 `tests/support/tty_script.rs`: 探一次 `script -c` 能力并缓存, util-linux 走 `-c`(命令行 POSIX 单引号引用),
-  BSD/macOS 走尾随命令; 探测失败不静默跳过。
-- 顺带修 `control_pty_should_treat_control_words_as_remote_input`: 直接给 `rdog control --pty` 喂管道 stdin
-  (`--pty` 需要真终端) 会永久挂到超时(实测 rc=124), 包一层伪终端后拿到 `GOT:@script:...`。
-- 回执: 本机(ubuntu 24.04 / util-linux 2.39.3 / cargo 1.100) `control_pty` 8 passed/1 failed、
-  `control_tty` 2 passed、`zenoh_router_client` 38 passed/0 failed/2 ignored。
-- 剩余 1 个失败 (`control_pty_ctrl_c_...`) 与夹具无关: python 真 pty(不经 script)复现同一行为; 远端 pty 实测
-  `isig icanon`、helper 即该 pty 的 foreground pgrp、0x03 也确实作为字节送到远端(raw 读端收到 `61 03 62`),
-  只是不产生 SIGINT — 属 pty lane 产品侧缺口, 本票范围外。
-- 评审修复: `control_pty_should_treat_control_words_as_remote_input` 原先写完就关 stdin,
-  而 BSD/macOS 的 script 见到 stdin EOF 可能提前收掉伪终端 (control_tty 里有同类记录); 改成等远端打印
-  `GOT:` 后再关写端, stdout/stderr 走收集器。
-  收集线程在子进程退出后 join 再快照, 否则最后一段输出可能还没落 buffer 就断言 (评审第二轮)。
-- 提交: 370317f (评审修复 6c187d7 / ee8474c)
-
 ## [2026-11-26] tests/ 下 17 处 rdog 二进制路径反推收成一处 (RAI-405)
 
 - `tests/` 下 17 个集成测试各自复制「测试可执行文件上两级 + `/rdog`」; cargo 1.100 把测试可执行文件放到
@@ -395,6 +344,289 @@ cargo 1.100 的 build-dir 布局让 `recording_e2e` 的 `rdog_binary_path()` 在
 - 提交: 176d191
 - 提交: 6924b82
 
+## [2026-11-24] RAI-178: P2-A ACL 与租约可否定实验（仅本地）
+
+- 显式注入单调时钟, 验证租约截止边界、可续租、云不可达不可续租、目标绑定、查询 ACL 和旧实例 fence；5/5 通过。
+- 提交: c4fea5f44912a1c0b1fb6cdb9ef3c63229d701b8
+- 用 18 个实际 iroh 回环进程验证可注册/续租/查询、同名竞争、旧实例注销拒绝、握手后准入拒绝、现实短租约与云失联回收。保持正式 CLI/config/协议/锁不变；既有回归通过。临时契约见 [rdog-crossnet-p2-a-probe](specs/rdog-crossnet-p2-a-probe.md)，生产凭证、政策和撤销顺序维持 HOLD。
+- 提交: a81553f32c2ee0341154240b64747c04dd4f1bce
+
+## [2026-11-24] RAI-168: 正式 CLI iroh 只读闭环（仅本地）
+
+- 同一个默认 OCR release 二进制启动只允许回环的 rendezvous（内嵌 HTTPS relay 和 QAD）、daemon 和 control。按名探活经 iroh 直连或 relay 均返回 `id:42/pong:true`; 另一临时身份在两条路径完成握手后被 daemon 明确拒绝, ping handler 均未进入。
+- 复用既有 parser、ping handler、`ControlPeerSession` 和扩展后的 `ControlTransport`。旧 TCP、WebSocket、Zenoh 的针对性集成测试、Linux unixpipe 单元和 CLI 冒烟通过。临时契约见 [rdog-crossnet-p1-readonly](specs/rdog-crossnet-p1-readonly.md); 未接入 bulk、其他业务命令或生产授权。
+- 提交: 15f3ce1f032a65be4638b328fe83ad789a77e648
+
+## [2026-11-23] RAI-137: iroh 回环准入探针（仅本地）
+
+- 用 RAI-131 实编的 iroh 1.4.1 在仅回环的网络命名空间验证三个连接。两次获准连接都收到 `@ping#42` 的结构化 pong; 不在测试 allowlist 的临时身份完成 QUIC 握手后被明确关闭, ping handler 未进入。
+- 只添加手工测试探针, 没有改动根锁、默认特性、生产命令或授权策略。探针没有调用生产 ping handler, 不代表官方 CLI 已接入 iroh。
+- 提交: 34909253345e4af4841efd4866df55dbb7418b68
+
+## [2026-11-23] RAI-131: Rust 1.95 根包默认构建（仅本地）
+
+- 从 RAI-128 私有基线建立候选, 根包保留默认 OCR, 精确 pin `iroh` 与 `iroh-relay` 为 `=1.4.1`, 后者启用 `server`。Linux x86_64 在空目标目录用 Rust 1.95.0 进行 `cargo build --release --locked --bin rdog` 成功, 编译事件确认 OCR 和两条 iroh 依赖均参与实际构建。
+- 同一 release 二进制在仅 loopback 的网络命名空间完成既有、带认证的 Zenoh `@ping#42`, 返回原 request ID 和 `pong: true`。没有执行 shell 指令或改动控制行为, 未验证 OCR 推理或跨网 P2P。
+- 提交: 77215d8cd21fdb38b5117eadd8823257c5e4c84f
+
+## [2026-11-23] RAI-128: fixed-echo 原型恢复（仅本地）
+
+- 从 Mac 仓库仍可读取的 Git 快照 `50d55eba98fecef92f08354464aeb55a14b8a5d7` 恢复四个原型源码/测试文件。逐文件核对模式、大小、Git blob 和 SHA-256。原临时工作树已不存在, 不将快照视为对其他未提交文件的完整保全。
+- 保留独立原型锁文件与 `iroh` / `iroh-relay` 的 `=1.4.1` pin。Linux x86_64 用 Rust 1.91.0 验证 release 构建、两条写失败回归、既有本地 echo 脚本和独立首流隔离场景。未改动正式控制面, 未运行跨网验证。
+- 提交: 16df4c8975fa478363157ec1623727f032b61857
+
+## [2026-11-23] RAI-128: iroh 原型本地构建基线
+
+- 从 `5588fcb75bdb77735e4e43af19234a82b822735d` 在隔离分支导入公开原型 `eaaf5a677021f1d737d58597b4696e37532c42b2`。保留两侧历史, 无冲突; 导入时原型子树与上游完全一致。
+- 提交: b2768fd31020c342a3d8b39cf44ebd61d0ab7ace
+- 原型 `Cargo.toml` 精确 pin `iroh` 和 `iroh-relay` 到 `=1.4.1`, 原型 `Cargo.lock` 未变。Linux x86_64 干净 `cargo +1.91.0 build --release --locked` 通过。主线根目录同命令在默认特性下被锁定的 `oar-ocr` 0.9.2 依赖族的 Rust 1.95 要求拦截。主线清单和锁文件未变, 尚无合并依赖图, 未取得原工作树的修复。
+- 提交: be1a9b9e80960cf97dd230f7239f7bc9ffb11e97
+
+## 2026-11-25 RAI-183: PTY 桥接错误后回收当前会话
+
+共享 PTY 桥接在不可恢复的传输读写错误后请求回收; runtime 只处理仍归该控制端的会话。正常退出、显式 detach 和重附语义保持, Iroh 正式入口未开放 PTY。
+隔离 Linux 定向用例 7/7, Rust 1.95 默认特性 release 构建通过。既有 PTY 套件 5/8, 三条红项均在等价基线复现; 未将全套标为通过。
+- 提交: 15aadeb34fac8f5ba9bb6512798900332cb70f98
+
+## 2026-11-25 RAI-179 U1: Iroh 会话准入契约
+
+冻结 H1=B、H2=A、H3=C 及角色、拒绝和终态边界。默认入口保持 ping-only；隔离入口验证与运行证据留给后续单元。
+- 提交: 1d1d5c65ab980c24cacf1b7a5080bf32ebcb4907
+
+## 2026-11-25 RAI-179 U2: 隔离准入模型
+
+测试编译内的签发、续租、本地策略、撤销及固定 PTY 夹具通过 4 项定向验证；正常 Iroh 入口仍只接受 ping。此单元未证明 Iroh 传输上的 PTY 生命周期。
+- 提交: 0df1f9de885a38778076da0f6242376944cb442f
+
+## 2026-11-25 RAI-179 U3: 固定夹具的隔离生命周期
+
+真实回环 Iroh 测试入口只运行固定无害 PTY 夹具，验证身份拒绝、重附与 stale owner、租约到期、graceful/emergency 终态及回收；本地真实 TTY 另验恢复。默认生产入口仍拒非 ping。
+- 提交: a2bd9b3b23bfd6de846a52bc0bb923191f3c9bb9
+
+## 2026-11-25 RAI-179: 隔离验收评审补修
+
+测试入口定时回收已 detach 夹具，确认终态后清理 live 状态，持久写入不等同于现存终止，实例内按 UUID 去重。四条定向红绿均复核；默认 release 仍拒非 ping。
+- 提交: ee9b2fc603dd559c7c85ebb6c5229dcb83109683
+
+## 2026-11-25 RAI-179: 隔离终态授权与撤销时钟
+
+终态重复 Close 仍按已认证 peer 和最后 attachment 授权；emergency 在持久化成功后读时钟。两项定向红绿和隔离生命周期通过。
+- 提交: 1df17acd868e92da01f0da05e216919ae103fef8
+
+## 2026-11-25 RAI-305 U1: Iroh 跨网 profile 地址放开
+
+profile 新增 `routable`(缺省 false)与 `bind`; `network`/`relay_allowed` 是唯一地址策略, 目录、endpoint、relay-QAD、advertise 与注册校验都走它。缺省 profile 仍是 P1 的 IPv4 回环门禁与原错误文案; routable 下拒绝未指定/组播/广播地址。4 项定向用例从红转绿(基线红是 `routable daemon profile parses: invalid iroh JSON profile`), 16 项 control_iroh 既有用例保持绿。
+- 提交: b5205ba
+
+## 2026-11-25 RAI-305 U2-a: 准入语义搬出测试构建
+
+`Admission`/`SignedGrant`/`Policy`/撤销语义从 `#[cfg(test)]` 的 `admission_tests.rs` 搬进生产模块 `src/control_iroh/admission.rs`, 生产与测试共用同一份实现; 夹具与 Lane 驱动留在测试侧 (`fixtures.rs`/`lifecycle_tests.rs`)。新增 `sweep`: 同一锁与同一时钟下处理到期、已落盘的 emergency 标记与未确认终帧的重发。
+搬移后 RAI-179 隔离证据重跑通过: 18 项单测/驱动用例全绿; 隔离 Iroh 生命周期矩阵 graceful 3006/3000ms 报 `lease_expired`、emergency 256/12000ms 报 `lease_revoked`, 授权前零进程、重附与跨主体不误关均保持; 真实本地 TTY 全部标志恢复。
+- 提交: 52ab6a1
+
+## 2026-11-25 RAI-305 U2/U3/U4: iroh 承载附着式 PTY 会话
+
+生产接线: daemon profile 给出 `policy_file` 时启用准入 PTY 通道(`serve_admitted`), 缺省仍 ping-only + 回环; 通道只服务 ping 与 PTY 帧, 其余 control 行按 `LANE_REFUSED` 拒绝, bulk 保持关闭。`route`/`network`/`relay_allowed` 是地址唯一策略, `Route::Auto` 提供直连不可得时经 relay 的交互回退并记录实际路径。
+租约: 客户端按 TTL/3 续租, 服务侧 `lease_sweeper` + `Admission::sweep` 在同一锁与同一时钟下处理到期、已落盘 emergency 标记与未确认终帧; detach 后无后续请求也会到期回收。
+关闭授权(Rai-298 契约重实现): 按主体判定, 同主体跨连接可关自己的会话, 异主体 `iroh_subject_denied` 且目标继续运行; 旧通道维持按 id 关闭并已在规格写明"可达即全权"。
+证据: 隔离回环矩阵 8/8(`tests/manual/iroh_pty_lane.py`, 含准入前零进程、stdin 回显、跨连接关闭、异主拒绝、detach 到期回收、graceful/emergency、真 TTY); 19 项 iroh 单测; 搬迁后 RAI-179 隔离夹具矩阵重跑通过。`control_pty` 2 项与 `control_tty` 1 项为 util-linux `script` 2.39.3 的 BrokenPipe 环境红, 与候选无关(基线复核见回执)。
+- 提交: 187c2e5
+
+## 2026-11-25 RAI-305 U6: 跨网验收与回退修正
+
+非回环验收改成三主机拓扑(`tests/manual/iroh_pty_routable.sh`): 客户 10.41.0.1 / 中转 10.41.0.2-10.42.0.1(目录 + relay, 开转发) / daemon 10.42.0.2, 客户能到 relay 与目录但直连 daemon 被黑洞。11 项全绿: 真实握手、长会话 stdin 回显与 exit、同主体跨连接关闭、异主拒绝且目标存活、detach 到期回收、graceful/emergency、relay-only 可达、直连被黑洞时 `direct` 必失败而 `auto` 落到 `iroh_path=relay`(实测 auto 11.1s)。回环 8 项、iroh 单测 19 项、profile 测试 5 项同步复跑通过。
+U3 行为基线: 同一矩阵里 `direct` 在直连被阻断时失败、`auto` 成功并记录 `iroh_path=relay`, 构成红/绿对照。
+发现的真实缺陷与修法: 同一 endpoint 先试 direct 后, 远端状态会持续重试已知路径, relay 候选拿不到新的 QAD 应答; 改为 `candidate_endpoint` 按候选建 endpoint, 并给 relay 候选独立的 `RELAY_CONNECT` 预算。
+环境红: `control_pty`/`control_tty` 的 3 个用例在 `b5205ba` 与候选顶点红集完全相同(util-linux `script` BrokenPipe), 与候选无关。
+- 提交: bc2eb93
+
+## 2026-11-25 RAI-305 复核处置: 续租与终止
+
+非作者只读复核给出 2 条 high, 均经代码核对成立并已修:
+- 续租帧被桥写进远端 PTY 的 stdin, `Admission::renew` 在会话期间永不执行, 会话到 TTL 被 sweep 杀掉。红基线: 2s 租约下终端出现三份 `{"op":"renew",...}`、客户端报 `remote PTY closed before natural exit: lease_expired`(`receipts/u7/baseline-red.log`, sha256 a1ae1e37…)。修法: lane 侧 `LaneIo` 在桥接层截获 `Handshake::Renew` 并处理, 同处拒绝指向异主体会话的 close。绿: `receipts/u7/green-loopback.log`(sha256 4844d3f4…)、三主机 `receipts/u7/routable.log` 12/12 含 `renewal: a session outlived its lease deadline`。
+- 回收只杀直接子进程, 无进程组信号、无 SIGKILL 升级。修法: `signal_pty_group` 按 `setsid` 会话首进程发组信号 + `escalate_pty_group_kill` 在 `PTY_KILL_GRACE` 后升级。绿: `revocation: grandchild 93065 died with the session`(回环)、`grandchild 93337`(三主机)。
+另修: 一条租约只持有一个 PTY(`Admission::session_of`, 否则 detach 后同租约再开会让第一条永久无回收路径)、grant 容忍 `CLOCK_SKEW`、`MIN_SESSION_TTL` 下限(夹具租约 300ms 同步改为 1000ms, 断言未削弱)。规格已同步并指回 `LaneIo` / `signal_pty_group` / `escalate_pty_group_kill` / `CLOCK_SKEW` / `MIN_SESSION_TTL` / `PTY_KILL_GRACE`。
+未修(记录在报告): 3s 写超时按断链处理、租约表不裁剪、attach 的 200ms 到期窗口、`iroh is only supported by the ping one-shot CLI` 的陈旧注释。
+- 提交: 8b99436
+
+## 2026-11-25 RAI-305 验收补口
+
+按复核指出的缺口补 attach 用例: `--pty-detach` 之后由第三个连接 `--pty-attach` 重新附着、回显并关闭。回环 11/11(`receipts/u7/loopback-attach.log`)、三主机 13/13(`receipts/u7/routable.log`)含 `attach: ... attached again and closed from a third connection`。同时把 `control_invocation.rs` 里"iroh 只支持 ping 一次性 CLI"的陈旧提示改成实际语义(不是删除检查, 只改文案)。
+- 提交: c2d882f
+
+## 2026-11-25 RAI-305 第二轮复核处置
+
+修后 diff 的第二轮只读复核判定三项修复(续租截获、进程组终止、一条租约一个 PTY + TTL 下限 + 时钟容忍)全部成立, 另给四条: 当场修三条 ——
+- 宽限期在一半路径上是 0: `kill_pty_child` 传空 session id 使 `pty_session_registered("")` 恒假, SIGHUP 后立刻 SIGKILL。改为 `Option<String>`, 没有会话 id 时走满 `PTY_KILL_GRACE` 再探测组, sweep / `@pty-close` / 断链三条路径同一套升级语义, 规格同步。
+- 同主体但指向另一会话的 `@pty-close` 被当字面量敲进当前 PTY 的 stdin: `LaneIo` 记住本 lane 的会话 id, 不匹配的一律丢弃。
+- 租约冲突复用 lane 能力拒绝的 reason: 改为独立 `LEASE_BUSY`(`iroh_lease_session_conflict`), 规格错误表加一行。
+未修(确认为这批之前就存在): 3s 写超时超时不 reset 的半帧风险, 以及慢链上可能被误判断链。
+回执: 回环 11/11(`receipts/u7/loopback-final.log`)、三主机 13/13(`receipts/u7/routable-final.log`)、iroh 单测 19/19。
+- 提交: 77f7b42
+
+## 2026-11-25 RAI-305 U7: 半帧安全与写预算
+
+- 半帧: 新增 `FrameGuard`(归一化写帧路径)与 `FRAME_BROKEN`。任何一次写失败/超时都把该流标记不可用, 之后写直接被拒, lane 结束并用同一 reason 关闭会话(`abort_broken_frame`)。红基线 `receipts/u7/u7-half-frame-red.log`(旧行为下第二次写确实进了残留半帧的流, 断言 `a frame written onto a stream that holds a partial frame must be refused` 失败); 绿: `cargo test --bin rdog control_iroh` 23/23。
+- 写预算: profile 新增 `frame_timeout_ms`, 两侧校验, `MIN_FRAME_TIMEOUT` 1s / `MAX_FRAME_TIMEOUT` 120s / 缺省 3s。红基线 `receipts/u7/u7-frame-budget-red.log`(字段与校验都不存在); 绿: 两条 profile 用例。
+- 三主机实测(如实记录, 与预期相反): 链路消失 2s(`u7-outage-2s.log`)、6s(`u7-outage-6s.log`)、6s+12s 预算(`u7-outage-6s-budget12s.log`)、20s 冻结读端+64MB(`u7-stall-reader.log`) 全部以连接层 `connection lost` / `LastOpenPath` 结束, 均未出现 `iroh_frame_broken`。结论: 路径消失由连接活性决定, 写预算不改变结果; 写预算只管"路径在、对端不读"的写挂起, 该规则的真实网络证据尚未构造出来, 确定性证据是传输层单测。
+- 提交: d7c5dd2
+
+## 2026-11-25 RAI-305 U8: 操作者撤销路径
+
+- CLI: `rdog policy --config <daemon profile> <list|admit|revoke|emergency>`(`src/input.rs` + `control_iroh::run_policy`)。list 输出 id + SHA-256 指纹前缀 + 登记时间 + 备注 + revoked/terminate 标记; admit/revoke/emergency 都走 `save_policy`(临时文件 → 替换 → 父目录 fsync), 写失败与持久性未确认分别非零退出并报原因。
+- 策略文件新增 `parties`(备注 + 登记时间), 准入判定仍只读 allow/revoked/terminate 三个集合。
+- 验收(回环 13/13 `receipts/u8/loopback.log`, 三主机 15/15 `receipts/u8/routable.log`): `policy list` 显示指纹与备注; `policy revoke` 返回 0 后新会话 `iroh_target_denied`、现存会话仍活; `policy emergency` 现存会话被终止且终帧 `lease_revoked`; 重启 daemon 后仍拒新。
+- 规格新增"操作者路径"一节(命令、落盘语义、两种失败、重启语义)。
+- 提交: 9f30ce3
+
+## 2026-11-25 RAI-305 第三轮复核处置(U7/U8)
+
+复核给 6 条, 全部处置:
+- 作废检查在写锁之外(并发写者可绕): `FrameGuard::ensure_intact`, 拿到流锁后再查一次。
+- `abort_broken_frame` 对第一次失败不可达(会话其实以 `control_disconnect` 收尾): lane 写失败改带哨兵, 会话真的以 `iroh_frame_broken` 关闭。**正向实测**: 1s 预算 + 20s 冻结读端 + 16MB 积压 → `stall: ... frame_broken=True`, daemon 记录 `iroh lane aborted reason=iroh_frame_broken session=…`(`receipts/u7/u7-stall-budget1s.log`)。
+- `policy admit` 对已撤销主体谎报成功: 现在明确报"仍被撤销, 先解封"。
+- `run_policy` 读-改-写无锁(并发可覆盖刚落盘的 revoked): 加 `<policy>.lock` 上的 `flock` 排他锁。
+- `frame_timeout_ms` 只覆盖 lane: 写进规格(目录跳仍 3s); `@pty-detach` 按本 lane 会话收紧。
+- 重启用例使 `path=direct` 断言失效: 改读第一个 daemon 的日志。
+复跑: 回环 13/13(`receipts/u8/loopback-final.log`)、三主机 15/15(`receipts/u8/routable-final.log`)、iroh 单测 23/23、shell 单测 46/46。
+- 提交: 132c66b
+
+## 2026-11-25 RAI-305 公网 1:1 NAT 的 relay 通告地址(RUST-3 真机反馈)
+
+真机跨网实测暴露的缺口: 1:1 NAT 机型上公网地址(EIP)只存在于 NAT 设备, 本机网卡绑不住
+(`[Errno 99] Cannot assign requested address`); 而 registry 用绑定地址拼 relay URL, 对端
+因此拿到一个到不了的地址, 注册被 `iroh_registration_denied` 拒 —— 候选在真机起不来。
+
+处理:
+- `RendezvousConfig` 新增 `advertise`(缺省空), 只改写给对端的 relay URL, 不改绑定地址;
+  `bind` / `relay_http` / `relay_https` / `qad` 仍绑网卡地址。就绪日志同时打印绑定与通告值。
+- 规格 `specs/rdog-iroh-admission-contract.md` 写明 `advertise` 有意不过 `network()`:
+  它不是本机地址, 按绑定地址规则校验会把唯一可用的配置方式判死; 进 URL 后仍受 `RelayUrl`
+  解析与对端 `relay_allowed` 约束。
+- 新增隔离证据 `tests/manual/iroh_pty_advertise.sh` → `iroh_pty_lane.py --advertise`:
+  三网络栈模拟 1:1 NAT(peer 10.60.0.2 / nat 10.60.0.1+10.50.0.254 / relay 10.50.0.2, 四个端口
+  DNAT + SNAT), 三段: 绑私网通告公网 → daemon relay home 为通告值且注册+ping 通过; 不写
+  `advertise` → `iroh_registration_denied` 且非零退出; 通告一个没人持有的地址 → 从未注册。
+
+复跑(同一二进制):
+- `advertise` 三段全过 `receipts/u10/advertise.log`
+- 回环 13/13 `receipts/u10/loopback.log`
+- 三主机合成 15/15 `receipts/u10/routable.log`
+- iroh 单测 23/23, shell 单测 46/46
+- 载体守卫 `check-carrier-assertions.py` OK
+- 提交: b57d780
+
+## 2026-11-26 RAI-305 真机换网恢复后的两条运维事实
+
+RUST-3 真机第二轮(家宽 -> 手机热点)补的两条, 写进规格与交付文档, 避免被当 bug 查:
+
+- 客户端 `bind` 必须跟本机当前地址走: `bind_addr` 把它直接交给 `network` 绑, 换网后已在跑的会话
+  不受影响(走已建连接), 但新建连接用旧地址会 `EADDRNOTAVAIL`, CLI 表面是 `Failed to bind sockets`。
+  实测 192.168.50.143 -> 172.20.10.2 沿用旧值报该错, 改新值立刻 `iroh_path=relay` + `pong:true`。
+- relay 主机运行库: glibc 2.39 构建在 glibc 2.38 宿主上 `GLIBC_2.39 not found`(容器 `rust:1-slim-bookworm`
+  构建可解); `LD_LIBRARY_PATH` 只能带 GUI 那几个库, 混进 `ld-linux`/`libc`/`libm`/`libpthread`/`libgcc_s`
+  会直接 `Floating point exception (core dumped)`。
+
+同步到交付文档: `real3/README.md` 的客户端参数节与 relay 部署节、`profiles/README.md`(模板旁注意事项)。
+守卫 `check-carrier-assertions.py` OK。
+- 提交: 72b4220
+
+## 2026-11-26 RAI-305 bind 通配化与注册契约放宽(Rais 批准)
+
+动机: 客户端必须填本机 IP 才能用, 换网就得改配置。Rais 追问后批准同时放宽注册契约。
+
+- `bind_addr` 在 `routable` 下把"省略"与 `0.0.0.0:0` 都解析成通配绑定 `0.0.0.0:0`, daemon 与 client
+  共用; `bindable` 让绑定面接受未指定地址。通配 + 固定端口仍拒; loopback profile 仍回环。
+- `register` 改为枚举端点实际接口地址(`data.addr().ip_addrs()`), 通配绑定下逐接口展开, 不出现
+  `0.0.0.0` 字面值; `connect_route` 把**全部** IP 候选一起拨, 不再只用第一个。
+- `Registry::request` 的 `Register` 分支: 去掉 `addrs.len() == 2` 与 `ip_addrs().count() == 1`,
+  改为 `>= 1` 个 IP 候选 + 恰好 1 个等于配置值的 relay; 逐 IP 过 `network` 且端口非 0。保留
+  `owners[name] == Some(peer)` 与 `addr.id == peer`(一个名字一个 owner)。去重无需代码:
+  `EndpointAddr.addrs` 是 `BTreeSet`。
+- 新增 `src/control_iroh/registry_tests.rs`: 多候选注册+回读, 以及 0 候选/未指定地址/relay 不匹配/
+  非 owner 四个负例都落在 `iroh_registration_denied`。
+
+复跑(同一二进制): 回环 13/13(`receipts/u11/loopback.log`)、routable 17/17 显式(`routable.log`)、
+routable 17/17 daemon 通配(`routable-wildcard.log`, netns 双接口)、advertise 3/3(`advertise.log`)、
+iroh+shell 单测 74 通过 / 2 ignored(netns 专用)、载体守卫 OK。
+- 提交: 8ad4aa6
+
+## 2026-11-26 RAI-305 routable 下不回环候选(RUST-3 收口要求)
+
+- `candidate_ok`(src/control_iroh.rs): `network` + 端口非 0, 且 `routable` 下拒回环 —— 对端拨
+  `127.0.0.1` 只会打到它自己, 既浪费一次拨号又制造误导性的前半段失败。
+- daemon 侧 `register` 用它过滤通告候选; registry 的 `Register` 校验同样用它, 收到回环候选
+  按 `iroh_registration_denied` 拒; 非 `routable`(回环 profile)不变。
+- `Register` 成功后新增一行 `iroh directory registered name=… candidates=…`, 让通告的候选集
+  可观测, harness 在 routable 下断言该行不含 `127.0.0.1`。
+- 新增 registry 用例: routable 收到回环候选被拒 / 回环 profile 仍接受回环 socket。
+
+复跑(`receipts/u12/`, 同一二进制): 回环 13/13(`loopback.log`)、routable 显式 18/18(`routable.log`,
+`candidates=10.42.0.2:36558`)、routable daemon 通配 18/18(`routable-wildcard.log`, netns 双接口
+仍只通告 `10.42.0.2:58186`)、advertise 3/3(`advertise.log`)、control_iroh 29 passed / 2 ignored、
+shell 46 passed、两个载体守卫 OK。
+- 提交: a897b79
+
+## 2026-11-26 RAI-413 把 iroh 跨网 lane 落到 main（rebased 到 b227c63）
+
+落地方式：lane 的历史在 `capy/rai305-iroh-crossnet-lane`（备份顶点 `ef6360c`）；PR 分支 `rai412` 以当前
+`main`(`b227c63`) 为基，用两提交承载同一棵树——工作提交 + 本记账提交，避免 55 个历史 commit 逐个与
+`WORKLOG.md` 冲突。`tests/**`（含 #138 的 `tests/support/rdog_binary.rs`）保持 main 原样，本 lane 只新增
+`tests/manual/**`。
+- 提交: fc17ebd
+  - Windows 编译门(同轮补): `a43cbca` —— `OpenOptionsExt::mode` 与 `libc::flock` 的 `#[cfg(unix)]` 门控
+
+## 2026-11-26 RAI-413 #141 评审六条处置
+
+评审给 6 条(5 medium / 1 low), 逐条对照 diff 后全部成立并已修:
+- **重附会话仍按原租约到期**: 附上后没有把会话从 detach 掉的租约转移走, sweep 仍按旧租约截止杀死它。新增
+  `Admission::attach_session`(清旧租约 pty + 记到新租约), 附分支先转移再桥接; 单测
+  `an_attached_session_survives_the_lease_that_detached_it` + harness 在旧租约截止后再写一行验证仍通。
+- **输出积压饿死续租**: `bridge_attached_pty_session_inner` 无界排空输出队列, 读侧拿不到 `@lease-renew`。
+  改为每轮最多 64 帧后必定读一次(桥接本就用 25ms 轮询读超时, 代价可忽略)。
+- **过期连接仍持生命周期权**: attach/close/detach 只查主体不查本连接的租约。三个分支都加 `require_active`。
+- **策略准入无法让新客户端进来**: 连接层用静态 ping allowlist 拦, `rdog policy admit` 白写。有 policy 时
+  准入 lane 只按 policy 判, 无 policy(ping-only lane)仍用 allowlist。
+- **并发写可接在半帧之后**: `FrameGuard` 在释放 stream 锁之后才标 broken。改为在锁内 `mark_broken()`。
+- **相对 policy 路径必报持久性失败**: `Path::parent()` 对 `policy.json` 返回空串 → `File::open("")` 失败。
+  空父目录归一为 `.`。
+
+复跑: `--bin rdog` 1144 passed / 0 failed / 4 ignored; `control_iroh` 30 passed / 2 ignored; 回环 13/13(含新增
+的重附跨原截止用例); `control_pty` 5 passed / 3 failed 与基线逐项相同; `control_tty` 0/1 与基线相同。
+- 提交: f9543b7
+
+## 2026-11-26 RAI-413 #141 第二轮评审两条处置
+
+- **附上第二个会话会孤立第一个**: 一个租约若已持有一个仍然存在的会话, 再附上另一个会话会让前者失去唯一回收者
+  (sweep 只走租约指向的会话)。`attach_session` 增加 `held_alive` 判据: 租约已持有别的活会话即拒(映射 LEASE_BUSY);
+  持有的会话已不存在则不阻塞。新增单测 `a_lease_cannot_take_a_second_session_and_orphan_the_first`。
+- **未登记对端会白占 task slot**: 上一轮把连接门放宽成"有 policy 就放行", 结果任何能拨通的对端都会拿到
+  `MAX_SESSIONS` 名额并在 `serve_admitted` 里等满 `HANDSHAKE_TIMEOUT`。改为**在分配 task 之前**问 policy
+  (`Admission::party_permitted` + `identity_admitted`), 未知对端立即拒。
+
+复跑: `--bin rdog` 1145 passed / 0 failed / 4 ignored; `control_iroh` 31 passed / 2 ignored; 回环 13/13; 两个守卫 OK。
+- 提交: 9a32601
+
+## [2026-11-26] tests/ TTY 夹具改按能力探测选择 script 调用形式 (RAI-410)
+
+- 4 处夹具写 `script -q /dev/null <rdog> control ...`(BSD/macOS 尾随命令形式), util-linux 2.39.3 只认
+  `script -q -c "<CMD>" /dev/null`, 直接报 `unexpected number of arguments` 退出 -> 子进程 stdin BrokenPipe,
+  这 4 个 TTY 用例在 Linux 上从未跑起来。
+- 新增 `tests/support/tty_script.rs`: 探一次 `script -c` 能力并缓存, util-linux 走 `-c`(命令行 POSIX 单引号引用),
+  BSD/macOS 走尾随命令; 探测失败不静默跳过。
+- 顺带修 `control_pty_should_treat_control_words_as_remote_input`: 直接给 `rdog control --pty` 喂管道 stdin
+  (`--pty` 需要真终端) 会永久挂到超时(实测 rc=124), 包一层伪终端后拿到 `GOT:@script:...`。
+- 回执: 本机(ubuntu 24.04 / util-linux 2.39.3 / cargo 1.100) `control_pty` 8 passed/1 failed、
+  `control_tty` 2 passed、`zenoh_router_client` 38 passed/0 failed/2 ignored。
+- 剩余 1 个失败 (`control_pty_ctrl_c_...`) 与夹具无关: python 真 pty(不经 script)复现同一行为; 远端 pty 实测
+  `isig icanon`、helper 即该 pty 的 foreground pgrp、0x03 也确实作为字节送到远端(raw 读端收到 `61 03 62`),
+  只是不产生 SIGINT — 属 pty lane 产品侧缺口, 本票范围外。
+- 评审修复: `control_pty_should_treat_control_words_as_remote_input` 原先写完就关 stdin,
+  而 BSD/macOS 的 script 见到 stdin EOF 可能提前收掉伪终端 (control_tty 里有同类记录); 改成等远端打印
+  `GOT:` 后再关写端, stdout/stderr 走收集器。
+  收集线程在子进程退出后 join 再快照, 否则最后一段输出可能还没落 buffer 就断言 (评审第二轮)。
+- 提交: 370317f (评审修复 6c187d7 / ee8474c)
+
 ## 2026-11-26 ort-sys 获取可复现 + 合并门区分「未运行 / 失败」(RAI-397)
 
 `main` 的 `test (windows-latest)` 自基线起在 Build 就红, 一次测试都没跑到。日志里的
@@ -452,6 +684,41 @@ run 45777540822 的 `tests.rs:51` 红是第二种环境性失败: PowerShell 起
 `NotFound` 与这种启动失败重试, 其它错误与断言不成立照旧直接红。
 - 提交: aa68f95
 - 提交: 8db8a35
+## 2026-11-26 RAI-413 #141 第三轮评审一条 + 重定基到 03ff36e
+
+- **被拒的重复附上会把目标会话留在"已附"状态**: attach 分支先 `attach_active_pty_session`(运行时会标记 attached
+  并装帧发送器) 才做准入检查, 拒绝时 `AttachedPtySession` 被直接丢弃、没 disconnect, 目标会话便挂在一个已消失的
+  控制会话上(输出线程下一次 send 失败即停, 后续 attach 报 already attached)。改为**先查后占**: 用
+  `session_of(lease)` + `pty_session_registered` 预检(与 open 分支同形), 再 claim; 防御性地在 `attach_session`
+  拒绝分支补 `session.disconnect()`。
+- 分支重定基到 `main`(`03ff36e`, #137 落地后)。`tests/**`(含 #138 的 `tests/support/rdog_binary.rs`)保持 main 原样。
+
+重定基后复跑: `--bin rdog` 1145 passed / 0 failed / 4 ignored; `control_iroh` 31 passed / 2 ignored;
+回环 13/13; `control_pty` 8 passed / 1 failed(`ctrl_c`) vs 基线 7 passed / 2 failed(`ctrl_c`+`string_shorthand`);
+`control_tty` 本分支 2 passed / 0 failed, 与基线同(基线此前已转绿)。
+- 提交: 2b30395
+
+## 2026-11-26 RAI-413 #141 第四轮评审一条(low)
+
+被拒的重复附上原用 `session.disconnect()` 释放占位, 但 Disconnect 是**关闭**语义(运行时 Killer 该子进程),
+而目标是别的租约的会话 —— 拒绝不该毁掉它。改为 `session.detach("attach_refused")`: 清 owner、会话继续存活。
+该分支当前不可达(预检与 `attach_session` 判据同源, 租约无删除路径), 属防御性修正。
+
+复跑: `--bin rdog` 1145 passed / 0 failed / 4 ignored; `control_iroh` 31 passed / 2 ignored; 回环 13/13。
+- 提交: 0993ff6
+
+## [2026-11-26] 测试夹具的 daemon 在 panic 路径被收掉 (RAI-423)
+
+- 现象: 夹具只在正常路径 `stop_child`; 断言 panic 后子进程被 init 收养, 一轮批次留下 27 个孤儿
+  `rdog daemon`, 放大后续用例的假红(一次 panic 污染整批)。
+- 改法: 新增 `tests/support/child_guard.rs`: `ChildGuard` 持有 Child、`Drop` 里 kill+wait,
+  `take()` 供 `wait_with_output` 用, `ChildHandle` trait 让 `stop_child(&mut impl ChildHandle)`
+  同时接受裸 `Child` 与 `ChildGuard`(调用点语义不变)。
+- 迁移: control_lanes / control_mode / control_pty / control_websocket / daemon_inbound /
+  zenoh_router_client / connect_modes; zenoh_unixpipe 自带 Drop 的 TestDaemon 未动。
+- 回执: panic 探针 → guard 那个被收、裸 Child 对照残留 1 个; 连跑三轮批次 leftover 恒为 0;
+  各 target 计数与改动前一致。
+- 提交: 8792422
 
 ## 2026-11-26 serial listen endpoint 不再当可达 locator 通告 (RAI-383)
 
@@ -490,6 +757,23 @@ endpoint 记进 locator 集合), 于是打不开的串口也会出现在 `Zenoh 
 - 提交: ddf32fb
 - 提交: d226320
 
+## [2026-11-26] 控制行分片到达时被读超时丢弃, PTY 的 ^C 因此失效 (RAI-415)
+
+- 根因: `src/control_line_read.rs::read_line_limited` 入口 `buf.clear()`; `read_until` 在
+  「正文已到、换行未到」时被读超时打断返回 WouldBlock, 下一轮调用把半行清掉 → 整条消息静默丢失。
+- 触发面: `transport.write_message` 是 `write_all(message)` + `write_all("\n")` 两次写, 25ms 读超时的
+  PTY 桥接最容易在两次读之间撞超时。表现: `@pty-stdin`(含 ^C) 帧被吞, 远端收不到 SIGINT。
+- 定位链: 远端 pty termios 正常 → helper 即前台 pgrp → python `pty.fork` 纯 kernel 对照正常 →
+  直连 daemon TCP 发同一帧正常 → strace 双侧发现 daemon 收到帧却只写出过 `\4` 没写出 `\3`。
+- 改法: 入口不清 buf, `total` 从 `buf.len()` 起算, 只在整行交出/超限丢弃/干净 EOF 时清空。
+- 评审修复 e884f71: 状态收进 `LineReadState`(半行 + 丢弃标记 + 已丢弃字节数), 修 CRLF 边界
+  (尾部 `\r` 不计入内容长度) 与丢弃计数跨读超时丢失(4097 报成 1537); 三个调用方共用同一状态。
+- 评审修复 6a009ae: 跨调用保留的半行会绕过 8 MiB 上限(错误分支在长度检查前返回);
+  改成进入时先判 limit、丢弃状态用 buf 留 `limit+1` 字节跨调用传递(截断而非清空),
+  否则下一轮会忘记状态把剩余数据当成新行。回归测试覆盖 8 块超限分片。
+- 回执: `control_pty` 9 passed(断言零改动) / 全量单测 1110 passed / control_tty·shell_pty·control_lanes·
+  control_websocket·connect_modes 全绿; 分片复现命令修复后 3/3 成功。
+- 提交: 49ea862 (评审修复 6a009ae / e884f71; 均为 rebase 到当前 main 后的工作提交)
 
 ## 2026-11-26 RAI-368 Zenoh Windows scout 接口与 loopback 告警
 
