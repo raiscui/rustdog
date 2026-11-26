@@ -364,3 +364,4 @@ panic 于 `dynamic_link.rs:45` (unix 分支, 同一循环); `mkdir -p target/deb
   ort-sys/onnxruntime 获取契约与"改 Cargo.lock 里的 ort-sys 版本 = 复核这条链"。
 - 提交: 139becb
 - 提交: 360c000 (build 失败摘要 + 已知红到期日规则)
+- 提交: fb378c4 (按 OS 拆 needs / 测试目标编译进 build / 注解化退出 / 编码)
