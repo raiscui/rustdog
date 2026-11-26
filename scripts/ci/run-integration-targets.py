@@ -44,6 +44,7 @@ ALL_OS = ("ubuntu-latest", "macos-latest", "windows-latest")
 # 没登记 = 红 (见 verify_inventory)。
 CLASSIFICATION: dict[str, str] = {
     "connect_modes": "unix",
+    "iroh_bulk_abort_resume": "unix",
     "control_lanes": "unix",
     "control_mode": "unix",
     "control_pty": "unix",

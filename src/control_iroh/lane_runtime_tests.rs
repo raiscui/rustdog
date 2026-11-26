@@ -308,3 +308,175 @@ fn a_download_runs_over_the_real_line_transport() {
     rt.shutdown_background();
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+// ---------------------------------------------------------------------------
+// RAI-591: lane 被中止之后的第二次尝试
+// ---------------------------------------------------------------------------
+
+/// 真 daemon 那一段: 真 `serve_admitted` → `serve_lane` → `serve_bulk_request` → 会话表,
+/// 只把传输换成 loopback 的 quinn 流。客户端中途消失时留在它这里的会话就是真现场。
+fn serve_real_daemon_lane(
+    rt: &Runtime,
+    server: &Endpoint,
+    admission: Arc<Mutex<admission::Admission>>,
+) -> tokio::task::JoinHandle<()> {
+    let server = server.clone();
+    rt.spawn(async move {
+        let Ok(Some(incoming)) = timeout(CONNECT, server.accept()).await else {
+            return;
+        };
+        let Ok(conn) = incoming.await else { return };
+        let Ok((send, read)) = conn.accept_bi().await else {
+            return;
+        };
+        let transport = ControlTransport::Iroh(IrohLineTransport::new(send, read, CONNECT));
+        let probe = conn.clone();
+        let peer = conn.remote_id();
+        let _ = tokio::task::spawn_blocking(move || {
+            let sampler = PathSampler::Lane {
+                conn: &probe,
+                routable: false,
+            };
+            let mut gate = BulkPathGate::new(ADMITTED_LANE_PATH_CAPABILITY);
+            serve_admitted(transport, peer, "loopback", admission, &sampler, &mut gate)
+        })
+        .await;
+    })
+}
+
+/// 真准入状态: 策略文件里放行这条 loopback 客户端 (identity 固定成 `[7u8; 32]` 那份)。
+fn loopback_admission(dir: &Path, target: EndpointId) -> Arc<Mutex<admission::Admission>> {
+    let client = SecretKey::from_bytes(&[7u8; 32]).public();
+    let policy = dir.join("policy.json");
+    // 直接写策略 JSON: `save_policy` 的持久化会 fsync 父目录, Windows 上打开目录当文件会失败
+    // (仓库里其它用它的 fixture 都按 linux 分流), 而这里要的只是"策略文件存在且能读"。
+    let body = admission::Policy {
+        allow: std::collections::BTreeSet::from([client]),
+        ..admission::Policy::default()
+    };
+    std::fs::write(&policy, serde_json::to_vec(&body).expect("policy json"))
+        .expect("policy file");
+    Arc::new(Mutex::new(admission::Admission::new(
+        policy,
+        target,
+    )))
+}
+
+#[test]
+fn a_lane_aborted_mid_upload_still_resumes_on_the_next_attempt() {
+    use crate::transfer_cli::{iroh_exchange, run_put, BulkPathRecorder, TransferIdStore};
+    use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+    use sha2::{Digest, Sha256};
+
+    let dir = std::env::temp_dir().join(format!("rdog-lane-abort-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("scratch dir");
+    let key_file = dir.join("client.key");
+    let local = dir.join("source.bin");
+    let remote = dir.join("landed.bin");
+    let payload: Vec<u8> = (0..400_000u32).map(|byte| (byte % 251) as u8).collect();
+    std::fs::write(&local, &payload).expect("source bytes");
+    let sha = format!("{:x}", Sha256::digest(&payload));
+    let transfer_id = "rai591-abort".to_string();
+
+    let rt = runtime().expect("runtime");
+    let server_key = SecretKey::generate();
+    let (server, addr) = rt.block_on(async {
+        let server = endpoint(server_key.clone(), Some("127.0.0.1:0".parse().unwrap()), TEST_ALPN, None)
+            .await
+            .expect("fixture endpoint");
+        let addr = server.addr();
+        (server, addr)
+    });
+    let admission = loopback_admission(&dir, server_key.public());
+
+    // 第一次尝试: open + 一块, 然后客户端直接消失 (没有 `@file-end`, 也没有 `@file-cancel`)。
+    let first_serve = serve_real_daemon_lane(&rt, &server, Arc::clone(&admission));
+    let first_chunk = &payload[..100_000];
+    let open = serde_json::json!({
+        "transfer_id": transfer_id,
+        "attempt_id": "attempt-1",
+        "path": remote.display().to_string(),
+        "size": payload.len(),
+        "sha256": sha,
+        "resume": false,
+    });
+    let first = with_bulk_lane_at(client_config_for(&key_file), addr.clone(), {
+        let open = format!("@put-file:{open}");
+        let chunk = format!(
+            "@file-chunk:{}",
+            serde_json::json!({
+                "transfer_id": transfer_id,
+                "offset": 0,
+                "data": BASE64.encode(first_chunk),
+            })
+        );
+        move |lane| {
+            let opened = lane.request(&open, CONNECT).expect("open must be answered");
+            assert!(opened.contains("\"written\""), "{opened}");
+            let accepted = lane.request(&chunk, CONNECT).expect("chunk must be answered");
+            assert!(accepted.contains("\"written\""), "{accepted}");
+        }
+    });
+    first.expect("the aborted attempt must at least run");
+    first_serve.abort();
+
+    // 会话与半成品此刻都留在 daemon 侧: 客户端没来得及 cancel, 这正是"被中止的 lane"。
+    // 端点本身不重启 —— 判据要求的是"不重启 daemon 也能恢复", 这里连进程都没换。
+    let staged: Vec<u64> = std::fs::read_dir(dir.join(".rdog-partial"))
+        .expect("the daemon keeps the partial under .rdog-partial")
+        .map(|entry| entry.expect("partial entry").metadata().expect("metadata").len())
+        .collect();
+    assert_eq!(
+        staged,
+        vec![100_000],
+        "第一次尝试必须留下 100000 字节的可续半成品"
+    );
+
+    // 第二次尝试: 同一条 (目标, 本地, 远端) 复用同一个 transfer_id。
+    let ids = TransferIdStore::at(dir.join("ids"));
+    ids.seed("loopback", &local, &remote.display().to_string(), &transfer_id);
+    let second_serve = serve_real_daemon_lane(&rt, &server, Arc::clone(&admission));
+    let remote_text = remote.display().to_string();
+    let evidence_out = dir.join("bulk-path.json");
+    let receipt = with_bulk_lane_at(client_config_for(&key_file), addr.clone(), {
+        let ids = ids;
+        let local = local.clone();
+        move |lane| {
+            let exchange_peer = iroh_exchange(lane, 20_000);
+            let mut recorder = BulkPathRecorder::new(
+                "lane-abort-retry".to_string(),
+                crate::bulk_path::PathCapability::PATH_AWARE_CHECKED_PER_CHUNK,
+                Some(evidence_out),
+            );
+            run_put(
+                &exchange_peer,
+                &mut recorder,
+                &ids,
+                "loopback",
+                &local,
+                &remote_text,
+                false,
+            )
+        }
+    });
+    second_serve.abort();
+
+    let receipt = receipt
+        .map_err(|err| err.to_string())
+        .expect("the resumed attempt must run")
+        .expect("the resumed attempt must commit");
+    assert_eq!(receipt.transfer_id, transfer_id);
+    assert_eq!(
+        receipt.resume_honored,
+        Some(true),
+        "被打断的 lane 之后重跑必须真的续上 (收到 {receipt:?})"
+    );
+    assert_eq!(std::fs::read(&remote).expect("landed file"), payload);
+
+    crate::control_file_transfer::forget_sessions_for_tests(&[&transfer_id]);
+    rt.block_on(async {
+        let _ = timeout(CONNECT, server.close()).await;
+    });
+    rt.shutdown_background();
+    let _ = std::fs::remove_dir_all(&dir);
+}
