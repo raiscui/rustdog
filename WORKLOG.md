@@ -1294,7 +1294,7 @@ rebase 会重写分支上每个 commit 的 sha, 本票在合并前又被 rebase 
 不为它单独推提交刷 sha。
 ### 2026-11-26 RAI-411 第九个真缺陷 (windows 脚本) + 第十个发现 (macos 接力红)
 
-- 提交: (本条随修复提交记入下一次账本)
+- 提交: 0cd2444
 
 ① windows `test` job 又崩在脚本里: 修好解码后**输出**这一端同样按 cp1252 编码, summary 表格与
 失败详情里的中文抛 `UnicodeEncodeError`。`main()` 开头把 stdout/stderr 都 `reconfigure(
