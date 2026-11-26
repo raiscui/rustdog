@@ -17,7 +17,8 @@
 - 评审修复: `control_pty_should_treat_control_words_as_remote_input` 原先写完就关 stdin,
   而 BSD/macOS 的 script 见到 stdin EOF 可能提前收掉伪终端 (control_tty 里有同类记录); 改成等远端打印
   `GOT:` 后再关写端, stdout/stderr 走收集器。
-- 提交: 370317f (评审修复 6c187d7)
+  收集线程在子进程退出后 join 再快照, 否则最后一段输出可能还没落 buffer 就断言 (评审第二轮)。
+- 提交: 370317f (评审修复 6c187d7 / ee8474c)
 
 ## [2026-11-26] tests/ 下 17 处 rdog 二进制路径反推收成一处 (RAI-405)
 
