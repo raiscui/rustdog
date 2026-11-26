@@ -1,4 +1,9 @@
-use std::{io, path::PathBuf};
+use std::{
+    fs::OpenOptions,
+    io,
+    path::PathBuf,
+    time::Duration,
+};
 
 use super::{
     find_local_daemon, find_local_daemon_by_port, loopback_zenoh_endpoints, register_local_daemon,
@@ -111,6 +116,41 @@ fn duplicate_identity_registration_should_be_rejected() {
     let err = register_local_daemon("lab", "dup.lab", zenoh_lane(17481))
         .expect_err("duplicate identity must not silently overwrite");
     assert_eq!(err.kind(), io::ErrorKind::AlreadyExists);
+}
+
+#[test]
+fn registration_should_retry_past_a_short_liveness_probe() {
+    let dir = TestDir::new("probe-race");
+    let lock_path = dir.path.join("lab__probe.lab.lock");
+    let probe = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(&lock_path)
+        .expect("probe lock should open");
+    probe
+        .try_lock_shared()
+        .expect("probe should take the shared lock");
+
+    // 客户端探测只持锁极短时间; 启动登记必须退避越过它, 不能把"有人正在读"当成
+    // "已有活跃 daemon"而静默放弃登记。
+    let probe_release = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(120));
+        drop(probe);
+    });
+
+    let guard = register_local_daemon("lab", "probe.lab", zenoh_lane(17480))
+        .expect("registration should retry past a transient shared lock");
+    probe_release.join().expect("probe thread should finish");
+
+    assert_eq!(
+        find_local_daemon(None)
+            .expect("registered daemon should be visible")
+            .daemon_name,
+        "probe.lab"
+    );
+    drop(guard);
 }
 
 #[test]

@@ -24,6 +24,10 @@ use serde::{Deserialize, Serialize};
 
 pub(crate) const LOCAL_DAEMON_SCHEMA: &str = "rdog.local-daemon.v1";
 
+/// 启动登记遇到共享锁探测时的重试预算 (客户端探测只持锁数微秒)。
+const REGISTRATION_LOCK_ATTEMPTS: usize = 5;
+const REGISTRATION_LOCK_RETRY_INTERVAL: std::time::Duration = std::time::Duration::from_millis(80);
+
 /// daemon 暴露给本机客户端的控制 lane。
 ///
 /// 这里刻意只描述"本机怎么连上它",不含网络可达性: 外部入口仍由 daemon 配置的
@@ -131,18 +135,31 @@ pub(crate) fn register_local_daemon(
         .read(true)
         .write(true)
         .open(&lock_path)?;
-    match lock.try_lock() {
-        Ok(()) => {}
-        Err(TryLockError::WouldBlock) => {
-            return Err(io::Error::new(
-                io::ErrorKind::AlreadyExists,
-                format!(
-                    "本机已存在活跃的 daemon 登记: namespace={namespace}, daemon_name={daemon_name}, lock={}",
-                    lock_path.display()
-                ),
-            ));
+    // 客户端的 liveness 探测会短暂持共享锁,撞上启动窗口时 register 会拿到 WouldBlock。
+    // 把那当成"已有活跃 daemon"会让本机登记静默缺失到下次重启,所以退避重试几次。
+    let mut acquired = false;
+    for attempt in 0..REGISTRATION_LOCK_ATTEMPTS {
+        match lock.try_lock() {
+            Ok(()) => {
+                acquired = true;
+                break;
+            }
+            Err(TryLockError::WouldBlock) => {
+                if attempt + 1 < REGISTRATION_LOCK_ATTEMPTS {
+                    std::thread::sleep(REGISTRATION_LOCK_RETRY_INTERVAL);
+                }
+            }
+            Err(TryLockError::Error(err)) => return Err(err),
         }
-        Err(TryLockError::Error(err)) => return Err(err),
+    }
+    if !acquired {
+        return Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            format!(
+                "本机已存在活跃的 daemon 登记: namespace={namespace}, daemon_name={daemon_name}, lock={}",
+                lock_path.display()
+            ),
+        ));
     }
 
     let record = LocalDaemonRecord {
