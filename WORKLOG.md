@@ -1276,6 +1276,19 @@ job summary 单列、**不计入 ran 集合**, 真机 lane 的 5 条命令与权
 zenoh_router_client 38/2 ignored)。
 - 提交: f3b3502
 
+### 2026-11-26 RAI-411 第七个发现 (windows): e2e 不隔离 HOME, 两个 target 无法在 windows 执行
+
+- 提交: (本条随修复提交记入下一次账本)
+
+跑通 timeout 修复后两个 windows 红都点得出名字了: `control_websocket` 整 target 挂死后被
+1500s 上限终止 (`[timeout] 超过 1500s 未结束`), `zenoh_router_client_windows` 的 daemon 因
+残留 `service_name` 守卫拒启动 (`local_guard=C:\Users\runneradmin\AppData\Local\rustdog\zenoh-guards\...`)。
+共同点: 两者都没隔离 HOME, 在 runner 真实 HOME 上与前序用例共用 `.rdog` / `zenoh-guards`;
+unix 侧早有 `test_isolated_home()`, 所以同一份用例在 ubuntu/macos 稳定绿。
+处置: 开出 issue #162 承接隔离修复, 期间用新增的 `PLATFORM_EXEMPTIONS` 把这 2 个 target 在
+windows 显式豁免 (理由 + 票号进 job summary 的 `exempt on this platform` 表, 不计入 ran),
+ubuntu/macos 照常执行。**本 PR 之后 windows 的 integration 面只有 `computer_use_density`**
+—— 这是真实覆盖, 不写成 windows 也跑了 e2e。
 ### 2026-11-26 RAI-411 第六个真缺陷 (macos): unixpipe e2e 假设 ~/.rdog/run 已存在
 
 - 提交: e26b885 (候选用例) + 726c0da (stale 用例, 同一个假设)

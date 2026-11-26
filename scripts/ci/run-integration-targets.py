@@ -63,6 +63,23 @@ CLASSIFICATION: dict[str, str] = {
     "recording_e2e": "exempt:由 ci.yml 的独立步骤执行 (unix), 不在本脚本清单内",
 }
 
+# target -> {os: 理由}: 该 target 在这个平台上**不执行**, 其余平台照常。
+# 这是「平台不兼容 / 稳定红」的显式出口 —— 理由必须写明并挂 follow-up 票, 且会在 job summary
+# 里单列一行 "exempt on this platform", 所以它既不是静默 skip, 也不会被当成"跑过了"。
+PLATFORM_EXEMPTIONS: dict[str, dict[str, str]] = {
+    "control_websocket": {
+        "windows-latest": (
+            "windows runner 上整 target 挂死 (1500s 墙钟上限才终止), 用例未隔离 HOME; "
+            "见 issue #162"
+        )
+    },
+    "zenoh_router_client_windows": {
+        "windows-latest": (
+            "windows runner 上 daemon 因遗留 service_name 守卫拒启动 (用例未隔离 HOME); "
+            "见 issue #162"
+        )
+    },
+}
 
 OS_KIND = {"ubuntu-latest": "unix", "macos-latest": "macos", "windows-latest": "windows"}
 # macos 同时是 unix 平台, 所以它吃的 kind 集合是 {"all", "unix", "macos"}。
@@ -75,7 +92,21 @@ OS_KINDS: dict[str, set[str]] = {
 
 def executed_targets(os_name: str) -> list[str]:
     kinds = OS_KINDS[os_name]
-    return [target for target, kind in CLASSIFICATION.items() if kind in kinds]
+    return [
+        target
+        for target, kind in CLASSIFICATION.items()
+        if kind in kinds and os_name not in PLATFORM_EXEMPTIONS.get(target, {})
+    ]
+
+
+def platform_exempt_targets(os_name: str) -> list[tuple[str, str]]:
+    """本平台被显式豁免的 target 与理由 (只列本来会执行的那些)。"""
+    kinds = OS_KINDS[os_name]
+    return [
+        (target, PLATFORM_EXEMPTIONS[target][os_name])
+        for target, kind in CLASSIFICATION.items()
+        if kind in kinds and os_name in PLATFORM_EXEMPTIONS.get(target, {})
+    ]
 
 
 def compile_only_targets(os_name: str) -> list[str]:
@@ -97,6 +128,12 @@ def verify_inventory(repo_root: Path) -> list[str]:
     for target in CLASSIFICATION:
         if not (repo_root / "tests" / f"{target}.rs").exists():
             problems.append(f"CLASSIFICATION 里的 `{target}` 在 tests/ 下没有对应文件")
+    for target, os_reasons in PLATFORM_EXEMPTIONS.items():
+        if target not in CLASSIFICATION:
+            problems.append(f"PLATFORM_EXEMPTIONS 里的 `{target}` 没有在 CLASSIFICATION 登记")
+        for os_name in os_reasons:
+            if os_name not in ALL_OS:
+                problems.append(f"PLATFORM_EXEMPTIONS 里的 `{target}` 写了未知平台 `{os_name}`")
     return problems
 
 
@@ -211,6 +248,19 @@ def main() -> int:
         "| --- | --- | --- | --- | --- | --- |",
         *executed_rows,
     ]
+    exempt_rows = [
+        f"| `{target}` | {reason} |" for target, reason in platform_exempt_targets(args.os)
+    ]
+    if exempt_rows:
+        summary += [
+            "",
+            "**exempt on this platform** — 本来会在本平台执行, 现在是显式豁免 (带理由与票号), "
+            "**不计入 ran 集合**, 也不等于跑过了:",
+            "",
+            "| target | 豁免理由 |",
+            "| --- | --- |",
+            *exempt_rows,
+        ]
     if compile_rows:
         summary += [
             "",
