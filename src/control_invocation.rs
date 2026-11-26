@@ -633,16 +633,48 @@ fn send_control_lines_zenoh(
     lines: &[String],
     artifacts_dir: &Path,
 ) -> Result<Vec<ControlLineExchange>, String> {
-    let line_frames = zenoh_control::send_control_lines_collect_frames(
+    let outcome = zenoh_control::send_control_lines_collect_frames(
         namespace,
         target_name,
         entry_point,
         3_000,
         lines,
+    );
+    // 失败也要把**已收到的那几帧**打出来: 空 stdout 让读的人分不清
+    // 「一条都没跑」与「跑了几条才卡住」(RAI-579)。先打印, 再报错。
+    let completed = outcome.line_frames.len();
+    let exchanges = collect_control_exchanges_from_frames(
+        &lines[..completed],
+        outcome.line_frames,
+        artifacts_dir,
     )
     .map_err(|err| err.to_string())?;
-    collect_control_exchanges_from_frames(lines, line_frames, artifacts_dir)
-        .map_err(|err| err.to_string())
+    match outcome.failure {
+        None => Ok(exchanges),
+        Some(failure) => Err(multi_one_shot_failure_message(&failure, completed)),
+    }
+}
+
+/// 多行 one-shot 失败的对外文案。
+///
+/// 必须包含三件读日志的人靠猜拿不到的事实: **第几条失败 / 共几条 / 已收到几帧**。
+/// 否则「非零退出 + 空 stdout」既可能是「一条都没发出去」, 也可能是「跑了一半才断」——
+/// 两者的处置完全不同 (前者可以重跑, 后者要先确认副作用)。RAI-579。
+fn multi_one_shot_failure_message(
+    failure: &zenoh_control::ControlLinesFailure,
+    completed_lines: usize,
+) -> String {
+    // 单位是**行**, 不是帧: 一条命令可能回多个帧 (例如 `@screenshot` + `@savefile`),
+    // 报「已收到 N 帧」会与「已完成 N 行」混为一谈 (复核指出)。
+    let position = if failure.dispatched_any {
+        format!("失败于第 {} 条", failure.line_index + 1)
+    } else {
+        "还没发出第一条就失败".to_owned()
+    };
+    format!(
+        "多行 one-shot {position} (共 {} 条, 已完成 {completed_lines} 行): {}. 已完成的响应已打到 stdout; 未执行的行没有副作用, 但已执行的行可能有 —— 不要盲目重跑整段脚本, 先确认前面的副作用要不要回滚。",
+        failure.total_lines, failure.cause
+    )
 }
 
 /// TCP line-control 对端身份,只用于把"会话被关"翻译成可行动的错误。
@@ -828,8 +860,8 @@ fn print_control_line_exchange(exchange: &ControlLineExchange) -> std::io::Resul
 #[cfg(test)]
 mod tests {
     use super::{
-        describe_tcp_connect_failure, extract_one_shot_lines, parse_port,
-        promote_loopback_tcp_with, resolve_control_invocation, ControlInvocation,
+        describe_tcp_connect_failure, extract_one_shot_lines, multi_one_shot_failure_message,
+        parse_port, promote_loopback_tcp_with, resolve_control_invocation, ControlInvocation,
     };
     use crate::input::Transport;
 
@@ -1202,5 +1234,47 @@ mod tests {
             extract_one_shot_lines(vec!["mac.lab".to_string(), payload.to_string()]);
         assert_eq!(host, vec!["mac.lab".to_string()]);
         assert_eq!(lines, vec![payload.to_string()]);
+    }
+
+    /// RAI-579: 失败文案必须自带「第几条 / 共几条 / 已收到几帧」——
+    /// 缺了它们, 「非零退出 + 空 stdout」既可能是没发出去, 也可能是跑了一半才断。
+    #[test]
+    fn multi_one_shot_failure_message_must_name_the_line_and_frame_count() {
+        let failure = crate::zenoh_control::ControlLinesFailure {
+            line_index: 1,
+            total_lines: 3,
+            dispatched_any: true,
+            cause: std::io::Error::new(std::io::ErrorKind::TimedOut, "请求超时"),
+        };
+        let message = multi_one_shot_failure_message(&failure, 1);
+        assert!(message.contains("第 2 条"), "{message}");
+        assert!(message.contains("共 3 条"), "{message}");
+        assert!(message.contains("已完成 1 行"), "{message}");
+        assert!(
+            !message.contains("帧"),
+            "单位必须是行: 一条命令可能回多个帧, 报帧数会与行数混淆; {message}"
+        );
+        assert!(message.contains("请求超时"), "{message}");
+        assert!(
+            message.contains("不要盲目重跑整段脚本"),
+            "必须提醒副作用可能已发生: {message}"
+        );
+    }
+
+    /// 连不上/解析不到目标时还没发出任何一条 —— 文案不许谎称「已收到 N 帧」。
+    #[test]
+    fn multi_one_shot_failure_message_must_not_claim_frames_when_nothing_was_sent() {
+        let failure = crate::zenoh_control::ControlLinesFailure {
+            line_index: 0,
+            total_lines: 2,
+            dispatched_any: false,
+            cause: std::io::Error::new(std::io::ErrorKind::NotFound, "未找到目标 service"),
+        };
+        let message = multi_one_shot_failure_message(&failure, 0);
+        assert!(
+            message.contains("还没发出第一条就失败"),
+            "一条都没发出时不许说「第 1 条失败」; {message}"
+        );
+        assert!(message.contains("已完成 0 行"), "{message}");
     }
 }
