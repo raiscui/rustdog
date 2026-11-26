@@ -24,7 +24,7 @@
   先 `iroh_path=direct unavailable` 再 `iroh_path=relay` 应答。回执 `handoffs/rai426/receipts/directory-relay.log`。
 - Windows 编译期:`cargo check --no-default-features --target x86_64-pc-windows-gnu --bin rdog` exit=0。
 - 未验:真实公网 relay 的公共 CA 链、真实双 NAT、bulk;分别归 RAI-302 / RAI-366 / RAI-367。
-- 提交: d883b4f
+- 提交: d883b4f(实现)、534ac3e(信任锚裁定:宽化只挂在显式 `root_cert` 上,该字段因此改为必填)
 
 ## [2026-11-26] tests/ 下 17 处 rdog 二进制路径反推收成一处 (RAI-405)
 
