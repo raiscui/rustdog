@@ -26,6 +26,11 @@ use std::{
 
 use zenoh::{config::Config, Session, Wait};
 
+/// 这两个测试各自起一个 daemon + 若干 client session; 同一个 runner 上并行跑会互相抢端口与
+/// CPU, 也会让「谁连了哪个 router」变得难以判读 —— 按 `parallel-test-global-state-single-lock`
+/// 的纪律用模块级唯一锁串起来。
+static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 const ROUNDS_DEFAULT: usize = 20;
 /// 单轮里等首条 sample 的预算: 足够覆盖正常投递 (本机 ~1ms), 又不至于让一次丢包拖很久。
 const FIRST_SAMPLE_BUDGET: Duration = Duration::from_millis(400);
@@ -165,6 +170,7 @@ fn deliver_one_round(entrypoint: &str, key: &str, guard: bool) -> bool {
 
 #[test]
 fn declaration_self_check_should_make_first_message_deterministic() {
+    let _serial = TEST_LOCK.lock().unwrap_or_else(|err| err.into_inner());
     let (daemon, entrypoint) = start_daemon();
     let total = rounds();
 
@@ -195,6 +201,7 @@ fn declaration_self_check_should_make_first_message_deterministic() {
 /// 消息 —— 所以自检必须**答不出来**。SIGCONT 之后必须重新答得出来。
 #[test]
 fn self_check_should_fail_when_the_router_is_not_processing() {
+    let _serial = TEST_LOCK.lock().unwrap_or_else(|err| err.into_inner());
     let (daemon, entrypoint) = start_daemon();
     let subscriber_session = open_session(&entrypoint);
     let witness = open_session(&entrypoint);
