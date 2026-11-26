@@ -126,7 +126,7 @@ cargo clean -p ort-sys && cargo build --bin rdog    # 走一遍 build script
 
 | 现象 | 归因 | 负责人 | 到期日 |
 | --- | --- | --- | --- |
-| (当前无未清的已知红) | — | — | — |
+| `zenoh_control::tests::diagnostic_ping_should_bypass_busy_query_worker_and_preserve_queue` 间歇红 (28 轮 2 次, panic 文案 `worker 未进入执行`, 疑 TMPDIR 进程级改写) | 单跑 5/5 绿, 只在并行/全量时出现 (`src/zenoh_control.rs` 的 panic 行) | RAI-405 承接线程 | 2026-11-30 |
 
 规则:
 

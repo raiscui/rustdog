@@ -6,6 +6,7 @@ use crate::control_protocol::{KeyMode, KeyRequest, PasteRequestKind};
 use crate::{control_actions::ActionExecutionResult, control_protocol::ControlCommand};
 use std::{
     fs,
+    io::Read,
     net::{Shutdown, TcpListener, TcpStream},
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
@@ -278,6 +279,26 @@ fn connected_pair() -> (TcpStream, TcpStream) {
     (client, server)
 }
 
+/// 读完一条控制响应。
+///
+/// Windows 上 daemon 侧关闭 socket 会给对端 `WSAECONNRESET (10054)`, 而已读到的字节
+/// 仍然有效 —— 同一条连接在 unix 上是 `Ok(0)`、在 windows 上是一次 `ConnectionReset`,
+/// 用 `read_to_string` 就变成"读响应失败"。这些用例断言的是帧内容, 关闭语义不是被测
+/// 对象, 所以把 reset 当作 EOF (2026-11-26 windows job 首次跑到本组测试时实测)。
+fn read_control_response(client: &mut TcpStream) -> String {
+    let mut buffer = Vec::new();
+    let mut chunk = [0u8; 4096];
+    loop {
+        match client.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(read) => buffer.extend_from_slice(&chunk[..read]),
+            Err(error) if error.kind() == io::ErrorKind::ConnectionReset => break,
+            Err(error) => panic!("should read control response: {error}"),
+        }
+    }
+    String::from_utf8(buffer).expect("control response should be utf-8")
+}
+
 fn bind_test_listener() -> TcpListener {
     #[cfg(windows)]
     {
@@ -397,10 +418,7 @@ fn control_receiver_should_route_built_in_commands_to_executor() {
         .shutdown(Shutdown::Write)
         .expect("should close write side");
 
-    let mut output = String::new();
-    client
-        .read_to_string(&mut output)
-        .expect("should read control response");
+    let output = read_control_response(&mut client);
 
     worker
         .join()
@@ -437,10 +455,7 @@ fn control_receiver_should_wrap_success_response_with_request_id() {
         .shutdown(Shutdown::Write)
         .expect("should close write side");
 
-    let mut output = String::new();
-    client
-        .read_to_string(&mut output)
-        .expect("should read response with request id");
+    let output = read_control_response(&mut client);
 
     worker
         .join()
@@ -466,10 +481,7 @@ fn control_receiver_should_execute_basic_bootstrap_preflight() {
         .shutdown(Shutdown::Write)
         .expect("should close write side");
 
-    let mut output = String::new();
-    client
-        .read_to_string(&mut output)
-        .expect("should read bootstrap response");
+    let output = read_control_response(&mut client);
 
     worker
         .join()
@@ -510,10 +522,7 @@ fn control_receiver_should_execute_gui_bootstrap_window_probe() {
         .shutdown(Shutdown::Write)
         .expect("should close write side");
 
-    let mut output = String::new();
-    client
-        .read_to_string(&mut output)
-        .expect("should read gui bootstrap response");
+    let output = read_control_response(&mut client);
 
     worker
         .join()
@@ -553,10 +562,7 @@ fn control_receiver_should_execute_gui_bench_with_real_fixture_runner() {
         .shutdown(Shutdown::Write)
         .expect("should close write side");
 
-    let mut output = String::new();
-    client
-        .read_to_string(&mut output)
-        .expect("should read gui-bench response");
+    let output = read_control_response(&mut client);
 
     worker
         .join()
@@ -597,10 +603,7 @@ fn control_receiver_should_execute_gui_bench_all_variants() {
         .shutdown(Shutdown::Write)
         .expect("should close write side");
 
-    let mut output = String::new();
-    client
-        .read_to_string(&mut output)
-        .expect("should read gui-bench all response");
+    let output = read_control_response(&mut client);
 
     worker
         .join()
@@ -646,10 +649,7 @@ fn control_receiver_should_write_gui_bench_artifact_for_ci_collection() {
         .shutdown(Shutdown::Write)
         .expect("should close write side");
 
-    let mut output = String::new();
-    client
-        .read_to_string(&mut output)
-        .expect("should read gui-bench artifact response");
+    let output = read_control_response(&mut client);
 
     worker
         .join()
@@ -704,10 +704,7 @@ fn control_receiver_should_execute_savefile_request_and_report_saved_path() {
         .shutdown(Shutdown::Write)
         .expect("should close write side");
 
-    let mut output = String::new();
-    client
-        .read_to_string(&mut output)
-        .expect("should read savefile response");
+    let output = read_control_response(&mut client);
 
     worker
         .join()
@@ -867,10 +864,7 @@ fn control_receiver_should_escape_double_at_to_literal_shell_command() {
         .shutdown(Shutdown::Write)
         .expect("should close write side");
 
-    let mut output = String::new();
-    client
-        .read_to_string(&mut output)
-        .expect("should read shell fallback output");
+    let output = read_control_response(&mut client);
 
     worker
         .join()
@@ -902,10 +896,7 @@ fn control_receiver_should_report_parse_failure_without_falling_back_to_shell() 
         .shutdown(Shutdown::Write)
         .expect("should close write side");
 
-    let mut output = String::new();
-    client
-        .read_to_string(&mut output)
-        .expect("should read parse failure response");
+    let output = read_control_response(&mut client);
 
     worker
         .join()
@@ -949,10 +940,7 @@ fn control_receiver_should_report_executor_failure_with_return_object() {
         .shutdown(Shutdown::Write)
         .expect("should close write side");
 
-    let mut output = String::new();
-    client
-        .read_to_string(&mut output)
-        .expect("should read executor failure response");
+    let output = read_control_response(&mut client);
 
     worker
         .join()
@@ -996,10 +984,7 @@ fn control_receiver_should_wrap_executor_failure_with_request_id() {
         .shutdown(Shutdown::Write)
         .expect("should close write side");
 
-    let mut output = String::new();
-    client
-        .read_to_string(&mut output)
-        .expect("should read executor failure response with id");
+    let output = read_control_response(&mut client);
 
     worker
         .join()
