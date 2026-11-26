@@ -83,11 +83,16 @@ on:
 `tests/` 下 19 个 target 现在由 `scripts/ci/run-integration-targets.py` 按平台执行, **每个
 target 的 `passed` 必须 > 0**, 否则判红 —— 「退出码 0 但零执行」在 CI 上同样算失败。
 
+按平台清单的真相源是 `scripts/ci/run-integration-targets.py` 的 `CLASSIFICATION`:
+每个 target 标 `all` (三平台) / `unix` (ubuntu + macos) / `macos` / `windows` /
+`compile-only:macos` / `exempt:<理由>`。**`tests/` 下新增文件而没登记 = 红** (脚本会枚举
+`tests/*.rs` 双向对账), 所以「新增的 target 悄悄没人跑」这条不可达。
+
 | 平台 | 执行的 target |
 | --- | --- |
 | ubuntu | `connect_modes`、`control_lanes`、`control_mode`、`control_pty`、`control_tty`、`shell_pty`、`daemon_inbound`、`listen_suspend`、`zenoh_router_client`、`computer_use_density`、`control_websocket` |
 | macos | 同上 + `zenoh_unixpipe_fast_path` |
-| windows | `zenoh_router_client_windows` |
+| windows | `computer_use_density`、`control_websocket`、`zenoh_router_client_windows` |
 | 全平台 (build 阶段) | `cargo test --no-run` 编译**全部** target, 含下面的 compile-only 面 |
 | compile-only (macos) | `control_ax_e2e`、`control_display_aware_e2e`、`control_mouse_e2e`、`control_ocr_e2e`、`control_window_e2e` |
 
