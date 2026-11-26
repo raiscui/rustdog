@@ -723,7 +723,8 @@ rdog control <TARGET> --get <REMOTE_PATH> --local-path <LOCAL_PATH>
 | 退出码 | 沿用现有约定: 成功 0, 失败 1. **不新造退出码** —— 细分原因读结果 JSON 里的 `error_code` |
 | 下载侧校验 | 客户端拼装完必须自己算 sha256 与 `@get-file` 返回的比对, 不符即失败并删本地半成品 |
 | 直连门禁 | 无开关. 由 §3 判定表决定, 默认且唯一行为 |
-| `--resume` | 检测到未过期的半成品时**默认按续传发** (`resume:true`), 把"从头来"留给调用方显式选择. 理由同 §2.5: 静默抹掉 178 MB 进度是比多传一遍更坏的默认 |
+| 续传默认值 | 检测到未过期的半成品时**默认按续传发** (`resume:true`), 把"从头来"留给调用方显式选择 (`--restart`). 理由同 §2.5: 静默抹掉 178 MB 进度是比多传一遍更坏的默认 |
+| `--restart` | 只在 `--put` 上: 先按 id store 里的旧 id 发 `@file-cancel`, 再换新 id 从 0 开始 (§5.1) |
 
 远端路径与本地路径**不做 shell 解析** (走 JSON 字段, 这是 10-06 规格里列出的相对 scp 的价值之一).
 
@@ -743,7 +744,7 @@ rdog control <TARGET> --get <REMOTE_PATH> --local-path <LOCAL_PATH>
 | 括号对账 | 终态对账用的是**本次尝试见过的 relay path 并集** (`before` + 每个边界采样 + 终态采样), 不是 `before` 那一刻的集合。并集里任何一条在 `after` 不在场 → 四个 `null`。`before` 集合为空不构成豁免: 两个计数仍必须都在 |
 | `established_direct` | 按 `transfer_id` 记"本次尝试曾观测到 direct", open 复位。它让 `iroh_direct_path_lost` 在客户端有生产者 (与 daemon 的 `BulkPathGate` 同一形状, 两个方向都走同一个门禁) |
 | 中途掉 relay | 门禁在块**发出之前**判, 所以被拒的那个边界一个字节都没上线; 不走 `@file-cancel` —— 按 §2.5 B3 保留半成品供续传 |
-| `transfer_id` 复用 | `--put` 的 id 按 (目标, 本地路径, 远端路径) 记在 `<rdog 用户目录>/bulk-transfer-ids.json`。lane 层失败后 daemon 的会话仍占着目标推导出的暂存名, 换新 id 会被 `file_transfer_path_in_use` 挡到窗口过期; 复用 id 让下一次自然落到 `resume:true`。提交成功后忘掉这条记录, `--restart` 先按记录里的旧 id 发 `@file-cancel` 再换新 id。`--get` 不复用: daemon 没有"未完成的下载"状态, 同 id 换不来续传 |
+| `transfer_id` 复用 | `--put` 的 id 按 (目标, 本地路径, 远端路径) **一个键一个文件**记在 `<rdog 用户目录>/bulk-transfer-ids/<FNV-1a 64>.json` (内容写真实键与 id)。lane 层失败后 daemon 的会话仍占着目标推导出的暂存名, 换新 id 会被 `file_transfer_path_in_use` 挡到窗口过期; 复用 id 让下一次自然落到 `resume:true`。提交成功后删掉这条记录, `--restart` 先按记录里的旧 id 发 `@file-cancel` 再换新 id。`--get` 不复用: daemon 没有"未完成的下载"状态, 同 id 换不来续传 |
 | daemon 半快照 | `@file-end` / `eof:true` 的 `@file-read` 响应里的 `evidence` 被**原样**写到 `--bulk-path-json` 同目录的 `bulk-path.daemon.json`; **错误回执**上带的 `evidence` 同样收下。每次尝试开始前删掉上一次留下的那份, 免得两半配错。收不到就**不写**, 只在 stderr 说明, 让 join 落到 `bulk_path_endpoint_missing` |
 | 失败码 | 准入 lane 握不上手且连接按 `DENIED` 关闭 → `iroh_bulk_path_pin_unavailable` (对端没有策略文件, 该入口不承载 bulk); 路径类失败走 §2.2 的 `iroh_*` 三码 |
 | 非 iroh 传输 | 行为不变: 逐请求建链, `path_class` 恒 `not_applicable`, 不产出 daemon 半快照 |
@@ -761,11 +762,20 @@ rdog control <TARGET> --get <REMOTE_PATH> --local-path <LOCAL_PATH>
 两者都不需要使用者改配置 —— 抬 `frame_timeout_ms` 只能救一条已知慢的链路, 救不了"帧本身就比
 窗口大一个量级"这件事。
 
+**id store 的存储形态: 一个键一个文件。** 共用一张表时 `load → insert → save` 之间没有互斥, 两条
+并发的传输会各自拿旧快照把整表覆盖掉 (200 轮实测丢一条键 144 次); 临时文件 + rename 只保证"读者
+看不到半张表", 挡不住"读-改-写丢更新"。键天然可分, 所以每个键一份文件: `put` / `remove` 只碰自己
+那份, 没有读-改-写窗口, 不需要锁, 也不会丢别人的键。单文件仍用 temp + rename —— 那才是它该保的
+(一个键的文件要么是旧的完整内容, 要么是新的完整内容)。读出截断/坏 JSON 时按"该键无 id"处理并
+warn, **不删文件** (留给排障); 最坏只坏这一个键。文件名是键的 FNV-1a 64 十六进制 (确定性、无依赖),
+真实键写在文件内容里便于人读。旧的单文件 `<rdog 用户目录>/bulk-transfer-ids.json` 不迁移也不读:
+这个 store 在同一个 PR 里引入、从未随发布版本出去, 盘上那份只是本分支早期构建留下的。
+
 **id store 的已知边界 (没有在途 owner)。** 键是 `(target, local, remote)`，**不含进程身份, 也没有
 "这条 id 现在归谁用"的守卫**。同一键上若有另一个进程正在传, 会出两件事: 它写的 id 覆盖本机的
 记录; 而 `--restart` 读到那个 id 后发出的 `@file-cancel` 会把**那条在途会话**一起取消 (daemon 的
 cancel 只认 `transfer_id`, 不认发起者)。本版只写清不解决: 规避方式是同一键不要并发; 根治要给
-daemon 侧的会话加 owner 租约 (未开票)。刻意不加进程锁 —— 它只能挡住"读-改-写"那几毫秒, 挡不住
+daemon 侧的会话加 owner 租约 (RAI-526, Backlog/low)。刻意不加进程锁 —— 它只能挡住"读-改-写"那几毫秒, 挡不住
 "我在传的时候你 restart", 反而让人以为这一格已经闭合。
 
 **下载方向的结构上限 (写在这里, 免得被当成 bug)**: 下载每块 36096 B, 而每块是一次完整往返, 所以

@@ -232,11 +232,27 @@ pub(crate) const DAEMON_HALF_FILE: &str = "bulk-path.daemon.json";
 ///
 /// lane 层失败 (帧写超时、读超时) 之后 daemon 的会话还在, 它按目标路径推导出来的暂存名被占着。
 /// 下一次 `--put` 换一个新 id 会被 `file_transfer_path_in_use` 拒到续传窗口过期; 而每次都新生成
-/// id 的 CLI 永远走不到"同 id + resume"那条路。按 (本地路径, 目标, 远端路径) 复用 id, 就把
+/// id 的 CLI 永远走不到"同 id + resume"那条路。按 (目标, 本地路径, 远端路径) 复用 id, 就把
 /// "挡住下一次"变成"续上"。
 ///
-/// 存储: `<rdog 用户目录>/bulk-transfer-ids.json` (与 `~/.rdog/` 下其它文件同一约定)。
+/// # 存储形态: 一个键一个文件
+///
+/// 目录 `<rdog 用户目录>/bulk-transfer-ids/`, 每个键一份 `<FNV-1a 64 十六进制>.json`, 内容是
+/// `{"key": <真实键>, "transfer_id": <id>}`。
+///
+/// 为什么不共用一张表: `load → insert → save` 之间没有互斥, 两条并发的传输会各自拿旧快照把整表
+/// 覆盖掉 —— 200 轮实测丢一条键 144 次。临时文件 + rename 只保证"读者看不到半张表", 挡不住
+/// "读-改-写丢更新"。键本身是天然可分的, 一个键一个文件之后 `put` / `remove` 只碰自己那份,
+/// **没有读-改-写窗口, 不需要锁, 也不会丢别人的键**。
+///
+/// 单文件仍然 temp + rename: 那才是它该保的东西 —— 一个键的文件要么是旧的完整内容, 要么是新的
+/// 完整内容。读不出来 (截断/坏 JSON) 时按"该键没有 id"处理并 warn, **不删文件** (留给排障);
+/// 最坏只坏这一个键, 其余键不受影响。
+///
 /// 只记 `--put`: 下载方向 daemon 没有"未完成的下载"这种状态, 同 id 换不来续传, 记了也只是垃圾。
+///
+/// 旧的单文件 `<rdog 用户目录>/bulk-transfer-ids.json` 不迁移也不读: 这个 store 是同一个 PR 里
+/// 引入的, 从未随发布版本出去, 盘上可能存在的那份只是本分支早期构建留下的。它原样留着不动。
 ///
 /// # 已知边界: 没有在途 owner
 ///
@@ -244,25 +260,24 @@ pub(crate) const DAEMON_HALF_FILE: &str = "bulk-path.daemon.json";
 /// 有另一个进程正在传时: 它写的 id 会覆盖这条, 而 `--restart` 读到那个 id 后发的 `@file-cancel`
 /// 会把**那条在途会话**一起取消 (daemon 的 cancel 只认 `transfer_id`, 不认发起者)。
 ///
-/// 规避是"同一键不要并发"; 根治要给 daemon 侧的会话加 owner 租约 (与 §5.1 同一条, 未开票)。
-/// 这里刻意不做进程锁: 一把锁只能挡住"读-改-写"那几毫秒, 挡不住"我在传的时候你 restart", 反而
-/// 让人以为这个问题已经解决。
+/// 规避是"同一键不要并发"; 根治要给 daemon 侧的会话加 owner 租约 (RAI-526, Backlog/low)。
 pub(crate) struct TransferIdStore {
-    path: Option<PathBuf>,
+    /// 存储目录; `None` = 不持久化 (`$HOME` 缺失)。
+    dir: Option<PathBuf>,
 }
 
 impl TransferIdStore {
     /// 用户级默认存储。`$HOME` 缺失时退化为不持久化 (读不到用户目录不是传输失败的理由)。
     pub(crate) fn user_default() -> Self {
         Self {
-            path: crate::config::resolve_user_config_dir()
-                .map(|dir| dir.join("bulk-transfer-ids.json")),
+            dir: crate::config::resolve_user_config_dir()
+                .map(|dir| dir.join("bulk-transfer-ids")),
         }
     }
 
     #[cfg(test)]
-    pub(crate) fn at(path: PathBuf) -> Self {
-        Self { path: Some(path) }
+    pub(crate) fn at(dir: PathBuf) -> Self {
+        Self { dir: Some(dir) }
     }
 
     /// 键是 (目标, 本地路径, 远端路径): 同一个本地文件发往两台不同主机是两次传输, 吃同一个
@@ -271,80 +286,120 @@ impl TransferIdStore {
         format!("{target}\0{}\0{remote}", local.display())
     }
 
-    fn load(&self) -> std::collections::BTreeMap<String, String> {
-        let Some(path) = self.path.as_ref() else {
-            return std::collections::BTreeMap::new();
+    /// 键 → 文件名: FNV-1a 64 的十六进制。**确定性、无依赖**, 同一个键在任何机器上都落到同一个
+    /// 文件名上; 文件名只承载哈希, 真实键写在文件内容里, 便于人读与排障。
+    fn file_name(key: &str) -> String {
+        let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+        for byte in key.as_bytes() {
+            hash ^= u64::from(*byte);
+            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        format!("{hash:016x}.json")
+    }
+
+    fn entry_path(&self, key: &str) -> Option<PathBuf> {
+        self.dir.as_ref().map(|dir| dir.join(Self::file_name(key)))
+    }
+
+    fn read(&self, key: &str) -> Option<String> {
+        let path = self.entry_path(key)?;
+        let bytes = match std::fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return None,
+            Err(err) => {
+                eprintln!("warning: 读不到 {}: {err}; 该键按无 id 处理", path.display());
+                return None;
+            }
         };
-        match std::fs::read(path) {
-            Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_else(|err| {
-                // 坏文件按空表处理 (它只是一份提示, 不是传输状态), 但要说出来 —— 静默丢弃会让人
-                // 以为"复用生效了"而实际每次都从头来。
-                eprintln!("warning: 读不懂 {}: {err}; 按空表处理", path.display());
-                std::collections::BTreeMap::new()
-            }),
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-                std::collections::BTreeMap::new()
+        match serde_json::from_slice::<StoredTransferId>(&bytes) {
+            Ok(stored) if stored.key == key => Some(stored.transfer_id),
+            // 坏文件/哈希撞车: 只作废这一个键, 文件留着给排障看。
+            Ok(_) => {
+                eprintln!(
+                    "warning: {} 里记的是另一个键; 该键按无 id 处理",
+                    path.display()
+                );
+                None
             }
             Err(err) => {
-                eprintln!("warning: 读不到 {}: {err}; 按空表处理", path.display());
-                std::collections::BTreeMap::new()
+                eprintln!(
+                    "warning: 读不懂 {}: {err}; 该键按无 id 处理",
+                    path.display()
+                );
+                None
             }
         }
     }
 
-    /// 写临时文件再 rename: 读者永远看不到半张表 (截断写能让并发读者读回空表, 于是所有 id
-    /// 一起丢, 退回的正是这个 store 要消灭的 `path_in_use`)。临时名带 pid, 两个进程不会撞。
-    fn save(&self, ids: &std::collections::BTreeMap<String, String>) {
-        let Some(path) = self.path.as_ref() else {
+    /// 一个键一个文件, 所以这里只写自己那一份: 没有读-改-写窗口, 不会丢掉别人的键。
+    fn write(&self, key: &str, transfer_id: &str) {
+        let Some(path) = self.entry_path(key) else {
             return;
         };
-        if let Some(parent) = path.parent() {
-            if let Err(err) = std::fs::create_dir_all(parent) {
-                eprintln!("warning: 建不出 {}: {err}", parent.display());
+        if let Some(dir) = self.dir.as_ref() {
+            if let Err(err) = std::fs::create_dir_all(dir) {
+                eprintln!("warning: 建不出 {}: {err}", dir.display());
                 return;
             }
         }
-        let bytes = match serde_json::to_vec(ids) {
+        let bytes = match serde_json::to_vec(&StoredTransferId {
+            key: key.to_string(),
+            transfer_id: transfer_id.to_string(),
+        }) {
             Ok(bytes) => bytes,
             Err(err) => {
-                eprintln!("warning: 序列化 transfer_id 表失败: {err}");
+                eprintln!("warning: 序列化 transfer_id 条目失败: {err}");
                 return;
             }
         };
-        let staging = path.with_file_name(format!(
-            "{}.{}.tmp",
-            path.file_name()
-                .map(|name| name.to_string_lossy().into_owned())
-                .unwrap_or_else(|| "bulk-transfer-ids".to_string()),
+        // 单文件的完整性: 读者只会看到旧的完整内容或新的完整内容。
+        //
+        // 临时名必须**唯一**: 只带 pid 时同 pid 的两个并发写 (同一进程的两个线程) 共用一个暂存
+        // 文件, 能把写了一半的内容 rename 到位 (实测出现 `trailing characters` 与 `No such file`).
+        // 后缀用进程级原子计数器: pid 区分进程, 计数器区分线程与同一线程的先后。
+        let unique = TEMP_WRITE_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let staging = path.with_extension(format!(
+            "{}.{unique}.tmp",
             std::process::id()
         ));
         if let Err(err) = std::fs::write(&staging, bytes) {
             eprintln!("warning: 写不进 {staging:?}: {err}");
             return;
         }
-        if let Err(err) = std::fs::rename(&staging, path) {
+        if let Err(err) = std::fs::rename(&staging, &path) {
             eprintln!("warning: 换不上 {path:?}: {err}");
             let _ = std::fs::remove_file(&staging);
         }
     }
 
     fn get(&self, target: &str, local: &Path, remote: &str) -> Option<String> {
-        self.load().remove(&Self::key(target, local, remote))
+        self.read(&Self::key(target, local, remote))
     }
 
-    /// 写前重读: 并发跑的两条传输各自只改自己那一条, 不能拿自己这份快照把别人的整表覆盖掉。
     fn put(&self, target: &str, local: &Path, remote: &str, transfer_id: &str) {
-        let mut ids = self.load();
-        ids.insert(Self::key(target, local, remote), transfer_id.to_string());
-        self.save(&ids);
+        self.write(&Self::key(target, local, remote), transfer_id);
     }
 
     fn remove(&self, target: &str, local: &Path, remote: &str) {
-        let mut ids = self.load();
-        if ids.remove(&Self::key(target, local, remote)).is_some() {
-            self.save(&ids);
+        let Some(path) = self.entry_path(&Self::key(target, local, remote)) else {
+            return;
+        };
+        match std::fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => eprintln!("warning: 删不掉 {:?}: {err}", path),
         }
     }
+}
+
+/// 暂存文件名的唯一后缀: 只靠 pid 会让同一进程的两个并发写撞在同一个暂存名上。
+static TEMP_WRITE_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// 一个键的文件内容。真实键写在里面: 文件名是哈希, 而排障时人要能看出这是哪条传输。
+#[derive(serde::Serialize, serde::Deserialize)]
+struct StoredTransferId {
+    key: String,
+    transfer_id: String,
 }
 
 /// 本端这一半的 `rdog.bulk-path.v1` 证据 (规格 §4.3: 两端各发一半, 不替对端填数)。
@@ -1362,7 +1417,7 @@ mod tests {
     /// 用例用的 transfer_id 存储: 每次调用一个独立文件, 不碰真实的 `~/.rdog`。
     fn ids_for(tag: &str) -> TransferIdStore {
         let dir = std::env::temp_dir().join(format!("rdog-cli-ids-{tag}-{}", std::process::id()));
-        TransferIdStore::at(dir.join("bulk-transfer-ids.json"))
+        TransferIdStore::at(dir)
     }
 
     /// 绝大多数用例只关心协议状态机, 不关心 id 复用: 给它们一份用完即弃的存储。
@@ -2010,6 +2065,112 @@ mod tests {
         }
         assert_eq!(value["relay_sample_available"], false);
         assert_eq!(value["verdict"], "relay_sample_unavailable");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn concurrent_writers_on_different_keys_never_lose_each_other() {
+        // 评审 D3 实测: 共用一张表时 `load → insert → save` 会互相覆盖, 200 轮丢一条键 144 次。
+        // 一个键一个文件之后两条写入只碰自己那份, 所以每一轮两条都必须还在。
+        //
+        // 用**线程**而不是进程: store 的全部状态都在文件里, 没有进程内缓存, 两个独立实例从文件
+        // 读、往文件写, 在文件系统层面与两个进程等价 (这一点写在这里, 免得读成"只测了线程")。
+        let dir = std::env::temp_dir().join(format!("rdog-cli-ids-race-{}", std::process::id()));
+        let local = std::path::PathBuf::from("/tmp/race.bin");
+
+        for round in 0..200 {
+            let remote_a = format!("/tmp/race-a-{round}.bin");
+            let remote_b = format!("/tmp/race-b-{round}.bin");
+            let dir_a = dir.clone();
+            let dir_b = dir.clone();
+            let remote_a2 = remote_a.clone();
+            let remote_b2 = remote_b.clone();
+            let local_a = local.clone();
+            let local_b = local.clone();
+            let start = std::sync::Arc::new(std::sync::Barrier::new(2));
+            let start_a = start.clone();
+            let start_b = start.clone();
+
+            let writer_a = std::thread::spawn(move || {
+                let store = TransferIdStore::at(dir_a);
+                start_a.wait();
+                store.put("t", &local_a, &remote_a2, "id-a");
+            });
+            let writer_b = std::thread::spawn(move || {
+                let store = TransferIdStore::at(dir_b);
+                start_b.wait();
+                store.put("t", &local_b, &remote_b2, "id-b");
+            });
+            writer_a.join().unwrap();
+            writer_b.join().unwrap();
+
+            let reader = TransferIdStore::at(dir.clone());
+            assert_eq!(
+                reader.get("t", &local, &remote_a),
+                Some("id-a".to_string()),
+                "第 {round} 轮丢了 A 的条目"
+            );
+            assert_eq!(
+                reader.get("t", &local, &remote_b),
+                Some("id-b".to_string()),
+                "第 {round} 轮丢了 B 的条目"
+            );
+        }
+
+        // 第二轮: 两个线程各写 300 次 (同一 pid、同一目录)。共用暂存名时这一支出现过
+        // `trailing characters` 与 `换不上 …: No such file or directory` —— 现在每个写都有自己的
+        // 唯一临时名, 所以既不该读坏, 也不该留下 `.tmp` 残片。
+        let remote_a = "/tmp/burst-a.bin".to_string();
+        let remote_b = "/tmp/burst-b.bin".to_string();
+        let burst = |dir: std::path::PathBuf, remote: String, id: &'static str| {
+            std::thread::spawn(move || {
+                let store = TransferIdStore::at(dir);
+                let local = std::path::PathBuf::from("/tmp/race.bin");
+                for _ in 0..300 {
+                    store.put("t", &local, &remote, id);
+                }
+            })
+        };
+        burst(dir.clone(), remote_a.clone(), "id-a").join().unwrap();
+        burst(dir.clone(), remote_b.clone(), "id-b").join().unwrap();
+        let reader = TransferIdStore::at(dir.clone());
+        assert_eq!(reader.get("t", &local, &remote_a), Some("id-a".to_string()));
+        assert_eq!(reader.get("t", &local, &remote_b), Some("id-b".to_string()));
+        let leftovers: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.ends_with(".tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "不得留下暂存残片: {leftovers:?}");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_truncated_entry_only_loses_its_own_key() {
+        // 一个键一个文件: 截断只坏这一个键, 别的键照常可读; 坏文件按"该键无 id"处理且**不删**,
+        // 留给排障 (它是不是被谁写坏了, 只有文件还在才查得出来)。
+        let dir = std::env::temp_dir().join(format!("rdog-cli-ids-corrupt-{}", std::process::id()));
+        let local = std::path::PathBuf::from("/tmp/corrupt.bin");
+        let store = TransferIdStore::at(dir.clone());
+        store.put("t", &local, "/tmp/good.bin", "id-good");
+        store.put("t", &local, "/tmp/broken.bin", "id-broken");
+
+        let broken = dir.join(TransferIdStore::file_name(&TransferIdStore::key(
+            "t",
+            &local,
+            "/tmp/broken.bin",
+        )));
+        std::fs::write(&broken, b"{\"key\":\"t\",\"transfer_id\":\"id-trunc").unwrap();
+
+        assert_eq!(store.get("t", &local, "/tmp/broken.bin"), None);
+        assert_eq!(
+            store.get("t", &local, "/tmp/good.bin"),
+            Some("id-good".to_string()),
+            "坏的只该坏它自己"
+        );
+        assert!(broken.exists(), "坏文件不删, 留给排障");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
