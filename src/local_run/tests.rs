@@ -273,10 +273,12 @@ fn twenty_start_stop_cycles_should_not_accumulate_files() {
             vec![
                 "lab__cycle.lab.lock".to_string(),
                 "lab__cycle.lab.meta".to_string(),
+                "lab__cycle.lab.pipe.rdog-owner.pid".to_string(),
                 "lab__cycle.lab.pipe_downlink".to_string(),
                 "lab__cycle.lab.pipe_uplink".to_string(),
             ],
-            "第 {round} 轮: 1 逻辑 pipe(Zenoh 派生 2 个 FIFO) + 1 lock + 1 meta,不能多也不能少"
+            "第 {round} 轮: 1 逻辑 pipe(Zenoh 派生 2 个 FIFO) + 1 lock + 1 meta \
+             + 1 跨版本兼容守卫,不能多也不能少"
         );
         drop(guard);
         assert!(
@@ -569,6 +571,75 @@ fn removal_should_be_skipped_when_a_new_owner_takes_the_lock() {
     }
 
     drop(owner);
+}
+
+#[test]
+fn new_owner_should_block_an_old_binary_on_the_same_base() {
+    let dirs = TestDirs::new("compat");
+    let base = dirs.run.join("shared").join("lab__compat.lab.pipe");
+    fs::create_dir_all(base.parent().expect("parent")).expect("parent dir");
+
+    let guard =
+        UnixpipeRunGuard::acquire(paths_for_base(&base).expect("paths"), "lab", "compat.lab")
+            .expect("new owner should acquire");
+
+    // 旧二进制会在同一个 `<base>.rdog-owner.pid` 上抢锁并读 pid:
+    // 抢不到锁 + pid 存活 = 拒绝接管,不会去 unlink 新 daemon 的 FIFO。
+    let legacy_guard = legacy_guard_path(&base);
+    let err = process_lease::ProcessLease::acquire(
+        legacy_guard.clone(),
+        process_lease::metadata_path_for_lock(&legacy_guard),
+        "unixpipe-path",
+        "shared",
+    )
+    .expect_err("旧二进制不能在活着的新 owner 上抢到路径守卫");
+    assert_eq!(err.kind(), io::ErrorKind::AlreadyExists);
+    assert!(
+        err.to_string().contains("已被活跃") || err.to_string().contains("legacy"),
+        "旧二进制应看到活跃 owner: {err}"
+    );
+
+    drop(guard);
+    // 退出后守卫文件不残留,旧二进制可以正常接管。
+    assert!(!legacy_guard.exists(), "新 owner 退出后兼容守卫不该留下");
+}
+
+#[test]
+fn legacy_removal_should_be_skipped_while_old_guard_is_held() {
+    let dirs = TestDirs::new("legacy-race");
+    let legacy_base = dirs.legacy.join("rdog-lab-race.lab.pipe");
+    create_fake_fifos(&legacy_base);
+    let legacy_guard = legacy_guard_path(&legacy_base);
+
+    let holder = process_lease::ProcessLease::acquire(
+        legacy_guard.clone(),
+        process_lease::metadata_path_for_lock(&legacy_guard),
+        "unixpipe-path",
+        "legacy-race",
+    )
+    .expect("old daemon takes the guard");
+
+    let entry = RunEntry {
+        pipe_base: legacy_base.clone(),
+        namespace: Some("lab".to_string()),
+        daemon_name: Some("race.lab".to_string()),
+        pid: Some(std::process::id()),
+        fifo_files: 2,
+        owner_alive: false,
+        pid_alive: Some(true),
+        legacy_location: true,
+        started_at_unix_ms: None,
+    };
+    assert_eq!(
+        remove_stale_entry(&entry).expect("removal should not error"),
+        None,
+        "旧守卫被持有时必须放弃删除"
+    );
+    for path in fifo_paths(&legacy_base) {
+        assert!(path.exists(), "活 owner 的 FIFO 不能删: {}", path.display());
+    }
+
+    drop(holder);
 }
 
 #[test]

@@ -385,6 +385,10 @@ struct RunMeta {
 #[derive(Debug)]
 pub(crate) struct UnixpipeRunGuard {
     _lock_file: File,
+    /// 旧二进制只认 `<base>.rdog-owner.pid`,所以新 owner 也用它声明占用。
+    /// 少了这把锁,升级窗口里"旧二进制启动到新 daemon 正在用的显式 base"会
+    /// 无条件 unlink 新 daemon 的 FIFO(反向互斥)。
+    _legacy_guard: File,
     paths: UnixpipeRunPaths,
 }
 
@@ -400,21 +404,7 @@ impl UnixpipeRunGuard {
             ensure_base_parent_dir(dir)?;
         }
 
-        // 跨版本互斥: 旧二进制用 `<base>.rdog-owner.pid` 持锁,新二进制看 `<stem>.lock`。
-        // 不检查旧锁就会在"同名 base、不同 daemon name"的升级窗口里删掉仍在跑的旧
-        // daemon 的 FIFO 与它持有的守卫文件。旧 owner 还活着时这里直接失败。
-        if let Some(holder) = legacy_guard_holder(&paths.base)? {
-            return Err(io::Error::new(
-                io::ErrorKind::AlreadyExists,
-                format!(
-                    "unixpipe pipe 已被旧版本 daemon 占用: base={}, legacy_guard={}{}",
-                    paths.base.display(),
-                    legacy_guard_path(&paths.base).display(),
-                    holder.describe()
-                ),
-            ));
-        }
-
+        // 新格式锁先抢: 同一版本的两个 daemon 竞争时,这里给出的错误最准确。
         let Some((mut lock_file, previous)) = acquire_owner_lock(&paths.lock)? else {
             let holder = read_lock_at(&paths.lock)
                 .map(|lock| {
@@ -433,6 +423,28 @@ impl UnixpipeRunGuard {
                 ),
             ));
         };
+
+        // 跨版本互斥必须**双向**: 旧二进制用 `<base>.rdog-owner.pid` 表达占用,
+        // 新二进制只看 `<stem>.lock` 的话,两个方向的升级窗口都会互相删 FIFO。
+        // 所以新 owner 自己也在这把锁上 flock + 写 pid —— 旧 owner 还活着就抢不到
+        // (直接失败),我们活着时旧二进制也会因 pid 存活而拒绝接管。
+        let legacy_guard = match acquire_flock(&legacy_guard_path(&paths.base), true)? {
+            Some(file) => file,
+            None => {
+                let holder = legacy_guard_holder(&paths.base)?
+                    .map(|holder| holder.describe())
+                    .unwrap_or_default();
+                return Err(io::Error::new(
+                    io::ErrorKind::AlreadyExists,
+                    format!(
+                        "unixpipe pipe 已被旧版本 daemon 占用: base={}, legacy_guard={}{holder}",
+                        paths.base.display(),
+                        legacy_guard_path(&paths.base).display()
+                    ),
+                ));
+            }
+        };
+        write_legacy_guard_pid(&legacy_guard, std::process::id())?;
 
         // 拿到 exclusive lock 就证明上一个 owner 已经死了(哪怕它的 PID 被别的进程复用)。
         // 这里把判定依据写进日志,现场排查"到底是残留还是真活着"时不用再猜。
@@ -465,10 +477,12 @@ impl UnixpipeRunGuard {
         process_lease::write_json_atomically(&paths.meta, &meta)?;
         tighten_file_permissions(&paths.meta)?;
 
-        remove_unixpipe_artifacts(&paths.base)?;
+        // 只清旧 FIFO: 旧格式守卫现在是我们自己持有的,不能一起删掉。
+        remove_stale_pipe_files(&paths.base)?;
 
         Ok(Self {
             _lock_file: lock_file,
+            _legacy_guard: legacy_guard,
             paths,
         })
     }
@@ -514,13 +528,17 @@ impl UnixpipeRunGuard {
 #[cfg(unix)]
 impl Drop for UnixpipeRunGuard {
     fn drop(&mut self) {
-        if let Err(err) = remove_unixpipe_artifacts(&self.paths.base) {
+        if let Err(err) = remove_stale_pipe_files(&self.paths.base) {
             log::warn!(
                 "清理 unixpipe FIFO 失败: base={}, error={err}",
                 self.paths.base.display()
             );
         }
-        for path in [&self.paths.lock, &self.paths.meta] {
+        for path in [
+            &self.paths.lock,
+            &self.paths.meta,
+            &legacy_guard_path(&self.paths.base),
+        ] {
             if let Err(err) = fs::remove_file(path) {
                 if err.kind() != io::ErrorKind::NotFound {
                     log::warn!("清理 unixpipe 生命周期文件失败: {}: {err}", path.display());
@@ -552,19 +570,43 @@ fn open_lock_file(path: &Path) -> io::Result<File> {
 /// 于是重开重抢。最多重试 `LOCK_ACQUIRE_ATTEMPTS` 次。
 #[cfg(unix)]
 fn acquire_owner_lock(lock: &Path) -> io::Result<Option<(File, Option<RunLock>)>> {
+    let Some(mut file) = acquire_flock(lock, true)? else {
+        return Ok(None);
+    };
+    let previous = read_lock(&mut file)?;
+    Ok(Some((file, previous)))
+}
+
+/// 在 `path` 上抢一把 exclusive flock;抢到就返回持有句柄。
+///
+/// 覆盖两种锁文件: 新格式 `<stem>.lock`(JSON)与旧格式 `<base>.rdog-owner.pid`(纯 pid)。
+/// 约束:
+/// - `create = false` 时不创建文件(只读探测/清理时不该凭空造出锁文件)。
+/// - 抢到后复核"路径当前指向的 inode 是否就是我锁住的 inode";不一致说明文件已被
+///   前一个 owner unlink 或被替换,释放后重抢,避免在旧 inode 上与新建 inode 的
+///   owner 并存。
+/// - `Ok(None)` = 已被别的进程持有。
+#[cfg(unix)]
+fn acquire_flock(path: &Path, create: bool) -> io::Result<Option<File>> {
     for _ in 0..LOCK_ACQUIRE_ATTEMPTS {
-        let mut file = open_lock_file(lock)?;
-        let previous = read_lock(&mut file)?;
+        let file = if create {
+            open_lock_file(path)?
+        } else {
+            match open_existing_lock_file(path)? {
+                Some(file) => file,
+                None => return Ok(None),
+            }
+        };
+
         match file.try_lock() {
             Ok(()) => {}
             Err(TryLockError::WouldBlock) => return Ok(None),
             Err(TryLockError::Error(err)) => return Err(err),
         }
 
-        if path_matches_locked_inode(lock, &file)? {
-            return Ok(Some((file, previous)));
+        if path_matches_locked_inode(path, &file)? {
+            return Ok(Some(file));
         }
-        // 抢到的是已被 unlink 的旧 inode: 释放后重来,避免与新建 inode 的 owner 并存。
         drop(file);
     }
 
@@ -572,7 +614,7 @@ fn acquire_owner_lock(lock: &Path) -> io::Result<Option<(File, Option<RunLock>)>
         io::ErrorKind::WouldBlock,
         format!(
             "unixpipe ownership lock 在 {LOCK_ACQUIRE_ATTEMPTS} 次尝试内始终被替换: {}",
-            lock.display()
+            path.display()
         ),
     ))
 }
@@ -594,6 +636,18 @@ fn path_matches_locked_inode(path: &Path, file: &File) -> io::Result<bool> {
 #[cfg(unix)]
 fn legacy_guard_path(base: &Path) -> PathBuf {
     PathBuf::from(format!("{}.rdog-owner.pid", base.display()))
+}
+
+/// 把当前 pid 写进旧格式守卫文件(纯 pid 文本,与旧 ProcessLease 的兼容格式一致)。
+#[cfg(unix)]
+fn write_legacy_guard_pid(file: &File, pid: u32) -> io::Result<()> {
+    use std::io::{Seek, SeekFrom, Write};
+
+    let mut handle = file;
+    handle.set_len(0)?;
+    handle.seek(SeekFrom::Start(0))?;
+    handle.write_all(pid.to_string().as_bytes())?;
+    handle.sync_data()
 }
 
 /// 仍持有旧版本路径守卫的 owner。空结构表示"持有但读不到 pid"。
@@ -665,56 +719,66 @@ fn tighten_file_permissions(path: &Path) -> io::Result<()> {
 ///
 /// 文件存在但**是目录**时报错而不是删,避免把用户的同名目录当残留清掉。
 /// 返回 Ok(()) 表示路径已干净(本来就干净或已被本调用清理)。
+///
+/// 注意: 接管路径的 daemon **不能**用它清 stale —— 它必须在持有旧格式守卫之后
+/// 只清 FIFO(`remove_stale_pipe_files`),否则会把自己刚拿到的守卫文件删掉。
 #[cfg(unix)]
 pub(crate) fn remove_unixpipe_artifacts(base: &Path) -> io::Result<()> {
-    let fifos = fifo_paths(base);
-    let base_owner = PathBuf::from(format!("{}.rdog-owner.pid", base.display()));
-    let base_owner_lease = crate::zenoh_runtime::process_lease::metadata_path_for_lock(&base_owner);
+    remove_stale_pipe_files(base)?;
 
-    for candidate in [
-        base.to_path_buf(),
-        fifos[0].clone(),
-        fifos[1].clone(),
-        base_owner,
-        base_owner_lease,
-    ] {
-        match fs::metadata(&candidate) {
-            Ok(metadata) if metadata.is_dir() => {
-                return Err(io::Error::new(
-                    io::ErrorKind::AlreadyExists,
-                    format!(
-                        "unixpipe 路径 {} 是目录而不是 FIFO 文件,拒绝清理",
-                        candidate.display()
-                    ),
-                ));
-            }
-            Ok(_) => match fs::remove_file(&candidate) {
-                Ok(()) => {}
-                Err(err) if err.kind() == io::ErrorKind::NotFound => {}
-                Err(err) => {
-                    return Err(io::Error::new(
-                        err.kind(),
-                        format!(
-                            "清理 stale unixpipe 文件 {} 失败: {err}",
-                            candidate.display()
-                        ),
-                    ))
-                }
-            },
-            Err(err) if err.kind() == io::ErrorKind::NotFound => {}
-            Err(err) => {
-                return Err(io::Error::new(
+    let base_owner = legacy_guard_path(base);
+    let base_owner_lease = crate::zenoh_runtime::process_lease::metadata_path_for_lock(&base_owner);
+    for candidate in [base_owner, base_owner_lease] {
+        remove_artifact_file(&candidate)?;
+    }
+    Ok(())
+}
+
+/// 只删 base 与其派生 FIFO(不碰任何守卫文件)。
+///
+/// 用于"已经拿到 ownership、准备自己建 FIFO"的接管路径。
+#[cfg(unix)]
+fn remove_stale_pipe_files(base: &Path) -> io::Result<()> {
+    let fifos = fifo_paths(base);
+    for candidate in [base.to_path_buf(), fifos[0].clone(), fifos[1].clone()] {
+        remove_artifact_file(&candidate)?;
+    }
+    Ok(())
+}
+
+/// 删一个残留文件: 不存在算成功,是目录报错(绝不删用户目录)。
+#[cfg(unix)]
+fn remove_artifact_file(candidate: &Path) -> io::Result<()> {
+    {
+        match fs::metadata(candidate) {
+            Ok(metadata) if metadata.is_dir() => Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                format!(
+                    "unixpipe 路径 {} 是目录而不是 FIFO 文件,拒绝清理",
+                    candidate.display()
+                ),
+            )),
+            Ok(_) => match fs::remove_file(candidate) {
+                Ok(()) => Ok(()),
+                Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
+                Err(err) => Err(io::Error::new(
                     err.kind(),
                     format!(
-                        "检查 unixpipe 路径 {} 元数据失败: {err}",
+                        "清理 stale unixpipe 文件 {} 失败: {err}",
                         candidate.display()
                     ),
-                ))
-            }
+                )),
+            },
+            Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(err) => Err(io::Error::new(
+                err.kind(),
+                format!(
+                    "检查 unixpipe 路径 {} 元数据失败: {err}",
+                    candidate.display()
+                ),
+            )),
         }
     }
-
-    Ok(())
 }
 
 /// 读 `.meta` 里的完整身份;压缩名场景下这是唯一的身份来源。
@@ -1082,15 +1146,17 @@ fn clean_stale_entries(dry_run: bool) -> io::Result<CleanReport> {
 /// - 旧 `$TMPDIR` 条目: 复核旧 `<base>.rdog-owner.pid` 的 flock,仍被持有就不删。
 #[cfg(unix)]
 fn remove_stale_entry(entry: &RunEntry) -> io::Result<Option<usize>> {
-    // 旧版本 owner 的 ownership 只体现在 `<base>.rdog-owner.pid` 的 flock 上,
-    // 所以新旧两条路径都要先复核它,仍被持有就一律不删。
-    if legacy_guard_holder(&entry.pipe_base)?.is_some() {
+    // 旧格式守卫在新旧两条路径上都是 ownership 证据,所以两条路径都必须**持锁删除**:
+    // 只探测不持锁的话,旧二进制可能恰好在这个窗口里拿到守卫并建出 FIFO,
+    // 随后被我们连 FIFO 带守卫一起删掉。
+    let Some(_legacy_guard) = acquire_flock(&legacy_guard_path(&entry.pipe_base), true)? else {
         return Ok(None);
-    }
+    };
     if entry.legacy_location {
         return remove_entry_files(&entry.pipe_base).map(Some);
     }
 
+    // 新格式 owner 还要再抢一次 `<stem>.lock`: 两个方向都锁住才敢删。
     let paths = paths_for_base(&entry.pipe_base)?;
     let Some((_owner_lock, _previous)) = acquire_owner_lock(&paths.lock)? else {
         return Ok(None);

@@ -44,12 +44,16 @@ agent 高频跑 `@web-find` / `@screenshot` / `@click` 时,这段延迟会肉眼
     不是 PID(进程怎么死内核都会释放 lock,而 PID 会被复用)
   - `<stem>.meta`:完整身份 `{namespace, daemon_name, pipe_base, pid, created_at_unix_ms}`,
     压缩名场景下这是唯一能还原完整名字的地方,`rdog local list` 据此显示全名
+  - `<base>.rdog-owner.pid`:旧版本的路径守卫,新 owner 也在这把锁上 flock + 写 pid。
+    跨版本互斥必须是**双向**的 —— 只检查不持有的话,升级窗口里旧二进制会无条件
+    unlink 新 daemon 的 FIFO(反之亦然)。正常退出时与 lock/meta 一起删除。
 - 默认路径由 `(namespace, daemon_name)` 稳定推导。若配置显式 unixpipe listen endpoint,
   该 endpoint 的 base path 是 listener、cleanup、registry 与 ownership guard 的唯一真相源;
   lock/meta 由 base 的目录与 stem 反推,因此显式路径也进同一套生命周期。
 - 观测与回收入口: `rdog local list`(pipe / namespace / daemon_name / pid / 存活)与
   `rdog local clean`(默认 dry-run,`--force` 才删死进程残留;活 daemon 的 pipe 一律不动)。
-  旧版本留在 `$TMPDIR/rdog-*.pipe*` 的残留也列出来并可清理。
+  删除前会重新抢 ownership(新格式 lock + 旧格式守卫)**持锁删除**,抢不到就跳过并计入
+  `skipped=`。旧版本留在 `$TMPDIR/rdog-*.pipe*` 的残留也列出来并可清理。
 
 ### 3.2 daemon 端行为
 
