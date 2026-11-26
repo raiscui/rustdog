@@ -127,7 +127,8 @@ P7 第 3 项今天**既不可验证也不可证伪**: 候选没有任何 bulk �
 | --- | --- | --- |
 | `bulk.max_bytes` | 单文件上限. 在 `@put-file` 按声明 size 拒一次, 在 `@file-chunk` 按累计写入**再**拒一次 (声明可以撒谎) | 本规格定义, 待实现落地 (最小要容得下 10-06 规格里记录的 178 MB 模型件) |
 | `bulk.max_concurrent_sessions` | daemon 侧并发会话上限, 超出返回稳定码 `bulk_session_limit_reached` | 本规格定义 |
-| `bulk.idle_timeout_ms` | 会话空闲过期: 超过该时长无 `@file-chunk` / `@file-read`, evict 会话并删 partial. 由单一 sweep 驱动, **不**为每个会话起线程 | 本规格定义 |
+| `bulk.idle_timeout_ms` | 会话空闲过期: 超过该时长无 `@file-chunk` / `@file-read` 进展, 把会话移出注册表. **是否连带删半成品见 §2.5** | 本规格定义 |
+| `bulk.resume_window_ms` | 可续传半成品的保留窗口, 必须 **大于** `bulk.idle_timeout_ms` (`validate_file_transfer_config` 同族校验) | 本规格定义 |
 | `bulk.chunk_ack_timeout_ms` | 客户端侧单块应答超时, 超时即 `@file-cancel` 并失败 | 本规格定义 |
 
 取消链路有两条, 互补, 都要实现:
@@ -135,6 +136,31 @@ P7 第 3 项今天**既不可验证也不可证伪**: 候选没有任何 bulk �
 1. **显式取消**: 客户端调 `@file-cancel` (`@cancel#seq` 取消的是 in-flight 命令, 取消不了已经提交的传输会话).
 2. **隐式过期**: `bulk.idle_timeout_ms` 的 sweep. 覆盖客户端进程被杀、网络断掉、机器睡眠这些没人来
    调 cancel 的情况.
+
+### 2.5 半成品回收: 终态删, 可续传留 (带窗口)
+
+三个地方都会回收半成品 —— `@file-cancel`、空闲 sweep、同 id 换路径重开 —— 但**留不留文件**
+取决于这次中止是不是**可续传**的. 混成一条规则会两头出错: 一律删, 就把 D1 的续传打掉;
+一律留, 就是 RAI-417 挂号的那个残留缺陷.
+
+| 中止原因 | 会话 | 半成品 | 理由 |
+| --- | --- | --- | --- |
+| 显式 `@file-cancel` | 移出注册表 | **删** | 调用方明确表示不要了 |
+| 门禁在 open 拒绝 (`iroh_direct_path_unavailable` / `iroh_path_unknown` / `iroh_bulk_path_pin_unavailable`) | 不移出, 因为根本没建 | **不存在** | 拒绝必须是零副作用: open 时连 partial 都还没创建 |
+| 摘要/字节数不符 (`@file-end`) | 移出注册表 | **删** | 坏文件不得留盘 |
+| 中途路径丢失/不可读 (`iroh_direct_path_lost` / `iroh_path_unknown`) | 移出注册表 | **留**, 到 `bulk.resume_window_ms` 为止 | 这是唯一可续传的中止; 续传 offset 就是从这份半成品的长度推导的 |
+| 空闲超过 `bulk.idle_timeout_ms` | 移出注册表 | 取决于中止原因: 终态删, 可续传留到窗口末 | 空闲只说明"没人来了", 不说明"不要了" |
+
+一张表说清为什么必须有第二个 TTL: `idle_timeout_ms` 回答的是"多久没有进展就不再跟踪这个会话",
+`resume_window_ms` 回答的是"那道半成品还值不值得留着". 两者用同一个数, 就必然把其中一个需求压死.
+
+**已知边界 (不假装已覆盖)**: 可续传半成品的索引在 daemon 内存里 (与会话表同一处). daemon 重启后
+索引丢失, 那份半成品不再被任何路径回收. 要补上需要一个持久化的 partial 索引 (指向真相的
+"文件 mtime + 登记"), 本规格不展开 —— RAI-417 的实现落地时把这一条记为已知缺口并单独开票.
+
+**续传窗口用文件长度, 不用额外记账**: 续传 offset 的真相源是半成品文件自身的长度
+(`execute_put_file` 的 resume 分支), 所以窗口到期判定直接用该文件的 mtime 与
+`resume_window_ms` 比, 不引入第二份"已收字节"状态.
 
 ---
 
@@ -165,7 +191,7 @@ P7 第 3 项今天**既不可验证也不可证伪**: 候选没有任何 bulk �
 | 码 | 触发条件 | 终态 | 可重试 |
 | --- | --- | --- | --- |
 | `iroh_direct_path_unavailable` | 路径层观测到没有直连, 当前走 relay | 是 | 路径变直连后可 (见 D2) |
-| `iroh_direct_path_lost` | 直连曾建立, 中途丢失 | 是 (本次尝试) | 可, 带 `resume:true` 新开一次尝试 |
+| `iroh_direct_path_lost` | 直连曾建立, 中途丢失 | 是 (本次尝试) | 可, 带 `resume:true` 新开一次尝试; 半成品保留 `bulk.resume_window_ms` (§2.5) |
 | `iroh_path_unknown` | 路径类别读不出 | 是 | 可, 但重试前先修路径可观测性 |
 | `iroh_bulk_path_pin_unavailable` | 传输是路径感知的, 但无法把 bulk 连接钉在直连上 | 是 | 不可, 除非传输侧补上路径 pin |
 
@@ -385,8 +411,8 @@ B 与 C 的区别不在结果 (两者都必须失败), 而在**失败原因的�
 | --- | --- |
 | 输入 | 大文件上传, 传输进行中把路径打断 (断 UDP / 切网) |
 | 前置 | 起始 `direct`, 传输已过一个或多个 chunk |
-| 预期 | **中止**, `error_code:"iroh_direct_path_lost"`; 已写 partial **保留** (续传靠它, 删了就退化成重传); 快照 `verdict=aborted` 且 delta 非 0 |
-| 证据 | 两端快照; 中止时的 offset (证明不是从头开始也不是静默完成); partial 存在与大小; 续传一次到 `direct` 后完成的回执; **在途字节的归属**: 中止前已放行但未确认的字节数与其最终路径类别 (验证 §3.5 的 pin 确实生效, 不是"查到得太晚") |
+| 预期 | **中止**, `error_code:"iroh_direct_path_lost"`; 已写 partial **保留到 `bulk.resume_window_ms`** (续传 offset 就是从它推导的, 删了就退化成重传); 快照 `verdict=aborted` 且 delta 非 0 |
+| 证据 | 两端快照; 中止时的 offset (证明不是从头开始也不是静默完成); partial 存在与大小; 续传一次到 `direct` 后完成的回执, 且续传的起始 offset **不等于 0** (证明是真续传而不是静默重传); **在途字节的归属**: 中止前已放行但未确认的字节数与其最终路径类别 (验证 §3.5 的 pin 确实生效, 不是"查到得太晚") |
 
 ### D2 类: relay → direct
 
