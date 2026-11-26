@@ -651,13 +651,9 @@ fn shell_mode_from_endpoint(mode: EndpointMode) -> ShellMode {
 }
 
 #[cfg(all(test, unix))]
-#[path = "../tests/support/test_ports.rs"]
-mod test_ports;
-
-#[cfg(all(test, unix))]
 mod tests {
-    use super::test_ports::allocate_tcp_port;
     use super::*;
+    use crate::test_support::test_ports::allocate_tcp_port;
     use std::{net::TcpStream, sync::atomic::AtomicUsize, time::Instant};
 
     const TEST_HOST: &str = "127.0.0.1";

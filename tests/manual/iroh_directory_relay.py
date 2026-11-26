@@ -30,13 +30,15 @@ DAEMON_NS = os.environ["RAI426_DAEMON_NS"]
 
 PORT_PROBE = """
 import json, socket, sys
-ports = []
-for kind in (socket.SOCK_DGRAM, socket.SOCK_STREAM, socket.SOCK_STREAM, socket.SOCK_DGRAM):
-    sock = socket.socket(socket.AF_INET, kind)
-    sock.bind(("127.0.0.1", 0))
-    ports.append(sock.getsockname()[1])
-    sock.close()
-json.dump(ports, sys.stdout)
+from contextlib import ExitStack
+
+with ExitStack() as stack:
+    ports = []
+    for kind in (socket.SOCK_DGRAM, socket.SOCK_STREAM, socket.SOCK_STREAM, socket.SOCK_DGRAM):
+        sock = stack.enter_context(socket.socket(socket.AF_INET, kind))
+        sock.bind(("127.0.0.1", 0))
+        ports.append(sock.getsockname()[1])
+    json.dump(ports, sys.stdout)
 """
 
 

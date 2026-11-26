@@ -1,10 +1,13 @@
-//! 跨模块单测共享的进程级状态锁。
+//! 跨模块单测共享的进程级夹具。
 //!
 //! `cargo test` 默认 harness 在同一进程内多线程并行跑用例, 进程级状态
 //! (cwd / 环境变量 / 全局 subscriber) 因此被隐式共享。纪律与已踩坑案例见
 //! `docs/solutions/best-practices/parallel-test-global-state-single-lock.md`。
 
 use std::sync::{Mutex, MutexGuard};
+
+#[path = "../tests/support/test_ports.rs"]
+pub(crate) mod test_ports;
 
 /// 串行化"改进程级 cwd 的用例"与"子进程依赖 cwd 的用例"。
 ///

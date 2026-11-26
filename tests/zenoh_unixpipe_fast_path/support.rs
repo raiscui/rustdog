@@ -1,7 +1,6 @@
 use std::{
     fs,
     io::{Read, Write},
-    net::TcpListener,
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     sync::{Arc, Mutex},
@@ -11,13 +10,10 @@ use std::{
 
 use super::RDOG_NAMESPACE;
 
-pub(super) fn next_port() -> u16 {
-    TcpListener::bind(("127.0.0.1", 0))
-        .expect("ephemeral port probe should bind")
-        .local_addr()
-        .expect("ephemeral port probe should expose local addr")
-        .port()
-}
+#[path = "../support/test_ports.rs"]
+mod test_ports;
+
+pub(super) use test_ports::allocate_tcp_port;
 
 #[path = "../support/rdog_binary.rs"]
 mod rdog_binary;
@@ -53,7 +49,7 @@ fn write_temp_zenoh_router_config_for_namespace(
         "rdog-zenoh-unixpipe-{}-{}-{}.toml",
         std::process::id(),
         daemon_name,
-        next_port()
+        allocate_tcp_port()
     ));
 
     let listen_endpoints = listen_endpoints
@@ -182,7 +178,7 @@ fn create_state_home(prefix: &str) -> PathBuf {
     let path = std::env::temp_dir().join(format!(
         "rdog-{prefix}-state-{}-{}",
         std::process::id(),
-        next_port()
+        allocate_tcp_port()
     ));
     let _ = fs::remove_dir_all(&path);
     fs::create_dir_all(&path).expect("state home should be created");
