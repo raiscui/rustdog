@@ -45,11 +45,12 @@ fn next_free_port() -> u16 {
     port
 }
 
-/// 按优先级列出 `rdog` 可能所在的位置 (相对测试可执行文件的位置推导)。
+/// 按优先级列出 `rdog` 可能所在的位置。
 ///
-/// cargo 1.100 起本 crate 的产物落在 `target/{profile}/build/rustdog/<hash>/out/`
-/// (连 `target/{profile}/deps/` 都不再创建), 所以"测试二进制上两级 + `/rdog`"
-/// 只对旧布局成立, 不能作为唯一假设。这里把已知布局全部列成候选。
+/// 首选 cargo 为本包注入的 `CARGO_BIN_EXE_rdog`: 它指向本轮构建为这个集成测试
+/// 产出的 bin, 与布局和 hash 都无关。只有它不在时 (二进制被清理、测试可执行
+/// 文件被拷出 target 目录) 才回落到按布局探测 —— 探测会看到 `build/rustdog/`
+/// 下所有历史 hash 目录, 挑中旧构建的 daemon 等于悄悄换了一个被测对象。
 fn rdog_binary_candidates(current_exe: &Path) -> Vec<PathBuf> {
     let mut candidates: Vec<PathBuf> = Vec::new();
     let mut push = |path: PathBuf| {
@@ -57,6 +58,10 @@ fn rdog_binary_candidates(current_exe: &Path) -> Vec<PathBuf> {
             candidates.push(path);
         }
     };
+
+    if let Some(cargo_built) = option_env!("CARGO_BIN_EXE_rdog") {
+        push(PathBuf::from(cargo_built));
+    }
 
     // 布局无关的基准: 向上回溯到 `target` 目录, 再拼 `{profile}/rdog`。
     if let Some(profile_dir) = target_profile_dir(current_exe) {
@@ -93,7 +98,8 @@ fn target_profile_dir(current_exe: &Path) -> Option<PathBuf> {
     Some(target_dir.join(profile.as_os_str()))
 }
 
-/// `target/{profile}/build/<package>/<hash>/out/rdog` 的全部命中 (无命中时为空)。
+/// `target/{profile}/build/<package>/<hash>/out/rdog` 的全部命中 (无命中时为空),
+/// 新的在前。
 fn build_dir_rdog_candidates(profile_dir: &Path) -> Vec<PathBuf> {
     let mut candidates = Vec::new();
     let Ok(packages) = fs::read_dir(profile_dir.join("build")) else {
@@ -107,7 +113,10 @@ fn build_dir_rdog_candidates(profile_dir: &Path) -> Vec<PathBuf> {
             candidates.push(hash.path().join("out").join("rdog"));
         }
     }
-    candidates.sort();
+    // 新构建优先: 保留的旧 hash 目录里的 daemon 不是本轮的被测对象。
+    candidates.sort_by_key(|candidate| {
+        std::cmp::Reverse(candidate.metadata().and_then(|meta| meta.modified()).ok())
+    });
     candidates
 }
 
