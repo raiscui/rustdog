@@ -339,3 +339,30 @@ fn sweep_applies_a_persisted_emergency_marker() {
         }]
     );
 }
+
+#[test]
+fn an_attached_session_survives_the_lease_that_detached_it() {
+    let (_root, target, client, mut admission) = setup();
+    let peer = client.public();
+    let first = Uuid::new_v4().to_string();
+    let second = Uuid::new_v4().to_string();
+    admission
+        .admit(peer, &grant(&client, target.public(), &first, 0), 0)
+        .unwrap();
+    admission.record_session(&first, "reattached-session".into());
+    admission
+        .admit(peer, &grant(&client, target.public(), &second, 900), 900)
+        .unwrap();
+    admission.attach_session(&second, "reattached-session").unwrap();
+    assert_eq!(admission.session_of(&first), None, "the detached lease lets go");
+    assert_eq!(
+        admission.session_of(&second),
+        Some("reattached-session".into()),
+        "the attaching lease owns the session now"
+    );
+    assert_eq!(
+        admission.sweep(1_500, |_| true),
+        Vec::new(),
+        "the original deadline no longer reclaims a session that was reattached"
+    );
+}

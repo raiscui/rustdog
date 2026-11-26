@@ -806,6 +806,7 @@ pub(crate) fn run_daemon(path: &Path) -> Result<()> {
             "iroh daemon registered pty={}",
             if admission.is_some() { "admitted" } else { "ping-only" }
         );
+        let admitted = admission.is_some();
         let mut tasks = JoinSet::new();
         loop {
             tokio::select! {
@@ -823,7 +824,12 @@ pub(crate) fn run_daemon(path: &Path) -> Result<()> {
                             let route = route(&conn, routable);
                             let path = route.as_ref().map(|route| route.label()).unwrap_or("pending");
                             let live = expires.lock().ok().is_some_and(|at| *at > Instant::now());
-                            if !live || !allow.contains(&conn.remote_id()) {
+                            // The admitted lane answers to the policy file: a party the
+                            // operator admitted there may not be in the static ping
+                            // allowlist, and refusing it here would make `rdog policy
+                            // admit` useless until the next daemon restart.
+                            let permitted = admitted || allow.contains(&conn.remote_id());
+                            if !live || !permitted {
                                 log::info!("iroh admission deny path={path} handler_entries=0");
                                 conn.close(DENIED_CODE.into(), DENIED.as_bytes());
                                 return Ok(());
@@ -1286,6 +1292,11 @@ fn serve_lane(
         }
 
         if let Some(request) = crate::pty_control::parse_pty_attach_request(&line)? {
+            if let Err(rejection) = require_active(admission, peer, lease) {
+                let (code, reason) = rejection.code_reason();
+                refuse_frame(transport, None, code as i32, reason)?;
+                continue;
+            }
             match crate::pty_control::authorize_pty_subject(&request.session_id, &subject)? {
                 crate::pty_control::SubjectAccess::Allowed => {}
                 crate::pty_control::SubjectAccess::Foreign => {
@@ -1302,6 +1313,15 @@ fn serve_lane(
                 continue;
             };
             let attached = session.session_id().to_owned();
+            if let Err(rejection) = admission
+                .lock()
+                .map_err(|_| io::Error::other("admission lock poisoned"))?
+                .attach_session(lease, &attached)
+            {
+                let (code, reason) = rejection.code_reason();
+                refuse_frame(transport, None, code as i32, reason)?;
+                continue;
+            }
             log::info!("iroh pty reattached session={attached}");
             let mut lane = LaneIo {
                 transport,
@@ -1330,6 +1350,11 @@ fn serve_lane(
                 ControlPeerSession::new("iroh-admitted").dispatch_outcome(outcome, transport)?;
             }
             ControlCommand::PtyClose(close) => {
+                if let Err(rejection) = require_active(admission, peer, lease) {
+                    let (code, reason) = rejection.code_reason();
+                    refuse_frame(transport, request.request_id, code as i32, reason)?;
+                    continue;
+                }
                 match crate::pty_control::authorize_pty_subject(&close.session_id, &subject)? {
                     crate::pty_control::SubjectAccess::Allowed => {
                         let closed =
@@ -1355,6 +1380,11 @@ fn serve_lane(
                 }
             }
             ControlCommand::PtyDetach(detach) => {
+                if let Err(rejection) = require_active(admission, peer, lease) {
+                    let (code, reason) = rejection.code_reason();
+                    refuse_frame(transport, request.request_id, code as i32, reason)?;
+                    continue;
+                }
                 match crate::pty_control::authorize_pty_subject(&detach.session_id, &subject)? {
                     crate::pty_control::SubjectAccess::Allowed => {
                         match crate::pty_control::detach_active_pty_session(&detach.session_id) {
@@ -1859,6 +1889,11 @@ impl FrameGuard {
         Ok(())
     }
 
+    /// Void the stream from inside a write that still holds it.
+    fn mark_broken(&self) {
+        self.broken.store(true, Ordering::SeqCst);
+    }
+
     fn write<F>(&self, message: &str, write: F) -> io::Result<()>
     where
         F: FnOnce(&[u8]) -> io::Result<()>,
@@ -1871,7 +1906,7 @@ impl FrameGuard {
                 // A write that failed or ran out of time may have left part of this
                 // frame on the stream. Later frames would then be read misaligned,
                 // so this connection is done: abort it instead of writing more.
-                self.broken.store(true, Ordering::SeqCst);
+                self.mark_broken();
                 Err(err)
             }
         }
@@ -1906,10 +1941,20 @@ fn write_line(
             // A writer that failed while this one waited for the lock has already
             // truncated the stream, so ask again now that the lock is held.
             guard.ensure_intact()?;
-            timeout(guard.timeout, stream.write_all(frame))
-                .await
-                .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "iroh line write timed out"))?
-                .map_err(io::Error::other)
+            let outcome = match timeout(guard.timeout, stream.write_all(frame)).await {
+                Ok(Ok(())) => Ok(()),
+                Ok(Err(err)) => Err(io::Error::other(err)),
+                Err(_) => Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "iroh line write timed out",
+                )),
+            };
+            if outcome.is_err() {
+                // Publish the broken state before this lock is released: a writer
+                // that acquires it next must not append behind a half frame.
+                guard.mark_broken();
+            }
+            outcome
         })
     })
 }

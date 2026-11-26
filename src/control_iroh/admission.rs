@@ -162,7 +162,12 @@ pub(crate) fn save_policy_with(
     policy: &Policy,
     sync_parent: impl FnOnce(&Path) -> io::Result<()>,
 ) -> Result<(), PersistenceError> {
-    let parent = path.parent().expect("private policy has a parent");
+    // A bare relative name like `policy.json` has an empty parent, so syncing it
+    // would open "" and fail every save with a bogus durability error.
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
     let staging = parent.join(format!("policy-{}.tmp", uuid::Uuid::new_v4()));
     let replaced = (|| {
         let mut options = OpenOptions::new();
@@ -371,6 +376,23 @@ impl Admission {
             lease.state = LeaseState::Live;
             lease.pty = Some(pty);
         }
+    }
+
+    /// Hand a live PTY to the lease that just attached. Without this the lease
+    /// that detached keeps sole ownership, so the sweeper reclaims the session on
+    /// that lease's deadline even while the new client renews on time.
+    pub(crate) fn attach_session(&mut self, id: &str, pty: &str) -> AdmissionResult<()> {
+        let target = Uuid::parse_str(id).map_err(|_| Rejection::Denied)?;
+        if !self.leases.contains_key(&target) {
+            return Err(Rejection::Denied);
+        }
+        for (lease_id, lease) in self.leases.iter_mut() {
+            if *lease_id != target && lease.pty.as_deref() == Some(pty) {
+                lease.pty = None;
+            }
+        }
+        self.record_session(id, pty.to_owned());
+        Ok(())
     }
 
     /// The PTY session this lease already holds, if it holds one.

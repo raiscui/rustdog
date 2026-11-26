@@ -575,6 +575,25 @@ shell 46 passed、两个载体守卫 OK。
 `tests/manual/**`。
 - 提交: 230f9c3
 
+## 2026-11-26 RAI-413 #141 评审六条处置
+
+评审给 6 条(5 medium / 1 low), 逐条对照 diff 后全部成立并已修:
+- **重附会话仍按原租约到期**: 附上后没有把会话从 detach 掉的租约转移走, sweep 仍按旧租约截止杀死它。新增
+  `Admission::attach_session`(清旧租约 pty + 记到新租约), 附分支先转移再桥接; 单测
+  `an_attached_session_survives_the_lease_that_detached_it` + harness 在旧租约截止后再写一行验证仍通。
+- **输出积压饿死续租**: `bridge_attached_pty_session_inner` 无界排空输出队列, 读侧拿不到 `@lease-renew`。
+  改为每轮最多 64 帧后必定读一次(桥接本就用 25ms 轮询读超时, 代价可忽略)。
+- **过期连接仍持生命周期权**: attach/close/detach 只查主体不查本连接的租约。三个分支都加 `require_active`。
+- **策略准入无法让新客户端进来**: 连接层用静态 ping allowlist 拦, `rdog policy admit` 白写。有 policy 时
+  准入 lane 只按 policy 判, 无 policy(ping-only lane)仍用 allowlist。
+- **并发写可接在半帧之后**: `FrameGuard` 在释放 stream 锁之后才标 broken。改为在锁内 `mark_broken()`。
+- **相对 policy 路径必报持久性失败**: `Path::parent()` 对 `policy.json` 返回空串 → `File::open("")` 失败。
+  空父目录归一为 `.`。
+
+复跑: `--bin rdog` 1144 passed / 0 failed / 4 ignored; `control_iroh` 30 passed / 2 ignored; 回环 13/13(含新增
+的重附跨原截止用例); `control_pty` 5 passed / 3 failed 与基线逐项相同; `control_tty` 0/1 与基线相同。
+- 提交: 7f3f5c1
+
 ## [2026-11-26] tests/ TTY 夹具改按能力探测选择 script 调用形式 (RAI-410)
 
 - 4 处夹具写 `script -q /dev/null <rdog> control ...`(BSD/macOS 尾随命令形式), util-linux 2.39.3 只认

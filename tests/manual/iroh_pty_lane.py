@@ -512,7 +512,8 @@ with tempfile.TemporaryDirectory(prefix="iroh-pty-", dir=scratch) as dirname:
         case("a detached session can be attached again from another connection")
         loner, loner_master = pty_client(owner_key, "import sys\nprint('ready', flush=True)\n"
                                         "for line in sys.stdin:\n"
-                                        "    print('echo:' + line.strip(), flush=True)\n")
+                                        "    print('echo:' + line.strip(), flush=True)\n",
+                                        ttl=2000)
         assert "ready" in read_until(loner_master, "ready"), "attach target never became ready"
         attachable = re.findall(r"iroh pty opened session=(\S+)", daemon_log.read_text())[-1]
         closed = control(owner, "--pty-detach", attachable)
@@ -531,6 +532,12 @@ with tempfile.TemporaryDirectory(prefix="iroh-pty-", dir=scratch) as dirname:
         os.write(attacher_master, b"again\n")
         text = read_until(attacher_master, "echo:again")
         assert "echo:again" in text, repr(text)
+        print("attach: holding past the detached lease's deadline", flush=True)
+        time.sleep(3.0)
+        os.write(attacher_master, b"after-deadline\n")
+        text += read_until(attacher_master, "echo:after-deadline")
+        assert "echo:after-deadline" in text, (
+            f"the reattached session died with the lease that detached it: {text!r}")
         result = control(owner, "--pty-close", attachable)
         assert result.returncode == 0, result.stdout + result.stderr
         pty_wait(attacher)

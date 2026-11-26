@@ -538,8 +538,17 @@ fn bridge_attached_pty_session_inner(
     transport: &mut impl PtyBridgeIo,
     session: &mut crate::pty_control::AttachedPtySession,
 ) -> io::Result<()> {
+    // Drain a bounded batch, then always look at the wire. An unbounded drain lets a
+    // sustained output backlog starve the lease renewals that arrive on the read
+    // side, and the sweeper would then reclaim a session its client is renewing.
+    const OUTPUT_BATCH: usize = 64;
     loop {
-        while let Ok(frame) = session.try_recv_frame() {
+        let mut budget = OUTPUT_BATCH;
+        while budget > 0 {
+            let Ok(frame) = session.try_recv_frame() else {
+                break;
+            };
+            budget -= 1;
             if let Err(err) = transport.write_message(frame.to_wire_message().as_str()) {
                 session.disconnect();
                 return Err(err);
