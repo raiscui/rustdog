@@ -145,10 +145,14 @@ with tempfile.TemporaryDirectory(prefix="iroh-directory-", dir=scratch) as dirna
               f"{Path(profile).name} {target} '@ping'", flush=True)
         result = subprocess.run(command, cwd=home, env=env, capture_output=True, text=True,
                                 timeout=budget, stdin=subprocess.DEVNULL)
-        paths = sorted({token for token in (result.stdout + result.stderr).split()
-                        if token.startswith("iroh_path=")})
+        combined = result.stdout + result.stderr
+        paths = sorted({token for token in combined.split() if token.startswith("iroh_path=")})
+        hop = sorted({token for token in combined.split()
+                      if token.startswith("iroh_directory_path=")})
         print(f"receipt: {Path(profile).name} exit={result.returncode} "
-              f"paths={' '.join(paths) or 'none'}", flush=True)
+              f"paths={' '.join(paths) or 'none'} directory_hop={' '.join(hop) or 'none'}",
+              flush=True)
+        result.directory_hop = hop
         return result, paths
 
     try:
@@ -193,7 +197,10 @@ with tempfile.TemporaryDirectory(prefix="iroh-directory-", dir=scratch) as dirna
         assert answered.returncode == 0, f"the relay-carried lookup failed: {answered.stderr[-1500:]}"
         assert '"pong":true' in answered.stdout.replace(" ", ""), answered.stdout
         assert answered_paths, f"the client reported no path: {answered.stderr[-1500:]}"
-        print(f"case 2: answered over {' '.join(answered_paths)}", flush=True)
+        assert "iroh_directory_path=relay" in answered.directory_hop, \
+            f"the relay-carried lookup reported no directory path: {answered.stderr[-1500:]}"
+        print(f"case 2: answered over {' '.join(answered_paths)}, directory hop reported "
+              f"{' '.join(answered.directory_hop)}", flush=True)
 
         # Case 3: the same lookup with the data path forced onto the relay.
         case("a relay-only data path reports iroh_path=relay")
