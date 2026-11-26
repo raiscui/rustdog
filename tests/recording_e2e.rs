@@ -13,7 +13,7 @@ use std::{
     fs,
     io::{Read, Write},
     net::{TcpListener, TcpStream},
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     thread,
     time::{Duration, Instant},
@@ -45,20 +45,97 @@ fn next_free_port() -> u16 {
     port
 }
 
+/// 按优先级列出 `rdog` 可能所在的位置。
+///
+/// 首选 cargo 为本包注入的 `CARGO_BIN_EXE_rdog`: 它指向本轮构建为这个集成测试
+/// 产出的 bin, 与布局和 hash 都无关。只有它不在时 (二进制被清理、测试可执行
+/// 文件被拷出 target 目录) 才回落到按布局探测 —— 探测会看到 `build/rustdog/`
+/// 下所有历史 hash 目录, 挑中旧构建的 daemon 等于悄悄换了一个被测对象。
+fn rdog_binary_candidates(current_exe: &Path) -> Vec<PathBuf> {
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    let mut push = |path: PathBuf| {
+        if !candidates.contains(&path) {
+            candidates.push(path);
+        }
+    };
+
+    if let Some(cargo_built) = option_env!("CARGO_BIN_EXE_rdog") {
+        push(PathBuf::from(cargo_built));
+    }
+
+    // 布局无关的基准: 向上回溯到 `target` 目录, 再拼 `{profile}/rdog`。
+    if let Some(profile_dir) = target_profile_dir(current_exe) {
+        // 旧布局 (`target/{profile}/deps/<test>-<hash>`) 与 cargo 1.100 的
+        // bin uplift 都解析到这里。
+        push(profile_dir.join("rdog"));
+        push(profile_dir.join("deps").join("rdog"));
+        // build-dir 布局: bin 的 out 目录与测试可执行文件的 hash 目录是兄弟。
+        for candidate in build_dir_rdog_candidates(&profile_dir) {
+            push(candidate);
+        }
+    }
+
+    // 直接从测试可执行文件所在目录推导 (布局假设失效时的兜底)。
+    if let Some(exe_dir) = current_exe.parent() {
+        push(exe_dir.join("rdog"));
+        if let Some(ancestor) = exe_dir.parent() {
+            push(ancestor.join("rdog"));
+        }
+    }
+
+    candidates
+}
+
+/// `.../target/{profile}/...` 里的 `target/{profile}` 目录; 路径中没有 `target`
+/// 组成部分 (例如从别处拷出来的测试二进制) 时返回 `None`。
+fn target_profile_dir(current_exe: &Path) -> Option<PathBuf> {
+    let components: Vec<_> = current_exe.components().collect();
+    let target_index = components
+        .iter()
+        .rposition(|component| component.as_os_str() == "target")?;
+    let profile = components.get(target_index + 1)?;
+    let target_dir: PathBuf = components[..=target_index].iter().collect();
+    Some(target_dir.join(profile.as_os_str()))
+}
+
+/// `target/{profile}/build/<package>/<hash>/out/rdog` 的全部命中 (无命中时为空),
+/// 新的在前。
+fn build_dir_rdog_candidates(profile_dir: &Path) -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    let Ok(packages) = fs::read_dir(profile_dir.join("build")) else {
+        return candidates;
+    };
+    for package in packages.flatten() {
+        let Ok(hashes) = fs::read_dir(package.path()) else {
+            continue;
+        };
+        for hash in hashes.flatten() {
+            candidates.push(hash.path().join("out").join("rdog"));
+        }
+    }
+    // 新构建优先: 保留的旧 hash 目录里的 daemon 不是本轮的被测对象。
+    candidates.sort_by_key(|candidate| {
+        std::cmp::Reverse(candidate.metadata().and_then(|meta| meta.modified()).ok())
+    });
+    candidates
+}
+
 fn rdog_binary_path() -> PathBuf {
     let current_exe = std::env::current_exe().expect("current test binary path should exist");
-    let debug_dir = current_exe
-        .parent()
-        .expect("test binary should have parent directory")
-        .parent()
-        .expect("test binary should live under target/debug/deps");
-    let binary = debug_dir.join("rdog");
-    assert!(
-        binary.exists(),
-        "expected rdog binary at {}",
-        binary.display()
-    );
-    binary
+    let candidates = rdog_binary_candidates(&current_exe);
+    match candidates.iter().find(|path| path.is_file()) {
+        Some(binary) => binary.clone(),
+        None => {
+            let tried = candidates
+                .iter()
+                .map(|path| format!("\n  - {}", path.display()))
+                .collect::<String>();
+            panic!(
+                "expected the rdog binary beside the test executable ({}); tried:{tried}",
+                current_exe.display()
+            )
+        }
+    }
 }
 
 fn is_port_listening(port: u16) -> bool {
