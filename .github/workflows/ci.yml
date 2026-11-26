@@ -1,9 +1,5 @@
 name: CI
 
-# job 墙钟上限的**单一定义**: 既给下面每个 job 的 `timeout-minutes`, 也给 integration 预算
-# (`RDOG_JOB_TIMEOUT_MINUTES`)。改一处漏一处就是下一次「预算算出剩余 3299s 却被 cancel」。
-x-job-timeout-minutes: &job-timeout-minutes 60
-
 
 # Run the full rdog test suite on every push to main and every PR.
 # Matrix 覆盖 macOS (生产目标)、Ubuntu (最常见的 CI runner) 与 Windows
@@ -39,10 +35,14 @@ env:
   CARGO_NET_RETRY: 10
 
 jobs:
+  # `&job-timeout-minutes` 是 job 墙钟上限的**单一定义**: 下面每个 job 的 `timeout-minutes`
+  # 与 integration 预算 (`RDOG_JOB_TIMEOUT_MINUTES`) 都引用它。改一处漏一处 = 下一次
+  # 「预算算出剩余 3299s 却被 cancel」。(GitHub Actions 不接受自定义顶层键, 所以 anchor 挂在
+  # 第一个 job 上而不是文件头。)
   build-ubuntu:
     name: build (ubuntu-latest)
     runs-on: ubuntu-latest
-    timeout-minutes: *job-timeout-minutes
+    timeout-minutes: &job-timeout-minutes 60
 
     steps:
       - name: Record job start (integration budget baseline)
