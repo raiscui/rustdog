@@ -23,6 +23,29 @@ relay 侧另有一个 `advertise` 字段（缺省空），只改写给对端的 
 - **`bind` 可以整条不写。** [`bind_addr`](../src/control_iroh.rs) 在 `routable` 下把"省略"和 `0.0.0.0:0` 都解析成通配绑定 `0.0.0.0:0`（[`bindable`](../src/control_iroh.rs) 让绑定面接受未指定地址），daemon 与 client 都适用：换网（家宽 → 手机热点）、换 IP 都不用改配置。只有这两种写法被放宽——通配地址 + 固定端口仍按 `iroh routable profile requires an explicit address` 拒，不静默丢掉端口；loopback profile 仍要回环 socket。**被通告/被拨的地址永远具体**：daemon 注册时用 [`register`](../src/control_iroh.rs) 枚举端点实际拥有的接口地址（通配绑定下是逐接口展开，不会出现 `0.0.0.0` 字面值），client 侧 [`connect_route`](../src/control_iroh.rs) 把**所有**候选 IP 一起拨，不再只用第一个。若主动钉了具体地址，它仍须跟本机当前地址走：旧地址不在网卡上时新建连接 `EADDRNOTAVAIL`，CLI 表面是 `Failed to bind sockets`（实测 `192.168.50.143` 切 `172.20.10.2` 沿用旧值即报该错），这时先重填 `bind`。
 - **relay 主机的运行库**：本地 glibc 2.39 构建在 glibc 2.38 的宿主上 `GLIBC_2.39 not found`，用 `rust:1-slim-bookworm` 容器构建可解。用 `LD_LIBRARY_PATH` 外带依赖库时只能带 GUI 那几个（`libgbm`/`wayland`/`xcb`/`drm`/`expat`/`Xau`/`Xdmcp`/`bsd`/`md`/`ffi`/`stdc++`），把 `ld-linux`/`libc`/`libm`/`libpthread`/`libgcc_s` 混进去会让进程直接 `Floating point exception (core dumped)`。
 
+### 目录的 relay 承载（`directory.via_relay`）
+
+数据路径可以走 relay，目录原本不行：目录端点只能按 `id + SocketAddr` 拨，两端都没有入站地址时连"去哪儿查这个 daemon"都发不出去。拨号目标由 [`Directory::dial`](../src/control_iroh.rs) 决定，`directory` 写 `via_relay: true` 配 `relay: {url, root_cert?}` 时改走 relay：
+
+- **拨号目标只有 `TransportAddr::Relay(url)`**，不带任何 IP 候选——地址在配置里本来就不存在，不是查出来的。这一跳的预算用 `RELAY_CONNECT` 而不是 `CONNECT`，因为 relay home 要先建起来；同时**关掉 QAD**（`RelayConfig::new(url, None)`），目录请求因此不会漂到直连路径。
+- **目录侧**（rendezvous profile 的 `directory_relay: {url, root_cert?}`）把自己的目录端点挂到该 relay 上（同一个 key，id 不变），并把自身 id 加进自建 relay 的准入表，否则它自己会被自己的 ACL 拒掉；ready 行随之多出 `directory_relay=<url>`。
+- **daemon 侧不能有第二个端点**：一条对端身份在一个 relay 上只有一条连接，目录端点与服务端点同时挂同一个 relay 会互相顶掉（实测原文 `Relay server reports problem: Another endpoint connected with the same endpoint id`，随后注册超时、daemon 非零退出）。所以打开开关时 daemon 复用服务端点本身（ALPN 同时带 `CONTROL` 与 `DIRECTORY`，relay map 是 lane relay ∪ directory relay）；关掉开关时仍是"目录端点无 relay + 服务端点挂 lane relay"两个端点。
+- **宽化只挂在显式的信任锚上**：一个 endpoint 只有一份 TLS 配置，根集合由 [`relay_roots`](../src/control_iroh.rs) 一处决定：
+  - 只拨目录的端点（rendezvous 的目录端点、client 的查找端点）用 `custom_roots(directory.relay.root_cert)`，**不引入公共根**；
+  - daemon 的共享端点（lane + 目录同一个 endpoint）用 `custom_roots(lane 链).with_extra_roots(directory 链)`，也就是两份**显式链**，**不**打底任何公共根：私有目录 relay 的场景根本不需要 WebPKI，无条件 `embedded()` 会让整条私有链路信任全量公共 CA。公共目录 relay 需要操作者把那份根包作为 `root_cert` 交进来。
+
+  `root_cert` 因此是**必填字段**：打开 `via_relay` 却不给信任锚时 profile 直接解析失败，不存在"开关一开顺带放宽 TLS"的路径 —— 功能维度（开不开目录的 relay 承载）与安全维度（信任面）不共用一个布尔量；用公共 relay 就必须显式给出那份 CA 链，这是"操作者知道自己信什么"的价格。关掉开关时仍是 `custom_roots(lane 链)`。
+- **地址策略不放宽**：目录 relay 的 URL 必须 https，非 `routable` profile 还必须是回环主机。三种半配置一律 fail closed：有 `relay` 没 `via_relay`、有 `via_relay` 没 `relay`、两者都没有又不给 `addr`。
+
+实测（`tests/manual/iroh_directory_relay.sh` → `iroh_directory_relay.py`，三网络栈，目录端点绑在中转机回环上、任何对端都拨不到它；回执 `handoffs/rai426/receipts/directory-relay.log`）：
+
+| 用例 | 结果 |
+|---|---|
+| 不带开关、`directory.addr` 填一个没人听的地址（今天的行为） | daemon exit=1 且从未注册，client exit=1 |
+| 打开开关，`path:"auto"` | `@ping` 应答，`iroh_path=direct` |
+| 打开开关，`path:"relay"` | 应答，`iroh_path=relay` |
+| 打开开关，`path:"auto"` + 黑洞掉 daemon 地址 | 先 `iroh_path=direct unavailable`，再 `iroh_path=relay` 应答 |
+
 注册契约的形状（[`Registry::request`](../src/control_iroh.rs) 的 `Register` 分支）：
 - **至少 1 个 IP 候选 + 恰好 1 个 relay，且该 relay 等于配置值**；每个 IP 候选单独过 [`candidate_ok`](../src/control_iroh.rs)（`network` + 端口非 0）且端口非 0。通配绑定朝多网卡展开，所以候选数不设上限——这是"多候选"的唯一合法来源。
 - **`routable` 下回环地址不是候选**：对端拨 `127.0.0.1` 只会打到它自己，既浪费一次拨号又会让日志出现误导性的前半段失败。daemon 通告前用同一个 `candidate_ok` 过滤，registry 收到回环候选同样拒（与未指定地址同类，仍是 `iroh_registration_denied`）；非 `routable`（回环 profile）不变。
@@ -36,7 +59,7 @@ relay 侧另有一个 `advertise` 字段（缺省空），只改写给对端的 
 
 写帧失败即作废该流：[`FrameGuard`](../src/control_iroh.rs) 在帧被完整写入之前不放行下一帧，任何一次写失败或写超时都把这条流标记成不可用，之后的所有写直接返回 [`FRAME_BROKEN`](../src/control_iroh.rs)，lane 随之结束并用同一 reason 关闭会话（[`abort_broken_frame`](../src/control_iroh.rs)）。理由是残留半帧会让后续帧错位解析，宁可断开也不继续发。
 
-单帧写预算由 profile 的 `frame_timeout_ms` 给出，覆盖 lane 上的帧写（目录那一跳仍用固定 3s），两侧都校验：低于 [`MIN_FRAME_TIMEOUT`](../src/control_iroh.rs) 或高于 [`MAX_FRAME_TIMEOUT`](../src/control_iroh.rs) 直接按字段名报错，缺省 3s。
+单帧写预算由 profile 的 `frame_timeout_ms` 给出，覆盖 lane 上的帧写（目录那一跳用固定预算：走 IP 时 `CONNECT`，走 relay 时 `RELAY_CONNECT`），两侧都校验：低于 [`MIN_FRAME_TIMEOUT`](../src/control_iroh.rs) 或高于 [`MAX_FRAME_TIMEOUT`](../src/control_iroh.rs) 直接按字段名报错，缺省 3s。
 
 实测边界（三主机拓扑，`tests/manual/iroh_pty_routable.sh`，`RAI305_STALL` / `RAI305_BURST` / `RAI305_FRAME_MS` 驱动）：
 

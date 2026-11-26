@@ -567,6 +567,17 @@ Useful specs:
 - [`specs/zenoh-sdk-integration-playbook.md`](./specs/zenoh-sdk-integration-playbook.md): direct Zenoh SDK integration guide
 - [`specs/zenoh-sdk-agent-prompts.md`](./specs/zenoh-sdk-agent-prompts.md): prompt templates for programming agents
 
+## Iroh cross-network profile
+
+The iroh lane's formal entry (`rdog control --transport iroh NAMESPACE/NAME`) is configured by a JSON profile; four fields decide where it can go:
+
+- `routable`: opt in to non-loopback addresses (default `false` keeps the IPv4 loopback gate). Under it an omitted `bind` — or `0.0.0.0:0` — becomes the wildcard socket, so changing networks needs no new profile.
+- `bind`: the local socket. Omit it under `routable` to follow whatever address the machine currently has; a wildcard with a fixed port is refused rather than silently dropping the port.
+- `relay`: `{url, qad_port, root_cert}` — the relay that carries data. `root_cert` is the CA chain you pin; nothing falls back to public CAs.
+- `directory.via_relay`: `true` plus `directory.relay: {url, root_cert}` looks the daemon up through a relay instead of dialling the directory's address, which is what makes a lookup work when both ends sit behind NAT. `root_cert` is required here too: a public relay needs that root bundle handed in explicitly, otherwise the profile does not parse. With the switch off, `directory.addr` is dialled exactly as before.
+
+Rules and the reasoning behind them live in [`specs/rdog-iroh-admission-contract.md`](./specs/rdog-iroh-admission-contract.md); this section is only the entry point.
+
 ## Security notes
 
 Rustdog can expose remote shell execution, GUI input simulation, file output, screenshots, and persistent PTY sessions.

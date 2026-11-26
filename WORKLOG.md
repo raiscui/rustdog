@@ -1,5 +1,32 @@
 # WORKLOG: rustdog
 
+## [2026-11-26] iroh 目录的 relay 承载 `directory.via_relay` (RAI-426)
+
+- 目录端点原本只能按 `id + SocketAddr` 拨,两端都在 NAT 后时连「去哪儿查这个 daemon」都发不出去。
+  `directory` 新增 `via_relay: bool` 与 `relay: {url, root_cert?}`(给了 `via_relay` 就不再有 `addr`),
+  拨号目标变成唯一的 `TransportAddr::Relay(url)`,预算从 `CONNECT` 换成 `RELAY_CONNECT`,并**关掉这一跳的 QAD**
+  (`RelayConfig::new(url, None)`),目录请求因此不会漂到直连路径。
+- **一条对端身份在一个 relay 上只有一条连接**:目录端点与服务端点同时挂同一个 relay 会互相顶掉
+  (`Relay server reports problem: Another endpoint connected with the same endpoint id`),随后注册超时、daemon 非零退出。
+  所以打开开关时 daemon 复用服务端点本身(ALPN 同时带 `CONTROL`/`DIRECTORY`,relay map = lane ∪ directory);
+  关掉开关时仍是「目录端点无 relay + 服务端点挂 lane relay」两个端点,与今天逐项一致。
+- 一个 endpoint 只有一份 TLS 配置,根集合由 `relay_roots` 一处决定:目录专用端点 `custom_roots(root_cert)`;
+  daemon 的共享端点 `embedded().with_extra_roots(lane 链 + directory 链)`。`directory.relay.root_cert` 因此是**必填**,
+  打开开关不给信任锚 profile 直接解析失败 —— 宽化只挂在显式信任锚上,不挂在功能开关上(Captain 2026-11-26 裁定)。
+  已在 `specs/rdog-iroh-admission-contract.md` 记账。
+- rendezvous 侧新增 `directory_relay`,把目录端点挂到该 relay 并把自身 id 加进自建 relay 的 ACL(否则它会被自己拒掉);
+  ready 行相应多出 `directory_relay=<url>`。三种半配置(有 `relay` 没 `via_relay`、有 `via_relay` 没 `relay`、都没有又不给
+  `addr`)一律 fail closed;URL 仍须 https,非 `routable` 仍须回环主机。
+- 回执:`cargo test --bin rdog -- control_iroh` 34 passed / 0 failed / 2 ignored(新增 3 条:relay 拨号零 IP 候选、
+  三种半配置 fail closed、目录 relay 的 https/回环门禁不放宽);`iroh_pty_lane.py` 回环 **13/13**(关掉开关的端到端回归);
+  新增 `tests/manual/iroh_directory_relay.sh` 四例(目录端点绑在中转机回环、任何对端都拨不到它):不带开关 daemon/client
+  都非零退出且从未注册、`path:"auto"` 应答 `iroh_path=direct`、`path:"relay"` 应答 `iroh_path=relay`、黑洞掉 daemon 地址后
+  先 `iroh_path=direct unavailable` 再 `iroh_path=relay` 应答。回执 `handoffs/rai426/receipts/directory-relay.log`。
+- Windows 编译期:`cargo check --no-default-features --target x86_64-pc-windows-gnu --bin rdog` exit=0。
+- 未验:真实公网 relay 的公共 CA 链、真实双 NAT、bulk;分别归 RAI-302 / RAI-366 / RAI-367。
+- 提交: d883b4f(实现)、534ac3e(信任锚裁定:宽化只挂在显式 `root_cert` 上,该字段因此改为必填)、9136455(公共 relay 需显式 CA 链,写进规格)
+- 评审 F1/F2 修复 (c21591e):F1 根集合改为「lane 链 + 目录链」两份**显式链**,不再打底 `embedded()` —— 全私有链路因此不含任何公共 CA(`RelayRoots::config` 只剩 `custom_roots` + `with_extra_roots`);F2 目录跳改用自己的 `DIRECTORY_CONNECT`(8s)并加关系型断言 `DIRECTORY_CONNECT < LEASE - RENEW`(原借用 `RELAY_CONNECT` 20s > 租约 15s,一次抖动就能让租约过期、把所有对端拒掉十几秒),租约期限改为注册被接受后才起算,续期失败从 `if let Ok` 静默吞掉改成 `iroh directory renewal failed: <err>`。README 新增「Iroh cross-network profile」小节收 `routable` / `bind` / `relay` / `directory.via_relay` 四字段,规范仍指回 spec。
+
 ## [2026-11-26] tests/ 下 17 处 rdog 二进制路径反推收成一处 (RAI-405)
 
 - `tests/` 下 17 个集成测试各自复制「测试可执行文件上两级 + `/rdog`」; cargo 1.100 把测试可执行文件放到
