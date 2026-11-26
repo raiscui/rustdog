@@ -1,5 +1,13 @@
 # WORKLOG: rustdog
 
+## [2026-11-26] rendezvous 注册契约可声明 registry_relay (RAI-462)
+
+- 真机拓扑暴露:`Registry` 期望的 relay 恒等于 `format!("https://{advertised}")`(rendezvous 自己 hosted 的那个),而 `advertised` 是 IP 类型、写不出公共 relay 的域名。于是「自建 rendezvous + 公共 relay 承载数据」这个合法配置被 `iroh_registration_denied` 拒 —— RAI-426 证明的是目录这一跳能经 relay 承载,但注册仍把 daemon 的数据 relay 钉在 rendezvous 自建 relay 上。
+- `RendezvousConfig` 新增 `registry_relay: Option<RelayUrl>`(缺省 = 今天行为);配了就用它作为「注册必须带的那 1 个 relay」。**只改期望值,校验不放松**:带别的 relay 仍 `iroh_registration_denied`,用例 `a_registry_declared_on_another_relay_still_pins_the_one_registration_carries` 正反两面都断言。
+- 同 PR 顺带清掉 RAI-450 最后一条:`EXPERIENCE.md` 里 `embedded().with_extra_roots(...)` 的失效示例改成 `custom_roots(链A).with_extra_roots(链B)`,并写明整条 lane 不用任何内嵌公共根。
+- 回执:`control_iroh` 38 passed / 0 failed / 2 ignored;`check-carrier-assertions` OK。
+- 提交: a515523
+
 ## [2026-11-26] RAI-450 合后三条残项 (F4 原因码 / F2 零余量 / F1 注释)
 
 - **F4**:`DIRECTORY_ALPN` 被拒不再复用 `iroh_target_denied` —— 新增 `iroh_directory_alpn_unserved`(code 44),对端拿到的码说的就是真实原因。
