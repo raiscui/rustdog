@@ -1236,3 +1236,12 @@ CLI 重跑得到 `resume=honored`。教训: 之前 CLI 挂住不是 CLI 的 bug,
 不算通过 (空真), unknown 一律 fail-closed。iroh lane 的 bulk 拒绝从通用 "只许 ping" 换成能力事实
 码 iroh_bulk_path_pin_unavailable。relay_bytes_zero 与正对照各自成函数, 正对照用严格不等式。
 未验: 正对照还没跑 (需要真的 relay 拓扑)。
+
+### RAI-367 评审第二轮 (F1-F6)
+
+- 提交: da11b6d
+
+三条必修都指向同一个反面: **"没采到"与"测到零"必须在类型层分开**。计数改成 Option; 判定式加
+"本次确有字节移动" (否则一次'续传已完成'的零字节尝试就成了正面证据); path_aware 下 not_applicable
+按 unknown 拒。另修快照只写两条失败路径、上传在确认前记账、门禁只判一次 (established_direct
+没有生产者) 三处。
