@@ -1292,6 +1292,19 @@ zenoh_router_client 38/2 ignored)。
 rebase 会重写分支上每个 commit 的 sha, 本票在合并前又被 rebase 了两次, 所以这里补一张对照表;
 按 `docs/agents/ci-merge-gate.md` §2 的口径, 这类 sha 漂移属于流程设计问题, 由 RAI-433 统一治 (合入后纯账本提交补记),
 不为它单独推提交刷 sha。
+### 2026-11-26 RAI-411 第九个真缺陷 (windows 脚本) + 第十个发现 (macos 接力红)
+
+- 提交: (本条随修复提交记入下一次账本)
+
+① windows `test` job 又崩在脚本里: 修好解码后**输出**这一端同样按 cp1252 编码, summary 表格与
+失败详情里的中文抛 `UnicodeEncodeError`。`main()` 开头把 stdout/stderr 都 `reconfigure(
+encoding="utf-8", errors="replace")` —— 解码与编码两端都固定 utf-8 才算修完。
+② macos `zenoh_unixpipe_fast_path` 是**逐个接力**红: 我修掉 `~/.rdog/run` 不存在那两条之后,
+`duplicate_daemon_start_should_not_break_running_local_default_unixpipe` 露出来 —— 重复 daemon
+启动后原 daemon 拒绝新 client 的专用 FIFO (`Received a close message (reason GENERIC) in response
+to an OpenSyn`)。这条开发机绿、runner 红, 属 runner 与真机的环境差, 盲改不了。处置: 分类从
+`macos`(执行) 降为 `compile-only:macos` (只证明能编译, 不计入 ran), 真机 lane 命令写进 §3b,
+根因与两个区分实验写进 issue #164。覆盖数随之变成 ubuntu 10 / macos 11 / windows 1。
 ### 2026-11-26 RAI-411 覆盖数进载体 + 票面改成可 actionable
 
 - 提交: 4ea8c37

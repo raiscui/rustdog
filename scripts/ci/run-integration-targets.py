@@ -53,7 +53,7 @@ CLASSIFICATION: dict[str, str] = {
     "zenoh_router_client": "unix",
     "computer_use_density": "all",
     "control_websocket": "all",
-    "zenoh_unixpipe_fast_path": "macos",
+    "zenoh_unixpipe_fast_path": "compile-only:macos",
     "zenoh_router_client_windows": "windows",
     "control_ax_e2e": "compile-only:macos",
     "control_display_aware_e2e": "compile-only:macos",
@@ -210,6 +210,12 @@ def run(argv: list[str], timeout: int | None = None) -> tuple[int, str]:
 
 
 def main() -> int:
+    # windows runner 的控制台是 cp1252: 表格与失败详情里有中文, 直接 print 会抛
+    # UnicodeEncodeError 让整步崩掉 (归因看起来像 target 红)。解码与编码两端都固定 utf-8。
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
+
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--os", required=True, choices=sorted(ALL_OS))
     parser.add_argument("--repo-root", default=".")
