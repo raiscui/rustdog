@@ -478,3 +478,18 @@ U3 行为基线: 同一矩阵里 `direct` 在直连被阻断时失败、`auto` �
 - iroh 单测 23/23, shell 单测 46/46
 - 载体守卫 `check-carrier-assertions.py` OK
 - 提交: b57d780
+
+## 2026-11-26 RAI-305 真机换网恢复后的两条运维事实
+
+RUST-3 真机第二轮(家宽 -> 手机热点)补的两条, 写进规格与交付文档, 避免被当 bug 查:
+
+- 客户端 `bind` 必须跟本机当前地址走: `bind_addr` 把它直接交给 `network` 绑, 换网后已在跑的会话
+  不受影响(走已建连接), 但新建连接用旧地址会 `EADDRNOTAVAIL`, CLI 表面是 `Failed to bind sockets`。
+  实测 192.168.50.143 -> 172.20.10.2 沿用旧值报该错, 改新值立刻 `iroh_path=relay` + `pong:true`。
+- relay 主机运行库: glibc 2.39 构建在 glibc 2.38 宿主上 `GLIBC_2.39 not found`(容器 `rust:1-slim-bookworm`
+  构建可解); `LD_LIBRARY_PATH` 只能带 GUI 那几个库, 混进 `ld-linux`/`libc`/`libm`/`libpthread`/`libgcc_s`
+  会直接 `Floating point exception (core dumped)`。
+
+同步到交付文档: `real3/README.md` 的客户端参数节与 relay 部署节、`profiles/README.md`(模板旁注意事项)。
+守卫 `check-carrier-assertions.py` OK。
+- 提交: 72b4220
