@@ -60,6 +60,8 @@ mod readonly_tests {
 }
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
+/// The CA roots and relay mode an endpoint dials its relay with.
+type RelayTransport = (CaTlsConfig, RelayMode);
 const DIRECTORY_ALPN: &[u8] = b"rdog/iroh-directory/1";
 const CONTROL_ALPN: &[u8] = b"rdog/iroh-readonly/1";
 const IO: Duration = Duration::from_secs(3);
@@ -67,6 +69,11 @@ const CONNECT: Duration = Duration::from_secs(7);
 // A relay candidate brings its home connection up first, so it needs a budget
 // that covers that hop as well as the connection made through it.
 const RELAY_CONNECT: Duration = Duration::from_secs(20);
+// The directory hop sits on the lease's critical path: a daemon registers and
+// then renews every `RENEW`, so a directory call that ran longer than
+// `LEASE - RENEW` would let the lease expire while it was still in flight and
+// deny every peer in the meantime. It is deliberately shorter than `RELAY_CONNECT`.
+const DIRECTORY_CONNECT: Duration = Duration::from_secs(8);
 const LEASE: Duration = Duration::from_secs(15);
 const RENEW: Duration = Duration::from_secs(5);
 const MAX_DIRECTORY: usize = 2048;
@@ -93,13 +100,76 @@ struct RendezvousConfig {
     /// (a 1:1 NAT EIP cannot be bound locally at all).
     #[serde(default)]
     advertise: Option<std::net::IpAddr>,
+    /// Publish the directory endpoint on this relay, so a peer that cannot reach
+    /// `bind` still has an address to dial it through.
+    #[serde(default)]
+    directory_relay: Option<DirectoryRelay>,
 }
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Directory {
     id: EndpointId,
-    addr: SocketAddr,
+    #[serde(default)]
+    addr: Option<SocketAddr>,
+    /// Reach the directory through `relay` instead of dialling `addr`. A host
+    /// behind NAT has no inbound address to publish, so the relay is the only
+    /// address a peer can hand out for it.
+    #[serde(default)]
+    via_relay: bool,
+    #[serde(default)]
+    relay: Option<DirectoryRelay>,
+}
+
+/// The relay that carries directory traffic. `root_cert` names the CA chain of a
+/// private relay; a public relay leaves it out, because the embedded WebPKI roots
+/// already verify it.
+#[derive(Deserialize, Clone)]
+#[serde(deny_unknown_fields)]
+struct DirectoryRelay {
+    url: RelayUrl,
+    /// The CA chain that verifies this relay. It is required, not optional: naming
+    /// the anchor is what lets a shared endpoint accept public WebPKI roots
+    /// alongside the lane's pinned chain, so trust is never widened by merely
+    /// flipping `via_relay` on.
+    root_cert: PathBuf,
+}
+
+/// Where a directory is dialled, and the relay that carries the dial when the
+/// directory has no address of its own.
+#[derive(Clone)]
+struct DirectoryDial {
+    addr: EndpointAddr,
+    relay: Option<DirectoryRelay>,
+}
+
+impl Directory {
+    fn dial(&self, routable: bool) -> Result<DirectoryDial> {
+        match (self.via_relay, &self.relay, self.addr) {
+            (true, Some(relay), _) => Ok(DirectoryDial {
+                addr: EndpointAddr::from_parts(
+                    self.id,
+                    [TransportAddr::Relay(relay.url.clone())],
+                ),
+                relay: Some(DirectoryRelay {
+                    url: relay.url.clone(),
+                    root_cert: relay.root_cert.clone(),
+                }),
+            }),
+            (true, None, _) => Err("iroh directory `via_relay` requires a `relay`".into()),
+            (false, Some(_), _) => Err("iroh directory `relay` is only read with `via_relay`".into()),
+            (false, None, Some(addr)) => Ok(DirectoryDial {
+                addr: EndpointAddr::from_parts(
+                    self.id,
+                    [TransportAddr::Ip(network(addr, routable)?)],
+                ),
+                relay: None,
+            }),
+            (false, None, None) => {
+                Err("iroh directory profile requires `addr`, or `via_relay` with `relay`".into())
+            }
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -339,9 +409,128 @@ async fn endpoint_with_network(
     relay: Option<&Relay>,
     routable: bool,
 ) -> Result<Endpoint> {
+    let transport = match relay {
+        Some(relay) => Some(lane_relay(relay, routable)?),
+        None => None,
+    };
+    endpoint_on(key, bind, &[alpn], transport, routable).await
+}
+
+/// The lane's own relay, which this process hosts or dials as a full relay: it
+/// carries data, so it keeps QUIC address discovery on.
+fn lane_relay(relay: &Relay, routable: bool) -> Result<RelayTransport> {
+    relay_allowed(&relay.url, relay.qad_port, routable)?;
+    Ok((
+        CaTlsConfig::custom_roots(certificates(&relay.root_cert)?),
+        RelayMode::Custom(RelayMap::from_iter([RelayConfig::new(
+            relay.url.clone(),
+            Some(RelayQuicConfig::new(relay.qad_port)),
+        )])),
+    ))
+}
+
+fn directory_url_ok(url: &RelayUrl, routable: bool) -> Result<()> {
+    if url.scheme() != "https" || url.host_str().is_none() {
+        return Err("iroh directory relay requires an explicit HTTPS relay".into());
+    }
+    if !routable && url.host_str() != Some("127.0.0.1") {
+        return Err("P1 iroh requires an explicit HTTPS loopback relay".into());
+    }
+    Ok(())
+}
+
+/// A directory relay is only dialled, so it needs no QAD hop: turning discovery
+/// off keeps the directory request on the relay instead of letting it drift onto
+/// a direct path, which is the path a NAT'd directory does not have.
+fn directory_relay(relay: &DirectoryRelay, routable: bool) -> Result<RelayTransport> {
+    directory_url_ok(&relay.url, routable)?;
+    Ok((
+        relay_roots(None, relay).config()?,
+        RelayMode::Custom(RelayMap::from_iter([RelayConfig::new(
+            relay.url.clone(),
+            None,
+        )])),
+    ))
+}
+
+/// Which roots verify one endpoint's relays. A directory relay is trusted only
+/// once the operator names its CA chain, and that named anchor is what allows an
+/// endpoint shared with the lane to keep accepting public WebPKI roots beside the
+/// lane's pinned chain — a public hop cannot be verified by a private anchor.
+/// Widening therefore hangs on the explicit `directory.relay.root_cert`, never on
+/// `via_relay` alone.
+#[derive(Debug, PartialEq, Eq)]
+enum RelayRoots {
+    /// Only this chain, for a directory endpoint that dials one relay and nothing
+    /// else.
+    Pinned(PathBuf),
+    /// The lane's pinned chain plus the directory relay's named chain. Still
+    /// pinned: no endpoint ever falls back to public WebPKI, so a public
+    /// directory relay needs the operator to hand in that root bundle as
+    /// `root_cert` instead of trusting every public CA.
+    LaneAndDirectory(PathBuf, PathBuf),
+}
+
+/// The one place that decides what an endpoint trusts: a directory-only endpoint
+/// pins the chain the profile named, while an endpoint that also carries the lane
+/// adds that same chain on top of the lane's pinned chain and the embedded WebPKI
+/// roots.
+fn relay_roots(lane: Option<&Relay>, directory: &DirectoryRelay) -> RelayRoots {
+    match lane {
+        Some(lane) => RelayRoots::LaneAndDirectory(
+            lane.root_cert.clone(),
+            directory.root_cert.clone(),
+        ),
+        None => RelayRoots::Pinned(directory.root_cert.clone()),
+    }
+}
+
+impl RelayRoots {
+    fn config(&self) -> io::Result<CaTlsConfig> {
+        Ok(match self {
+            Self::Pinned(chain) => CaTlsConfig::custom_roots(certificates(chain)?),
+            Self::LaneAndDirectory(lane, directory) => {
+                CaTlsConfig::custom_roots(certificates(lane)?)
+                    .with_extra_roots(certificates(directory)?)
+            }
+        })
+    }
+}
+
+/// A directory and the lane live on one endpoint once the directory is relay
+/// carried: a peer identity holds one connection per relay, so a second endpoint
+/// of the same peer on the same relay would evict the first one every few
+/// seconds. That endpoint keeps both relays in one map and one root set.
+fn shared_relay(
+    lane: &Relay,
+    directory: &DirectoryRelay,
+    routable: bool,
+) -> Result<RelayTransport> {
+    relay_allowed(&lane.url, lane.qad_port, routable)?;
+    directory_url_ok(&directory.url, routable)?;
+    let mut map = RelayMap::from_iter([RelayConfig::new(
+        lane.url.clone(),
+        Some(RelayQuicConfig::new(lane.qad_port)),
+    )]);
+    if directory.url != lane.url {
+        map.insert(
+            directory.url.clone(),
+            Arc::new(RelayConfig::new(directory.url.clone(), None)),
+        );
+    }
+    Ok((relay_roots(Some(lane), directory).config()?, RelayMode::Custom(map)))
+}
+
+async fn endpoint_on(
+    key: SecretKey,
+    bind: Option<SocketAddr>,
+    alpns: &[&[u8]],
+    transport: Option<RelayTransport>,
+    routable: bool,
+) -> Result<Endpoint> {
     let mut builder = Endpoint::builder(presets::Minimal)
         .secret_key(key)
-        .alpns(vec![alpn.to_vec()])
+        .alpns(alpns.iter().map(|alpn| alpn.to_vec()).collect())
         .clear_ip_transports()
         .clear_address_lookup()
         .portmapper_config(PortmapperConfig::Disabled)
@@ -349,16 +538,23 @@ async fn endpoint_with_network(
     if let Some(bind) = bind {
         builder = builder.bind_addr(bindable(bind, routable)?)?;
     }
-    if let Some(r) = relay {
-        relay_allowed(&r.url, r.qad_port, routable)?;
-        builder = builder
-            .ca_tls_config(CaTlsConfig::custom_roots(certificates(&r.root_cert)?))
-            .relay_mode(RelayMode::Custom(RelayMap::from_iter([RelayConfig::new(
-                r.url.clone(),
-                Some(RelayQuicConfig::new(r.qad_port)),
-            )])));
+    if let Some((roots, mode)) = transport {
+        builder = builder.ca_tls_config(roots).relay_mode(mode);
     }
     Ok(builder.bind().await?)
+}
+
+async fn directory_endpoint(
+    key: SecretKey,
+    bind: Option<SocketAddr>,
+    relay: Option<&DirectoryRelay>,
+    routable: bool,
+) -> Result<Endpoint> {
+    let transport = match relay {
+        Some(relay) => Some(directory_relay(relay, routable)?),
+        None => None,
+    };
+    endpoint_on(key, bind, &[DIRECTORY_ALPN], transport, routable).await
 }
 
 async fn frame_get<T: DeserializeOwned>(read: &mut RecvStream) -> Result<T> {
@@ -378,15 +574,14 @@ async fn frame_put<T: Serialize>(write: &mut SendStream, value: &T) -> Result<()
 
 async fn directory_call(
     ep: &Endpoint,
-    directory: &Directory,
+    dial: &DirectoryDial,
     request: DirectoryRequest,
-    routable: bool,
 ) -> Result<DirectoryReply> {
-    let addr = EndpointAddr::from_parts(
-        directory.id,
-        [TransportAddr::Ip(network(directory.addr, routable)?)],
-    );
-    let conn = timeout(CONNECT, ep.connect(addr, DIRECTORY_ALPN)).await??;
+    let budget = match dial.relay {
+        Some(_) => DIRECTORY_CONNECT,
+        None => CONNECT,
+    };
+    let conn = timeout(budget, ep.connect(dial.addr.clone(), DIRECTORY_ALPN)).await??;
     let (mut send, mut read) = timeout(IO, conn.open_bi()).await??;
     frame_put(&mut send, &request).await?;
     match frame_get(&mut read).await? {
@@ -475,14 +670,19 @@ pub(crate) fn run_rendezvous(path: &Path) -> Result<()> {
     .with_safe_default_protocol_versions()?
     .with_no_client_auth()
     .with_single_cert(certificates(&cfg.relay_cert)?, relay_key)?;
+    // The directory endpoint joins this relay like any other peer, so a profile
+    // that publishes it there has to let it in as well.
+    let mut admitted: Vec<EndpointId> = cfg
+        .lookups
+        .iter()
+        .chain(cfg.registrations.values())
+        .copied()
+        .collect();
+    if cfg.directory_relay.is_some() {
+        admitted.push(key.public());
+    }
     let mut relay_config = server::RelayConfig::new(network(cfg.relay_http, cfg.routable)?);
-    relay_config.access = Arc::new(RelayAccess(
-        cfg.lookups
-            .iter()
-            .chain(cfg.registrations.values())
-            .copied()
-            .collect(),
-    ));
+    relay_config.access = Arc::new(RelayAccess(admitted));
     relay_config.tls = Some(server::TlsConfig::new(
         network(cfg.relay_https, cfg.routable)?,
         server::CertConfig::Manual { server_config: tls },
@@ -491,9 +691,13 @@ pub(crate) fn run_rendezvous(path: &Path) -> Result<()> {
     config.relay = Some(relay_config);
     config.quic = Some(server::QuicConfig::new(network(cfg.qad, cfg.routable)?));
     runtime()?.block_on(async {
-        let directory =
-            endpoint_with_network(key, Some(network(cfg.bind, cfg.routable)?), DIRECTORY_ALPN,
-                                  None, cfg.routable).await?;
+        let directory = directory_endpoint(
+            key,
+            Some(network(cfg.bind, cfg.routable)?),
+            cfg.directory_relay.as_ref(),
+            cfg.routable,
+        )
+        .await?;
         let relay = server::Server::spawn(config).await?;
         let tls_addr = relay.https_addr().ok_or("missing P1 HTTPS relay")?;
         let qad = relay.quic_addr().ok_or("missing P1 QAD listener")?;
@@ -505,7 +709,15 @@ pub(crate) fn run_rendezvous(path: &Path) -> Result<()> {
             owners: cfg.registrations, readers: cfg.lookups, leases: HashMap::new(),
             relay: format!("https://{advertised}").parse()?, routable: cfg.routable,
         }));
-        log::info!("iroh rendezvous ready relay_https={tls_addr} advertised={advertised} qad={qad}");
+        match &cfg.directory_relay {
+            Some(relay) => log::info!(
+                "iroh rendezvous ready relay_https={tls_addr} advertised={advertised} qad={qad} directory_relay={}",
+                relay.url
+            ),
+            None => log::info!(
+                "iroh rendezvous ready relay_https={tls_addr} advertised={advertised} qad={qad}"
+            ),
+        }
         let mut tasks = JoinSet::new();
         loop {
             tokio::select! {
@@ -531,7 +743,12 @@ pub(crate) fn run_rendezvous(path: &Path) -> Result<()> {
     })
 }
 
-async fn register(ep: &Endpoint, cfg: &DaemonConfig, data: &Endpoint) -> Result<Instant> {
+async fn register(
+    ep: &Endpoint,
+    dial: &DirectoryDial,
+    cfg: &DaemonConfig,
+    data: &Endpoint,
+) -> Result<Instant> {
     // Every interface the endpoint actually has, not just the first bound socket:
     // a wildcard bind covers several, and a peer may not reach the first one.
     let mut addrs: Vec<TransportAddr> = data
@@ -545,19 +762,17 @@ async fn register(ep: &Endpoint, cfg: &DaemonConfig, data: &Endpoint) -> Result<
     }
     addrs.push(TransportAddr::Relay(cfg.relay.url.clone()));
     let addr = EndpointAddr::from_parts(data.id(), addrs);
-    let expires = Instant::now() + LEASE;
     match directory_call(
         ep,
-        &cfg.directory,
+        dial,
         DirectoryRequest::Register {
             name: cfg.name.clone(),
             addr,
         },
-        cfg.routable,
     )
     .await?
     {
-        DirectoryReply::Registered => Ok(expires),
+        DirectoryReply::Registered => Ok(Instant::now() + LEASE),
         _ => Err("unexpected iroh directory registration response".into()),
     }
 }
@@ -771,14 +986,38 @@ pub(crate) fn run_daemon(path: &Path) -> Result<()> {
     let key = identity(&cfg.key_file)?;
     let bind = bind_addr(cfg.bind, cfg.routable)?;
     runtime()?.block_on(async {
-        let directory =
-            endpoint_with_network(key.clone(), Some(bind), DIRECTORY_ALPN, None, cfg.routable)
+        let dial = cfg.directory.dial(cfg.routable)?;
+        // A relay-carried directory shares the serving endpoint, so the daemon
+        // keeps one relay connection per relay instead of two that evict each
+        // other. Without the switch the two endpoints stay exactly as they were.
+        let (directory, data) = match dial.relay.as_ref() {
+            Some(relay) => {
+                let served = endpoint_on(
+                    key,
+                    Some(bind),
+                    &[CONTROL_ALPN, DIRECTORY_ALPN],
+                    Some(shared_relay(&cfg.relay, relay, cfg.routable)?),
+                    cfg.routable,
+                )
                 .await?;
-        let data =
-            endpoint_with_network(key, Some(bind), CONTROL_ALPN, Some(&cfg.relay), cfg.routable)
+                (served.clone(), served)
+            }
+            None => {
+                let directory =
+                    directory_endpoint(key.clone(), Some(bind), None, cfg.routable).await?;
+                let data = endpoint_with_network(
+                    key,
+                    Some(bind),
+                    CONTROL_ALPN,
+                    Some(&cfg.relay),
+                    cfg.routable,
+                )
                 .await?;
+                (directory, data)
+            }
+        };
         timeout(CONNECT, data.online()).await?;
-        let deadline = register(&directory, &cfg, &data).await?;
+        let deadline = register(&directory, &dial, &cfg, &data).await?;
         let allow = Arc::new(cfg.allow.clone());
         let routable = cfg.routable;
         let admission = match &cfg.policy_file {
@@ -797,8 +1036,11 @@ pub(crate) fn run_daemon(path: &Path) -> Result<()> {
         tokio::spawn(async move {
             loop {
                 tokio::time::sleep(RENEW).await;
-                if let Ok(deadline) = register(&directory, &cfg, &renewal_data).await {
-                    if let Ok(mut when) = renewal_expires.lock() { *when = deadline; }
+                match register(&directory, &dial, &cfg, &renewal_data).await {
+                    Ok(deadline) => {
+                        if let Ok(mut when) = renewal_expires.lock() { *when = deadline; }
+                    }
+                    Err(err) => log::info!("iroh directory renewal failed: {err}"),
                 }
             }
         });
@@ -906,14 +1148,13 @@ pub(crate) fn run_control(path: &Path, name: &str, line: &str) -> Result<()> {
     let key = identity(&cfg.key_file)?;
     let bind = bind_addr(cfg.bind, cfg.routable)?;
     runtime()?.block_on(async {
+        let dial = cfg.directory.dial(cfg.routable)?;
         let directory =
-            endpoint_with_network(key.clone(), Some(bind), DIRECTORY_ALPN, None, cfg.routable)
-                .await?;
+            directory_endpoint(key.clone(), Some(bind), dial.relay.as_ref(), cfg.routable).await?;
         let lookup = directory_call(
             &directory,
-            &cfg.directory,
+            &dial,
             DirectoryRequest::Lookup { name: name.to_owned() },
-            cfg.routable,
         )
         .await;
         directory.close().await;
@@ -1736,16 +1977,15 @@ pub(crate) fn run_pty_control(path: &Path, name: &str, request: IrohPtyRequest) 
     }
     let bind = bind_addr(cfg.bind, cfg.routable)?;
     runtime()?.block_on(async {
+        let dial = cfg.directory.dial(cfg.routable)?;
         let directory =
-            endpoint_with_network(key.clone(), Some(bind), DIRECTORY_ALPN, None, cfg.routable)
-                .await?;
+            directory_endpoint(key.clone(), Some(bind), dial.relay.as_ref(), cfg.routable).await?;
         let lookup = directory_call(
             &directory,
-            &cfg.directory,
+            &dial,
             DirectoryRequest::Lookup {
                 name: name.to_owned(),
             },
-            cfg.routable,
         )
         .await;
         directory.close().await;
