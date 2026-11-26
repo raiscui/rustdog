@@ -472,3 +472,14 @@ endpoint 记进 locator 集合), 于是打不开的串口也会出现在 `Zenoh 
   故只跑现存的两份守卫 (`check-carrier-assertions.py` / `check-bookkeeping.py`)。
 - 提交: ddf32fb
 - 提交: d226320
+
+
+## 2026-11-26 RAI-368 Zenoh Windows scout 接口与 loopback 告警
+
+- Windows 的默认 Scout 使用本机非回环单播 IPv4 列表；显式 `zenoh.scout_interfaces` 优先，空列表不写 Zenoh 接口键。Unix 无显式设置时继续用 `auto`。
+- 提交: 8133573
+
+- Zenoh 的 TCP/UDP listener 全为回环时给出告警，仍允许本机使用。与 Scout 接口改动可独立回退。
+- 提交: 413182d
+
+本轮 Linux 验证：构建通过，config 单测 46/46，session 单测 6/6；未跑真机或网络 e2e。

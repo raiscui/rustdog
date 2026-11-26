@@ -23,6 +23,7 @@ pub fn open_client_session(connect_endpoints: &[String]) -> io::Result<Session> 
         credentials.as_ref(),
         None,
         None,
+        None,
     )
 }
 
@@ -44,6 +45,7 @@ pub fn open_router_session_tls(
     listen_endpoints: &[String],
     users_file: Option<&std::path::Path>,
     tls_listen: Option<&TlsListenConfig>,
+    scout_interfaces: Option<&str>,
 ) -> io::Result<Session> {
     open_session_auth(
         "router",
@@ -52,6 +54,7 @@ pub fn open_router_session_tls(
         None,
         users_file,
         tls_listen,
+        scout_interfaces,
     )
 }
 
@@ -223,11 +226,16 @@ fn open_session_auth(
     client_credentials: Option<&crate::auth_credentials::AuthCredentials>,
     users_file: Option<&std::path::Path>,
     tls_listen: Option<&TlsListenConfig>,
+    scout_interfaces: Option<&str>,
 ) -> io::Result<Session> {
     let mut config = Config::default();
     config
         .insert_json5("mode", &json5_string(mode)?)
         .map_err(to_io_error)?;
+
+    if mode == "router" {
+        insert_scout_interfaces(&mut config, scout_interfaces, default_scout_ips)?;
+    }
 
     if let Some(credentials) = client_credentials {
         config
@@ -294,6 +302,8 @@ fn autodiscover_router_endpoints(discovery_timeout: Duration) -> io::Result<Vec<
     config
         .insert_json5("mode", r#""client""#)
         .map_err(to_io_error)?;
+    let scout_interfaces = crate::config::load_client_scout_interfaces()?;
+    insert_scout_interfaces(&mut config, scout_interfaces.as_deref(), default_scout_ips)?;
 
     let scout = zenoh::scout(WhatAmI::Router, config)
         .wait()
@@ -339,6 +349,65 @@ fn autodiscover_router_endpoints(discovery_timeout: Duration) -> io::Result<Vec<
             }
         }
     }
+}
+
+fn default_scout_ips() -> Vec<IpAddr> {
+    #[cfg(windows)]
+    {
+        zenoh_util::net::get_ipv4_ipaddrs(None)
+    }
+    #[cfg(not(windows))]
+    {
+        Vec::new()
+    }
+}
+
+fn insert_scout_interfaces(
+    config: &mut Config,
+    configured: Option<&str>,
+    default_ips: impl FnOnce() -> Vec<IpAddr>,
+) -> io::Result<()> {
+    let configured = crate::config::validate_scout_interfaces(configured)?;
+    if let Some(interfaces) = select_scout_interfaces(configured, default_ips) {
+        config
+            .insert_json5("scouting/multicast/interface", &json5_string(&interfaces)?)
+            .map_err(to_io_error)?;
+    } else if cfg!(windows) {
+        log::warn!("Zenoh 未发现可用于 scouting 的非回环单播 IPv4 地址，保留默认接口 auto");
+    }
+    Ok(())
+}
+
+fn select_scout_interfaces(
+    configured: Option<&str>,
+    default_ips: impl FnOnce() -> Vec<IpAddr>,
+) -> Option<String> {
+    if let Some(configured) = configured {
+        return Some(configured.to_owned());
+    }
+
+    let mut ips = default_ips()
+        .into_iter()
+        .filter_map(|ip| match ip {
+            IpAddr::V4(ip)
+                if !ip.is_loopback()
+                    && !ip.is_multicast()
+                    && !ip.is_unspecified()
+                    && !ip.is_broadcast() =>
+            {
+                Some(ip)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    ips.sort_unstable();
+    ips.dedup();
+    (!ips.is_empty()).then(|| {
+        ips.iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(",")
+    })
 }
 
 fn prioritize_hello_locators(hello: &Hello) -> Vec<String> {

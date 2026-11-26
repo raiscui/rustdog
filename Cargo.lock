@@ -4549,6 +4549,7 @@ dependencies = [
  "windows-sys 0.61.2",
  "xcap",
  "zenoh",
+ "zenoh-util",
 ]
 
 [[package]]
