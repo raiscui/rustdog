@@ -52,6 +52,9 @@ mod frame_tests;
 mod bulk_tests;
 
 #[cfg(test)]
+mod lane_runtime_tests;
+
+#[cfg(test)]
 mod readonly_tests {
     #[test]
     fn default_iroh_gate_admits_only_ping() {
@@ -2541,8 +2544,16 @@ fn serve_lane(
     let subject = peer.to_string();
     loop {
         let Some(line) = transport.read_message()? else {
+            // 对端把写半边关了。debug 级: 正常收尾也会走到这里, 默认输出里不该多一行。
+            log::debug!("iroh lane saw end of stream");
             return Ok(());
         };
+        // 逐行的 verb 与字节数是排障面 (卡在首块时"收没收到"靠它), 但不该进默认输出。
+        log::debug!(
+            "iroh lane line bytes={} verb={}",
+            line.len(),
+            line.split_once(':').map(|(verb, _)| verb).unwrap_or(line.as_str())
+        );
         if line.starts_with('{') {
             match serde_json::from_str::<Handshake>(&line) {
                 Ok(Handshake::Renew { grant }) => {
@@ -3174,7 +3185,16 @@ impl IrohBulkLane {
             Ok(Some(reply)) => Ok(reply),
             Ok(None) => Err(self.poison("对端在回执前关闭了连接".to_string())),
             Err(err) if err.kind() == io::ErrorKind::TimedOut => {
-                Err(self.poison(format!("等待回执超时 ({}ms)", timeout.as_millis())))
+                // 超时时把对端连接此刻的状态一起带出来: "对端已关 (原因 X)" 与 "对端还开着但没回"
+                // 是两条完全不同的线索, 只报"超时"就分不开。
+                let peer = match self.conn.close_reason() {
+                    Some(reason) => format!("对端已关: {reason:?}"),
+                    None => "对端连接仍开着".to_string(),
+                };
+                Err(self.poison(format!(
+                    "等待回执超时 ({}ms; {peer})",
+                    timeout.as_millis()
+                )))
             }
             Err(err) => Err(self.poison(format!("读回执失败: {err}"))),
         }
@@ -3226,14 +3246,30 @@ where
         return Err("iroh target must be NAMESPACE/NAME".into());
     }
     let cfg: ClientConfig = profile(path)?;
+    // 配置校验必须**早于任何网络动作**: 坏配置先表现成"目录查不到 / 连不上", 归因就跑偏了。
+    check_client_config(&cfg)?;
+    let addr = resolve_by_name(&cfg, name)?;
+    with_bulk_lane_at(cfg, addr, body)
+}
+
+/// profile 里那些与网络无关的约束: 帧预算与租约 TTL 范围。
+///
+/// 两条都只读 profile, 所以可以在 dial 之前判 —— 坏配置不该先表现成一个网络错误。
+fn check_client_config(cfg: &ClientConfig) -> Result<()> {
     cfg.check_frame_budget()?;
-    let key = identity(&cfg.key_file)?;
     let ttl = Duration::from_millis(cfg.lease_ttl_ms.unwrap_or(DEFAULT_LEASE_TTL_MS));
     if ttl < admission::MIN_SESSION_TTL || ttl > admission::MAX_SESSION_TTL {
         return Err("iroh lease_ttl_ms is outside the supported range".into());
     }
+    Ok(())
+}
+
+/// 目录查找: NAMESPACE/NAME → 对端地址。与 `with_bulk_lane` 同一套手续, 只是单独拿出来,
+/// 好让按 endpoint id 直连的调用方跳过查找但仍走同一段连接/握手代码。
+fn resolve_by_name(cfg: &ClientConfig, name: &str) -> Result<EndpointAddr> {
     let bind = bind_addr(cfg.bind, cfg.routable)?;
-    runtime()?.block_on(async move {
+    let key = identity(&cfg.key_file)?;
+    runtime()?.block_on(async {
         let dial = cfg.directory.dial(cfg.routable)?;
         let directory =
             directory_endpoint(key.clone(), Some(bind), dial.relay.as_ref(), cfg.routable).await?;
@@ -3251,6 +3287,24 @@ where
         let DirectoryReply::Found { addr } = lookup? else {
             return Err("iroh directory did not find the target".into());
         };
+        Ok(addr)
+    })
+}
+
+/// 已经知道对端地址之后的那一段: 连接、准入握手、租约续期、跑 body、关连接。
+pub(crate) fn with_bulk_lane_at<T>(
+    cfg: ClientConfig,
+    addr: EndpointAddr,
+    body: impl FnOnce(&mut IrohBulkLane) -> T + Send + 'static,
+) -> Result<T>
+where
+    T: Send + 'static,
+{
+    check_client_config(&cfg)?;
+    let key = identity(&cfg.key_file)?;
+    let ttl = Duration::from_millis(cfg.lease_ttl_ms.unwrap_or(DEFAULT_LEASE_TTL_MS));
+    let bind = bind_addr(cfg.bind, cfg.routable)?;
+    runtime()?.block_on(async move {
         let target = addr.id;
         let (data, conn, actual) =
             connect_with_path(&key, Some(bind), &addr, cfg.path, &cfg.relay, cfg.routable).await?;
@@ -3258,47 +3312,71 @@ where
         let (send, read) = timeout(IO, conn.open_bi()).await??;
         let mut transport =
             ControlTransport::Iroh(IrohLineTransport::new(send, read, cfg.frame_timeout()));
-        let session = uuid::Uuid::new_v4().to_string();
-        if let Err(err) = admit_lane(&mut transport, &key, target, &session, ttl) {
-            // 未开准入策略的对端在第一条非 `@ping` 行上就拒 (`serve_ping`), 然后按 DENIED 关流:
-            // 那是"这条入口不承载 bulk"的能力事实, 与路径类别无关, 重试也没有用。
-            let refused = if denied_close(&conn).await {
-                format!(
-                    "{}: 对端没有准入 lane (没有 policy_file), 不承载 bulk: {err}",
-                    crate::bulk_path::IROH_BULK_PATH_PIN_UNAVAILABLE
-                )
-            } else {
-                err.to_string()
-            };
-            data.close().await;
-            return Err(refused.into());
-        }
-        transport.set_read_timeout(None)?;
-        let renewal_stop = Arc::new(AtomicBool::new(false));
-        let renewal = spawn_lease_renewer(
-            transport.try_clone_writer()?,
-            key.clone(),
-            target,
-            session,
-            ttl,
-            renewal_stop.clone(),
-        );
-        let lane = IrohBulkLane {
-            transport,
-            conn,
-            routable: cfg.routable,
-            poisoned: None,
-            renewal_stop,
-            renewal: Some(renewal),
-        };
+        // 握手与 body 都必须跑在**阻塞线程**上。
+        //
+        // `IrohLineTransport` 的每次读写都是 `handle.block_on(...)` (它要在一个同步接口后面驱动
+        // 异步流); 而这里的外层已经是 `runtime().block_on(...)`, 在 async 上下文里再 block_on 自己
+        // 会 panic: "Cannot start a runtime from within a runtime"。PTY 客户端一直是把整段行 I/O
+        // 放进 `spawn_blocking` 的 (`client_lane`), 这里之前把握手留在了 async 块里 —— 回环集成测试
+        // 用的是一次性 TCP 替身, 照不到这一格, 所以真机第一次跑 `--put` 就炸。
+        let probe = conn.clone();
+        let routable = cfg.routable;
         let outcome = tokio::task::spawn_blocking(move || {
-            let mut lane = lane;
+            let session = uuid::Uuid::new_v4().to_string();
+            if let Err(err) = admit_lane(&mut transport, &key, target, &session, ttl) {
+                // "是不是被 DENIED 关的"要 conn 与 runtime 才判得出来, 交回 async 侧。
+                return Err((err.to_string(), true));
+            }
+            if let Err(err) = transport.set_read_timeout(None) {
+                return Err((format!("清不掉握手读超时: {err}"), false));
+            }
+            let renewal_stop = Arc::new(AtomicBool::new(false));
+            let renewal = match transport.try_clone_writer() {
+                Ok(writer) => spawn_lease_renewer(
+                    writer,
+                    key.clone(),
+                    target,
+                    session,
+                    ttl,
+                    renewal_stop.clone(),
+                ),
+                Err(err) => return Err((format!("续期写半边拿不到: {err}"), false)),
+            };
+            let mut lane = IrohBulkLane {
+                transport,
+                conn,
+                routable,
+                poisoned: None,
+                renewal_stop,
+                renewal: Some(renewal),
+            };
             let value = body(&mut lane);
             lane.shutdown();
-            value
+            Ok(value)
         })
         .await
         .map_err(|err| -> Box<dyn std::error::Error + Send + Sync> { err.to_string().into() })?;
+        let outcome = match outcome {
+            Ok(value) => value,
+            Err((message, true)) => {
+                // 未开准入策略的对端在第一条非 `@ping` 行上就拒 (`serve_ping`), 然后按 DENIED 关流:
+                // 那是"这条入口不承载 bulk"的能力事实, 与路径类别无关, 重试也没有用。
+                let refused = if denied_close(&probe).await {
+                    format!(
+                        "{}: 对端没有准入 lane (没有 policy_file), 不承载 bulk: {message}",
+                        crate::bulk_path::IROH_BULK_PATH_PIN_UNAVAILABLE
+                    )
+                } else {
+                    message
+                };
+                data.close().await;
+                return Err(refused.into());
+            }
+            Err((message, false)) => {
+                data.close().await;
+                return Err(message.into());
+            }
+        };
         data.close().await;
         Ok(outcome)
     })
