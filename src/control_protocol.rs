@@ -9,7 +9,8 @@ pub(crate) use self::parsers::{
 
 use self::parsers::{
     parse_agent_ack_payload, parse_agent_name_payload, parse_cancel_payload, parse_cmd_payload,
-    parse_computer_act_payload, parse_control_header, parse_key_payload, parse_open_app_payload,
+    parse_computer_act_payload, parse_control_header, parse_file_cancel_payload,
+    parse_key_payload, parse_open_app_payload,
     parse_pty_attach_payload, parse_pty_close_payload, parse_pty_detach_payload, parse_pty_payload,
     parse_screenshot_payload, parse_spawn_payload, parse_task_id_payload,
     parse_task_output_payload, parse_wait_payload, require_non_empty_payload,
@@ -86,6 +87,8 @@ pub enum ControlCommand {
     FileChunk(String),
     FileEnd(String),
     FileRead(String),
+    FileCancel(String),
+    FileList,
     /// 在指定页执行 JS (Runtime.evaluate)
     CdpEval(crate::control_cdp::CdpEvalRequest),
     /// 直接 spawn 可执行文件, 同步等退出 + 退出码 (不经 shell, 参数逐个原样)
@@ -591,6 +594,16 @@ pub fn parse_control_line(line: &str) -> io::Result<ControlParseResult> {
         }));
     }
 
+    // `@file-list` 与上面几个裸动词同理: 无 payload 是它唯一的正常形态。
+    // 不加这一支的话, 行协议上 `@file-list` 会落到下面"缺少 `:`"的错误分支 ——
+    // 回收原语的回读入口就只能在单测里调函数, agent 拿不到。
+    if kind.eq_ignore_ascii_case("file-list") && !has_payload {
+        return Ok(ControlParseResult::Control(ControlRequest {
+            request_id,
+            command: ControlCommand::FileList,
+        }));
+    }
+
     let Some((_, payload)) = command.split_once(':') else {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -694,6 +707,8 @@ pub fn parse_control_line(line: &str) -> io::Result<ControlParseResult> {
         "file-chunk" => ControlCommand::FileChunk(payload.to_owned()),
         "file-end" => ControlCommand::FileEnd(payload.to_owned()),
         "file-read" => ControlCommand::FileRead(payload.to_owned()),
+        "file-cancel" => ControlCommand::FileCancel(parse_file_cancel_payload(payload)?),
+        "file-list" => ControlCommand::FileList,
         "cdp-targets" => {
             ControlCommand::CdpTargets(crate::control_cdp::parse_cdp_targets_request(payload)?)
         }

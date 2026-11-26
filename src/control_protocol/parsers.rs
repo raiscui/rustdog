@@ -24,6 +24,47 @@ pub(super) use self::task::{
 };
 pub(super) use self::wait::parse_wait_payload;
 
+/// `@file-cancel:{transfer_id:"t-1"}` 的对象载荷。
+///
+/// 走共享的紧凑对象解析 (`object_inner` + `split_object_fields`), 不走 `serde_json`:
+/// 行协议面向模型, `{transfer_id:"t-1"}` 这种不带引号的键是正常写法, 严格 JSON 会把它判成
+/// 语法错误 —— 而模型看到"语法错误"无从修正, 它并不知道自己的写法在别处是合法的.
+pub(crate) fn parse_file_cancel_payload(input: &str) -> io::Result<String> {
+    let inner = object_inner(input, "@file-cancel")?;
+    let mut transfer_id: Option<String> = None;
+    for field in split_object_fields(inner)? {
+        let (field_name, raw_value) = split_object_field(field)?;
+        match normalize_object_field_name(field_name)?.as_str() {
+            "transfer_id" => {
+                if transfer_id.is_some() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "@file-cancel 的 transfer_id 重复",
+                    ));
+                }
+                transfer_id = Some(parse_quoted_payload(raw_value.trim())?);
+            }
+            other => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("@file-cancel 不支持字段 {other}; 只接受 {{transfer_id}}"),
+                ))
+            }
+        }
+    }
+    let transfer_id = transfer_id.ok_or_else(|| {
+        io::Error::new(io::ErrorKind::InvalidData, "@file-cancel 缺 transfer_id")
+    })?;
+    if transfer_id.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "@file-cancel 的 transfer_id 不能为空",
+        ));
+    }
+    // 交给执行层的是规范化后的 JSON, 执行层不必再关心两种写法
+    Ok(serde_json::json!({ "transfer_id": transfer_id }).to_string())
+}
+
 pub(crate) fn object_inner<'a>(input: &'a str, kind: &str) -> io::Result<&'a str> {
     let trimmed = input.trim();
     trimmed
