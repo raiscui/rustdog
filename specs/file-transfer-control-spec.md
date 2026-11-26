@@ -217,7 +217,10 @@ agent 场景下带宽不是瓶颈，正确性与可恢复才是 —— 33% 膨�
 规定:
 
 - 索引位置由平台 state 目录决定 (`LOCALAPPDATA` / `Application Support` / `XDG_STATE_HOME`),
-  路径推导只在 `default_index_path()` 定义一次.
+  路径推导只在 `default_index_path()` 定义一次. 文件名带 **namespace + daemon_name**, 即
+  `<state>/rdog/file-transfer/<namespace>/<daemon_name>/partials.json`: 同用户起两个 daemon 是受支持
+  形态, 共用一份索引会互相覆写条目、互相把 sweep 删过的幽灵条目写回. 两段名字先归一成安全单段
+  (非 `[A-Za-z0-9._-]` 折成 `-`, 只剩点或空则用固定占位), 否则配置就能把索引写到任意位置.
 - 落盘时机: 新建或续传 `@put-file`、`@file-end` 的**成功与全部失败分支**、`@file-cancel`、
   以及 TTL 回收真的回收了会话时. 只落**上传**会话 —— 下载没有半成品.
 - 写入 SHALL 先写 `<name>.json.tmp` 再 rename: 崩溃时索引要么是旧的, 要么是新的, 不会是半个 JSON.
@@ -229,6 +232,7 @@ agent 场景下带宽不是瓶颈，正确性与可恢复才是 —— 33% 膨�
 | 账本读不懂就不认账 | 索引缺失 / 不可读 / 不是合法 JSON / 缺 `transfers` 数组 → 本次**不恢复任何条目**, 只 warn, **不动盘上任何文件** | 读不懂账本不等于可以扔掉货. 宁可让半成品暂时无人认领 (人工可清理), 也不能在一知半解的基础上删文件或把它当成新传输从 0 覆盖 |
 | 索引项指向的文件已不存在 → 丢掉该条 | 逐条 `metadata(temp_path)`, 失败即跳过 | 不假装一条传输还在. 文件没了, 会话就是个幻觉, 留着只会让 `@file-end` 去 rename 一个不存在的路径 |
 | 进度只从文件本身取 | `written` = 暂存文件长度, `last_activity_ms` = 暂存文件 mtime | 见 §2.5: 续传 offset 的真相源是文件长度 + mtime. 索引里再存一份进度, 就是给同一件事两个答案, 重启后二者不一致时无从判断谁对 |
+| 账本是**用户可写**的输入 | 恢复时对 `target_path` 跑 `validate_transfer_path`, 并要求 `temp_path` 与 `staging_path(target)` 归一后相等; 不符即丢条 | 恢复路径必须与请求路径同等不可信. 少这一步, 能写 `partials.json` 的本地主体就能让 sweep 删任意文件、`@file-end` rename 任意路径、`@file-chunk` 向任意文件追加 —— 本模块"请求路径不可信"的决策会在恢复路径上被整个绕过 (本地提权面) |
 
 落盘失败 (目录建不了、磁盘满) SHALL NOT 让正在进行的传输失败 —— 索引是恢复用的元数据, 不是传输的
 前置条件, 只 warn. 但**会话结束时必须能从索引里消失**: 否则重启后会把已经提交的传输当成还在,

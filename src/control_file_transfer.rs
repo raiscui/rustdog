@@ -54,10 +54,7 @@ const STAGING_DIR: &str = ".rdog-partial";
 const STAGING_SUFFIX: &str = ".partial";
 
 /// 半成品索引所在目录名与文件名 (默认落在平台 state 目录下, 与 observation 同一套约定)。
-/// 只被 `default_index_path()` 使用, 而测试里索引路径一律显式给定, 故仅非测试构建需要。
-#[cfg(not(test))]
 const INDEX_DIR: &str = "file-transfer";
-#[cfg(not(test))]
 const INDEX_FILE: &str = "partials.json";
 
 /// 单个 @file-chunk data 载荷的字节上限 (解码前 base64 文本的字符数上限)。
@@ -786,8 +783,43 @@ fn stamp_last_activity_for_tests(transfer_id: &str, last_activity_ms: u64) {
 ///
 /// 与 observation 的默认根同一套平台约定 (`control_observation::durable::default_observation_root`),
 /// 只是换成本 lane 的子目录 —— 索引必须落在**重启后还在**的位置, 不能进临时目录。
-#[cfg(not(test))]
-fn default_index_path() -> PathBuf {
+/// 索引属于**一个 daemon 实例**, 不是"这台机器上的用户"。
+///
+/// 同用户起两个 daemon 是受支持形态 (`acquire_daemon_name_guard(namespace, daemon_name)` 就是为它存在的).
+/// 若两者共用一份索引, 会坏两种方式: 后启动的把前者的条目整张覆写掉; 重启后两个实例恢复同一批条目,
+/// 一方 sweep 删了文件、另一方下次落盘又把幽灵条目写回去。所以文件名带 namespace + daemon_name,
+/// 与 observation 存储按 daemon 分目录是同一条纪律。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TransferIndexIdentity {
+    pub namespace: Option<String>,
+    pub daemon_name: String,
+}
+
+static INDEX_IDENTITY: Mutex<Option<TransferIndexIdentity>> = Mutex::new(None);
+
+/// 把 namespace / daemon_name 收敛成一个安全的单段目录名。
+///
+/// 这两个值来自配置, 可以含 `/` 或 `..`; 直接拼进路径就等于允许配置把索引写到任意位置。
+/// 非 `[A-Za-z0-9._-]` 一律折成 `-`; 折叠后为空或只剩点 (`.` / `..`) 时用固定占位, 不留穿越面。
+fn sanitize_index_component(value: &str) -> String {
+    let sanitized: String = value
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '.' | '-' | '_') {
+                ch
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    if sanitized.is_empty() || sanitized.chars().all(|ch| ch == '.') {
+        "-unnamed".to_string()
+    } else {
+        sanitized
+    }
+}
+
+fn default_index_path(identity: &TransferIndexIdentity) -> PathBuf {
     let base = if cfg!(windows) {
         std::env::var_os("LOCALAPPDATA").map(PathBuf::from)
     } else if cfg!(target_os = "macos") {
@@ -800,7 +832,16 @@ fn default_index_path() -> PathBuf {
             .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/state")))
     }
     .unwrap_or_else(|| PathBuf::from("."));
-    base.join("rdog").join(INDEX_DIR).join(INDEX_FILE)
+    let namespace = identity
+        .namespace
+        .as_deref()
+        .map(sanitize_index_component)
+        .unwrap_or_else(|| "-no-namespace".to_string());
+    base.join("rdog")
+        .join(INDEX_DIR)
+        .join(namespace)
+        .join(sanitize_index_component(&identity.daemon_name))
+        .join(INDEX_FILE)
 }
 
 /// 测试里索引路径是按**线程**记的, 不是进程全局: `cargo test` 每个用例一个线程, 而索引读写都发生在
@@ -821,7 +862,13 @@ fn index_path() -> Option<PathBuf> {
     }
     #[cfg(not(test))]
     {
-        Some(default_index_path())
+        // 没有实例身份 (没跑过 daemon 初始化) 就不落盘也不恢复: 猜一个位置写下去,
+        // 只会让另一个实例的条目在两份文件之间来回打架。
+        let identity = INDEX_IDENTITY
+            .lock()
+            .ok()
+            .and_then(|guard| guard.clone())?;
+        Some(default_index_path(&identity))
     }
 }
 
@@ -912,7 +959,28 @@ fn restore_index() -> usize {
         ) else {
             continue;
         };
+        // 索引是**用户可写**的文件, 所以恢复路径必须与请求路径同等不可信:
+        // 目标路径要过 `validate_transfer_path` (拒 `..` / 保留目录组件), 暂存路径必须是
+        // 从该目标推导出来的那一个 —— 不校验的话, 能写 partials.json 的本地主体就能让
+        // sweep 删任意文件、`@file-end` rename 任意路径、`@file-chunk` 向任意文件追加。
+        let Ok(target_path) = validate_transfer_path(target_path, "restore-index") else {
+            log::warn!("半成品索引条目的目标路径不合法, 丢弃该条: {target_path}");
+            continue;
+        };
+        let Ok(expected_temp) = staging_path(&target_path) else {
+            continue;
+        };
         let temp_path = PathBuf::from(temp_path);
+        if !temp_path_matches(Some(&temp_path), &expected_temp) {
+            log::warn!(
+                "半成品索引条目的暂存路径与目标不匹配, 丢弃该条: target={}, temp={}, expected={}",
+                target_path.display(),
+                temp_path.display(),
+                expected_temp.display()
+            );
+            continue;
+        }
+        let temp_path = expected_temp;
         let Ok(metadata) = std::fs::metadata(&temp_path) else {
             continue;
         };
@@ -926,7 +994,7 @@ fn restore_index() -> usize {
         sessions.insert(
             transfer_id.to_owned(),
             TransferSession {
-                path: PathBuf::from(target_path),
+                path: target_path.clone(),
                 size: entry.get("size").and_then(Value::as_u64).unwrap_or(written),
                 expected_sha256: entry
                     .get("sha256")
@@ -1006,7 +1074,12 @@ impl Drop for TransferMaintenance {
 /// 幂等, 重复调用会停掉旧 worker 再起新的。
 pub fn initialize_file_transfer_maintenance(
     config: &crate::config::FileTransferConfig,
+    identity: TransferIndexIdentity,
 ) -> std::io::Result<()> {
+    // 实例身份必须先落定: `restore_index()` 靠它决定读哪一份索引文件。
+    if let Ok(mut guard) = INDEX_IDENTITY.lock() {
+        *guard = Some(identity);
+    }
     // 先按索引把上次进程留下的半成品接回会话表, 再起 worker —— 否则第一轮 sweep 看到的是空表,
     // 盘上的遗留半成品要等到"有人恰好再来"才会被认领 (而它可能永远不会来)。
     let restored = restore_index();
@@ -1692,6 +1765,116 @@ mod tests {
             .iter()
             .any(|entry| entry["transfer_id"] == tid.as_str());
         assert!(!mine, "损坏索引里的条目不得变成一条可查的传输");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+
+    #[test]
+    fn index_path_is_per_daemon_instance() {
+        // M2: 同用户两个 daemon 不能共用一份索引. 同名 namespace 不同 daemon 必须落在不同文件上,
+        // 否则后写的会把前者的条目整张覆写掉。
+        let alpha = default_index_path(&TransferIndexIdentity {
+            namespace: Some("lab".into()),
+            daemon_name: "alpha".into(),
+        });
+        let beta = default_index_path(&TransferIndexIdentity {
+            namespace: Some("lab".into()),
+            daemon_name: "beta".into(),
+        });
+        let other_ns = default_index_path(&TransferIndexIdentity {
+            namespace: Some("prod".into()),
+            daemon_name: "alpha".into(),
+        });
+        assert_ne!(alpha, beta, "同 namespace 的两个 daemon 必须各有索引文件");
+        assert_ne!(alpha, other_ns, "同 daemon 名的两个 namespace 必须各有索引文件");
+        assert_eq!(
+            alpha.file_name().and_then(|n| n.to_str()),
+            Some(INDEX_FILE)
+        );
+        assert_eq!(
+            alpha.parent().and_then(|p| p.file_name()).and_then(|n| n.to_str()),
+            Some("alpha")
+        );
+        assert_eq!(
+            alpha
+                .parent()
+                .and_then(|p| p.parent())
+                .and_then(|p| p.file_name())
+                .and_then(|n| n.to_str()),
+            Some("lab")
+        );
+    }
+
+    #[test]
+    fn index_path_sanitizes_traversal_shaped_identity() {
+        // namespace / daemon_name 来自配置, 可以含 `/` 与 `..`: 直接拼进路径等于允许配置
+        // 把索引写到任意位置。
+        let path = default_index_path(&TransferIndexIdentity {
+            namespace: Some("../../etc".into()),
+            daemon_name: "..".into(),
+        });
+        // 判据是**组件**层面: 归一后不许出现 `..` 这个组件 (名字里含两个点是无害的字面量,
+        // 真正危险的是它能被当成上级目录)。
+        let escapes = path
+            .components()
+            .any(|component| matches!(component, std::path::Component::ParentDir));
+        assert!(
+            !escapes,
+            "归一后不得留下可穿越的父目录组件: {}",
+            path.display()
+        );
+        let daemon_component = path
+            .parent()
+            .and_then(|p| p.file_name())
+            .and_then(|n| n.to_str())
+            .unwrap_or_default();
+        assert_eq!(daemon_component, "-unnamed", "只有点的名字要换成固定占位");
+    }
+
+    #[test]
+    fn restored_index_discards_entries_whose_paths_a_request_would_be_refused() {
+        // M1: 索引是用户可写的文件. 恢复路径必须与请求路径同等不可信 —— 否则能写
+        // partials.json 的本地主体就能让 sweep 删 / @file-end rename 任意路径。
+        let _guard = TRANSFER_TABLE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let dir = std::env::temp_dir().join(format!("rdog-ft-idx-m1-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let index = dir.join("partials.json");
+        set_index_path_for_tests(index.clone());
+
+        // 受害者: 一个完全正常的文件, 不是任何传输的暂存文件
+        let victim = dir.join("victim.bin");
+        std::fs::write(&victim, b"important").unwrap();
+        let target = dir.join("legit-target.bin");
+
+        let document = json!({
+            "version": 1,
+            "transfers": [
+                {
+                    "transfer_id": "m1-arbitrary-temp",
+                    "target_path": target.to_string_lossy(),
+                    "temp_path": victim.to_string_lossy(),
+                    "size": 9,
+                },
+                {
+                    "transfer_id": "m1-traversal-target",
+                    "target_path": format!("{}", target.join("..").join("..").join("escape.bin").display()),
+                    "temp_path": victim.to_string_lossy(),
+                    "size": 9,
+                }
+            ]
+        });
+        std::fs::write(&index, document.to_string()).unwrap();
+
+        assert_eq!(
+            restore_index(),
+            0,
+            "暂存路径与目标不匹配 / 目标含穿越组件时, 一条都不得恢复"
+        );
+        assert!(victim.exists(), "恢复不得让任意文件进入可删/可 rename 的状态");
+        assert_eq!(std::fs::read(&victim).unwrap(), b"important");
 
         let _ = std::fs::remove_dir_all(&dir);
     }
