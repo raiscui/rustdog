@@ -52,7 +52,7 @@ jobs:
       # 只编译不运行: bin 的 `#[cfg(test)]` 模块 + (非 Windows) recording_e2e。
       # 让"这段测试代码编译不过"归到"测试没跑", 而不是在 test job 里被读成"测试失败"
       # (那样零执行断言还会被 cargo 的编译失败直接跳过)。
-      # 注意范围: `tests/` 下其余 17 个 integration target **没有**被编译, 这是已知
+      # 注意范围: `tests/` 下其余 18 个 integration target **没有**被编译, 这是已知
       # 覆盖缺口 (RAI-411 放量), 不要把它读成"所有测试目标都编过"。
       - name: Compile test targets
         shell: bash
@@ -102,7 +102,7 @@ jobs:
       # 只编译不运行: bin 的 `#[cfg(test)]` 模块 + (非 Windows) recording_e2e。
       # 让"这段测试代码编译不过"归到"测试没跑", 而不是在 test job 里被读成"测试失败"
       # (那样零执行断言还会被 cargo 的编译失败直接跳过)。
-      # 注意范围: `tests/` 下其余 17 个 integration target **没有**被编译, 这是已知
+      # 注意范围: `tests/` 下其余 18 个 integration target **没有**被编译, 这是已知
       # 覆盖缺口 (RAI-411 放量), 不要把它读成"所有测试目标都编过"。
       - name: Compile test targets
         shell: bash
@@ -153,7 +153,7 @@ jobs:
       # 只编译不运行: bin 的 `#[cfg(test)]` 模块 + (非 Windows) recording_e2e。
       # 让"这段测试代码编译不过"归到"测试没跑", 而不是在 test job 里被读成"测试失败"
       # (那样零执行断言还会被 cargo 的编译失败直接跳过)。
-      # 注意范围: `tests/` 下其余 17 个 integration target **没有**被编译, 这是已知
+      # 注意范围: `tests/` 下其余 18 个 integration target **没有**被编译, 这是已知
       # 覆盖缺口 (RAI-411 放量), 不要把它读成"所有测试目标都编过"。
       - name: Compile test targets
         shell: bash
@@ -212,7 +212,7 @@ jobs:
 
       # Unit tests inside the rdog binary only (recording handler, lifecycle, journal,
       # daemon lanes...). 实际覆盖 = `src/**` 里的 `#[cfg(test)]` 模块。
-      # `tests/` 下除 recording_e2e 外的 17 个 integration target (control_lanes /
+      # `tests/` 下除 recording_e2e 外的 18 个 integration target (control_lanes /
       # control_mode / control_pty / zenoh_* ...) 在 CI 里既不编译也不运行 —— 这是
       # 已知覆盖缺口, 由 RAI-411 放量补齐; 别把这条 job 读成"协议回归面已覆盖"。
       # pipefail 必需: 没有它 tee 的退出码会盖掉 cargo 的失败。
@@ -260,7 +260,7 @@ jobs:
 
       # Unit tests inside the rdog binary only (recording handler, lifecycle, journal,
       # daemon lanes...). 实际覆盖 = `src/**` 里的 `#[cfg(test)]` 模块。
-      # `tests/` 下除 recording_e2e 外的 17 个 integration target (control_lanes /
+      # `tests/` 下除 recording_e2e 外的 18 个 integration target (control_lanes /
       # control_mode / control_pty / zenoh_* ...) 在 CI 里既不编译也不运行 —— 这是
       # 已知覆盖缺口, 由 RAI-411 放量补齐; 别把这条 job 读成"协议回归面已覆盖"。
       # pipefail 必需: 没有它 tee 的退出码会盖掉 cargo 的失败。
@@ -308,7 +308,7 @@ jobs:
 
       # Unit tests inside the rdog binary only (recording handler, lifecycle, journal,
       # daemon lanes...). 实际覆盖 = `src/**` 里的 `#[cfg(test)]` 模块。
-      # `tests/` 下除 recording_e2e 外的 17 个 integration target (control_lanes /
+      # `tests/` 下除 recording_e2e 外的 18 个 integration target (control_lanes /
       # control_mode / control_pty / zenoh_* ...) 在 CI 里既不编译也不运行 —— 这是
       # 已知覆盖缺口, 由 RAI-411 放量补齐; 别把这条 job 读成"协议回归面已覆盖"。
       # pipefail 必需: 没有它 tee 的退出码会盖掉 cargo 的失败。
