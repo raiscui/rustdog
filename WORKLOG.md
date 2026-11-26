@@ -413,3 +413,4 @@ drill 分支 poison 预取 URL 后, 第一次真的跑到 failure 分支, 发现
 `scripts/ci/coverage-gap-summary.md` + 三个 job 各自 `cat`, 文字不再经过 shell 解析,
 同一份文字也不再在三处各抄一遍。本地用同一条命令回放, 摘要内容已验证完整。
 - 提交: 4a3069a
+- 提交: aa68f95 (PowerShell 启动失败也纳入有界重试)
