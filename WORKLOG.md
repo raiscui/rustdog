@@ -1294,7 +1294,7 @@ rebase 会重写分支上每个 commit 的 sha, 本票在合并前又被 rebase 
 不为它单独推提交刷 sha。
 ### 2026-11-26 RAI-411 评审必修: 载体自相矛盾 + 空 executed 集合 = 绿
 
-- 提交: (本条随修复提交记入下一次账本)
+- 提交: 41049fa
 
 ① `ci-merge-gate.md` §3b 里「ubuntu 侧 3 条已知红用逐条 `#[ignore]` 收窄」是上一轮处置的残留,
 与改成的 target 级豁免打架 (而且 `zenoh_router_client` 是 `unix`, 从不进 windows), 重写成
