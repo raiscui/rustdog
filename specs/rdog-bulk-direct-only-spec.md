@@ -928,7 +928,15 @@ sha256、拓扑描述 (哪些段跨网)、脱敏后的地址、判定式计算�
 探测**只认 `CARGO_MANIFEST_DIR` 自己的仓库** (顶层目录必须等于该目录), 没有可查时就写 `unknown` ——
 写 `unknown` 也要写, 不许留空.
 
-**已知限制 (共享 target)**: 共享 `CARGO_TARGET_DIR` 且**跨 checkout** 构建时, Cargo 在包指纹相同时根本
-不会重跑 build script, 构建身份可能沿用上一次的值. 这不能靠 `rerun-if-changed` 修. 处置: CI 显式注入
-`GIT_SHA`; 本地需要可信读数时**显式设 `GIT_SHA`** 或用独立 target. **判据**: 同一 target 依次构建两份
-只差账本的 checkout, 若第二次 `Fresh` 且 ELF 沿用旧 sha, 那次读数不得用于跨版本对比.
+**已知限制 (本地构建, 两条)**:
+
+1. **共享 `CARGO_TARGET_DIR` 且跨 checkout 构建**: Cargo 在包指纹相同时根本不会重跑 build script,
+   构建身份可能沿用上一次的值. 这不能靠 `rerun-if-changed` 修. 处置: 用独立 target, 或显式设
+   `GIT_SHA` 后**强制重编**. **判据**: 同一 target 依次构建两份只差账本的 checkout, 若第二次报
+   `Fresh` 且 ELF 沿用旧 sha, 那次读数不得用于跨版本对比.
+2. **读取是编译期的** (`rustc-env`, 见 `src/build_info.rs` 的 `env!("GIT_SHA")`): 构建时设值才生效,
+   **事后**设 `GIT_SHA` 不会改变已有二进制; 反过来, 本地设了 `GIT_SHA` 却没重编时, 读到的仍是上一次
+   烘进去的值.
+
+CI 不受这两条影响: `.github/workflows/ci.yml` 在**全部六个 job** (三段 `build` + 三段 `test`, 后者也会
+在缓存未命中时编译) 注入了 `GIT_SHA=${{ github.sha }}`, 所以 CI 里同一份代码在任何 job 中身份一致.
