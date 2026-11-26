@@ -23,7 +23,7 @@ use std::{
 use async_trait::async_trait;
 use time::OffsetDateTime;
 use tokio::{
-    io::{AsyncRead, AsyncReadExt, AsyncWriteExt},
+    io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
     net::{TcpListener, TcpStream},
     sync::Mutex as AsyncMutex,
 };
@@ -73,6 +73,7 @@ pub struct LinkUnicastTls {
     auth_identifier: LinkAuthId,
     rai524_seq: std::sync::atomic::AtomicUsize,
     read_wake: std::sync::Arc<ReadWake>,
+    write_wake: std::sync::Arc<ReadWake>,
     mtu: BatchSize,
     expiration_manager: Option<LinkCertExpirationManager>,
 }
@@ -189,6 +190,9 @@ impl LinkUnicastTls {
             read_wake: std::sync::Arc::new(ReadWake {
                 permits: tokio::sync::Semaphore::new(0),
             }),
+            write_wake: std::sync::Arc::new(ReadWake {
+                permits: tokio::sync::Semaphore::new(0),
+            }),
             mtu,
             expiration_manager,
         }
@@ -211,6 +215,49 @@ impl LinkUnicastTls {
     ///
     /// 现在: 锁内循环 poll 到 Pending (把 rustls 已缓冲的明文读干净), 然后**放锁**在这个
     /// link 自持的 waker 上等可读; 醒来再取锁 poll。`allow_partial` 时读到一个完整结果就返回。
+    /// 写的短临界区实现: 与读对称 —— **锁内只做非阻塞 poll_write, 绝不跨 await 持锁**。
+    ///
+    /// 读与写共用同一把锁 (`write_mtx`), 所以两个任务不可能同时进入同一个 rustls 连接
+    /// (这正是 `HandshakeNotComplete` 的来源); 而两侧都不跨 await 持锁, 所以谁也不会把对方饿死。
+    async fn write_short_critical_section(&self, buffer: &[u8]) -> ZResult<usize> {
+        loop {
+            let mut pending = false;
+            {
+                let _guard = zasynclock!(self.write_mtx);
+                match self.try_write_locked(buffer) {
+                    Ok(Some(written)) => return Ok(written),
+                    Ok(None) => pending = true,
+                    Err(err) => return Err(err),
+                }
+            }
+            if pending {
+                if buffer.is_empty() {
+                    return Ok(0);
+                }
+                // 锁外等可写: waker 唤醒, 或 100ms 兜底重试 (链路关闭时不会永远挂住)。
+                tokio::select! {
+                    _ = self.write_wake.permits.acquire() => {}
+                    _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {}
+                }
+            }
+        }
+    }
+
+    /// 同步的「非阻塞写一次」: `Ok(Some(n))` 写入了 n 字节, `Ok(None)` 表示对端/缓冲暂不可写。
+    fn try_write_locked(&self, buffer: &[u8]) -> ZResult<Option<usize>> {
+        let waker = std::task::Waker::from(self.write_wake.clone());
+        let mut cx = std::task::Context::from_waker(&waker);
+        let stream = self.get_mut_socket();
+        match std::pin::Pin::new(stream).poll_write(&mut cx, buffer) {
+            std::task::Poll::Ready(Ok(written)) => Ok(Some(written)),
+            std::task::Poll::Ready(Err(err)) => {
+                tracing::trace!("Write error on TLS link {}: {}", self, err);
+                Err(zerror!(err).into())
+            }
+            std::task::Poll::Pending => Ok(None),
+        }
+    }
+
     async fn read_short_critical_section(
         &self,
         buffer: &mut [u8],
@@ -316,26 +363,34 @@ impl LinkUnicastTrait for LinkUnicastTls {
     }
 
     async fn write(&self, buffer: &[u8]) -> ZResult<usize> {
-        let _guard = zasynclock!(self.write_mtx);
-        self.get_mut_socket().write(buffer).await.map_err(|e| {
-            tracing::trace!("Write error on TLS link {}: {}", self, e);
-            zerror!(e).into()
-        })
+        self.write_short_critical_section(buffer).await
     }
 
     async fn write_all(&self, buffer: &[u8]) -> ZResult<()> {
         let seq = self.rai524_seq.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
-        let _guard = zasynclock!(self.write_mtx);
-        match self.get_mut_socket().write_all(buffer).await {
-            Ok(()) => Ok(()),
-            Err(err) => {
-                tracing::warn!(
-                    "RAI524 residual: write #{seq} on TLS link {} failed: {err}",
-                    self
-                );
-                Err(zerror!(err).into())
+        let mut written = 0usize;
+        while written < buffer.len() {
+            match self.write_short_critical_section(&buffer[written..]).await {
+                Ok(0) => {
+                    return Err(zerror!(
+                        "TLS link {} accepted 0 bytes of a {} byte write",
+                        self,
+                        buffer.len()
+                    )
+                    .into())
+                }
+                Ok(n) => written += n,
+                Err(err) => {
+                    tracing::warn!(
+                        "RAI524 residual: write #{seq} on TLS link {} failed after {} bytes: {err}",
+                        self,
+                        written
+                    );
+                    return Err(err);
+                }
             }
         }
+        Ok(())
     }
 
     async fn read(&self, buffer: &mut [u8]) -> ZResult<usize> {
