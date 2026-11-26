@@ -97,7 +97,9 @@ fn routable_profile_opens_directory_relay_and_bind() {
     let parsed: DaemonConfig = profile(&daemon).expect("routable daemon profile parses");
     assert!(parsed.routable);
     assert_eq!(parsed.bind, Some("10.21.0.2:0".parse().unwrap()));
-    assert!(network(parsed.directory.addr, parsed.routable).is_ok());
+    let dial = parsed.directory.dial(parsed.routable).expect("the directory dial target resolves");
+    assert_eq!(dial.addr.ip_addrs().count(), 1, "a directory with an address is dialled by it");
+    assert!(dial.relay.is_none());
     assert!(relay_allowed(&parsed.relay.url, parsed.relay.qad_port, parsed.routable).is_ok());
 
     let client = scratch.write(
@@ -112,7 +114,8 @@ fn routable_profile_opens_directory_relay_and_bind() {
     let parsed: ClientConfig = profile(&client).expect("routable client profile parses");
     assert!(matches!(parsed.path, Route::Direct));
     assert_eq!(parsed.bind, Some("10.22.0.2:0".parse().unwrap()));
-    assert!(network(parsed.directory.addr, parsed.routable).is_ok());
+    let dial = parsed.directory.dial(parsed.routable).expect("the directory dial target resolves");
+    assert_eq!(dial.addr.ip_addrs().count(), 1);
 
     let rendezvous = scratch.write(
         "rendezvous.json",
@@ -293,4 +296,105 @@ fn a_published_address_stays_explicit() {
     let err = network(wildcard, true)
         .expect_err("a registration candidate cannot be the wildcard itself");
     assert!(err.to_string().contains("explicit address"), "{err}");
+}
+
+fn relay_carried_client(directory: &str, routable: bool) -> String {
+    format!(
+        r#"{{
+  "key_file": "/tmp/client.key",
+  "directory": {directory},
+  "relay": {{"url": "https://{}", "qad_port": 9002, "root_cert": "/tmp/relay.pem"}},
+  "path": "auto"{}
+}}"#,
+        if routable { "10.21.0.1:7001" } else { "127.0.0.1:7001" },
+        if routable { r#", "routable": true"# } else { "" }
+    )
+}
+
+#[test]
+fn a_directory_without_an_address_is_dialled_through_its_relay() {
+    let scratch = Scratch::new();
+    let relay: RelayUrl = "https://127.0.0.1:7100".parse().unwrap();
+    let client = scratch.write(
+        "client.json",
+        &relay_carried_client(
+            &format!(
+                r#"{{"id": "{}", "via_relay": true, "relay": {{"url": "{relay}", "root_cert": "/tmp/relay.pem"}}}}"#,
+                endpoint_id(2)
+            ),
+            false,
+        ),
+    );
+    let parsed: ClientConfig = profile(&client).expect("a relay-carried directory profile parses");
+    parsed.check_frame_budget().expect("the profile is otherwise unchanged");
+    assert!(parsed.directory.addr.is_none(), "the profile never names an address");
+    let dial = parsed.directory.dial(parsed.routable).expect("the relay resolves the dial target");
+    assert_eq!(
+        dial.addr.ip_addrs().count(),
+        0,
+        "no address is invented for a directory that published none"
+    );
+    assert_eq!(
+        dial.addr.relay_urls().next(),
+        Some(&relay),
+        "the relay is the only address the lookup is dialled at"
+    );
+    assert!(dial.relay.is_some(), "the endpoint needs the relay it dials through");
+    println!("directory: a relay-carried lookup dials no IP at all");
+}
+
+#[test]
+fn the_directory_switch_never_invents_a_dial_target() {
+    let scratch = Scratch::new();
+    let cases = [
+        (
+            "no switch, no address",
+            format!(r#"{{"id": "{}"}}"#, endpoint_id(2)),
+            "requires `addr`",
+        ),
+        (
+            "switch without a relay",
+            format!(r#"{{"id": "{}", "via_relay": true}}"#, endpoint_id(2)),
+            "`via_relay` requires a `relay`",
+        ),
+        (
+            "relay without the switch",
+            format!(
+                r#"{{"id": "{}", "relay": {{"url": "https://127.0.0.1:7100"}}}}"#,
+                endpoint_id(2)
+            ),
+            "only read with `via_relay`",
+        ),
+    ];
+    for (label, directory, expected) in cases {
+        let path = scratch.write("client.json", &relay_carried_client(&directory, false));
+        let parsed: ClientConfig = profile(&path).expect("the profile itself still parses");
+        let err = parsed
+            .directory
+            .dial(parsed.routable)
+            .err()
+            .expect("an ambiguous directory profile must not pick a target");
+        assert!(err.to_string().contains(expected), "{label}: {err}");
+    }
+    println!("directory: every half-configured profile fails closed");
+}
+
+#[test]
+fn a_directory_relay_follows_the_profile_without_weakening_it() {
+    let loopback: RelayUrl = "https://127.0.0.1:7100".parse().unwrap();
+    let routable: RelayUrl = "https://10.21.0.1:7100".parse().unwrap();
+    let plaintext: RelayUrl = "http://127.0.0.1:7100".parse().unwrap();
+    let relay = |url: &RelayUrl, cert: Option<&str>| DirectoryRelay {
+        url: url.clone(),
+        root_cert: cert.map(PathBuf::from),
+    };
+    assert!(directory_relay(&relay(&loopback, None), false).is_ok());
+    assert!(directory_relay(&relay(&routable, None), true).is_ok());
+    let err = directory_relay(&relay(&routable, None), false)
+        .expect_err("a loopback profile keeps its relay on loopback");
+    assert!(err.to_string().contains("loopback"), "{err}");
+    let err = directory_relay(&relay(&plaintext, None), true)
+        .expect_err("a directory relay is never plaintext");
+    assert!(err.to_string().contains("HTTPS"), "{err}");
+    println!("directory: the relay URL follows the same profile gate as the lane relay");
 }
