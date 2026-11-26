@@ -807,3 +807,11 @@ Capy review 给出的 4 条(2 high / 2 medium)复核后全部成立,均属会伤
 重新跑过仍全部 `@response`。`tests/control_lanes` 的 15 红在干净基线上逐字同款(回执
 `handoffs/rai385/receipts/04-baseline-control-lanes-red.txt`), 属既有夹具缺陷。
 - 提交: bb94451
+
+## 2026-11-26 RAI-385 第三轮评审 (1 low) 修复:登记锁与客户端探测的启动竞态
+
+客户端 `live_local_daemons` 的 liveness 探测会短暂持 `<ns>__<name>.lock` 共享锁;若 daemon
+正在启动并 `try_lock`,会拿到 WouldBlock 并被当成"已有活跃 daemon",登记静默缺失到下次重启。
+`register_local_daemon` 改为退避重试(5 次 x 80ms),新增用例
+`registration_should_retry_past_a_short_liveness_probe` 锁住该路径。
+- 提交: 03bf1e8
