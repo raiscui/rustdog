@@ -22,6 +22,7 @@ import argparse
 import os
 import re
 import subprocess
+import time
 import sys
 from pathlib import Path
 
@@ -135,13 +136,33 @@ def failure_detail(target: str, log: str) -> str:
     return "\n".join(picked[:160]) + f"\n(full log: {log_dir / (target + '.log')})"
 
 
-def run(argv: list[str]) -> tuple[int, str]:
+# 单 target 的墙钟上限。跑不完就判这个 target 红并留下它已有的输出, 而不是让整个 job 撞上
+# GitHub 的 job timeout 被 cancel —— 后者在日志里只显示 "The job has been cancelled", 分不清
+# 是哪个 target 挂住, 也无法区分"慢"与"死等"。
+TARGET_TIMEOUT_SECONDS = 1500
+
+
+def run(argv: list[str], timeout: int | None = None) -> tuple[int, str]:
     # encoding 固定 utf-8: 默认按平台 locale 解码 (windows runner 是 cp1252), 而 cargo test
     # 的输出里有 UTF-8 中文断言文案 —— 会在这里抛 UnicodeDecodeError 让整步崩掉, 归因看起来
     # 像"target 红"但其实是解码失败。errors=replace 保证任何残余字节都不会中断。
-    completed = subprocess.run(
-        argv, capture_output=True, text=True, encoding="utf-8", errors="replace"
-    )
+    try:
+        completed = subprocess.run(
+            argv,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired as expired:
+        # text=True 下 expired.stdout/stderr 仍可能是 bytes, 逐段判定再拼。
+        partial = "".join(
+            chunk if isinstance(chunk, str) else (chunk or b"").decode("utf-8", "replace")
+            for chunk in (expired.stdout, expired.stderr)
+            if chunk
+        )
+        return 124, ANSI.sub("", partial) + f"\n[timeout] 超过 {timeout}s 未结束, 已终止\n"
     return completed.returncode, ANSI.sub("", completed.stdout + completed.stderr)
 
 
@@ -162,9 +183,13 @@ def main() -> int:
     failures: list[str] = []
 
     for target in executed_targets(args.os):
-        code, log = run(["cargo", "test", "--test", target])
+        started = time.monotonic()
+        code, log = run(["cargo", "test", "--test", target], timeout=TARGET_TIMEOUT_SECONDS)
         passed, failed, ignored = summarize(log)
-        executed_rows.append(f"| `{target}` | {passed} | {failed} | {ignored} | {code} |")
+        elapsed = round(time.monotonic() - started)
+        executed_rows.append(
+            f"| `{target}` | {passed} | {failed} | {ignored} | {code} | {elapsed}s |"
+        )
         if code != 0 or failed or passed == 0:
             failures.append(f"{target}: exit={code} passed={passed} failed={failed}")
             print(f"--- {target} failure detail ---\n{failure_detail(target, log)}\n", file=sys.stderr)
@@ -182,8 +207,8 @@ def main() -> int:
         "",
         "**executed** — 下列 target 的 `passed` 计数必须 > 0:",
         "",
-        "| target | passed | failed | ignored | exit |",
-        "| --- | --- | --- | --- | --- |",
+        "| target | passed | failed | ignored | exit | elapsed |",
+        "| --- | --- | --- | --- | --- | --- |",
         *executed_rows,
     ]
     if compile_rows:

@@ -98,6 +98,11 @@ target 的 `passed` 必须 > 0**, 否则判红 —— 「退出码 0 但零执�
 
 `recording_e2e` 仍由它自己那一步执行 (unix)。
 
+**单个 target 有 1500s 墙钟上限** (`TARGET_TIMEOUT_SECONDS`), 超时判该 target 红并把它
+已有的输出留进失败详情, summary 里同时给出每个 target 的 `elapsed`。原因是反过来的:
+挂住的 target 会一路撑到 GitHub 的 job timeout 被 cancel, 日志只剩一句
+`The job has been cancelled` —— 既指不出是哪个 target, 也分不清「慢」与「死等」。
+
 **ubuntu 侧 3 条已知红** (`control_lanes` 1 条 + `zenoh_router_client` 2 条) 用
 `#[cfg_attr(target_os = "linux", ignore = …)]` 显式收窄: 它们仍然在 macos / windows
 上执行, 只在 ubuntu runner 上跳过, 登记与到期日见 §6 (`RAI-464`)。收窄的是**平台**, 不是

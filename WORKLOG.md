@@ -1276,6 +1276,15 @@ job summary 单列、**不计入 ran 集合**, 真机 lane 的 5 条命令与权
 zenoh_router_client 38/2 ignored)。
 - 提交: f3b3502
 
+### 2026-11-26 RAI-411 第五个真缺陷 (windows): target 没有墙钟上限
+
+- 提交: (本条随修复提交记入下一次账本)
+
+`f9e5272` 的 windows `test` job 跑了 45 分钟仍未结束; 该步没有 per-target timeout, 所以
+一旦某个 target 挂住, 表现是整 job 被 GitHub cancel, 日志只留 `The job has been cancelled`
+—— 分不清哪个 target、也分不清慢与死等。加 `TARGET_TIMEOUT_SECONDS = 1500`, 超时判该
+target 红并保留它已有的输出 (`exit=124`), summary 增 `elapsed` 列; 超时路径本地以
+`bash -c 'echo hello; sleep 5'` + `timeout=1` 验证过 (拿到部分输出 `hello`)。
 ### 2026-11-26 RAI-411 评审意见落地 (M1/M2/M3/low)
 
 - 提交: 898a1b3
