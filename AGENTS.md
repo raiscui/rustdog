@@ -122,7 +122,7 @@ Issues 和 Wayfinder maps 使用 GitHub Issues。详见 `docs/agents/issue-track
 
 - `docs/solutions/conventions/daemon-log-sentinel-e2e-contract.md`
   - 主题: daemon log 输出行是 e2e 测试的隐性启动 sentinel; "ready" 的定义是「订阅已建立、可以投递」而非「router 起来了」
-  - 用途: 固定改 logger 路径/文案/level 前先 grep `wait_until_output_contains` 双侧、`start_zenoh_daemon_with_combined_output` 合流 helper 模板, 以及 ready 必须在 mailbox 通配 sub 声明之后 (RAI-576 的确定性守卫 `daemon_ready_should_be_logged_after_mailbox_subscriptions`)
+  - 用途: 固定改 logger 路径/文案/level 前先 grep `wait_until_output_contains` 双侧、`start_zenoh_daemon_with_combined_output` 合流 helper 模板, ready 必须在 mailbox 通配 sub 声明之后 (RAI-576 守卫 `daemon_ready_should_be_logged_after_mailbox_subscriptions`), 以及 marker 命中后必须等到换行才算整行 (RAI-582 守卫 `sentinel_wait_must_wait_for_the_whole_line`)
   - 何时阅读: 修改 `init_logger`/fern 配置、daemon "ready" 日志或启动步骤顺序, 或新写等待 daemon 就绪的 e2e 前
 
 - `docs/solutions/test-failures/silent-replace-anchor-assertion.md`

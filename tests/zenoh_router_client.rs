@@ -2,6 +2,7 @@
 
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use std::{
+    collections::VecDeque,
     fs,
     io::{Read, Write},
     path::PathBuf,
@@ -204,6 +205,19 @@ fn daemon_output(buffer: &Arc<Mutex<String>>) -> String {
         .unwrap_or_default()
 }
 
+/// marker 命中**不等于整行到齐**。
+///
+/// 收集器按 1024 字节块把 daemon 输出追加进 buffer, 而 `log::info!` 的一行可能跨块:
+/// 只看 `contains(needle)` 会在半行处返回, 读这一行后半段 (`control_key=…`) 的调用方
+/// 就拿到 `None` —— RAI-582 实测 `daemon_should_reuse_same_control_key_after_restart_by_default`
+/// 1/20 红在这个形状上。判据因此是「marker 之后还出现了换行」。
+fn marker_line_complete(collected: &str, needle: &str) -> bool {
+    let Some(position) = collected.find(needle) else {
+        return false;
+    };
+    collected[position + needle.len()..].contains('\n')
+}
+
 fn wait_until_output_contains(
     child: &mut Child,
     output: &Arc<Mutex<String>>,
@@ -217,7 +231,7 @@ fn wait_until_output_contains(
             .lock()
             .expect("collector buffer lock should work")
             .clone();
-        if collected.contains(needle) {
+        if marker_line_complete(&collected, needle) {
             return Ok(collected);
         }
 
@@ -1706,6 +1720,98 @@ fn control_should_repaint_tui_input_while_zenoh_pty_output_is_busy() {
     );
 }
 
+/// 等到一条**控制帧** (以 `prefix` 开头), 期间到达的 `@pty-output` 入队而不是丢弃。
+///
+/// PTY 输出被切在哪个 chunk 由内核与调度决定, 与控制帧之间**没有严格交替的保证** ——
+/// 子进程在 close 前打出的一个换行 (`data:"DQo="`) 就足以让「下一条一定是 `@pty-closed`」
+/// 的断言偶发失败 (RAI-582 实测 1–2/20)。跳过输出帧不削弱断言: 被测性质仍然是
+/// 「close 得到 `@pty-closed` 且带 force_close」, 只是不再替内核规定交付顺序。
+///
+/// 跳过的帧**必须留在 `buffered_output` 里**: 下游 (`second_output`) 要的正是下一条
+/// `@pty-output`, 丢弃等于把失败从 attached 断言挪到「拿不到 second output」上 —— 断言没变弱,
+/// 但诊断变差了 (复核 observation 2)。
+fn wait_for_pty_control_frame(
+    prefix: &str,
+    daemon_log: &dyn Fn() -> String,
+    buffered_output: &mut VecDeque<String>,
+    mut next_frame: impl FnMut(Duration) -> Option<String>,
+) -> String {
+    let deadline = Instant::now() + Duration::from_secs(8);
+    let mut skipped_output = 0_usize;
+    while Instant::now() < deadline {
+        let Some(payload) = next_frame(Duration::from_millis(500)) else {
+            continue;
+        };
+        if payload.starts_with("@pty-output ") {
+            skipped_output += 1;
+            buffered_output.push_back(payload);
+            continue;
+        }
+        assert!(
+            payload.starts_with(prefix),
+            "unexpected pty frame (期待 {}, 期间暂存 {skipped_output} 条 @pty-output): {payload}\ndaemon:\n{}",
+            prefix.trim_end(),
+            daemon_log()
+        );
+        return payload;
+    }
+    panic!(
+        "等待 {} 超时 (期间暂存 {skipped_output} 条 @pty-output)\ndaemon:\n{}",
+        prefix.trim_end(),
+        daemon_log()
+    );
+}
+
+/// 取下一条 `@pty-output`: 先取等控制帧时暂存下来的, 再向订阅者要新的。
+fn next_pty_output(
+    buffered_output: &mut VecDeque<String>,
+    daemon_log: &dyn Fn() -> String,
+    mut next_frame: impl FnMut(Duration) -> Option<String>,
+) -> String {
+    if let Some(payload) = buffered_output.pop_front() {
+        return payload;
+    }
+    let deadline = Instant::now() + Duration::from_secs(8);
+    while Instant::now() < deadline {
+        if let Some(payload) = next_frame(Duration::from_millis(500)) {
+            assert!(
+                payload.starts_with("@pty-output "),
+                "unexpected pty frame (期待 @pty-output): {payload}\ndaemon:\n{}",
+                daemon_log()
+            );
+            return payload;
+        }
+    }
+    panic!("等待 @pty-output 超时\ndaemon:\n{}", daemon_log());
+}
+
+/// RAI-582 复核 observation 2 的守卫: 等控制帧时跳过的 `@pty-output` 必须能被下游读到。
+#[test]
+fn pty_control_frame_wait_must_not_swallow_output_frames() {
+    let daemon_log = || String::new();
+    let mut buffered: VecDeque<String> = VecDeque::new();
+    let mut frames = [
+        r#"@pty-output {"encoding":"base64","data":"U0VDT05E"}"#.to_string(),
+        r#"@pty-attached {"session_id":"s-1"}"#.to_string(),
+    ]
+    .into_iter();
+
+    let attached = wait_for_pty_control_frame("@pty-attached ", &daemon_log, &mut buffered, |_| {
+        frames.next()
+    });
+    assert!(attached.starts_with("@pty-attached "), "{attached}");
+    assert_eq!(
+        buffered.len(),
+        1,
+        "被跳过的输出帧必须留在缓冲里, 不能被吃掉"
+    );
+
+    let output = next_pty_output(&mut buffered, &daemon_log, |_| None);
+    assert!(output.starts_with("@pty-output "), "{output}");
+    assert!(output.contains("U0VDT05E"), "下游仍要能读到那一帧: {output}");
+    assert!(buffered.is_empty(), "取过之后不该留着");
+}
+
 #[test]
 fn control_should_detach_and_attach_pty_in_zenoh_profile() {
     let daemon_name = unique_name("pty-reattach");
@@ -1844,28 +1950,26 @@ fn control_should_detach_and_attach_pty_in_zenoh_profile() {
         ))
         .wait()
         .expect("should publish pty attach");
-    let attached = attach_subscriber
-        .recv_timeout(Duration::from_secs(8))
-        .expect("should receive attached sample")
-        .expect("attached sample should exist");
-    let attached_payload = attached
-        .payload()
-        .try_to_string()
-        .expect("attached payload should be utf-8")
-        .to_string();
+    let mut buffered_output: VecDeque<String> = VecDeque::new();
+    let attached_payload =
+        wait_for_pty_control_frame("@pty-attached ", &daemon_log, &mut buffered_output, |timeout| {
+        attach_subscriber
+            .recv_timeout(timeout)
+            .ok()
+            .flatten()
+            .and_then(|sample| sample.payload().try_to_string().ok().map(|text| text.into_owned()))
+    });
     assert!(
-        attached_payload.starts_with("@pty-attached ") && attached_payload.contains(&session_id),
+        attached_payload.contains(&session_id),
         "unexpected attached payload: {attached_payload}"
     );
-    let second_output = attach_subscriber
-        .recv_timeout(Duration::from_secs(8))
-        .expect("should receive second output sample")
-        .expect("second output sample should exist");
-    let second_payload = second_output
-        .payload()
-        .try_to_string()
-        .expect("second output payload should be utf-8")
-        .to_string();
+    let second_payload = next_pty_output(&mut buffered_output, &daemon_log, |timeout| {
+        attach_subscriber
+            .recv_timeout(timeout)
+            .ok()
+            .flatten()
+            .and_then(|sample| sample.payload().try_to_string().ok().map(|text| text.into_owned()))
+    });
     assert!(
         second_payload.starts_with("@pty-output "),
         "unexpected second output payload: {second_payload}"
@@ -1875,17 +1979,16 @@ fn control_should_detach_and_attach_pty_in_zenoh_profile() {
         .put(format!(r#"@pty-close:{{session_id:"{session_id}"}}"#))
         .wait()
         .expect("should publish pty close after attach");
-    let closed = attach_subscriber
-        .recv_timeout(Duration::from_secs(8))
-        .expect("should receive close sample")
-        .expect("close sample should exist");
-    let closed_payload = closed
-        .payload()
-        .try_to_string()
-        .expect("closed payload should be utf-8")
-        .to_string();
+    let closed_payload =
+        wait_for_pty_control_frame("@pty-closed ", &daemon_log, &mut buffered_output, |timeout| {
+        attach_subscriber
+            .recv_timeout(timeout)
+            .ok()
+            .flatten()
+            .and_then(|sample| sample.payload().try_to_string().ok().map(|text| text.into_owned()))
+    });
     assert!(
-        closed_payload.starts_with("@pty-closed ") && closed_payload.contains("force_close"),
+        closed_payload.contains("force_close"),
         "unexpected closed payload: {closed_payload}"
     );
 
@@ -2010,6 +2113,41 @@ fn control_should_execute_screenshot_and_save_file_in_zenoh_profile() {
     );
 
     let _ = fs::remove_dir_all(workdir);
+}
+
+/// RAI-582 负对照: marker 落在 1024 字节块边界上时, 旧判据 (`contains(needle)`) 会
+/// 在半行处返回, 而 `parse_control_key` 读的正是这一行的后半段。
+///
+/// 这不是构造出来的巧合: 收集器就是按 1024 字节块追加的, marker 落在哪里由 daemon
+/// 已打印多少字节决定 —— 实测在整 target 并发下命中过 1/20。
+#[test]
+fn sentinel_wait_must_wait_for_the_whole_line() {
+    let marker = "zenoh router daemon ready";
+    // 首块正好 1024 字节, 且断在 `control_key=` 之前 —— 与 :2034 那次红的快照同形。
+    let head = "zenoh router daemon ready: namespace=lab, ";
+    let cut = "contro";
+    let first_chunk = format!("{}{}{}", "r".repeat(1024 - head.len() - cut.len()), head, cut);
+    assert_eq!(first_chunk.len(), 1024);
+    assert!(
+        first_chunk.contains(marker),
+        "旧判据 (`contains(needle)`) 在这半行上就会返回"
+    );
+    assert!(
+        !marker_line_complete(&first_chunk, marker),
+        "换行还没到, 整行不算到齐"
+    );
+    assert!(
+        parse_control_key(&first_chunk).is_none(),
+        "半行里没有 `control_key=` —— 这正是 `first output should contain control_key` 的 panic"
+    );
+
+    let whole_line = format!("{first_chunk}l_key=rdog/lab/stable\n");
+    assert!(marker_line_complete(&whole_line, marker), "换行到了才算整行");
+    assert_eq!(
+        parse_control_key(&whole_line).as_deref(),
+        Some("rdog/lab/stable"),
+        "整行能读出 control_key"
+    );
 }
 
 #[test]

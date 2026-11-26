@@ -16,6 +16,7 @@ tags:
 verified_by:
   - "rg -c 'wait_until_output_contains' tests/zenoh_router_client.rs -> 28; tests/zenoh_router_client_windows.rs -> 3 (2026-08-22)"
   - "rg -n 'fn start_zenoh_daemon_with_combined_output' tests/ -> tests/zenoh_router_client.rs:174 与 tests/zenoh_unixpipe_fast_path/support.rs:236"
+  - "整行判据 (RAI-582, 2026-11-27): marker 落在 1024 字节块边界的快照上, 旧判据 `contains(marker)` 返回半行且 `parse_control_key` 为 None; 改判「marker 后出现换行」后同快照判为未到齐, 补齐整行后读到 control_key"
   - "ready 语义 (RAI-576, 2026-11-27): 修复前 10/10 轮 ready 先于 `agent inbox 通配 sub 已声明`, 修复后 8/8 轮声明先于 ready; `daemon_ready_should_be_logged_after_mailbox_subscriptions` 把 ready 挪回声明之前即红 (card=1917, inbox=1987, ready=1364)"
 ---
 
@@ -60,6 +61,24 @@ zenoh_router_client) 失败; 其中 zenoh_router_client 有 24+ 个测试只 pip
 2b. **zenoh 的声明是异步传播的, `.wait()` 只代表本地注册** —— 见
    `zenoh-pub-sub-declaration-propagation.md`。所以「声明调用返回」与「对端 router
    能据此路由」不是同一件事; 需要更强保证时要的是**一次往返读数**, 不是把日志再挪一步。
+2c. **marker 命中不等于整行到齐。** 合流收集器按 1024 字节块把 daemon 输出追加进
+   buffer, 而一行日志可能跨块 —— 只在 `contains(marker)` 上返回, 读这一行**后半段**的
+   调用方就会拿到半行。2026-11-27 (RAI-582) 实测:
+   `daemon_should_reuse_same_control_key_after_restart_by_default` 以 1/20 红在
+   `first output should contain control_key` 上 —— marker 到了, `control_key=` 还在下一个
+   块里。等待方的判据必须是「marker 之后还出现了换行」(`wait_until_output_contains` 的
+   `marker_line_complete`), 负对照是 `sentinel_wait_must_wait_for_the_whole_line`
+   (造一个 marker 落在 1024 字节边界的快照, 旧判据读完半行, `parse_control_key` 返回 `None`)。
+   **这条与 2a 同源**: 两者都是「sentinel 说的状态比实际状态多」—— 2a 是顺序先于对象,
+   2c 是位置先于内容。
+
+   **适用范围 (别把这条读大了)**: `bandwidth/` 之外还有第二份实现 ——
+   `tests/zenoh_router_client_windows.rs` 的 `wait_until_output_contains` 仍是
+   `contains(needle)` 判据、收集器也仍是 1024 块。它当前的两处调用不解析行尾字段,
+   所以没有活缺陷; 该 target 在 windows 本就被 `PLATFORM_EXEMPTIONS` 豁免、CI 不执行,
+   所以没有同票同步 (同步了也验不到)。**将来在 windows 那份上加「读行尾字段」的等待前,
+   先把判据一起改。**
+
 3. **多测试共用的 daemon 启动应走合流 helper**
    (`start_zenoh_daemon_with_combined_output`): 调用方只看到一个合流的
    `Arc<Mutex<String>>`, 未来 init_logger 路径再变, 只改 helper 内部, 24+ 个
