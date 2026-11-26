@@ -103,7 +103,8 @@ P7 第 3 项今天**既不可验证也不可证伪**: 候选没有任何 bulk �
 | 字段 | 语义 |
 | --- | --- |
 | `evidence` | 见 §4.3 的快照子对象 |
-| `stale_partial_discarded` | 只有 `@put-file` 会出现. `true` 表示存在一份已超过 `file_transfer.resume_window_ms` 的半成品, 本次 open 把它删掉并从 0 开始 (§2.5 A5). **必须回报**, 否则"续上了"与"过期重来"在回执上分不开 |
+| `resume_honored` | 只有 `@put-file` 会出现. `true` 当且仅当本次是 `resume:true` **且** 起始 offset > 0. 这是"我要求续传, 但实际从 0 开始"的唯一判定位: `false` 就代表重来了, 不管原因是窗口过期 (A5)、被 sweep 提前删掉 (C3), 还是根本没有半成品 |
+| `stale_partial_discarded` | 只有 `@put-file` 会出现. `true` 表示本次 open **亲手删掉**了一份超过 `file_transfer.resume_window_ms` 的半成品 (§2.5 A5). 它比 `resume_honored` 更窄: 只覆盖"删除发生在这里", 供排障区分是谁清的 |
 
 #### 稳定码总表 (唯一登记处)
 
@@ -162,7 +163,7 @@ P7 第 3 项今天**既不可验证也不可证伪**: 候选没有任何 bulk �
 
 ### 2.5 半成品与会话: 按阶段分四块, 不留未定义的转移
 
-凡是会碰到半成品或会话表的地方只有四个阶段 —— **open 的准入、中止、空闲、窗口到期**. 上一版把
+凡是会碰到半成品或会话表的地方只有五个阶段 —— **open 的准入、中止、空闲、窗口到期、提交成功**. 上一版把
 它们混成一张按"中止原因"排的表, 于是 open 阶段的三种情形 (同 id 活会话、同 id 换路径、半成品
 已过期) 一直没定义. 现在按阶段分开, 每块自己穷举.
 
@@ -177,6 +178,16 @@ P7 第 3 项今天**既不可验证也不可证伪**: 候选没有任何 bulk �
 | A1 | 门禁不通过 (`iroh_direct_path_unavailable` / `iroh_path_unknown` / `iroh_bulk_path_pin_unavailable`) | **拒绝**, 不建会话, 不碰任何半成品 | 见 §3.2 |
 | A2 | `transfer_id` 与一条**活跃**会话相同 (未过期、未中止) | **拒绝**. 否则这次 open 会替换掉那条会话, 而 `resume:false` 会把它正在写的文件删掉 | `file_transfer_id_in_use` |
 | A2b | 另一条**活跃**会话已持有同一暂存路径 (不同 id) | **拒绝**. 暂存文件名从目标路径推导, 两个 id 指向同一目标就共用一个文件: 交错写会让先到的 `@file-end` 把混合字节的哈希算过、把损坏的文件 rename 到目标上 | `file_transfer_path_in_use` |
+
+A2b 的比较口径必须写明, 否则这道门禁是假的: 直接比路径值是**文本相等**, `m.bin` 与 `./m.bin`
+在 `Path` 组件层面就不相等, 两次 open 都能过, 然后写同一个物理文件. 规定:
+
+- 先做**词法规范化** (去掉 `.` 组件; `..` 已被 `validate_transfer_path` 拒掉), 再比;
+- Windows 上**折叠大小写** (卷默认不敏感);
+- 不用 `canonicalize`: 它要求路径存在, 而暂存文件此刻可能还没创建;
+- **已知残留**: macOS 默认 APFS 同样大小写不敏感, 但没有可移植的办法在配置期判定卷的大小写
+  策略, 所以那一侧只剩"同目标、仅字母大小写不同、并发上传"这一个窗口. 它需要客户端自己制造
+  这种请求; 记为已知边界, 不假装已解决.
 | A3 | `transfer_id` 与一条**已中止或已过期**的会话相同 | 允许: 旧条目已被移出, id 复用合法 | — |
 | A4 | `resume:true`, 半成品存在且 **mtime 在窗口内** | 允许: offset = 文件长度 | — |
 | A5 | `resume:true`, 半成品存在但 **mtime 超过窗口** | 允许, 但**删**该过期半成品, offset = 0, 并在响应里回报 | `stale_partial_discarded: true` |
@@ -212,7 +223,8 @@ B3 写成"唯一可续传的中止"是错的 —— 客户端被杀、断网、�
 | --- | --- | --- |
 | C1 | **索引的身份是半成品路径**, 不是 `transfer_id` | `transfer_id` 由客户端自选且可复用; 盘上的半成品是路径唯一的 |
 | C2 | 同 id 换目标路径重开 (A3 的一种) | 旧半成品**保留**, 按**它自己的路径**继续索引, 由 C3 回收. 它的字节仍然有效, 删掉就是拿"id 复用"当理由销毁另一个文件的有效进度 |
-| C3 | 超过 `file_transfer.resume_window_ms` 仍未续传 | **删**. 由索引 sweep 执行, 并在 open 时按 A5 兜一次 |
+| C3 | 超过 `file_transfer.resume_window_ms` 仍未续传 | **删**. 由索引 sweep 执行, 并在 open 时按 A5 兜一次. sweep 删过之后 open 已看不到任何痕迹, 所以"是不是重来了"只能由 `resume_honored` 回答, 不能靠 `stale_partial_discarded` |
+| C4 | 提交成功 (`@file-end` 通过校验并 rename 完成) | **移出注册表**. 否则这条已完成的条目仍算"活跃", 同目标的**下一次**上传会被 A2b 判成路径占用而拒绝 —— 一条早该消失的记录把正常重传挡在门外 |
 
 **C2 的过渡状态要写明**: RAI-417 (分支 `capy/rai-417-transfer-residue`, PR #144, **未合并**) 今天
 在"同 id 换路径"时是**回收旧半成品**的. 那是因为它既没有路径索引、也没有续传窗口 —— 在它的世界里
@@ -259,12 +271,13 @@ B3 写成"唯一可续传的中止"是错的 —— 客户端被杀、断网、�
 原因码走既有 `iroh_*` 前缀, 与父票措辞对齐 (`direct_path_unavailable` / `direct_path_lost`).
 **码的登记处是 §2.2 的稳定码总表**, 这里只解释路径族四个码为什么这样分:
 
-| 码 | 触发条件 | 终态 | 可重试 |
-| --- | --- | --- | --- |
-| `iroh_direct_path_unavailable` | 路径层观测到没有直连, 当前走 relay | 是 | 路径变直连后可 (见 D2) |
-| `iroh_direct_path_lost` | 直连曾建立, 中途丢失 | 是 (本次尝试) | 可, 带 `resume:true` 新开一次尝试; 半成品按 §2.5 的 B3 保留到 `file_transfer.resume_window_ms` |
-| `iroh_path_unknown` | 路径类别读不出 | 是 | 可, 但重试前先修路径可观测性 |
-| `iroh_bulk_path_pin_unavailable` | 传输是路径感知的, 但无法把 bulk 连接钉在直连上 | 是 | 不可, 除非传输侧补上路径 pin |
+四个码按"路径层的哪一个事实不成立"分, 触发/终态/可重试三列一律以 §2.2 总表为准
+(这里不再抄第二份 —— 抄两份的代价是下一次改一处、另一处留成旧合同):
+
+- `iroh_direct_path_unavailable` —— 从来没有直连;
+- `iroh_direct_path_lost` —— 曾经有直连, 中途丢了;
+- `iroh_path_unknown` —— 根本问不到路径类别 (fail-closed);
+- `iroh_bulk_path_pin_unavailable` —— 有直连但钉不住 (见 §3.5).
 
 **刻意不加**第四个"bulk 被门禁拒绝"的码: 门禁相对路径层没有增加任何语义, 多一个码只会让
 "relay" 有两种写法, 逼调用方同时匹配两个. 会话级资源拒绝用 `bulk_session_limit_reached`,
