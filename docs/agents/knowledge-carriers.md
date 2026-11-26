@@ -164,7 +164,7 @@ python3 scripts/check-bookkeeping.py --main     # main 上: 无条目出宽限�
 | 模式 | 触发 | 漏账时的行为 | 用在哪 |
 | --- | --- | --- | --- |
 | `--report-only` | 显式加该参数 | 打印报告 + 发 `::warning::` 注解，**退出码永远 0** | CI 的 `pull_request` |
-| `--main [--main-grace N]` | 显式加该参数 | 最新 N 个 commit 记宽限，其余缺 sha → **退出码 1** | CI 的 `push` 到 main |
+| `--main [--main-grace N]` | 显式加该参数 | 按下方「两件事两个判据」表判：无条目出宽限 → 漏账；占位超 `--max-placeholder-age-days` → 占位超期；两者都 **退出码 1** | CI 的 `push` 到 main |
 | 默认（strict） | 不加参数 | 打印报告，退出码 1 | 本地 pre-flight |
 
 **为什么 PR 只报告、main 才阻断**：PR 阶段工作 commit 的条目通常还没落盘 (它在同一张 PR 的

@@ -116,12 +116,17 @@ def commit_shas(
     return [line.strip() for line in git(root, *args).splitlines() if line.strip()]
 
 
-def commit_epoch(root: Path, sha: str) -> float:
-    """commit 的提交时间 (epoch 秒)。占位是否该判超期看它, 不看位置。"""
+def commit_epoch(root: Path, sha: str) -> float | None:
+    """commit 的提交时间 (epoch 秒); **读不出来返回 None, 绝不兜底成"现在"**。
+
+    兜底成 `time.time()` 等于「读不出日期 = 还很新 = 放行」—— 一个日期非法/缺失/在未来的占位就此
+    永久绿, 时间口径的全部价值被这一行抵消。所以这里 fail-closed: 由调用方判红。
+    """
     try:
-        return float(git(root, "log", "-1", "--format=%ct", sha).strip())
-    except ValueError:
-        return time.time()
+        value = git(root, "log", "-1", "--format=%ct", sha).strip()
+        return float(value) if value else None
+    except (ValueError, SystemExit):
+        return None
 
 
 def changed_files(root: Path, sha: str) -> list[str]:
@@ -156,8 +161,9 @@ def main(argv: list[str]) -> int:
         "--main",
         action="store_true",
         help=(
-            "main 分支模式: 关掉 --first-parent (否则只看得到 merge commit)、排除 merge 本身, "
-            "范围内最新 --main-grace 个工作 commit 记宽限, 其余缺 sha 即失败 (RAI-433)"
+            "main 分支模式: 关掉 --first-parent (否则只看得到 merge commit)、排除 merge 本身。"
+            "两件事两个判据: 完全没有账本条目的 commit 在最新 --main-grace 个位置内宽限, 出宽限即漏账;"
+            " 有占位只差 sha 的按时间判 (--max-placeholder-age-days), 超期即占位超期"
         ),
     )
     parser.add_argument(
@@ -174,7 +180,7 @@ def main(argv: list[str]) -> int:
         "--main-grace",
         type=int,
         default=10,
-        help="main 上允许的「刚合入、还没补 sha / 还留着占位」的工作 commit 数, 默认 10 (一次合并的提交量)",
+        help=("main 上「账本里完全没有条目」的 commit 的**位置**宽限, 默认 10。占位 (有条目只差 sha) 不看位置, 按 --max-placeholder-age-days 的时间判"),
     )
     parser.add_argument(
         "--ref-only",
@@ -259,31 +265,36 @@ def main(argv: list[str]) -> int:
             #   - 刚合入时年龄 ~0 → 任何规模的合并都不会让 main 当天变红;
             #   - 超过 --max-placeholder-age-days 还没补 → 「占位超期」判红。
             # 非 main 模式 (本地 strict / PR) 永不判占位超期: sha 在 PR 阶段本来就不稳定。
+            # 多次违规要**都列出来** —— 只报一类会让人以为修掉那类就够了。
+            reasons: list[str] = []
             if subject_counts.get(subject, 0) > 1:
-                unaccounted.append(
-                    (
-                        short,
-                        subject,
-                        changed_files(root, sha),
-                        f"占位标题不唯一: 范围内有 {subject_counts[subject]} 个 commit 用同一标题, "
-                        "占位只能认领一个",
-                    )
+                reasons.append(
+                    f"占位标题不唯一: 范围内有 {subject_counts[subject]} 个 commit 用同一标题, "
+                    "占位只能认领一个"
                 )
-                continue
             if args.main:
-                age_days = (time.time() - commit_epoch(root, sha)) / 86400.0
-                if age_days >= args.max_placeholder_age_days:
-                    unaccounted.append(
-                        (
-                            short,
-                            subject,
-                            changed_files(root, sha),
+                epoch = commit_epoch(root, sha)
+                if epoch is None:
+                    reasons.append(
+                        "占位日期不可解析: 读不出该 commit 的提交时间, 无法判断是否超期 "
+                        "(fail-closed, 不按「还很新」放行)"
+                    )
+                else:
+                    age_days = (time.time() - epoch) / 86400.0
+                    if age_days < 0:
+                        reasons.append(
+                            f"占位日期在未来 ({age_days:.1f} 天): 提交时间晚于当前时间, "
+                            "无法用它判断超期 (fail-closed)"
+                        )
+                    elif age_days >= args.max_placeholder_age_days:
+                        reasons.append(
                             f"占位超期 {age_days:.1f} 天 (上限 "
                             f"{args.max_placeholder_age_days:g} 天): 账本里还写着「待合入后补」, "
-                            "sha 早已稳定",
+                            "sha 早已稳定"
                         )
-                    )
-                    continue
+            if reasons:
+                unaccounted.append((short, subject, changed_files(root, sha), "; ".join(reasons)))
+                continue
             pending.append((short, subject))
             continue
         # 数量宽限只给**完全没有账本条目**的 commit: 刚合入的提交可能还在等记账提交落盘。
