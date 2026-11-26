@@ -145,10 +145,16 @@ pub fn execute_put_file(payload: &str) -> std::io::Result<Value> {
         .map(str::to_owned);
     let resume = value.get("resume").and_then(Value::as_bool).unwrap_or(false);
 
-    let temp_path = path.with_extension(format!(
-        "{}.yino-partial",
-        path.extension().and_then(|e| e.to_str()).unwrap_or("bin")
-    ));
+    // 暂存名必须由目标路径**单射**得到: 后缀是追加的, 不是替换扩展名.
+    // 用 with_extension 替换时会撞车 —— "model" 没有扩展名, 落到 "model.bin.yino-partial",
+    // 而 "model.bin" 也落到同一个名字; 于是两个**不同**目标共用一份暂存文件, 一次对 model.bin
+    // 的非续传重开就会把 model 留着续传的那份字节删掉, 而 model 本身没被碰过.
+    let mut file_name = path
+        .file_name()
+        .ok_or_else(|| std::io::Error::other("@put-file 路径缺少文件名"))?
+        .to_os_string();
+    file_name.push(".yino-partial");
+    let temp_path = path.with_file_name(file_name);
 
     let mut sessions = transfers().lock().expect("transfer table poisoned");
     // 准入必须早于任何落盘动作. 放在 remove_file 之后就是"拒绝带副作用" ——
@@ -1268,6 +1274,58 @@ mod tests {
 
         // 收尾: 把 fresh 也回收掉, 别把会话留在表里影响后续用例
         execute_file_cancel(&format!(r#"{{"transfer_id":"{fresh}"}}"#)).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn staging_name_is_injective_so_two_targets_never_share_a_partial() {
+        // "model" 与 "model.bin" 用 with_extension 推导会落到同一个暂存名, 于是两个**不同**
+        // 目标共用一份半成品: 对 model.bin 的非续传重开会把 model 留着续传的字节删掉, 而
+        // model 本身没被碰过. 暂存名必须由目标路径单射得到.
+        let _guard = TRANSFER_TABLE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let dir = std::env::temp_dir().join(format!("rdog-ft-inject-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let no_ext = dir.join("model");
+        let with_ext = dir.join("model.bin");
+        let first = unique_id("noext");
+        let second = unique_id("withext");
+        let data = BASE64_STANDARD.encode(b"xxxxx");
+
+        execute_put_file(&format!(
+            r#"{{"transfer_id":"{first}","path":"{}","size":10}}"#,
+            escape_json(&no_ext.display().to_string())
+        ))
+        .unwrap();
+        execute_file_chunk(&format!(
+            r#"{{"transfer_id":"{first}","offset":0,"data":"{data}"}}"#
+        ))
+        .unwrap();
+        let no_ext_partial = dir.join("model.yino-partial");
+        assert!(no_ext_partial.exists(), "无扩展名目标的暂存名应追加后缀");
+
+        // 另一个目标 (不同文件) 非续传重开: 不得删掉 model 的半成品
+        execute_put_file(&format!(
+            r#"{{"transfer_id":"{second}","path":"{}","size":10}}"#,
+            escape_json(&with_ext.display().to_string())
+        ))
+        .unwrap();
+        execute_file_chunk(&format!(
+            r#"{{"transfer_id":"{second}","offset":0,"data":"{data}"}}"#
+        ))
+        .unwrap();
+        assert!(
+            no_ext_partial.exists(),
+            "另一个目标的重开不得删掉本目标的半成品"
+        );
+        assert!(
+            dir.join("model.bin.yino-partial").exists(),
+            "两个不同目标各自独立一份暂存文件"
+        );
+
+        execute_file_cancel(&format!(r#"{{"transfer_id":"{first}"}}"#)).unwrap();
+        execute_file_cancel(&format!(r#"{{"transfer_id":"{second}"}}"#)).unwrap();
         let _ = std::fs::remove_dir_all(&dir);
     }
 
