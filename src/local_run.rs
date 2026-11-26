@@ -385,10 +385,12 @@ struct RunMeta {
 #[derive(Debug)]
 pub(crate) struct UnixpipeRunGuard {
     _lock_file: File,
-    /// 旧二进制只认 `<base>.rdog-owner.pid`,所以新 owner 也用它声明占用。
-    /// 少了这把锁,升级窗口里"旧二进制启动到新 daemon 正在用的显式 base"会
-    /// 无条件 unlink 新 daemon 的 FIFO(反向互斥)。
-    _legacy_guard: File,
+    /// 旧二进制只认 `<base>.rdog-owner.pid`,所以共享显式 base 上我们也用它声明占用。
+    ///
+    /// 只对**非运行目录**的 base 启用: 派生路径(运行目录里的 `<ns>__<name>.pipe`)
+    /// 旧二进制根本算不出来(它推导 `$TMPDIR/rdog-...`),没有跨版本冲突可言;
+    /// 而给每个 daemon 都留一个旧格式守卫文件,会让"退出后不留文件"这条要求变味。
+    _legacy_guard: Option<File>,
     paths: UnixpipeRunPaths,
 }
 
@@ -426,25 +428,45 @@ impl UnixpipeRunGuard {
 
         // 跨版本互斥必须**双向**: 旧二进制用 `<base>.rdog-owner.pid` 表达占用,
         // 新二进制只看 `<stem>.lock` 的话,两个方向的升级窗口都会互相删 FIFO。
-        // 所以新 owner 自己也在这把锁上 flock + 写 pid —— 旧 owner 还活着就抢不到
-        // (直接失败),我们活着时旧二进制也会因 pid 存活而拒绝接管。
-        let legacy_guard = match acquire_flock(&legacy_guard_path(&paths.base), true)? {
-            Some(file) => file,
-            None => {
-                let holder = legacy_guard_holder(&paths.base)?
-                    .map(|holder| holder.describe())
-                    .unwrap_or_default();
+        // 共享显式 base 上,新 owner 自己也在这把锁上 flock + 写 pid —— 旧 owner
+        // 还活着就抢不到(直接失败),我们活着时旧二进制也会因 pid 存活而拒绝接管。
+        // 派生路径不用这把锁: 旧二进制推导的是 `$TMPDIR/rdog-...`,不会撞上。
+        let legacy_guard = if base_is_shared(&paths.base) {
+            match acquire_flock(&legacy_guard_path(&paths.base), true)? {
+                Some(file) => {
+                    write_legacy_guard_pid(&file, std::process::id())?;
+                    Some(file)
+                }
+                None => {
+                    let holder = legacy_guard_holder(&paths.base)?
+                        .map(|holder| holder.describe())
+                        .unwrap_or_default();
+                    return Err(io::Error::new(
+                        io::ErrorKind::AlreadyExists,
+                        format!(
+                            "unixpipe pipe 已被旧版本 daemon 占用: base={}, legacy_guard={}{holder}",
+                            paths.base.display(),
+                            legacy_guard_path(&paths.base).display()
+                        ),
+                    ));
+                }
+            }
+        } else {
+            // 派生路径上不该有旧格式守卫;真有(手工或历史遗留)时只探测不接管,
+            // 避免把一个仍被旧二进制持有的 base 当成自己的。
+            if let Some(holder) = legacy_guard_holder(&paths.base)? {
                 return Err(io::Error::new(
                     io::ErrorKind::AlreadyExists,
                     format!(
-                        "unixpipe pipe 已被旧版本 daemon 占用: base={}, legacy_guard={}{holder}",
+                        "unixpipe pipe 已被旧版本 daemon 占用: base={}, legacy_guard={}{}",
                         paths.base.display(),
-                        legacy_guard_path(&paths.base).display()
+                        legacy_guard_path(&paths.base).display(),
+                        holder.describe()
                     ),
                 ));
             }
+            None
         };
-        write_legacy_guard_pid(&legacy_guard, std::process::id())?;
 
         // 拿到 exclusive lock 就证明上一个 owner 已经死了(哪怕它的 PID 被别的进程复用)。
         // 这里把判定依据写进日志,现场排查"到底是残留还是真活着"时不用再猜。
@@ -534,14 +556,19 @@ impl Drop for UnixpipeRunGuard {
                 self.paths.base.display()
             );
         }
-        for path in [
-            &self.paths.lock,
-            &self.paths.meta,
-            &legacy_guard_path(&self.paths.base),
-        ] {
+        for path in [&self.paths.lock, &self.paths.meta] {
             if let Err(err) = fs::remove_file(path) {
                 if err.kind() != io::ErrorKind::NotFound {
                     log::warn!("清理 unixpipe 生命周期文件失败: {}: {err}", path.display());
+                }
+            }
+        }
+        // 兼容守卫只在共享显式 base 上存在;退出时同样清掉(不留文件)。
+        if self._legacy_guard.is_some() {
+            let guard = legacy_guard_path(&self.paths.base);
+            if let Err(err) = fs::remove_file(&guard) {
+                if err.kind() != io::ErrorKind::NotFound {
+                    log::warn!("清理 unixpipe 兼容守卫失败: {}: {err}", guard.display());
                 }
             }
         }
@@ -630,6 +657,17 @@ fn path_matches_locked_inode(path: &Path, file: &File) -> io::Result<bool> {
         Err(err) => return Err(err),
     };
     Ok(on_disk.ino() == file.metadata()?.ino())
+}
+
+/// base 是否"共享显式路径"(不在专用运行目录里)。
+///
+/// 只有这种 base 才可能被旧二进制用同一路径推导出来,也就才需要旧格式守卫做跨版本互斥。
+#[cfg(unix)]
+fn base_is_shared(base: &Path) -> bool {
+    match (base.parent(), run_dir()) {
+        (Some(parent), Ok(run_dir)) => parent != run_dir,
+        _ => true,
+    }
 }
 
 /// 旧版本 daemon 的路径守卫文件名。
@@ -1146,20 +1184,28 @@ fn clean_stale_entries(dry_run: bool) -> io::Result<CleanReport> {
 /// - 旧 `$TMPDIR` 条目: 复核旧 `<base>.rdog-owner.pid` 的 flock,仍被持有就不删。
 #[cfg(unix)]
 fn remove_stale_entry(entry: &RunEntry) -> io::Result<Option<usize>> {
-    // 旧格式守卫在新旧两条路径上都是 ownership 证据,所以两条路径都必须**持锁删除**:
-    // 只探测不持锁的话,旧二进制可能恰好在这个窗口里拿到守卫并建出 FIFO,
-    // 随后被我们连 FIFO 带守卫一起删掉。
-    let Some(_legacy_guard) = acquire_flock(&legacy_guard_path(&entry.pipe_base), true)? else {
-        return Ok(None);
-    };
+    // 两条路径都必须**持锁删除**: 只探测不持锁的话,owner 可能恰好在这个窗口里
+    // 拿到锁并建出 FIFO,随后被我们连 FIFO 带守卫一起删掉。
+    // 加锁顺序与 `UnixpipeRunGuard::acquire` 保持一致(先 stem lock,再兼容守卫),
+    // 否则两个方向的持锁顺序相反,会让正常启动误报"已被旧版本 daemon 占用"。
     if entry.legacy_location {
+        let Some(_legacy_guard) = acquire_flock(&legacy_guard_path(&entry.pipe_base), true)? else {
+            return Ok(None);
+        };
         return remove_entry_files(&entry.pipe_base).map(Some);
     }
 
-    // 新格式 owner 还要再抢一次 `<stem>.lock`: 两个方向都锁住才敢删。
     let paths = paths_for_base(&entry.pipe_base)?;
     let Some((_owner_lock, _previous)) = acquire_owner_lock(&paths.lock)? else {
         return Ok(None);
+    };
+    let _legacy_guard = if base_is_shared(&entry.pipe_base) {
+        match acquire_flock(&legacy_guard_path(&entry.pipe_base), true)? {
+            Some(file) => Some(file),
+            None => return Ok(None),
+        }
+    } else {
+        None
     };
 
     remove_entry_files(&entry.pipe_base).map(Some)

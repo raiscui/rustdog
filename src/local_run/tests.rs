@@ -273,12 +273,10 @@ fn twenty_start_stop_cycles_should_not_accumulate_files() {
             vec![
                 "lab__cycle.lab.lock".to_string(),
                 "lab__cycle.lab.meta".to_string(),
-                "lab__cycle.lab.pipe.rdog-owner.pid".to_string(),
                 "lab__cycle.lab.pipe_downlink".to_string(),
                 "lab__cycle.lab.pipe_uplink".to_string(),
             ],
-            "第 {round} 轮: 1 逻辑 pipe(Zenoh 派生 2 个 FIFO) + 1 lock + 1 meta \
-             + 1 跨版本兼容守卫,不能多也不能少"
+            "第 {round} 轮: 1 逻辑 pipe(Zenoh 派生 2 个 FIFO) + 1 lock + 1 meta,不能多也不能少"
         );
         drop(guard);
         assert!(
@@ -576,7 +574,8 @@ fn removal_should_be_skipped_when_a_new_owner_takes_the_lock() {
 #[test]
 fn new_owner_should_block_an_old_binary_on_the_same_base() {
     let dirs = TestDirs::new("compat");
-    let base = dirs.run.join("shared").join("lab__compat.lab.pipe");
+    // 兼容守卫只作用于"共享显式 base"(运行目录之外): 派生路径旧二进制算不出来。
+    let base = dirs.root.join("shared").join("control.sock");
     fs::create_dir_all(base.parent().expect("parent")).expect("parent dir");
 
     let guard =
@@ -602,6 +601,25 @@ fn new_owner_should_block_an_old_binary_on_the_same_base() {
     drop(guard);
     // 退出后守卫文件不残留,旧二进制可以正常接管。
     assert!(!legacy_guard.exists(), "新 owner 退出后兼容守卫不该留下");
+}
+
+#[test]
+fn derived_base_should_not_create_a_legacy_compat_guard() {
+    let dirs = TestDirs::new("derived");
+    let paths = unixpipe_run_paths("lab", "derived.lab").expect("paths");
+    let guard = UnixpipeRunGuard::acquire(paths.clone(), "lab", "derived.lab").expect("acquire");
+
+    assert!(
+        !legacy_guard_path(&paths.base).exists(),
+        "派生路径不该留旧格式守卫: 旧二进制推导不出这条路,没有跨版本冲突"
+    );
+    assert!(!base_is_shared(&paths.base));
+    drop(guard);
+    assert!(
+        dir_file_names(&dirs.run).is_empty(),
+        "派生路径退出后目录应为空: {:?}",
+        dir_file_names(&dirs.run)
+    );
 }
 
 #[test]
