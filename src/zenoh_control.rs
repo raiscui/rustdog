@@ -76,6 +76,7 @@ pub struct ZenohDaemonRuntimeConfig {
     pub namespace: String,
     pub daemon_name: String,
     pub listen_endpoints: Vec<String>,
+    pub scout_interfaces: Option<String>,
     pub request_timeout_ms: u64,
     pub startup_guard_window_ms: u64,
     pub key_input_events: KeyInputEventsConfig,
@@ -256,6 +257,7 @@ pub fn run_router_daemon(config: ZenohDaemonRuntimeConfig, shell: &str) -> io::R
         &listen_endpoints,
         auth_users_file.as_deref(),
         tls_listen.as_ref(),
+        config.scout_interfaces.as_deref(),
     )?;
 
     // FIFO 由 Zenoh 的 unixpipe link 创建,mode 受 umask 影响(常见 0644)。

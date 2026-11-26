@@ -201,6 +201,7 @@ pub fn run_zenoh_router(
             namespace: config.zenoh.namespace,
             daemon_name,
             listen_endpoints: composed_listen.listen_endpoints,
+            scout_interfaces: config.zenoh.scout_interfaces,
             request_timeout_ms: config.zenoh.request_timeout_ms,
             startup_guard_window_ms: config.zenoh.startup_guard_window_ms,
             key_input_events: config.zenoh.key_input_events,

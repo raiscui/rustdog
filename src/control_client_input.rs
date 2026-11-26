@@ -56,11 +56,10 @@ fn for_each_buffered_line(
     mut on_line: impl FnMut(String) -> io::Result<ControlStdinAction>,
 ) -> io::Result<()> {
     let mut reader = io::BufReader::new(stdin.lock());
-    let mut buf = Vec::new();
-    let mut sink = Vec::new();
+    let mut line_state = crate::control_line_read::LineReadState::new();
 
     loop {
-        match read_line_limited(&mut reader, &mut buf, &mut sink, MAX_CONTROL_MESSAGE_BYTES)? {
+        match read_line_limited(&mut reader, &mut line_state, MAX_CONTROL_MESSAGE_BYTES)? {
             // 超限行: 已消费丢弃, 提示后继续读 —— 控制端敲了一行超长文本
             // 不应该导致整个会话退出。
             LineOutcome::TooLong { consumed_bytes } => {
