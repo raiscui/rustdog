@@ -24,6 +24,7 @@ use tokio::{
 };
 
 use crate::{
+    bulk_path::{BulkDecision, PathCapability, PathClass},
     control_core::execute_ping,
     control_protocol::{parse_control_line, ControlCommand, ControlParseResult, ControlRequest},
     control_session::ControlPeerSession,
@@ -48,20 +49,28 @@ mod registry_tests;
 mod frame_tests;
 
 #[cfg(test)]
+mod bulk_tests;
+
+#[cfg(test)]
 mod readonly_tests {
     #[test]
-    fn default_iroh_gate_rejects_pty() {
-        assert!(super::ping_only("@ping").is_ok());
+    fn default_iroh_gate_admits_only_ping() {
+        assert!(super::readonly_request("@ping").is_ok());
+        for line in ["@window-find", "@capabilities", "ls -la"] {
+            let err = super::readonly_request(line).unwrap_err();
+            assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied, "{line}");
+            assert_eq!(err.to_string(), "iroh_readonly_ping_required", "{line}");
+        }
         let open = crate::pty_control::render_pty_open_line(&["python3".into()], 80, 24).unwrap();
-        let err = super::ping_only(&open).unwrap_err();
+        let err = super::readonly_request(&open).unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
         assert_eq!(err.to_string(), "iroh_readonly_ping_required");
     }
 
     #[test]
     fn default_iroh_gate_refuses_bulk_with_the_path_pin_code() {
-        // bulk 动词在这条通道上必须回**能力事实**的稳定码, 而不是通用的"只许 ping":
-        // 前者告诉调用方换一条能钉住路径的传输, 后者只说这条通道不许。
+        // 默认 lane 没有租约与主体判定 (裁定 F), 所以 bulk 只走准入 lane。这里的拒码是
+        // **能力事实**: 换一条承载 bulk 的通道, 而不是"这条策略不许"。
         for line in [
             r#"@put-file:{"transfer_id":"t","path":"/tmp/a","size":1,"resume":false}"#,
             r#"@get-file:{"transfer_id":"t","path":"/tmp/a"}"#,
@@ -71,7 +80,7 @@ mod readonly_tests {
             r#"@file-cancel:{"transfer_id":"t"}"#,
             "@file-list",
         ] {
-            let err = super::ping_only(line).unwrap_err();
+            let err = super::readonly_request(line).unwrap_err();
             assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied, "{line}");
             assert_eq!(
                 err.to_string(),
@@ -79,6 +88,33 @@ mod readonly_tests {
                 "{line}"
             );
         }
+    }
+
+    #[test]
+    fn the_default_lane_declares_that_it_neither_pins_nor_checks() {
+        // 拒绝码必须由声明查表得出, 不是手写字符串: 把声明改成"逐 chunk 检查", 这条
+        // lane 就会开始按路径类别判定 —— 那是另一件事, 得有租约面才谈得上 (裁定 F)。
+        let declared = super::DEFAULT_LANE_PATH_CAPABILITY;
+        assert!(declared.path_aware);
+        assert!(!declared.bulk_path_pin);
+        assert!(!declared.bulk_path_checked_per_chunk);
+        assert_eq!(
+            super::default_lane_bulk_refusal(),
+            crate::bulk_path::IROH_BULK_PATH_PIN_UNAVAILABLE
+        );
+    }
+
+    #[test]
+    fn one_shot_entry_still_refuses_bulk() {
+        // `run_control` 发一行、只认 pong: 一次 bulk 尝试要 open / chunk / end 多行,
+        // 这条入口给不了, 所以它连 `@put-file` 都不收。
+        let err = super::ping_request(
+            r#"@put-file:{"transfer_id":"t","path":"/tmp/a","size":1,"resume":false}"#,
+        )
+        .unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
+        assert_eq!(err.to_string(), "iroh_readonly_ping_required");
+        assert!(super::ping_request("@ping").is_ok());
     }
 }
 
@@ -419,54 +455,224 @@ fn name_valid(name: &str) -> bool {
     })
 }
 
-/// bulk 动词在这条通道上不存在 (这条 lane 没有 bulk 数据面, 也就谈不上把连接钉在直连上)。
+/// 未开准入策略的默认 lane 的请求门禁: 只收 `@ping`。
 ///
-/// 用 §2.2 的稳定码 `iroh_bulk_path_pin_unavailable` 而不是通用的 `iroh_readonly_ping_required`:
-/// 前者告诉调用方"换一条支持钉住路径的传输", 后者只说"这条通道不许"。两者对排查的意义不同 ——
-/// 前者是能力事实, 后者是准入策略。
-/// bulk 在这条通道上的拒绝码**由判定表给出**, 不在这里手写字符串:
-/// 这条 lane 的能力是 `path_aware=true / bulk_path_pin=false`, 按 §3.1 它连采样都不必做,
-/// 直接就是 `iroh_bulk_path_pin_unavailable`。查表让"拒绝码"与"能力声明"只有一个真相源。
-fn bulk_refusal_code() -> &'static str {
-    match crate::bulk_path::decide(
-        crate::bulk_path::PathCapability::PATH_AWARE_UNPINNED,
-        crate::bulk_path::PathClass::Unknown,
-        false,
-    ) {
-        crate::bulk_path::BulkDecision::Refused(code) => code,
-        // 走到这里只可能是判决表把"有 relay 跳但钉不住"改成了放行；但这条 lane **无论如何都不承载
-        // bulk 数据面**, 所以仍然拒。这个兜底是 **lane 的能力事实** (没有 bulk 数据面), 不是判决
-        // 结果 —— 两者今天恰好给出同一个码, 但说的不是同一件事。
-        crate::bulk_path::BulkDecision::Allowed => crate::bulk_path::IROH_BULK_PATH_PIN_UNAVAILABLE,
-    }
-}
-
-fn is_bulk_command(command: &ControlCommand) -> bool {
-    matches!(
-        command,
-        ControlCommand::FilePutFile(_)
-            | ControlCommand::FileGetFile(_)
-            | ControlCommand::FileChunk(_)
-            | ControlCommand::FileEnd(_)
-            | ControlCommand::FileRead(_)
-            | ControlCommand::FileCancel(_)
-            | ControlCommand::FileList
-    )
-}
-
-fn ping_only(line: &str) -> io::Result<ControlRequest> {
+/// bulk 只走**准入** lane (daemon profile 给了 `policy_file`) —— 那条路径上有租约与主体
+/// 判定, 不带策略的入口没有。所以这里对 bulk 回的是**能力码**(由本 lane 的能力声明查表
+/// 得出, 见 `default_lane_bulk_refusal`), 而不是通用的"只许 ping": 前者告诉调用方换一条
+/// 承载 bulk 的通道, 后者只说这条不许。
+fn readonly_request(line: &str) -> io::Result<ControlRequest> {
     match parse_control_line(line)? {
         ControlParseResult::Control(request) if matches!(request.command, ControlCommand::Ping) => {
             Ok(request)
         }
-        ControlParseResult::Control(request) if is_bulk_command(&request.command) => Err(
-            io::Error::new(io::ErrorKind::PermissionDenied, bulk_refusal_code()),
-        ),
+        ControlParseResult::Control(request)
+            if crate::control_core::is_file_transfer_command(&request.command) =>
+        {
+            Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                default_lane_bulk_refusal(),
+            ))
+        }
         _ => Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
             "iroh_readonly_ping_required",
         )),
     }
+}
+
+/// 一次性入口 (`run_control`, 客户端发一行、只认 `pong`) 的请求门禁。
+///
+/// 这条入口只发一行, 而一次 bulk 尝试是 open / chunk / end 多行, 所以它连 `@put-file`
+/// 都不收。它和 `readonly_request` 的区别不是能力, 是"这条入口只问一次"。
+fn ping_request(line: &str) -> io::Result<ControlRequest> {
+    match parse_control_line(line)? {
+        ControlParseResult::Control(request) if matches!(request.command, ControlCommand::Ping) => {
+            Ok(request)
+        }
+        _ => Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "iroh_readonly_ping_required",
+        )),
+    }
+}
+
+/// 默认 lane 的能力声明: 有 relay 跳, **既钉不住也不逐 chunk 检查** ⇒ 不承载 bulk。
+///
+/// 这是适配器声明, 不是策略开关: 不带 `policy_file` 的入口没有租约与主体判定, 它就没有
+/// 让 bulk 字节上线的授权面。
+const DEFAULT_LANE_PATH_CAPABILITY: PathCapability = PathCapability::PATH_AWARE_UNPINNED;
+
+/// 准入 lane 的能力声明: 有 relay 跳, 传输层**钉不住**, 应用层在 open 与每个 chunk 边界
+/// 各检查一次 (`BulkPathGate`)。
+///
+/// 刻意**不是** `PATH_AWARE_PINNED`: `conn.paths()` 是事后快照, 它禁不了 QUIC 的路径迁移,
+/// 也看不见排队/重传里改走 relay 的字节 (§3.5 的两条 pin 义务)。把逐 chunk 检查登记成 pin,
+/// 就是拿"每个边界上都直连"去顶替"边界之间不会改路"。真做传输层 pin 另开票。
+const ADMITTED_LANE_PATH_CAPABILITY: PathCapability =
+    PathCapability::PATH_AWARE_CHECKED_PER_CHUNK;
+
+/// 默认 lane 拒绝 bulk 的码: 查自己声明的能力, 不手写字符串。
+fn default_lane_bulk_refusal() -> &'static str {
+    match crate::bulk_path::decide(DEFAULT_LANE_PATH_CAPABILITY, PathClass::Unknown, false) {
+        BulkDecision::Refused(code) => code,
+        // 走到这里说明判定表把"既不钉也不查"改成了放行 —— 但这条 lane 仍然不承载 bulk:
+        // 拒绝依据是**授权面**(没有租约与主体判定), 不是判定表结果。今天两者恰好同码。
+        BulkDecision::Allowed => crate::bulk_path::IROH_BULK_PATH_PIN_UNAVAILABLE,
+    }
+}
+
+/// 读路径的有界重试: 握手刚完成时路径可能还没就绪, **一次**读不出不等于"问不到类别"。
+///
+/// 与客户端 `await_route` 同形 (20 × 50ms); 重试穷尽才 fall back `Unknown` (fail-closed)。
+const PATH_SAMPLE_ATTEMPTS: usize = 20;
+const PATH_SAMPLE_STEP: Duration = Duration::from_millis(50);
+
+/// 门禁读路径的采样面: 生产上读这条 iroh 连接**此刻**选中的路径。
+///
+/// `Script` 只给测试用 —— 回环拓扑上 `route` 只会给出 `direct`, 另外三种读数
+/// (relay / 读不出 / 先 direct 后掉 relay) 在回环里造不出来, 而它们正是门禁的
+/// 主体。把读数做成可按顺序钉住的, 而不是把判定逻辑抄第二份进测试。
+enum PathSampler<'a> {
+    Lane { conn: &'a Connection, routable: bool },
+    #[cfg(test)]
+    Script(Mutex<Vec<PathClass>>),
+}
+
+impl PathSampler<'_> {
+    fn sample(&self) -> PathClass {
+        match self {
+            Self::Lane { conn, routable } => {
+                for attempt in 0..PATH_SAMPLE_ATTEMPTS {
+                    if let Ok(observed) = route(conn, *routable) {
+                        match observed {
+                            Route::Direct => return PathClass::Direct,
+                            Route::Relay => return PathClass::Relay,
+                            // `route` 从不返回 auto; 若哪天返回, 按读不出处理。
+                            Route::Auto => break,
+                        }
+                    }
+                    if attempt + 1 < PATH_SAMPLE_ATTEMPTS {
+                        std::thread::sleep(PATH_SAMPLE_STEP);
+                    }
+                }
+                PathClass::Unknown
+            }
+            // 按顺序取读数; 用完最后一个就一直用它 (单读数的用例写一个元素即可)。
+            #[cfg(test)]
+            Self::Script(readings) => {
+                let mut readings = readings.lock().expect("path readings poisoned");
+                if readings.len() > 1 {
+                    readings.remove(0)
+                } else {
+                    readings[0]
+                }
+            }
+        }
+    }
+}
+
+/// 这条请求是本次尝试的开头, 还是它的后续一步。
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum BulkStep {
+    Open,
+    Continue,
+}
+
+/// bulk 的逐 chunk 检查门禁 (§3.1): open 与每个 chunk 边界各采样、各判一次。
+///
+/// `attempts` 记的是**每条在途传输是否曾观测到 direct**, 不是"当前是否 direct" ——
+/// 只有前者能把"中途掉 relay" (`iroh_direct_path_lost`) 与"从来没有直连"
+/// (`iroh_direct_path_unavailable`) 分成两个码。按键而不是单槽, 是因为同一条连接上
+/// 可以交错两条传输 (A 的 chunk、B 的 chunk), 单槽会让 B 的 open 把 A 的"曾直连"清掉。
+///
+/// **这层不做传输层 pin** (`bulk_path_pin = false`): 边界之间的排队与重传它看不到,
+/// 也禁不了 QUIC 的路径迁移 (§3.5)。
+struct BulkPathGate {
+    capability: PathCapability,
+    attempts: HashMap<String, bool>,
+}
+
+impl BulkPathGate {
+    fn new(capability: PathCapability) -> Self {
+        Self {
+            capability,
+            attempts: HashMap::new(),
+        }
+    }
+
+    /// 一次采样 → 一次判定。
+    ///
+    /// open **无条件**把这条传输复位: 同 id 的幂等重试是**新的一次尝试**, 继承上一次的
+    /// "曾直连"会把 `unavailable` 误判成 `lost`。判定为拒时把条目移掉 —— 一次失败的尝试
+    /// 不该留下可供下一次继承的状态。
+    fn admit(&mut self, step: BulkStep, attempt: Option<&str>, observed: PathClass) -> BulkDecision {
+        let mut seen = match (step, attempt) {
+            (BulkStep::Open, Some(id)) => {
+                self.attempts.insert(id.to_owned(), false);
+                false
+            }
+            (_, Some(id)) => *self.attempts.entry(id.to_owned()).or_insert(false),
+            // 没有 transfer_id 就分不清是哪一次尝试: 按"未观测到直连"判 (fail-closed),
+            // 执行器随后按它自己的规则拒这条载荷。
+            (_, None) => false,
+        };
+        if observed == PathClass::Direct {
+            seen = true;
+        }
+        if let Some(id) = attempt {
+            self.attempts.insert(id.to_owned(), seen);
+        }
+        let decision = crate::bulk_path::decide(self.capability, observed, seen);
+        if decision != BulkDecision::Allowed {
+            if let Some(id) = attempt {
+                self.attempts.remove(id);
+            }
+        }
+        decision
+    }
+}
+
+/// 一条 bulk 请求过不过路径门禁; `Some(code)` = 拒, 码取自判定表。
+///
+/// `@file-list` / `@file-cancel` 不搬字节, 因此不过路径门禁: 拒一条 cancel 只会
+/// 把半成品留在盘上, 换不来任何"字节没走 relay"的保证。
+///
+/// 注意门禁的粒度: 上传方向的 chunk 载荷内联在请求行里, daemon 读到 `transfer_id` 之前
+/// 那一 chunk 的字节**已经过线** (at most one chunk in flight)。"上传方向线上一字节为零"
+/// 只能由发送端的 pre-send 门禁保证, 不在这一层。
+fn gate_bulk(
+    gate: &mut BulkPathGate,
+    sampler: &PathSampler,
+    command: &ControlCommand,
+) -> Option<&'static str> {
+    use crate::control_core::FileTransferVerb;
+
+    let (step, transfer_id) = match crate::control_core::file_transfer_verb(command)? {
+        FileTransferVerb::PutFile(payload) | FileTransferVerb::GetFile(payload) => {
+            (BulkStep::Open, payload_transfer_id(payload))
+        }
+        FileTransferVerb::Chunk(payload)
+        | FileTransferVerb::End(payload)
+        | FileTransferVerb::Read(payload) => (BulkStep::Continue, payload_transfer_id(payload)),
+        FileTransferVerb::List | FileTransferVerb::Cancel(_) => return None,
+    };
+    match gate.admit(step, transfer_id.as_deref(), sampler.sample()) {
+        BulkDecision::Allowed => None,
+        BulkDecision::Refused(code) => Some(code),
+    }
+}
+
+/// 载荷里的 `transfer_id` —— 一次尝试的身份。
+///
+/// 载荷本身不合法时读不到, 于是 attempt 为 `None`: 门禁照做, 执行器随后按它自己的规则
+/// 拒这条请求。这里不替执行器判载荷合法性。
+fn payload_transfer_id(payload: &str) -> Option<String> {
+    serde_json::from_str::<serde_json::Value>(payload)
+        .ok()?
+        .get("transfer_id")?
+        .as_str()
+        .map(str::to_owned)
 }
 
 fn certificates(path: &Path) -> io::Result<Vec<rustls::pki_types::CertificateDer<'static>>> {
@@ -1253,7 +1459,11 @@ pub(crate) fn run_daemon(path: &Path) -> Result<()> {
         });
         log::info!(
             "iroh daemon registered pty={}",
-            if admission.is_some() { "admitted" } else { "ping-only" }
+            if admission.is_some() {
+                "admitted (ping + pty + bulk)"
+            } else {
+                "ping-only (bulk needs an admitted lane)"
+            }
         );
         let mut tasks = JoinSet::new();
         loop {
@@ -1304,17 +1514,26 @@ pub(crate) fn run_daemon(path: &Path) -> Result<()> {
                             let peer = conn.remote_id();
                             let served = match admission {
                                 Some(state) => {
+                                    let probe = conn.clone();
                                     tokio::task::spawn_blocking(move || {
-                                        serve_admitted(transport, peer, path, state)
+                                        let sampler = PathSampler::Lane {
+                                            conn: &probe,
+                                            routable,
+                                        };
+                                        let mut gate =
+                                            BulkPathGate::new(ADMITTED_LANE_PATH_CAPABILITY);
+                                        serve_admitted(
+                                            transport, peer, path, state, &sampler, &mut gate,
+                                        )
                                     })
                                     .await?
                                 }
-                                None => {
-                                    tokio::task::spawn_blocking(move || {
-                                        serve_ping(transport, path)
-                                    })
-                                    .await?
-                                }
+                                // 默认 lane 不承载 bulk (裁定 F): 没有租约与主体判定的入口上
+                                // 不放字节, 也就不需要路径采样。
+                                None => tokio::task::spawn_blocking(move || {
+                                    serve_ping(transport, path)
+                                })
+                                .await?,
                             };
                             match served {
                                 Err(err) if err.kind() == io::ErrorKind::PermissionDenied => {
@@ -1343,11 +1562,15 @@ pub(crate) fn run_daemon(path: &Path) -> Result<()> {
     })
 }
 
+/// 未开准入策略时的默认 lane: 只答一次 `@ping`。
+///
+/// bulk 只走准入 lane —— 那条路径上有租约与主体判定; 这个入口没有, 所以它连字节都不收
+/// (拒绝码由 `DEFAULT_LANE_PATH_CAPABILITY` 查表得到)。
 fn serve_ping(mut transport: ControlTransport, path: &'static str) -> io::Result<()> {
     let line = transport
         .read_message()?
         .ok_or(io::ErrorKind::UnexpectedEof)?;
-    let request = ping_only(&line)?;
+    let request = readonly_request(&line)?;
     let outcome = execute_ping(request.request_id, "");
     if let Some(id) = request.request_id {
         log::info!("iroh ping dispatch path={path} id={id}");
@@ -1357,7 +1580,7 @@ fn serve_ping(mut transport: ControlTransport, path: &'static str) -> io::Result
 }
 
 pub(crate) fn run_control(path: &Path, name: &str, line: &str) -> Result<()> {
-    let request = ping_only(line)?;
+    let request = ping_request(line)?;
     if !name_valid(name) {
         return Err("iroh target must be NAMESPACE/NAME".into());
     }
@@ -1447,8 +1670,9 @@ pub(crate) fn run_control(path: &Path, name: &str, line: &str) -> Result<()> {
 // ---------------------------------------------------------------------------
 // Admitted PTY lane
 //
-// The formal iroh entry stays ping-only unless the daemon profile names an
-// admission policy file. When it does, every connection presents a locally
+// The formal iroh entry answers ping only unless the daemon profile names an
+// admission policy file; bulk rides the admitted lane and nowhere else. When the
+// profile does name one, every connection presents a locally
 // signed grant, the daemon serves the request through the same PTY runtime the
 // other control lanes use, and one sweeper reclaims sessions whose lease ran out
 // or whose peer was revoked, with no further request needed.
@@ -1460,7 +1684,7 @@ const DEFAULT_LEASE_TTL_MS: u64 = 60_000;
 const RENEW_STEP: u32 = 3;
 const RENEW_POLL: Duration = Duration::from_millis(100);
 const LANE_REFUSED_CODE: i32 = 66;
-const LANE_REFUSED: &str = "iroh_admitted_lane_supports_ping_and_pty_only";
+const LANE_REFUSED: &str = "iroh_admitted_lane_supports_ping_pty_and_bulk_only";
 /// A lease holds one PTY session, so a second open has to say so plainly.
 const LEASE_BUSY: (i32, &str) = (66, "iroh_lease_session_conflict");
 const SUBJECT_REFUSED_CODE: i32 = 43;
@@ -1532,6 +1756,8 @@ fn serve_admitted(
     peer: EndpointId,
     path: &'static str,
     admission: Arc<Mutex<admission::Admission>>,
+    sampler: &PathSampler,
+    gate: &mut BulkPathGate,
 ) -> io::Result<()> {
     transport.set_read_timeout(Some(HANDSHAKE_TIMEOUT))?;
     log::info!("iroh admitted lane reading the handshake");
@@ -1554,7 +1780,9 @@ fn serve_admitted(
                 format!("iroh ping refused by the local policy: peer={peer}"),
             ));
         }
-        if let Ok(request) = ping_only(&first) {
+        // bulk 要过租约 (`require_active`) 与路径门禁, 所以这里只认 ping ——
+        // 未握手的首行若放 bulk 进来, 等于绕开租约。
+        if let Ok(request) = ping_request(&first) {
             let outcome = execute_ping(request.request_id, "");
             ControlPeerSession::new("iroh-admitted").dispatch_outcome(outcome, &mut transport)?;
             return transport.close();
@@ -1588,7 +1816,7 @@ fn serve_admitted(
     }
     transport.set_read_timeout(None)?;
     log::info!("iroh session admitted peer={peer} path={path}");
-    let result = serve_lane(&mut transport, peer, &lease, &admission);
+    let result = serve_lane(&mut transport, peer, &lease, &admission, sampler, gate);
     result.and(transport.close())
 }
 
@@ -1709,6 +1937,8 @@ fn serve_lane(
     peer: EndpointId,
     lease: &str,
     admission: &Arc<Mutex<admission::Admission>>,
+    sampler: &PathSampler,
+    gate: &mut BulkPathGate,
 ) -> io::Result<()> {
     let subject = peer.to_string();
     loop {
@@ -1944,8 +2174,29 @@ fn serve_lane(
                     }
                 }
             }
-            other if is_bulk_command(&other) => {
-                refuse_frame(transport, None, LANE_REFUSED_CODE, bulk_refusal_code())?
+            other if crate::control_core::is_file_transfer_command(&other) => {
+                // bulk 与 PTY 一样要过租约: 一条过期/被撤的会话不该还能搬字节。
+                if let Err(rejection) = require_active(admission, peer, lease) {
+                    let (code, reason) = rejection.code_reason();
+                    refuse_frame(transport, request.request_id, code as i32, reason)?;
+                    continue;
+                }
+                if let Some(code) = gate_bulk(gate, sampler, &other) {
+                    log::info!("iroh bulk refused code={code} peer={peer}");
+                    refuse_frame(transport, request.request_id, LANE_REFUSED_CODE, code)?;
+                    continue;
+                }
+                // 谓词与执行入口共用 `control_core::file_transfer_verb`, 所以这里必然是
+                // `Some`; 仍不 `expect` —— 这条分支跑在 spawn_blocking 里, panic 会直接
+                // 断掉连接, 而"看起来不可能"的分支正是最值得留一条诚实出口的地方。
+                let Some(outcome) = crate::control_core::execute_file_transfer_request(
+                    request.request_id,
+                    &other,
+                ) else {
+                    refuse_frame(transport, request.request_id, LANE_REFUSED_CODE, LANE_REFUSED)?;
+                    continue;
+                };
+                ControlPeerSession::new("iroh-admitted").dispatch_outcome(outcome, transport)?;
             }
             _ => refuse_frame(transport, None, LANE_REFUSED_CODE, LANE_REFUSED)?,
         }

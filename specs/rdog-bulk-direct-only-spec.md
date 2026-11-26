@@ -76,19 +76,26 @@ P7 第 3 项今天**既不可验证也不可证伪**: 候选没有任何 bulk �
 
 路径类别是**传输的属性**, 不是控制协议的属性. 现有四个传输适配器里只有一个有路径概念:
 
-**三格的定义与读者 (唯一登记处是 `src/bulk_path.rs` 的模块文档, 这里只引用)**: `path_aware` 是
-**传输适配器**的拓扑属性 (这条链路上有没有 relay 跳), `bulk_path_pin` 是适配器能否把 bulk 连接钉在
-直连上 (禁止迁移、排队与重传不得改走 relay), 两者由门禁 `decide()` 读; `path_class` 是**本次尝试
-此刻**观测到的类别, 由传输入口在 open 与每个 chunk 边界读。读到 `path_aware=false` ⇒ 放行并记
-`not_applicable`; 读到 `path_aware=true && bulk_path_pin=false` ⇒ **拒绝** (不采样也不放行);
-读到 `unknown` ⇒ **拒绝** (fail-closed, 永不强转 `direct`)。
+**四格的定义与读者 (唯一登记处是 `src/bulk_path.rs` 的模块文档, 这里只引用)**: `path_aware` 是
+**传输适配器**的拓扑属性 (这条链路上有没有 relay 跳); `bulk_path_pin` 是**传输层**能否把 bulk 连接
+钉在直连上 (禁止迁移、排队与重传不得改走 relay); `bulk_path_checked_per_chunk` 是**应用层**会不会在
+open 与每个 chunk 边界采样、读到非 `direct` 即拒; `path_class` 是**本次尝试此刻**观测到的类别, 由
+传输入口在 open 与每个 chunk 边界读。
 
-| 传输 | `path_aware` | `bulk_path_pin` | 说明 |
-| --- | --- | --- | --- |
-| TCP (`ControlInvocation::Tcp`) | false | — | 单跳 socket, 无 relay 概念 |
-| WebSocket (`ControlInvocation::WebSocket`) | false | — | 同上 |
-| Zenoh (`ControlInvocation::Zenoh` / `ZenohLocal`) | false | — | router 是转发跳, 但不是 iroh relay, 没有 direct/relay 分类 |
-| iroh (RAI-413 落地, 今天不在 main) | true | **必须为 true** | QUIC, 有 `iroh_path=direct\|relay`; `bulk_path_pin` 见 §3.5 |
+- `path_aware=false` ⇒ 放行并记 `not_applicable`;
+- `path_aware=true` 且 **`bulk_path_pin=false` 且 `bulk_path_checked_per_chunk=false`** ⇒ **拒绝**
+  (既不钉也不查, 采样到 direct 也不代表之后的字节);
+- `path_aware=true` 且 `bulk_path_checked_per_chunk=true` ⇒ 按 `path_class` 判定 (见 §3.1), 但
+  **不得**因此主张"连接被钉在直连上" (§3.5);
+- 读到 `unknown` ⇒ **拒绝** (fail-closed, 永不强转 `direct`)。
+
+| 传输 | `path_aware` | `bulk_path_pin` | `bulk_path_checked_per_chunk` | 说明 |
+| --- | --- | --- | --- | --- |
+| TCP (`ControlInvocation::Tcp`) | false | — | — | 单跳 socket, 无 relay 概念 |
+| WebSocket (`ControlInvocation::WebSocket`) | false | — | — | 同上 |
+| Zenoh (`ControlInvocation::Zenoh` / `ZenohLocal`) | false | — | — | router 是转发跳, 但不是 iroh relay, 没有 direct/relay 分类 |
+| iroh 默认 lane (无 `policy_file`) | true | false | **false** | 不承载 bulk: 回 `iroh_bulk_path_pin_unavailable` (没有租约与主体判定的入口不放字节) |
+| iroh 准入 lane (有 `policy_file`) | true | false | **true** | 逐 chunk 检查; **不是** pin, 见 §3.5 与 §3.1 最后两行 |
 
 `path_aware=false` 的传输上, "relay 字节为零"是**拓扑上不存在**的命题 (没有 relay 跳),
 快照记 `path_class:"not_applicable"`, 判定门禁不适用. 这一条必须写在验收里,
@@ -122,7 +129,7 @@ P7 第 3 项今天**既不可验证也不可证伪**: 候选没有任何 bulk �
 | `iroh_direct_path_unavailable` | 路径 (`iroh_*`) | open 时观测到没有直连, 当前走 relay (§3.1) | 是 | 路径变直连后可 (D2) |
 | `iroh_direct_path_lost` | 路径 | 直连曾建立, 中途丢失 (§3.1) | 是 (本次尝试) | 可, 半成品按 §2.5 B3 保留到窗口末 |
 | `iroh_path_unknown` | 路径 | 路径类别读不出 (§3.1) | 是 | 可, 但先修路径可观测性 |
-| `iroh_bulk_path_pin_unavailable` | 路径 | 传输是路径感知的, 但钉不住 bulk 连接 (§3.5) | 是 | 不可, 除非传输侧补上路径 pin |
+| `iroh_bulk_path_pin_unavailable` | 路径 | 该入口既不声明传输层 pin, 也不做逐 chunk 检查 (§3.5); 今天只有默认入口 (`serve_ping`) 返它 | 是 | 不可, 换到逐 chunk 检查的准入 lane, 或等传输层 pin (RAI-501) |
 | `file_transfer_id_in_use` | 会话 | open 时该 `transfer_id` 已有活跃会话 (§2.5 A2) | 是 | 可, 先 `@file-cancel` 再重开 |
 | `file_transfer_path_in_use` | 会话 | open 时另一条活跃会话已持有同一暂存路径 (§2.5 A2b) | 是 | 可, 等那条完成或取消它 |
 | `bulk_session_limit_reached` | 会话 | 活跃会话数超过 `file_transfer.max_concurrent_sessions` (§2.4) | 是 | 可, 等已有会话收尾 |
@@ -332,8 +339,15 @@ B3 写成"唯一可续传的中止"是错的 —— 客户端被杀、断网、�
 | true | `direct` → `relay` | 中途 chunk 边界 | **中止**, 保留 partial 以便续传 | `iroh_direct_path_lost` |
 | true | `unknown` / 读取失败 / 未建立 | open / 任意 chunk 边界 | **拒绝** (fail-closed) | `iroh_path_unknown` |
 | true | `relay` → `direct` | 中途 | 不可达: relay 在 open 已被拒, 没有字节可以"切回" (见 §8 的 D2) | — |
-| true | 任意 | open, **但 `bulk_path_pin=false`** | **拒绝**, 该传输不得承载 bulk (见 §3.5) | `iroh_bulk_path_pin_unavailable` |
+| true | 任意 | open, **`bulk_path_pin=false` 且 `bulk_path_checked_per_chunk=false`** | **拒绝**, 该传输不得承载 bulk (见 §3.5) | `iroh_bulk_path_pin_unavailable` |
+| true | `direct` / `relay` / `unknown` | open / 任意 chunk 边界, **`bulk_path_checked_per_chunk=true`** | 与上四行**完全一致**: 逐 chunk 检查只改变"谁来判", 不改变判据 | 同上三码 |
 | false | `not_applicable` | open | **允许**, 证据记 `not_applicable` | — |
+
+读表时最容易错的两条, 一条关于 `unknown`, 一条关于"检查"与"钉住"的区别:
+
+- **`bulk_path_checked_per_chunk=true` 不等于 `bulk_path_pin=true`**. 前者是"每个边界查一次",
+  后者要求"边界之间的排队、重传与路径迁移都不改走 relay" (§3.5). 判据相同, 保证不同; 报告里
+  只能用前者措辞。
 
 三条读表时容易读错的:
 
@@ -352,7 +366,7 @@ B3 写成"唯一可续传的中止"是错的 —— 客户端被杀、断网、�
 - `iroh_direct_path_unavailable` —— 从来没有直连;
 - `iroh_direct_path_lost` —— 曾经有直连, 中途丢了;
 - `iroh_path_unknown` —— 根本问不到路径类别 (fail-closed);
-- `iroh_bulk_path_pin_unavailable` —— 有直连但钉不住 (见 §3.5).
+- `iroh_bulk_path_pin_unavailable` —— 该入口既不钉也不查, 因此不放字节 (见 §3.5).
 
 **刻意不加**第四个"bulk 被门禁拒绝"的码: 门禁相对路径层没有增加任何语义, 多一个码只会让
 "relay" 有两种写法, 逼调用方同时匹配两个. 会话级资源拒绝用 `bulk_session_limit_reached`,
@@ -391,28 +405,50 @@ daemon 都会把 178 MB 从 relay 推出去. 所以两端都要, 且两端都要
 
 | 要求 | 归属 | 不满足时 |
 | --- | --- | --- |
-| bulk 连接钉在直连路径上: 禁止路径迁移, 排队中与重传的字节不得改走 relay | RAI-413 传输适配器 (\`bulk_path_pin=true\`) | 该传输**拒绝**承载 bulk (\`iroh_bulk_path_pin_unavailable\`) |
-| 排队中与重传的字节计入 \`relay_tx_bytes\` / \`relay_rx_bytes\` | RAI-413 传输适配器 | 零值无法区分"没走 relay"与"没记账", 观测口径失效 |
-| \`path_aware=true\` 但 \`bulk_path_pin=false\` 的传输 | 本规格 | **拒绝** bulk, 不得退化成"应用层尽力而为" |
+| **逐 chunk 检查**: open 与每个 chunk 边界采样路径, 读到非 `direct` 即拒 | 承载 bulk 的入口 (应用层, 适配器声明 `bulk_path_checked_per_chunk=true`) | 该传输不得承载 bulk, 或只按路径类别判定并**如实登记它没做到的那一半** |
+| **传输层钉住**: 禁止路径迁移, 排队中与重传的字节不得改走 relay | RAI-413 传输适配器 (`bulk_path_pin=true`) | 该传输**拒绝**承载 bulk (`iroh_bulk_path_pin_unavailable`), 或只申报逐 chunk 检查 |
+| 排队中与重传的字节计入 `relay_tx_bytes` / `relay_rx_bytes` | RAI-413 传输适配器 | 零值无法区分"没走 relay"与"没记账", 观测口径失效 |
+| `path_aware=true` 且 `bulk_path_pin=false` 且 `bulk_path_checked_per_chunk=false` | 本规格 | **拒绝** bulk: 既不钉也不查, 采样到 direct 也不代表之后的字节 |
 
-第三行是关键: 宁可让 iroh 侧暂时不接受 bulk, 也不要让 bulk 接受一个"大致直连".
+四条读法 (第二与第三行是两条**独立**义务, 不能互相顶替):
 
-注意 \`bulk_path_pin\` 与 \`path_aware\` 是两个独立事实, 不能互相顶替:
+- `path_aware=false` 说的是**拓扑里没有 relay 跳** (TCP/WebSocket/Zenoh), 所以钉路径这件事不存在;
+- `bulk_path_checked_per_chunk=true` 说的是**每个边界都查过**, 边界之间的排队、重传与路径迁移仍未覆盖;
+- `bulk_path_pin=false` 说的是**没做到传输层那两条义务**, 所以不得用"检查过了"去主张"钉住了";
+- 把第三种当第一种, 就得到一条"看起来有门禁、其实只在边界上有"的路径; 把第二种当第三种, 则白扔了
+  它确实做到的那一半。两种错都在这一格上发生过, 所以能力是**三格**而不是一个布尔。
 
-- \`path_aware=false\` 说的是**拓扑里没有 relay 跳** (TCP/WebSocket/Zenoh), 所以钉路径这件事不存在;
-- \`path_aware=true\` 但 pin 不了, 说的是**有 relay 跳而钉不住**, 这不能借用前者的"允许".
+**当前落地形态 (2026-11-26 RAI-476 步骤 1+2, 按评审裁定回填).** iroh **准入 lane** 承载 bulk 数据面:
+七个 bulk 动词与 `@ping` 共用同一条连接, 每条 chunk 是一条独立请求行 (`serve_admitted`, 见
+`specs/rdog-iroh-admission-contract.md`); 未开准入策略的默认 lane 仍拒绝 bulk (`readonly_request` →
+`iroh_bulk_path_pin_unavailable`)。适配器声明是 `path_aware=true` / `bulk_path_pin=false` /
+`bulk_path_checked_per_chunk=true` (`src/control_iroh.rs` 的 `ADMITTED_LANE_PATH_CAPABILITY`):
 
-把后者当成前者, 就得到一条"看起来有门禁、其实没有"的路径, 而那正是本规格要否掉的东西.
+- open 与每个 chunk 边界各采样一次当前连接路径 (`route(&conn, routable)` → `PathClass`), 读不出先按
+  20 × 50ms 有界重试, 穷尽才 fall back `unknown`;
+- `direct` 放行; `relay` 拒 `iroh_direct_path_unavailable`; 读不出拒 `iroh_path_unknown`;
+- 本次尝试**曾**观测到 `direct`、之后掉成 `relay` ⇒ 拒 `iroh_direct_path_lost` (「曾直连」按
+  `transfer_id` 记录, **open 动词无条件复位**, 判定失败即移除该条记录);
+- `@file-list` / `@file-cancel` 不搬字节, 不过路径门禁: 拒一条 cancel 只会把半成品留在盘上.
 
-**今天这条不变量的落地形态要说准 (2026-11-26 实现阶段回填).** iroh lane 的准入面只有 `@ping` 与
-`@pty` (`ping_only` / `LANE_REFUSED`, 见 `specs/rdog-iroh-admission-contract.md`), bulk 动词在那条
-通道上根本不被接受; 也就是说"relay 上 bulk 字节为 0"今天由**能力拒绝**保证, 而不是由**路径判定**
-保证. 这不是权宜之计 —— 反过来"放行 bulk 再靠路径采样兜"会让这条不变量空真: 一次压根没发出字节的
-尝试当然记 0, 而空真的不变量在验收里和成立长得一模一样.
+**这一版没有做到的部分必须说准**: `conn.paths()` 是**事后快照**, 它既禁不了 QUIC 的路径迁移, 也看
+不见排队与重传里改走 relay 的字节; `iroh_bulk_path_pin_unavailable` 今天的含义是「这个入口既不钉也不
+查」—— 只有默认入口 (`serve_ping`) 返它, 准入 lane 靠逐 chunk 检查放行, 与 pin 无关. 真做传输层 pin
+另开票 (RAI-501). 结论的措辞上限是"**每个 chunk 边界上路径是直连**", 不得写成"连接被钉
+在直连上"、"relay 上 bulk 字节为 0" 或"迁移与重传已覆盖"。
 
-因此适配器今天的声明是 `path_aware=true` / `bulk_path_pin=false`, 落到 §3.1 的最后一行: 该 lane 上的
-bulk 一律以 `iroh_bulk_path_pin_unavailable` 拒绝. **适配器补上路径 pin 之后, 必须回来重写这一段的
-理由** —— 否则下一个读到 `bulk_path_pin=false` 的人会以为门禁坏了, 而不是"这条通道还没开 bulk".
+**门禁粒度 (上传方向尤其要写清)**: 上传 chunk 的载荷**内联在请求行里**, daemon 要先读到
+`transfer_id` 才能判 —— 那一 chunk 的字节在判定之前**已经过线**。所以本层的不变量是 **at most one
+chunk in flight**: 每个被拒的边界保证的是"这一 chunk 之后不再有字节", 不是"一字节都没上线"。
+"上传方向线上一字节为零"只能由**发送端的 pre-send 门禁**保证 (§3.4 的上传行), 不在本层。
+
+**验收边界 (别读过头)**: 上述事实的运行时证据只有**回环** (§8 的用例与 `src/control_iroh/bulk_tests.rs`)
+—— 回环拓扑只会给出 `direct`, 所以 `relay` / 读不出 / 中途掉路径三种读数由测试钉住喂进门禁, 不是
+真拓扑采样. 真机 (RAI-476 步骤 3+4) 的采样与两端快照 join 都还没做。
+
+上一版这一段写的是"bulk 在 lane 上根本不被接受, 不变量由**能力拒绝**保证", 再上一版把逐 chunk 检查
+登记成了 pin —— 两版都不再成立, 但各自当时都指出了真实的一半: 前者说明"没发字节"是最不空真的保证,
+后者说明"边界上都查过"确实是可观测的进步. 现在这一版把两半分开记, 不再用一半冒充另一半.
 
 
 ---
@@ -454,7 +490,8 @@ bulk 一律以 `iroh_bulk_path_pin_unavailable` 拒绝. **适配器补上路径 
   "transfer_id": "<string>",
   "direction": "put | get",
   "path_aware": true,
-  "bulk_path_pin": true,
+  "bulk_path_pin": false,
+  "bulk_path_checked_per_chunk": true,
   "path_class": "direct | relay | unknown | not_applicable",
   "direct_addr": "<脱敏后的对端直连地址, 仅 direct 时存在>",
   "bulk_bytes": 123,
@@ -513,23 +550,29 @@ relay 计数还没接线, 见 RAI-476):
 
 断言必须是**严格不等式** `> 0`. `>= 0` 的断言在计数器坏掉时照样通过, 等于没有正对照.
 
-> 实现状态 (2026-11-26): 判定表、三格语义与快照格式已落地在 `src/bulk_path.rs`, iroh lane 上的
-> bulk 动词已经按能力表以 `iroh_bulk_path_pin_unavailable` 拒绝。**正对照仍未执行** —— 它需要一条
-> 真的走 relay 的拓扑 (RAI-366), 在那之前"relay 上 bulk 字节为 0"这条不做结论。
+> 实现状态 (2026-11-26 更新): 判定表、四格语义与快照格式在 `src/bulk_path.rs`; iroh **准入 lane** 以
+> `path_aware=true` / `bulk_path_pin=false` / `bulk_path_checked_per_chunk=true` 承载 bulk, 并在 open
+> 与每个 chunk 边界读路径 (RAI-476 步骤 1+2, 按评审裁定回填)。**正对照仍未执行** —— 它需要一条真的
+> 走 relay 的拓扑 (RAI-366), 在那之前"relay 上 bulk 字节为 0"这条不做结论; 而且本版连传输层 pin 都
+> 没有, 所以那句结论的资格比上一版更低: 能主张的只有"每个边界上路径是直连"。
 >
-> **客户端门禁恒传 `established_direct = false`**, 所以 §2.5 D1 的「中途 direct → relay」
-> (`iroh_direct_path_lost`) **今天不可产生**: 判定表里那个分支的语义已定义、门禁也按它分支, 但
-> 没有适配器能在读采样的同时记录「本次是否曾观测到 direct」。它只有单测覆盖, **不得据此主张
-> "中途路径丢失已处理"**; 生产者随 RAI-476 的数据面适配器一起到来。
+> **`established_direct` 现在有了生产者, 但只在 daemon 侧**: `BulkPathGate` 在读采样的同时记录
+> 「本次尝试是否曾观测到 direct」, 所以 §2.5 D1 的「中途 direct → relay」(`iroh_direct_path_lost`)
+> 在 lane 上真的会走到, 并有回环用例 (钉住读数) 与门禁单测覆盖. **客户端门禁仍恒传
+> `established_direct = false`** (`src/transfer_cli.rs`), 因为客户端还没有采样源 —— 所以
+> "上传方向的中途路径丢失已处理"**不得主张**: 上传字节由客户端发出, 那一侧的记录还没接上.
 >
-> 另有一处**带撤除条件的** `#[allow(dead_code)]`: `PathClass::Relay` 在生产路径上没有生产者 (同上,
-> 要等 RAI-476 的适配器读采样), 编译器报 `never constructed` 正是这个事实的指纹。**RAI-476 落地后
-> 撤掉那行 allow**, 它就会成为门禁里真正会走到的分支。一条带理由和到期条件的 `allow` 是文档,
-> 不带的才是债。
+> `PathClass::Relay` 上那行带撤除条件的 `#[allow(dead_code)]` 已按约定撤掉: 采样生产者到位后,
+> 它是门禁里会走到并有用例覆盖的分支.
 >
-> 跑批单 (`handoffs/rai367/positive-control-runsheet.md`) 已写好并写清了三件边界: iroh lane 今天
-> 不承载 bulk 数据面, 所以单子执行的是**仪表验证 + 门禁验证**而不是 A 类验收; daemon 侧 relay 计数
-> 尚未接线, 所以快照今天只有客户端那一半; **拿不到正对照计数时, 门禁那个"零"不得用于任何结论**。
+> **未验的一条要说清**: `src/main.rs:503` 仍恒传 `NOT_PATH_AWARE`, `rdog --put` / `--get` 根本走不到
+> 这条 lane —— 今天只有手写的控制行 (或用例) 能触发它。所以"真机上 lane 会拒 relay"这件事**没有被
+> 证明**, 只有回环 + 钉住读数.
+>
+> 跑批单 (`handoffs/rai367/positive-control-runsheet.md`) 是 RAI-367 当时的形态记录 (那时 lane
+> 不承载 bulk), 不再是当前行为的描述; 新的回环用例在 `src/control_iroh/bulk_tests.rs`. daemon 侧
+> relay 计数尚未接线, 所以快照里仍然只有客户端那一半; **拿不到正对照计数时, 门禁那个"零"不得
+> 用于任何结论**。
 
 ---
 
@@ -624,7 +667,7 @@ B 与 C 的区别不在结果 (两者都必须失败), 而在**失败原因的�
 | 输入 | 大文件上传, 传输进行中把路径打断 (断 UDP / 切网) |
 | 前置 | 起始 `direct`, 传输已过一个或多个 chunk |
 | 预期 | **中止**, `error_code:"iroh_direct_path_lost"`; 已写 partial **保留到 `file_transfer.resume_window_ms`** (续传 offset 就是从它推导的, 删了就退化成重传); 快照 `verdict=aborted` 且 delta 非 0 |
-| 证据 | 两端快照; 中止时的 offset (证明不是从头开始也不是静默完成); partial 存在与大小; 续传一次到 `direct` 后完成的回执, 且续传的起始 offset **不等于 0** (证明是真续传而不是静默重传); **在途字节的归属**: 中止前已放行但未确认的字节数与其最终路径类别 (验证 §3.5 的 pin 确实生效, 不是"查到得太晚") |
+| 证据 | 两端快照; 中止时的 offset (证明不是从头开始也不是静默完成); partial 存在与大小; 续传一次到 `direct` 后完成的回执, 且续传的起始 offset **不等于 0** (证明是真续传而不是静默重传); **在途字节的归属**: 中止前已放行但未确认的字节数与其最终路径类别 (验证 §3.5 的**逐 chunk 检查**在路径变化后确实拒下一 chunk, 而不是"查到得太晚"; 传输层 pin 属 RAI-501, 不在本条验收面) |
 
 ### D2 类: relay → direct
 

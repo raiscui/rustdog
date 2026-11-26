@@ -32,6 +32,11 @@ pub fn execute_explicit_control_request<E: ControlActionExecutor>(
     // 探活不计入执行负载, 其余协议执行共享同一份实时诊断状态.
     let _execution = (!matches!(request.command, ControlCommand::Ping))
         .then(crate::control_diagnostics::executing);
+    // bulk 七动词有自己的执行入口: 承载 bulk 的第二条通道 (iroh lane) 也调它,
+    // 动词 → `execute_*` 的映射因此只有一份。
+    if let Some(outcome) = execute_file_transfer_request(request.request_id, &request.command) {
+        return outcome;
+    }
     match &request.command {
         ControlCommand::Coding(coding_request) => {
             let reply = match executor.coding_service() {
@@ -265,27 +270,6 @@ pub fn execute_explicit_control_request<E: ControlActionExecutor>(
                 Err(err) => cdp_denied_or_error_response(request.request_id, &err),
             }
         }
-        ControlCommand::FilePutFile(payload) => file_transfer_outcome(request.request_id, || {
-            crate::control_file_transfer::execute_put_file(&payload)
-        }),
-        ControlCommand::FileGetFile(payload) => file_transfer_outcome(request.request_id, || {
-            crate::control_file_transfer::execute_get_file(&payload)
-        }),
-        ControlCommand::FileChunk(payload) => file_transfer_outcome(request.request_id, || {
-            crate::control_file_transfer::execute_file_chunk(&payload)
-        }),
-        ControlCommand::FileEnd(payload) => file_transfer_outcome(request.request_id, || {
-            crate::control_file_transfer::execute_file_end(&payload)
-        }),
-        ControlCommand::FileRead(payload) => file_transfer_outcome(request.request_id, || {
-            crate::control_file_transfer::execute_file_read(&payload)
-        }),
-        ControlCommand::FileCancel(payload) => file_transfer_outcome(request.request_id, || {
-            crate::control_file_transfer::execute_file_cancel(&payload)
-        }),
-        ControlCommand::FileList => file_transfer_outcome(request.request_id, || {
-            crate::control_file_transfer::execute_file_list()
-        }),
         ControlCommand::Capabilities => {
             match capabilities_for_coding(executor.coding_service().is_some())
                 .map(|value| value.to_string())
@@ -557,6 +541,74 @@ fn file_transfer_outcome(
             render_control_action_error_response(request_id, &err),
         ),
     }
+}
+
+/// bulk 七个分块原语, 从 `ControlCommand` 里**唯一一次**取出来。
+///
+/// 动词清单只写在这里: 执行入口 `execute_file_transfer_request` 在它上面 match (穷举),
+/// 判定"这条请求是不是 bulk"的 `is_file_transfer_command` 也从它派生。两份清单各写一遍
+/// 的代价是它们会漂移, 而漂移的表现是"门禁放行了一条执行器不认识的动词"或反过来 ——
+/// 前者静默失败, 后者 panic 断连接。
+pub(crate) enum FileTransferVerb<'a> {
+    PutFile(&'a str),
+    GetFile(&'a str),
+    Chunk(&'a str),
+    End(&'a str),
+    Read(&'a str),
+    Cancel(&'a str),
+    List,
+}
+
+pub(crate) fn file_transfer_verb(command: &ControlCommand) -> Option<FileTransferVerb<'_>> {
+    match command {
+        ControlCommand::FilePutFile(payload) => Some(FileTransferVerb::PutFile(payload)),
+        ControlCommand::FileGetFile(payload) => Some(FileTransferVerb::GetFile(payload)),
+        ControlCommand::FileChunk(payload) => Some(FileTransferVerb::Chunk(payload)),
+        ControlCommand::FileEnd(payload) => Some(FileTransferVerb::End(payload)),
+        ControlCommand::FileRead(payload) => Some(FileTransferVerb::Read(payload)),
+        ControlCommand::FileCancel(payload) => Some(FileTransferVerb::Cancel(payload)),
+        ControlCommand::FileList => Some(FileTransferVerb::List),
+        _ => None,
+    }
+}
+
+pub(crate) fn is_file_transfer_command(command: &ControlCommand) -> bool {
+    file_transfer_verb(command).is_some()
+}
+
+/// bulk 七个分块原语的执行入口: `Some(outcome)` = 这条请求是 bulk 动词。
+///
+/// 收口在这里而不是各自实现, 是因为承载 bulk 的通道不止一条 —— 通用执行器 (TCP /
+/// WebSocket / Zenoh) 与 iroh lane 都调它, 动词 → `execute_*` 的映射只有一份。
+pub(crate) fn execute_file_transfer_request(
+    request_id: Option<u64>,
+    command: &ControlCommand,
+) -> Option<ControlExecutionOutcome> {
+    let verb = file_transfer_verb(command)?;
+    let outcome = match verb {
+        FileTransferVerb::PutFile(payload) => file_transfer_outcome(request_id, || {
+            crate::control_file_transfer::execute_put_file(payload)
+        }),
+        FileTransferVerb::GetFile(payload) => file_transfer_outcome(request_id, || {
+            crate::control_file_transfer::execute_get_file(payload)
+        }),
+        FileTransferVerb::Chunk(payload) => file_transfer_outcome(request_id, || {
+            crate::control_file_transfer::execute_file_chunk(payload)
+        }),
+        FileTransferVerb::End(payload) => file_transfer_outcome(request_id, || {
+            crate::control_file_transfer::execute_file_end(payload)
+        }),
+        FileTransferVerb::Read(payload) => file_transfer_outcome(request_id, || {
+            crate::control_file_transfer::execute_file_read(payload)
+        }),
+        FileTransferVerb::Cancel(payload) => file_transfer_outcome(request_id, || {
+            crate::control_file_transfer::execute_file_cancel(payload)
+        }),
+        FileTransferVerb::List => {
+            file_transfer_outcome(request_id, crate::control_file_transfer::execute_file_list)
+        }
+    };
+    Some(outcome)
 }
 
 /// CDP 错误分流: 关闭态 (lane disabled) 是 permission 语义 (错误信封带

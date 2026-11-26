@@ -1,18 +1,20 @@
 # rdog Iroh 会话准入契约
 
-状态：RAI-179 定案的契约，RAI-305 完成生产接线。生产 iroh 入口的 PTY 只在 daemon profile 显式给出 `policy_file` 时开启；未给出时仍是 P1 的 ping-only + 回环门禁。跨网地址放开由 `routable` 控制，缺省不启用。正式 P3、公网与 NAT、真实远端设备与 bulk 仍未验收。
+状态：RAI-179 定案的契约，RAI-305 完成生产接线。生产 iroh 入口的 PTY 只在 daemon profile 显式给出 `policy_file` 时开启；未给出时仍是 P1 的 `@ping` + 回环门禁（bulk 被拒）。跨网地址放开由 `routable` 控制，缺省不启用。正式 P3、公网与 NAT、真实远端设备与跨网 bulk 仍未验收（bulk 只有回环证据，见 `specs/rdog-bulk-direct-only-spec.md` §3.5）。
 
 ## 默认入口与生产入口
 
-正常构建的 Iroh CLI 和 daemon 只处理 ping。默认请求门禁的唯一定义是 [`ping_only`](../src/control_iroh.rs)，调用方为同文件的 `run_control` 和 `serve_ping`。
+默认入口的服务面只有 `@ping`，其余控制行一律拒 —— 七个 bulk 动词只在准入 lane 上（见下）。门禁有两个入口、各管一件事：lane 侧（服务端）的定义是 [`readonly_request`](../src/control_iroh.rs)，调用方为 [`serve_ping`](../src/control_iroh.rs) 与 `serve_admitted` 的未握手首行；客户端一次性入口 [`run_control`](../src/control_iroh.rs) 只发一行、只认 pong，因此仍只收 `@ping`，定义在同文件的 `ping_request`。
 
-准入 PTY 通道的开关是 [`DaemonConfig::policy_file`](../src/control_iroh.rs)：给出策略文件时 daemon 走 [`serve_admitted`](../src/control_iroh.rs)，否则走 `serve_ping`。两条路径都不改变旧 TCP、WebSocket 或 Zenoh 准入。
+准入 PTY 通道的开关是 [`DaemonConfig::policy_file`](../src/control_iroh.rs)：给出策略文件时 daemon 走 [`serve_admitted`](../src/control_iroh.rs)，否则走 [`serve_ping`](../src/control_iroh.rs)。两条路径都不改变旧 TCP、WebSocket 或 Zenoh 准入。
 
-准入通道的服务面只有 ping 和 PTY：
+准入通道的服务面是 ping、PTY 与 bulk：
 
 - `@ping` 与 `@pty` / `@pty-attach` / `@pty-close` / `@pty-detach`，以及桥接内的 `@pty-stdin` / `@pty-resize`。
+- bulk 七个动词（`@put-file` / `@get-file` / `@file-chunk` / `@file-end` / `@file-read` / `@file-cancel` / `@file-list`）：每条 chunk 是一条独立请求行，同一连接按顺序服务；执行走与其它传输同一份 [`execute_file_transfer_request`](../src/control_core.rs)。**bulk 只在这条准入 lane 上**：未给 `policy_file` 的默认入口仍以 `iroh_bulk_path_pin_unavailable` 拒绝（没有租约与主体判定的入口不放字节）。
+- bulk 在准入通道上先过租约（与 PTY 同一份 `require_active`），再过**逐 chunk 路径检查**：open 与每个 chunk 边界读当前连接路径，只放行 `direct`；拒绝码取自 [`bulk_path::decide`](../src/bulk_path.rs)（`iroh_direct_path_unavailable` / `iroh_direct_path_lost` / `iroh_path_unknown`）。`@file-list` / `@file-cancel` 不搬字节，因此不过路径门禁。
+- 这条 lane 的声明是 `path_aware=true` / `bulk_path_pin=false` / `bulk_path_checked_per_chunk=true`：**逐 chunk 检查不是传输层钉住**（边界之间的排队、重传与 QUIC 路径迁移未覆盖），所以它不主张"连接被钉在直连上"，也不构成 `iroh_bulk_path_pin_unavailable` 被解除的依据。
 - 其余 control 行一律拒绝，错误码与文案取自 [`LANE_REFUSED`](../src/control_iroh.rs)。
-- bulk 传输不在这条通道上，P4 保持关闭。
 
 跨网地址放开用 profile 的 `routable` 字段（缺省 `false`）。地址的策略是 [`network`](../src/control_iroh.rs) 与 [`relay_allowed`](../src/control_iroh.rs)：目录、endpoint、relay/relay-QAD 的**绑定**地址与注册校验都走它们。缺省时仍是 P1 的 IPv4 回环门禁与原错误文案；`routable` 下拒绝未指定、组播和广播地址。relay 的 URL 门禁按 profile 分档：**回环 profile 要求 https + 显式端口 + `qad_port != 0`**；**`routable` profile 只要求 https、主机名与 `qad_port != 0`**，端口可缺省 —— 标准公共 relay 只监听 443，而 `RelayUrl` 会把默认端口规范化掉，要求显式端口等于拒绝公共 relay 唯一合法的写法。显式端口这条规则服务的是自建 relay 的随机端口，不是安全属性；`http://` 在两个 profile 下一律拒绝。
 
@@ -112,8 +114,9 @@ relay 侧另有一个 `advertise` 字段（缺省空），只改写给对端的 
 
 | 情形 | 拒绝阶段与真相源 |
 |---|---|
-| 默认入口收到非 ping | 本地或服务端只读门禁拒绝；错误来自 [`ping_only`](../src/control_iroh.rs)，不能声称已建立可写会话。 |
-| 准入通道收到非 ping、非 PTY 的 control 行 | 该 lane 拒绝，文案取自 [`LANE_REFUSED`](../src/control_iroh.rs)。 |
+| 默认入口收到非 `@ping` 的行 | 本地或服务端只读门禁拒绝；错误来自 [`readonly_request`](../src/control_iroh.rs)，不能声称已建立可写会话。 |
+| bulk 在 relay 路径上、或读不出路径 | 该 lane 拒绝，码来自 [`bulk_path::decide`](../src/bulk_path.rs)，响应仍是 `@response {"code":66,"error":"…"}`。 |
+| 准入通道收到非 ping、非 PTY、非 bulk 的 control 行 | 该 lane 拒绝，文案取自 [`LANE_REFUSED`](../src/control_iroh.rs)。 |
 | 身份、授权或绑定校验失败 | 在处理器前拒绝，不执行操作。拒绝码与原因取自 [`DENIED_CODE` / `DENIED`](../src/control_iroh.rs)；准入通道上的拒绝以握手回复或连接关闭码两种形式送达。 |
 | 活动会话租约到期 | 关闭授权并回收该会话；拒绝取自 [`Rejection::Expired` 的 `code_reason`](../src/control_iroh/admission.rs)，终帧 reason 取自 [`EXPIRED`](../src/control_iroh/admission.rs)。 |
 | Graceful / emergency 撤销 | 新会话和续租归目标拒绝；emergency 的已建会话终止须显式可观测，终帧 reason 取自 [`REVOKED_REASON`](../src/control_iroh/admission.rs)。 |
