@@ -1,5 +1,15 @@
 # WORKLOG: rustdog
 
+## [2026-11-26] RAI-476 文档: 把三处「声明比机制宽」的措辞改准
+
+- **触发**:评审复核指出——机制全对,但声明在多个载体里各留了一份旧说法:改了 §3.5/§3.1,§2.2 的码表、§3.2 的重试列、§8 D1 的证据要求、准入契约的三处段落都还是 pin 时代的口径。
+- **稳定码表 (§2.2)**:`iroh_bulk_path_pin_unavailable` 的触发从「传输是路径感知但钉不住 bulk 连接」改成「该入口既不声明传输层 pin 也不做逐 chunk 检查,今天只有默认入口 `serve_ping` 返它」,可重试列从「除非传输侧补上路径 pin」改成「换到逐 chunk 检查的准入 lane,或等传输层 pin (RAI-501)」——准入 lane 同样 `pin=false` 却承载 bulk,所以「没有适配器达到 pin」不再是这个码的语义。
+- **§3.2 与 §3.5 脚注**:同一句话的两处副本同步改成「该入口既不钉也不查,因此不放字节」,并把 RAI-501 的票号写进去。
+- **§8 D1 证据**:旧文要求验证「§3.5 的 pin 确实生效」,而这一版根本没有 pin;改成验证「逐 chunk 检查在路径变化后确实拒下一个 chunk,而不是查到得太晚」,并写明传输层 pin 不在该验收面。
+- **准入契约**:头部状态句「未给出时仍是 ping + bulk + 回环门禁」、§默认入口「服务面是 `@ping` 加七个 bulk 动词」、§117「非 ping、非 bulk 的行」三处都把 bulk 写进了默认入口,与同文 §14「bulk 只在这条准入 lane 上」自相矛盾;两处 `serve_readonly` 指向 `src/` 里已不存在的函数(现为 `serve_ping` → `readonly_request`),这类死链会让下一个人开始怀疑整份契约。
+- **守卫**:`check-carrier-assertions` OK (断言数 3 / 载体数 8)。
+- 提交: 3e6578f
+
 ## [2026-11-26] RAI-476 评审回填 A–I: 逐 chunk 检查与 pin 分开登记
 
 - **A (硬阻塞)**:上一次把"每 chunk 采样"登记成 `bulk_path_pin=true`,而 `conn.paths()` 是事后快照 —— 既禁不了 QUIC 路径迁移,也看不见排队/重传里改走 relay 的字节。新增第三格 `bulk_path_checked_per_chunk`;准入 lane 声明 `path_aware=true / bulk_path_pin=false / bulk_path_checked_per_chunk=true`;`decide()` 只在"既不钉也不查"时回 `iroh_bulk_path_pin_unavailable`,该码留给真做 pin 的传输层(另开票)。`PATH_AWARE_PINNED` 回到测试专用并断言"检查 ≠ pin";快照 JSON 加同名字段。
