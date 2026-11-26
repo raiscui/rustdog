@@ -5,7 +5,11 @@
 //!   零配置哲学延续 (不依赖 minica/openssl 外部工具)
 //! - 布局: ~/.rdog/tls/{ca.pem, ca-key.pem, daemon/{cert,key}.pem,
 //!   client/{cert,key}.pem}, 私钥 0600
-//! - 幂等: 已存在则跳过不覆盖 (用户材料是手工调过的不能静默毁掉)
+//! - 幂等: 已存在则跳过不覆盖 (用户材料是手工调过的不能静默毁掉)。**`tls/` 目录永远不会被
+//!   替换**: 六件齐备就跳过, 不齐就报错点名缺哪几件 —— 想重新生成必须先由人删掉该目录, 代价是
+//!   显式的一步而不是某个 rename 顺手做掉
+//! - 发布方式是原子的: 六件先写进同目录的 `<tls>.staging-<pid>-<n>`, 再整目录 rename 到位,
+//!   所以"目录存在"对新一代写入方等价于"材料完整" (见 `tls_init` 的注释)
 //! - daemon 证书 SAN 覆盖 hostname + 127.0.0.1 (zenoh 0.7.1+ 支持 IP SAN)
 
 use std::{fs, io, path::Path};
@@ -293,6 +297,51 @@ mod tests {
         assert!(leftovers.is_empty(), "暂存目录残留: {leftovers:?}");
 
         let _ = fs::remove_dir_all(&root);
+    }
+
+    /// 已存在的材料目录永远不会被替换 —— 连 rename 都不会发生。
+    ///
+    /// 判据用 inode: 整目录 rename 到位会换掉目录 inode, 而"跳过"不会动它。这条同时挡住
+    /// 两类误读: ① 把 `tls-init` 当成"重新生成"的人以为它会顺手刷新; ② 有人在目录里放了
+    /// 自己的标记文件, 被一次 rename 静默清掉。想重新生成必须先人工删目录 (显式的一步)。
+    #[test]
+    fn tls_init_should_never_replace_existing_material_directory() {
+        let dir = temp_tls_dir("no-replace");
+        tls_init(&dir).unwrap();
+        fs::write(dir.join("ca.pem"), "USER TWEAKED").unwrap();
+        fs::write(dir.join("keep.txt"), "user marker").unwrap();
+        #[cfg(unix)]
+        let inode_before = {
+            use std::os::unix::fs::MetadataExt;
+            fs::metadata(&dir).unwrap().ino()
+        };
+
+        let report = tls_init(&dir).unwrap();
+        assert!(
+            report.created.is_empty(),
+            "已存在材料不应被重新生成: {report:?}"
+        );
+        assert_eq!(report.skipped.len(), 1, "{report:?}");
+        assert_eq!(
+            fs::read_to_string(dir.join("ca.pem")).unwrap(),
+            "USER TWEAKED",
+            "已存在材料不得被覆盖"
+        );
+        assert!(
+            dir.join("keep.txt").is_file(),
+            "目录被整目录替换了: 用户的标记文件随之消失"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            assert_eq!(
+                fs::metadata(&dir).unwrap().ino(),
+                inode_before,
+                "目录 inode 变了 = 发生过 rename 替换"
+            );
+        }
+
+        let _ = fs::remove_dir_all(&dir);
     }
 
     /// 半套材料必须 fail closed, 而不是被当成"已初始化"跳过。

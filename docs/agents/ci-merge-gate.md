@@ -87,20 +87,24 @@ target 的 `passed` 必须 > 0**, 否则判红 —— 「退出码 0 但零执�
 每个 target 标 `all` (三平台) / `unix` (ubuntu + macos) / `macos` / `windows` /
 `compile-only:macos` / `exempt:<理由>`。**`tests/` 下新增文件而没登记 = 红** (脚本会枚举
 `tests/*.rs` 双向对账), 所以「新增的 target 悄悄没人跑」这条不可达。
+比整片豁免细一档的出口是 `TARGET_TEST_SKIPS` (**具名跳过**): target 照常执行并计入 ran 集合,
+只按名字跳过列出的用例; 名字进 job summary, 且脚本用 `-- --list` 验证名字真实存在 —— 打错名字
+会判红, 不会变成「summary 说跳过了、其实全跑」或者反过来。它的成立条件是**根因已定位的同一族
+缺陷**, 不是「下一轮换个用例继续红」。
 
 | 平台 | 执行的 target |
 | --- | --- |
-| ubuntu | `connect_modes`、`control_lanes`、`control_mode`、`control_pty`、`control_tty`、`shell_pty`、`daemon_inbound`、`listen_suspend`、`computer_use_density`、`control_websocket` (另有 1 个 target 在 ubuntu 显式豁免, 见下) |
-| macos | ubuntu 那 10 个 + `zenoh_router_client` (ubuntu 上豁免) |
+| ubuntu | `connect_modes`、`control_lanes`、`control_mode`、`control_pty`、`control_tty`、`shell_pty`、`daemon_inbound`、`listen_suspend`、`computer_use_density`、`control_websocket`、`zenoh_router_client` (后者有 2 条用例具名跳过, 见下) |
+| macos | ubuntu 那 11 个 target 全部, 且无具名跳过 |
 | windows | `computer_use_density` (另有 2 个 target 在 windows 显式豁免, 见下) |
 | 全平台 (build 阶段) | `cargo test --no-run` 编译**全部** target, 含下面的 compile-only 面 |
 | compile-only (macos) | `zenoh_unixpipe_fast_path` (issue #164)、`control_ax_e2e`、`control_display_aware_e2e`、`control_mouse_e2e`、`control_ocr_e2e`、`control_window_e2e` |
 
 **各平台实际执行 target 数 (每次放量或豁免变更都更新这张表)**:
 
-| 平台 | 实际执行的 integration target 数 | 豁免/只编译 |
+| 平台 | 实际执行的 integration target 数 | 具名跳过 / 豁免 / 只编译 |
 | --- | --- | --- |
-| ubuntu | **10** | `zenoh_router_client` (issue #163) |
+| ubuntu | **11** | `zenoh_router_client` 里 2 条 TLS 用例具名跳过 (issue #163); 20 处 `#[ignore]` 见 §6 |
 | macos | **11** | 6 个 compile-only (`zenoh_unixpipe_fast_path` 见 issue #164; 5 个 GUI 面需真实桌面会话) |
 | windows | **1** (`computer_use_density`) | `control_websocket`、`zenoh_router_client_windows` (issue #162) |
 
@@ -174,9 +178,11 @@ target 的 `passed` 必须 > 0**, 否则判红 —— 「退出码 0 但零执�
 | `@key` 注入类 (`control_lanes` 的对象载荷用例 + 本 target 的 key 事件用例) | linux 输入后端要先连 X11/Wayland display; runner 没有时 enigo 直接报 `no connection could be established: (no successful connection)` (code 70), 与 control client 到 daemon 的连接**无关** | **已修**: ubuntu 的 integration 步骤改在 `xvfb-run` 下执行 (`ci.yml`), `control_lanes` 那条已撤 `#[ignore]` 并在 ubuntu 执行 |
 | TLS/mTLS 两例 | `zenoh-link-tls` 1.8.0 在 rustls 握手完成前就把链路交给 transport: 首帧写入报 `handshake not complete` 并关链路 (daemon 侧), client 侧看到 `peer closed connection without sending TLS close_notify`; 同族还有 `tls_init` 并发写坏材料 (两个 `tls-init` 交错落盘 → TLS 握手必失败), 后者已修为「整目录 rename 原子落地」 | **未收回**: 首帧竞态在风味机与 2 核本地都能复现 (全 target 一轮约 1/3), 需要 zenoh 链路层或 rdog 链路启动时序的修复, 见 issue #163 |
 
-整 target 在 ubuntu 豁免、macos 照常执行, job summary 单列 `exempt on this platform`、
-**不计入 ran 集合**; 收回条件 (issue #163 / RAI-464, 到期 2026-12-03) 是上面的首帧竞态有结论、
-ubuntu 连续三轮通过。
+处置是 `TARGET_TEST_SKIPS` 的**具名跳过**: ubuntu 上 `zenoh_router_client` 照常执行 (36 passed,
+其余 30 多条与 TLS 无关的用例都在跑), 只跳过上面那 2 条 TLS 用例; job summary 单列
+**named skip on this platform** 表 (名字 + 理由) 并计入 ran 集合。**不再是整 target 豁免** ——
+豁免的是"这 2 条用例碰上的首帧竞态", 不是这个 target 的全部。
+收回条件 (issue #163 / RAI-464, 到期 2026-12-03) 是首帧竞态有结论、2 条用例连续三轮在 ubuntu 通过。
 
 **windows 侧 2 个 target 显式豁免** (`PLATFORM_EXEMPTIONS`): `control_websocket` (整 target 挂死,
 1500s 上限才终止) 与 `zenoh_router_client_windows` (daemon 因遗留 `service_name` 守卫拒启动) ——
@@ -196,8 +202,8 @@ execute 面之外 (5 个 macOS GUI 面是 compile-only)。
 **`#[cfg_attr(target_os = ..., ignore = ...)]` 这种平台级逐条收窄已归零** —— `control_lanes` 的
 key 注入用例曾用它在 ubuntu 跳过, 根因是 enigo 连不上 display, 已由 ubuntu job 的 `xvfb-run`
 前提解决 (见上)。`zenoh_router_client` 的 key 事件用例在 main 上曾按 `#[ignore]` 跳过 (commit
-`9dbf80f` 加、`f0ebc7e` 随 target 级豁免一起撤), 现在同样不带 `#[ignore]`; 在该 target 整片豁免
-撤销前, ubuntu 上它仍随 target 一起不执行, 但不再是「用例级跳过」。
+`9dbf80f` 加、`f0ebc7e` 随 target 级豁免一起撤), 现在同样不带 `#[ignore]`; ubuntu 上它随
+`zenoh_router_client` 一起执行 (该 target 现在只用 `TARGET_TEST_SKIPS` 跳过 2 条 TLS 用例)。
 
 **compile-only 是显式的, 不是静默 skip —— 但它也不计入「ran」。** 这 6 个 target 里, 5 个
 需要真实桌面会话 (已登录的 GUI 用户 + Accessibility 与 Screen Recording 授权, GitHub runner
@@ -287,7 +293,7 @@ cargo clean -p ort-sys && cargo build --bin rdog    # 走一遍 build script
 | 现象 | 归因 | 负责人 | 到期日 |
 | --- | --- | --- | --- |
 | `zenoh_control::tests::diagnostic_ping_should_bypass_busy_query_worker_and_preserve_queue` 间歇红 (28 轮 2 次, panic 文案 `worker 未进入执行`, 疑 TMPDIR 进程级改写) | 单跑 5/5 绿, 只在并行/全量时出现 (`src/zenoh_control.rs` 的 panic 行) | RAI-405 承接线程 | 2026-11-30 |
-| ubuntu runner 上 `zenoh_router_client` 的跨进程连接 e2e 不稳定 | **两族, 2026-11-26 (RAI-464) 按证据拆开**: ① `@key`/`@type` 类 = enigo 连不上 display (code 70) → **已修** (ubuntu 步骤改 `xvfb-run`); ② TLS/mTLS 两例 = `zenoh-link-tls` 1.8.0 首帧写入早于 rustls 握手完成 (`TX task failed: handshake not complete` + client 侧 `peer closed ... without TLS close_notify`), 串行跑同样复现; ②的同族 `tls_init` 并发写坏材料已修为整目录原子落地。**不是**「client 连不上刚启动的 daemon」, 也不是 runner 特有; ① 已撤销 `control_lanes` 那条 `#[ignore]`, ② 仍按 target 级豁免 (`PLATFORM_EXEMPTIONS`); 入口=豁免理由 + issue #163 | issue #163 / RAI-464 | 2026-12-03 |
+| ubuntu runner 上 `zenoh_router_client` 的跨进程连接 e2e 不稳定 | **两族, 2026-11-26 (RAI-464) 按证据拆开**: ① `@key`/`@type` 类 = enigo 连不上 display (code 70) → **已修** (ubuntu 步骤改 `xvfb-run`); ② TLS/mTLS 两例 = `zenoh-link-tls` 1.8.0 首帧写入早于 rustls 握手完成 (`TX task failed: handshake not complete` + client 侧 `peer closed ... without TLS close_notify`), 串行跑同样复现; ②的同族 `tls_init` 并发写坏材料已修为整目录原子落地。**不是**「client 连不上刚启动的 daemon」, 也不是 runner 特有; ① 已撤销 `control_lanes` 那条 `#[ignore]`, ② 在 ubuntu 上按 `TARGET_TEST_SKIPS` 具名跳过那 2 条 (target 其余用例照跑); 入口=具名跳过表 + issue #163 | issue #163 / RAI-464 | 2026-12-03 |
 | windows runner 上 `control_websocket` 整 target 挂死、`zenoh_router_client_windows` daemon 因遗留 `service_name` 守卫拒启动 | 两者都不隔离 HOME, 与同 job 前序用例共用 `.rdog` / `zenoh-guards`; 入口=`PLATFORM_EXEMPTIONS` 两条理由 + `tests/` 无 `HOME` 注入 | issue #162 承接 | 2026-12-03 |
 | macos runner 上 `zenoh_unixpipe_fast_path` 的连接类用例逐个接力红, 最后一个卡在「运行中的 daemon 拒绝新 client 的专用 FIFO」(`Received a close message (reason GENERIC) in response to an OpenSyn`) | 前两条是用例假设 `~/.rdog/run` 已存在 (已修); 第三条开发机绿、runner 红, 是 runner 与真机在这条链路上的环境差; 处置=分类降为 `compile-only:macos` 并给真机 lane 命令; 入口=CLASSIFICATION + issue #164 | issue #164 承接 | 2026-12-03 |
 
