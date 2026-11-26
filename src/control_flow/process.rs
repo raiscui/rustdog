@@ -130,17 +130,12 @@ fn terminate_timed_out_child(
 #[cfg(all(test, windows))]
 mod tests {
     use super::*;
+    use crate::test_support::console_probe;
 
     #[test]
     fn flow_shell_should_not_allocate_a_console() {
         let step = FlowCmdStep {
-            run: concat!(
-                "Add-Type -Namespace Rdog -Name ConsoleProbe -MemberDefinition ",
-                "'[DllImport(\"kernel32.dll\")] public static extern ",
-                "System.IntPtr GetConsoleWindow();'; ",
-                "[Rdog.ConsoleProbe]::GetConsoleWindow().ToInt64()"
-            )
-            .to_owned(),
+            run: console_probe::script(),
             shell: Some("powershell.exe".to_owned()),
             cwd: None,
             env: BTreeMap::new(),
@@ -155,8 +150,7 @@ mod tests {
         )
         .expect("flow shell 应成功运行 console probe");
 
-        assert_eq!(result.exit_code, Some(0), "{}", result.stderr);
-        assert_eq!(result.stdout.trim(), "0");
+        console_probe::assert_no_console(result.exit_code, &result.stdout, &result.stderr);
     }
 }
 

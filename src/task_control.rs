@@ -839,18 +839,16 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn spawned_task_should_not_allocate_a_console() {
-        let script = concat!(
-            "Add-Type -Namespace Rdog -Name ConsoleProbe -MemberDefinition ",
-            "'[DllImport(\"kernel32.dll\")] public static extern ",
-            "System.IntPtr GetConsoleWindow();'; ",
-            "[Rdog.ConsoleProbe]::GetConsoleWindow().ToInt64()"
-        );
-        let task_id = spawn_quick(script);
+        let task_id = spawn_quick(&crate::test_support::console_probe::script());
         let snapshot = wait_terminal(&task_id);
         let output = task_output(&task_id, DEFAULT_OUTPUT_TAIL_LINES).unwrap();
 
-        assert_eq!(snapshot.state, TaskState::Completed);
-        assert_eq!(output.output.trim(), "0");
+        // task 的输出是 stdout/stderr 合流, 所以两边传同一份。
+        crate::test_support::console_probe::assert_no_console(
+            snapshot.exit_code,
+            &output.output,
+            &output.output,
+        );
     }
 
     #[cfg(windows)]

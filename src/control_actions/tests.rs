@@ -17,6 +17,9 @@ use std::sync::{
     Arc,
 };
 
+#[cfg(windows)]
+use crate::test_support::console_probe;
+
 #[test]
 fn shell_builder_suppresses_powershell_progress_without_hiding_errors() {
     // 只关闭 progress; 用户脚本和真实错误流必须原样保留.
@@ -35,18 +38,60 @@ fn shell_builder_suppresses_powershell_progress_without_hiding_errors() {
 #[cfg(windows)]
 #[test]
 fn shell_builder_should_not_allocate_a_console() {
-    let script = concat!(
-        "Add-Type -Namespace Rdog -Name ConsoleProbe -MemberDefinition ",
-        "'[DllImport(\"kernel32.dll\")] public static extern ",
-        "System.IntPtr GetConsoleWindow();'; ",
-        "[Rdog.ConsoleProbe]::GetConsoleWindow().ToInt64()"
-    );
     // 被测对象是 builder 的建台标志, 不是 PowerShell 自己能不能起来 —— 见
     // run_powershell_probe 里对两种环境性失败的说明。
-    let output = run_powershell_probe(script).expect("应启动无控制台的 PowerShell probe");
+    let output = run_powershell_probe(&console_probe::script())
+        .expect("应启动无控制台的 PowerShell probe");
 
-    assert!(output.status.success(), "{:?}", output.stderr);
-    assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "0");
+    console_probe::assert_no_console(
+        output.status.code(),
+        &String::from_utf8_lossy(&output.stdout),
+        &console_probe::decode_stderr(&output.stderr),
+    );
+}
+
+/// 负对照 (RAI-563): 探针编译失败时, 失败文本必须点名「探针不可用」。
+///
+/// CI 上真实发生过的形状是 `flow_shell_should_not_allocate_a_console` 报
+/// `left: Some(1)` / `right: Some(0)` —— 仪器坏了, 却被读成「子进程分到了控制台」的
+/// 同族错误。这里故意写坏 `MemberDefinition` (删掉一个 `)`), 让 `Add-Type` 必然编不过,
+/// 再抓 `assert_no_console` 的 panic 文本。**没有这条负对照, 修法就只是换了一种说法。**
+#[cfg(windows)]
+#[test]
+fn console_probe_should_report_instrument_failure_not_console_allocation() {
+    let broken = console_probe::script().replacen("GetConsoleWindow();", "GetConsoleWindow(;", 1);
+    assert_ne!(
+        broken,
+        console_probe::script(),
+        "负对照必须真的写坏 MemberDefinition"
+    );
+
+    let output = run_powershell_probe(&broken).expect("应启动写坏的 console probe 进程");
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    let stderr = console_probe::decode_stderr(&output.stderr);
+
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        console_probe::assert_no_console(output.status.code(), &stdout, &stderr);
+    }))
+    .expect_err("编译失败的探针不应通过断言");
+
+    let message = outcome
+        .downcast_ref::<String>()
+        .cloned()
+        .or_else(|| outcome.downcast_ref::<&str>().map(|text| (*text).to_owned()))
+        .unwrap_or_default();
+    assert!(
+        message.starts_with("console 探针不可用"),
+        "失败文本必须点名仪器不可用, 实际: {message}"
+    );
+    assert!(
+        message.contains(console_probe::COMPILE_FAILED_MARKER),
+        "失败文本必须带上编译失败标记, 实际: {message}"
+    );
+    assert!(
+        !message.contains("拿到了控制台"),
+        "仪器坏时不许被读成控制台分配, 实际: {message}"
+    );
 }
 
 /// 起一次 PowerShell probe, 对**环境性**启动失败做有界重试。
@@ -67,21 +112,7 @@ fn run_powershell_probe(script: &str) -> std::io::Result<std::process::Output> {
         if output.status.success() {
             return false;
         }
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let is_utf16 = output.stderr.len() > 1
-            && output.stderr.len() % 2 == 0
-            && output.stderr.chunks(2).take(8).all(|pair| pair[1] == 0);
-        let stderr = if is_utf16 {
-            String::from_utf16_lossy(
-                &output
-                    .stderr
-                    .chunks(2)
-                    .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
-                    .collect::<Vec<_>>(),
-            )
-        } else {
-            stderr.into_owned()
-        };
+        let stderr = console_probe::decode_stderr(&output.stderr);
         stderr.contains("Internal Windows PowerShell error") || stderr.contains("8009001d")
     }
 
