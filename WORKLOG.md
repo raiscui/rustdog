@@ -1174,3 +1174,12 @@ iroh lane 的准入面只有 `@ping` / `@pty`, bulk 动词在 `LANE_REFUSED` 之
 transfer_id —— 这跟 RAI-424 索引的口径是同一条。回收分两条阈值 (会话按 idle_timeout, 孤儿按
 resume_window), 孤儿也进索引跨重启恢复, 恢复时只认暂存区里的文件 (索引是用户可写的输入)。
 用例覆盖: 换目标不删旧半成品且转孤儿、孤儿按窗口回收 (未到窗口不许删)、孤儿跨重启存活后回收。
+
+### RAI-367 阶段 2: CLI 流式驱动 (G1)
+
+- 提交: 1ae327c
+
+`rdog control --put/--get` 逐块流式驱动 bulk。峰值内存是一个 chunk, 与文件大小无关; 失败即
+`@file-cancel`; 下载落地后客户端自己比对 sha256。驱动抽成 `LineExchange` trait, 用例把请求直接
+发给真的 daemon 侧实现, 只换线缆, 因此测的是状态机 + 真实协议语义。
+同时修了孤儿用例里 `clear()` 抹掉并行用例条目的串台 (CI ubuntu 红了那一项的原因)。
