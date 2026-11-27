@@ -38,3 +38,36 @@
    tree（daemon 起不来、目录没注册），失败串却像网络问题。这条前置检查现在是单子的第一项。
 2. **判据不能只看 exit code。** 三个动词都 `exit=1` 还不够 —— 要看**有没有 `@response`**、
    被拒的是**动词**还是**参数**。前者是能力拒绝（我们要的），后者是"参数写错所以拒"，不是证据。
+
+---
+
+## 后续证据推翻本判读的两条结论 (2026-11-27)
+
+新证据: 同源 `334271c` 的真机补证 (RUST-38, 报告 `drive://captain-remote-p2p/reports/RUST-38.md`),
+A 云机 → B razer 的 **524,288 B 直连上传两端哈希一致**, 同 attempt `cli-5070` 由官方 join 得
+`relay_bytes_zero:true`。代码侧一并核过 (`origin/main`):
+
+| 事实 | 落点 |
+| --- | --- |
+| 客户端走 iroh 准入 lane 传 bulk + relay 括号采样 | `7f7f83a` |
+| daemon 侧出自己那一半快照 (真实 bracket 采样, `endpoint:"daemon"`, `concurrency_suspected:null`) | `src/control_iroh.rs:1030` 附近 |
+| 真机 `--put` 首字节 panic 的修复 | `2fa1c4c` |
+| 两端 join 的官方实现 | `src/bulk_path.rs` `join_inputs` |
+
+**旧结论不再成立的两条**:
+
+1. ~~「A 类 (bulk 在直连上完成) 不可达: iroh lane 不承载 bulk 数据面」~~ —— 数据面已落地, A 类已有
+   读数 (上面那 524,288 B)。
+2. ~~「仪表未成立: daemon 侧没有 relay 计数, 快照只有客户端那一半」~~ —— daemon 半已出, join 可做。
+
+**仍然成立、且被这次证据加强的两条**:
+
+- 「bulk 不过 relay 由**能力拒绝**保证」—— 四次自然 relay 回退与一次强制 relay 都在发出 bulk 请求
+  **之前**被拒 (`iroh_direct_path_unavailable`), 无目标文件、无 `.rdog-partial`;
+- 「没有正对照的零推不出结论」—— 这一轮 A→B 的零**带**了后端 join 的 `relay_bytes_zero:true`,
+  所以它是结论; 而缺 daemon 半的那次 join 报 `bulk_path_endpoint_missing`, 依旧不算证据。
+
+**新出现的一条边界 (不是 `iroh_direct_path_lost`)**: C → B 直连首块在 30 秒等 ACK 失败, 而 B 侧
+有 262,144 B 半成品且与源前缀哈希一致, 客户端记录 0 个已确认 chunk。这是**单端确认与实写的差异**:
+路径没有丢, 是 ACK 没在预算内回来。按记账口径 (只记被对端确认的字节) 客户端记 0 是对的, 不得据此
+主张"中途路径丢失"; 该场景的正确后续是**从 262144 续传**, 并单独立票查 ACK 为什么 30 秒没回。
