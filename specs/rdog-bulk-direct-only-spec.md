@@ -695,6 +695,16 @@ relay 跳上承载, 这个判定都看不见 (§3.5 / §4.2 的已知边界)。
 > 还没在任何一次运行里达到, 所以在它达到之前"relay 上 bulk 字节为 0"这条不做结论; 而且本版连传输层 pin
 > 都没有, 所以那句结论的资格比上一版更低: 能主张的只有"每个边界上路径是直连"。
 >
+> **2026-11-27 真机证据刷新上一段的「正对照未建立」**: A 云机 → B razer 的 **524,288 B 直连上传
+> 两端哈希一致**, 同 attempt `cli-5070` 由官方 join (`bulk_path::join_inputs`) 得
+> `relay_bytes_zero:true` —— 这是**有千字节以上实际字节**的一次尝试, 所以那条阈值前提已满足。
+> 但**传输层 pin 仍然缺**, 因此能主张的仍是「每个边界上路径直连 + 该次尝试两端 relay 采样 delta 为 0」,
+> 不主张「整条连接从未经过 relay」。判读全文 `handoffs/rai367/positive-control-verdict.md`。
+>
+> 另一条边界同理要分清: C → B 直连首块 30 秒等不到 ACK, 而 B 侧已写 262,144 B 且与源前缀哈希一致,
+> 客户端记 0 个已确认 chunk —— 这是**确认与实写的差异**, **不得**记成 `iroh_direct_path_lost`;
+> 正确后续是从 262144 续传, 并单独立票查 ACK 为何 30 秒未回。
+>
 > **`established_direct` 两端都有生产者**: daemon 的 `BulkPathGate` 与客户端的
 > `BulkPathRecorder` 都在读采样的同时记录「本次尝试是否曾观测到 direct」, 所以 §2.5 D1 的
 > 「中途 direct → relay」(`iroh_direct_path_lost`) 在两个方向都会走到, 各有钉住读数的用例覆盖
