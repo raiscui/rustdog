@@ -1336,3 +1336,15 @@ CLI 重跑得到 `resume=honored`。教训: 之前 CLI 挂住不是 CLI 的 bug,
 - 提交: 9e9fbec (正对照判读)
 - 提交: 566b017 (评审 F5/F6)
 - 提交: 1c7064a (评审 F5 收口)
+
+### RAI-367 判读刷新: A 类与正对照按真机新证据成立 (旧结论作废)
+
+- 提交: ad92238
+
+RAI-476 落地 (客户端 lane 承载 bulk `7f7f83a`、daemon 半快照、join 实现、首字节 panic 修复
+`2fa1c4c`) 后, 我在 2026-11-26 写下的两条结论不再成立: 「A 类不可达」与「仪表未成立(daemon 侧无
+relay 计数)」。真机证据: A 云机 → B razer 的 524,288 B 直连上传两端哈希一致, 同 attempt `cli-5070`
+官方 join 得 `relay_bytes_zero:true`。
+仍然成立: bulk 不过 relay 由**能力拒绝**保证 (四次自然 relay 回退与一次强制 relay 都在发出 bulk
+请求前被拒、零副作用); 没有正对照的零推不出结论。新增边界: C → B 首块 30 秒等不到 ACK 而 B 侧已写
+262,144 B — 确认与实写的差异, 不得记成 `iroh_direct_path_lost`。
