@@ -167,6 +167,9 @@ struct TransferSession {
     is_upload: bool,
     /// 最近一次有进展的时刻 (epoch ms)。空闲过期 (reap_idle_transfers) 据此判定。
     last_activity_ms: u64,
+    /// 重放会话专用: 对账那一刻目标**不存在**, 所以提交时**不许覆盖**后来出现的任何东西。
+    /// 只有"探针说 `Absent` 且本命令带 `verify_committed`"的会话置位 (其余保持覆盖语义)。
+    no_replace_publish: bool,
 }
 
 /// 当前 epoch 毫秒。过期判定收 now 参数而不是内部取时钟, 让单测能确定性地构造时间。
@@ -335,6 +338,7 @@ pub fn execute_put_file(payload: &str) -> std::io::Result<Value> {
         )));
     }
 
+    let mut no_replace_publish = false;
     // 重放对账 (RAI-711 M1): 客户端只在"上一次没干净收尾"时带这个字段, 所以正常首传不多一次哈希。
     if value
         .get("verify_committed")
@@ -367,7 +371,11 @@ pub fn execute_put_file(payload: &str) -> std::io::Result<Value> {
                 )));
             }
             // 没有目标文件 = 上次没提交过 (提交必然留下目标), 从 0 重来是安全的。
-            ReplayState::Absent => {}
+            ReplayState::Absent => {
+                // 对账那一刻没有目标: 这条会话在提交时**不许覆盖**后来出现的任何东西
+                // (评审 #204 severe 2: probe 与提交之间可以被旧的 `@file-end` 落盘)。
+                no_replace_publish = true;
+            }
         }
     }
 
@@ -475,6 +483,7 @@ pub fn execute_put_file(payload: &str) -> std::io::Result<Value> {
             temp_path: Some(temp_path),
             is_upload: true,
             last_activity_ms: now_ms(),
+            no_replace_publish,
         },
     );
     persist_index(&sessions);
@@ -643,6 +652,20 @@ pub fn execute_file_end(payload: &str) -> std::io::Result<Value> {
         }
     }
 
+    // 重放会话的发布守卫 (评审 #204 severe 2): 对账那一刻目标不存在, 从那一刻到这里的窗口里
+    // **有人落了盘** —— 这是真实并发, 不是坏数据。此时绝不覆盖: 拒, 清掉本次临时文件, 会话退役。
+    //
+    // 这一步与提交在同一次会话锁内 (本函数整段持锁), 所以它与"对账探针 + 会话登记"互斥;
+    // 发布本身仍是 rename, 但要先在这里复查目标**仍然不存在**。
+    if session.no_replace_publish && std::fs::symlink_metadata(&final_path).is_ok() {
+        reap_file(&temp_path);
+        sessions.remove(&transfer_id);
+        persist_index(&sessions);
+        return Err(std::io::Error::other(
+            "file_transfer_replay_raced: 目标在对账之后被别的写入占用/替换了 — 不覆盖、不重传; 请重跑以重新对账",
+        ));
+    }
+
     // 提交: 原子改名到目标 (同目录 rename, 失败回退为复制)
     if std::fs::rename(&temp_path, &final_path).is_err() {
         std::fs::copy(&temp_path, &final_path).map_err(|e| {
@@ -698,6 +721,7 @@ pub fn execute_get_file(payload: &str) -> std::io::Result<Value> {
             written: 0,
             temp_path: None,
             is_upload: false,
+            no_replace_publish: false,
             last_activity_ms: now_ms(),
         },
     );
@@ -1409,6 +1433,8 @@ fn restore_index() -> usize {
                 temp_path: Some(temp_path),
                 is_upload: true,
                 last_activity_ms,
+                // 索引恢复出来的会话不知道原来是哪种发布语义: 按覆盖走 (与恢复前一致)。
+                no_replace_publish: false,
             },
         );
         restored += 1;
@@ -1734,6 +1760,84 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// RAI-711 severe 2: 对账探到 `Absent` 之后、提交之前有人落了盘 ⇒ **不许覆盖**。
+    #[test]
+    fn a_replay_session_refuses_to_overwrite_a_target_that_appeared_after_the_probe() {
+        let _guard = TRANSFER_TABLE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let dir = std::env::temp_dir().join(unique_id("replay-raced"));
+        std::fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("raced.bin");
+        let payload = b"replay payload";
+        let sha = format!("{:x}", Sha256::digest(payload));
+
+        // 客户端带 verify_committed: 探针说 Absent ⇒ 这条会话置位 no_replace_publish
+        let tid = unique_id("raced");
+        execute_put_file(&format!(
+            r#"{{"transfer_id":"{tid}","path":"{}","size":{},"sha256":"{sha}","resume":false,"verify_committed":true}}"#,
+            escape_json(&target.display().to_string()),
+            payload.len()
+        ))
+        .unwrap();
+        let data = BASE64_STANDARD.encode(payload);
+        execute_file_chunk(&format!(
+            r#"{{"transfer_id":"{tid}","offset":0,"data":"{data}"}}"#
+        ))
+        .unwrap();
+
+        // 别人在我们 probe 之后把目标写上了
+        let theirs = b"someone else's bytes";
+        std::fs::write(&target, theirs).unwrap();
+
+        let err = execute_file_end(&format!(r#"{{"transfer_id":"{tid}","sha256":"{sha}"}}"#))
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("file_transfer_replay_raced"),
+            "必须报 raced: {err}"
+        );
+        assert_eq!(
+            std::fs::read(&target).unwrap(),
+            theirs.to_vec(),
+            "别人的字节一个都不许动"
+        );
+        assert!(
+            !staging_path(&target).unwrap().exists(),
+            "被 raced 挡下的临时文件必须清掉"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 同一格的正对照: 正常上传 (没带 `verify_committed`) 照样覆盖已存在的目标。
+    #[test]
+    fn a_normal_upload_still_overwrites_an_existing_target() {
+        let _guard = TRANSFER_TABLE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let dir = std::env::temp_dir().join(unique_id("normal-overwrite"));
+        std::fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("over.bin");
+        std::fs::write(&target, b"old").unwrap();
+        let payload = b"new content";
+        let sha = format!("{:x}", Sha256::digest(payload));
+
+        let tid = unique_id("over");
+        execute_put_file(&format!(
+            r#"{{"transfer_id":"{tid}","path":"{}","size":{},"sha256":"{sha}","resume":false}}"#,
+            escape_json(&target.display().to_string()),
+            payload.len()
+        ))
+        .unwrap();
+        let data = BASE64_STANDARD.encode(payload);
+        execute_file_chunk(&format!(
+            r#"{{"transfer_id":"{tid}","offset":0,"data":"{data}"}}"#
+        ))
+        .unwrap();
+        execute_file_end(&format!(r#"{{"transfer_id":"{tid}","sha256":"{sha}"}}"#)).unwrap();
+        assert_eq!(std::fs::read(&target).unwrap(), payload.to_vec());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn digest_mismatch_cleans_up_partial() {
         let dir = std::env::temp_dir().join(format!("rdog-ft-mismatch-{}", std::process::id()));
@@ -1920,6 +2024,7 @@ mod tests {
             temp_path: Some(partial.clone()),
             is_upload: true,
             last_activity_ms: now_ms(),
+            no_replace_publish: false,
         };
         {
             let mut sessions = transfers().lock().unwrap();
@@ -2508,6 +2613,7 @@ mod tests {
                 temp_path: None,
                 is_upload: true,
                 last_activity_ms: 0,
+            no_replace_publish: false,
             },
         );
         let err = admit_new_session(&table, "newcomer", 1).unwrap_err();
@@ -2552,6 +2658,7 @@ mod tests {
                 temp_path: Some(temp_path),
                 is_upload: true,
                 last_activity_ms: now_ms(),
+                no_replace_publish: false,
             },
         );
         let resumed = execute_put_file(&format!(
