@@ -13,7 +13,10 @@ use std::{
 };
 
 use iroh::{
-    endpoint::{presets, Connection, ConnectionError, PortmapperConfig, RecvStream, SendStream},
+    endpoint::{
+        presets, Connection, ConnectionError, LocalTransportAddr, PortmapperConfig, RecvStream,
+        SendStream,
+    },
     Endpoint, EndpointAddr, EndpointId, RelayMode, RelayUrl, SecretKey, TransportAddr,
 };
 use iroh_relay::{server, tls::CaTlsConfig, RelayConfig, RelayMap, RelayQuicConfig};
@@ -58,6 +61,9 @@ mod lane_runtime_tests;
 
 #[cfg(test)]
 mod direct_probe_tests;
+
+#[cfg(test)]
+mod bulk_prewarm_tests;
 
 #[cfg(test)]
 mod readonly_tests {
@@ -297,6 +303,8 @@ struct ClientConfig {
     path: Route,
     #[serde(default)]
     probe_direct_via_relay: bool,
+    #[serde(default)]
+    bulk_prewarm: bool,
     #[serde(default)]
     direct_connect_timeout_ms: Option<u64>,
     #[serde(default)]
@@ -2317,42 +2325,35 @@ pub(crate) fn run_control(path: &Path, name: &str, line: &str) -> Result<()> {
             return Err("unexpected iroh directory lookup response".into());
         };
         if cfg.probe_direct_via_relay {
-            if !addr.relay_urls().any(|url| *url == cfg.relay.url) {
-                return Err("iroh directory has no configured relay candidate".into());
-            }
-            let data = endpoint_with_network(
+            let (reply, _) = direct_ping_probe(
                 key,
-                Some(bind),
-                DIRECT_PROBE_RETURN_ALPN,
-                Some(&cfg.relay),
-                true,
+                bind,
+                &addr,
+                &cfg,
+                direct_budget,
+                line,
+                request.request_id,
             )
             .await?;
-            let probe = async {
-                let conn = connect_direct_probe(&data, &addr, &cfg.relay, direct_budget).await?;
-                exchange_ping(&conn, Route::Direct, &cfg, line, request.request_id).await
-            };
-            let reply =
-                with_probe_reverse(probe, accept_direct_probe_reverse(&data, addr.id)).await;
-            data.close().await;
-            return reply;
+            println!("{reply}");
+            return Ok(());
         }
         let (data, conn, actual) =
             connect_with_path(&key, Some(bind), &addr, &cfg, direct_budget).await?;
-        let reply = exchange_ping(&conn, actual, &cfg, line, request.request_id).await;
+        log::info!("iroh_path={}", actual.label());
+        let reply = exchange_ping(&conn, &cfg, line, request.request_id).await;
         data.close().await;
-        reply
+        println!("{}", reply?);
+        Ok(())
     })
 }
 
 async fn exchange_ping(
     conn: &Connection,
-    actual: Route,
     cfg: &ClientConfig,
     line: &str,
     request_id: Option<u64>,
-) -> Result<()> {
-    log::info!("iroh_path={}", actual.label());
+) -> Result<String> {
     let reply = match timeout(IO, conn.open_bi()).await {
         Ok(Ok((send, read))) => {
             let mut transport =
@@ -2389,13 +2390,7 @@ async fn exchange_ping(
     if value["pong"].as_bool() != Some(true) {
         return Err("invalid iroh pong".into());
     }
-    if cfg.probe_direct_via_relay {
-        let direct_addr = selected_direct_ip(conn, cfg.routable)
-            .ok_or("iroh direct probe lost its direct path before pong")?;
-        log::info!("iroh direct probe pong id={request_id:?} direct_addr={direct_addr}");
-    }
-    println!("{reply}");
-    Ok(())
+    Ok(reply)
 }
 
 // ---------------------------------------------------------------------------
@@ -3058,12 +3053,15 @@ async fn connect_with_path(
     Err(last.unwrap_or_else(|| "iroh has no reachable path".into()))
 }
 
-fn selected_direct_ip(conn: &Connection, routable: bool) -> Option<SocketAddr> {
+fn selected_direct_path(
+    conn: &Connection,
+    routable: bool,
+) -> Option<(SocketAddr, LocalTransportAddr)> {
     conn.paths()
         .iter()
         .find_map(|path| match path.remote_addr() {
             TransportAddr::Ip(ip) if path.is_selected() && candidate_ok(*ip, routable).is_ok() => {
-                Some(*ip)
+                Some((*ip, path.local_addr().clone()))
             }
             _ => None,
         })
@@ -3072,7 +3070,7 @@ fn selected_direct_ip(conn: &Connection, routable: bool) -> Option<SocketAddr> {
 async fn await_direct(conn: &Connection, routable: bool, budget: Duration) -> Result<SocketAddr> {
     timeout(budget, async {
         loop {
-            if let Some(ip) = selected_direct_ip(conn, routable) {
+            if let Some((ip, _)) = selected_direct_path(conn, routable) {
                 return Ok(ip);
             }
             tokio::select! {
@@ -3230,6 +3228,177 @@ async fn connect_direct_probe(
         connected.elapsed().as_millis()
     );
     Ok(conn)
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct BulkPrewarmTuple {
+    peer: EndpointId,
+    local: SocketAddr,
+    remote: SocketAddr,
+}
+
+fn observed_bulk_tuple(
+    data: &Endpoint,
+    peer: EndpointId,
+    remote: SocketAddr,
+    local: LocalTransportAddr,
+) -> Option<BulkPrewarmTuple> {
+    let sockets = data.bound_sockets();
+    let [bound] = sockets.as_slice() else {
+        return None;
+    };
+    let LocalTransportAddr::Ip(interface) = local else {
+        return None;
+    };
+    let local_ip = interface
+        .map(|ip| ip.to_canonical())
+        .or_else(|| (!bound.ip().is_unspecified()).then_some(bound.ip()))?;
+    if local_ip.is_unspecified()
+        || local_ip.is_ipv4() != bound.is_ipv4()
+        || (!bound.ip().is_unspecified() && local_ip != bound.ip())
+        || bound.port() == 0
+    {
+        return None;
+    }
+    Some(BulkPrewarmTuple {
+        peer,
+        local: SocketAddr::new(local_ip, bound.port()),
+        remote,
+    })
+}
+
+async fn close_direct_probe(data: Endpoint, peer: EndpointId) {
+    let closed = data.closed();
+    data.close().await;
+    closed.await;
+    drop(data);
+    log::info!("iroh direct probe endpoint closed peer={peer}");
+}
+
+async fn direct_ping_probe(
+    key: SecretKey,
+    bind: SocketAddr,
+    addr: &EndpointAddr,
+    cfg: &ClientConfig,
+    budget: Duration,
+    line: &str,
+    request_id: Option<u64>,
+) -> Result<(String, Option<BulkPrewarmTuple>)> {
+    if !addr.relay_urls().any(|url| *url == cfg.relay.url) {
+        return Err("iroh directory has no configured relay candidate".into());
+    }
+    let data = endpoint_with_network(
+        key,
+        Some(bind),
+        DIRECT_PROBE_RETURN_ALPN,
+        Some(&cfg.relay),
+        true,
+    )
+    .await?;
+    let probe = async {
+        let conn = connect_direct_probe(&data, addr, &cfg.relay, budget).await?;
+        if cfg.probe_direct_via_relay {
+            log::info!("iroh_path=direct");
+        }
+        let reply = exchange_ping(&conn, cfg, line, request_id).await?;
+        let (remote, local) = selected_direct_path(&conn, cfg.routable)
+            .ok_or("iroh direct probe lost its direct path before pong")?;
+        let tuple = observed_bulk_tuple(&data, conn.remote_id(), remote, local);
+        if cfg.bulk_prewarm && !cfg.probe_direct_via_relay {
+            if let Some(tuple) = &tuple {
+                log::info!(
+                    "iroh bulk prewarm tuple local={} remote={} peer={}",
+                    tuple.local,
+                    tuple.remote,
+                    tuple.peer
+                );
+            }
+        } else {
+            log::info!("iroh direct probe pong id={request_id:?} direct_addr={remote}");
+        }
+        Ok((reply, tuple))
+    };
+    let outcome = with_probe_reverse(probe, accept_direct_probe_reverse(&data, addr.id)).await;
+    close_direct_probe(data, addr.id).await;
+    outcome
+}
+
+const BULK_PREWARM_TUPLE_UNAVAILABLE: &str = "iroh_bulk_prewarm_tuple_unavailable";
+const BULK_PREWARM_REBIND_FAILED: &str = "iroh_bulk_prewarm_rebind_failed";
+const BULK_PREWARM_DIRECT_UNAVAILABLE: &str = "iroh_bulk_prewarm_direct_unavailable";
+
+async fn dial_prewarmed_bulk(
+    key: &SecretKey,
+    cfg: &ClientConfig,
+    tuple: BulkPrewarmTuple,
+    budget: Duration,
+) -> Result<(Endpoint, Connection, Route)> {
+    let data = endpoint_with_network(
+        key.clone(),
+        Some(tuple.local),
+        CONTROL_ALPN,
+        None,
+        cfg.routable,
+    )
+    .await
+    .map_err(|err| {
+        format!(
+            "{BULK_PREWARM_REBIND_FAILED}: could not bind {}: {err}",
+            tuple.local
+        )
+    })?;
+    if data.bound_sockets().as_slice() != [tuple.local] {
+        let actual = data.bound_sockets();
+        data.close().await;
+        return Err(format!(
+            "{BULK_PREWARM_REBIND_FAILED}: expected {}, got {actual:?}",
+            tuple.local
+        )
+        .into());
+    }
+    log::info!(
+        "iroh bulk prewarm rebound local={} remote={} peer={} relay=disabled",
+        tuple.local,
+        tuple.remote,
+        tuple.peer
+    );
+    let target = EndpointAddr::from_parts(tuple.peer, [TransportAddr::Ip(tuple.remote)]);
+    let conn = connect_once(
+        &data,
+        &target,
+        Route::Direct,
+        &cfg.relay,
+        cfg.routable,
+        budget,
+    )
+    .await;
+    match conn {
+        Ok((conn, Route::Direct))
+            if conn.remote_id() == tuple.peer
+                && selected_direct_path(&conn, cfg.routable)
+                    .is_some_and(|(remote, _)| remote == tuple.remote) =>
+        {
+            log::info!(
+                "iroh bulk prewarm direct established local={} remote={} peer={}",
+                tuple.local,
+                tuple.remote,
+                tuple.peer
+            );
+            Ok((data, conn, Route::Direct))
+        }
+        other => {
+            data.close().await;
+            let reason = other.err().map_or_else(
+                || "authenticated peer did not select the prewarmed address".to_owned(),
+                |err| err.to_string(),
+            );
+            Err(format!(
+                "{BULK_PREWARM_DIRECT_UNAVAILABLE}: {}: {reason}",
+                tuple.remote
+            )
+            .into())
+        }
+    }
 }
 
 fn spawn_lease_renewer(
@@ -3677,6 +3846,9 @@ fn check_client_config(cfg: &ClientConfig) -> Result<()> {
     if cfg.probe_direct_via_relay {
         return Err("iroh probe_direct_via_relay is only supported for @ping".into());
     }
+    if cfg.bulk_prewarm && (!cfg.routable || cfg.path != Route::Direct) {
+        return Err("iroh bulk_prewarm requires routable mode and path=direct".into());
+    }
     let ttl = Duration::from_millis(cfg.lease_ttl_ms.unwrap_or(DEFAULT_LEASE_TTL_MS));
     if ttl < admission::MIN_SESSION_TTL || ttl > admission::MAX_SESSION_TTL {
         return Err("iroh lease_ttl_ms is outside the supported range".into());
@@ -3727,8 +3899,20 @@ where
     let bind = bind_addr(cfg.bind, cfg.routable)?;
     runtime()?.block_on(async move {
         let target = addr.id;
-        let (data, conn, actual) =
-            connect_with_path(&key, Some(bind), &addr, &cfg, direct_budget).await?;
+        let (data, conn, actual) = if cfg.bulk_prewarm {
+            let (_, tuple) =
+                direct_ping_probe(key.clone(), bind, &addr, &cfg, direct_budget, "@ping", None)
+                    .await
+                    .map_err(|err| format!("{BULK_PREWARM_TUPLE_UNAVAILABLE}: {err}"))?;
+            let tuple = tuple.ok_or_else(|| {
+                format!(
+                "{BULK_PREWARM_TUPLE_UNAVAILABLE}: selected path has no verifiable local UDP tuple"
+            )
+            })?;
+            dial_prewarmed_bulk(&key, &cfg, tuple, direct_budget).await?
+        } else {
+            connect_with_path(&key, Some(bind), &addr, &cfg, direct_budget).await?
+        };
         log::info!("iroh_path={}", actual.label());
         let (send, read) = timeout(IO, conn.open_bi()).await??;
         let mut transport =
