@@ -133,6 +133,22 @@ fn require_u64(value: &Value, key: &str, verb: &str) -> Result<u64, std::io::Err
 // 路径安全 (决策 3)
 // ============================================================
 
+pub(crate) fn validate_portable_transfer_path(raw: &str, verb: &str) -> std::io::Result<()> {
+    // 远端可能是另一种 OS。带驱动器、UNC、流名或反斜杠的语义留给 daemon,
+    // 但普通斜杠路径可以复用同一套词法门禁。
+    if raw.contains(['\\', ':']) || raw.starts_with("//") {
+        return validate_nonempty_transfer_path(raw, verb);
+    }
+    validate_transfer_path(raw, verb).map(|_| ())
+}
+
+fn validate_nonempty_transfer_path(raw: &str, verb: &str) -> std::io::Result<()> {
+    if raw.trim().is_empty() {
+        return Err(std::io::Error::other(format!("@{verb} 路径为空")));
+    }
+    Ok(())
+}
+
 /// 规范化并校验目标路径: 拒绝 `..` 穿越 (含符号链接语义上等价的逃逸方向)。
 ///
 /// 不用 `canonicalize`: 它要求路径存在且会**解析符号链接** — 后者对
@@ -147,9 +163,7 @@ fn validate_transfer_path(raw: &str, verb: &str) -> Result<PathBuf, std::io::Err
             )));
         }
     }
-    if raw.trim().is_empty() {
-        return Err(std::io::Error::other(format!("@{verb} 路径为空")));
-    }
+    validate_nonempty_transfer_path(raw, verb)?;
     // 目标路径不许落在保留目录里: 那是暂存区的命名空间。允许它, 就等于允许客户端把别人的
     // 暂存文件当成目标来覆盖/删除。
     //

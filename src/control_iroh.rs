@@ -22,7 +22,7 @@ use tokio::{
     runtime::{Builder, Handle, Runtime},
     sync::Semaphore,
     task::JoinSet,
-    time::timeout,
+    time::{timeout, timeout_at},
 };
 
 use crate::{
@@ -3531,6 +3531,7 @@ pub(crate) struct IrohBulkLane {
     poisoned: Option<LaneError>,
     renewal_stop: Arc<AtomicBool>,
     renewal: Option<std::thread::JoinHandle<()>>,
+    probe_attempted: bool,
 }
 
 impl IrohBulkLane {
@@ -3577,6 +3578,29 @@ impl IrohBulkLane {
         }
     }
 
+    pub(crate) fn request_probe(
+        &mut self,
+        line: &str,
+        deadline: Instant,
+    ) -> std::result::Result<String, LaneError> {
+        if let Some(err) = self.poisoned.clone() {
+            return Err(err);
+        }
+        self.probe_attempted = true;
+        self.renewal_stop.store(true, Ordering::Relaxed);
+        let ControlTransport::Iroh(transport) = &mut self.transport else {
+            return Err(LaneError::local("零负载探针需要 iroh 流".to_string()));
+        };
+        let result = transport
+            .write_message_before(line, Some(deadline))
+            .and_then(|()| transport.read_message_before(Some(deadline)));
+        match result {
+            Ok(Some(reply)) => Ok(reply),
+            Ok(None) => Err(self.poison(LaneError::closed("对端在探针回执前关流".to_string()))),
+            Err(err) => Err(self.poison(LaneError::local(err.to_string()))),
+        }
+    }
+
     /// 本端此刻的路径观测: 门禁判定与本端证据的输入, 与 daemon 侧读的是同一批字段。
     pub(crate) fn observe(&self) -> PathObservation {
         let sampler = PathSampler::Lane {
@@ -3609,10 +3633,16 @@ impl IrohBulkLane {
     /// 这是这条 lane 唯一的出口 (`with_bulk_lane` 在 body 返回后无条件调用)。
     fn shutdown(mut self) {
         self.renewal_stop.store(true, Ordering::Relaxed);
+        if self.probe_attempted {
+            // 取证已是最终失败路径。关连接唤醒已在写的续期线程, 不再等常规 graceful close。
+            self.conn.close(0u32.into(), b"zero-load probe finished");
+        }
         if let Some(renewal) = self.renewal.take() {
             let _ = renewal.join();
         }
-        let _ = self.transport.close();
+        if !self.probe_attempted {
+            let _ = self.transport.close();
+        }
     }
 }
 
@@ -3740,6 +3770,7 @@ where
                 poisoned: None,
                 renewal_stop,
                 renewal: Some(renewal),
+                probe_attempted: false,
             };
             let value = body(&mut lane);
             lane.shutdown();
@@ -3803,7 +3834,12 @@ impl IrohLineTransport {
     }
 
     pub(crate) fn read_message(&mut self) -> io::Result<Option<String>> {
+        self.read_message_before(None)
+    }
+
+    fn read_message_before(&mut self, deadline: Option<Instant>) -> io::Result<Option<String>> {
         loop {
+            let deadline = deadline.map(probe_deadline).transpose()?;
             if let Some(line) = take_line(&mut self.buffered) {
                 return Ok(Some(line));
             }
@@ -3815,12 +3851,12 @@ impl IrohLineTransport {
             let read = &mut self.read;
             let mut chunk = [0_u8; 16 * 1024];
             let outcome = handle.block_on(async {
-                match wait {
-                    Some(wait) => timeout(wait, read.read(&mut chunk)).await.map_err(|_| {
-                        io::Error::new(io::ErrorKind::TimedOut, "iroh line read timed out")
-                    }),
-                    None => Ok(read.read(&mut chunk).await),
+                match (deadline, wait) {
+                    (Some(deadline), _) => timeout_at(deadline, read.read(&mut chunk)).await,
+                    (None, Some(wait)) => timeout(wait, read.read(&mut chunk)).await,
+                    (None, None) => return Ok(read.read(&mut chunk).await),
                 }
+                .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "iroh line read timed out"))
             });
             match outcome?.map_err(io::Error::other)? {
                 None => self.eof = true,
@@ -3838,7 +3874,11 @@ impl IrohLineTransport {
     }
 
     pub(crate) fn write_message(&mut self, message: &str) -> io::Result<()> {
-        write_line(&self.handle, &self.send, &self.guard, message)
+        self.write_message_before(message, None)
+    }
+
+    fn write_message_before(&mut self, message: &str, deadline: Option<Instant>) -> io::Result<()> {
+        write_line(&self.handle, &self.send, &self.guard, message, deadline)
     }
 
     pub(crate) fn try_clone_writer(&self) -> IrohLineWriter {
@@ -3874,7 +3914,7 @@ impl IrohLineTransport {
 
 impl IrohLineWriter {
     pub(crate) fn write_message(&mut self, message: &str) -> io::Result<()> {
-        write_line(&self.handle, &self.send, &self.guard, message)
+        write_line(&self.handle, &self.send, &self.guard, message, None)
     }
 }
 
@@ -3990,16 +4030,33 @@ fn write_line(
     send: &Arc<Mutex<SendStream>>,
     guard: &FrameGuard,
     message: &str,
+    deadline: Option<Instant>,
 ) -> io::Result<()> {
     let send = send.clone();
     guard.write(message, |frame| {
         handle.block_on(async move {
-            let mut stream = send.lock().expect("iroh send stream");
+            let mut stream = if deadline.is_some() {
+                send.try_lock()
+                    .map_err(|_| io::Error::other("iroh probe send stream is busy"))?
+            } else {
+                send.lock().expect("iroh send stream")
+            };
             // A writer that failed while this one waited for the lock has already
             // truncated the stream, so ask again now that the lock is held.
             guard.ensure_intact()?;
-            let budget = frame_write_budget(frame.len(), guard.timeout);
-            let outcome = match timeout(budget, stream.write_all(frame)).await {
+            let written = match deadline {
+                Some(deadline) => {
+                    timeout_at(probe_deadline(deadline)?, stream.write_all(frame)).await
+                }
+                None => {
+                    timeout(
+                        frame_write_budget(frame.len(), guard.timeout),
+                        stream.write_all(frame),
+                    )
+                    .await
+                }
+            };
+            let outcome = match written {
                 Ok(Ok(())) => Ok(()),
                 Ok(Err(err)) => Err(io::Error::other(err)),
                 Err(_) => Err(io::Error::new(
@@ -4015,6 +4072,16 @@ fn write_line(
             outcome
         })
     })
+}
+
+fn probe_deadline(deadline: Instant) -> io::Result<tokio::time::Instant> {
+    if Instant::now() >= deadline {
+        return Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            "iroh probe deadline elapsed",
+        ));
+    }
+    Ok(deadline.into())
 }
 
 fn take_line(buffered: &mut Vec<u8>) -> Option<String> {

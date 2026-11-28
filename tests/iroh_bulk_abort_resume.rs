@@ -189,6 +189,7 @@ impl Harness {
                 .args(args)
                 .current_dir(&home)
                 .env("HOME", &home)
+                .env("USERPROFILE", &home)
                 .env("TMPDIR", &home)
                 // debug 是判别流程的一部分: daemon 的 `iroh lane line … verb=@file-chunk`
                 // 与 `iroh bulk ack …` 两行只在 debug 级出现, 而"这块到底到没到 / 回执写没写"
@@ -231,6 +232,7 @@ impl Harness {
             .args(extra)
             .current_dir(&self.home)
             .env("HOME", &self.home)
+            .env("USERPROFILE", &self.home)
             .env("TMPDIR", &self.home)
             .stdin(Stdio::null());
         command
@@ -256,6 +258,261 @@ impl Drop for Harness {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.home);
     }
+}
+
+fn force_client_relay(harness: &Harness) {
+    let mut profile = read_json(Path::new(&harness.client));
+    profile["path"] = serde_json::json!("relay");
+    std::fs::write(&harness.client, profile.to_string()).expect("relay client profile");
+}
+
+fn read_json(path: &Path) -> serde_json::Value {
+    serde_json::from_slice(&std::fs::read(path).unwrap_or_else(|err| panic!("{path:?}: {err}")))
+        .expect("JSON")
+}
+
+fn wire_verbs(log: &str) -> Vec<&str> {
+    log.lines()
+        .filter(|line| line.contains("iroh lane line bytes="))
+        .filter_map(|line| line.split_once(" verb=").map(|(_, verb)| verb))
+        .collect()
+}
+
+fn assert_no_output_files(harness: &Harness) {
+    assert!(!harness.remote.exists());
+    assert!(!harness.home.join(".rdog-partial").exists());
+    assert!(!harness
+        .home
+        .join("landed.bin.rdog-partial-download")
+        .exists());
+}
+
+fn join_bulk_halves(harness: &Harness, client: &Path, daemon: &Path) -> std::process::Output {
+    Command::new(&harness.binary)
+        .args(["bulk-path", "join"])
+        .args([client, daemon])
+        .current_dir(&harness.home)
+        .env("HOME", &harness.home)
+        .env("USERPROFILE", &harness.home)
+        .output()
+        .expect("join")
+}
+
+#[test]
+fn bulk_zero_load_opt_in_joins_aborted_halves_without_files_or_chunks() {
+    let harness = Harness::start("zero-opt-in", 17);
+    force_client_relay(&harness);
+    let source = harness.source();
+    let landed = harness.remote.to_str().unwrap();
+    let client_path = harness.home.join("bulk-path.client.json");
+    let daemon_path = harness.home.join("bulk-path.daemon.json");
+
+    for (direction, mut command) in [
+        ("put", harness.put(&source)),
+        (
+            "get",
+            harness.control(vec!["--get", &source, "--local-path", landed]),
+        ),
+    ] {
+        let before = std::fs::read_to_string(&harness.daemon_log).unwrap().len();
+        let output = command
+            .args(["--bulk-zero-load-evidence", "--bulk-path-json"])
+            .arg(&client_path)
+            .output()
+            .expect("bulk command");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(output.status.code(), Some(1), "{stderr}");
+        assert!(stderr.contains("iroh_direct_path_unavailable"), "{stderr}");
+        let log = std::fs::read_to_string(&harness.daemon_log).unwrap();
+        let log = &log[before..];
+        assert_eq!(wire_verbs(log), ["@put-file", "@file-cancel"]);
+        assert!(log.contains("iroh bulk refused code=iroh_direct_path_unavailable"));
+        assert_no_output_files(&harness);
+        assert_eq!(std::fs::read(&source).unwrap(), harness.payload);
+
+        let client = read_json(&client_path);
+        let daemon = read_json(&daemon_path);
+        assert_eq!(client["direction"], direction);
+        assert_eq!(daemon["direction"], "put");
+        for field in ["build", "attempt_id", "transfer_id"] {
+            assert!(client[field]
+                .as_str()
+                .is_some_and(|value| !value.is_empty()));
+            assert_eq!(client[field], daemon[field], "{field}");
+        }
+        for (endpoint, half) in [("client", &client), ("daemon", &daemon)] {
+            assert_eq!(half["endpoint"], endpoint);
+            assert_eq!(half["path_class"], "relay");
+            assert_eq!(half["aborted"], true);
+            assert_eq!(half["bulk_bytes"], 0);
+            assert_eq!(half["wire_bytes"], 0);
+            assert_eq!(half["chunks"], 0);
+        }
+        let id = daemon["transfer_id"].as_str().unwrap();
+        assert!(log.contains(&format!(
+            "iroh bulk ack verb=@file-cancel transfer_id={id} failed=false"
+        )));
+
+        let joined = join_bulk_halves(&harness, &client_path, &daemon_path);
+        assert_eq!(joined.status.code(), Some(1));
+        let joined: serde_json::Value = serde_json::from_slice(&joined.stdout).unwrap();
+        let report = &joined["reports"][0];
+        assert_eq!(report["status"], "joined");
+        assert_eq!(report["reason"], "bulk_path_inconclusive_aborted");
+        assert_eq!(report["relay_bytes_zero"], serde_json::Value::Null);
+    }
+}
+
+#[test]
+fn bulk_zero_load_default_keeps_wire_silent_on_initial_refusal() {
+    let harness = Harness::start("zero-default", 17);
+    force_client_relay(&harness);
+    let source = harness.source();
+    let landed = harness.remote.to_str().unwrap();
+    let evidence = harness.home.join("bulk-path.client.json");
+    for mut command in [
+        harness.put(&source),
+        harness.control(vec!["--get", &source, "--local-path", landed]),
+    ] {
+        let output = command
+            .arg("--bulk-path-json")
+            .arg(&evidence)
+            .output()
+            .expect("bulk command");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(output.status.code(), Some(1), "{stderr}");
+        assert!(stderr.contains("iroh_direct_path_unavailable"), "{stderr}");
+        assert_eq!(read_json(&evidence)["bulk_bytes"], 0);
+        assert!(!harness.home.join("bulk-path.daemon.json").exists());
+        assert_no_output_files(&harness);
+    }
+    let log = std::fs::read_to_string(&harness.daemon_log).unwrap();
+    assert!(!log.contains("iroh lane line bytes="), "{log}");
+}
+
+#[test]
+fn bulk_zero_load_opt_in_keeps_direct_payload_evidence() {
+    let harness = Harness::start("zero-direct", 17);
+    let client_path = harness.home.join("bulk-path.client.json");
+    let output = harness
+        .put(&harness.source())
+        .args(["--bulk-zero-load-evidence", "--bulk-path-json"])
+        .arg(&client_path)
+        .output()
+        .expect("direct put");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(std::fs::read(&harness.remote).unwrap(), harness.payload);
+    let client = read_json(&client_path);
+    let daemon_path = harness.home.join("bulk-path.daemon.json");
+    let daemon = read_json(&daemon_path);
+    for field in ["build", "attempt_id", "transfer_id"] {
+        assert!(client[field]
+            .as_str()
+            .is_some_and(|value| !value.is_empty()));
+        assert_eq!(client[field], daemon[field], "{field}");
+    }
+    for (endpoint, half) in [("client", client), ("daemon", daemon)] {
+        assert_eq!(half["endpoint"], endpoint);
+        assert_eq!(half["path_class"], "direct");
+        assert_eq!(half["aborted"], false);
+        assert_eq!(half["bulk_bytes"], harness.payload.len());
+        assert!(half["wire_bytes"].as_u64().is_some_and(|bytes| bytes > 0));
+        assert!(half["chunks"].as_u64().is_some_and(|chunks| chunks > 0));
+    }
+    let log = std::fs::read_to_string(&harness.daemon_log).unwrap();
+    assert_eq!(wire_verbs(&log), ["@put-file", "@file-chunk", "@file-end"]);
+    let joined = join_bulk_halves(&harness, &client_path, &daemon_path);
+    assert!(
+        joined.status.success(),
+        "{}",
+        String::from_utf8_lossy(&joined.stderr)
+    );
+    let joined: serde_json::Value = serde_json::from_slice(&joined.stdout).unwrap();
+    assert_eq!(joined["reports"][0]["status"], "joined");
+    assert_eq!(joined["reports"][0]["relay_bytes_zero"], true);
+}
+
+#[test]
+fn bulk_zero_load_invalid_put_and_get_inputs_send_no_bulk_requests() {
+    let harness = Harness::start("zero-invalid", 17);
+    force_client_relay(&harness);
+    let source = harness.source();
+    let landed = harness.remote.to_str().unwrap();
+    let evidence = harness.home.join("bulk-path.client.json");
+    for (args, message) in [
+        (
+            vec!["--put", &source, "--remote-path", " \t "],
+            "@put-file 路径为空",
+        ),
+        (
+            vec!["--get", " \t ", "--local-path", landed],
+            "@get-file 路径为空",
+        ),
+        (
+            vec!["--put", &source, "--remote-path", "a/../b"],
+            "@put-file 路径拒绝",
+        ),
+        (
+            vec!["--get", "a/.rdog-partial/x", "--local-path", landed],
+            "file_transfer_staging_path_reserved",
+        ),
+        (
+            vec![
+                "--get",
+                &source,
+                "--local-path",
+                "missing-parent/landed.bin",
+            ],
+            "--local-path 需要现有目录",
+        ),
+    ] {
+        let output = harness
+            .control(args)
+            .args(["--bulk-zero-load-evidence", "--bulk-path-json"])
+            .arg(&evidence)
+            .output()
+            .expect("invalid transfer");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(output.status.code(), Some(1), "{stderr}");
+        assert!(stderr.contains(message), "{stderr}");
+        assert!(!stderr.contains("iroh_path="), "{stderr}");
+        assert!(!evidence.exists());
+        assert!(!harness.home.join("bulk-path.daemon.json").exists());
+    }
+    let log = std::fs::read_to_string(&harness.daemon_log).unwrap();
+    assert!(wire_verbs(&log).is_empty(), "{log}");
+    assert_no_output_files(&harness);
+}
+
+#[test]
+fn bulk_zero_load_rejects_a_conflicting_daemon_evidence_output_before_dial() {
+    let harness = Harness::start("zero-conflicting-output", 17);
+    force_client_relay(&harness);
+    let mut names = vec!["bulk-path.daemon.json", "BULK-PATH.DAEMON.JSON"];
+    if cfg!(windows) {
+        names.extend(["bulk-path.daemon.json. ", "bulk-path.daemon.json:stream"]);
+    }
+    for name in names {
+        let output = harness
+            .put(&harness.source())
+            .args(["--bulk-zero-load-evidence", "--bulk-path-json", name])
+            .output()
+            .expect("conflicting output");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(output.status.code(), Some(1), "{stderr}");
+        assert!(
+            stderr.contains("--bulk-path-json 需要独立的普通文件"),
+            "{stderr}"
+        );
+        assert!(!stderr.contains("iroh_path="), "{stderr}");
+    }
+    let log = std::fs::read_to_string(&harness.daemon_log).unwrap();
+    assert!(wire_verbs(&log).is_empty(), "{log}");
+    assert_no_output_files(&harness);
 }
 
 /// 跑到"字节已经在过线、但还没提交"那一刻再杀: 用 daemon 侧的暂存文件判, 比抢进度行稳。
