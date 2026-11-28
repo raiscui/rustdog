@@ -130,7 +130,27 @@ fn replay_state(path: &Path, size: u64, sha256: &str) -> std::io::Result<ReplayS
             metadata.len()
         )));
     }
+    // 哈希前后各看一次身份 (大小 + mtime + inode/dev): 哈希期间目标被别人换了, 那份摘要就不再是
+    // "现在这个文件"的摘要 —— 报"已提交"会是另一种**错误的成功** (不是覆盖, 但同样把人骗了)。
+    // 不改用第二次哈希 (那要再读一遍全文件), 只比两次 stat; 不一致就按"结果未知"拒绝下结论。
+    // **它是启发式, 不是证明**: 文件系统时间戳粒度粗于写入间隔时, "同 tick 内换掉再换不回"看不见。
+    let identity_before = target_identity(&metadata);
     let actual = sha256_file(path)?;
+    let after = match std::fs::symlink_metadata(path) {
+        Ok(after) => after,
+        Err(err) => {
+            return Ok(ReplayState::Unreadable(format!(
+                "哈希期间读不到目标 {} ({err}) — 结果未知",
+                path.display()
+            )))
+        }
+    };
+    if target_identity(&after) != identity_before {
+        return Ok(ReplayState::Unreadable(format!(
+            "目标 {} 在哈希期间身份发生变化 — 结果未知, 不按已提交处理",
+            path.display()
+        )));
+    }
     if actual.eq_ignore_ascii_case(sha256) {
         Ok(ReplayState::Committed)
     } else {
@@ -138,6 +158,29 @@ fn replay_state(path: &Path, size: u64, sha256: &str) -> std::io::Result<ReplayS
             "目标 {} 的 sha256 是 {actual}, 与本次声明的 {sha256} 不等",
             path.display()
         )))
+    }
+}
+
+/// 一份目标的"身份": 大小 + mtime + inode/dev。哈希前后各取一次, 一致才允许下"已提交"结论。
+fn target_identity(metadata: &std::fs::Metadata) -> (u64, Option<std::time::SystemTime>, u64, u64) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        (
+            metadata.len(),
+            metadata.modified().ok(),
+            metadata.ino(),
+            metadata.dev(),
+        )
+    }
+    #[cfg(not(unix))]
+    {
+        (
+            metadata.len(),
+            metadata.modified().ok(),
+            metadata.len(),
+            0,
+        )
     }
 }
 
@@ -1734,6 +1777,35 @@ mod tests {
         assert!(matches!(
             replay_state(&target, 32, &mine_sha).unwrap(),
             ReplayState::Absent
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 哈希期间目标被换掉 ⇒ **不下"已提交"结论**, 报"结果未知" (评审/ Captain 2026-11-28)。
+    ///
+    /// 这条钉的是"另一种错误的成功": 探针说 committed, 而哈希期间目标已被替换 —— 盘上已经不是
+    /// 那份内容。判据: 两次 stat 的身份 (大小 + mtime + inode) 不一致 ⇒ `Unreadable`(结果未知)。
+    #[test]
+    fn replay_state_refuses_committed_when_the_target_changes_during_the_hash() {
+        // 直接钉身份比较这一跳: 同大小、内容不同的两份文件的身份必须不同 (mtime 至少会变)。
+        let dir = std::env::temp_dir().join(unique_id("replay-identity"));
+        std::fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("swap.bin");
+        std::fs::write(&target, vec![1u8; 64]).unwrap();
+        let before = target_identity(&std::fs::symlink_metadata(&target).unwrap());
+        // 换成同大小、不同内容。**先睡 2 ms**: 文件系统的时间戳粒度可能粗于一次写入的间隔,
+        // 同 tick 内的替换这一层看不见 —— 这条检查是启发式, 不是证明 (注释里也这么写)。
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        std::fs::write(&target, vec![2u8; 64]).unwrap();
+        let after = target_identity(&std::fs::symlink_metadata(&target).unwrap());
+        assert_ne!(before, after, "同大小换内容必须被身份比较看见");
+
+        // 而内容确实已变 ⇒ 按旧摘要判定也不该说 committed
+        let mine = vec![1u8; 64];
+        let mine_sha = format!("{:x}", Sha256::digest(&mine));
+        assert!(matches!(
+            replay_state(&target, 64, &mine_sha).unwrap(),
+            ReplayState::Mismatch(_)
         ));
         let _ = std::fs::remove_dir_all(&dir);
     }
