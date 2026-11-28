@@ -103,11 +103,9 @@ struct TransferSession {
     is_upload: bool,
     /// 最近一次有进展的时刻 (epoch ms)。空闲过期 (reap_idle_transfers) 据此判定。
     last_activity_ms: u64,
-    /// 这次上传的发布是否**必须 no-replace** (客户端在"上一次没干净收尾"的重跑里要求)。
-    ///
-    /// 三态是必须的: `None` = **不知道** (从旧索引恢复出来的会话, 那时还没有这个字段)。判据:
-    /// 任何 replay open 要求保护而命中的会话给不出保证 (`None`) ⇒ **拒 open**, 绝不默认覆盖。
-    no_replace_publish: Option<bool>,
+    /// 这次上传的发布是否**必须 no-replace**。**只由当次 open 请求决定** —— 会话不跨重启,
+    /// 所以不需要持久化, 也不需要从索引里猜 (2026-11-28 最后一次设计迭代, 评审 #204c)。
+    no_replace_publish: bool,
 }
 
 /// 当前 epoch 毫秒。过期判定收 now 参数而不是内部取时钟, 让单测能确定性地构造时间。
@@ -301,19 +299,8 @@ pub fn execute_put_file(payload: &str) -> std::io::Result<Value> {
         // ./a.bin 与 a.bin 这种同义写法就会一边算续传、另一边算换目标.
         let same_target = temp_path_matches(existing.temp_path.as_deref(), &temp_path);
         if resume && same_target {
-            // 保护语义**只许加强不许降级** (评审 #204b severe 2):
-            // - 客户端这次要求 no-replace 而旧会话给不出保证 (`None`, 旧索引恢复的) ⇒ 拒, 不默认覆盖;
-            // - 旧会话是 `Some(false)` ⇒ 锁内升为 `Some(true)`;
-            // - 旧会话已是 `Some(true)` 而这次没要求 ⇒ **不降级** (保持 `Some(true)`)。
-            if requested_no_replace && existing.no_replace_publish.is_none() {
-                return Err(std::io::Error::other(
-                    "file_transfer_replay_unprotected: 这次重跑要求发布不覆盖, 而这条会话的来源给不出该保证 \
-                     (旧版本留下的会话记录) — 要么用 `--restart` 明确同意覆盖, 要么换一个新 id 重来",
-                ));
-            }
-            if requested_no_replace {
-                existing.no_replace_publish = Some(true);
-            }
+            // 保护策略**以当次 open 请求为准** (会话不跨重启, 没有"恢复出未知"这回事)。
+            existing.no_replace_publish = requested_no_replace;
             // 续传式重开: 会话继续用, 只刷新声明与活跃时刻, 已收字节(真相源是半成品长度)不动
             existing.size = size;
             existing.expected_sha256 = expected_sha256;
@@ -330,6 +317,7 @@ pub fn execute_put_file(payload: &str) -> std::io::Result<Value> {
                 "written": written,
                 "next_offset": written,
                 "resume_honored": honored,
+                "publish": if requested_no_replace { "no_replace" } else { "overwrite" },
                 // 活跃会话没有"过期半成品"这回事: 它一直在被 sweep 盯着, 到不了窗口外。
                 "stale_partial_discarded": false,
             }));
@@ -401,7 +389,7 @@ pub fn execute_put_file(payload: &str) -> std::io::Result<Value> {
             temp_path: Some(temp_path),
             is_upload: true,
             last_activity_ms: now_ms(),
-            no_replace_publish: Some(requested_no_replace),
+            no_replace_publish: requested_no_replace,
         },
     );
     persist_index(&sessions);
@@ -412,6 +400,8 @@ pub fn execute_put_file(payload: &str) -> std::io::Result<Value> {
         "kind": "file-transfer",
         "state": if resume_honored { "resumed" } else { "open" },
         "resume_honored": resume_honored,
+        // 回执回声**实际生效**的发布策略: 客户端据此确认"我以为的保护"真的被这一端认可了。
+        "publish": if requested_no_replace { "no_replace" } else { "overwrite" },
         "stale_partial_discarded": stale_discarded,
         "transfer_id": transfer_id,
         "written": written,
@@ -512,6 +502,13 @@ pub fn execute_file_chunk(payload: &str) -> std::io::Result<Value> {
     }))
 }
 
+/// Windows `MoveFileExW` 的 flags: **必须是 0**。
+///
+/// 0 = 既不带 `REPLACE_EXISTING` (会覆盖), 也不带 `MOVEFILE_COPY_ALLOWED` (跨卷时它会把一次原子
+/// rename 退化成 copy+delete, 那就不再是原子的)。这条由 `windows_move_flags_must_stay_zero` 钉住。
+#[cfg(windows)]
+const WINDOWS_MOVE_FLAGS: u32 = 0;
+
 /// 把临时文件发布到目标: **只在目标不存在时**成功, 失败不回退覆盖。
 ///
 /// 这是重放会话的发布原语 (RAI-711 severe 2)。锁内的"复查目标不存在"只挡得住本进程的并发,
@@ -577,7 +574,7 @@ fn publish_no_replace(temp: &Path, target: &Path) -> std::io::Result<()> {
     #[cfg(windows)]
     {
         use std::os::windows::ffi::OsStrExt;
-        use windows_sys::Win32::Storage::FileSystem::{MoveFileExW, MOVEFILE_COPY_ALLOWED};
+        use windows_sys::Win32::Storage::FileSystem::MoveFileExW;
         let wide = |path: &Path| -> Vec<u16> {
             path.as_os_str().encode_wide().chain(Some(0)).collect()
         };
@@ -662,9 +659,7 @@ pub fn execute_file_end(payload: &str) -> std::io::Result<Value> {
     //
     // 这一步与提交在同一次会话锁内 (本函数整段持锁), 所以它与"对账探针 + 会话登记"互斥;
     // 发布本身仍是 rename, 但要先在这里复查目标**仍然不存在**。
-    if session.no_replace_publish == Some(true)
-        && std::fs::symlink_metadata(&final_path).is_ok()
-    {
+    if session.no_replace_publish && std::fs::symlink_metadata(&final_path).is_ok() {
         reap_file(&temp_path);
         sessions.remove(&transfer_id);
         persist_index(&sessions);
@@ -677,7 +672,7 @@ pub fn execute_file_end(payload: &str) -> std::io::Result<Value> {
     }
 
     // 重放会话走**原子 no-replace** 发布: 判据不在锁里, 在内核里 (别的进程也可能落盘)。
-    if session.no_replace_publish == Some(true) {
+    if session.no_replace_publish {
         return match publish_no_replace(&temp_path, &final_path) {
             Ok(()) => {
                 sessions.remove(&transfer_id);
@@ -703,8 +698,15 @@ pub fn execute_file_end(payload: &str) -> std::io::Result<Value> {
                 if let Some(staging_dir) = temp_path.parent() {
                     let _ = std::fs::remove_dir(staging_dir);
                 }
+                let code = if err.kind() == std::io::ErrorKind::AlreadyExists {
+                    "file_transfer_replay_raced"
+                } else if err.kind() == std::io::ErrorKind::Unsupported {
+                    "file_transfer_publish_unsupported"
+                } else {
+                    "file_transfer_publish_failed"
+                };
                 Err(std::io::Error::other(format!(
-                    "file_transfer_replay_raced: 发布时目标已存在 ({err}) — 不覆盖、不重传; 请重跑以重新对账"
+                    "{code}: 无覆盖发布失败 ({err}) — 不覆盖、不重传; 请先核对目标内容, 确认要覆盖再用 `--restart`"
                 )))
             }
         };
@@ -766,7 +768,7 @@ pub fn execute_get_file(payload: &str) -> std::io::Result<Value> {
             temp_path: None,
             is_upload: false,
             // 下载不发布任何东西, 因此与 no-replace 无关 —— 这里不是漏掉的构造点。
-            no_replace_publish: Some(false),
+            no_replace_publish: false,
             last_activity_ms: now_ms(),
         },
     );
@@ -1322,8 +1324,6 @@ fn persist_index(sessions: &HashMap<String, TransferSession>) {
                 "temp_path": temp_path.to_string_lossy(),
                 "size": session.size,
                 "sha256": session.expected_sha256,
-                // `None` 不落盘: 恢复出来仍是"未知", 不会被写成 `false`。
-                "no_replace_publish": session.no_replace_publish,
             }))
         })
         .collect();
@@ -1482,9 +1482,8 @@ fn restore_index() -> usize {
                 last_activity_ms,
                 // 旧索引条目没有这个字段 ⇒ **未知**(`None`), 不是 `false`: 之后任何 replay open 要求
                 // 保护而这条给不出保证时, 必须在 open 期拒掉, 不许默认覆盖 (评审 #204b severe 3)。
-                no_replace_publish: entry
-                    .get("no_replace_publish")
-                    .and_then(Value::as_bool),
+                // 不持久化: 恢复出来的会话没有保护这回事, 下一次 open 会重新决定。
+                no_replace_publish: false,
             },
         );
         restored += 1;
@@ -1780,6 +1779,14 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// Windows 的 `MoveFileExW` flags 必须是 0 —— 带上 `MOVEFILE_COPY_ALLOWED` 就等于允许跨卷
+    /// copy+delete, 那不再是原子的; 带上 `REPLACE_EXISTING` 等于允许覆盖。
+    #[cfg(windows)]
+    #[test]
+    fn windows_move_flags_must_stay_zero() {
+        assert_eq!(WINDOWS_MOVE_FLAGS, 0);
+    }
+
     /// fail-closed 分支的可执行证据: 本平台"没有原子 no-replace"时, 发布必须被拒, 且
     /// **目标与暂存文件都不动**、错误是结构化的那个码。
     #[test]
@@ -1814,8 +1821,8 @@ mod tests {
         FORCE_NO_ATOMIC.with(|flag| flag.set(false));
 
         assert!(
-            err.to_string().contains("file_transfer_replay_raced"),
-            "必须是结构化的那个码: {err}"
+            err.to_string().contains("file_transfer_publish_unsupported"),
+            "无原子能力必须是它自己的码, 不许混成 raced: {err}"
         );
         assert!(!target.exists(), "失败时目标不许出现");
         assert!(!partial.exists(), "失败即清: 暂存文件不许留");
@@ -1829,77 +1836,84 @@ mod tests {
     }
 
     /// 恢复出来的旧会话(标记未知) + 客户端要求保护 ⇒ **拒 open**, 且给两条出路。
+
+    /// **旧索引恢复 + 普通续传必须照旧能续** (Captain 自查点): 恢复出的会话标记是 `None`(未知),
+    /// 而这次 open **没有**要求保护 ⇒ 不许因为它"未知"就拒 —— 误伤普通中断重跑比不覆盖更伤用户。
     #[test]
-    fn a_restored_session_without_the_flag_refuses_a_protected_open() {
+    fn a_restored_session_still_resumes_a_plain_open_without_the_flag() {
         let _guard = TRANSFER_TABLE_TEST_LOCK
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let dir = std::env::temp_dir().join(unique_id("replay-unprotected"));
+        let dir = std::env::temp_dir().join(unique_id("restored-plain"));
         std::fs::create_dir_all(&dir).unwrap();
-        let target = dir.join("restored.bin");
-        let tid = unique_id("restored");
-        // 模拟"旧索引恢复": 会话在表里, 但发布语义未知
+        let target = dir.join("plain.bin");
+        let tid = unique_id("plain");
+        let partial = staging_path(&target).unwrap();
+        std::fs::create_dir_all(partial.parent().unwrap()).unwrap();
+        std::fs::write(&partial, b"ABCDE").unwrap();
         transfers().lock().unwrap().insert(
             tid.clone(),
             TransferSession {
                 path: target.clone(),
                 size: 10,
                 expected_sha256: None,
-                written: 0,
-                temp_path: Some(staging_path(&target).unwrap()),
+                written: 5,
+                temp_path: Some(partial.clone()),
                 is_upload: true,
                 last_activity_ms: now_ms(),
-                no_replace_publish: None,
+                no_replace_publish: false,
             },
         );
-        let err = execute_put_file(&format!(
-            r#"{{"transfer_id":"{tid}","path":"{}","size":10,"resume":true,"no_replace_publish":true}}"#,
+
+        let opened = execute_put_file(&format!(
+            r#"{{"transfer_id":"{tid}","path":"{}","size":10,"resume":true}}"#,
             escape_json(&target.display().to_string())
         ))
-        .unwrap_err();
-        let text = err.to_string();
-        assert!(text.contains("file_transfer_replay_unprotected"), "{text}");
-        assert!(text.contains("--restart"), "必须给出路: {text}");
+        .expect("普通续传不许因为标记未知而被拒");
+        assert_eq!(opened["state"], "resumed");
+        assert_eq!(opened["written"], 5);
+        assert!(
+            !transfers().lock().unwrap()[&tid].no_replace_publish,
+            "没要求保护就不该凭空升级"
+        );
         execute_file_cancel(&format!(r#"{{"transfer_id":"{tid}"}}"#)).unwrap();
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// resume 命中活跃会话: 只许加强不许降级。
+    /// 保护策略**以当次 open 为准**: 要求了就有保护, 下一次没要求就恢复覆盖 (不粘连)。
     #[test]
-    fn a_resumed_session_upgrades_but_never_downgrades_its_protection() {
+    fn a_resumed_session_takes_the_policy_from_the_current_open() {
         let _guard = TRANSFER_TABLE_TEST_LOCK
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let dir = std::env::temp_dir().join(unique_id("replay-upgrade"));
+        let dir = std::env::temp_dir().join(unique_id("replay-peropen"));
         std::fs::create_dir_all(&dir).unwrap();
-        let target = dir.join("up.bin");
-        let tid = unique_id("up");
+        let target = dir.join("per.bin");
+        let tid = unique_id("per");
         let target_json = escape_json(&target.display().to_string());
 
-        // 先正常开一条(不带保护), 再要求保护 ⇒ 升为 Some(true)
         execute_put_file(&format!(
             r#"{{"transfer_id":"{tid}","path":"{target_json}","size":10,"resume":false}}"#
         ))
         .unwrap();
-        execute_put_file(&format!(
+        assert!(
+            !transfers().lock().unwrap()[&tid].no_replace_publish,
+            "首传不带字段 ⇒ 覆盖语义"
+        );
+        let opened = execute_put_file(&format!(
             r#"{{"transfer_id":"{tid}","path":"{target_json}","size":10,"resume":true,"no_replace_publish":true}}"#
         ))
         .unwrap();
-        assert_eq!(
-            transfers().lock().unwrap()[&tid].no_replace_publish,
-            Some(true),
-            "要求保护必须升级"
-        );
-
-        // 再来一次"没要求保护"的 open ⇒ 不许降级
-        execute_put_file(&format!(
+        assert_eq!(opened["publish"], "no_replace", "回执必须回声实际生效的策略");
+        assert!(transfers().lock().unwrap()[&tid].no_replace_publish);
+        let opened = execute_put_file(&format!(
             r#"{{"transfer_id":"{tid}","path":"{target_json}","size":10,"resume":true}}"#
         ))
         .unwrap();
-        assert_eq!(
-            transfers().lock().unwrap()[&tid].no_replace_publish,
-            Some(true),
-            "后续 open 不许把它降级成覆盖"
+        assert_eq!(opened["publish"], "overwrite");
+        assert!(
+            !transfers().lock().unwrap()[&tid].no_replace_publish,
+            "当次 open 没要求 ⇒ 回到覆盖语义 (策略不粘连)"
         );
         execute_file_cancel(&format!(r#"{{"transfer_id":"{tid}"}}"#)).unwrap();
         let _ = std::fs::remove_dir_all(&dir);
@@ -2121,7 +2135,7 @@ mod tests {
             temp_path: Some(partial.clone()),
             is_upload: true,
             last_activity_ms: now_ms(),
-            no_replace_publish: Some(false),
+            no_replace_publish: false,
         };
         {
             let mut sessions = transfers().lock().unwrap();
@@ -2710,7 +2724,7 @@ mod tests {
                 temp_path: None,
                 is_upload: true,
                 last_activity_ms: 0,
-            no_replace_publish: Some(false),
+            no_replace_publish: false,
             },
         );
         let err = admit_new_session(&table, "newcomer", 1).unwrap_err();
@@ -2755,7 +2769,7 @@ mod tests {
                 temp_path: Some(temp_path),
                 is_upload: true,
                 last_activity_ms: now_ms(),
-                no_replace_publish: Some(false),
+                no_replace_publish: false,
             },
         );
         let resumed = execute_put_file(&format!(

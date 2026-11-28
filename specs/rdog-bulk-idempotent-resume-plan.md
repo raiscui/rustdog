@@ -232,3 +232,21 @@ M4、M2 先行 (结构化错误 + ID 预分配: 改动小、是后面几条的�
 
 它**不受**新拒绝逻辑影响, 发布仍走覆盖语义; 判据表里单列一行, 免得后来的人把 `--restart`
 也塞进 fail-closed。
+
+## 最终形状 (2026-11-28 最后一次设计迭代, 评审 #204c)
+
+**不需要持久化 —— 因为会话本身不跨重启。** 之前为"重启后仍保护"引入的三态字段 + 索引持久化 +
+恢复未知即拒, 全部删除。
+
+1. **标记只在 open 这一跳**: 本次 open 带 `no_replace_publish:true` ⇒ 这条会话的发布走 no-replace;
+   否则走覆盖。恢复/续传的会话**以当次 open 请求为准**, 不看索引 (策略不粘连)。
+2. **回执回声策略**: open 回执带 `"publish":"no_replace"|"overwrite"`。客户端要求了保护而回执没有
+   这条回声 ⇒ **立即停**: 不发任何 chunk/end, 取消刚开的会话, 报 `file_transfer_no_replace_unsupported`。
+3. **原子发布**: Linux `renameat2(RENAME_NOREPLACE)` / macOS `renameatx_np(RENAME_EXCL)` /
+   Windows `MoveFileExW` flags **0** (既不带 `REPLACE_EXISTING` 也不带 `MOVEFILE_COPY_ALLOWED` ——
+   后者会在跨卷时退化成 copy+delete)。平台不支持 ⇒ 拒 (`file_transfer_publish_unsupported`), 不降级。
+4. **码要分开**: 撞名 ⇒ `file_transfer_replay_raced`; 无原子能力/跨卷 ⇒ `file_transfer_publish_unsupported`;
+   其它发布 I/O ⇒ `file_transfer_publish_failed`。都不进自动重试集, 文本都给"先核对目标, 确认覆盖再用 `--restart`"。
+5. **清理**: 失败即清暂存并收掉空暂存目录; 删除失败要记录并交给 sweep, 不许 warn 一句就摘索引。
+6. **证据层级**: test seam (`FORCE_NO_ATOMIC`) 与 Windows flags 断言 (`windows_move_flags_must_stay_zero`,
+   仅 `cfg(windows)` 执行) 都是可执行证据; Windows/macOS 的运行期仍只有 CI, 不写成"已验"。

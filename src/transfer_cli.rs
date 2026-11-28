@@ -1263,6 +1263,19 @@ fn run_put_inner(
     let opened = exchange_peer
         .request(&format!("@put-file:{}", open_line))
         .map_err(|err| note_error(recorder, err, &transfer_id, false))?;
+    // 混版负对照 (评审 #204c severe 1): 我要求了无覆盖发布, 而回执里**没有**这个策略的回声
+    // ⇒ 对端不认这条要求 (旧 daemon 会静默忽略该字段)。此刻一个 chunk 都还没发, 必须停下 ——
+    // 继续发就等于"以为有保护、其实会覆盖"。这里不重试、不降级。
+    if no_replace_publish
+        && opened.get("publish").and_then(Value::as_str) != Some("no_replace")
+    {
+        let _ = exchange_peer.request(&format!(
+            "@file-cancel:{{\"transfer_id\":\"{transfer_id}\"}}"
+        ));
+        return Err(format!(
+            "file_transfer_no_replace_unsupported: 对端没有认可无覆盖发布 (旧版本 daemon 会忽略该字段), \u{5f3a}\u{5236}\u{505c}\u{6b62} —— 请升级对端, 或显式 `--restart` 接受覆盖 (transfer_id={transfer_id})"
+        ));
+    }
     let written = opened.get("written").and_then(Value::as_u64).unwrap_or(0);
     let resume_honored = opened
         .get("resume_honored")
@@ -1539,6 +1552,8 @@ mod tests {
         end_failure_evidence: Option<Value>,
         /// `@put-file` 直接失败 (open 没被接受)。
         fail_open: bool,
+        /// 假装对端是旧 daemon: 回执里**不带** `publish` 策略回声。
+        strip_publish_policy: bool,
     }
 
     impl LoopbackPeer {
@@ -1554,7 +1569,13 @@ mod tests {
                 poison_after_chunk: None,
                 end_failure_evidence: None,
                 fail_open: false,
+                strip_publish_policy: false,
             }
+        }
+
+        fn with_stripped_publish_policy(mut self) -> Self {
+            self.strip_publish_policy = true;
+            self
         }
 
         fn with_observations(mut self, observations: Vec<PathObservation>) -> Self {
@@ -1660,6 +1681,11 @@ mod tests {
                 other => return Err(ExchangeError::without_evidence(format!("未知动词: {other}"))),
             };
             let mut value = result.map_err(|err| ExchangeError::without_evidence(err.to_string()))?;
+            if self.strip_publish_policy && verb == "put-file" {
+                if let Some(object) = value.as_object_mut() {
+                    object.remove("publish");
+                }
+            }
             if verb == "get-file" {
                 if let Some(sha) = &self.download_sha_override {
                     value["sha256"] = Value::String(sha.clone());
@@ -2989,6 +3015,50 @@ mod tests {
     }
 
 
+
+    #[test]
+    fn a_peer_that_does_not_echo_the_publish_policy_stops_the_rerun() {
+        // 混版负对照 (评审 #204c severe 1): 我要求了无覆盖发布, 而回执没有策略回声 ⇒ 旧 daemon 会
+        // 静默忽略该字段。此刻一个 chunk 都没发, 必须停下 —— 继续就变成"以为有保护、其实会覆盖"。
+        let dir = scratch_dir("no-replace-mixed");
+        let local = dir.join("source.bin");
+        std::fs::write(&local, vec![6u8; 16]).unwrap();
+        let remote = dir.join("landed.bin");
+        let ids = ids_for("no-replace-mixed");
+        ids.put("test-target", &local, &remote.to_string_lossy(), "cli-put-known");
+
+        let peer = LoopbackPeer::new(7).with_stripped_publish_policy();
+        let mut recorder = test_recorder(None);
+        let err = run_put(
+            &peer,
+            &mut recorder,
+            &ids,
+            "test-target",
+            &local,
+            &remote.to_string_lossy(),
+            false,
+            None,
+        )
+        .expect_err("对端不认无覆盖发布 ⇒ 必须停");
+        assert!(err.contains("file_transfer_no_replace_unsupported"), "{err}");
+        assert_eq!(
+            peer.seen()
+                .iter()
+                .filter(|line| line.starts_with("@file-chunk:"))
+                .count(),
+            0,
+            "停下之前一个块都不该发: {:?}",
+            peer.seen()
+        );
+        assert!(
+            peer.seen()
+                .iter()
+                .any(|line| line.starts_with("@file-cancel:")),
+            "必须把刚开的会话取消掉"
+        );
+        assert!(!remote.exists(), "不得落下目标文件");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn only_a_rerun_without_restart_asks_for_no_replace_publish() {
