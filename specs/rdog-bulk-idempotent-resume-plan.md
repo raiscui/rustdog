@@ -46,6 +46,21 @@ daemon 入站行与 ack 行必须带 **`transfer_id` + `attempt` (序号) + `off
 | --- | --- | --- | --- |
 | 对账探到 `Absent` 之后、重开拿到锁之前, 旧 `@file-end` 落盘并退役 | 对账放行与 daemon 提交**互斥**; `Absent` 只允许**原子 no-replace 发布** (Linux `renameat2(RENAME_NOREPLACE)`, Windows `MoveFileEx` 不带 `REPLACE_EXISTING`) | 回退到覆盖式 copy; 或发布前不复查目标 | 发布路径与返回值; 目标 mtime/内容前后; 是否出现覆盖 |
 
+### M1-b 落地形状 (Captain 拍板 2026-11-28)
+
+- `no_replace_publish` **只**在"探针说 `Absent` **且**本命令带 `verify_committed`"的会话上置位;
+  正常首传 / 显式 `--restart` / 探针不可用的老对端**保持覆盖语义** —— 三条 severe 的防线是
+  "重放路径绝不覆盖", 不是"所有上传绝不覆盖"。
+- 发布: Linux `renameat2(AT_FDCWD, …, RENAME_NOREPLACE)`、macOS `renameatx_np(RENAME_EXCL)`、
+  Windows `MoveFileExW` (不带 `REPLACE_EXISTING`); 目标已存在 ⇒ `file_transfer_replay_raced`,
+  **不覆盖、不回退 copy**, 并清掉本次 attempt 的临时文件 (否则暂存目录会被这类冲突喂大)。
+- `file_transfer_replay_raced` 语义: 有人在我们 probe 之后落了盘 —— 真实并发, 不是坏数据。
+  客户端**不自动重传**, 文本说清"目标在核对之后被占用/替换, 请重跑以重新对账"; 进稳定码总表,
+  **自动重试集: 否**。
+- **锁的纪律**: 对账的哈希**不许算在 TRANSFERS 锁内** (那会把整条 lane 的提交堵在大文件 sha 上)。
+  形状: 锁内取目标身份 (存在性 + 大小 + mtime/inode) → 锁外算 sha → 回锁内复核身份未变 ⇒ 才下结论;
+  身份变了就按 `raced` 拒, 不猜。
+
 ## M1 原格 (内容判据, 仍然有效)
 
 | 输入 | 期望终态 | 失败判据 | 需要的原始行 |
