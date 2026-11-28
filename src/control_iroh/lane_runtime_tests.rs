@@ -72,8 +72,23 @@ async fn read_line(recv: &mut RecvStream) -> Result<String> {
     Ok(String::from_utf8_lossy(&buffer[..end]).into_owned())
 }
 
+/// 读走握手与下一条请求、**永不回执**, 并让连接保持开着。
+///
+/// "回执没来"与"连接断了"在客户端是两条完全不同的结论 (前者是本端不知道对端做了什么), 而这两条
+/// 只能靠"读超时那一刻连接还开着"分开。这个对端把前者造出来: 请求确实被读走了, 就是没有答案。
+async fn serve_silent_fixture(conn: Connection) -> Result<()> {
+    let (mut send, mut recv) = conn.accept_bi().await?;
+    let handshake = read_line(&mut recv).await?;
+    assert!(handshake.contains("\"op\":\"admit\""), "{handshake}");
+    send.write_all(b"{\"status\":\"admitted\"}\n").await?;
+    let _ = read_line(&mut recv).await;
+    // 保持连接直到对端自己关: 客户端读超时时 `close_reason()` 必须是 `None`。
+    let _ = timeout(CONNECT, conn.closed()).await;
+    Ok(())
+}
+
 /// 写一份 32 字节的 identity 文件与一个最小 `ClientConfig`: `path=direct`, 直连 loopback 端点,
-/// 因此不需要 relay / directory 的任何证书。
+/// 因此不需要 relay / 目录的任何证书。
 fn client_config_for(key_file: &Path) -> ClientConfig {
     let mut file = File::create(key_file).expect("identity file");
     file.write_all(&[7u8; 32]).expect("identity bytes");
@@ -179,6 +194,58 @@ fn a_bulk_sized_chunk_line_is_read_and_answered() {
     assert!(
         reply.contains(&format!("\"len\":{expected}")),
         "回执里的长度必须与整行一致: {reply}"
+    );
+
+    rt.block_on(async {
+        let _ = timeout(CONNECT, server.close()).await;
+    });
+    acceptor.abort();
+    rt.shutdown_background();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_read_timeout_on_a_live_connection_maps_to_the_ack_unanswered_code() {
+    // RAI-705: "回执没来"与"连接断了"必须给出两个不同的结论 —— 前者是本端不知道对端做了什么
+    // (chunk 可能已落盘, `@file-end` 甚至可能已提交), 后者才是"对端没了"。这条映射靠"超时那一
+    // 刻连接还开着"成立, 所以对端读走请求、永不回执、连接保持打开: 结果与链路快慢无关。
+    let dir = std::env::temp_dir().join(format!("rdog-lane-acktimeout-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("scratch dir");
+    let cfg = client_config_for(&dir.join("client.key"));
+
+    let rt = runtime().expect("runtime");
+    let server_key = SecretKey::generate();
+    let (server, addr) = rt.block_on(async {
+        let server = endpoint(server_key, Some("127.0.0.1:0".parse().unwrap()), TEST_ALPN, None)
+            .await
+            .expect("fixture endpoint");
+        let addr = server.addr();
+        (server, addr)
+    });
+    let acceptor = {
+        let server = server.clone();
+        rt.spawn(async move {
+            if let Ok(Some(incoming)) = timeout(CONNECT, server.accept()).await {
+                if let Ok(conn) = incoming.await {
+                    let _ = serve_silent_fixture(conn).await;
+                }
+            }
+        })
+    };
+
+    let err = with_bulk_lane_at(cfg, addr, |lane| {
+        lane.request(
+            "@file-chunk:{\"transfer_id\":\"t\",\"offset\":0,\"data\":\"\"}",
+            Duration::from_millis(300),
+        )
+    })
+    .map_err(|err| err.to_string())
+    .expect("the lane handshake must succeed")
+    .expect_err("对端不回执, 这次请求必须超时");
+    assert!(err.contains(BULK_CHUNK_ACK_UNANSWERED), "{err}");
+    assert!(
+        err.contains("对端连接仍开着"),
+        "连接没断时必须如实说, 否则会把人指向网络: {err}"
     );
 
     rt.block_on(async {

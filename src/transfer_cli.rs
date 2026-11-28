@@ -826,6 +826,11 @@ pub(crate) fn run_iroh_bulk(
     // 就是 `iroh_path_unknown`。**重拨本身就是修路径的手段** (实测: 重拨在 8.16 s 拿到可用路径,
     // 不重试时那条连接要 30.0 s 才被传输层放掉), 不是"等它过期"。该码在 §2.2 里可重试, 所以
     // 这里按它重拨, 让使用者看到的第一次重跑就能续上。
+    //
+    // 回执没回来 (`bulk_chunk_ack_unanswered`) **不在这条重拨里**: 那个状态下本端不知道对端
+    // 做了什么 (chunk 可能已落盘, `@file-end` 甚至可能已提交), 而 daemon 没有"已提交结果"可回放
+    // —— 盲目重开会让一次已经提交的上传从 0 重传、把成品替换掉。所以它如实报错, 由使用者显式
+    // 重跑 (那条路径上 daemon 的 `written` 与提交结果才是可核的)。
     let mut waited = Duration::ZERO;
     loop {
         let attempt = run_iroh_bulk_once(path, name, request.clone(), out.clone());
