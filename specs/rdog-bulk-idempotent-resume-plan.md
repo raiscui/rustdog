@@ -54,7 +54,7 @@ daemon 入站行与 ack 行必须带 **`transfer_id` + `attempt` (序号) + `off
 
 | 输入 | 期望终态 | 失败判据 | 需要的原始行 |
 | --- | --- | --- | --- |
-| 对端读走请求、永不回执、连接仍开 | `kind=AckUnansweredLive` ⇒ 允许一次重拨 | 文本匹配通知了别的错误 | 客户端错误行 (带 kind) |
+| 对端读走请求、永不回执、连接仍开 | `kind=AckUnansweredLive`（**语义: 本端不知道对端做了什么**）。**不自动重拨** —— 自动重放要等盘上对账 + generation 交接落地 (RAI-705 已裁定该码不进自动重试集) | 仍按文案匹配; 或在对账落地前就自动重拨 | 客户端错误行 (带 kind) |
 | 同上但对端已关 | `kind=AckUnansweredClosed` ⇒ 不重拨, 如实报错 | 仍重拨 | 同上 + `close_reason` 行 |
 | 文本里含 `iroh_path_unknown` 的无关失败 (负对照) | 不触发重拨 | 触发了重拨 | 尝试次数 |
 

@@ -1239,6 +1239,11 @@ fn run_put_inner(
     // 多次被拒会并成一条。括号左端也在这里取 —— 它必须早于 open 执行 (§4.2)。
     recorder.begin(exchange_peer)?;
 
+    // 在**发出 open 之前**落盘 (RAI-711 判据 2 / 评审 #205 finding 1): open 的回执一丢, 下一条命令
+    // 就得知道该回到哪个 id —— "等回执再落盘"在那种情况下等于把 id 丢掉, 重放只能换新 id, 于是
+    // 撞上暂存路径占用。代价是 open 被拒时 store 里会留一条指向"没有会话"的 id, 而那条下一轮会被
+    // 当作续传候选: daemon 那边没有会话也没有半成品时它会如实报 `written:0` (从 0 开始)。
+    ids.put(target, local, remote, &transfer_id);
     let open_line = serde_json::json!({
         "transfer_id": transfer_id,
         // 两端快照要按 `attempt_id` 对齐 (§4.3): 客户端把自己这一半的身份交给 daemon,
@@ -1251,10 +1256,7 @@ fn run_put_inner(
     });
     let opened = exchange_peer
         .request(&format!("@put-file:{}", open_line))
-        // open 没被接受就还没有可续的会话: 这时不写 store, 错误文本里也就不该许诺"会用它续传"。
         .map_err(|err| note_error(recorder, err, &transfer_id, false))?;
-    // daemon 接受了这一次 open, 会话才算真的存在: 从这一刻起这个 id 才有"续传"的含义。
-    ids.put(target, local, remote, &transfer_id);
     let written = opened.get("written").and_then(Value::as_u64).unwrap_or(0);
     let resume_honored = opened
         .get("resume_honored")
@@ -2738,7 +2740,8 @@ mod tests {
 
     #[test]
     fn an_open_that_never_happened_promises_no_resume() {
-        // open 没被接受时 daemon 侧还没有会话: store 不能写, 错误文本也不能说"会用它续传"。
+        // open 没被接受时 daemon 侧还没有会话: 错误文本不能说"会用它续传"。
+        // id 本身**在发 open 之前**就落盘 (M2), 见本用例末尾那条断言与理由。
         let dir = scratch_dir("open-refused");
         let local = dir.join("source.bin");
         std::fs::write(&local, vec![4u8; 8]).unwrap();
@@ -2760,11 +2763,18 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.contains("模拟的 open 被拒"), "{err}");
+        // 文案仍不许许诺"会用它续传" —— 那一刻确实还没有会话。
         assert!(
             !err.contains("会用它续传"),
             "没有可续的会话就不许许诺: {err}"
         );
-        assert_eq!(ids.get("test-target", &local, &remote.to_string_lossy()), None);
+        // **契约变更 (RAI-711 M2)**: id 现在在发 open **之前**就落盘, 因为 open 的回执丢了之后
+        // 下一条命令必须知道该回到哪个 id (评审 #205 finding 1)。落盘不等于"会话存在": 下一轮
+        // 拿这个 id 去 open 时, daemon 没有会话也没有半成品就会如实报 `written:0`, 从 0 开始。
+        let planned = ids
+            .get("test-target", &local, &remote.to_string_lossy())
+            .expect("id 必须在发 open 之前落盘");
+        assert!(planned.starts_with("cli-put-"), "{planned}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -2950,7 +2960,8 @@ mod tests {
         // RAI-711 判据 2: id 必须在第一个 open **之前**定下来并在整条命令内固定 —— 否则第一次
         // open 的回执一丢, 重放就不知道回到哪个会话 (现场形态: 新 id 撞 `file_transfer_path_in_use`)。
         let dir = scratch_dir("plan-id");
-        let ids = TransferIdStore::user_default();
+        // 隔离到 scratch 目录: `user_default()` 会写真实 `$HOME/.rdog/bulk-transfer-ids`。
+        let ids = TransferIdStore::at(dir.join("ids"));
         let local = dir.join("source.bin");
         let remote = "/tmp/landed.bin";
         let fresh = plan_transfer_id(&ids, "lab/daemon", &local, remote, false);
