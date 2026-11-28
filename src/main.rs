@@ -329,6 +329,7 @@ fn run(opts: input::Opts) -> Result<(), String> {
             local_path,
             restart,
             bulk_path_json,
+            bulk_zero_load_evidence,
             dry_run,
             trace_dir,
             host,
@@ -343,6 +344,13 @@ fn run(opts: input::Opts) -> Result<(), String> {
             // 共享同一条 transport(TCP / WebSocket / Zenoh session bridge)。
             // ------------------------------------------------------------
             let (host, one_shot_lines) = control_invocation::extract_one_shot_lines(host);
+            if bulk_zero_load_evidence
+                && (transport != Some(Transport::Iroh) || (put.is_none() && get.is_none()))
+            {
+                return Err(
+                    "`--bulk-zero-load-evidence` 只用于 iroh 的 `--put` / `--get`".to_string(),
+                );
+            }
             if transport == Some(Transport::Iroh) {
                 let [name] = host.as_slice() else {
                     return Err("iroh control requires one NAMESPACE/NAME target".into());
@@ -381,8 +389,13 @@ fn run(opts: input::Opts) -> Result<(), String> {
                         },
                         _ => return Err("`--put` 与 `--get` 互斥".to_string()),
                     };
-                    let receipt =
-                        transfer_cli::run_iroh_bulk(path, name, request, bulk_path_json)?;
+                    let receipt = transfer_cli::run_iroh_bulk(
+                        path,
+                        name,
+                        request,
+                        bulk_path_json,
+                        bulk_zero_load_evidence,
+                    )?;
                     println!("{}", receipt.render());
                     return Ok(());
                 }

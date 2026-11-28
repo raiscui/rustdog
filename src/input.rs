@@ -200,6 +200,11 @@ pub enum Command {
         #[clap(long = "bulk-path-json", value_name = "FILE")]
         bulk_path_json: Option<PathBuf>,
 
+        /// iroh bulk 在本端路径门禁先拒时, 向 daemon 补取零文件负载证据 (默认关闭)。
+        /// 用 `--bulk-path-json` 保存两端快照。
+        #[clap(long = "bulk-zero-load-evidence")]
+        bulk_zero_load_evidence: bool,
+
         /// Only parse and compile `--ui-script`, then print the generated control lines.
         #[clap(long = "dry-run", requires = "ui_script")]
         dry_run: bool,

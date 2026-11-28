@@ -508,6 +508,7 @@ pub(crate) struct BulkPathRecorder {
     aborted: bool,
     /// 失败路径上写快照时用的 id (成功路径用收据里的那个)。
     last_transfer_id: String,
+    zero_load_evidence: bool,
     /// 这一次尝试为什么失败 —— 重放决策读它。`None` = 还没失败。
     failure: Option<FailureKind>,
 }
@@ -537,6 +538,7 @@ impl BulkPathRecorder {
             daemon_half: None,
             aborted: false,
             last_transfer_id: String::new(),
+            zero_load_evidence: false,
             failure: None,
         }
     }
@@ -552,7 +554,42 @@ impl BulkPathRecorder {
         self.clear_daemon_half_file();
         let before = self.sample(exchange_peer).and_then(|seen| seen.relay);
         self.bracket = RelayBracket::new(before);
-        self.admit()
+        let decision = self.admit();
+        // 默认不增加往返。这两帧只用于取证, 且只响应 open 前的本端路径拒绝;
+        // 文件/参数错误、对端错误和传输中途拒绝都不能触发补发。
+        if decision.is_err()
+            && self.zero_load_evidence
+            && matches!(
+                self.failure(),
+                Some(FailureKind::PathUnknown | FailureKind::PathRefused)
+            )
+        {
+            self.collect_zero_load_evidence(exchange_peer);
+        }
+        decision
+    }
+
+    fn collect_zero_load_evidence(&mut self, exchange_peer: &dyn LineExchange) {
+        // 补发仍过 daemon 的原门禁, 不会把本端拒绝改成放行。上传和下载都只发
+        // PUT 取证帧: 不带文件路径或负载, 即使对端此刻已直连, 执行器也不能建文件会话。
+        // 用独立 ID, 避免 cancel 清掉已有的可续传会话或半成品。
+        let transfer_id = format!("cli-zero-load-{}", uuid::Uuid::new_v4());
+        self.remember_transfer(&transfer_id);
+        let open = serde_json::json!({
+            "transfer_id": transfer_id,
+            "attempt_id": self.attempt_id,
+        });
+        let cancel = serde_json::json!({ "transfer_id": transfer_id });
+        for line in [
+            format!("@put-file:{open}"),
+            format!("@file-cancel:{cancel}"),
+        ] {
+            let evidence = match exchange_peer.request(&line) {
+                Ok(reply) => reply.evidence,
+                Err(error) => error.evidence,
+            };
+            self.note_daemon_half(evidence);
+        }
     }
 
     /// 门禁复查: **每个 chunk 边界都要再来一次** (§3.1), 判定用这一刻的采样。
@@ -900,6 +937,7 @@ pub(crate) fn run_iroh_bulk(
     name: &str,
     request: IrohBulkRequest,
     out: Option<PathBuf>,
+    zero_load_evidence: bool,
 ) -> Result<TransferReceipt, String> {
     // 被中止的 lane 会在 daemon 侧留一条已死的连接: 它搬过字节、然后不再有任何帧, 而 iroh 按
     // endpoint id 管路径状态 —— 同一身份的下一条连接的路径会停在 `selected=false`, 门禁读到的
@@ -924,8 +962,15 @@ pub(crate) fn run_iroh_bulk(
     };
     let mut waited = Duration::ZERO;
     loop {
-        match run_iroh_bulk_once(path, name, request.clone(), out.clone(), &ids, planned.as_deref()) {
-
+        match run_iroh_bulk_once(
+            path,
+            name,
+            request.clone(),
+            out.clone(),
+            &ids,
+            planned.as_deref(),
+            zero_load_evidence,
+        ) {
             // 只看**来源**: 路径读不出才重拨 (重拨自己就是修路径的手段)。文案里恰好出现
             // `iroh_path_unknown` 的别的失败不该被当成路径问题 —— 那条负对照有用例钉住。
             Err(failure) => match retry_step(&failure, waited) {
@@ -992,6 +1037,7 @@ fn run_iroh_bulk_once(
     out: Option<PathBuf>,
     ids: &TransferIdStore,
     planned: Option<&str>,
+    zero_load_evidence: bool,
 ) -> Result<TransferReceipt, AttemptFailure> {
     let chunk_ack_timeout_ms = chunk_ack_timeout_ms_from_config();
     let ids = ids.clone();
@@ -1004,6 +1050,7 @@ fn run_iroh_bulk_once(
             PathCapability::PATH_AWARE_CHECKED_PER_CHUNK,
             out,
         );
+        recorder.zero_load_evidence = zero_load_evidence;
         let outcome = match request {
             IrohBulkRequest::Put {
                 local,
@@ -2829,6 +2876,82 @@ mod tests {
     }
 
     #[test]
+    fn bulk_zero_load_probe_does_not_touch_a_resumable_upload_or_mask_local_errors() {
+        let dir = scratch_dir("zero-load-resume");
+        let local = dir.join("source.bin");
+        let remote = dir.join("landed.bin");
+        let remote = remote.to_str().unwrap();
+        let ids = TransferIdStore::at(dir.join("ids"));
+        let old_id = new_transfer_id("resumable");
+        ids.put("test-target", &local, remote, &old_id);
+        execute_put_file(
+            &serde_json::json!({
+                "transfer_id": old_id, "path": remote, "size": 8, "resume": true
+            })
+            .to_string(),
+        )
+        .unwrap();
+        execute_file_chunk(
+            &serde_json::json!({ "transfer_id": old_id, "offset": 0, "data": "AQIDBA==" })
+                .to_string(),
+        )
+        .unwrap();
+
+        let peer = LoopbackPeer::new(7).with_observations(vec![PathObservation::unknown()]);
+        let mut recorder = iroh_recorder(None);
+        recorder.zero_load_evidence = true;
+        let put = |recorder: &mut BulkPathRecorder| {
+            run_put(
+                &peer,
+                recorder,
+                &ids,
+                "test-target",
+                &local,
+                remote,
+                false,
+                None,
+            )
+        };
+        let err = put(&mut recorder).unwrap_err();
+        assert!(err.contains("source.bin"), "{err}");
+        assert!(peer.seen().is_empty());
+
+        std::fs::write(&local, [1u8; 8]).unwrap();
+        let err = put(&mut recorder).unwrap_err();
+        assert!(err.contains("iroh_path_unknown"), "{err}");
+        assert_eq!(recorder.failure(), Some(FailureKind::PathUnknown));
+        let lines = peer.seen();
+        let [open, cancel] = lines.as_slice() else {
+            panic!("expected one open and one cancel: {lines:?}");
+        };
+        let probe = transfer_id_of(&peer);
+        assert_ne!(probe, old_id);
+        let open: Value = serde_json::from_str(open.strip_prefix("@put-file:").unwrap()).unwrap();
+        let cancel: Value =
+            serde_json::from_str(cancel.strip_prefix("@file-cancel:").unwrap()).unwrap();
+        assert_eq!(
+            open,
+            serde_json::json!({
+                "transfer_id": probe, "attempt_id": recorder.attempt_id
+            })
+        );
+        assert_eq!(cancel, serde_json::json!({ "transfer_id": probe }));
+        assert_eq!(ids.get("test-target", &local, remote), Some(old_id.clone()));
+        let listed = crate::control_file_transfer::execute_file_list().unwrap();
+        let transfers = listed["transfers"].as_array().unwrap();
+        assert!(!transfers.iter().any(|entry| entry["transfer_id"] == probe));
+        assert_eq!(
+            transfers
+                .iter()
+                .find(|entry| entry["transfer_id"] == old_id)
+                .unwrap()["written"],
+            4
+        );
+        execute_file_cancel(&serde_json::json!({ "transfer_id": old_id }).to_string()).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn the_iroh_exit_rejects_a_bad_target_before_touching_the_network() {
         let dir = scratch_dir("iroh-name");
         let local = dir.join("source.bin");
@@ -2845,6 +2968,7 @@ mod tests {
                 restart: false,
             },
             None,
+            false,
         )
         .unwrap_err();
         assert!(err.contains("NAMESPACE/NAME"), "{err}");
@@ -2868,6 +2992,7 @@ mod tests {
                 restart: false,
             },
             None,
+            false,
         )
         .unwrap_err();
         assert!(
