@@ -702,6 +702,33 @@ relay 跳上承载, 这个判定都看不见 (§3.5 / §4.2 的已知边界)。
 > **上一版据此写的「正对照成立」作废** (2026-11-28): 正对照要证明同一套仪表能测到**非零**, 而该轮控制面
 > `@ping` 没有同仪表的两端计数字段; "该次尝试 delta 为 0"与"仪表能测非零"是两件事。
 > RAI-706 补的是先拒时的双端文件负载账, 不替本节的 relay 正对照签字。
+>
+> **收口正式口径 (2026-11-28, RAI-706 合入 `#208` merge `8b947f11`, 基线 `66e5adaf`)**: 本节那格
+> "relay 侧非零正对照"在强制直连门禁下**不会产出读数** —— bulk 在 relay 上到不了计数层。所以收口
+> 不签这一格, 改成三句可核的话:
+> ① relay 上永远没有 bulk 字节是**能力拒绝**的结果, 不是缺测 (制品里 bulk 起不到 relay 上);
+> ② 可核的是 wire 上该请求被拒、两端无目标无 partial、两端 abort 快照按同 attempt 配对、
+> `relay_bytes_zero` 保持 `null` (不填零); ③ 仪表的非零能力由**直连路径**证明
+> (65,762 B 双端 SHA-256 一致、join `true`)。
+> **不主张** "同一套仪表在 relay 上测到了非零" —— 那需要制品允许 relay bulk, 与本规格门禁冲突。
+> relay 上确实在涨的是非文件负载 (取证 open/cancel 帧), 客户端括号各 TX +3,252 B / RX +3,768 B,
+> 不能读成 relay 无流量; ①②里的"零"专指 bulk 文件字节 (`bulk_bytes` / `chunks`),
+> 上面强度声明里 `relay_bytes_zero` 的语义不因此改变 —— relay 先拒的场景里它是 `null`, 因为那次尝试
+> 被 abort, 不是"测到了零"。
+>
+> **② 的覆盖范围 (不读这一条会读错上表)**: "两端 abort 快照按同 attempt 配对"只成立于**取证开启**
+> 的两组 (`relay / 开` 的 put 与 get): 同 `transfer_id` / `attempt_id`、`aborted:true`、`chunks:0`、
+> `wire_bytes:0`, join 报 `bulk_path_inconclusive_aborted`。**取证关闭**的两组在 open 前就被客户端的
+> `BulkPathRecorder::begin` 门禁拒 (`src/transfer_cli.rs`), daemon 侧 0 行请求、没有对端半份, join 只能
+> 报 `bulk_path_endpoint_missing` —— 那两行**不**提供配对证据。所以先拒这件事是**客户端 pre-open 门禁**
+> 的证据, 取证开启时才有对端的那一半; 四行共有的唯一跨行结论是 `relay_bytes_zero: null`。
+>
+> **证据落点**: 五组真机读数 (relay 关/开 × put/get + direct/开/put) 的仓库内副本是本规格同目录的
+> `handoffs/rai367/positive-control-verdict.md` 收口节; 原始回执**不在仓库**, 只在
+> `drive://captain-remote-p2p/handoffs/RAI-706/receipts/be0957f-summary.txt` 与
+> `drive://captain-remote-p2p/reports/RAI-706.md` (固定 head
+> `be0957f2ffb6f310c4e7588cdc9ba1abb952d391`); 直连探针 (`#207` merge `66e5adaf`) 另有
+> 65,536 B 双端 SHA 一致的一次独立正对照 (`ledger/RAI-718.md`)。
 > 但**传输层 pin 仍然缺**, 因此能主张的仍是「每个边界上路径直连 + 该次尝试两端 relay 采样 delta 为 0」,
 > 不主张「整条连接从未经过 relay」。判读全文 `handoffs/rai367/positive-control-verdict.md`。
 >
@@ -873,7 +900,7 @@ PATH_CHALLENGE), 空闲 relay path 自己也会涨, 所以在真机上"增量为
 | 4 | 新客户端驱动 (与 `src/control_invocation.rs` 同层) | 流式: 读一块 → 发一块 → 等应答 → 推进 offset, 不整文件驻留 |
 | 5 | `src/input.rs` + `src/main.rs` | 四个新 flag + 互斥 + 调用驱动 |
 | 6 | `src/config.rs` | `[bulk]` 段四个配置项 |
-| 7 | 验收工具 | 两端快照 join (`rdog bulk-path join` → `src/bulk_path.rs::join_inputs`) + §4.3 判定式 + §4.4 正对照 (未执行) |
+| 7 | 验收工具 | 两端快照 join (`rdog bulk-path join` → `src/bulk_path.rs::join_inputs`) + §4.3 判定式 + §4.4 正对照 (直连路径已执行, relay 侧按门禁只到 abort 配对; 见 §4.4 收口口径) |
 
 ---
 
