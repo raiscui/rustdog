@@ -100,15 +100,30 @@ async fn closing_the_probe_releases_the_kernel_socket_before_rebind() {
     let closed = probe.closed();
     close_direct_probe(probe, tuple.peer).await;
     timeout(IO, closed).await.unwrap();
+    wait_for_bulk_port_release(tuple.local).await.unwrap();
     let socket = UdpSocket::bind(tuple.local).expect("probe socket is still bound");
     assert_eq!(socket.local_addr().unwrap(), tuple.local);
     daemon.close().await;
 }
 
 #[tokio::test]
+async fn port_release_check_waits_for_a_late_kernel_release() {
+    let socket = UdpSocket::bind(LOOPBACK).unwrap();
+    let local = socket.local_addr().unwrap();
+    let owner = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(25)).await;
+        drop(socket);
+    });
+    wait_for_bulk_port_release(local).await.unwrap();
+    owner.await.unwrap();
+    assert_eq!(UdpSocket::bind(local).unwrap().local_addr().unwrap(), local);
+}
+
+#[tokio::test]
 async fn busy_port_is_a_rebind_failure_and_does_not_start_a_bulk_dial() {
     let (key, probe, daemon, tuple) = fixture_probe().await;
     close_direct_probe(probe, tuple.peer).await;
+    wait_for_bulk_port_release(tuple.local).await.unwrap();
     let _owner = UdpSocket::bind(tuple.local).unwrap();
     let error = dial_prewarmed_bulk(&key, &config(PathBuf::new()), tuple, IO)
         .await
@@ -183,4 +198,33 @@ fn unavailable_coordination_does_not_enter_the_bulk_handler() {
             .is_err());
         daemon.close().await;
     });
+}
+
+#[test]
+fn prewarm_keeps_a_known_ipv6_scope_and_rejects_an_unknown_one() {
+    let scoped: SocketAddr = "[fe80::1%7]:34567".parse().unwrap();
+    let wildcard: SocketAddr = "[::]:34567".parse().unwrap();
+    let local = LocalTransportAddr::Ip(Some(scoped.ip()));
+    assert_eq!(bulk_local_addr(scoped, local.clone()), Some(scoped));
+    assert_eq!(bulk_local_addr(wildcard, local), None);
+}
+
+#[tokio::test]
+async fn ping_publishes_before_closing_the_endpoint() {
+    let data = endpoint(
+        SecretKey::generate(),
+        Some(LOOPBACK.parse().unwrap()),
+        CONTROL_ALPN,
+        None,
+    )
+    .await
+    .unwrap();
+    let observed = data.clone();
+    publish_ping_and_close(data, Ok("pong"), |reply| {
+        assert_eq!(*reply, "pong");
+        assert!(!observed.is_closed());
+    })
+    .await
+    .unwrap();
+    assert!(observed.is_closed());
 }

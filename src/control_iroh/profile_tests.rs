@@ -297,7 +297,7 @@ fn direct_probe_profile_cannot_reach_the_bulk_or_pty_dialer() {
         ),
     );
     assert_eq!(
-        with_bulk_lane(&path, "lab/daemon", |_| ())
+        with_bulk_lane(&path, "lab/daemon", true, |_| ())
             .unwrap_err()
             .to_string(),
         "iroh probe_direct_via_relay is only supported for @ping",
