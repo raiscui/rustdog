@@ -123,9 +123,35 @@ fn replay_state(
             return Ok(ReplayState::Committed);
         }
     }
-    let Ok(metadata) = std::fs::metadata(path) else {
-        return Ok(ReplayState::Absent);
+    // **读不出来 ≠ 不存在**。只有 `NotFound` 才是"没提交过"的正面证据; 不可读 / 符号链接 /
+    // 目录都必须走"拒"这一侧 —— 把它们归到 `Absent` 会落到正常 open 并覆盖, 那比 `Mismatch`
+    // 危险得多 (覆盖了别的东西, 而用户以为只是重传一次)。
+    // **规矩 (RAI-711): `Absent` 的语义只能是 `NotFound`。** 永远不要加"读失败就当作不存在"
+    // 的兜底 —— 在这个模块里那等于"覆盖已提交的成品", 而在别处它可能只是无害的宽容。
+    let metadata = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(ReplayState::Absent),
+        Err(err) => {
+            return Ok(ReplayState::Unreadable(format!(
+                "读不到目标 {} 的元数据 ({err})",
+                path.display()
+            )))
+        }
     };
+    // **符号链接与目录即便内容一致也拒**: 提交动作会替换掉链接本身或目录, 所以"内容相等"
+    // 不是这里的判据 —— 判据是"提交之后那个路径上会是什么"。
+    if metadata.file_type().is_symlink() {
+        return Ok(ReplayState::Unreadable(format!(
+            "目标 {} 是符号链接, 提交会把它替换掉",
+            path.display()
+        )));
+    }
+    if !metadata.is_file() {
+        return Ok(ReplayState::Unreadable(format!(
+            "目标 {} 不是普通文件",
+            path.display()
+        )));
+    }
     if metadata.len() != size {
         return Ok(ReplayState::Mismatch(format!(
             "目标 {} 已存在 {} 字节, 与本次声明的 {size} 不等",
@@ -147,6 +173,8 @@ fn replay_state(
 enum ReplayState {
     Committed,
     Mismatch(String),
+    /// 目标存在但**读不出来** (权限 / 符号链接 / 非普通文件): 拒, 绝不退化成"不存在"。
+    Unreadable(String),
     Absent,
 }
 
@@ -360,6 +388,11 @@ pub fn execute_put_file(payload: &str) -> std::io::Result<Value> {
             ReplayState::Mismatch(reason) => {
                 return Err(std::io::Error::other(format!(
                     "file_transfer_replay_mismatch: {reason} — 不重传、不覆盖"
+                )));
+            }
+            ReplayState::Unreadable(reason) => {
+                return Err(std::io::Error::other(format!(
+                    "file_transfer_replay_unreadable: {reason} — 不重传、不覆盖 (读不出来不等于不存在)"
                 )));
             }
             // 没有目标文件 = 上次没提交过 (提交必然留下目标), 从 0 重来是安全的。
@@ -1632,6 +1665,39 @@ mod tests {
 
         // 盘上字节一个都没动
         assert_eq!(std::fs::read(&target).unwrap(), on_disk);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Captain 自查点 1: **读不出来 ≠ 不相等**。目录 / 符号链接 / 不可读都必须落在"拒",
+    /// 绝不能退化成 `Absent`(⇒ 正常 open ⇒ 覆盖)。
+    #[test]
+    fn replay_state_never_treats_an_unreadable_target_as_absent() {
+        let dir = std::env::temp_dir().join(unique_id("replay-unreadable"));
+        std::fs::create_dir_all(&dir).unwrap();
+        let as_dir = dir.join("i-am-a-directory.bin");
+        std::fs::create_dir_all(&as_dir).unwrap();
+        assert!(matches!(
+            replay_state("cli-put-dir", &as_dir, 1024, &"0".repeat(64)).unwrap(),
+            ReplayState::Unreadable(_)
+        ));
+
+        #[cfg(unix)]
+        {
+            let real = dir.join("real.bin");
+            std::fs::write(&real, vec![9u8; 16]).unwrap();
+            let link = dir.join("link.bin");
+            std::os::unix::fs::symlink(&real, &link).unwrap();
+            let sha = format!("{:x}", Sha256::digest(vec![9u8; 16]));
+            assert!(
+                matches!(
+                    replay_state("cli-put-link", &link, 16, &sha).unwrap(),
+                    ReplayState::Unreadable(_)
+                ),
+                "符号链接即使内容一致也不能判已提交: 提交会把链接本身替换掉"
+            );
+            // 真身后面的文件一个字节都没动
+            assert_eq!(std::fs::read(&real).unwrap(), vec![9u8; 16]);
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 
