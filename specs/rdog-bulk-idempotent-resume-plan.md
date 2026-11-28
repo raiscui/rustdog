@@ -45,6 +45,8 @@ daemon 入站行与 ack 行必须带 **`transfer_id` + `attempt` (序号) + `off
 
 **可用例**: `a_peer_that_ignores_the_reconcile_request_fails_closed` (替身剥掉 `reconcile` 标记模拟旧 daemon)。
 
+**两条 lane 同一条规则**: 判断写在共享驱动 `run_put_inner` 里, iroh 与 TCP 都带 `verify_committed`、都按 `reconcile` 标记 fail closed; `--restart` 不拦 (它的语义就是显式同意替换)。正常首传 (store 里没有旧 id) 不带这个字段, 升级压力只落在"上一次没干净收尾"的重跑上。
+
 **前提 (M1 的 `Absent` 分支)**: "目标不存在 ⇒ 本命令未提交"依赖**两次尝试之间没有外部删除/移动目标**。
 被人为删掉后再重放会让文件重新出现 —— 可接受, 但它是假设不是定理。
 

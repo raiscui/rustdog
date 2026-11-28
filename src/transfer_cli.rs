@@ -1273,7 +1273,7 @@ fn run_put_inner(
         let _ = exchange_peer
             .request(&format!("@file-cancel:{{\"transfer_id\":\"{transfer_id}\"}}"));
         return Err(format!(
-            "file_transfer_reconcile_unsupported: 对端没有回报已提交对账 (旧版本 daemon 会忽略              verify_committed), 重试有替换已提交成品的风险 —— 要么升级对端, 要么显式 `--restart`              (transfer_id={transfer_id})"
+            "file_transfer_reconcile_unsupported: 对端没有回报已提交对账 (旧版本 daemon 会忽略 verify_committed), 重试有替换已提交成品的风险 —— 要么升级对端, 要么显式 `--restart` (transfer_id={transfer_id})"
         ));
     }
 
@@ -3089,6 +3089,8 @@ mod tests {
     #[test]
     fn a_peer_that_ignores_the_reconcile_request_fails_closed() {
         // 混合版本: 旧 daemon 会**静默忽略** `verify_committed` (它按 Value 解析, 未知字段不报错)。
+        // 规则写在共享驱动 `run_put_inner` 里, 所以 iroh 与 TCP 两条 lane 同一条规则; 这里的替身是
+        // 非路径感知 (TCP) 的能力形状, 即这条也是 TCP 侧的拒绝对照。
         // 那种中间态等于"客户端以为对过账、其实直接重传" —— 源文件变过就会替换已提交的成品。
         // 所以缺 `reconcile` 标记必须报错并把刚开的会话取消, 不是继续搬字节。
         let dir = scratch_dir("reconcile-legacy");
