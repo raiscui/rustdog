@@ -242,9 +242,14 @@ fn a_read_timeout_on_a_live_connection_maps_to_the_ack_unanswered_code() {
     .map_err(|err| err.to_string())
     .expect("the lane handshake must succeed")
     .expect_err("对端不回执, 这次请求必须超时");
-    assert!(err.contains(BULK_CHUNK_ACK_UNANSWERED), "{err}");
+    assert_eq!(
+        err.kind,
+        LaneFailure::AckUnansweredLive,
+        "连接仍开着时必须是 Live, 决定端到端能不能重放的就是这一格: {err}"
+    );
+    assert!(err.message.contains(BULK_CHUNK_ACK_UNANSWERED), "{err}");
     assert!(
-        err.contains("对端连接仍开着"),
+        err.message.contains("对端连接仍开着"),
         "连接没断时必须如实说, 否则会把人指向网络: {err}"
     );
 
@@ -523,6 +528,7 @@ fn a_lane_aborted_mid_upload_still_resumes_on_the_next_attempt() {
                 &local,
                 &remote_text,
                 false,
+                None,
             )
         }
     });

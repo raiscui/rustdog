@@ -552,6 +552,7 @@ fn run(opts: input::Opts) -> Result<(), String> {
                             &local,
                             &remote,
                             restart,
+                            None,
                         )?
                     }
                     (None, Some(remote)) => {

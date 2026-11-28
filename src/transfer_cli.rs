@@ -98,6 +98,21 @@ pub(crate) fn target_label(invocation: &ControlInvocation) -> String {
 pub(crate) struct ExchangeError {
     message: String,
     evidence: Option<String>,
+    /// 失败来源。重放决策只读它, 不读 `message` —— 文案会被改写, 来源不会。
+    kind: FailureKind,
+}
+
+/// 一次尝试为什么失败。只用于"要不要重放"的判断, 不用于给用户看的文案。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FailureKind {
+    /// 路径类别读不出 (`iroh_path_unknown`): 重拨本身就是修路径的手段。
+    PathUnknown,
+    /// 门禁明确拒绝 (走 relay / 钉不住): 换个时刻重拨也不该放行, 不重拨。
+    PathRefused,
+    /// 读回执超时、那一刻连接仍开着: 对端可能已执行, 本端只是没收到答案。
+    AckUnansweredLive,
+    /// 本机原因 (写/读失败、协议错、文件动作失败) 或对端已关。
+    Local,
 }
 
 impl ExchangeError {
@@ -105,6 +120,15 @@ impl ExchangeError {
         Self {
             message,
             evidence: None,
+            kind: FailureKind::Local,
+        }
+    }
+
+    fn with_kind(message: String, kind: FailureKind) -> Self {
+        Self {
+            message,
+            evidence: None,
+            kind,
         }
     }
 }
@@ -150,11 +174,37 @@ fn parse_reply(line: &str) -> Result<Reply, ExchangeError> {
 }
 
 /// 回执是错误信封时: 错误文本 + daemon 半快照 (若有)。
-fn error_reply(reply: Reply, error: String) -> ExchangeError {
+fn error_reply(reply: Reply, error: String, kind: FailureKind) -> ExchangeError {
     ExchangeError {
         message: error,
         evidence: reply.evidence,
+        kind,
     }
+}
+
+/// 稳定码 → 重放决策用的类别。读的是**结构化的 `error_code` 字段**, 不是文案: 文案会被改写,
+/// 而"这条 rerun 得通不通"取决于码。
+fn kind_for_code(code: Option<&str>) -> FailureKind {
+    match code {
+        Some(crate::bulk_path::IROH_PATH_UNKNOWN) => FailureKind::PathUnknown,
+        Some(crate::bulk_path::IROH_DIRECT_PATH_UNAVAILABLE)
+        | Some(crate::bulk_path::IROH_DIRECT_PATH_LOST)
+        | Some(crate::bulk_path::IROH_BULK_PATH_PIN_UNAVAILABLE) => FailureKind::PathRefused,
+        _ => FailureKind::Local,
+    }
+}
+
+/// 回执里的**机器码** (不是文案)。两种信封都认: `error_code` 字段, 以及门禁拒绝那种把码直接
+/// 放在 `error` 字段里的形状 (`{"code":65,"error":"iroh_path_unknown"}`)。
+///
+/// 匹配用**全等**而不是子串: `error` 也可能是 file-transfer 的自然语言错误, 全等才不会把
+/// "某句话里出现这个码"误当成路径拒绝。
+fn failure_code(payload: &Value) -> Option<&str> {
+    let envelope = payload.get("value").unwrap_or(payload);
+    envelope
+        .get("error_code")
+        .and_then(Value::as_str)
+        .or_else(|| envelope.get("error").and_then(Value::as_str))
 }
 
 /// daemon 在响应里挂的半快照原文。
@@ -278,6 +328,7 @@ pub(crate) const DAEMON_HALF_FILE: &str = "bulk-path.daemon.json";
 /// 会把**那条在途会话**一起取消 (daemon 的 cancel 只认 `transfer_id`, 不认发起者)。
 ///
 /// 规避是"同一键不要并发"; 根治要给 daemon 侧的会话加 owner 租约 (RAI-526, Backlog/low)。
+#[derive(Clone)]
 pub(crate) struct TransferIdStore {
     /// 存储目录; `None` = 不持久化 (`$HOME` 缺失)。
     dir: Option<PathBuf>,
@@ -457,6 +508,8 @@ pub(crate) struct BulkPathRecorder {
     aborted: bool,
     /// 失败路径上写快照时用的 id (成功路径用收据里的那个)。
     last_transfer_id: String,
+    /// 这一次尝试为什么失败 —— 重放决策读它。`None` = 还没失败。
+    failure: Option<FailureKind>,
 }
 
 impl BulkPathRecorder {
@@ -484,6 +537,7 @@ impl BulkPathRecorder {
             daemon_half: None,
             aborted: false,
             last_transfer_id: String::new(),
+            failure: None,
         }
     }
 
@@ -522,7 +576,7 @@ impl BulkPathRecorder {
     }
 
     /// 门禁判定: 用当前采样与"这条尝试曾否直连"查表 (§3.1)。
-    pub(crate) fn admit(&self) -> Result<(), String> {
+    pub(crate) fn admit(&mut self) -> Result<(), String> {
         let established = self
             .established
             .get(&self.last_transfer_id)
@@ -530,8 +584,20 @@ impl BulkPathRecorder {
             .unwrap_or(false);
         match decide(self.capability, self.path_class, established) {
             BulkDecision::Allowed => Ok(()),
-            BulkDecision::Refused(code) => Err(refuse_message(code)),
+            BulkDecision::Refused(code) => {
+                self.failure = Some(kind_for_code(Some(code)));
+                Err(refuse_message(code))
+            }
         }
+    }
+
+    /// 记下这一次尝试的失败来源。文案还要往上走, 但"能不能重放"只看这里。
+    pub(crate) fn note_failure(&mut self, kind: FailureKind) {
+        self.failure = Some(kind);
+    }
+
+    pub(crate) fn failure(&self) -> Option<FailureKind> {
+        self.failure
     }
 
     /// 一次边界采样: 更新路径类别与 `direct_addr`, 并把"曾直连"记到这条尝试上。
@@ -681,6 +747,7 @@ fn note_error(
     resumable: bool,
 ) -> String {
     recorder.note_daemon_half(error.evidence);
+    recorder.note_failure(error.kind);
     if resumable {
         format!(
             "{} (transfer_id={transfer_id}; 同路径重跑会用它续传)",
@@ -776,10 +843,23 @@ impl LineExchange for IrohExchange<'_> {
                 line,
                 Duration::from_millis(self.chunk_ack_timeout_ms.max(1)),
             )
-            .map_err(ExchangeError::without_evidence)?;
+            .map_err(|err| {
+                // lane 已经分了类: "连接仍开着但没答案"与"对端没了"是两条不同的路, 不能都退化成
+                // 一个字符串再靠子串猜回来。
+                let kind = match err.kind {
+                    crate::control_iroh::LaneFailure::AckUnansweredLive => {
+                        FailureKind::AckUnansweredLive
+                    }
+                    crate::control_iroh::LaneFailure::AckUnansweredClosed
+                    | crate::control_iroh::LaneFailure::PeerClosed
+                    | crate::control_iroh::LaneFailure::Local => FailureKind::Local,
+                };
+                ExchangeError::with_kind(err.message, kind)
+            })?;
         let reply = parse_reply(&line_read)?;
         if let Some(error) = response_error(&reply.payload) {
-            return Err(error_reply(reply, error));
+            let kind = kind_for_code(failure_code(&reply.payload));
+            return Err(error_reply(reply, error, kind));
         }
         Ok(reply)
     }
@@ -831,19 +911,42 @@ pub(crate) fn run_iroh_bulk(
     // 做了什么 (chunk 可能已落盘, `@file-end` 甚至可能已提交), 而 daemon 没有"已提交结果"可回放
     // —— 盲目重开会让一次已经提交的上传从 0 重传、把成品替换掉。所以它如实报错, 由使用者显式
     // 重跑 (那条路径上 daemon 的 `written` 与提交结果才是可核的)。
+    // ID 在**第一个 open 之前**就定下来, 并在整条命令内固定 (RAI-711 判据 2): 若第一次 open 的
+    // 回执丢了, 下一轮才知道该回到哪一个会话 —— 等回执再落盘会让重放拿不到同一个 id。
+    let ids = TransferIdStore::user_default();
+    let planned = match &request {
+        IrohBulkRequest::Put {
+            local,
+            remote,
+            restart,
+        } => Some(plan_transfer_id(&ids, name, local, remote, *restart)),
+        IrohBulkRequest::Get { .. } => None,
+    };
     let mut waited = Duration::ZERO;
     loop {
-        let attempt = run_iroh_bulk_once(path, name, request.clone(), out.clone());
-        match attempt {
-            Err(err) if err.contains(crate::bulk_path::IROH_PATH_UNKNOWN)
-                && waited < IROH_PATH_RETRY_BUDGET =>
-            {
-                std::thread::sleep(IROH_PATH_RETRY_STEP);
-                waited += IROH_PATH_RETRY_STEP;
-            }
-            other => return other,
+        match run_iroh_bulk_once(path, name, request.clone(), out.clone(), &ids, planned.as_deref()) {
+
+            // 只看**来源**: 路径读不出才重拨 (重拨自己就是修路径的手段)。文案里恰好出现
+            // `iroh_path_unknown` 的别的失败不该被当成路径问题 —— 那条负对照有用例钉住。
+            Err(failure) => match retry_step(&failure, waited) {
+                Some(step) => {
+                    std::thread::sleep(step);
+                    waited += step;
+                }
+                None => return Err(failure.message),
+            },
+            Ok(receipt) => return Ok(receipt),
         }
     }
+}
+
+/// 一次尝试为什么失败: 给重放决策用的类别 + 给用户看的文案。
+///
+/// 两者分开是因为它们的读者不同 —— 决策要的是"来源", 用户要的是"发生了什么"; 用文案兼做判据
+/// 会让任何一次措辞改动悄悄改变重试行为 (评审 Finding 5)。
+struct AttemptFailure {
+    kind: FailureKind,
+    message: String,
 }
 
 /// 路径读不出时重拨的间隔与总量: 一次重拨通常就够 (重拨自己会修路径), 预算只防"旧连接还没被
@@ -851,14 +954,48 @@ pub(crate) fn run_iroh_bulk(
 const IROH_PATH_RETRY_STEP: Duration = Duration::from_secs(2);
 const IROH_PATH_RETRY_BUDGET: Duration = Duration::from_secs(18);
 
+/// 这条命令要用哪个 `transfer_id` —— **在第一个 open 之前**算, 之后不再变 (RAI-711 判据 2)。
+///
+/// `--restart` 换新 id (旧会话由第一次尝试里的取消收掉); 否则复用 store 里的那个 —— 同一条
+/// (目标, 本地, 远端) 上一次没走完时, 新 id 会撞 `file_transfer_path_in_use`。
+fn plan_transfer_id(
+    ids: &TransferIdStore,
+    target: &str,
+    local: &Path,
+    remote: &str,
+    restart: bool,
+) -> String {
+    if restart {
+        return new_transfer_id("put");
+    }
+    ids.get(target, local, remote)
+        .unwrap_or_else(|| new_transfer_id("put"))
+}
+
+/// 这次失败要不要重拨、隔多久 —— **只看 `kind`**, 文案里出现什么都不影响它。
+///
+/// `AckUnansweredLive` 也**不在这里**: 它意味着本端不知道对端做了什么 (对端可能已提交), 重开会让
+/// 已提交的上传从 0 重传并替换成品。同 ID 幂等续传是 RAI-711, 那条要先把"已提交就返回原终态"
+/// 做出来, 才轮得到自动重放。
+fn retry_step(failure: &AttemptFailure, waited: Duration) -> Option<Duration> {
+    if failure.kind == FailureKind::PathUnknown && waited < IROH_PATH_RETRY_BUDGET {
+        Some(IROH_PATH_RETRY_STEP)
+    } else {
+        None
+    }
+}
+
 fn run_iroh_bulk_once(
     path: &Path,
     name: &str,
     request: IrohBulkRequest,
     out: Option<PathBuf>,
-) -> Result<TransferReceipt, String> {
+    ids: &TransferIdStore,
+    planned: Option<&str>,
+) -> Result<TransferReceipt, AttemptFailure> {
     let chunk_ack_timeout_ms = chunk_ack_timeout_ms_from_config();
-    let ids = TransferIdStore::user_default();
+    let ids = ids.clone();
+    let planned = planned.map(str::to_owned);
     let target = name.to_owned();
     crate::control_iroh::with_bulk_lane(path, name, move |lane| {
         let exchange_peer = IrohExchange::new(lane, chunk_ack_timeout_ms);
@@ -867,7 +1004,7 @@ fn run_iroh_bulk_once(
             PathCapability::PATH_AWARE_CHECKED_PER_CHUNK,
             out,
         );
-        match request {
+        let outcome = match request {
             IrohBulkRequest::Put {
                 local,
                 remote,
@@ -880,13 +1017,26 @@ fn run_iroh_bulk_once(
                 &local,
                 &remote,
                 restart,
+                planned.as_deref(),
             ),
             IrohBulkRequest::Get { remote, local } => {
                 run_get(&exchange_peer, &mut recorder, &remote, &local)
             }
-        }
+        };
+        // 失败来源由驱动里的门禁与交换器记进 recorder —— 这里是唯一还看得见它的地方。
+        (outcome, recorder.failure())
     })
-    .map_err(|err| err.to_string())?
+    .map_err(|err| AttemptFailure {
+        kind: FailureKind::Local,
+        message: err.to_string(),
+    })
+    .and_then(|(outcome, kind)| match outcome {
+        Ok(receipt) => Ok(receipt),
+        Err(message) => Err(AttemptFailure {
+            kind: kind.unwrap_or(FailureKind::Local),
+            message,
+        }),
+    })
 }
 
 fn exchange(options: &TransportExchange, line: &str) -> Result<Reply, ExchangeError> {
@@ -936,7 +1086,8 @@ fn exchange(options: &TransportExchange, line: &str) -> Result<Reply, ExchangeEr
             .ok_or_else(|| ExchangeError::without_evidence("回执不可解析: <none>".to_string()))?,
     )?;
     if let Some(error) = response_error(&reply.payload) {
-        return Err(error_reply(reply, error));
+        let kind = kind_for_code(failure_code(&reply.payload));
+        return Err(error_reply(reply, error, kind));
     }
     Ok(reply)
 }
@@ -1014,11 +1165,21 @@ pub(crate) fn run_put(
     local: &Path,
     remote: &str,
     restart: bool,
+    planned: Option<&str>,
 ) -> Result<TransferReceipt, String> {
     // 任何一条失败路径都必须留下快照: 门禁拒绝、open 失败、分块失败、`@file-end` 失败。
     // 只在两条路上写会让"这次尝试到底发生了什么"在证据里缺一块 —— 而缺的那块最可能是
     // 失败原因本身。成功路径只在括号右端取完之后写一次。
-    let outcome = run_put_inner(exchange_peer, recorder, ids, target, local, remote, restart);
+    let outcome = run_put_inner(
+        exchange_peer,
+        recorder,
+        ids,
+        target,
+        local,
+        remote,
+        restart,
+        planned,
+    );
     recorder.close_bracket(exchange_peer);
     match outcome {
         Ok(receipt) => {
@@ -1041,6 +1202,7 @@ fn run_put_inner(
     local: &Path,
     remote: &str,
     restart: bool,
+    planned: Option<&str>,
 ) -> Result<TransferReceipt, String> {
     let metadata = std::fs::metadata(local).map_err(|err| format!("读取 {local:?} 失败: {err}"))?;
     if metadata.is_dir() {
@@ -1062,9 +1224,15 @@ fn run_put_inner(
             ));
             ids.remove(target, local, remote);
         }
-        new_transfer_id("put")
+        // 计划好的 id 优先: 它在第一个 open 之前就定了, 重放轮也必须用它 (RAI-711 判据 2/7)。
+        planned
+            .map(str::to_owned)
+            .unwrap_or_else(|| new_transfer_id("put"))
     } else {
-        previous.unwrap_or_else(|| new_transfer_id("put"))
+        planned
+            .map(str::to_owned)
+            .or(previous)
+            .unwrap_or_else(|| new_transfer_id("put"))
     };
     recorder.remember_transfer(&transfer_id);
     // 门禁在 transfer_id 之后就判: 被拒的尝试也要在证据里带自己的 id, 否则按 id join 时
@@ -1451,6 +1619,7 @@ mod tests {
                     return Err(ExchangeError {
                         message: "模拟的终态失败".to_string(),
                         evidence: Some(evidence.to_string()),
+                        kind: FailureKind::Local,
                     });
                 }
             }
@@ -1528,7 +1697,7 @@ mod tests {
         restart: bool,
     ) -> Result<TransferReceipt, String> {
         let ids = ids_for(&recorder.attempt_id.clone());
-        run_put(peer, recorder, &ids, "test-target", local, remote, restart)
+        run_put(peer, recorder, &ids, "test-target", local, remote, restart, None)
     }
 
     fn scratch_dir(tag: &str) -> std::path::PathBuf {
@@ -1731,7 +1900,7 @@ mod tests {
     fn path_aware_transport_without_sampling_is_refused() {
         // 适配器一旦声明路径感知而调用方还没有采样, 就必须 fail-closed 成 iroh_path_unknown ——
         // 读不出路径类别永远不许被当成直连。
-        let recorder = BulkPathRecorder::new(
+        let mut recorder = BulkPathRecorder::new(
             "attempt".to_string(),
             PathCapability::PATH_AWARE_PINNED,
             None,
@@ -1739,7 +1908,7 @@ mod tests {
         let err = recorder.admit().unwrap_err();
         assert!(err.contains(crate::bulk_path::IROH_PATH_UNKNOWN), "{err}");
 
-        let unpinned = BulkPathRecorder::new(
+        let mut unpinned = BulkPathRecorder::new(
             "attempt".to_string(),
             PathCapability::PATH_AWARE_UNPINNED,
             None,
@@ -2396,6 +2565,7 @@ mod tests {
             &local,
             &remote.to_string_lossy(),
             false,
+            None,
         )
         .unwrap_err();
         assert!(err.contains("poison"), "错误要把 lane 的真实原因带出来: {err}");
@@ -2416,6 +2586,7 @@ mod tests {
             &local,
             &remote.to_string_lossy(),
             false,
+            None,
         )
         .unwrap();
         assert_eq!(
@@ -2500,7 +2671,8 @@ mod tests {
                 &local,
                 &remote.to_string_lossy(),
                 false,
-            )
+            None,
+        )
             .unwrap_err();
             assert!(err.contains("poison"), "{err}");
             transfer_id_of(&peer)
@@ -2517,6 +2689,7 @@ mod tests {
             &local,
             &remote.to_string_lossy(),
             true,
+            None,
         )
         .unwrap();
         assert!(
@@ -2553,6 +2726,7 @@ mod tests {
             &local,
             &remote.to_string_lossy(),
             false,
+            None,
         );
         assert!(
             again.is_ok(),
@@ -2582,6 +2756,7 @@ mod tests {
             &local,
             &remote.to_string_lossy(),
             false,
+            None,
         )
         .unwrap_err();
         assert!(err.contains("模拟的 open 被拒"), "{err}");
@@ -2691,5 +2866,126 @@ mod tests {
         );
         assert!(!target.exists(), "失败的尝试不得落下目标文件");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn failure(kind: FailureKind, message: &str) -> AttemptFailure {
+        AttemptFailure {
+            kind,
+            message: message.to_string(),
+        }
+    }
+
+    #[test]
+    fn a_path_unknown_failure_gets_one_redial_within_budget() {
+        let step = retry_step(
+            &failure(FailureKind::PathUnknown, "iroh_path_unknown"),
+            Duration::ZERO,
+        );
+        assert_eq!(step, Some(IROH_PATH_RETRY_STEP));
+        // 预算用尽之后不再重拨: 上界是"间隔 × 次数", 不是无限。
+        assert_eq!(
+            retry_step(
+                &failure(FailureKind::PathUnknown, "iroh_path_unknown"),
+                IROH_PATH_RETRY_BUDGET
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn a_failure_that_only_mentions_the_path_code_in_its_text_is_not_retried() {
+        // 负对照 (评审 Finding 5): 判据是来源, 不是文案。一个"文案里恰好带 iroh_path_unknown"的
+        // 本机失败 (比如本地路径名里就有这串) 不得触发重拨 —— 否则这次改动只是把脆弱从字符串
+        // 搬到了类型上, 而没证明搬对了。
+        assert_eq!(
+            retry_step(
+                &failure(
+                    FailureKind::Local,
+                    "打开 \"/tmp/iroh_path_unknown-note.bin\" 失败: 没有那个文件"
+                ),
+                Duration::ZERO
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn an_unanswered_ack_is_not_in_the_retry_set() {
+        // RAI-705 → RAI-711 的分界: "本端不知道对端做了什么"不许自动重放, 因为对端可能已经提交,
+        // 重开会把成品从 0 重传并替换。同 ID 幂等续传要先做出"已提交就返回原终态"。
+        for kind in [
+            FailureKind::AckUnansweredLive,
+            FailureKind::PathRefused,
+            FailureKind::Local,
+        ] {
+            assert_eq!(
+                retry_step(&failure(kind, "任意文案"), Duration::ZERO),
+                None,
+                "{kind:?} 不该被重拨"
+            );
+        }
+    }
+
+    #[test]
+    fn a_gate_refusal_envelope_is_classified_by_its_code_not_by_prose() {
+        // 门禁拒绝的信封是 `{"code":65,"error":"iroh_path_unknown"}` —— 码放在 `error` 字段里。
+        // 只认 `error_code` 会让这种拒绝退化成 `Local`, 于是"路径读不出 ⇒ 重拨修路径"这条既有
+        // 承诺静默失效 (2026-11-28 实测: 该误分类让 `a_put_killed_mid_upload_resumes_on_the_first_
+        // retry` 直接变红)。
+        let refused = serde_json::json!({"code": 65, "error": crate::bulk_path::IROH_PATH_UNKNOWN});
+        assert_eq!(
+            kind_for_code(failure_code(&refused)),
+            FailureKind::PathUnknown,
+            "门禁拒绝的码必须落到 PathUnknown"
+        );
+        // 自然语言的 file-transfer 错误: 全等匹配不成立 ⇒ Local (不会因为句子里出现某个码而重拨)。
+        let prose = serde_json::json!({
+            "error": "@file-chunk offset 不连续: 期望 100, 收到 90 (iroh_path_unknown 不是这里的原因)"
+        });
+        assert_eq!(kind_for_code(failure_code(&prose)), FailureKind::Local);
+    }
+
+    #[test]
+    fn the_transfer_id_is_planned_before_the_first_open() {
+        // RAI-711 判据 2: id 必须在第一个 open **之前**定下来并在整条命令内固定 —— 否则第一次
+        // open 的回执一丢, 重放就不知道回到哪个会话 (现场形态: 新 id 撞 `file_transfer_path_in_use`)。
+        let dir = scratch_dir("plan-id");
+        let ids = TransferIdStore::user_default();
+        let local = dir.join("source.bin");
+        let remote = "/tmp/landed.bin";
+        let fresh = plan_transfer_id(&ids, "lab/daemon", &local, remote, false);
+        assert!(!fresh.is_empty());
+        // 同一条 (目标, 本地, 远端) 有旧 id 时复用它 —— 换新 id 会撞暂存路径占用。
+        ids.put("lab/daemon", &local, remote, "cli-put-known");
+        assert_eq!(
+            plan_transfer_id(&ids, "lab/daemon", &local, remote, false),
+            "cli-put-known"
+        );
+        // `--restart` 显式要换新 id, 不继承旧的那个。
+        assert_ne!(
+            plan_transfer_id(&ids, "lab/daemon", &local, remote, true),
+            "cli-put-known"
+        );
+        ids.remove("lab/daemon", &local, remote);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn daemon_stable_codes_map_to_their_retry_kind() {
+        // 稳定码总表 ↔ 实现的对应: 读的是结构化的 `error_code` 字段。
+        use crate::bulk_path::{
+            IROH_BULK_PATH_PIN_UNAVAILABLE, IROH_DIRECT_PATH_LOST, IROH_DIRECT_PATH_UNAVAILABLE,
+            IROH_PATH_UNKNOWN,
+        };
+        assert_eq!(kind_for_code(Some(IROH_PATH_UNKNOWN)), FailureKind::PathUnknown);
+        for code in [
+            IROH_DIRECT_PATH_LOST,
+            IROH_DIRECT_PATH_UNAVAILABLE,
+            IROH_BULK_PATH_PIN_UNAVAILABLE,
+        ] {
+            assert_eq!(kind_for_code(Some(code)), FailureKind::PathRefused, "{code}");
+        }
+        assert_eq!(kind_for_code(None), FailureKind::Local);
+        assert_eq!(kind_for_code(Some("file_transfer_id_in_use")), FailureKind::Local);
     }
 }
