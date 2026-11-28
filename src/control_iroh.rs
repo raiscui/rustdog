@@ -3187,6 +3187,57 @@ pub(crate) fn run_pty_control(path: &Path, name: &str, request: IrohPtyRequest) 
 // 连接、握手、租约续期与采样由这里提供, 驱动只见 `request` 与 `observe`.
 // ---------------------------------------------------------------------------
 
+/// lane 上一次请求为什么失败 —— 重放决策读它, **不读错误文案**。
+///
+/// 文案会被改写 (`对端在回执前关闭了连接` 之类), 而"这条能不能重放"取决于**来源**:
+/// 只有"本端不知道对端做了什么"才值得重放, 连接已死或本端写失败都不值得。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LaneFailure {
+    /// 读回执超时, 那一刻连接**仍开着**: 对端可能已执行, 本端只是没收到答案。
+    AckUnansweredLive,
+    /// 读回执超时, 但那一刻对端已经关了: 从"没收到答案"退化成"对端没了"。
+    AckUnansweredClosed,
+    /// 对端在回执前关掉了写半边。
+    PeerClosed,
+    /// 本端写/读失败、设置超时失败等本机原因。
+    Local,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct LaneError {
+    pub(crate) kind: LaneFailure,
+    pub(crate) message: String,
+}
+
+impl std::fmt::Display for LaneError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl LaneError {
+    fn live(message: String) -> Self {
+        Self {
+            kind: LaneFailure::AckUnansweredLive,
+            message,
+        }
+    }
+
+    fn closed(message: String) -> Self {
+        Self {
+            kind: LaneFailure::AckUnansweredClosed,
+            message,
+        }
+    }
+
+    fn local(message: String) -> Self {
+        Self {
+            kind: LaneFailure::Local,
+            message,
+        }
+    }
+}
+
 /// 客户端一条已准入的 bulk lane。
 pub(crate) struct IrohBulkLane {
     transport: ControlTransport,
@@ -3194,7 +3245,7 @@ pub(crate) struct IrohBulkLane {
     routable: bool,
     /// 写失败/读超时之后这条流已经接不上了 (字节流可能停在半帧上): 后续请求一律返回同一条
     /// 错误, 不假装还能发第二条。
-    poisoned: Option<String>,
+    poisoned: Option<LaneError>,
     renewal_stop: Arc<AtomicBool>,
     renewal: Option<std::thread::JoinHandle<()>>,
 }
@@ -3205,27 +3256,41 @@ impl IrohBulkLane {
         &mut self,
         line: &str,
         timeout: Duration,
-    ) -> std::result::Result<String, String> {
+    ) -> std::result::Result<String, LaneError> {
         if let Some(err) = self.poisoned.clone() {
             return Err(err);
         }
         if let Err(err) = self.transport.set_read_timeout(Some(timeout)) {
-            return Err(self.poison(format!("设置读超时失败: {err}")));
+            return Err(self.poison(LaneError::local(format!("设置读超时失败: {err}"))));
         }
         if let Err(err) = self.transport.write_message(line) {
-            return Err(self.poison(format!("发送失败: {err} ({})", self.peer_state())));
+            return Err(self.poison(LaneError::local(format!(
+                "发送失败: {err} ({})",
+                self.peer_state()
+            ))));
         }
         match self.transport.read_message() {
             Ok(Some(reply)) => Ok(reply),
-            Ok(None) => Err(self.poison("对端在回执前关闭了连接".to_string())),
+            Ok(None) => Err(self.poison(LaneError::closed("对端在回执前关闭了连接".to_string()))),
             Err(err) if err.kind() == io::ErrorKind::TimedOut => {
-                Err(self.poison(format!(
+                let message = format!(
                     "{BULK_CHUNK_ACK_UNANSWERED}: 等待回执超时 ({}ms; {})",
                     timeout.as_millis(),
                     self.peer_state()
-                )))
+                );
+                // 超时那一刻连接是死是活决定这条错误是"结果未知"还是"对端没了": 前者才有
+                // 重放的意义 (对端可能已经落盘), 后者重放只会重传。
+                let error = if self.conn.close_reason().is_some() {
+                    LaneError::closed(message)
+                } else {
+                    LaneError::live(message)
+                };
+                Err(self.poison(error))
             }
-            Err(err) => Err(self.poison(format!("读回执失败: {err} ({})", self.peer_state()))),
+            Err(err) => Err(self.poison(LaneError::local(format!(
+                "读回执失败: {err} ({})",
+                self.peer_state()
+            )))),
         }
     }
 
@@ -3251,9 +3316,9 @@ impl IrohBulkLane {
         }
     }
 
-    fn poison(&mut self, message: String) -> String {
-        self.poisoned = Some(message.clone());
-        message
+    fn poison(&mut self, error: LaneError) -> LaneError {
+        self.poisoned = Some(error.clone());
+        error
     }
 
     /// 先停续期线程再关流: 它握着这条流的写半边, 关流之后它只会在已关的流上失败。
