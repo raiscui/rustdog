@@ -136,6 +136,7 @@ open 与每个 chunk 边界采样、读到非 `direct` 即拒; `path_class` 是*
 | `file_transfer_staging_path_reserved` | 会话 | 目标路径包含保留目录 `.rdog-partial` 组件 (§2.5) | 是 | 不可, 换一个目标路径 |
 | `file_transfer_reconcile_unsupported` | 会话 (客户端侧) | 客户端带了 `verify_committed` 但对端回执里没有 `reconcile` 标记 (旧 daemon 按 `Value` 解析, **静默忽略**未知字段) | 是 | 不可自动重试: 继续重传有替换已提交成品的风险。升级对端, 或显式 `--restart` |
 | `file_transfer_replay_mismatch` | 会话 | 重放对账 (RAI-711 M1): 客户端带 `verify_committed:true` 时目标已存在, 但大小或 sha256 与本次声明不符 | 是 | 不可: **绝不**把它当"已提交"或从 0 重传 (那会把不同的成品说成本次结果); 使用者须换目标或换 id 重来 |
+| `file_transfer_replay_raced` | 会话 | 重放会话发布时目标已存在 (对账之后有人落盘) —— 走到原子 no-replace 发布才可能发生 | 是 | **不进自动重试集**: 这是真实并发, 不是坏数据。不覆盖、不删别人的目标, 清本次临时文件; 使用者重跑以重新对账 |
 | `bulk_chunk_ack_unanswered` | bulk (客户端侧) | 客户端在 iroh 准入 lane 上读回执超时**且连接仍开着** (§3.1 的 ack 预算 `[file_transfer].chunk_ack_timeout_ms`); 只说"本端不知道对端做了什么" | **否 —— 不进自动重试集** | 该码 = 本端不知道对端做了什么, **不自动重拨**: daemon 没有"已提交结果"可回放, 盲目重开会让已提交的上传从 0 重传并替换成品。使用者须显式重跑, 并走 `resume:true` (daemon 的 `written` / 提交结果此时可核); 同 ID 幂等续传归 RAI-711。**下一个人不要把它接进任何重试循环** |
 
 两个命名空间的分界是**事实类型**, 不是严重程度: `iroh_*` 只回答"路径是什么", 其余一律用

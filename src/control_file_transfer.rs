@@ -595,6 +595,85 @@ pub fn execute_file_chunk(payload: &str) -> std::io::Result<Value> {
     }))
 }
 
+/// 把临时文件发布到目标: **只在目标不存在时**成功, 失败不回退覆盖。
+///
+/// 这是重放会话的发布原语 (RAI-711 severe 2)。锁内的"复查目标不存在"只挡得住本进程的并发,
+/// 挡不住别的进程在查与 rename 之间落盘 —— 只有内核级的 no-replace rename 才是一次原子的判定。
+///
+/// 平台: Linux `renameat2(RENAME_NOREPLACE)`、macOS `renameatx_np(RENAME_EXCL)`、
+/// Windows `MoveFileExW` (不带 `REPLACE_EXISTING`)。
+fn publish_no_replace(temp: &Path, target: &Path) -> std::io::Result<()> {
+    #[cfg(target_os = "linux")]
+    {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
+        let from = CString::new(temp.as_os_str().as_bytes())
+            .map_err(|_| std::io::Error::other("暂存路径含 NUL"))?;
+        let to = CString::new(target.as_os_str().as_bytes())
+            .map_err(|_| std::io::Error::other("目标路径含 NUL"))?;
+        let rc = unsafe {
+            libc::renameat2(
+                libc::AT_FDCWD,
+                from.as_ptr(),
+                libc::AT_FDCWD,
+                to.as_ptr(),
+                libc::RENAME_NOREPLACE,
+            )
+        };
+        if rc == 0 {
+            return Ok(());
+        }
+        return Err(std::io::Error::last_os_error());
+    }
+    #[cfg(target_os = "macos")]
+    {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
+        let from = CString::new(temp.as_os_str().as_bytes())
+            .map_err(|_| std::io::Error::other("暂存路径含 NUL"))?;
+        let to = CString::new(target.as_os_str().as_bytes())
+            .map_err(|_| std::io::Error::other("目标路径含 NUL"))?;
+        let rc = unsafe {
+            libc::renameatx_np(
+                libc::AT_FDCWD,
+                from.as_ptr(),
+                libc::AT_FDCWD,
+                to.as_ptr(),
+                libc::RENAME_EXCL,
+            )
+        };
+        if rc == 0 {
+            return Ok(());
+        }
+        return Err(std::io::Error::last_os_error());
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        use windows_sys::Win32::Storage::FileSystem::{MoveFileExW, MOVEFILE_COPY_ALLOWED};
+        let wide = |path: &Path| -> Vec<u16> {
+            path.as_os_str().encode_wide().chain(Some(0)).collect()
+        };
+        let (from, to) = (wide(temp), wide(target));
+        // 不带 REPLACE_EXISTING: 目标存在时这里直接失败, 不会覆盖。
+        let ok = unsafe { MoveFileExW(from.as_ptr(), to.as_ptr(), MOVEFILE_COPY_ALLOWED) };
+        if ok != 0 {
+            return Ok(());
+        }
+        return Err(std::io::Error::last_os_error());
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+    {
+        if std::fs::symlink_metadata(target).is_ok() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::AlreadyExists,
+                "目标已存在 (本平台没有原子的 no-replace rename)",
+            ));
+        }
+        std::fs::rename(temp, target)
+    }
+}
+
 pub fn execute_file_end(payload: &str) -> std::io::Result<Value> {
     const VERB: &str = "file-end";
     let value = parse_object(payload, VERB)?;
@@ -664,6 +743,35 @@ pub fn execute_file_end(payload: &str) -> std::io::Result<Value> {
         return Err(std::io::Error::other(
             "file_transfer_replay_raced: 目标在对账之后被别的写入占用/替换了 — 不覆盖、不重传; 请重跑以重新对账",
         ));
+    }
+
+    // 重放会话走**原子 no-replace** 发布: 判据不在锁里, 在内核里 (别的进程也可能落盘)。
+    if session.no_replace_publish {
+        return match publish_no_replace(&temp_path, &final_path) {
+            Ok(()) => {
+                sessions.remove(&transfer_id);
+                persist_index(&sessions);
+                if let Some(staging_dir) = temp_path.parent() {
+                    let _ = std::fs::remove_dir(staging_dir);
+                }
+                Ok(json!({
+                    "kind": "file-transfer",
+                    "state": "committed",
+                    "transfer_id": transfer_id,
+                    "path": final_path,
+                    "size": written,
+                    "sha256": actual_sha256,
+                }))
+            }
+            Err(err) => {
+                reap_file(&temp_path);
+                sessions.remove(&transfer_id);
+                persist_index(&sessions);
+                Err(std::io::Error::other(format!(
+                    "file_transfer_replay_raced: 发布时目标已存在 ({err}) — 不覆盖、不重传; 请重跑以重新对账"
+                )))
+            }
+        };
     }
 
     // 提交: 原子改名到目标 (同目录 rename, 失败回退为复制)
@@ -1805,6 +1913,36 @@ mod tests {
             !staging_path(&target).unwrap().exists(),
             "被 raced 挡下的临时文件必须清掉"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 原子 no-replace 发布: 目标不存在 ⇒ 放上去; 目标已存在 ⇒ 报错且两份字节都不动。
+    ///
+    /// 这条在 Windows 上走 `MoveFileExW` (不带 `REPLACE_EXISTING`)、macOS 走 `renameatx_np`,
+    /// 判据相同 —— 各平台由 CI 的对应 job 执行本用例。
+    #[test]
+    fn publish_no_replace_never_clobbers_an_existing_target() {
+        let dir = std::env::temp_dir().join(unique_id("no-replace"));
+        std::fs::create_dir_all(&dir).unwrap();
+        let staged = dir.join("staged.bin");
+        let target = dir.join("target.bin");
+
+        // 目标不存在: 放上去
+        std::fs::write(&staged, b"fresh").unwrap();
+        publish_no_replace(&staged, &target).expect("目标不存在时必须发布成功");
+        assert_eq!(std::fs::read(&target).unwrap(), b"fresh".to_vec());
+        assert!(!staged.exists(), "发布后暂存文件不该还在");
+
+        // 目标已存在: 报错, 且谁的字节都不动
+        std::fs::write(&staged, b"second").unwrap();
+        let err = publish_no_replace(&staged, &target).expect_err("目标已存在时必须失败");
+        assert!(
+            err.kind() == std::io::ErrorKind::AlreadyExists
+                || err.raw_os_error().is_some(),
+            "应是一次真实的失败: {err}"
+        );
+        assert_eq!(std::fs::read(&target).unwrap(), b"fresh".to_vec(), "别人的字节不许动");
+        assert_eq!(std::fs::read(&staged).unwrap(), b"second".to_vec(), "暂存文件留在原处等清理");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
