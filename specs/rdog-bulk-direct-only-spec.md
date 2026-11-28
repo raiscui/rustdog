@@ -954,3 +954,17 @@ sha256、拓扑描述 (哪些段跨网)、脱敏后的地址、判定式计算�
 
 CI 不受这条影响: `.github/workflows/ci.yml` 在**全部六个 job** (三段 `build` + 三段 `test`, 后者也会在
 缓存未命中时编译) 注入了 `GIT_SHA=${{ github.sha }}`, 所以 CI 里同一份代码在任何 job 中身份一致.
+
+## 双端 join 的三态判据 (RAI-476 步骤 5, 真机 LAN 复核 2026-11-28)
+
+**陷阱: 后两条的原始 JSON 里 `status` 仍然是 `joined`** —— 它只表示"同一 attempt 的双端快照配对
+成功", **不是同源通过**。判据在 `reason` 与 exit code 上:
+
+| 客户端 / daemon build | `reason` | `relay_bytes_zero` | exit | 结论 |
+| --- | --- | --- | --- | --- |
+| 同源 | `null` | `true` | 0 | 可以下结论 |
+| 不同 sha | `bulk_path_build_mismatch` | `null` | 1 | **未得出结论** |
+| 构建身份读不出 | `bulk_path_build_unverified` | `null` | 1 | **未得出结论** |
+
+读 `status:joined` 就当"两端一致"会把 `bulk_path_build_mismatch` 读成通过。这一格是 LAN 承载,
+不涉及 NAT。
