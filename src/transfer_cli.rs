@@ -246,8 +246,6 @@ pub(crate) struct TransferReceipt {
     pub(crate) sha256: String,
     /// 只有上传会出现: 本次是否真的从半成品接着传 (daemon 的 `resume_honored`)。
     pub(crate) resume_honored: Option<bool>,
-    /// daemon 用盘上事实判定"这条上传早就提交过了" —— 本次一个字节都没搬。
-    pub(crate) replayed: bool,
 }
 
 impl TransferReceipt {
@@ -259,9 +257,8 @@ impl TransferReceipt {
         };
         // 尾列不能被新字段打断: put 的最后一列仍是 `resume=…`, get 的最后一列仍是 `sha256=…`,
         // 所以 `build=` 插在 `sha256=` **之前**。
-        let replayed = if self.replayed { " replayed=committed" } else { "" };
         format!(
-            "{} ok bytes={} {} sha256={}{replayed}{}",
+            "{} ok bytes={} {} sha256={}{}",
             self.direction,
             self.bytes,
             crate::build_info::build_tag(),
@@ -1249,12 +1246,12 @@ fn run_put_inner(
     // 撞上暂存路径占用。代价是 open 被拒时 store 里会留一条指向"没有会话"的 id, 而那条下一轮会被
     // 当作续传候选: daemon 那边没有会话也没有半成品时它会如实报 `written:0` (从 0 开始)。
     ids.put(target, local, remote, &transfer_id);
-    // 只在"上一次没干净收尾"时要求对账: 正常首传不为此多付一次哈希。问的是"我上次到底提交没
-    // 提交", 盘上事实是唯一判据。
-    let verify_committed = !restart && had_previous;
+    // 只在"上一次没干净收尾"时要求**本次发布 no-replace**: 正常首传不带, `--restart` 一律不带
+    // (它是"显式同意覆盖"的唯一入口)。含义只有一个: 这次 open 的发布不许覆盖已有目标。
+    let no_replace_publish = !restart && had_previous;
     let open_line = serde_json::json!({
         "transfer_id": transfer_id,
-        "verify_committed": verify_committed,
+        "no_replace_publish": no_replace_publish,
         // 两端快照要按 `attempt_id` 对齐 (§4.3): 客户端把自己这一半的身份交给 daemon,
         // 否则 daemon 只能按 `transfer_id` 派生一个, join 会永远是 `attempt_mismatch`。
         "attempt_id": recorder.attempt_id,
@@ -1266,36 +1263,6 @@ fn run_put_inner(
     let opened = exchange_peer
         .request(&format!("@put-file:{}", open_line))
         .map_err(|err| note_error(recorder, err, &transfer_id, false))?;
-    // 我要求过对账、对端却没报它做了 (`reconcile` 缺席) ⇒ 这是旧 daemon 静默忽略了这个字段。
-    // 那种中间态最危险: 客户端以为"结果未知已核对", 实际是"直接重传", 源文件变过就会替换成品。
-    // 所以这里 fail closed, 并把刚开的会话取消掉 (一个字节都没搬)。
-    if verify_committed && opened.get("reconcile").is_none() {
-        let _ = exchange_peer
-            .request(&format!("@file-cancel:{{\"transfer_id\":\"{transfer_id}\"}}"));
-        return Err(format!(
-            "file_transfer_reconcile_unsupported: 对端没有回报已提交对账 (旧版本 daemon 会忽略 verify_committed), 重试有替换已提交成品的风险 —— 要么升级对端, 要么显式 `--restart` (transfer_id={transfer_id})"
-        ));
-    }
-
-    // daemon 用盘上事实判定"这条上传早就提交过了": 一个字节都不用搬, 也不能再开会话。
-    //
-    // 这是本票唯一一处**故意把"我查到了成品"说成成功**的地方 —— 盘上就是这份字节, 终态不可区分;
-    // 但它不证明"本次写入发生过", 别拿它当写入证据。回执上单独标 `replayed=committed` 就是为了
-    // 让人一眼看出这次没有搬字节。
-    if opened.get("state").and_then(Value::as_str) == Some("committed")
-        && opened.get("replayed").and_then(Value::as_bool) == Some(true)
-    {
-        ids.remove(target, local, remote);
-        report_progress("put", size, size);
-        return Ok(TransferReceipt {
-            transfer_id,
-            direction: "put",
-            bytes: 0,
-            sha256,
-            resume_honored: None,
-            replayed: true,
-        });
-    }
     let written = opened.get("written").and_then(Value::as_u64).unwrap_or(0);
     let resume_honored = opened
         .get("resume_honored")
@@ -1392,7 +1359,6 @@ fn run_put_inner(
         bytes: size,
         sha256,
         resume_honored: Some(resume_honored),
-        replayed: false,
     })
 }
 
@@ -1539,7 +1505,6 @@ fn run_get_inner(
         bytes: offset,
         sha256: actual,
         resume_honored: None,
-        replayed: false,
     })
 }
 
@@ -1574,8 +1539,6 @@ mod tests {
         end_failure_evidence: Option<Value>,
         /// `@put-file` 直接失败 (open 没被接受)。
         fail_open: bool,
-        /// 假装是旧 daemon: `@put-file` 的回执里**不含** `reconcile` 标记。
-        legacy_without_reconcile: bool,
     }
 
     impl LoopbackPeer {
@@ -1591,14 +1554,7 @@ mod tests {
                 poison_after_chunk: None,
                 end_failure_evidence: None,
                 fail_open: false,
-                legacy_without_reconcile: false,
             }
-        }
-
-        /// 假装对端是旧 daemon: 回执里没有 `reconcile` 标记 (= 它忽略了 `verify_committed`)。
-        fn with_legacy_without_reconcile(mut self) -> Self {
-            self.legacy_without_reconcile = true;
-            self
         }
 
         fn with_observations(mut self, observations: Vec<PathObservation>) -> Self {
@@ -1704,12 +1660,6 @@ mod tests {
                 other => return Err(ExchangeError::without_evidence(format!("未知动词: {other}"))),
             };
             let mut value = result.map_err(|err| ExchangeError::without_evidence(err.to_string()))?;
-            if self.legacy_without_reconcile && verb == "put-file" {
-                // 旧 daemon 忽略 `verify_committed`, 回执里也就没有这个标记。
-                if let Some(object) = value.as_object_mut() {
-                    object.remove("reconcile");
-                }
-            }
             if verb == "get-file" {
                 if let Some(sha) = &self.download_sha_override {
                     value["sha256"] = Value::String(sha.clone());
@@ -2549,7 +2499,6 @@ mod tests {
             bytes: 10,
             sha256: "abc".into(),
             resume_honored: Some(true),
-            replayed: false,
         }
         .render();
         assert!(put.ends_with("resume=honored"), "put 尾列必须是 resume: {put}");
@@ -2561,7 +2510,6 @@ mod tests {
             bytes: 10,
             sha256: "abc".into(),
             resume_honored: None,
-            replayed: false,
         }
         .render();
         assert!(
@@ -3040,93 +2988,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    #[test]
-    fn a_committed_target_makes_the_replay_move_no_bytes() {
-        // RAI-711 M1 的主判据: 盘上成品与本次声明一致 (同大小 + 同 sha) ⇒ daemon 回
-        // `committed/replayed`, 客户端一个块都不发, 也不开会话。
-        let dir = scratch_dir("replay-committed");
-        let local = dir.join("source.bin");
-        let remote = dir.join("landed.bin");
-        let payload: Vec<u8> = (0..64u8).collect();
-        std::fs::write(&local, &payload).unwrap();
-        // daemon 侧的目标已经就是这份内容 (上一次提交过)
-        std::fs::write(&remote, &payload).unwrap();
 
-        let ids = TransferIdStore::at(dir.join("ids"));
-        // store 里留着 id ⇒ 这条命令按"上一次没干净收尾"处理, 会带 `verify_committed`
-        ids.put("test-target", &local, &remote.to_string_lossy(), "cli-put-replay");
-
-        let peer = LoopbackPeer::new(7);
-        let mut recorder = test_recorder(None);
-        let receipt = run_put(
-            &peer,
-            &mut recorder,
-            &ids,
-            "test-target",
-            &local,
-            &remote.to_string_lossy(),
-            false,
-            None,
-        )
-        .expect("对账命中就是成功");
-
-        assert!(receipt.replayed, "回执必须标成 replay: {receipt:?}");
-        assert_eq!(receipt.bytes, 0, "replay 不该搬任何字节");
-        assert_eq!(
-            peer.seen()
-                .iter()
-                .filter(|line| line.starts_with("@file-chunk:"))
-                .count(),
-            0,
-            "一个块都不该发: {:?}",
-            peer.seen()
-        );
-        // 盘上的成品一个字节都没变
-        assert_eq!(std::fs::read(&remote).unwrap(), payload);
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn a_peer_that_ignores_the_reconcile_request_fails_closed() {
-        // 混合版本: 旧 daemon 会**静默忽略** `verify_committed` (它按 Value 解析, 未知字段不报错)。
-        // 规则写在共享驱动 `run_put_inner` 里, 所以 iroh 与 TCP 两条 lane 同一条规则; 这里的替身是
-        // 非路径感知 (TCP) 的能力形状, 即这条也是 TCP 侧的拒绝对照。
-        // 那种中间态等于"客户端以为对过账、其实直接重传" —— 源文件变过就会替换已提交的成品。
-        // 所以缺 `reconcile` 标记必须报错并把刚开的会话取消, 不是继续搬字节。
-        let dir = scratch_dir("reconcile-legacy");
-        let local = dir.join("source.bin");
-        let remote = dir.join("landed.bin");
-        let payload: Vec<u8> = (0..64u8).collect();
-        std::fs::write(&local, &payload).unwrap();
-        let ids = TransferIdStore::at(dir.join("ids"));
-        ids.put("test-target", &local, &remote.to_string_lossy(), "cli-put-legacy");
-
-        let peer = LoopbackPeer::new(7).with_legacy_without_reconcile();
-        let mut recorder = test_recorder(None);
-        let err = run_put(
-            &peer,
-            &mut recorder,
-            &ids,
-            "test-target",
-            &local,
-            &remote.to_string_lossy(),
-            false,
-            None,
-        )
-        .expect_err("对端没回报对账 ⇒ 必须 fail closed");
-        assert!(err.contains("file_transfer_reconcile_unsupported"), "{err}");
-        assert_eq!(
-            peer.seen()
-                .iter()
-                .filter(|line| line.starts_with("@file-chunk:"))
-                .count(),
-            0,
-            "fail closed 之前一个块都不该发: {:?}",
-            peer.seen()
-        );
-        assert!(!remote.exists(), "不得落下目标文件");
-        let _ = std::fs::remove_dir_all(&dir);
-    }
 
     #[test]
     fn daemon_stable_codes_map_to_their_retry_kind() {

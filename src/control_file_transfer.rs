@@ -78,119 +78,6 @@ fn transfers() -> &'static Mutex<HashMap<String, TransferSession>> {
     TRANSFERS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-/// `@put-file` 的 `verify_committed:true` 分支: 这条上传是不是**已经提交过了**。
-///
-/// **判据只有盘上事实** (存在 + 大小相等 + sha256 相等): 天然跨重启, 代价只是重放路径上的一次
-/// 哈希。此前有一张内存 `COMMITTED` 表当"快速路径", 评审 (#204 severe 1) 指出它会给出**错误的
-/// 成功** —— A 提交后丢回执、B 换了目标, 再跑 A 仍命中缓存并清掉本地 ID, 而盘上已经不是那份字节。
-/// 现在**没有缓存**: 每次"已提交"都必须由当前文件内容支撑 (顺带解掉那张表的无界增长)。
-///
-/// 三种结局, 语义必须分清:
-/// - **相等** ⇒ `Committed`。这里有一个**故意的假阳性**: 目标本来就在、内容恰好相同、但不是这次
-///   传的, 也会被判成已提交。终态不可区分 (盘上就是这份字节), 按成功返回是对的 —— 但它不证明
-///   "本次写入发生过", 别拿它当写入证据。
-/// - **目标存在但不符** ⇒ `Mismatch`。绝不返回"已提交" —— 那会把一份不同的成品说成这次的结果。
-/// - **目标不存在** ⇒ `Absent`。提交必然留下目标文件, 所以"没有目标"就是"没提交过"的正面证据
-///   (不是"未知"), 此时从 0 重来是安全的。**这条推论有前提**: 两次尝试之间没有外部删除/移动
-///   目标。被人为删掉后再重放会让文件重新出现 —— 那是可接受的行为, 但它是**假设, 不是定理**。
-fn replay_state(path: &Path, size: u64, sha256: &str) -> std::io::Result<ReplayState> {
-    // **读不出来 ≠ 不存在**。只有 `NotFound` 才是"没提交过"的正面证据; 不可读 / 符号链接 /
-    // 目录都必须走"拒"这一侧 —— 把它们归到 `Absent` 会落到正常 open 并覆盖, 那比 `Mismatch`
-    // 危险得多 (覆盖了别的东西, 而用户以为只是重传一次)。
-    // **规矩 (RAI-711): `Absent` 的语义只能是 `NotFound`。** 永远不要加"读失败就当作不存在"
-    // 的兜底 —— 在这个模块里那等于"覆盖已提交的成品", 而在别处它可能只是无害的宽容。
-    let metadata = match std::fs::symlink_metadata(path) {
-        Ok(metadata) => metadata,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(ReplayState::Absent),
-        Err(err) => {
-            return Ok(ReplayState::Unreadable(format!(
-                "读不到目标 {} 的元数据 ({err})",
-                path.display()
-            )))
-        }
-    };
-    // **符号链接与目录即便内容一致也拒**: 提交动作会替换掉链接本身或目录, 所以"内容相等"
-    // 不是这里的判据 —— 判据是"提交之后那个路径上会是什么"。
-    if metadata.file_type().is_symlink() {
-        return Ok(ReplayState::Unreadable(format!(
-            "目标 {} 是符号链接, 提交会把它替换掉",
-            path.display()
-        )));
-    }
-    if !metadata.is_file() {
-        return Ok(ReplayState::Unreadable(format!(
-            "目标 {} 不是普通文件",
-            path.display()
-        )));
-    }
-    if metadata.len() != size {
-        return Ok(ReplayState::Mismatch(format!(
-            "目标 {} 已存在 {} 字节, 与本次声明的 {size} 不等",
-            path.display(),
-            metadata.len()
-        )));
-    }
-    // 哈希前后各看一次身份 (大小 + mtime + inode/dev): 哈希期间目标被别人换了, 那份摘要就不再是
-    // "现在这个文件"的摘要 —— 报"已提交"会是另一种**错误的成功** (不是覆盖, 但同样把人骗了)。
-    // 不改用第二次哈希 (那要再读一遍全文件), 只比两次 stat; 不一致就按"结果未知"拒绝下结论。
-    // **它是启发式, 不是证明**: 文件系统时间戳粒度粗于写入间隔时, "同 tick 内换掉再换不回"看不见。
-    let identity_before = target_identity(&metadata);
-    let actual = sha256_file(path)?;
-    let after = match std::fs::symlink_metadata(path) {
-        Ok(after) => after,
-        Err(err) => {
-            return Ok(ReplayState::Unreadable(format!(
-                "哈希期间读不到目标 {} ({err}) — 结果未知",
-                path.display()
-            )))
-        }
-    };
-    if target_identity(&after) != identity_before {
-        return Ok(ReplayState::Unreadable(format!(
-            "目标 {} 在哈希期间身份发生变化 — 结果未知, 不按已提交处理",
-            path.display()
-        )));
-    }
-    if actual.eq_ignore_ascii_case(sha256) {
-        Ok(ReplayState::Committed)
-    } else {
-        Ok(ReplayState::Mismatch(format!(
-            "目标 {} 的 sha256 是 {actual}, 与本次声明的 {sha256} 不等",
-            path.display()
-        )))
-    }
-}
-
-/// 一份目标的"身份": 大小 + mtime + inode/dev。哈希前后各取一次, 一致才允许下"已提交"结论。
-fn target_identity(metadata: &std::fs::Metadata) -> (u64, Option<std::time::SystemTime>, u64, u64) {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        (
-            metadata.len(),
-            metadata.modified().ok(),
-            metadata.ino(),
-            metadata.dev(),
-        )
-    }
-    #[cfg(not(unix))]
-    {
-        (
-            metadata.len(),
-            metadata.modified().ok(),
-            metadata.len(),
-            0,
-        )
-    }
-}
-
-enum ReplayState {
-    Committed,
-    Mismatch(String),
-    /// 目标存在但**读不出来** (权限 / 符号链接 / 非普通文件): 拒, 绝不退化成"不存在"。
-    Unreadable(String),
-    Absent,
-}
 
 /// 一条进行中的传输。上传会话在 @put-file 建立、@file-end 提交后移除;
 /// 下载会话只读, @get-file 建立、读完即移除 (无状态残留)。
@@ -381,46 +268,14 @@ pub fn execute_put_file(payload: &str) -> std::io::Result<Value> {
         )));
     }
 
-    let mut no_replace_publish = false;
-    // 重放对账 (RAI-711 M1): 客户端只在"上一次没干净收尾"时带这个字段, 所以正常首传不多一次哈希。
-    if value
-        .get("verify_committed")
+    // 发布策略 (RAI-711 M1 新形状): 客户端要求本次 open 的发布**必须 no-replace**。
+    //
+    // 不做"是不是已经提交过"的对账 —— 那需要一次跨进程/跨重启/跨文件系统粒度都成立的证明,
+    // 两轮评审各 3 条 severe 都长在它上面。这里只留一个能证的不变量: 本命令不覆盖已有目标。
+    let no_replace_publish = value
+        .get("no_replace_publish")
         .and_then(Value::as_bool)
-        .unwrap_or(false)
-    {
-        match replay_state(&path, size, expected_sha256.as_deref().unwrap_or(""))? {
-            ReplayState::Committed => {
-                return Ok(json!({
-                    "kind": "file-transfer",
-                    "state": "committed",
-                    "replayed": true,
-                    // 能力标记: 这次 open 真的按盘上事实对过账。旧 daemon 没有这个字段 ——
-                    // 客户端据它的缺席 fail closed, 而不是以为对账发生了。
-                    "reconcile": "disk",
-                    "transfer_id": transfer_id,
-                    "path": path,
-                    "size": size,
-                    "next_offset": size,
-                }));
-            }
-            ReplayState::Mismatch(reason) => {
-                return Err(std::io::Error::other(format!(
-                    "file_transfer_replay_mismatch: {reason} — 不重传、不覆盖"
-                )));
-            }
-            ReplayState::Unreadable(reason) => {
-                return Err(std::io::Error::other(format!(
-                    "file_transfer_replay_unreadable: {reason} — 不重传、不覆盖 (读不出来不等于不存在)"
-                )));
-            }
-            // 没有目标文件 = 上次没提交过 (提交必然留下目标), 从 0 重来是安全的。
-            ReplayState::Absent => {
-                // 对账那一刻没有目标: 这条会话在提交时**不许覆盖**后来出现的任何东西
-                // (评审 #204 severe 2: probe 与提交之间可以被旧的 `@file-end` 落盘)。
-                no_replace_publish = true;
-            }
-        }
-    }
+        .unwrap_or(false);
 
     let temp_path = staging_path(&path)?;
 
@@ -1728,161 +1583,18 @@ mod tests {
         input.replace('\\', "\\\\").replace('"', "\\\"")
     }
 
-    /// RAI-711 M1: 盘上对账。判据是**目标文件事实**, 内存表只作快速路径。
-    #[test]
-    fn replay_state_reads_the_disk_when_the_memory_record_is_gone() {
-        let dir = std::env::temp_dir().join(unique_id("replay-disk"));
-        std::fs::create_dir_all(&dir).unwrap();
-        let target = dir.join("landed.bin");
-        let payload: Vec<u8> = (0..4096u32).map(|byte| (byte % 251) as u8).collect();
-        std::fs::write(&target, &payload).unwrap();
-        let sha = format!("{:x}", Sha256::digest(&payload));
-
-        // 没有内存记录 (daemon 重启后的形状) 也必须认出来 —— 这就是"天然跨重启"的那一半。
-        assert!(matches!(
-            replay_state(&target, payload.len() as u64, &sha).unwrap(),
-            ReplayState::Committed
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
-    }
 
     /// 负对照 (评审 #204 severe 1): **没有任何缓存能替盘上事实作证**。
     ///
     /// 现场形状: A 提交后丢回执 → B 把这个目标换成别的内容 (或删掉) → 再跑 A。修复前那张内存表
     /// 会让 A **命中缓存并报成功**, 同时清掉本地 id, 而盘上已经不是那份字节。现在缓存整个不存在了,
-    /// 所以这里断言的是"同样的 id, 只要盘上变了就必须 `Mismatch`"。
-    #[test]
-    fn replay_state_has_no_cache_that_can_outlive_the_disk() {
-        let dir = std::env::temp_dir().join(unique_id("replay-nocache"));
-        std::fs::create_dir_all(&dir).unwrap();
-        let target = dir.join("landed.bin");
-        let mine = vec![1u8; 32];
-        std::fs::write(&target, &mine).unwrap();
-        let mine_sha = format!("{:x}", Sha256::digest(&mine));
-        assert!(matches!(
-            replay_state(&target, 32, &mine_sha).unwrap(),
-            ReplayState::Committed
-        ));
-
-        // 别人把它换成了别的内容 (同大小): 必须立刻不再"已提交"
-        let theirs = vec![2u8; 32];
-        std::fs::write(&target, &theirs).unwrap();
-        assert!(
-            matches!(replay_state(&target, 32, &mine_sha).unwrap(), ReplayState::Mismatch(_)),
-            "盘上换了内容就必须拒, 不许有任何缓存替它作证"
-        );
-
-        // 别人把它删了: 那就不是"已提交", 而是"没提交过"
-        std::fs::remove_file(&target).unwrap();
-        assert!(matches!(
-            replay_state(&target, 32, &mine_sha).unwrap(),
-            ReplayState::Absent
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
-    }
 
     /// 哈希期间目标被换掉 ⇒ **不下"已提交"结论**, 报"结果未知" (评审/ Captain 2026-11-28)。
     ///
     /// 这条钉的是"另一种错误的成功": 探针说 committed, 而哈希期间目标已被替换 —— 盘上已经不是
-    /// 那份内容。判据: 两次 stat 的身份 (大小 + mtime + inode) 不一致 ⇒ `Unreadable`(结果未知)。
-    #[test]
-    fn replay_state_refuses_committed_when_the_target_changes_during_the_hash() {
-        // 直接钉身份比较这一跳: 同大小、内容不同的两份文件的身份必须不同 (mtime 至少会变)。
-        let dir = std::env::temp_dir().join(unique_id("replay-identity"));
-        std::fs::create_dir_all(&dir).unwrap();
-        let target = dir.join("swap.bin");
-        std::fs::write(&target, vec![1u8; 64]).unwrap();
-        let before = target_identity(&std::fs::symlink_metadata(&target).unwrap());
-        // 换成同大小、不同内容。**先睡 2 ms**: 文件系统的时间戳粒度可能粗于一次写入的间隔,
-        // 同 tick 内的替换这一层看不见 —— 这条检查是启发式, 不是证明 (注释里也这么写)。
-        std::thread::sleep(std::time::Duration::from_millis(2));
-        std::fs::write(&target, vec![2u8; 64]).unwrap();
-        let after = target_identity(&std::fs::symlink_metadata(&target).unwrap());
-        assert_ne!(before, after, "同大小换内容必须被身份比较看见");
 
-        // 而内容确实已变 ⇒ 按旧摘要判定也不该说 committed
-        let mine = vec![1u8; 64];
-        let mine_sha = format!("{:x}", Sha256::digest(&mine));
-        assert!(matches!(
-            replay_state(&target, 64, &mine_sha).unwrap(),
-            ReplayState::Mismatch(_)
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// 负对照 (Captain 要求): 目标存在但大小或摘要不符 ⇒ **绝不能**返回"已提交"。
-    #[test]
-    fn replay_state_never_calls_a_mismatched_target_committed() {
-        let dir = std::env::temp_dir().join(unique_id("replay-mismatch"));
-        std::fs::create_dir_all(&dir).unwrap();
-        let target = dir.join("landed.bin");
-        let on_disk = vec![1u8; 256];
-        std::fs::write(&target, &on_disk).unwrap();
-
-        // 同大小、不同内容: 摘要不符
-        let wanted: Vec<u8> = vec![2u8; 256];
-        let wanted_sha = format!("{:x}", Sha256::digest(&wanted));
-        assert!(matches!(
-            replay_state(&target, 256, &wanted_sha).unwrap(),
-            ReplayState::Mismatch(_)
-        ));
-
-        // 大小不符
-        assert!(matches!(
-            replay_state(&target, 512, &wanted_sha).unwrap(),
-            ReplayState::Mismatch(_)
-        ));
-
-        // 盘上字节一个都没动
-        assert_eq!(std::fs::read(&target).unwrap(), on_disk);
-        let _ = std::fs::remove_dir_all(&dir);
-    }
 
     /// Captain 自查点 1: **读不出来 ≠ 不相等**。目录 / 符号链接 / 不可读都必须落在"拒",
-    /// 绝不能退化成 `Absent`(⇒ 正常 open ⇒ 覆盖)。
-    #[test]
-    fn replay_state_never_treats_an_unreadable_target_as_absent() {
-        let dir = std::env::temp_dir().join(unique_id("replay-unreadable"));
-        std::fs::create_dir_all(&dir).unwrap();
-        let as_dir = dir.join("i-am-a-directory.bin");
-        std::fs::create_dir_all(&as_dir).unwrap();
-        assert!(matches!(
-            replay_state(&as_dir, 1024, &"0".repeat(64)).unwrap(),
-            ReplayState::Unreadable(_)
-        ));
-
-        #[cfg(unix)]
-        {
-            let real = dir.join("real.bin");
-            std::fs::write(&real, vec![9u8; 16]).unwrap();
-            let link = dir.join("link.bin");
-            std::os::unix::fs::symlink(&real, &link).unwrap();
-            let sha = format!("{:x}", Sha256::digest(vec![9u8; 16]));
-            assert!(
-                matches!(
-                    replay_state(&link, 16, &sha).unwrap(),
-                    ReplayState::Unreadable(_)
-                ),
-                "符号链接即使内容一致也不能判已提交: 提交会把链接本身替换掉"
-            );
-            // 真身后面的文件一个字节都没动
-            assert_eq!(std::fs::read(&real).unwrap(), vec![9u8; 16]);
-        }
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn replay_state_treats_a_missing_target_as_never_committed() {
-        // 提交必然留下目标文件, 所以"没有目标"是"没提交过"的正面证据, 不是"未知"。
-        let dir = std::env::temp_dir().join(unique_id("replay-absent"));
-        std::fs::create_dir_all(&dir).unwrap();
-        let target = dir.join("never-written.bin");
-        assert!(matches!(
-            replay_state(&target, 1024, &"0".repeat(64)).unwrap(),
-            ReplayState::Absent
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
-    }
 
     #[test]
     fn rejects_parent_dir_traversal() {
@@ -1955,7 +1667,7 @@ mod tests {
         // 客户端带 verify_committed: 探针说 Absent ⇒ 这条会话置位 no_replace_publish
         let tid = unique_id("raced");
         execute_put_file(&format!(
-            r#"{{"transfer_id":"{tid}","path":"{}","size":{},"sha256":"{sha}","resume":false,"verify_committed":true}}"#,
+            r#"{{"transfer_id":"{tid}","path":"{}","size":{},"sha256":"{sha}","resume":false,"no_replace_publish":true}}"#,
             escape_json(&target.display().to_string()),
             payload.len()
         ))
