@@ -237,6 +237,56 @@ fn auto_path_is_available_for_interactive_fallback() {
 }
 
 #[test]
+fn direct_connect_timeout_is_bounded_and_independent_of_frame_timeout() {
+    let scratch = Scratch::new();
+    for (timeout, expected) in [
+        ("", Some(CONNECT)),
+        (", \"direct_connect_timeout_ms\": 1000", Some(MIN_DIRECT_CONNECT)),
+        (", \"direct_connect_timeout_ms\": 30000", Some(MAX_DIRECT_CONNECT)),
+        (", \"direct_connect_timeout_ms\": 999", None),
+        (", \"direct_connect_timeout_ms\": 30001", None),
+    ] {
+        let body = client_profile(
+            "",
+            &format!(", \"frame_timeout_ms\": 9000{timeout}"),
+            "127.0.0.1:7000",
+            "https://127.0.0.1:7001",
+        );
+        let path = scratch.write("client.json", &body);
+        let cfg: ClientConfig = profile(&path).expect("client profile parses");
+        assert_eq!(cfg.direct_connect_budget().ok(), expected, "{timeout}");
+        assert_eq!(cfg.frame_timeout(), Duration::from_secs(9));
+    }
+}
+
+#[test]
+fn direct_probe_profile_cannot_reach_the_bulk_or_pty_dialer() {
+    let scratch = Scratch::new();
+    let path = scratch.write(
+        "probe.json",
+        &client_profile(
+            r#", "routable": true"#,
+            r#", "probe_direct_via_relay": true"#,
+            "127.0.0.1:7000",
+            "https://127.0.0.1:7001",
+        ),
+    );
+    assert_eq!(
+        with_bulk_lane(&path, "lab/daemon", |_| ())
+            .unwrap_err()
+            .to_string(),
+        "iroh probe_direct_via_relay is only supported for @ping",
+    );
+    let err = run_pty_control(
+        &path,
+        "lab/daemon",
+        IrohPtyRequest::Detach { session_id: "s".into() },
+    )
+    .unwrap_err();
+    assert_eq!(err.to_string(), "iroh probe_direct_via_relay is only supported for @ping");
+}
+
+#[test]
 fn frame_timeout_profile_sets_the_write_budget() {
     let scratch = Scratch::new();
     let daemon = scratch.write(

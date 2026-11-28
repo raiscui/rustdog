@@ -106,6 +106,8 @@ fn client_config_for(key_file: &Path) -> ClientConfig {
             root_cert: key_file.to_path_buf(),
         },
         path: Route::Direct,
+        probe_direct_via_relay: false,
+        direct_connect_timeout_ms: None,
         routable: false,
         bind: Some("127.0.0.1:0".parse().expect("bind")),
         lease_ttl_ms: None,

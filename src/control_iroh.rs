@@ -126,8 +126,11 @@ type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>
 type RelayTransport = (CaTlsConfig, RelayMode);
 const DIRECTORY_ALPN: &[u8] = b"rdog/iroh-directory/1";
 const CONTROL_ALPN: &[u8] = b"rdog/iroh-readonly/1";
+const DIRECT_PROBE_ALPN: &[u8] = b"rdog/iroh-direct-ping/1";
 const IO: Duration = Duration::from_secs(3);
 const CONNECT: Duration = Duration::from_secs(7);
+const MIN_DIRECT_CONNECT: Duration = Duration::from_secs(1);
+const MAX_DIRECT_CONNECT: Duration = Duration::from_secs(30);
 // A relay candidate brings its home connection up first, so it needs a budget
 // that covers that hop as well as the connection made through it.
 const RELAY_CONNECT: Duration = Duration::from_secs(20);
@@ -272,6 +275,8 @@ struct DaemonConfig {
     #[serde(default)]
     policy_file: Option<PathBuf>,
     #[serde(default)]
+    probe_direct_via_relay: bool,
+    #[serde(default)]
     frame_timeout_ms: Option<u64>,
 }
 
@@ -282,6 +287,10 @@ struct ClientConfig {
     directory: Directory,
     relay: Relay,
     path: Route,
+    #[serde(default)]
+    probe_direct_via_relay: bool,
+    #[serde(default)]
+    direct_connect_timeout_ms: Option<u64>,
     #[serde(default)]
     routable: bool,
     #[serde(default)]
@@ -303,6 +312,21 @@ impl DaemonConfig {
 }
 
 impl ClientConfig {
+    fn direct_connect_budget(&self) -> Result<Duration> {
+        let budget = self
+            .direct_connect_timeout_ms
+            .map_or(CONNECT, Duration::from_millis);
+        if !(MIN_DIRECT_CONNECT..=MAX_DIRECT_CONNECT).contains(&budget) {
+            return Err(format!(
+                "iroh direct_connect_timeout_ms must be between {} and {} ms",
+                MIN_DIRECT_CONNECT.as_millis(),
+                MAX_DIRECT_CONNECT.as_millis(),
+            )
+            .into());
+        }
+        Ok(budget)
+    }
+
     fn frame_timeout(&self) -> Duration {
         self.frame_timeout_ms.map_or(IO, Duration::from_millis)
     }
@@ -2004,19 +2028,28 @@ pub(crate) fn run_daemon(path: &Path) -> Result<()> {
     if !name_valid(&cfg.name) || cfg.allow.is_empty() {
         return Err("iroh daemon requires a name and an explicit ping allowlist".into());
     }
+    let probe_direct = cfg.probe_direct_via_relay;
+    if probe_direct && !cfg.routable {
+        return Err("iroh probe_direct_via_relay requires routable mode".into());
+    }
     let key = identity(&cfg.key_file)?;
     let bind = bind_addr(cfg.bind, cfg.routable)?;
     runtime()?.block_on(async {
         let dial = cfg.directory.dial(cfg.routable)?;
+        let mut alpns = vec![CONTROL_ALPN];
+        if probe_direct {
+            alpns.push(DIRECT_PROBE_ALPN);
+        }
         // A relay-carried directory shares the serving endpoint, so the daemon
         // keeps one relay connection per relay instead of two that evict each
         // other. Without the switch the two endpoints stay exactly as they were.
         let (directory, data) = match dial.relay.as_ref() {
             Some(relay) => {
+                alpns.push(DIRECTORY_ALPN);
                 let served = endpoint_on(
                     key,
                     Some(bind),
-                    &[CONTROL_ALPN, DIRECTORY_ALPN],
+                    &alpns,
                     Some(shared_relay(&cfg.relay, relay, cfg.routable)?),
                     cfg.routable,
                 )
@@ -2026,11 +2059,11 @@ pub(crate) fn run_daemon(path: &Path) -> Result<()> {
             None => {
                 let directory =
                     directory_endpoint(key.clone(), Some(bind), None, cfg.routable).await?;
-                let data = endpoint_with_network(
+                let data = endpoint_on(
                     key,
                     Some(bind),
-                    CONTROL_ALPN,
-                    Some(&cfg.relay),
+                    &alpns,
+                    Some(lane_relay(&cfg.relay, cfg.routable)?),
                     cfg.routable,
                 )
                 .await?;
@@ -2111,6 +2144,34 @@ pub(crate) fn run_daemon(path: &Path) -> Result<()> {
                                     conn.remote_id()
                                 );
                                 conn.close(UNSERVED_CODE.into(), UNSERVED.as_bytes());
+                                return Ok(());
+                            }
+                            if conn.alpn() == DIRECT_PROBE_ALPN {
+                                let live = expires.lock().ok().is_some_and(|at| *at > Instant::now());
+                                if !live || (!allow.contains(&conn.remote_id())
+                                    && !identity_admitted(&admission, conn.remote_id()))
+                                {
+                                    conn.close(DENIED_CODE.into(), DENIED.as_bytes());
+                                    return Ok(());
+                                }
+                                let (send, read) =
+                                    timeout(MAX_DIRECT_CONNECT + IO, conn.accept_bi()).await??;
+                                let live = expires.lock().ok().is_some_and(|at| *at > Instant::now());
+                                if !live || (!allow.contains(&conn.remote_id())
+                                    && !identity_admitted(&admission, conn.remote_id()))
+                                {
+                                    conn.close(DENIED_CODE.into(), DENIED.as_bytes());
+                                    return Ok(());
+                                }
+                                let direct_addr = await_direct(&conn, IO).await?;
+                                log::info!("iroh direct probe accepted peer={} direct_addr={direct_addr}", conn.remote_id());
+                                let transport = ControlTransport::Iroh(IrohLineTransport::new(
+                                    send,
+                                    read,
+                                    frame_timeout,
+                                ));
+                                tokio::task::spawn_blocking(move || serve_ping(transport, "direct")).await??;
+                                let _ = timeout(IO, conn.closed()).await;
                                 return Ok(());
                             }
                             log::info!("iroh connection accepted peer={}", conn.remote_id());
@@ -2219,6 +2280,10 @@ pub(crate) fn run_control(path: &Path, name: &str, line: &str) -> Result<()> {
     }
     let cfg: ClientConfig = profile(path)?;
     cfg.check_frame_budget()?;
+    let direct_budget = cfg.direct_connect_budget()?;
+    if cfg.probe_direct_via_relay && (!cfg.routable || cfg.path != Route::Direct) {
+        return Err("iroh probe_direct_via_relay requires routable mode and path=direct".into());
+    }
     let key = identity(&cfg.key_file)?;
     let bind = bind_addr(cfg.bind, cfg.routable)?;
     runtime()?.block_on(async {
@@ -2239,8 +2304,11 @@ pub(crate) fn run_control(path: &Path, name: &str, line: &str) -> Result<()> {
         let DirectoryReply::Found { addr } = lookup? else {
             return Err("unexpected iroh directory lookup response".into());
         };
-        let (data, conn, actual) =
-            connect_with_path(&key, Some(bind), &addr, cfg.path, &cfg.relay, cfg.routable).await?;
+        let (data, conn, actual) = if cfg.probe_direct_via_relay {
+            connect_direct_probe(&key, bind, &addr, &cfg.relay, direct_budget).await?
+        } else {
+            connect_with_path(&key, Some(bind), &addr, &cfg, direct_budget).await?
+        };
         log::info!("iroh_path={}", actual.label());
         let streams = timeout(IO, conn.open_bi()).await;
         let reply = match streams {
@@ -2263,6 +2331,11 @@ pub(crate) fn run_control(path: &Path, name: &str, line: &str) -> Result<()> {
         // stream reports its end; wait for it briefly before treating the
         // reply as a protocol failure.
         let denied = denied_close(&conn).await;
+        let direct_addr = if cfg.probe_direct_via_relay {
+            selected_direct_ip(&conn)
+        } else {
+            None
+        };
         data.close().await;
         if denied {
             return Err(DENIED.into());
@@ -2283,6 +2356,10 @@ pub(crate) fn run_control(path: &Path, name: &str, line: &str) -> Result<()> {
         };
         if value["pong"].as_bool() != Some(true) {
             return Err("invalid iroh pong".into());
+        }
+        if cfg.probe_direct_via_relay {
+            let direct_addr = direct_addr.ok_or("iroh direct probe lost its direct path before pong")?;
+            log::info!("iroh direct probe pong id={:?} direct_addr={direct_addr}", request.request_id);
         }
         println!("{reply}");
         Ok(())
@@ -2891,11 +2968,12 @@ async fn connect_once(
     candidate: Route,
     relay: &Relay,
     routable: bool,
+    direct_budget: Duration,
 ) -> Result<(Connection, Route)> {
     let target = connect_route(data, addr, candidate, relay, routable)?;
     let budget = match candidate {
         Route::Relay => RELAY_CONNECT,
-        Route::Direct | Route::Auto => CONNECT,
+        Route::Direct | Route::Auto => direct_budget,
     };
     let conn = timeout(budget, data.connect(target, CONTROL_ALPN)).await??;
     let actual = await_route(&conn, routable).await?;
@@ -2923,11 +3001,10 @@ async fn connect_with_path(
     key: &SecretKey,
     bind: Option<SocketAddr>,
     addr: &EndpointAddr,
-    path: Route,
-    relay: &Relay,
-    routable: bool,
+    cfg: &ClientConfig,
+    direct_budget: Duration,
 ) -> Result<(Endpoint, Connection, Route)> {
-    let candidates = match path {
+    let candidates = match cfg.path {
         Route::Auto => vec![Route::Direct, Route::Relay],
         single => vec![single],
     };
@@ -2936,8 +3013,8 @@ async fn connect_with_path(
         // Each candidate gets the endpoint its own profile would use: a remote
         // that a stalled attempt already knows keeps retrying that path, so the
         // relay retry has to start from a fresh relay-only endpoint.
-        let data = candidate_endpoint(key, bind, candidate, relay, routable).await?;
-        match connect_once(&data, addr, candidate, relay, routable).await {
+        let data = candidate_endpoint(key, bind, candidate, &cfg.relay, cfg.routable).await?;
+        match connect_once(&data, addr, candidate, &cfg.relay, cfg.routable, direct_budget).await {
             Ok((conn, actual)) if actual == candidate => return Ok((data, conn, actual)),
             Ok(_) => {
                 data.close().await;
@@ -2951,6 +3028,64 @@ async fn connect_with_path(
         }
     }
     Err(last.unwrap_or_else(|| "iroh has no reachable path".into()))
+}
+
+fn selected_direct_ip(conn: &Connection) -> Option<SocketAddr> {
+    conn.paths().iter().find_map(|path| match path.remote_addr() {
+        TransportAddr::Ip(ip) if path.is_selected() && candidate_ok(*ip, true).is_ok() => Some(*ip),
+        _ => None,
+    })
+}
+
+async fn await_direct(conn: &Connection, budget: Duration) -> Result<SocketAddr> {
+    timeout(budget, async {
+        loop {
+            if let Some(ip) = selected_direct_ip(conn) {
+                return Ok(ip);
+            }
+            tokio::select! {
+                reason = conn.closed() => return Err(format!("iroh direct probe closed: {reason}").into()),
+                _ = tokio::time::sleep(PATH_SAMPLE_STEP) => {}
+            }
+        }
+    })
+    .await
+    .map_err(|_| "iroh direct probe did not select a direct path")?
+}
+
+async fn connect_direct_probe(
+    key: &SecretKey,
+    bind: SocketAddr,
+    addr: &EndpointAddr,
+    relay: &Relay,
+    direct_budget: Duration,
+) -> Result<(Endpoint, Connection, Route)> {
+    if !addr.relay_urls().any(|url| *url == relay.url) {
+        return Err("iroh directory has no configured relay candidate".into());
+    }
+    let target = EndpointAddr::from_parts(addr.id, [TransportAddr::Relay(relay.url.clone())]);
+    let data =
+        endpoint_with_network(key.clone(), Some(bind), DIRECT_PROBE_ALPN, Some(relay), true).await?;
+    let outcome = async {
+        let conn = timeout(RELAY_CONNECT, data.connect(target, DIRECT_PROBE_ALPN)).await??;
+        let initial = await_route(&conn, true).await?;
+        log::info!(
+            "iroh direct probe initial_path={} wait_ms={}",
+            initial.label(),
+            direct_budget.as_millis(),
+        );
+        let addr = await_direct(&conn, direct_budget).await?;
+        log::info!("iroh direct probe selected direct_addr={addr}");
+        Ok((conn, Route::Direct))
+    }
+    .await;
+    match outcome {
+        Ok((conn, actual)) => Ok((data, conn, actual)),
+        Err(err) => {
+            data.close().await;
+            Err(err)
+        }
+    }
 }
 
 fn spawn_lease_renewer(
@@ -3139,6 +3274,10 @@ pub(crate) fn run_pty_control(path: &Path, name: &str, request: IrohPtyRequest) 
     }
     let cfg: ClientConfig = profile(path)?;
     cfg.check_frame_budget()?;
+    let direct_budget = cfg.direct_connect_budget()?;
+    if cfg.probe_direct_via_relay {
+        return Err("iroh probe_direct_via_relay is only supported for @ping".into());
+    }
     let key = identity(&cfg.key_file)?;
     let ttl = Duration::from_millis(cfg.lease_ttl_ms.unwrap_or(DEFAULT_LEASE_TTL_MS));
     if ttl < admission::MIN_SESSION_TTL || ttl > admission::MAX_SESSION_TTL {
@@ -3165,7 +3304,7 @@ pub(crate) fn run_pty_control(path: &Path, name: &str, request: IrohPtyRequest) 
         };
         let target = addr.id;
         let (data, conn, actual) =
-            connect_with_path(&key, Some(bind), &addr, cfg.path, &cfg.relay, cfg.routable).await?;
+            connect_with_path(&key, Some(bind), &addr, &cfg, direct_budget).await?;
         log::info!("iroh_path={}", actual.label());
         let (send, read) = timeout(IO, conn.open_bi()).await??;
         let transport =
@@ -3360,6 +3499,10 @@ where
 /// 两条都只读 profile, 所以可以在 dial 之前判 —— 坏配置不该先表现成一个网络错误。
 fn check_client_config(cfg: &ClientConfig) -> Result<()> {
     cfg.check_frame_budget()?;
+    cfg.direct_connect_budget()?;
+    if cfg.probe_direct_via_relay {
+        return Err("iroh probe_direct_via_relay is only supported for @ping".into());
+    }
     let ttl = Duration::from_millis(cfg.lease_ttl_ms.unwrap_or(DEFAULT_LEASE_TTL_MS));
     if ttl < admission::MIN_SESSION_TTL || ttl > admission::MAX_SESSION_TTL {
         return Err("iroh lease_ttl_ms is outside the supported range".into());
@@ -3404,13 +3547,14 @@ where
     T: Send + 'static,
 {
     check_client_config(&cfg)?;
+    let direct_budget = cfg.direct_connect_budget()?;
     let key = identity(&cfg.key_file)?;
     let ttl = Duration::from_millis(cfg.lease_ttl_ms.unwrap_or(DEFAULT_LEASE_TTL_MS));
     let bind = bind_addr(cfg.bind, cfg.routable)?;
     runtime()?.block_on(async move {
         let target = addr.id;
         let (data, conn, actual) =
-            connect_with_path(&key, Some(bind), &addr, cfg.path, &cfg.relay, cfg.routable).await?;
+            connect_with_path(&key, Some(bind), &addr, &cfg, direct_budget).await?;
         log::info!("iroh_path={}", actual.label());
         let (send, read) = timeout(IO, conn.open_bi()).await??;
         let mut transport =
