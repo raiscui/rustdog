@@ -263,6 +263,147 @@ fn a_read_timeout_on_a_live_connection_maps_to_the_ack_unanswered_code() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+#[test]
+fn bulk_zero_load_ack_loss_keeps_one_deadline_and_only_received_evidence() {
+    use crate::transfer_cli::{
+        iroh_exchange, run_get, BulkPathRecorder, ExchangeError, LineExchange, Reply,
+        ZERO_LOAD_EVIDENCE_BUDGET,
+    };
+
+    struct RefusedPath<P>(P);
+    impl<P: LineExchange> LineExchange for RefusedPath<P> {
+        fn request(&self, line: &str) -> std::result::Result<Reply, ExchangeError> {
+            panic!("unexpected regular bulk request: {line}");
+        }
+
+        fn request_probe(
+            &self,
+            line: &str,
+            deadline: Instant,
+        ) -> std::result::Result<Reply, ExchangeError> {
+            self.0.request_probe(line, deadline)
+        }
+
+        fn observe_path(&self) -> Option<PathObservation> {
+            Some(PathObservation {
+                class: PathClass::Relay,
+                direct_addr: None,
+                relay: None,
+            })
+        }
+    }
+
+    for open_acked in [false, true] {
+        let dir =
+            std::env::temp_dir().join(format!("rdog-lane-zero-load-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&dir).unwrap();
+        let cfg = client_config_for(&dir.join("client.key"));
+        let rt = runtime().unwrap();
+        let (server, addr) = rt.block_on(async {
+            let server = endpoint(
+                SecretKey::generate(),
+                Some("127.0.0.1:0".parse().unwrap()),
+                TEST_ALPN,
+                None,
+            )
+            .await
+            .unwrap();
+            let addr = server.addr();
+            (server, addr)
+        });
+        let acceptor = rt.spawn({
+            let server = server.clone();
+            async move {
+                let conn = server.accept().await.unwrap().await.unwrap();
+                let (mut send, mut recv) = conn.accept_bi().await.unwrap();
+                assert!(read_line(&mut recv)
+                    .await
+                    .unwrap()
+                    .contains("\"op\":\"admit\""));
+                send.write_all(b"{\"status\":\"admitted\"}\n")
+                    .await
+                    .unwrap();
+                let open = read_line(&mut recv).await.unwrap();
+                let open: serde_json::Value =
+                    serde_json::from_str(open.strip_prefix("@put-file:").unwrap()).unwrap();
+                let id = open["transfer_id"].as_str().unwrap();
+                assert_eq!(
+                    open,
+                    serde_json::json!({
+                        "transfer_id": id, "attempt_id": "lost-ack"
+                    })
+                );
+                let mut evidence = None;
+                if open_acked {
+                    tokio::time::sleep(ZERO_LOAD_EVIDENCE_BUDGET / 2).await;
+                    let reply = serde_json::json!({
+                        "code": LANE_REFUSED_CODE,
+                        "error": crate::bulk_path::IROH_DIRECT_PATH_UNAVAILABLE,
+                        "evidence": {"transfer_id": id, "attempt_id": "lost-ack", "aborted": true,
+                            "endpoint": "daemon", "bulk_bytes": 0}
+                    });
+                    send.write_all(format!("@response {reply}\n").as_bytes())
+                        .await
+                        .unwrap();
+                    let cancel = read_line(&mut recv).await.unwrap();
+                    assert_eq!(
+                        cancel,
+                        format!("@file-cancel:{}", serde_json::json!({"transfer_id": id}))
+                    );
+                    evidence = Some(reply["evidence"].to_string());
+                } else {
+                    let followup = timeout(CONNECT, read_line(&mut recv)).await.unwrap();
+                    assert!(followup.map_or(true, |line| line.is_empty()));
+                }
+                let _ = timeout(CONNECT, conn.closed()).await;
+                evidence
+            }
+        });
+
+        let client_half = dir.join("bulk-path.client.json");
+        let client_file = client_half.clone();
+        let daemon_half = dir.join("bulk-path.daemon.json");
+        let local = dir.join("landed.bin");
+        let (err, started) = with_bulk_lane_at(cfg, addr, {
+            let local = local.clone();
+            move |lane| {
+                let peer = RefusedPath(iroh_exchange(lane, 30_000));
+                let mut recorder = BulkPathRecorder::new(
+                    "lost-ack".to_string(),
+                    PathCapability::PATH_AWARE_CHECKED_PER_CHUNK,
+                    Some(client_half),
+                );
+                recorder.enable_zero_load_evidence(Duration::ZERO);
+                let start = Instant::now();
+                let err = run_get(&peer, &mut recorder, "source.bin", &local).unwrap_err();
+                (err, start)
+            }
+        })
+        .unwrap();
+        assert!(
+            err.contains(crate::bulk_path::IROH_DIRECT_PATH_UNAVAILABLE),
+            "{err}"
+        );
+        let elapsed = started.elapsed();
+        eprintln!("zero-load ACK loss: open_acked={open_acked}, elapsed={elapsed:?}");
+        assert!(
+            elapsed < ZERO_LOAD_EVIDENCE_BUDGET + Duration::from_millis(750),
+            "open_acked={open_acked} elapsed={elapsed:?}"
+        );
+        assert!(!local.exists());
+        assert!(!dir.join("landed.bin.rdog-partial-download").exists());
+        let expected = rt.block_on(async { timeout(CONNECT, acceptor).await.unwrap().unwrap() });
+        assert_eq!(std::fs::read_to_string(&daemon_half).ok(), expected);
+        let client: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(client_file).unwrap()).unwrap();
+        assert_eq!(client["aborted"], true);
+        assert_eq!(client["bulk_bytes"], 0);
+        rt.block_on(server.close());
+        rt.shutdown_background();
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+}
+
 /// 下载方向的真流回归: 客户端 `run_get` 跑在一条真 quinn 流上, 对端按 daemon 的形状回
 /// `@get-file` / `@file-read` (末帧带 `evidence`)。
 ///

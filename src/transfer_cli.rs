@@ -33,7 +33,7 @@ use std::{
     io::{Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
     sync::mpsc,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
@@ -53,6 +53,12 @@ use crate::{
 /// 比对), 用真的协议实现 + 假传输就能把状态机测全, 不必起 daemon 也不必绑网络。
 pub(crate) trait LineExchange {
     fn request(&self, line: &str) -> Result<Reply, ExchangeError>;
+
+    fn request_probe(&self, _line: &str, _deadline: Instant) -> Result<Reply, ExchangeError> {
+        Err(ExchangeError::without_evidence(
+            "当前传输不支持有界零负载取证".to_string(),
+        ))
+    }
 
     /// 每块装载多少字节。默认取协议上限; 测试用小值才能在几条用例里跑完多块循环。
     fn chunk_bytes(&self) -> usize {
@@ -508,7 +514,7 @@ pub(crate) struct BulkPathRecorder {
     aborted: bool,
     /// 失败路径上写快照时用的 id (成功路径用收据里的那个)。
     last_transfer_id: String,
-    zero_load_evidence: bool,
+    probe_after_retry_wait: Option<Duration>,
     /// 这一次尝试为什么失败 —— 重放决策读它。`None` = 还没失败。
     failure: Option<FailureKind>,
 }
@@ -538,9 +544,13 @@ impl BulkPathRecorder {
             daemon_half: None,
             aborted: false,
             last_transfer_id: String::new(),
-            zero_load_evidence: false,
+            probe_after_retry_wait: None,
             failure: None,
         }
+    }
+
+    pub(crate) fn enable_zero_load_evidence(&mut self, waited: Duration) {
+        self.probe_after_retry_wait = Some(waited);
     }
 
     /// open 前的门禁与括号左端 (§3.1 / §4.2)。
@@ -557,21 +567,20 @@ impl BulkPathRecorder {
         let Err(error) = self.admit() else {
             return Ok(());
         };
-        // 默认不增加往返。这两帧只用于取证, 且只响应 open 前的本端路径拒绝;
+        // 默认不增加往返。只为最终返回的本端 open 前路径拒绝取证;
         // 文件/参数错误、对端错误和传输中途拒绝都不能触发补发。
-        if self.zero_load_evidence
-            && matches!(
-                self.failure(),
-                Some(FailureKind::PathUnknown | FailureKind::PathRefused)
-            )
+        if let (Some(waited), Some(kind @ (FailureKind::PathUnknown | FailureKind::PathRefused))) =
+            (self.probe_after_retry_wait, self.failure())
         {
-            let evidence_id = self.collect_zero_load_evidence(exchange_peer);
-            let error = format!(
-                "{error} (transfer_id={}; zero_load_evidence_transfer_id={evidence_id})",
-                self.last_transfer_id
-            );
-            self.last_transfer_id = evidence_id;
-            return Err(error);
+            if retry_step(kind, waited).is_none() {
+                let evidence_id = self.collect_zero_load_evidence(exchange_peer);
+                let error = format!(
+                    "{error} (transfer_id={}; zero_load_evidence_transfer_id={evidence_id})",
+                    self.last_transfer_id
+                );
+                self.last_transfer_id = evidence_id;
+                return Err(error);
+            }
         }
         Err(error)
     }
@@ -586,11 +595,15 @@ impl BulkPathRecorder {
             "attempt_id": self.attempt_id,
         });
         let cancel = serde_json::json!({ "transfer_id": transfer_id });
+        let deadline = Instant::now() + ZERO_LOAD_EVIDENCE_BUDGET;
         for line in [
             format!("@put-file:{open}"),
             format!("@file-cancel:{cancel}"),
         ] {
-            let evidence = match exchange_peer.request(&line) {
+            if Instant::now() >= deadline {
+                break;
+            }
+            let evidence = match exchange_peer.request_probe(&line, deadline) {
                 Ok(reply) => reply.evidence,
                 Err(error) => error.evidence,
             };
@@ -880,32 +893,14 @@ impl<'lane> IrohExchange<'lane> {
 
 impl LineExchange for IrohExchange<'_> {
     fn request(&self, line: &str) -> Result<Reply, ExchangeError> {
-        let line_read = self
-            .lane
-            .borrow_mut()
-            .request(
-                line,
-                Duration::from_millis(self.chunk_ack_timeout_ms.max(1)),
-            )
-            .map_err(|err| {
-                // lane 已经分了类: "连接仍开着但没答案"与"对端没了"是两条不同的路, 不能都退化成
-                // 一个字符串再靠子串猜回来。
-                let kind = match err.kind {
-                    crate::control_iroh::LaneFailure::AckUnansweredLive => {
-                        FailureKind::AckUnansweredLive
-                    }
-                    crate::control_iroh::LaneFailure::AckUnansweredClosed
-                    | crate::control_iroh::LaneFailure::PeerClosed
-                    | crate::control_iroh::LaneFailure::Local => FailureKind::Local,
-                };
-                ExchangeError::with_kind(err.message, kind)
-            })?;
-        let reply = parse_reply(&line_read)?;
-        if let Some(error) = response_error(&reply.payload) {
-            let kind = kind_for_code(failure_code(&reply.payload));
-            return Err(error_reply(reply, error, kind));
-        }
-        Ok(reply)
+        iroh_reply(self.lane.borrow_mut().request(
+            line,
+            Duration::from_millis(self.chunk_ack_timeout_ms.max(1)),
+        ))
+    }
+
+    fn request_probe(&self, line: &str, deadline: Instant) -> Result<Reply, ExchangeError> {
+        iroh_reply(self.lane.borrow_mut().request_probe(line, deadline))
     }
 
     fn observe_path(&self) -> Option<PathObservation> {
@@ -918,6 +913,27 @@ impl LineExchange for IrohExchange<'_> {
     fn chunk_bytes(&self) -> usize {
         chunk_payload_bytes().min(IROH_CHUNK_PAYLOAD_BYTES)
     }
+}
+
+fn iroh_reply(
+    result: Result<String, crate::control_iroh::LaneError>,
+) -> Result<Reply, ExchangeError> {
+    let line = result.map_err(|err| {
+        // lane 已经分了类: "连接仍开着但没答案"与"对端没了"不能都退化成错误文本。
+        let kind = match err.kind {
+            crate::control_iroh::LaneFailure::AckUnansweredLive => FailureKind::AckUnansweredLive,
+            crate::control_iroh::LaneFailure::AckUnansweredClosed
+            | crate::control_iroh::LaneFailure::PeerClosed
+            | crate::control_iroh::LaneFailure::Local => FailureKind::Local,
+        };
+        ExchangeError::with_kind(err.message, kind)
+    })?;
+    let reply = parse_reply(&line)?;
+    if let Some(error) = response_error(&reply.payload) {
+        let kind = kind_for_code(failure_code(&reply.payload));
+        return Err(error_reply(reply, error, kind));
+    }
+    Ok(reply)
 }
 
 /// `rdog control <target> --transport iroh --put/--get` 的一次尝试。
@@ -934,6 +950,48 @@ pub(crate) enum IrohBulkRequest {
     },
 }
 
+fn validate_zero_load_inputs(request: &IrohBulkRequest, out: &Path) -> Result<(), String> {
+    let name = out.file_name().ok_or("--bulk-path-json 需要文件名")?;
+    let name = name.to_string_lossy();
+    let basename = if cfg!(windows) {
+        name.split(':')
+            .next()
+            .unwrap_or_default()
+            .trim_end_matches(['.', ' '])
+    } else {
+        &name
+    };
+    if basename.eq_ignore_ascii_case(DAEMON_HALF_FILE)
+        || out.symlink_metadata().is_ok_and(|meta| !meta.is_file())
+    {
+        return Err(format!(
+            "--bulk-path-json 需要独立的普通文件, 不能是 {DAEMON_HALF_FILE} 或别名"
+        ));
+    }
+    let (remote, verb) = match request {
+        IrohBulkRequest::Put { remote, .. } => (remote, "put-file"),
+        IrohBulkRequest::Get { remote, local } => {
+            let parent = local
+                .parent()
+                .filter(|parent| !parent.as_os_str().is_empty())
+                .unwrap_or_else(|| Path::new("."));
+            let invalid_parent = match parent.metadata() {
+                Ok(meta) => !meta.is_dir(),
+                Err(err) => err.kind() == std::io::ErrorKind::NotFound,
+            };
+            if local.file_name().is_none()
+                || local.symlink_metadata().is_ok_and(|meta| meta.is_dir())
+                || invalid_parent
+            {
+                return Err(format!("--local-path 需要现有目录下的文件路径: {local:?}"));
+            }
+            (remote, "get-file")
+        }
+    };
+    crate::control_file_transfer::validate_portable_transfer_path(remote, verb)
+        .map_err(|err| err.to_string())
+}
+
 /// iroh 准入 lane 上的 `--put` / `--get`。
 ///
 /// 能力声明与准入 lane 一致: `path_aware=true` / `bulk_path_pin=false` /
@@ -946,6 +1004,9 @@ pub(crate) fn run_iroh_bulk(
     out: Option<PathBuf>,
     zero_load_evidence: bool,
 ) -> Result<TransferReceipt, String> {
+    if zero_load_evidence {
+        validate_zero_load_inputs(&request, out.as_deref().ok_or("缺少 --bulk-path-json")?)?;
+    }
     // 被中止的 lane 会在 daemon 侧留一条已死的连接: 它搬过字节、然后不再有任何帧, 而 iroh 按
     // endpoint id 管路径状态 —— 同一身份的下一条连接的路径会停在 `selected=false`, 门禁读到的
     // 就是 `iroh_path_unknown`。**重拨本身就是修路径的手段** (实测: 重拨在 8.16 s 拿到可用路径,
@@ -976,11 +1037,11 @@ pub(crate) fn run_iroh_bulk(
             out.clone(),
             &ids,
             planned.as_deref(),
-            zero_load_evidence,
+            zero_load_evidence.then_some(waited),
         ) {
             // 只看**来源**: 路径读不出才重拨 (重拨自己就是修路径的手段)。文案里恰好出现
             // `iroh_path_unknown` 的别的失败不该被当成路径问题 —— 那条负对照有用例钉住。
-            Err(failure) => match retry_step(&failure, waited) {
+            Err(failure) => match retry_step(failure.kind, waited) {
                 Some(step) => {
                     std::thread::sleep(step);
                     waited += step;
@@ -1005,6 +1066,7 @@ struct AttemptFailure {
 /// 传输层放掉"的那几秒。
 const IROH_PATH_RETRY_STEP: Duration = Duration::from_secs(2);
 const IROH_PATH_RETRY_BUDGET: Duration = Duration::from_secs(18);
+pub(crate) const ZERO_LOAD_EVIDENCE_BUDGET: Duration = Duration::from_secs(2);
 
 /// 这条命令要用哪个 `transfer_id` —— **在第一个 open 之前**算, 之后不再变 (RAI-711 判据 2)。
 ///
@@ -1029,8 +1091,8 @@ fn plan_transfer_id(
 /// `AckUnansweredLive` 也**不在这里**: 它意味着本端不知道对端做了什么 (对端可能已提交), 重开会让
 /// 已提交的上传从 0 重传并替换成品。同 ID 幂等续传是 RAI-711, 那条要先把"已提交就返回原终态"
 /// 做出来, 才轮得到自动重放。
-fn retry_step(failure: &AttemptFailure, waited: Duration) -> Option<Duration> {
-    if failure.kind == FailureKind::PathUnknown && waited < IROH_PATH_RETRY_BUDGET {
+fn retry_step(kind: FailureKind, waited: Duration) -> Option<Duration> {
+    if kind == FailureKind::PathUnknown && waited < IROH_PATH_RETRY_BUDGET {
         Some(IROH_PATH_RETRY_STEP)
     } else {
         None
@@ -1044,7 +1106,7 @@ fn run_iroh_bulk_once(
     out: Option<PathBuf>,
     ids: &TransferIdStore,
     planned: Option<&str>,
-    zero_load_evidence: bool,
+    probe_after_retry_wait: Option<Duration>,
 ) -> Result<TransferReceipt, AttemptFailure> {
     let chunk_ack_timeout_ms = chunk_ack_timeout_ms_from_config();
     let ids = ids.clone();
@@ -1057,7 +1119,9 @@ fn run_iroh_bulk_once(
             PathCapability::PATH_AWARE_CHECKED_PER_CHUNK,
             out,
         );
-        recorder.zero_load_evidence = zero_load_evidence;
+        if let Some(waited) = probe_after_retry_wait {
+            recorder.enable_zero_load_evidence(waited);
+        }
         let outcome = match request {
             IrohBulkRequest::Put {
                 local,
@@ -1723,6 +1787,10 @@ mod tests {
             } else {
                 observations.front().cloned()
             }
+        }
+
+        fn request_probe(&self, line: &str, _deadline: Instant) -> Result<Reply, ExchangeError> {
+            self.request(line)
         }
 
         fn chunk_bytes(&self) -> usize {
@@ -2906,7 +2974,7 @@ mod tests {
 
         let peer = LoopbackPeer::new(7).with_observations(vec![PathObservation::unknown()]);
         let mut recorder = iroh_recorder(None);
-        recorder.zero_load_evidence = true;
+        recorder.enable_zero_load_evidence(Duration::ZERO);
         let put = |recorder: &mut BulkPathRecorder| {
             run_put(
                 &peer,
@@ -2924,6 +2992,10 @@ mod tests {
         assert!(peer.seen().is_empty());
 
         std::fs::write(&local, [1u8; 8]).unwrap();
+        let err = put(&mut recorder).unwrap_err();
+        assert!(err.contains("iroh_path_unknown"), "{err}");
+        assert!(peer.seen().is_empty(), "重拨中间轮不发探针");
+        recorder.enable_zero_load_evidence(IROH_PATH_RETRY_BUDGET);
         let err = put(&mut recorder).unwrap_err();
         assert!(err.contains("iroh_path_unknown"), "{err}");
         assert_eq!(recorder.failure(), Some(FailureKind::PathUnknown));
@@ -3012,26 +3084,13 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    fn failure(kind: FailureKind, message: &str) -> AttemptFailure {
-        AttemptFailure {
-            kind,
-            message: message.to_string(),
-        }
-    }
-
     #[test]
     fn a_path_unknown_failure_gets_one_redial_within_budget() {
-        let step = retry_step(
-            &failure(FailureKind::PathUnknown, "iroh_path_unknown"),
-            Duration::ZERO,
-        );
+        let step = retry_step(FailureKind::PathUnknown, Duration::ZERO);
         assert_eq!(step, Some(IROH_PATH_RETRY_STEP));
         // 预算用尽之后不再重拨: 上界是"间隔 × 次数", 不是无限。
         assert_eq!(
-            retry_step(
-                &failure(FailureKind::PathUnknown, "iroh_path_unknown"),
-                IROH_PATH_RETRY_BUDGET
-            ),
+            retry_step(FailureKind::PathUnknown, IROH_PATH_RETRY_BUDGET),
             None
         );
     }
@@ -3041,16 +3100,10 @@ mod tests {
         // 负对照 (评审 Finding 5): 判据是来源, 不是文案。一个"文案里恰好带 iroh_path_unknown"的
         // 本机失败 (比如本地路径名里就有这串) 不得触发重拨 —— 否则这次改动只是把脆弱从字符串
         // 搬到了类型上, 而没证明搬对了。
-        assert_eq!(
-            retry_step(
-                &failure(
-                    FailureKind::Local,
-                    "打开 \"/tmp/iroh_path_unknown-note.bin\" 失败: 没有那个文件"
-                ),
-                Duration::ZERO
-            ),
-            None
+        let failure = ExchangeError::without_evidence(
+            "打开 \"/tmp/iroh_path_unknown-note.bin\" 失败: 没有那个文件".to_string(),
         );
+        assert_eq!(retry_step(failure.kind, Duration::ZERO), None);
     }
 
     #[test]
@@ -3063,7 +3116,7 @@ mod tests {
             FailureKind::Local,
         ] {
             assert_eq!(
-                retry_step(&failure(kind, "任意文案"), Duration::ZERO),
+                retry_step(kind, Duration::ZERO),
                 None,
                 "{kind:?} 不该被重拨"
             );

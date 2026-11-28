@@ -700,7 +700,8 @@ relay 跳上承载, 这个判定都看不见 (§3.5 / §4.2 的已知边界)。
 > 两端哈希一致**, 同 attempt `cli-5070` 由官方 join (`bulk_path::join_inputs`) 得
 > `relay_bytes_zero:true` —— 这是**有千字节以上实际字节**的一次尝试, 所以那条阈值前提已满足。
 > **上一版据此写的「正对照成立」作废** (2026-11-28): 正对照要证明同一套仪表能测到**非零**, 而该轮控制面
-> `@ping` 没有同仪表的两端计数字段; "该次尝试 delta 为 0"与"仪表能测非零"是两件事。缺证在 RAI-706。
+> `@ping` 没有同仪表的两端计数字段; "该次尝试 delta 为 0"与"仪表能测非零"是两件事。
+> RAI-706 补的是先拒时的双端文件负载账, 不替本节的 relay 正对照签字。
 > 但**传输层 pin 仍然缺**, 因此能主张的仍是「每个边界上路径直连 + 该次尝试两端 relay 采样 delta 为 0」,
 > 不主张「整条连接从未经过 relay」。判读全文 `handoffs/rai367/positive-control-verdict.md`。
 >
@@ -783,6 +784,22 @@ rdog control <TARGET> --get <REMOTE_PATH> --local-path <LOCAL_PATH>
 | daemon 半快照 | `@file-end` / `eof:true` 的 `@file-read` 响应里的 `evidence` 被**原样**写到 `--bulk-path-json` 同目录的 `bulk-path.daemon.json`; **错误回执**上带的 `evidence` 同样收下。每次尝试开始前删掉上一次留下的那份, 免得两半配错。收不到就**不写**, 只在 stderr 说明, 让 join 落到 `bulk_path_endpoint_missing` |
 | 失败码 | 准入 lane 握不上手且连接按 `DENIED` 关闭 → `iroh_bulk_path_pin_unavailable` (对端没有策略文件, 该入口不承载 bulk); 路径类失败走 §2.2 的 `iroh_*` 三码 |
 | 非 iroh 传输 | 行为不变: 逐请求建链, `path_class` 恒 `not_applicable`, 不产出 daemon 半快照 |
+
+**客户端先拒的零负载取证 (RAI-706)。** 默认不为本端初始路径拒绝补发 bulk 行; 不改变已有的
+`--restart` 对旧会话的取消、活跃租约或后续传输行为。仅 iroh 的 put/get 可显式使用
+`--bulk-zero-load-evidence --bulk-path-json FILE`, 且客户端输出不得与伴生 `bulk-path.daemon.json`
+同名或指向它。取证前校验本地可确定的输入错误, 远端路径和策略仍由 daemon 判定。
+
+只有 `BulkPathRecorder::begin` 的 **本端 open 前路径拒绝**会触发取证, 且只在
+`retry_step` 不再重拨的最终尝试上执行。用独立取证 `transfer_id` 与这次尝试的 `attempt_id` 发
+不带路径或载荷的 `@put-file`, 再尽力发 `@file-cancel`。两帧均需原租约; PUT 仍过原路径门禁,
+即使对端此刻已直连, 执行器也因无路径拒绝, 不建文件会话。cancel 使用原有的非数据路径,
+只针对取证 ID, 不取消原传输。get 的客户端方向仍为 `get`, daemon 原样记录取证 PUT 的方向 `put`。
+
+取证读写共用 `src/transfer_cli.rs::ZERO_LOAD_EVIDENCE_BUDGET` 的限时, 不随重拨增加, 且始终返回原
+路径拒绝码。只收实际到达的 daemon 半快照: 超时或失败不重发、不编造; 已收到的 open 拒绝快照
+不会因 cancel 回执丢失而丢弃。两端 abort 配对后, `relay_bytes_zero` 仍按 §4.3 为 `null`;
+文件负载为零不代表探针、ACK、握手或 relay UDP 计数为零。该选项不是传输层 pin。
 
 **chunk 与写预算的算术 (为什么不能靠使用者抬 `frame_timeout_ms`)。** bulk 的默认块是
 `chunk_payload_bytes()` ≈ 5.03 MB, base64 之后的整帧约 6.7 MB; `noq` 单流接收窗口只有 1.25 MB,
