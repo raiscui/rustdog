@@ -1664,7 +1664,7 @@ mod tests {
         let payload = b"replay payload";
         let sha = format!("{:x}", Sha256::digest(payload));
 
-        // 客户端带 verify_committed: 探针说 Absent ⇒ 这条会话置位 no_replace_publish
+        // 客户端要求 no_replace_publish ⇒ 这条会话的发布走 no-replace (不再有"探针")
         let tid = unique_id("raced");
         execute_put_file(&format!(
             r#"{{"transfer_id":"{tid}","path":"{}","size":{},"sha256":"{sha}","resume":false,"no_replace_publish":true}}"#,
