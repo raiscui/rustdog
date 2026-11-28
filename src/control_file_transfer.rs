@@ -97,9 +97,11 @@ struct TransferSession {
     is_upload: bool,
     /// 最近一次有进展的时刻 (epoch ms)。空闲过期 (reap_idle_transfers) 据此判定。
     last_activity_ms: u64,
-    /// 重放会话专用: 对账那一刻目标**不存在**, 所以提交时**不许覆盖**后来出现的任何东西。
-    /// 只有"探针说 `Absent` 且本命令带 `verify_committed`"的会话置位 (其余保持覆盖语义)。
-    no_replace_publish: bool,
+    /// 这次上传的发布是否**必须 no-replace** (客户端在"上一次没干净收尾"的重跑里要求)。
+    ///
+    /// 三态是必须的: `None` = **不知道** (从旧索引恢复出来的会话, 那时还没有这个字段)。判据:
+    /// 任何 replay open 要求保护而命中的会话给不出保证 (`None`) ⇒ **拒 open**, 绝不默认覆盖。
+    no_replace_publish: Option<bool>,
 }
 
 /// 当前 epoch 毫秒。过期判定收 now 参数而不是内部取时钟, 让单测能确定性地构造时间。
@@ -272,7 +274,7 @@ pub fn execute_put_file(payload: &str) -> std::io::Result<Value> {
     //
     // 不做"是不是已经提交过"的对账 —— 那需要一次跨进程/跨重启/跨文件系统粒度都成立的证明,
     // 两轮评审各 3 条 severe 都长在它上面。这里只留一个能证的不变量: 本命令不覆盖已有目标。
-    let no_replace_publish = value
+    let requested_no_replace = value
         .get("no_replace_publish")
         .and_then(Value::as_bool)
         .unwrap_or(false);
@@ -293,6 +295,19 @@ pub fn execute_put_file(payload: &str) -> std::io::Result<Value> {
         // ./a.bin 与 a.bin 这种同义写法就会一边算续传、另一边算换目标.
         let same_target = temp_path_matches(existing.temp_path.as_deref(), &temp_path);
         if resume && same_target {
+            // 保护语义**只许加强不许降级** (评审 #204b severe 2):
+            // - 客户端这次要求 no-replace 而旧会话给不出保证 (`None`, 旧索引恢复的) ⇒ 拒, 不默认覆盖;
+            // - 旧会话是 `Some(false)` ⇒ 锁内升为 `Some(true)`;
+            // - 旧会话已是 `Some(true)` 而这次没要求 ⇒ **不降级** (保持 `Some(true)`)。
+            if requested_no_replace && existing.no_replace_publish.is_none() {
+                return Err(std::io::Error::other(
+                    "file_transfer_replay_unprotected: 这次重跑要求发布不覆盖, 而这条会话的来源给不出该保证 \
+                     (旧版本留下的会话记录) — 要么用 `--restart` 明确同意覆盖, 要么换一个新 id 重来",
+                ));
+            }
+            if requested_no_replace {
+                existing.no_replace_publish = Some(true);
+            }
             // 续传式重开: 会话继续用, 只刷新声明与活跃时刻, 已收字节(真相源是半成品长度)不动
             existing.size = size;
             existing.expected_sha256 = expected_sha256;
@@ -309,7 +324,6 @@ pub fn execute_put_file(payload: &str) -> std::io::Result<Value> {
                 "written": written,
                 "next_offset": written,
                 "resume_honored": honored,
-                "reconcile": "disk",
                 // 活跃会话没有"过期半成品"这回事: 它一直在被 sweep 盯着, 到不了窗口外。
                 "stale_partial_discarded": false,
             }));
@@ -381,7 +395,7 @@ pub fn execute_put_file(payload: &str) -> std::io::Result<Value> {
             temp_path: Some(temp_path),
             is_upload: true,
             last_activity_ms: now_ms(),
-            no_replace_publish,
+            no_replace_publish: Some(requested_no_replace),
         },
     );
     persist_index(&sessions);
@@ -392,7 +406,6 @@ pub fn execute_put_file(payload: &str) -> std::io::Result<Value> {
         "kind": "file-transfer",
         "state": if resume_honored { "resumed" } else { "open" },
         "resume_honored": resume_honored,
-        "reconcile": "disk",
         "stale_partial_discarded": stale_discarded,
         "transfer_id": transfer_id,
         "written": written,
@@ -562,13 +575,12 @@ fn publish_no_replace(temp: &Path, target: &Path) -> std::io::Result<()> {
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
     {
-        if std::fs::symlink_metadata(target).is_ok() {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::AlreadyExists,
-                "目标已存在 (本平台没有原子的 no-replace rename)",
-            ));
-        }
-        std::fs::rename(temp, target)
+        // **fail closed**: 没有原子的 no-replace rename 就不做——"先查再 rename"是降级, 不是保证。
+        let _ = (temp, target);
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "本平台没有原子的 no-replace rename, 拒绝以覆盖风险换取成功",
+        ))
     }
 }
 
@@ -634,7 +646,9 @@ pub fn execute_file_end(payload: &str) -> std::io::Result<Value> {
     //
     // 这一步与提交在同一次会话锁内 (本函数整段持锁), 所以它与"对账探针 + 会话登记"互斥;
     // 发布本身仍是 rename, 但要先在这里复查目标**仍然不存在**。
-    if session.no_replace_publish && std::fs::symlink_metadata(&final_path).is_ok() {
+    if session.no_replace_publish == Some(true)
+        && std::fs::symlink_metadata(&final_path).is_ok()
+    {
         reap_file(&temp_path);
         sessions.remove(&transfer_id);
         persist_index(&sessions);
@@ -644,7 +658,7 @@ pub fn execute_file_end(payload: &str) -> std::io::Result<Value> {
     }
 
     // 重放会话走**原子 no-replace** 发布: 判据不在锁里, 在内核里 (别的进程也可能落盘)。
-    if session.no_replace_publish {
+    if session.no_replace_publish == Some(true) {
         return match publish_no_replace(&temp_path, &final_path) {
             Ok(()) => {
                 sessions.remove(&transfer_id);
@@ -727,7 +741,8 @@ pub fn execute_get_file(payload: &str) -> std::io::Result<Value> {
             written: 0,
             temp_path: None,
             is_upload: false,
-            no_replace_publish: false,
+            // 下载不发布任何东西, 因此与 no-replace 无关 —— 这里不是漏掉的构造点。
+            no_replace_publish: Some(false),
             last_activity_ms: now_ms(),
         },
     );
@@ -1283,6 +1298,8 @@ fn persist_index(sessions: &HashMap<String, TransferSession>) {
                 "temp_path": temp_path.to_string_lossy(),
                 "size": session.size,
                 "sha256": session.expected_sha256,
+                // `None` 不落盘: 恢复出来仍是"未知", 不会被写成 `false`。
+                "no_replace_publish": session.no_replace_publish,
             }))
         })
         .collect();
@@ -1439,8 +1456,11 @@ fn restore_index() -> usize {
                 temp_path: Some(temp_path),
                 is_upload: true,
                 last_activity_ms,
-                // 索引恢复出来的会话不知道原来是哪种发布语义: 按覆盖走 (与恢复前一致)。
-                no_replace_publish: false,
+                // 旧索引条目没有这个字段 ⇒ **未知**(`None`), 不是 `false`: 之后任何 replay open 要求
+                // 保护而这条给不出保证时, 必须在 open 期拒掉, 不许默认覆盖 (评审 #204b severe 3)。
+                no_replace_publish: entry
+                    .get("no_replace_publish")
+                    .and_then(Value::as_bool),
             },
         );
         restored += 1;
@@ -1730,7 +1750,84 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// 同一格的正对照: 正常上传 (没带 `verify_committed`) 照样覆盖已存在的目标。
+    /// 恢复出来的旧会话(标记未知) + 客户端要求保护 ⇒ **拒 open**, 且给两条出路。
+    #[test]
+    fn a_restored_session_without_the_flag_refuses_a_protected_open() {
+        let _guard = TRANSFER_TABLE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let dir = std::env::temp_dir().join(unique_id("replay-unprotected"));
+        std::fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("restored.bin");
+        let tid = unique_id("restored");
+        // 模拟"旧索引恢复": 会话在表里, 但发布语义未知
+        transfers().lock().unwrap().insert(
+            tid.clone(),
+            TransferSession {
+                path: target.clone(),
+                size: 10,
+                expected_sha256: None,
+                written: 0,
+                temp_path: Some(staging_path(&target).unwrap()),
+                is_upload: true,
+                last_activity_ms: now_ms(),
+                no_replace_publish: None,
+            },
+        );
+        let err = execute_put_file(&format!(
+            r#"{{"transfer_id":"{tid}","path":"{}","size":10,"resume":true,"no_replace_publish":true}}"#,
+            escape_json(&target.display().to_string())
+        ))
+        .unwrap_err();
+        let text = err.to_string();
+        assert!(text.contains("file_transfer_replay_unprotected"), "{text}");
+        assert!(text.contains("--restart"), "必须给出路: {text}");
+        execute_file_cancel(&format!(r#"{{"transfer_id":"{tid}"}}"#)).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// resume 命中活跃会话: 只许加强不许降级。
+    #[test]
+    fn a_resumed_session_upgrades_but_never_downgrades_its_protection() {
+        let _guard = TRANSFER_TABLE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let dir = std::env::temp_dir().join(unique_id("replay-upgrade"));
+        std::fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("up.bin");
+        let tid = unique_id("up");
+        let target_json = escape_json(&target.display().to_string());
+
+        // 先正常开一条(不带保护), 再要求保护 ⇒ 升为 Some(true)
+        execute_put_file(&format!(
+            r#"{{"transfer_id":"{tid}","path":"{target_json}","size":10,"resume":false}}"#
+        ))
+        .unwrap();
+        execute_put_file(&format!(
+            r#"{{"transfer_id":"{tid}","path":"{target_json}","size":10,"resume":true,"no_replace_publish":true}}"#
+        ))
+        .unwrap();
+        assert_eq!(
+            transfers().lock().unwrap()[&tid].no_replace_publish,
+            Some(true),
+            "要求保护必须升级"
+        );
+
+        // 再来一次"没要求保护"的 open ⇒ 不许降级
+        execute_put_file(&format!(
+            r#"{{"transfer_id":"{tid}","path":"{target_json}","size":10,"resume":true}}"#
+        ))
+        .unwrap();
+        assert_eq!(
+            transfers().lock().unwrap()[&tid].no_replace_publish,
+            Some(true),
+            "后续 open 不许把它降级成覆盖"
+        );
+        execute_file_cancel(&format!(r#"{{"transfer_id":"{tid}"}}"#)).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 同一格的正对照: 正常上传 (没带 `no_replace_publish`) 照样覆盖已存在的目标。
     #[test]
     fn a_normal_upload_still_overwrites_an_existing_target() {
         let _guard = TRANSFER_TABLE_TEST_LOCK
@@ -1946,7 +2043,7 @@ mod tests {
             temp_path: Some(partial.clone()),
             is_upload: true,
             last_activity_ms: now_ms(),
-            no_replace_publish: false,
+            no_replace_publish: Some(false),
         };
         {
             let mut sessions = transfers().lock().unwrap();
@@ -2535,7 +2632,7 @@ mod tests {
                 temp_path: None,
                 is_upload: true,
                 last_activity_ms: 0,
-            no_replace_publish: false,
+            no_replace_publish: Some(false),
             },
         );
         let err = admit_new_session(&table, "newcomer", 1).unwrap_err();
@@ -2580,7 +2677,7 @@ mod tests {
                 temp_path: Some(temp_path),
                 is_upload: true,
                 last_activity_ms: now_ms(),
-                no_replace_publish: false,
+                no_replace_publish: Some(false),
             },
         );
         let resumed = execute_put_file(&format!(
