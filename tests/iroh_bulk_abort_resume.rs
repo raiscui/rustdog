@@ -259,6 +259,41 @@ impl Drop for Harness {
 }
 
 /// 跑到"字节已经在过线、但还没提交"那一刻再杀: 用 daemon 侧的暂存文件判, 比抢进度行稳。
+/// panic 消息里能留下来的那一段: **最后 N 行 + 所有错误行**。
+///
+/// GitHub 会在很长的 panic 消息里截断, 而这条用例的关键证据恰好在末端 —— 2026-11-28 两次红都只留到
+/// 几个 `iroh handshake` 行, 判不出失败究竟是 `iroh_path_unknown`、`bulk_chunk_ack_unanswered` 还是
+/// `reconcile_unsupported`。所以断言消息只带裁剪过的摘要, 而不是整份输出。
+fn diagnose(output: &str) -> String {
+    let lines: Vec<&str> = output
+        .lines()
+        .filter(|line| !line.trim().is_empty() && !line.contains("relay-actor"))
+        .collect();
+    let errors: Vec<&str> = lines
+        .iter()
+        .copied()
+        .filter(|line| {
+            let lower = line.to_ascii_lowercase();
+            lower.contains("error") || lower.contains("err:") || line.contains("失败")
+        })
+        .collect();
+    let tail_start = lines.len().saturating_sub(12);
+    format!(
+        "error 行({}):\n{}\n最后 12 行:\n{}",
+        errors.len(),
+        errors.join("\n"),
+        lines[tail_start..].join("\n")
+    )
+}
+
+/// 同一条命令的 daemon 侧摘要: 只挑判别要用的那两行。
+fn daemon_diagnose(log: &str) -> String {
+    log.lines()
+        .filter(|line| line.contains("verb=@file-chunk") || line.contains("iroh bulk ack") || line.contains("iroh bulk refused") || line.contains("iroh session admitted"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 fn kill_mid_upload(harness: &Harness, mut child: Child) -> u64 {
     let deadline = Instant::now() + Duration::from_secs(40);
     let mut staged = 0;
@@ -298,10 +333,16 @@ fn a_put_killed_mid_upload_resumes_on_the_first_retry() {
     let daemon_tail = std::fs::read_to_string(&harness.daemon_log).unwrap_or_default();
     assert!(
         retry.status.success(),
-        "中止之后的第一次重跑必须续上 (exit={:?}); 输出:\n{combined}\ndaemon:\n{daemon_tail}",
-        retry.status.code()
+        "中止之后的第一次重跑必须续上 (exit={:?})\n客户端:\n{}\ndaemon:\n{}",
+        retry.status.code(),
+        diagnose(&combined),
+        daemon_diagnose(&daemon_tail)
     );
-    assert!(combined.contains("resume=honored"), "必须真的续上而不是从头来:\n{combined}");
+    assert!(
+        combined.contains("resume=honored"),
+        "必须真的续上而不是从头来:\n{}",
+        diagnose(&combined)
+    );
     assert_eq!(std::fs::read(&harness.remote).expect("landed file"), harness.payload);
 }
 
