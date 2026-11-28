@@ -1,6 +1,7 @@
 use std::{
     collections::HashMap,
     fs::File,
+    future::Future,
     io::{self, BufReader, Read},
     net::SocketAddr,
     path::{Path, PathBuf},
@@ -19,6 +20,7 @@ use iroh_relay::{server, tls::CaTlsConfig, RelayConfig, RelayMap, RelayQuicConfi
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use tokio::{
     runtime::{Builder, Handle, Runtime},
+    sync::Semaphore,
     task::JoinSet,
     time::timeout,
 };
@@ -53,6 +55,9 @@ mod bulk_tests;
 
 #[cfg(test)]
 mod lane_runtime_tests;
+
+#[cfg(test)]
+mod direct_probe_tests;
 
 #[cfg(test)]
 mod readonly_tests {
@@ -144,8 +149,10 @@ const LEASE: Duration = Duration::from_secs(15);
 const RENEW: Duration = Duration::from_secs(5);
 const MAX_DIRECTORY: usize = 2048;
 const MAX_SESSIONS: usize = 16;
+const MAX_DIRECT_PROBES: usize = 4;
 const DENIED: &str = "iroh_target_denied";
 const DENIED_CODE: u32 = 43;
+const DIRECT_PROBE_BUSY_CODE: u32 = 45;
 /// This endpoint carries a directory *client*: a peer asking it for a lookup is
 /// refused with its own code, not a target denial it would misread.
 const UNSERVED: &str = "iroh_directory_alpn_unserved";
@@ -2091,6 +2098,12 @@ pub(crate) fn run_daemon(path: &Path) -> Result<()> {
             tokio::spawn(lease_sweeper(state));
         }
         let expires = Arc::new(Mutex::new(deadline));
+        let probe_gate = Arc::new(DirectProbeGate {
+            allow: allow.clone(),
+            admission: admission.clone(),
+            expires: expires.clone(),
+            slots: Semaphore::new(MAX_DIRECT_PROBES),
+        });
         let renewal_expires = expires.clone();
         let renewal_data = data.clone();
         let probe_relay = cfg.relay.url.clone();
@@ -2134,6 +2147,7 @@ pub(crate) fn run_daemon(path: &Path) -> Result<()> {
                     let allow = allow.clone();
                     let expires = expires.clone();
                     let admission = admission.clone();
+                    let probe_gate = probe_gate.clone();
                     let data = data.clone();
                     let probe_relay = probe_relay.clone();
                     tasks.spawn(async move {
@@ -2151,38 +2165,21 @@ pub(crate) fn run_daemon(path: &Path) -> Result<()> {
                                 return Ok(());
                             }
                             if conn.alpn() == DIRECT_PROBE_ALPN {
-                                let live = expires.lock().ok().is_some_and(|at| *at > Instant::now());
-                                if !live || (!allow.contains(&conn.remote_id())
-                                    && !identity_admitted(&admission, conn.remote_id()))
-                                {
-                                    conn.close(DENIED_CODE.into(), DENIED.as_bytes());
-                                    return Ok(());
-                                }
                                 let peer = conn.remote_id();
-                                let ping = async {
-                                    let (send, read) =
-                                        timeout(MAX_DIRECT_CONNECT + IO, conn.accept_bi()).await??;
-                                    let live = expires.lock().ok().is_some_and(|at| *at > Instant::now());
-                                    if !live || (!allow.contains(&peer) && !identity_admitted(&admission, peer)) {
-                                        conn.close(DENIED_CODE.into(), DENIED.as_bytes());
-                                        return Ok(());
-                                    }
-                                    let direct_addr = await_direct(&conn, IO).await?;
-                                    log::info!("iroh direct probe accepted peer={peer} direct_addr={direct_addr}");
-                                    let transport = ControlTransport::Iroh(IrohLineTransport::new(
-                                        send,
-                                        read,
-                                        frame_timeout,
-                                    ));
-                                    tokio::task::spawn_blocking(move || serve_ping(transport, "direct")).await??;
-                                    let _ = timeout(IO, conn.closed()).await;
-                                    Ok(())
-                                };
-                                tokio::pin!(ping);
-                                return tokio::select! {
-                                    result = &mut ping => result,
-                                    _reverse = dial_direct_probe_reverse(&data, &conn, probe_relay) => ping.await,
-                                };
+                                let target = EndpointAddr::from_parts(
+                                    peer, [TransportAddr::Relay(probe_relay)],
+                                );
+                                return serve_direct_probe(
+                                    &conn,
+                                    &probe_gate,
+                                    routable,
+                                    frame_timeout,
+                                    dial_direct_probe_reverse(
+                                        &conn,
+                                        RELAY_CONNECT,
+                                        data.connect(target, DIRECT_PROBE_RETURN_ALPN),
+                                    ),
+                                ).await;
                             }
                             log::info!("iroh connection accepted peer={}", conn.remote_id());
                             let (send, read) = timeout(IO, conn.accept_bi()).await??;
@@ -2227,7 +2224,7 @@ pub(crate) fn run_daemon(path: &Path) -> Result<()> {
                                 // 默认 lane 不承载 bulk (裁定 F): 没有租约与主体判定的入口上
                                 // 不放字节, 也就不需要路径采样。
                                 None => tokio::task::spawn_blocking(move || {
-                                    serve_ping(transport, path)
+                                    serve_ping(transport, path, || Ok(()))
                                 })
                                 .await?,
                             };
@@ -2270,10 +2267,15 @@ fn log_lane_closed(conn: &Connection, session: &str) {
 ///
 /// bulk 只走准入 lane —— 那条路径上有租约与主体判定; 这个入口没有, 所以它连字节都不收
 /// (拒绝码由 `DEFAULT_LANE_PATH_CAPABILITY` 查表得到)。
-fn serve_ping(mut transport: ControlTransport, path: &'static str) -> io::Result<()> {
+fn serve_ping(
+    mut transport: ControlTransport,
+    path: &'static str,
+    authorize: impl FnOnce() -> io::Result<()>,
+) -> io::Result<()> {
     let line = transport
         .read_message()?
         .ok_or(io::ErrorKind::UnexpectedEof)?;
+    authorize()?;
     let request = readonly_request(&line)?;
     let outcome = execute_ping(request.request_id, "");
     if let Some(id) = request.request_id {
@@ -2314,66 +2316,86 @@ pub(crate) fn run_control(path: &Path, name: &str, line: &str) -> Result<()> {
         let DirectoryReply::Found { addr } = lookup? else {
             return Err("unexpected iroh directory lookup response".into());
         };
-        let (data, conn, actual) = if cfg.probe_direct_via_relay {
-            connect_direct_probe(&key, bind, &addr, &cfg.relay, direct_budget).await?
-        } else {
-            connect_with_path(&key, Some(bind), &addr, &cfg, direct_budget).await?
-        };
-        log::info!("iroh_path={}", actual.label());
-        let streams = timeout(IO, conn.open_bi()).await;
-        let reply = match streams {
-            Ok(Ok((send, read))) => {
-                let mut transport =
-                    ControlTransport::Iroh(IrohLineTransport::new(send, read, cfg.frame_timeout()));
-                let line = line.to_owned();
-                tokio::task::spawn_blocking(move || {
-                    transport.write_message(&line)?;
-                    transport
-                        .read_message()?
-                        .ok_or(io::ErrorKind::UnexpectedEof.into())
-                })
-                .await?
-            }
-            Ok(Err(err)) => Err(io::Error::other(err)),
-            Err(err) => Err(io::Error::other(err)),
-        };
-        // A refusal closes the connection, so the reason can land after the
-        // stream reports its end; wait for it briefly before treating the
-        // reply as a protocol failure.
-        let denied = denied_close(&conn).await;
-        let direct_addr = if cfg.probe_direct_via_relay {
-            selected_direct_ip(&conn)
-        } else {
-            None
-        };
-        data.close().await;
-        if denied {
-            return Err(DENIED.into());
-        }
-        let reply = reply?;
-        let body: serde_json::Value = serde_json::from_str(
-            reply
-                .strip_prefix("@response ")
-                .ok_or("invalid iroh ping response")?,
-        )?;
-        let value = if let Some(id) = request.request_id {
-            if body["id"].as_u64() != Some(id) {
-                return Err("iroh ping response id mismatch".into());
-            }
-            &body["value"]
-        } else {
-            &body
-        };
-        if value["pong"].as_bool() != Some(true) {
-            return Err("invalid iroh pong".into());
-        }
         if cfg.probe_direct_via_relay {
-            let direct_addr = direct_addr.ok_or("iroh direct probe lost its direct path before pong")?;
-            log::info!("iroh direct probe pong id={:?} direct_addr={direct_addr}", request.request_id);
+            if !addr.relay_urls().any(|url| *url == cfg.relay.url) {
+                return Err("iroh directory has no configured relay candidate".into());
+            }
+            let data = endpoint_with_network(
+                key,
+                Some(bind),
+                DIRECT_PROBE_RETURN_ALPN,
+                Some(&cfg.relay),
+                true,
+            )
+            .await?;
+            let probe = async {
+                let conn = connect_direct_probe(&data, &addr, &cfg.relay, direct_budget).await?;
+                exchange_ping(&conn, Route::Direct, &cfg, line, request.request_id).await
+            };
+            let reply =
+                with_probe_reverse(probe, accept_direct_probe_reverse(&data, addr.id)).await;
+            data.close().await;
+            return reply;
         }
-        println!("{reply}");
-        Ok(())
+        let (data, conn, actual) =
+            connect_with_path(&key, Some(bind), &addr, &cfg, direct_budget).await?;
+        let reply = exchange_ping(&conn, actual, &cfg, line, request.request_id).await;
+        data.close().await;
+        reply
     })
+}
+
+async fn exchange_ping(
+    conn: &Connection,
+    actual: Route,
+    cfg: &ClientConfig,
+    line: &str,
+    request_id: Option<u64>,
+) -> Result<()> {
+    log::info!("iroh_path={}", actual.label());
+    let reply = match timeout(IO, conn.open_bi()).await {
+        Ok(Ok((send, read))) => {
+            let mut transport =
+                ControlTransport::Iroh(IrohLineTransport::new(send, read, cfg.frame_timeout()));
+            let line = line.to_owned();
+            tokio::task::spawn_blocking(move || {
+                transport.write_message(&line)?;
+                transport
+                    .read_message()?
+                    .ok_or(io::ErrorKind::UnexpectedEof.into())
+            })
+            .await?
+        }
+        Ok(Err(err)) => Err(io::Error::other(err)),
+        Err(err) => Err(io::Error::other(err)),
+    };
+    if denied_close(conn).await {
+        return Err(DENIED.into());
+    }
+    let reply = reply?;
+    let body: serde_json::Value = serde_json::from_str(
+        reply
+            .strip_prefix("@response ")
+            .ok_or("invalid iroh ping response")?,
+    )?;
+    let value = if let Some(id) = request_id {
+        if body["id"].as_u64() != Some(id) {
+            return Err("iroh ping response id mismatch".into());
+        }
+        &body["value"]
+    } else {
+        &body
+    };
+    if value["pong"].as_bool() != Some(true) {
+        return Err("invalid iroh pong".into());
+    }
+    if cfg.probe_direct_via_relay {
+        let direct_addr = selected_direct_ip(conn, cfg.routable)
+            .ok_or("iroh direct probe lost its direct path before pong")?;
+        log::info!("iroh direct probe pong id={request_id:?} direct_addr={direct_addr}");
+    }
+    println!("{reply}");
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -2480,11 +2502,7 @@ fn serve_admitted(
         // The admitted lane keeps answering the P1 ping one-shot, so the formal
         // CLI's diagnostic path needs no handshake; anything else is refused.
         // The local policy stays the authority: a revoked peer gets no ping.
-        let admitted_ping = admission
-            .lock()
-            .map(|state| state.admits_ping(peer))
-            .unwrap_or(false);
-        if !admitted_ping {
+        if !ping_policy_allows(&admission, peer) {
             return Err(io::Error::new(
                 io::ErrorKind::PermissionDenied,
                 format!("iroh ping refused by the local policy: peer={peer}"),
@@ -3040,17 +3058,21 @@ async fn connect_with_path(
     Err(last.unwrap_or_else(|| "iroh has no reachable path".into()))
 }
 
-fn selected_direct_ip(conn: &Connection) -> Option<SocketAddr> {
-    conn.paths().iter().find_map(|path| match path.remote_addr() {
-        TransportAddr::Ip(ip) if path.is_selected() && candidate_ok(*ip, true).is_ok() => Some(*ip),
-        _ => None,
-    })
+fn selected_direct_ip(conn: &Connection, routable: bool) -> Option<SocketAddr> {
+    conn.paths()
+        .iter()
+        .find_map(|path| match path.remote_addr() {
+            TransportAddr::Ip(ip) if path.is_selected() && candidate_ok(*ip, routable).is_ok() => {
+                Some(*ip)
+            }
+            _ => None,
+        })
 }
 
-async fn await_direct(conn: &Connection, budget: Duration) -> Result<SocketAddr> {
+async fn await_direct(conn: &Connection, routable: bool, budget: Duration) -> Result<SocketAddr> {
     timeout(budget, async {
         loop {
-            if let Some(ip) = selected_direct_ip(conn) {
+            if let Some(ip) = selected_direct_ip(conn, routable) {
                 return Ok(ip);
             }
             tokio::select! {
@@ -3063,16 +3085,91 @@ async fn await_direct(conn: &Connection, budget: Duration) -> Result<SocketAddr>
     .map_err(|_| "iroh direct probe did not select a direct path")?
 }
 
-async fn dial_direct_probe_reverse(
-    data: &Endpoint,
+fn ping_policy_allows(policy: &Mutex<admission::Admission>, peer: EndpointId) -> bool {
+    policy.lock().is_ok_and(|policy| policy.admits_ping(peer))
+}
+
+struct DirectProbeGate {
+    allow: Arc<Vec<EndpointId>>,
+    admission: Option<Arc<Mutex<admission::Admission>>>,
+    expires: Arc<Mutex<Instant>>,
+    slots: Semaphore,
+}
+
+impl DirectProbeGate {
+    fn allows(&self, peer: EndpointId) -> bool {
+        self.expires
+            .lock()
+            .is_ok_and(|expires| *expires > Instant::now())
+            && match &self.admission {
+                Some(policy) => ping_policy_allows(policy, peer),
+                None => self.allow.contains(&peer),
+            }
+    }
+}
+
+async fn with_probe_reverse<T, R>(
+    probe: impl Future<Output = T>,
+    reverse: impl Future<Output = R>,
+) -> T {
+    tokio::pin!(probe);
+    tokio::select! {
+        reply = &mut probe => reply,
+        _reverse = reverse => probe.await,
+    }
+}
+
+async fn serve_direct_probe(
+    conn: &Connection,
+    gate: &Arc<DirectProbeGate>,
+    routable: bool,
+    frame_timeout: Duration,
+    reverse: impl Future<Output = Option<Connection>>,
+) -> Result<()> {
+    let peer = conn.remote_id();
+    if !gate.allows(peer) {
+        conn.close(DENIED_CODE.into(), DENIED.as_bytes());
+        return Ok(());
+    }
+    let Ok(_slot) = gate.slots.try_acquire() else {
+        conn.close(DIRECT_PROBE_BUSY_CODE.into(), b"iroh_direct_probe_busy");
+        return Ok(());
+    };
+    let ping = async {
+        let deadline = tokio::time::Instant::now() + MAX_DIRECT_CONNECT + IO;
+        let (send, read) = tokio::time::timeout_at(deadline, conn.accept_bi()).await??;
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        let direct_addr = await_direct(conn, routable, remaining).await?;
+        log::info!("iroh direct probe accepted peer={peer} direct_addr={direct_addr}");
+        let transport = ControlTransport::Iroh(IrohLineTransport::new(send, read, frame_timeout));
+        let check_conn = conn.clone();
+        let gate = gate.clone();
+        tokio::task::spawn_blocking(move || {
+            serve_ping(transport, "direct", || {
+                if gate.allows(peer) {
+                    Ok(())
+                } else {
+                    check_conn.close(DENIED_CODE.into(), DENIED.as_bytes());
+                    Err(io::Error::new(io::ErrorKind::PermissionDenied, DENIED))
+                }
+            })
+        })
+        .await??;
+        let _ = timeout(IO, conn.closed()).await;
+        Ok(())
+    };
+    with_probe_reverse(ping, reverse).await
+}
+
+async fn dial_direct_probe_reverse<E: std::fmt::Display>(
     forward: &Connection,
-    relay: RelayUrl,
+    budget: Duration,
+    dial: impl Future<Output = std::result::Result<Connection, E>>,
 ) -> Option<Connection> {
     let peer = forward.remote_id();
     let lane = forward.stable_id();
-    let target = EndpointAddr::from_parts(peer, [TransportAddr::Relay(relay)]);
     log::info!("iroh direct probe reverse dial peer={peer} lane={lane} at_ms={}", utc_ms());
-    match timeout(RELAY_CONNECT, data.connect(target, DIRECT_PROBE_RETURN_ALPN)).await {
+    match timeout(budget, dial).await {
         Ok(Ok(conn)) => {
             log::info!("iroh direct probe reverse connected peer={peer} lane={lane} at_ms={}", utc_ms());
             Some(conn)
@@ -3095,6 +3192,10 @@ async fn accept_direct_probe_reverse(data: &Endpoint, peer: EndpointId) -> Resul
             continue;
         };
         if conn.remote_id() == peer && conn.alpn() == DIRECT_PROBE_RETURN_ALPN {
+            log::info!(
+                "iroh direct probe reverse accepted peer={peer} at_ms={}",
+                utc_ms()
+            );
             return Ok(conn);
         }
         conn.close(DENIED_CODE.into(), DENIED.as_bytes());
@@ -3102,59 +3203,33 @@ async fn accept_direct_probe_reverse(data: &Endpoint, peer: EndpointId) -> Resul
 }
 
 async fn connect_direct_probe(
-    key: &SecretKey,
-    bind: SocketAddr,
+    data: &Endpoint,
     addr: &EndpointAddr,
     relay: &Relay,
     direct_budget: Duration,
-) -> Result<(Endpoint, Connection, Route)> {
-    if !addr.relay_urls().any(|url| *url == relay.url) {
-        return Err("iroh directory has no configured relay candidate".into());
-    }
+) -> Result<Connection> {
     let target = EndpointAddr::from_parts(addr.id, [TransportAddr::Relay(relay.url.clone())]);
-    let data = endpoint_with_network(
-        key.clone(),
-        Some(bind),
-        DIRECT_PROBE_RETURN_ALPN,
-        Some(relay),
-        true,
-    )
-    .await?;
-    let accept_data = data.clone();
     let peer = addr.id;
-    tokio::spawn(async move {
-        if let Ok(Ok(reverse)) = timeout(RELAY_CONNECT, accept_direct_probe_reverse(&accept_data, peer)).await {
-            log::info!("iroh direct probe reverse accepted peer={peer} at_ms={}", utc_ms());
-            let _ = reverse.closed().await;
-        }
-    });
-    let outcome = async {
-        log::info!("iroh direct probe forward dial peer={peer} at_ms={}", utc_ms());
-        let conn = timeout(RELAY_CONNECT, data.connect(target, DIRECT_PROBE_ALPN))
-            .await
-            .map_err(|_| "iroh direct probe forward dial timed out")??;
-        let connected = Instant::now();
-        let initial = await_route(&conn, true).await?;
-        log::info!(
-            "iroh direct probe initial_path={} wait_ms={}",
-            initial.label(),
-            direct_budget.as_millis(),
-        );
-        let addr = await_direct(&conn, direct_budget).await?;
-        log::info!(
-            "iroh direct probe selected direct_addr={addr} switch_ms={}",
-            connected.elapsed().as_millis()
-        );
-        Ok((conn, Route::Direct))
-    }
-    .await;
-    match outcome {
-        Ok((conn, actual)) => Ok((data, conn, actual)),
-        Err(err) => {
-            data.close().await;
-            Err(err)
-        }
-    }
+    log::info!(
+        "iroh direct probe forward dial peer={peer} at_ms={}",
+        utc_ms()
+    );
+    let conn = timeout(RELAY_CONNECT, data.connect(target, DIRECT_PROBE_ALPN))
+        .await
+        .map_err(|_| "iroh direct probe forward dial timed out")??;
+    let connected = Instant::now();
+    let initial = await_route(&conn, true).await?;
+    log::info!(
+        "iroh direct probe initial_path={} wait_ms={}",
+        initial.label(),
+        direct_budget.as_millis(),
+    );
+    let addr = await_direct(&conn, true, direct_budget).await?;
+    log::info!(
+        "iroh direct probe selected direct_addr={addr} switch_ms={}",
+        connected.elapsed().as_millis()
+    );
+    Ok(conn)
 }
 
 fn spawn_lease_renewer(
