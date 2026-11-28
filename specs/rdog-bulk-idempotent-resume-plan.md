@@ -87,3 +87,15 @@ daemon 入站行与 ack 行必须带 **`transfer_id` + `attempt` (序号) + `off
 
 M4、M2 先行 (结构化错误 + ID 预分配: 改动小、是后面几条的地基), 再 M1、M3 (盘上对账 + generation),
 最后 M5、M6、M7 与总 deadline。每格自带单测; e2e 只在 M6 加一条。
+
+## M1 落地形态 (2026-11-28)
+
+- `@put-file` 新增可选字段 `verify_committed:true`。**客户端只在"上一次没干净收尾"时带它** (store 里
+  还留着那条 id), 所以正常首传不多一次哈希。
+- daemon 判定顺序: 内存 `COMMITTED` 快速路径 → 盘上目标 (存在 + 大小相等 + sha256 相等)。盘上判据
+  天然跨重启; 内存表丢了不影响正确性。
+- 三种结局: 相等 ⇒ `state:"committed", replayed:true` (客户端 `replayed=committed`, **搬 0 字节**);
+  目标存在但不符 ⇒ `file_transfer_replay_mismatch` (不覆盖、不重传); **目标不存在 ⇒ 正常 open**
+  (提交必然留下目标文件, 所以"没有目标"是"没提交过"的正面证据, 不是"未知")。
+- 假阳性语义在 `replay_state` 的注释里写死: 目标本来就在、内容恰好相同、不是这次传的, 也判已提交 ——
+  终态不可区分, 按成功返回是对的, 但它**不证明本次写入发生过**。

@@ -246,6 +246,8 @@ pub(crate) struct TransferReceipt {
     pub(crate) sha256: String,
     /// 只有上传会出现: 本次是否真的从半成品接着传 (daemon 的 `resume_honored`)。
     pub(crate) resume_honored: Option<bool>,
+    /// daemon 用盘上事实判定"这条上传早就提交过了" —— 本次一个字节都没搬。
+    pub(crate) replayed: bool,
 }
 
 impl TransferReceipt {
@@ -257,8 +259,9 @@ impl TransferReceipt {
         };
         // 尾列不能被新字段打断: put 的最后一列仍是 `resume=…`, get 的最后一列仍是 `sha256=…`,
         // 所以 `build=` 插在 `sha256=` **之前**。
+        let replayed = if self.replayed { " replayed=committed" } else { "" };
         format!(
-            "{} ok bytes={} {} sha256={}{}",
+            "{} ok bytes={} {} sha256={}{replayed}{}",
             self.direction,
             self.bytes,
             crate::build_info::build_tag(),
@@ -1215,6 +1218,8 @@ fn run_put_inner(
     // 同一条 (目标, 本地, 远端) 上一次没走完就复用它的 id: daemon 的会话还在, 新 id 会撞
     // `file_transfer_path_in_use` (那条检查先于 `resume:false` 的清理), 一直挡到续传窗口过期。
     let previous = ids.get(target, local, remote);
+    // "上一次没干净收尾" ⇔ store 里还留着这条 (成功终态会把它删掉)。
+    let had_previous = previous.is_some();
     let transfer_id = if restart {
         // `--restart` 要换新 id, 那就必须先把旧会话收掉 —— 否则"别的 id 持有同一暂存路径"
         // 会把它挡在门外, 而错误文本还会说"同路径重跑会用它续传"(那个 id 我们已经不用了)。
@@ -1244,8 +1249,12 @@ fn run_put_inner(
     // 撞上暂存路径占用。代价是 open 被拒时 store 里会留一条指向"没有会话"的 id, 而那条下一轮会被
     // 当作续传候选: daemon 那边没有会话也没有半成品时它会如实报 `written:0` (从 0 开始)。
     ids.put(target, local, remote, &transfer_id);
+    // 只在"上一次没干净收尾"时要求对账: 正常首传不为此多付一次哈希。问的是"我上次到底提交没
+    // 提交", 盘上事实是唯一判据。
+    let verify_committed = !restart && had_previous;
     let open_line = serde_json::json!({
         "transfer_id": transfer_id,
+        "verify_committed": verify_committed,
         // 两端快照要按 `attempt_id` 对齐 (§4.3): 客户端把自己这一半的身份交给 daemon,
         // 否则 daemon 只能按 `transfer_id` 派生一个, join 会永远是 `attempt_mismatch`。
         "attempt_id": recorder.attempt_id,
@@ -1257,6 +1266,25 @@ fn run_put_inner(
     let opened = exchange_peer
         .request(&format!("@put-file:{}", open_line))
         .map_err(|err| note_error(recorder, err, &transfer_id, false))?;
+    // daemon 用盘上事实判定"这条上传早就提交过了": 一个字节都不用搬, 也不能再开会话。
+    //
+    // 这是本票唯一一处**故意把"我查到了成品"说成成功**的地方 —— 盘上就是这份字节, 终态不可区分;
+    // 但它不证明"本次写入发生过", 别拿它当写入证据。回执上单独标 `replayed=committed` 就是为了
+    // 让人一眼看出这次没有搬字节。
+    if opened.get("state").and_then(Value::as_str) == Some("committed")
+        && opened.get("replayed").and_then(Value::as_bool) == Some(true)
+    {
+        ids.remove(target, local, remote);
+        report_progress("put", size, size);
+        return Ok(TransferReceipt {
+            transfer_id,
+            direction: "put",
+            bytes: 0,
+            sha256,
+            resume_honored: None,
+            replayed: true,
+        });
+    }
     let written = opened.get("written").and_then(Value::as_u64).unwrap_or(0);
     let resume_honored = opened
         .get("resume_honored")
@@ -1353,6 +1381,7 @@ fn run_put_inner(
         bytes: size,
         sha256,
         resume_honored: Some(resume_honored),
+        replayed: false,
     })
 }
 
@@ -1499,6 +1528,7 @@ fn run_get_inner(
         bytes: offset,
         sha256: actual,
         resume_honored: None,
+        replayed: false,
     })
 }
 
@@ -2493,6 +2523,7 @@ mod tests {
             bytes: 10,
             sha256: "abc".into(),
             resume_honored: Some(true),
+            replayed: false,
         }
         .render();
         assert!(put.ends_with("resume=honored"), "put 尾列必须是 resume: {put}");
@@ -2504,6 +2535,7 @@ mod tests {
             bytes: 10,
             sha256: "abc".into(),
             resume_honored: None,
+            replayed: false,
         }
         .render();
         assert!(
@@ -2956,11 +2988,12 @@ mod tests {
     }
 
     #[test]
-    fn the_transfer_id_is_planned_before_the_first_open() {
+    fn the_transfer_id_plan_reuses_a_stored_one_and_restart_picks_a_new_one() {
         // RAI-711 判据 2: id 必须在第一个 open **之前**定下来并在整条命令内固定 —— 否则第一次
         // open 的回执一丢, 重放就不知道回到哪个会话 (现场形态: 新 id 撞 `file_transfer_path_in_use`)。
         let dir = scratch_dir("plan-id");
-        // 隔离到 scratch 目录: `user_default()` 会写真实 `$HOME/.rdog/bulk-transfer-ids`。
+        // 隔离到 scratch 目录: `user_default()` 会写真实 `$HOME/.rdog/bulk-transfer-ids`, 用例一旦
+        // panic 就在用户的真状态里留一条记录 (同 docs/solutions 的测试隔离纪律)。
         let ids = TransferIdStore::at(dir.join("ids"));
         let local = dir.join("source.bin");
         let remote = "/tmp/landed.bin";
@@ -2978,6 +3011,52 @@ mod tests {
             "cli-put-known"
         );
         ids.remove("lab/daemon", &local, remote);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_committed_target_makes_the_replay_move_no_bytes() {
+        // RAI-711 M1 的主判据: 盘上成品与本次声明一致 (同大小 + 同 sha) ⇒ daemon 回
+        // `committed/replayed`, 客户端一个块都不发, 也不开会话。
+        let dir = scratch_dir("replay-committed");
+        let local = dir.join("source.bin");
+        let remote = dir.join("landed.bin");
+        let payload: Vec<u8> = (0..64u8).collect();
+        std::fs::write(&local, &payload).unwrap();
+        // daemon 侧的目标已经就是这份内容 (上一次提交过)
+        std::fs::write(&remote, &payload).unwrap();
+
+        let ids = TransferIdStore::at(dir.join("ids"));
+        // store 里留着 id ⇒ 这条命令按"上一次没干净收尾"处理, 会带 `verify_committed`
+        ids.put("test-target", &local, &remote.to_string_lossy(), "cli-put-replay");
+
+        let peer = LoopbackPeer::new(7);
+        let mut recorder = test_recorder(None);
+        let receipt = run_put(
+            &peer,
+            &mut recorder,
+            &ids,
+            "test-target",
+            &local,
+            &remote.to_string_lossy(),
+            false,
+            None,
+        )
+        .expect("对账命中就是成功");
+
+        assert!(receipt.replayed, "回执必须标成 replay: {receipt:?}");
+        assert_eq!(receipt.bytes, 0, "replay 不该搬任何字节");
+        assert_eq!(
+            peer.seen()
+                .iter()
+                .filter(|line| line.starts_with("@file-chunk:"))
+                .count(),
+            0,
+            "一个块都不该发: {:?}",
+            peer.seen()
+        );
+        // 盘上的成品一个字节都没变
+        assert_eq!(std::fs::read(&remote).unwrap(), payload);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

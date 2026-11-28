@@ -3223,6 +3223,13 @@ impl LaneError {
         }
     }
 
+    fn peer_closed(message: String) -> Self {
+        Self {
+            kind: LaneFailure::PeerClosed,
+            message,
+        }
+    }
+
     fn closed(message: String) -> Self {
         Self {
             kind: LaneFailure::AckUnansweredClosed,
@@ -3271,7 +3278,9 @@ impl IrohBulkLane {
         }
         match self.transport.read_message() {
             Ok(Some(reply)) => Ok(reply),
-            Ok(None) => Err(self.poison(LaneError::closed("对端在回执前关闭了连接".to_string()))),
+            Ok(None) => Err(self.poison(LaneError::peer_closed(
+                "对端在回执前关闭了连接".to_string(),
+            ))),
             Err(err) if err.kind() == io::ErrorKind::TimedOut => {
                 let message = format!(
                     "{BULK_CHUNK_ACK_UNANSWERED}: 等待回执超时 ({}ms; {})",

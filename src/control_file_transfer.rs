@@ -78,6 +78,77 @@ fn transfers() -> &'static Mutex<HashMap<String, TransferSession>> {
     TRANSFERS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+/// 已提交的成品: `transfer_id -> (目标路径, 大小, 摘要)`。
+///
+/// **只是快速路径, 不是判据。** 判据永远是盘上的成品事实 (§RAI-711 M1): 本表命中就省掉那次哈希,
+/// 未命中则回落到盘上检查; 表丢了 (daemon 重启) 也不影响正确性。写在这里而不是会话表: 提交之后
+/// 会话已经退役, 而"这次上传到底成没成"要能跨会话回答。
+static COMMITTED: OnceLock<Mutex<HashMap<String, CommittedFile>>> = OnceLock::new();
+
+struct CommittedFile {
+    path: PathBuf,
+    size: u64,
+    sha256: String,
+}
+
+fn committed() -> &'static Mutex<HashMap<String, CommittedFile>> {
+    COMMITTED.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// `@put-file` 的 `verify_committed:true` 分支: 这条上传是不是**已经提交过了**。
+///
+/// 判据按优先级: 内存记录 → 盘上成品 (存在 + 大小相等 + sha256 相等)。盘上判据天然跨重启, 代价
+/// 只是重放路径上的一次哈希 —— 正常首传不会走到这里 (客户端只在"上一次没干净收尾"时才带这个字段)。
+///
+/// 三种结局, 语义必须分清:
+/// - **相等** ⇒ `Committed`。这里有一个**故意的假阳性**: 目标本来就在、内容恰好相同、但不是这次
+///   传的, 也会被判成已提交。终态不可区分 (盘上就是这份字节), 按成功返回是对的 —— 但它不证明
+///   "本次写入发生过", 别拿它当写入证据。
+/// - **目标存在但不符** ⇒ `Mismatch`。绝不返回"已提交" —— 那会把一份不同的成品说成这次的结果。
+/// - **目标不存在** ⇒ `Absent`。提交必然留下目标文件, 所以"没有目标"就是"没提交过"的正面证据
+///   (不是"未知"), 此时从 0 重来是安全的。
+fn replay_state(
+    transfer_id: &str,
+    path: &Path,
+    size: u64,
+    sha256: &str,
+) -> std::io::Result<ReplayState> {
+    if let Some(record) = committed()
+        .lock()
+        .expect("committed table poisoned")
+        .get(transfer_id)
+    {
+        if record.path == path && record.size == size && record.sha256.eq_ignore_ascii_case(sha256) {
+            return Ok(ReplayState::Committed);
+        }
+    }
+    let Ok(metadata) = std::fs::metadata(path) else {
+        return Ok(ReplayState::Absent);
+    };
+    if metadata.len() != size {
+        return Ok(ReplayState::Mismatch(format!(
+            "目标 {} 已存在 {} 字节, 与本次声明的 {size} 不等",
+            path.display(),
+            metadata.len()
+        )));
+    }
+    let actual = sha256_file(path)?;
+    if actual.eq_ignore_ascii_case(sha256) {
+        Ok(ReplayState::Committed)
+    } else {
+        Ok(ReplayState::Mismatch(format!(
+            "目标 {} 的 sha256 是 {actual}, 与本次声明的 {sha256} 不等",
+            path.display()
+        )))
+    }
+}
+
+enum ReplayState {
+    Committed,
+    Mismatch(String),
+    Absent,
+}
+
 /// 一条进行中的传输。上传会话在 @put-file 建立、@file-end 提交后移除;
 /// 下载会话只读, @get-file 建立、读完即移除 (无状态残留)。
 #[derive(Debug, Clone, PartialEq)]
@@ -262,6 +333,34 @@ pub fn execute_put_file(payload: &str) -> std::io::Result<Value> {
             "file_transfer_size_limit_exceeded: @put-file 声明 {size} 字节, 超过 file_transfer.max_bytes = {}",
             limits.max_bytes
         )));
+    }
+
+    // 重放对账 (RAI-711 M1): 客户端只在"上一次没干净收尾"时带这个字段, 所以正常首传不多一次哈希。
+    if value
+        .get("verify_committed")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        match replay_state(&transfer_id, &path, size, expected_sha256.as_deref().unwrap_or(""))? {
+            ReplayState::Committed => {
+                return Ok(json!({
+                    "kind": "file-transfer",
+                    "state": "committed",
+                    "replayed": true,
+                    "transfer_id": transfer_id,
+                    "path": path,
+                    "size": size,
+                    "next_offset": size,
+                }));
+            }
+            ReplayState::Mismatch(reason) => {
+                return Err(std::io::Error::other(format!(
+                    "file_transfer_replay_mismatch: {reason} — 不重传、不覆盖"
+                )));
+            }
+            // 没有目标文件 = 上次没提交过 (提交必然留下目标), 从 0 重来是安全的。
+            ReplayState::Absent => {}
+        }
     }
 
     let temp_path = staging_path(&path)?;
@@ -544,6 +643,18 @@ pub fn execute_file_end(payload: &str) -> std::io::Result<Value> {
         })?;
         reap_file(&temp_path);
     }
+    // 记住"这条 id 已提交" —— 只作重放路径的快速路径 (省一次哈希), 判据仍是盘上事实。
+    committed()
+        .lock()
+        .expect("committed table poisoned")
+        .insert(
+            transfer_id.clone(),
+            CommittedFile {
+                path: final_path.clone(),
+                size: written,
+                sha256: actual_sha256.clone(),
+            },
+        );
     // 提交成功即退役会话. 不退的话, 这条已完成的条目会在 TTL 到期时被 sweep 拿去"回收"它的
     // 暂存路径 —— 而那个路径是按目标文件推导的, 同一目标的**下一次**上传正用着它.
     sessions.remove(&transfer_id);
@@ -1440,6 +1551,95 @@ mod tests {
     /// 的同名助手保持一致。
     fn escape_json(input: &str) -> String {
         input.replace('\\', "\\\\").replace('"', "\\\"")
+    }
+
+    /// RAI-711 M1: 盘上对账。判据是**目标文件事实**, 内存表只作快速路径。
+    #[test]
+    fn replay_state_reads_the_disk_when_the_memory_record_is_gone() {
+        let dir = std::env::temp_dir().join(unique_id("replay-disk"));
+        std::fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("landed.bin");
+        let payload: Vec<u8> = (0..4096u32).map(|byte| (byte % 251) as u8).collect();
+        std::fs::write(&target, &payload).unwrap();
+        let sha = format!("{:x}", Sha256::digest(&payload));
+
+        // 没有内存记录 (daemon 重启后的形状) 也必须认出来 —— 这就是"天然跨重启"的那一半。
+        assert!(matches!(
+            replay_state("cli-put-absent", &target, payload.len() as u64, &sha).unwrap(),
+            ReplayState::Committed
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn replay_state_memory_record_is_only_a_fast_path() {
+        let dir = std::env::temp_dir().join(unique_id("replay-mem"));
+        std::fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("landed.bin");
+        let payload = vec![7u8; 128];
+        std::fs::write(&target, &payload).unwrap();
+        let sha = format!("{:x}", Sha256::digest(&payload));
+        committed()
+            .lock()
+            .expect("committed table poisoned")
+            .insert(
+                "cli-put-mem".to_string(),
+                CommittedFile {
+                    path: target.clone(),
+                    size: payload.len() as u64,
+                    sha256: sha.clone(),
+                },
+            );
+        assert!(matches!(
+            replay_state("cli-put-mem", &target, payload.len() as u64, &sha).unwrap(),
+            ReplayState::Committed
+        ));
+        committed()
+            .lock()
+            .expect("committed table poisoned")
+            .remove("cli-put-mem");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 负对照 (Captain 要求): 目标存在但大小或摘要不符 ⇒ **绝不能**返回"已提交"。
+    #[test]
+    fn replay_state_never_calls_a_mismatched_target_committed() {
+        let dir = std::env::temp_dir().join(unique_id("replay-mismatch"));
+        std::fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("landed.bin");
+        let on_disk = vec![1u8; 256];
+        std::fs::write(&target, &on_disk).unwrap();
+
+        // 同大小、不同内容: 摘要不符
+        let wanted: Vec<u8> = vec![2u8; 256];
+        let wanted_sha = format!("{:x}", Sha256::digest(&wanted));
+        assert!(matches!(
+            replay_state("cli-put-mm1", &target, 256, &wanted_sha).unwrap(),
+            ReplayState::Mismatch(_)
+        ));
+
+        // 大小不符
+        assert!(matches!(
+            replay_state("cli-put-mm2", &target, 512, &wanted_sha).unwrap(),
+            ReplayState::Mismatch(_)
+        ));
+
+        // 盘上字节一个都没动
+        assert_eq!(std::fs::read(&target).unwrap(), on_disk);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn replay_state_treats_a_missing_target_as_never_committed() {
+        // 提交必然留下目标文件, 所以"没有目标"是"没提交过"的正面证据, 不是"未知"。
+        let dir = std::env::temp_dir().join(unique_id("replay-absent"));
+        std::fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("never-written.bin");
+        assert!(matches!(
+            replay_state("cli-put-none", &target, 1024, &"0".repeat(64)).unwrap(),
+            ReplayState::Absent
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
