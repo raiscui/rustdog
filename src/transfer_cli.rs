@@ -512,6 +512,7 @@ pub(crate) struct BulkPathRecorder {
     /// daemon 那一半的原文, 从终态响应的 `evidence` 里收下来 (§4.3)。
     daemon_half: Option<String>,
     aborted: bool,
+    put_open: Option<PutOpen>,
     /// 失败路径上写快照时用的 id (成功路径用收据里的那个)。
     last_transfer_id: String,
     probe_after_retry_wait: Option<Duration>,
@@ -543,6 +544,7 @@ impl BulkPathRecorder {
             relay_after: None,
             daemon_half: None,
             aborted: false,
+            put_open: None,
             last_transfer_id: String::new(),
             probe_after_retry_wait: None,
             failure: None,
@@ -1028,9 +1030,8 @@ pub(crate) fn run_iroh_bulk(
         } => Some(plan_transfer_id(&ids, name, local, remote, *restart)),
         IrohBulkRequest::Get { .. } => None,
     };
-    let mut waited = Duration::ZERO;
-    loop {
-        match run_iroh_bulk_once(
+    run_iroh_bulk_attempts(|waited| {
+        run_iroh_bulk_once(
             path,
             name,
             request.clone(),
@@ -1038,13 +1039,42 @@ pub(crate) fn run_iroh_bulk(
             &ids,
             planned.as_deref(),
             zero_load_evidence.then_some(waited),
-        ) {
+        )
+    })
+}
+
+fn run_iroh_bulk_attempts(
+    mut run: impl FnMut(Duration) -> Result<TransferReceipt, AttemptFailure>,
+) -> Result<TransferReceipt, String> {
+    let mut waited = Duration::ZERO;
+    let mut attempt = 1usize;
+    let mut previous_open: Option<(usize, PutOpen)> = None;
+    loop {
+        match run(waited) {
             // 只看**来源**: 路径读不出才重拨 (重拨自己就是修路径的手段)。文案里恰好出现
             // `iroh_path_unknown` 的别的失败不该被当成路径问题 —— 那条负对照有用例钉住。
             Err(failure) => match retry_step(failure.kind, waited) {
                 Some(step) => {
+                    if let Some(open) = failure.put_open {
+                        previous_open = Some((attempt, open));
+                    }
                     std::thread::sleep(step);
                     waited += step;
+                    attempt += 1;
+                }
+                None if failure.prewarm_failed => {
+                    let message = failure.message;
+                    return Err(match previous_open {
+                        Some((earlier, open)) => {
+                            let state = if open.acknowledged {
+                                "acknowledged"
+                            } else {
+                                "attempted"
+                            };
+                            format!("{message} (attempt={attempt}; earlier_attempt={earlier}; prior_put_open={state}; transfer_id={}; earlier receiver state may remain)", open.transfer_id)
+                        }
+                        None => format!("{message} (attempt={attempt})"),
+                    });
                 }
                 None => return Err(failure.message),
             },
@@ -1060,6 +1090,14 @@ pub(crate) fn run_iroh_bulk(
 struct AttemptFailure {
     kind: FailureKind,
     message: String,
+    prewarm_failed: bool,
+    put_open: Option<PutOpen>,
+}
+
+#[derive(Debug)]
+struct PutOpen {
+    transfer_id: String,
+    acknowledged: bool,
 }
 
 /// 路径读不出时重拨的间隔与总量: 一次重拨通常就够 (重拨自己会修路径), 预算只防"旧连接还没被
@@ -1112,7 +1150,8 @@ fn run_iroh_bulk_once(
     let ids = ids.clone();
     let planned = planned.map(str::to_owned);
     let target = name.to_owned();
-    crate::control_iroh::with_bulk_lane(path, name, move |lane| {
+    let upload = matches!(&request, IrohBulkRequest::Put { .. });
+    crate::control_iroh::with_bulk_lane(path, name, upload, move |lane| {
         let exchange_peer = IrohExchange::new(lane, chunk_ack_timeout_ms);
         let mut recorder = BulkPathRecorder::new(
             format!("cli-{}", std::process::id()),
@@ -1142,17 +1181,21 @@ fn run_iroh_bulk_once(
             }
         };
         // 失败来源由驱动里的门禁与交换器记进 recorder —— 这里是唯一还看得见它的地方。
-        (outcome, recorder.failure())
+        (outcome, recorder.failure(), recorder.put_open)
     })
     .map_err(|err| AttemptFailure {
         kind: FailureKind::Local,
         message: err.to_string(),
+        prewarm_failed: err.is::<crate::control_iroh::BulkPrewarmError>(),
+        put_open: None,
     })
-    .and_then(|(outcome, kind)| match outcome {
+    .and_then(|(outcome, kind, put_open)| match outcome {
         Ok(receipt) => Ok(receipt),
         Err(message) => Err(AttemptFailure {
             kind: kind.unwrap_or(FailureKind::Local),
             message,
+            prewarm_failed: false,
+            put_open,
         }),
     })
 }
@@ -1372,9 +1415,16 @@ fn run_put_inner(
         "sha256": sha256,
         "resume": !restart,
     });
+    recorder.put_open = Some(PutOpen {
+        transfer_id: transfer_id.clone(),
+        acknowledged: false,
+    });
     let opened = exchange_peer
         .request(&format!("@put-file:{}", open_line))
         .map_err(|err| note_error(recorder, err, &transfer_id, false))?;
+    if let Some(open) = &mut recorder.put_open {
+        open.acknowledged = true;
+    }
     let written = opened.get("written").and_then(Value::as_u64).unwrap_or(0);
     let resume_honored = opened
         .get("resume_honored")
@@ -2325,6 +2375,81 @@ mod tests {
             .expect("@put-file 已经发出, open 载荷里必有 transfer_id");
         crate::control_file_transfer::forget_sessions_for_tests(&[&id]);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn prewarm_failure_after_path_retry_reports_prior_open_and_preserves_partial() {
+        let dir = scratch_dir("iroh-prewarm-after-open");
+        let local = dir.join("source.bin");
+        let remote = dir.join("landed.bin");
+        std::fs::write(&local, vec![3u8; 40]).unwrap();
+        let ids = TransferIdStore::at(dir.join("ids"));
+        let remote_path = remote.to_string_lossy();
+        let target = "lab/daemon";
+        let transfer_id = new_transfer_id("put");
+        let peer = LoopbackPeer::new(7).with_observations(vec![
+            direct(),
+            direct(),
+            PathObservation {
+                class: PathClass::Unknown,
+                direct_addr: None,
+                relay: None,
+            },
+        ]);
+        let mut rounds = 0;
+        let result = run_iroh_bulk_attempts(|_| {
+            rounds += 1;
+            if rounds == 1 {
+                let mut recorder = iroh_recorder(None);
+                let message = run_put(
+                    &peer,
+                    &mut recorder,
+                    &ids,
+                    target,
+                    &local,
+                    &remote_path,
+                    false,
+                    Some(&transfer_id),
+                )
+                .unwrap_err();
+                assert_eq!(recorder.failure(), Some(FailureKind::PathUnknown));
+                return Err(AttemptFailure {
+                    kind: FailureKind::PathUnknown,
+                    message,
+                    prewarm_failed: false,
+                    put_open: recorder.put_open,
+                });
+            }
+            assert_eq!(rounds, 2);
+            Err(AttemptFailure {
+                kind: FailureKind::Local,
+                message: "iroh_bulk_prewarm_tuple_unavailable: fixture".into(),
+                prewarm_failed: true,
+                put_open: None,
+            })
+        });
+        let message = result.unwrap_err();
+        assert!(message.contains("attempt=2; earlier_attempt=1; prior_put_open=acknowledged"));
+        assert!(message.contains(&format!("transfer_id={transfer_id};")));
+        assert_eq!(
+            ids.get(target, &local, &remote_path),
+            Some(transfer_id.clone())
+        );
+        assert_eq!(peer.chunk_count(), 1);
+        assert!(!peer
+            .seen()
+            .iter()
+            .any(|line| line.starts_with("@file-cancel:")));
+        let partial = std::fs::read_dir(dir.join(".rdog-partial"))
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        assert_eq!(std::fs::read(partial).unwrap(), vec![3u8; 7]);
+        assert!(!remote.exists());
+        crate::control_file_transfer::forget_sessions_for_tests(&[&transfer_id]);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

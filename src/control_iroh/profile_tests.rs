@@ -237,6 +237,31 @@ fn auto_path_is_available_for_interactive_fallback() {
 }
 
 #[test]
+fn bulk_prewarm_is_opt_in_and_requires_routable_direct() {
+    let scratch = Scratch::new();
+    for (routable, route, prewarm, permitted) in [
+        (false, "direct", false, true),
+        (false, "direct", true, false),
+        (true, "auto", true, false),
+        (true, "relay", true, false),
+        (true, "direct", true, true),
+    ] {
+        let fields = if prewarm { r#", "bulk_prewarm": true"# } else { "" };
+        let value = client_profile_with_path(
+            &format!(", \"routable\": {routable}"),
+            fields,
+            "127.0.0.1:7000",
+            "https://127.0.0.1:7001",
+            route,
+        );
+        let path = scratch.write("prewarm.json", &value);
+        let cfg: ClientConfig = profile(&path).unwrap();
+        assert_eq!(cfg.bulk_prewarm, prewarm);
+        assert_eq!(check_client_config(&cfg).is_ok(), permitted);
+    }
+}
+
+#[test]
 fn direct_connect_timeout_is_bounded_and_independent_of_frame_timeout() {
     let scratch = Scratch::new();
     for (timeout, expected) in [
@@ -272,7 +297,7 @@ fn direct_probe_profile_cannot_reach_the_bulk_or_pty_dialer() {
         ),
     );
     assert_eq!(
-        with_bulk_lane(&path, "lab/daemon", |_| ())
+        with_bulk_lane(&path, "lab/daemon", true, |_| ())
             .unwrap_err()
             .to_string(),
         "iroh probe_direct_via_relay is only supported for @ping",

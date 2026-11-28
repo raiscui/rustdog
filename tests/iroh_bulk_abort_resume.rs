@@ -266,6 +266,109 @@ fn force_client_relay(harness: &Harness) {
     std::fs::write(&harness.client, profile.to_string()).expect("relay client profile");
 }
 
+#[test]
+fn only_put_uses_prewarm_and_a_probe_failure_releases_the_port_without_open() {
+    let harness = Harness::start("prewarm-put-only", 17);
+    let bind = free_udp_port();
+    let mut profile = read_json(Path::new(&harness.client));
+    profile["routable"] = serde_json::json!(true);
+    profile["bulk_prewarm"] = serde_json::json!(true);
+    profile["bind"] = serde_json::json!(format!("127.0.0.1:{bind}"));
+    std::fs::write(&harness.client, profile.to_string()).unwrap();
+    let source = harness.source();
+    let put = harness.put(&source).output().unwrap();
+    let error = String::from_utf8_lossy(&put.stderr);
+    assert_eq!(put.status.code(), Some(1), "{error}");
+    assert!(error.contains("iroh direct probe forward dial"), "{error}");
+    assert!(
+        error.contains("iroh direct probe endpoint closed"),
+        "{error}"
+    );
+    assert!(
+        error.contains("iroh_bulk_prewarm_tuple_unavailable"),
+        "{error}"
+    );
+    let log = std::fs::read_to_string(&harness.daemon_log).unwrap();
+    assert!(wire_verbs(&log).is_empty(), "{log}");
+    assert_no_output_files(&harness);
+    drop(std::net::UdpSocket::bind(("127.0.0.1", bind)).unwrap());
+
+    let get = harness
+        .control(vec![
+            "--get",
+            &source,
+            "--local-path",
+            harness.remote.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    let error = String::from_utf8_lossy(&get.stderr);
+    assert!(get.status.success(), "{error}");
+    assert!(!error.contains("iroh direct probe forward dial"), "{error}");
+    assert_eq!(std::fs::read(&harness.remote).unwrap(), harness.payload);
+}
+
+#[test]
+fn prewarm_relay_lock_rejects_same_identity_on_other_ports_including_directory_lookup() {
+    use sha2::{Digest, Sha256};
+    let harness = Harness::start("prewarm-relay-lock", 17);
+    let mut profile = read_json(Path::new(&harness.client));
+    let key = std::fs::read(profile["key_file"].as_str().unwrap()).unwrap();
+    let peer = iroh::SecretKey::from_bytes(&key.try_into().unwrap()).public();
+    let relay: iroh::RelayUrl = profile["relay"]["url"].as_str().unwrap().parse().unwrap();
+    let dir = harness.home.join(".rdog/iroh-relay-locks");
+    std::fs::create_dir_all(&dir).unwrap();
+    let hash = Sha256::digest(relay.as_str().as_bytes());
+    let lock = std::fs::File::create(dir.join(format!("{peer}-{hash:x}.lock"))).unwrap();
+    lock.try_lock().unwrap();
+    let source = harness.source();
+    let independent = harness.home.join("independent.bin");
+    let direct = harness
+        .control(vec![
+            "--get",
+            &source,
+            "--local-path",
+            independent.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        direct.status.success(),
+        "{}",
+        String::from_utf8_lossy(&direct.stderr)
+    );
+    assert_eq!(std::fs::read(independent).unwrap(), harness.payload);
+    let before = std::fs::read_to_string(&harness.daemon_log).unwrap().len();
+    profile["routable"] = serde_json::json!(true);
+    profile["bulk_prewarm"] = serde_json::json!(true);
+    let directory_id = profile["directory"]["id"].clone();
+    profile["directory"] = serde_json::json!({
+        "id": directory_id, "via_relay": true, "relay": {
+            "url": profile["relay"]["url"], "root_cert": profile["relay"]["root_cert"],
+        },
+    });
+    for args in [
+        vec![
+            "--put",
+            &source,
+            "--remote-path",
+            harness.remote.to_str().unwrap(),
+        ],
+        vec!["--get", &source, "--local-path", source.as_str()],
+    ] {
+        profile["bind"] = serde_json::json!(format!("127.0.0.1:{}", free_udp_port()));
+        std::fs::write(&harness.client, profile.to_string()).unwrap();
+        let result = harness.control(args).output().unwrap();
+        let error = String::from_utf8_lossy(&result.stderr);
+        assert_eq!(result.status.code(), Some(1), "{error}");
+        assert!(error.contains("iroh_relay_identity_busy"), "{error}");
+        assert!(!error.contains("iroh direct probe forward dial"), "{error}");
+    }
+    let log = std::fs::read_to_string(&harness.daemon_log).unwrap();
+    assert!(wire_verbs(&log[before..]).is_empty());
+    assert_no_output_files(&harness);
+}
+
 fn read_json(path: &Path) -> serde_json::Value {
     serde_json::from_slice(&std::fs::read(path).unwrap_or_else(|err| panic!("{path:?}: {err}")))
         .expect("JSON")
@@ -323,10 +426,6 @@ fn bulk_zero_load_opt_in_joins_aborted_halves_without_files_or_chunks() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert_eq!(output.status.code(), Some(1), "{stderr}");
         assert!(stderr.contains("iroh_direct_path_unavailable"), "{stderr}");
-        let log = std::fs::read_to_string(&harness.daemon_log).unwrap();
-        let log = &log[before..];
-        assert_eq!(wire_verbs(log), ["@put-file", "@file-cancel"]);
-        assert!(log.contains("iroh bulk refused code=iroh_direct_path_unavailable"));
         assert_no_output_files(&harness);
         assert_eq!(std::fs::read(&source).unwrap(), harness.payload);
 
@@ -349,9 +448,26 @@ fn bulk_zero_load_opt_in_joins_aborted_halves_without_files_or_chunks() {
             assert_eq!(half["chunks"], 0);
         }
         let id = daemon["transfer_id"].as_str().unwrap();
-        assert!(log.contains(&format!(
-            "iroh bulk ack verb=@file-cancel transfer_id={id} failed=false"
-        )));
+        let ack = format!("iroh bulk ack verb=@file-cancel transfer_id={id} failed=false");
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let log = loop {
+            let current = std::fs::read_to_string(&harness.daemon_log).unwrap();
+            let tail = &current[before..];
+            if tail
+                .split_inclusive('\n')
+                .any(|line| line.ends_with('\n') && line.contains(&ack))
+            {
+                break current;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "{ack} missing\nclient: {stderr}\ndaemon: {tail}"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        };
+        let log = &log[before..];
+        assert_eq!(wire_verbs(log), ["@put-file", "@file-cancel"]);
+        assert!(log.contains("iroh bulk refused code=iroh_direct_path_unavailable"));
 
         let joined = join_bulk_halves(&harness, &client_path, &daemon_path);
         assert_eq!(joined.status.code(), Some(1));
