@@ -86,9 +86,47 @@ RUST-38 报告原文写的就是「出货 `@ping` 也没有同仪表的两端计
 | --- | --- |
 | A→B 524,288 B **成功直连**那一次 | 两端快照 join 的 delta 为 0 → 「该次尝试 relay 采样为 0」成立 (A 类成立) |
 | 五次 **先拒** (自然 relay 回退 + 强制 relay) | 只主张"拒在发出 bulk 请求前、目标无文件、接收端无 partial"; **不**签"双端 relay 零负载" (daemon 半缺失) |
-| 正对照 (证明仪表能测非零) | **未建立**, 归 RAI-706 |
+| 正对照 (证明仪表能测非零) | **已按三句口径收口** (2026-11-28, RAI-706 合入后), 见本文末节 |
 
 **新出现的一条边界 (不是 `iroh_direct_path_lost`)**: C → B 直连首块在 30 秒等 ACK 失败, 而 B 侧
 有 262,144 B 半成品且与源前缀哈希一致, 客户端记录 0 个已确认 chunk。这是**单端确认与实写的差异**:
 路径没有丢, 是 ACK 没在预算内回来。按记账口径 (只记被对端确认的字节) 客户端记 0 是对的, 不得据此
 主张"中途路径丢失"; 该场景的正确后续是**从 262144 续传**, 并单独立票查 ACK 为什么 30 秒没回。
+
+---
+
+## 2026-11-28 收口: RAI-706 落地后的正式口径
+
+RAI-706 (`#208` merge `8b947f11`, 基线 `66e5adaf` 含 #207 直连探针) 已合入。真机读数
+(`be0957f2ffb6f310c4e7588cdc9ba1abb952d391`, Linux 客户端 → Windows rais-razer daemon):
+
+| 路径 / 开关 / 请求 | 正式 CLI | daemon 观测到的请求行 | 双端 bulk bytes | join | 目标 / partial |
+| --- | --- | --- | --- | --- | --- |
+| relay / 关 / put | exit 1 `iroh_direct_path_unavailable` | 0 | 0 / 未取得 | `bulk_path_endpoint_missing`; null | 均无 |
+| relay / 开 / put | exit 1 `iroh_direct_path_unavailable` | `@put-file` 102 B + `@file-cancel` 81 B | 0 / 0 | `bulk_path_inconclusive_aborted`; null | 均无 |
+| relay / 关 / get | exit 1 `iroh_direct_path_unavailable` | 0 | 0 / 未取得 | `bulk_path_endpoint_missing`; null | 均无, daemon 源未变 |
+| relay / 开 / get | exit 1 `iroh_direct_path_unavailable` | `@put-file` 102 B + `@file-cancel` 81 B | 0 / 0 | `bulk_path_inconclusive_aborted`; null | 均无, daemon 源未变 |
+| direct / 开 / put | exit 0 | `@put-file` + `@file-chunk` + `@file-end` | 65,762 / 65,762 | `joined`; true | 目标已提交, partial 无 |
+
+**正式口径 (三句, 一个字不放宽)**:
+
+1. relay 上永远没有 bulk 字节是**能力拒绝**的结果, 不是缺测 —— 制品里 bulk 起不到 relay 上;
+2. 可核的是 wire 上该请求被拒、两端无目标无 partial、两端 abort 快照按同 attempt 配对、
+   `relay_bytes_zero` 保持 `null` (不填零);
+3. 仪表的非零能力由**直连路径**证明 (65,762 B 双端 SHA-256 一致、join `true`)。
+
+**② 的覆盖范围**: "两端 abort 快照按同 attempt 配对"只成立于**取证开启**的两组 (`relay / 开` 的 put 与
+get), 即上表 `bulk_path_inconclusive_aborted` 那两行。取证关闭的两行在 open 前就被客户端
+`BulkPathRecorder::begin` 门禁拒, daemon 侧 0 行请求、没有对端半份, join 只能报
+`bulk_path_endpoint_missing` —— 那两行**不**提供配对证据, 也别把 ② 的 "wire 上被拒" 读到它们头上。
+四行共有的唯一跨行结论是 `relay_bytes_zero: null`。原始回执不在仓库, 见
+`drive://captain-remote-p2p/handoffs/RAI-706/receipts/be0957f-summary.txt`。
+
+**不主张**: "同一套仪表在 relay 上测到了非零" —— 那需要制品允许 relay bulk, 与门禁冲突。
+
+**读这份读数时不能漏的两条**: 客户端 relay 括号两组各涨 TX +3,252 B / RX +3,768 B, 那是取证
+open/cancel 帧 (非文件负载), 不能读成"relay 无流量"; 而 relay 先拒那一格 `relay_bytes_zero` 是
+`null` 而不是 `true` —— 那次尝试被 abort, 不是"测到了零"。
+
+**仍缺的一条** (不在本收口范围): 传输层 pin, 所以能主张的仍是"每个边界上路径直连", 不是"整条连接从未
+经过 relay"; 中途 `direct → relay` 的 `iroh_direct_path_lost` 真机实测仍缺 (住 §8 第 1 条)。
