@@ -74,6 +74,12 @@ use crate::control_line_read::MAX_CONTROL_MESSAGE_BYTES;
 /// 传输会话表。OnceLock + Mutex 与 task_control 的 TASKS 同模式。
 static TRANSFERS: OnceLock<Mutex<HashMap<String, TransferSession>>> = OnceLock::new();
 
+/// 测试专用: 强制走"本平台无原子 no-replace"那条 fail-closed 分支。
+#[cfg(test)]
+thread_local! {
+    static FORCE_NO_ATOMIC: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 fn transfers() -> &'static Mutex<HashMap<String, TransferSession>> {
     TRANSFERS.get_or_init(|| Mutex::new(HashMap::new()))
 }
@@ -514,6 +520,16 @@ pub fn execute_file_chunk(payload: &str) -> std::io::Result<Value> {
 /// 平台: Linux `renameat2(RENAME_NOREPLACE)`、macOS `renameatx_np(RENAME_EXCL)`、
 /// Windows `MoveFileExW` (不带 `REPLACE_EXISTING`)。
 fn publish_no_replace(temp: &Path, target: &Path) -> std::io::Result<()> {
+    // test-only seam: 把"本平台没有原子 no-replace"这件事**变成可执行的证据** —— 否则那条
+    // fail-closed 分支在三平台上都编不出来, 只剩"代码与文档证据"。
+    #[cfg(test)]
+    if FORCE_NO_ATOMIC.with(|flag| flag.get()) {
+        let _ = (temp, target);
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "本平台没有原子的 no-replace rename, 拒绝以覆盖风险换取成功",
+        ));
+    }
     #[cfg(target_os = "linux")]
     {
         use std::ffi::CString;
@@ -652,6 +668,9 @@ pub fn execute_file_end(payload: &str) -> std::io::Result<Value> {
         reap_file(&temp_path);
         sessions.remove(&transfer_id);
         persist_index(&sessions);
+        if let Some(staging_dir) = temp_path.parent() {
+            let _ = std::fs::remove_dir(staging_dir);
+        }
         return Err(std::io::Error::other(
             "file_transfer_replay_raced: 目标在对账之后被别的写入占用/替换了 — 不覆盖、不重传; 请重跑以重新对账",
         ));
@@ -676,9 +695,14 @@ pub fn execute_file_end(payload: &str) -> std::io::Result<Value> {
                 }))
             }
             Err(err) => {
+                // 失败即清: 暂存目录不该因为一次冲突慢慢长起来。被 raced 挡下的 bytes 没有续传价值
+                // (目标已经属于别人), 留着只会让下一次对账更混乱。
                 reap_file(&temp_path);
                 sessions.remove(&transfer_id);
                 persist_index(&sessions);
+                if let Some(staging_dir) = temp_path.parent() {
+                    let _ = std::fs::remove_dir(staging_dir);
+                }
                 Err(std::io::Error::other(format!(
                     "file_transfer_replay_raced: 发布时目标已存在 ({err}) — 不覆盖、不重传; 请重跑以重新对账"
                 )))
@@ -1715,8 +1739,14 @@ mod tests {
         );
         assert!(
             !staging_path(&target).unwrap().exists(),
-            "被 raced 挡下的临时文件必须清掉"
+            "被 raced 挡下的临时文件必须清掉 (失败即清, 不留暂存)"
         );
+        if let Some(staging_dir) = staging_path(&target).unwrap().parent() {
+            assert!(
+                !staging_dir.exists() || std::fs::read_dir(staging_dir).unwrap().next().is_none(),
+                "暂存目录跑完必须为空"
+            );
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1747,6 +1777,54 @@ mod tests {
         );
         assert_eq!(std::fs::read(&target).unwrap(), b"fresh".to_vec(), "别人的字节不许动");
         assert_eq!(std::fs::read(&staged).unwrap(), b"second".to_vec(), "暂存文件留在原处等清理");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// fail-closed 分支的可执行证据: 本平台"没有原子 no-replace"时, 发布必须被拒, 且
+    /// **目标与暂存文件都不动**、错误是结构化的那个码。
+    #[test]
+    fn publishing_fails_closed_when_the_platform_has_no_atomic_no_replace() {
+        let _guard = TRANSFER_TABLE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let dir = std::env::temp_dir().join(unique_id("replay-failclosed"));
+        std::fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("closed.bin");
+        let payload = b"payload";
+        let sha = format!("{:x}", Sha256::digest(payload));
+        let tid = unique_id("closed");
+
+        execute_put_file(&format!(
+            r#"{{"transfer_id":"{tid}","path":"{}","size":{},"sha256":"{sha}","resume":false,"no_replace_publish":true}}"#,
+            escape_json(&target.display().to_string()),
+            payload.len()
+        ))
+        .unwrap();
+        let data = BASE64_STANDARD.encode(payload);
+        execute_file_chunk(&format!(
+            r#"{{"transfer_id":"{tid}","offset":0,"data":"{data}"}}"#
+        ))
+        .unwrap();
+        let partial = staging_path(&target).unwrap();
+        let staging_dir = partial.parent().map(|dir| dir.to_path_buf());
+
+        FORCE_NO_ATOMIC.with(|flag| flag.set(true));
+        let err = execute_file_end(&format!(r#"{{"transfer_id":"{tid}","sha256":"{sha}"}}"#))
+            .unwrap_err();
+        FORCE_NO_ATOMIC.with(|flag| flag.set(false));
+
+        assert!(
+            err.to_string().contains("file_transfer_replay_raced"),
+            "必须是结构化的那个码: {err}"
+        );
+        assert!(!target.exists(), "失败时目标不许出现");
+        assert!(!partial.exists(), "失败即清: 暂存文件不许留");
+        if let Some(dir) = staging_dir {
+            assert!(
+                !dir.exists() || std::fs::read_dir(&dir).unwrap().next().is_none(),
+                "暂存目录跑完必须为空"
+            );
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 

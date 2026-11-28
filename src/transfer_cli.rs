@@ -2991,6 +2991,52 @@ mod tests {
 
 
     #[test]
+    fn only_a_rerun_without_restart_asks_for_no_replace_publish() {
+        // "何时带保护字段"是客户端判断 (`!restart && store 里有旧 id`) —— 它错了会**静默改变语义**,
+        // 所以这条直接核对 wire 上的 open 载荷, 而不是只看最终行为。
+        let dir = scratch_dir("no-replace-field");
+        let local = dir.join("source.bin");
+        std::fs::write(&local, vec![5u8; 16]).unwrap();
+        let remote = dir.join("landed.bin");
+        let remote_text = remote.to_string_lossy().into_owned();
+        let ids = ids_for("no-replace-field-shared");
+
+        let open_payload = |restart: bool| -> String {
+            // 每次都在同样的 store 条件下跑: 先塞一条旧 id
+            ids.put("test-target", &local, &remote_text, "cli-put-known");
+            let peer = LoopbackPeer::new(7);
+            let mut recorder = test_recorder(None);
+            run_put(
+                &peer,
+                &mut recorder,
+                &ids,
+                "test-target",
+                &local,
+                &remote_text,
+                restart,
+                None,
+            )
+            .expect("上传应成功");
+            peer.seen()
+                .into_iter()
+                .find(|line| line.starts_with("@put-file:"))
+                .expect("必须发出 open")
+        };
+
+        let redo = open_payload(false);
+        assert!(
+            redo.contains("\"no_replace_publish\":true"),
+            "重跑 (store 里有旧 id) 必须要求 no-replace: {redo}"
+        );
+        let restarted = open_payload(true);
+        assert!(
+            restarted.contains("\"no_replace_publish\":false"),
+            "`--restart` 是显式同意覆盖, 不许带保护字段: {restarted}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn daemon_stable_codes_map_to_their_retry_kind() {
         // 稳定码总表 ↔ 实现的对应: 读的是结构化的 `error_code` 字段。
         use crate::bulk_path::{
