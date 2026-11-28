@@ -37,6 +37,17 @@ daemon 入站行与 ack 行必须带 **`transfer_id` + `attempt` (序号) + `off
 | 盘上不匹配、内存也无记录 | **结果未知**, 明确措辞, 不重传 | 报告已提交却无对账依据; 或偷偷从 0 重传 | 错误原文 |
 | 无目标、无半成品 | 正常 open (`written:0`) | 报"未知"挡死正常首传 | `@put-file` 响应原文 |
 
+### M1b 混合版本 (协议面)
+
+| 输入 | 期望终态 | 失败判据 | 需要的原始行 |
+| --- | --- | --- | --- |
+| 旧 daemon (忽略 `verify_committed`, 按 `serde_json::Value` 解析未知字段不报错) | 回执里**没有** `reconcile` 标记 ⇒ 客户端 **fail closed**: `file_transfer_reconcile_unsupported`, 取消刚开的会话, 一个 `@file-chunk` 都不发 | 静默继续重传 (会把"结果未知"变成"直接重传", 源变过就替换成品); 或假装对账成功 | `@put-file` 响应原文 (无 `reconcile`)、`@file-cancel` 是否发出、`@file-chunk` 计数 |
+
+**可用例**: `a_peer_that_ignores_the_reconcile_request_fails_closed` (替身剥掉 `reconcile` 标记模拟旧 daemon)。
+
+**前提 (M1 的 `Absent` 分支)**: "目标不存在 ⇒ 本命令未提交"依赖**两次尝试之间没有外部删除/移动目标**。
+被人为删掉后再重放会让文件重新出现 —— 可接受, 但它是假设不是定理。
+
 ## M2 ID 预分配
 
 | 输入 | 期望终态 | 失败判据 | 需要的原始行 |

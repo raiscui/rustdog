@@ -106,7 +106,8 @@ fn committed() -> &'static Mutex<HashMap<String, CommittedFile>> {
 ///   "本次写入发生过", 别拿它当写入证据。
 /// - **目标存在但不符** ⇒ `Mismatch`。绝不返回"已提交" —— 那会把一份不同的成品说成这次的结果。
 /// - **目标不存在** ⇒ `Absent`。提交必然留下目标文件, 所以"没有目标"就是"没提交过"的正面证据
-///   (不是"未知"), 此时从 0 重来是安全的。
+///   (不是"未知"), 此时从 0 重来是安全的。**这条推论有前提**: 两次尝试之间没有外部删除/移动
+///   目标。被人为删掉后再重放会让文件重新出现 —— 那是可接受的行为, 但它是**假设, 不是定理**。
 fn replay_state(
     transfer_id: &str,
     path: &Path,
@@ -347,6 +348,9 @@ pub fn execute_put_file(payload: &str) -> std::io::Result<Value> {
                     "kind": "file-transfer",
                     "state": "committed",
                     "replayed": true,
+                    // 能力标记: 这次 open 真的按盘上事实对过账。旧 daemon 没有这个字段 ——
+                    // 客户端据它的缺席 fail closed, 而不是以为对账发生了。
+                    "reconcile": "disk",
                     "transfer_id": transfer_id,
                     "path": path,
                     "size": size,
@@ -395,6 +399,7 @@ pub fn execute_put_file(payload: &str) -> std::io::Result<Value> {
                 "written": written,
                 "next_offset": written,
                 "resume_honored": honored,
+                "reconcile": "disk",
                 // 活跃会话没有"过期半成品"这回事: 它一直在被 sweep 盯着, 到不了窗口外。
                 "stale_partial_discarded": false,
             }));
@@ -476,6 +481,7 @@ pub fn execute_put_file(payload: &str) -> std::io::Result<Value> {
         "kind": "file-transfer",
         "state": if resume_honored { "resumed" } else { "open" },
         "resume_honored": resume_honored,
+        "reconcile": "disk",
         "stale_partial_discarded": stale_discarded,
         "transfer_id": transfer_id,
         "written": written,

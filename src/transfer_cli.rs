@@ -1266,6 +1266,17 @@ fn run_put_inner(
     let opened = exchange_peer
         .request(&format!("@put-file:{}", open_line))
         .map_err(|err| note_error(recorder, err, &transfer_id, false))?;
+    // 我要求过对账、对端却没报它做了 (`reconcile` 缺席) ⇒ 这是旧 daemon 静默忽略了这个字段。
+    // 那种中间态最危险: 客户端以为"结果未知已核对", 实际是"直接重传", 源文件变过就会替换成品。
+    // 所以这里 fail closed, 并把刚开的会话取消掉 (一个字节都没搬)。
+    if verify_committed && opened.get("reconcile").is_none() {
+        let _ = exchange_peer
+            .request(&format!("@file-cancel:{{\"transfer_id\":\"{transfer_id}\"}}"));
+        return Err(format!(
+            "file_transfer_reconcile_unsupported: 对端没有回报已提交对账 (旧版本 daemon 会忽略              verify_committed), 重试有替换已提交成品的风险 —— 要么升级对端, 要么显式 `--restart`              (transfer_id={transfer_id})"
+        ));
+    }
+
     // daemon 用盘上事实判定"这条上传早就提交过了": 一个字节都不用搬, 也不能再开会话。
     //
     // 这是本票唯一一处**故意把"我查到了成品"说成成功**的地方 —— 盘上就是这份字节, 终态不可区分;
@@ -1563,6 +1574,8 @@ mod tests {
         end_failure_evidence: Option<Value>,
         /// `@put-file` 直接失败 (open 没被接受)。
         fail_open: bool,
+        /// 假装是旧 daemon: `@put-file` 的回执里**不含** `reconcile` 标记。
+        legacy_without_reconcile: bool,
     }
 
     impl LoopbackPeer {
@@ -1578,7 +1591,14 @@ mod tests {
                 poison_after_chunk: None,
                 end_failure_evidence: None,
                 fail_open: false,
+                legacy_without_reconcile: false,
             }
+        }
+
+        /// 假装对端是旧 daemon: 回执里没有 `reconcile` 标记 (= 它忽略了 `verify_committed`)。
+        fn with_legacy_without_reconcile(mut self) -> Self {
+            self.legacy_without_reconcile = true;
+            self
         }
 
         fn with_observations(mut self, observations: Vec<PathObservation>) -> Self {
@@ -1684,6 +1704,12 @@ mod tests {
                 other => return Err(ExchangeError::without_evidence(format!("未知动词: {other}"))),
             };
             let mut value = result.map_err(|err| ExchangeError::without_evidence(err.to_string()))?;
+            if self.legacy_without_reconcile && verb == "put-file" {
+                // 旧 daemon 忽略 `verify_committed`, 回执里也就没有这个标记。
+                if let Some(object) = value.as_object_mut() {
+                    object.remove("reconcile");
+                }
+            }
             if verb == "get-file" {
                 if let Some(sha) = &self.download_sha_override {
                     value["sha256"] = Value::String(sha.clone());
@@ -3057,6 +3083,46 @@ mod tests {
         );
         // 盘上的成品一个字节都没变
         assert_eq!(std::fs::read(&remote).unwrap(), payload);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_peer_that_ignores_the_reconcile_request_fails_closed() {
+        // 混合版本: 旧 daemon 会**静默忽略** `verify_committed` (它按 Value 解析, 未知字段不报错)。
+        // 那种中间态等于"客户端以为对过账、其实直接重传" —— 源文件变过就会替换已提交的成品。
+        // 所以缺 `reconcile` 标记必须报错并把刚开的会话取消, 不是继续搬字节。
+        let dir = scratch_dir("reconcile-legacy");
+        let local = dir.join("source.bin");
+        let remote = dir.join("landed.bin");
+        let payload: Vec<u8> = (0..64u8).collect();
+        std::fs::write(&local, &payload).unwrap();
+        let ids = TransferIdStore::at(dir.join("ids"));
+        ids.put("test-target", &local, &remote.to_string_lossy(), "cli-put-legacy");
+
+        let peer = LoopbackPeer::new(7).with_legacy_without_reconcile();
+        let mut recorder = test_recorder(None);
+        let err = run_put(
+            &peer,
+            &mut recorder,
+            &ids,
+            "test-target",
+            &local,
+            &remote.to_string_lossy(),
+            false,
+            None,
+        )
+        .expect_err("对端没回报对账 ⇒ 必须 fail closed");
+        assert!(err.contains("file_transfer_reconcile_unsupported"), "{err}");
+        assert_eq!(
+            peer.seen()
+                .iter()
+                .filter(|line| line.starts_with("@file-chunk:"))
+                .count(),
+            0,
+            "fail closed 之前一个块都不该发: {:?}",
+            peer.seen()
+        );
+        assert!(!remote.exists(), "不得落下目标文件");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
