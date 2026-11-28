@@ -554,27 +554,33 @@ impl BulkPathRecorder {
         self.clear_daemon_half_file();
         let before = self.sample(exchange_peer).and_then(|seen| seen.relay);
         self.bracket = RelayBracket::new(before);
-        let decision = self.admit();
+        let Err(error) = self.admit() else {
+            return Ok(());
+        };
         // 默认不增加往返。这两帧只用于取证, 且只响应 open 前的本端路径拒绝;
         // 文件/参数错误、对端错误和传输中途拒绝都不能触发补发。
-        if decision.is_err()
-            && self.zero_load_evidence
+        if self.zero_load_evidence
             && matches!(
                 self.failure(),
                 Some(FailureKind::PathUnknown | FailureKind::PathRefused)
             )
         {
-            self.collect_zero_load_evidence(exchange_peer);
+            let evidence_id = self.collect_zero_load_evidence(exchange_peer);
+            let error = format!(
+                "{error} (transfer_id={}; zero_load_evidence_transfer_id={evidence_id})",
+                self.last_transfer_id
+            );
+            self.last_transfer_id = evidence_id;
+            return Err(error);
         }
-        decision
+        Err(error)
     }
 
-    fn collect_zero_load_evidence(&mut self, exchange_peer: &dyn LineExchange) {
+    fn collect_zero_load_evidence(&mut self, exchange_peer: &dyn LineExchange) -> String {
         // 补发仍过 daemon 的原门禁, 不会把本端拒绝改成放行。上传和下载都只发
         // PUT 取证帧: 不带文件路径或负载, 即使对端此刻已直连, 执行器也不能建文件会话。
         // 用独立 ID, 避免 cancel 清掉已有的可续传会话或半成品。
         let transfer_id = format!("cli-zero-load-{}", uuid::Uuid::new_v4());
-        self.remember_transfer(&transfer_id);
         let open = serde_json::json!({
             "transfer_id": transfer_id,
             "attempt_id": self.attempt_id,
@@ -590,6 +596,7 @@ impl BulkPathRecorder {
             };
             self.note_daemon_half(evidence);
         }
+        transfer_id
     }
 
     /// 门禁复查: **每个 chunk 边界都要再来一次** (§3.1), 判定用这一刻的采样。
@@ -2926,6 +2933,8 @@ mod tests {
         };
         let probe = transfer_id_of(&peer);
         assert_ne!(probe, old_id);
+        assert!(err.contains(&format!("transfer_id={old_id};")), "{err}");
+        assert!(err.contains(&format!("zero_load_evidence_transfer_id={probe}")), "{err}");
         let open: Value = serde_json::from_str(open.strip_prefix("@put-file:").unwrap()).unwrap();
         let cancel: Value =
             serde_json::from_str(cancel.strip_prefix("@file-cancel:").unwrap()).unwrap();

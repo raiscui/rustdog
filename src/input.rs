@@ -202,7 +202,7 @@ pub enum Command {
 
         /// iroh bulk 在本端路径门禁先拒时, 向 daemon 补取零文件负载证据 (默认关闭)。
         /// 用 `--bulk-path-json` 保存两端快照。
-        #[clap(long = "bulk-zero-load-evidence")]
+        #[clap(long = "bulk-zero-load-evidence", requires = "bulk_path_json")]
         bulk_zero_load_evidence: bool,
 
         /// Only parse and compile `--ui-script`, then print the generated control lines.
@@ -753,6 +753,25 @@ mod tests {
             .expect_err("control --dry-run is only valid with --ui-script");
 
         assert!(err.to_string().contains("--ui-script"));
+    }
+
+    #[test]
+    fn bulk_zero_load_evidence_requires_an_output_file() {
+        let err = Opts::try_parse_from([
+            "rdog",
+            "control",
+            "--transport",
+            "iroh",
+            "lab/bulk",
+            "--get",
+            "remote.bin",
+            "--local-path",
+            "local.bin",
+            "--bulk-zero-load-evidence",
+        ])
+        .expect_err("zero-load probes require somewhere to save the evidence");
+        assert_eq!(err.kind(), clap::error::ErrorKind::MissingRequiredArgument);
+        assert!(err.to_string().contains("--bulk-path-json"));
     }
 
     #[test]
