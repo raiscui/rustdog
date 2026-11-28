@@ -190,6 +190,10 @@ impl Harness {
                 .current_dir(&home)
                 .env("HOME", &home)
                 .env("TMPDIR", &home)
+                // debug 是判别流程的一部分: daemon 的 `iroh lane line … verb=@file-chunk`
+                // 与 `iroh bulk ack …` 两行只在 debug 级出现, 而"这块到底到没到 / 回执写没写"
+                // 正是 RAI-705 唯一能分开 (A)(B) 的证据。
+                .env("RDOG_LOG_LEVEL", "debug")
                 .stdin(Stdio::null())
                 .stdout(merged.try_clone().expect("log clone"))
                 .stderr(merged)
@@ -299,6 +303,33 @@ fn a_put_killed_mid_upload_resumes_on_the_first_retry() {
     );
     assert!(combined.contains("resume=honored"), "必须真的续上而不是从头来:\n{combined}");
     assert_eq!(std::fs::read(&harness.remote).expect("landed file"), harness.payload);
+}
+
+#[test]
+fn the_daemon_logs_both_halves_of_the_ack_discriminant() {
+    // RAI-705 的判别流程完全靠 daemon 这两行: 客户端只看得见"回执没到", 分不出 daemon 没写、
+    // 写了没回、还是首块根本没到达。它们只在 debug 级出现, 所以这里同时钉住"debug 起得来"与
+    // "两行确实打出来" —— 否则现场只能靠猜。
+    let harness = Harness::start("acklog", 320 * 1024);
+    let put = harness.put(&harness.source()).output().expect("put");
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&put.stdout),
+        String::from_utf8_lossy(&put.stderr)
+    );
+    assert!(put.status.success(), "单文件上传必须成功:\n{combined}");
+    assert_eq!(std::fs::read(&harness.remote).expect("landed file"), harness.payload);
+
+    let log = std::fs::read_to_string(&harness.daemon_log).unwrap_or_default();
+    assert!(
+        log.contains("verb=@file-chunk"),
+        "daemon 必须记录收到的块 (判据的第一半):\n{log}"
+    );
+    let acks = log.matches("iroh bulk ack verb=@file-chunk").count();
+    assert!(
+        acks >= 2,
+        "320 KiB = 2 块, 每块都要有一条回执已写出的记录 (判据的第二半), 实际 {acks}:\n{log}"
+    );
 }
 
 #[test]

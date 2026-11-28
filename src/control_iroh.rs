@@ -1110,6 +1110,7 @@ fn serve_bulk_request(
 ) -> io::Result<()> {
     use crate::control_core::FileTransferVerb;
 
+    let started = std::time::Instant::now();
     let verb = crate::control_core::file_transfer_verb(command);
     let transfer_id = verb
         .as_ref()
@@ -1231,6 +1232,24 @@ fn serve_bulk_request(
         None => outcome,
     };
     ControlPeerSession::new("iroh-admitted").dispatch_outcome(outcome, transport)?;
+    // 这条只证明**本机**把应答写进了流 (dispatch → `write_all` 返回成功), 不证明对端收到 ——
+    // 反过来, 没有它时也分不出"未处理"与"写失败"。它把判别变三态: 有 ⇒ 本机写成功; 只有入站的
+    // `verb=…` 行 ⇒ 请求到了、应答没写成功; 两者都没有 ⇒ 这次请求没被这张 lane 观测到。
+    log::debug!(
+        "iroh bulk ack verb={} transfer_id={} failed={} elapsed_ms={}",
+        match verb.as_ref() {
+            Some(FileTransferVerb::PutFile(_)) => "@put-file",
+            Some(FileTransferVerb::GetFile(_)) => "@get-file",
+            Some(FileTransferVerb::Chunk(_)) => "@file-chunk",
+            Some(FileTransferVerb::End(_)) => "@file-end",
+            Some(FileTransferVerb::Read(_)) => "@file-read",
+            Some(FileTransferVerb::Cancel(_)) => "@file-cancel",
+            Some(FileTransferVerb::List) | None => "@file-list",
+        },
+        transfer_id.as_deref().unwrap_or("-"),
+        failed,
+        started.elapsed().as_millis()
+    );
     Ok(())
 }
 
@@ -3201,7 +3220,7 @@ impl IrohBulkLane {
             Ok(None) => Err(self.poison("对端在回执前关闭了连接".to_string())),
             Err(err) if err.kind() == io::ErrorKind::TimedOut => {
                 Err(self.poison(format!(
-                    "等待回执超时 ({}ms; {})",
+                    "{BULK_CHUNK_ACK_UNANSWERED}: 等待回执超时 ({}ms; {})",
                     timeout.as_millis(),
                     self.peer_state()
                 )))
@@ -3507,6 +3526,18 @@ impl IrohLineWriter {
 }
 
 pub(crate) const FRAME_BROKEN: &str = "iroh_frame_broken";
+
+/// 一次请求的回执在预算内没回来, 而连接**还开着**。
+///
+/// 命名空间是 `bulk_` 不是 `iroh_`: 它不是路径事实 (specs/rdog-bulk-direct-only-spec.md 的
+/// 稳定码总表规定 `iroh_*` 只回答"路径是什么"), 而是"这条请求的结果未知"。
+///
+/// 它是"本端不知道对端做了什么"的标记, 不是"对端没做": 上传的 chunk 载荷在请求行里, 对端可能
+/// 已经把字节落盘再写回执, 而回执帧没回来。所以这条错误**必须可重拨续传** —— 拨一条新连接、
+/// 用同一个 `transfer_id` 与 `resume:true` 重新 open, 以 daemon 回的 `written` 为真相源接着传,
+/// 而不是把这次尝试当成"零字节、整次失败"。它**不自动重拨**: daemon 没有"已提交结果"可
+/// 回放, 盲目重开会让已提交的上传从 0 重传并替换成品 (同 ID 幂等续传见 RAI-711)。
+pub(crate) const BULK_CHUNK_ACK_UNANSWERED: &str = "bulk_chunk_ack_unanswered";
 /// A frame write may not be cut shorter than this; below it a healthy relay hop
 /// already looks like a dead link.
 const MIN_FRAME_TIMEOUT: Duration = Duration::from_secs(1);
